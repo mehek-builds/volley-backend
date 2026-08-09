@@ -1,5 +1,10 @@
 import type { Page } from 'playwright-core';
-import { MANAGED_SUBMIT_CHOOSER_POLICY, type ManagedBrowserAction, type ManagedBrowserResult } from './browserbase';
+import {
+  MANAGED_DISCOVERY_ROLE_CAPABILITY,
+  MANAGED_SUBMIT_CHOOSER_POLICY,
+  type ManagedBrowserAction,
+  type ManagedBrowserResult,
+} from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
 import {
   classifyField,
@@ -395,6 +400,13 @@ export type SubmissionPacket = {
    * free text.
    */
   fieldOptions?: Record<string, string[]>;
+  /** Closed controls whose live option evidence failed. No action builder may guess at these. */
+  failedFields?: Array<{
+    controlId: string;
+    label: string;
+    selector?: string;
+    inputType?: string;
+  }>;
   applicationProfile?: ApplicationProfileLike;
   jdText?: string;
   resume: Buffer;
@@ -857,7 +869,8 @@ function optionProbeIdForSelector(selector: string | undefined): string | undefi
   // Matched on the SELECTOR as well as the label because the provider echoes `{selector, value}`
   // and drops `label` entirely (managed-browser.js), so the selector is the only key that is
   // guaranteed to come back.
-  return selector?.match(/^\[id="react-select-(.+)-listbox"\]$/)?.[1];
+  return selector?.match(/^\[id="react-select-(.+)-listbox"\]$/)?.[1]
+    ?? selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_-]*)"\]:is\(select\)$/)?.[1];
 }
 
 /**
@@ -924,7 +937,7 @@ export function pushManagedReactSelectOptionProbeActions(
  * thing to a stored answer on that list is the placeholder itself.
  */
 const NON_OPTION_LISTBOX_LINE =
-  /^(?:loading(?:\.{3}|…)?|no options?|no results?(?: found)?|type to search|start typing|searching(?:\.{3}|…)?)$/i;
+  /^(?:loading(?:\.{3}|…)?|no options?|no results?(?: found)?|type to search|start typing|searching(?:\.{3}|…)?|(?:please\s+)?select(?:\s+(?:an?|one|option|value))?(?:\.{3}|…)?|choose(?:\s+(?:an?|one|option|value))?(?:\.{3}|…)?|--\s*select\s*--)$/i;
 
 /**
  * How many rows Greenhouse's select renders into an unfiltered menu. A read this long is a WINDOW
@@ -943,6 +956,16 @@ const NON_OPTION_LISTBOX_LINE =
  */
 const MANAGED_OPTION_LISTBOX_RENDER_CAP = 100;
 
+function parsedManagedOptionLines(value: unknown): { options?: string[]; invalid?: 'loading' | 'windowed' | 'empty' } {
+  const text = managedExtractedValue(value);
+  if (!text) return { invalid: 'empty' };
+  const raw = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const options = raw.filter((line) => !NON_OPTION_LISTBOX_LINE.test(line));
+  if (options.length === 0) return { invalid: raw.length > 0 ? 'loading' : 'empty' };
+  if (options.length >= MANAGED_OPTION_LISTBOX_RENDER_CAP) return { invalid: 'windowed' };
+  return { options: [...new Set(options)] };
+}
+
 /** The option lists the probe brought back, keyed by the control's own id. */
 export function managedResultFieldOptions(result: ManagedBrowserResult | null | undefined): Record<string, string[]> {
   const out: Record<string, string[]> = {};
@@ -952,13 +975,8 @@ export function managedResultFieldOptions(result: ManagedBrowserResult | null | 
       : undefined;
     const inputId = labelled || optionProbeIdForSelector(item?.selector);
     if (!inputId) continue;
-    const text = managedExtractedValue(item?.value);
-    if (!text) continue;
-    const options = text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !NON_OPTION_LISTBOX_LINE.test(line));
-    if (options.length === 0 || options.length >= MANAGED_OPTION_LISTBOX_RENDER_CAP) continue;
+    const { options } = parsedManagedOptionLines(item?.value);
+    if (!options) continue;
     const seen = new Set(out[inputId] ?? []);
     for (const option of options) {
       if (seen.has(option)) continue;
@@ -980,23 +998,19 @@ export function attachManagedFieldOptions<T extends { label: string; selector?: 
   discovered: readonly T[],
   optionsByInputId: Record<string, string[]>,
 ): T[] {
-  const entries = Object.entries(optionsByInputId).filter(([, options]) => options.length > 0);
-  if (entries.length === 0) return [...discovered];
+  const controlCounts = new Map<string, number>();
+  for (const field of discovered) {
+    const controlId = managedOptionProbeControlId(field);
+    if (controlId) controlCounts.set(controlId, (controlCounts.get(controlId) ?? 0) + 1);
+  }
   return discovered.map((field) => {
     if (field.options && field.options.length > 0) return field;
-    // The control's own id, from its selector when the provider gave an id selector and from the
-    // raw label otherwise. Matching on the label alone was enough while only the four education
-    // controls were probed, because their handles land inside the label ("discipline* discipline--0").
-    // A custom Greenhouse question arrives as `#question_37228964002` with the handle in the
-    // SELECTOR, so a label-only match would drop every list this pass now reads.
     const controlId = managedOptionProbeControlId(field);
-    if (controlId) {
-      const exact = entries.find(([inputId]) => inputId === controlId);
-      if (exact) return { ...field, options: exact[1] };
-    }
-    const label = (field.label ?? '').toLowerCase();
-    const match = entries.find(([inputId]) => label.includes(inputId.toLowerCase()));
-    return match ? { ...field, options: match[1] } : field;
+    // The same durable id on two discovered fields is ambiguous. Never attach one list to both,
+    // and never fall back to a label substring that can match a neighbouring question.
+    if (!controlId || controlCounts.get(controlId) !== 1) return field;
+    const options = optionsByInputId[controlId];
+    return options?.length ? { ...field, options } : field;
   });
 }
 
@@ -1031,8 +1045,9 @@ export function attachManagedFieldOptions<T extends { label: string; selector?: 
  * it safe to run against an employer's form on an application the applicant has not yet approved.
  */
 
-/** Open, read, close. Three actions is the whole cost of one control's option list. */
-export const MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL = 3;
+/** A custom control needs one identity read plus two bounded open/read/close rounds. */
+export const MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL = 7;
+export const MANAGED_OPTION_PROBE_MAX_CONTROLS = 80;
 
 /**
  * Greenhouse's structural controls, which this pass deliberately does not spend actions on.
@@ -1044,6 +1059,7 @@ export const MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL = 3;
  * that cannot be used.
  */
 const MANAGED_OPTION_PROBE_SKIP_IDS = new Set<string>(['country', 'candidate-location']);
+const MANAGED_FIXED_CLOSED_CONTROL_IDS = new Set<string>(GREENHOUSE_OPTION_PROBE_IDS);
 
 /** `#question_37228964002` or `[id="school--0"]`, and nothing that is not a plain id selector. */
 function controlIdFromDiscoveredSelector(selector: string | undefined | null): string | undefined {
@@ -1115,6 +1131,38 @@ export function managedOptionProbeControlId(
     ?? label.match(LABEL_TRAILING_DEMOGRAPHIC_HANDLE_RE)?.[1]?.toLowerCase();
 }
 
+export type ManagedOptionProbeTarget = {
+  controlId: string;
+  kind: 'native' | 'custom';
+  required: boolean;
+  expectsClosed: boolean;
+};
+
+function managedOptionProbeTarget(
+  field: { label: string; selector?: string; inputType?: string; role?: string | null; required?: boolean },
+  discoveryRoleCapability = false,
+): ManagedOptionProbeTarget | undefined {
+  const controlId = managedOptionProbeControlId(field);
+  if (!controlId || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) return undefined;
+  const inputType = (field.inputType ?? '').trim().toLowerCase();
+  const role = (field.role ?? '').trim().toLowerCase();
+  const kind = /^select(?:-one|-multiple)?$/.test(inputType) ? 'native' : 'custom';
+  const expectsClosed = kind === 'native'
+    || /^(?:combobox|listbox)$/.test(inputType)
+    || (discoveryRoleCapability && /^(?:combobox|listbox)$/.test(role))
+    || MANAGED_FIXED_CLOSED_CONTROL_IDS.has(controlId);
+  // Greenhouse's education row mixes React-selects with a plain text graduation-year input. The
+  // shared `--0` suffix identifies a row, not a closed control. In particular, end-year--0 must be
+  // left to its normal text fill instead of being invalidated when a listbox can never appear.
+  if (!expectsClosed) return undefined;
+  return {
+    controlId,
+    kind,
+    required: discoveredFieldIsRequired(field),
+    expectsClosed,
+  };
+}
+
 /**
  * Which controls this pass should read, in the order a budget cut should keep.
  *
@@ -1127,24 +1175,101 @@ export function managedOptionProbeControlId(
  */
 export function managedOptionProbeTargets(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
+  discoveryRoleCapability = false,
 ): string[] {
   if (portalFamily(portal) !== 'greenhouse') return [];
-  const seen = new Set<string>(GREENHOUSE_OPTION_PROBE_IDS);
+  // A hardcoded education probe is only "already read" when it returned a usable list. Loading,
+  // empty and windowed reads are absent from alreadyRead and must enter this fail-closed stage.
+  const seen = new Set<string>();
   for (const [inputId, options] of Object.entries(alreadyRead)) {
     if (options.length > 0) seen.add(inputId);
   }
-  const required: string[] = [];
-  const optional: string[] = [];
+  const required: ManagedOptionProbeTarget[] = [];
+  const optional: ManagedOptionProbeTarget[] = [];
   for (const field of discovered) {
     if (field.options && field.options.length > 0) continue;
-    const controlId = managedOptionProbeControlId(field);
-    if (!controlId || seen.has(controlId) || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) continue;
-    seen.add(controlId);
-    (discoveredFieldIsRequired(field) ? required : optional).push(controlId);
+    const target = managedOptionProbeTarget(field, discoveryRoleCapability);
+    if (!target || seen.has(target.controlId)) continue;
+    seen.add(target.controlId);
+    (target.required ? required : optional).push(target);
   }
-  return [...required, ...optional].slice(0, Math.floor(MANAGED_ACTION_LIMIT / MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL));
+  return [...required, ...optional].map(({ controlId }) => controlId);
+}
+
+function detailedManagedOptionProbeTargets(
+  portal: SupportedPortal,
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  alreadyRead: Record<string, string[]> = {},
+  discoveryRoleCapability = false,
+): ManagedOptionProbeTarget[] {
+  const ids = managedOptionProbeTargets(portal, discovered, alreadyRead, discoveryRoleCapability);
+  const byId = new Map<string, ManagedOptionProbeTarget>();
+  for (const field of discovered) {
+    const target = managedOptionProbeTarget(field, discoveryRoleCapability);
+    if (target && !byId.has(target.controlId)) byId.set(target.controlId, target);
+  }
+  return ids.flatMap((id) => byId.get(id) ?? []);
+}
+
+function closedControlSelector(controlId: string): string {
+  return `[id="${quoteAttr(controlId)}"]:is([role="combobox"],[aria-haspopup="listbox"])`;
+}
+
+function nativeSelectSelector(controlId: string): string {
+  return `[id="${quoteAttr(controlId)}"]:is(select)`;
+}
+
+function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: ManagedOptionProbeTarget) {
+  if (target.kind === 'native') {
+    actions.push({
+      type: 'extract',
+      selector: nativeSelectSelector(target.controlId),
+      label: `${MANAGED_OPTION_EXTRACT_PREFIX}${target.controlId}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+    return;
+  }
+  const selector = closedControlSelector(target.controlId);
+  actions.push({
+    type: 'extract',
+    selector,
+    attribute: 'id',
+    label: `closed_control:${target.controlId}`,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  for (const round of [1, 2] as const) {
+    actions.push({ type: 'click', selector, label: `option_probe_open:${target.controlId}:${round}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+    actions.push({ type: 'extract', selector: reactSelectListboxSelector(target.controlId), label: `${MANAGED_OPTION_EXTRACT_PREFIX}${target.controlId}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+    actions.push({ type: 'press', selector, value: 'Escape', label: `option_probe_close:${target.controlId}:${round}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+  }
+}
+
+/** Pack whole controls into bounded requests. No control is partially probed at a budget edge. */
+export function buildManagedDiscoveredOptionProbeBatches(
+  portal: SupportedPortal,
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  alreadyRead: Record<string, string[]> = {},
+  discoveryRoleCapability = false,
+): ManagedBrowserAction[][] {
+  const targets = detailedManagedOptionProbeTargets(portal, discovered, alreadyRead, discoveryRoleCapability)
+    .slice(0, MANAGED_OPTION_PROBE_MAX_CONTROLS);
+  const batches: ManagedBrowserAction[][] = [];
+  let actions: ManagedBrowserAction[] = [];
+  for (const target of targets) {
+    const next: ManagedBrowserAction[] = [];
+    pushDiscoveredOptionProbe(next, target);
+    if (actions.length > 0 && actions.length + next.length > MANAGED_ACTION_LIMIT) {
+      batches.push(actions);
+      actions = [];
+    }
+    actions.push(...next);
+  }
+  if (actions.length > 0) batches.push(actions);
+  return batches;
 }
 
 /**
@@ -1164,15 +1289,15 @@ export function managedOptionProbeTargets(
  */
 export function buildManagedDiscoveredOptionProbeActions(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
+  discoveryRoleCapability = false,
 ): ManagedBrowserAction[] {
-  const targets = managedOptionProbeTargets(portal, discovered, alreadyRead);
-  if (targets.length === 0) return [];
-  const actions: ManagedBrowserAction[] = [];
-  pushManagedReactSelectOptionProbeActions(actions, portal, 3, targets);
-  if (actions.length > MANAGED_ACTION_LIMIT) truncateManagedActionsToBudget(actions, MANAGED_ACTION_LIMIT);
-  return actions;
+  return buildManagedDiscoveredOptionProbeBatches(portal, discovered, alreadyRead, discoveryRoleCapability)[0] ?? [];
+}
+
+export function managedResultSupportsDiscoveryRole(result: ManagedBrowserResult | null | undefined): boolean {
+  return result?.capabilities?.includes(MANAGED_DISCOVERY_ROLE_CAPABILITY) === true;
 }
 
 /**
@@ -1191,6 +1316,109 @@ export function mergeManagedFieldOptions(
     }
   }
   return out;
+}
+
+export type ManagedOptionProbeFailure = { controlId: string; reason: string };
+export type ManagedOptionProbeBatchFailure = { controlIds: string[]; reason: string };
+
+export function managedOptionProbeAnalysis(
+  portal: SupportedPortal,
+  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  alreadyRead: Record<string, string[]>,
+  results: readonly (ManagedBrowserResult | null | undefined)[],
+  batchFailures: readonly ManagedOptionProbeBatchFailure[] = [],
+  discoveryRoleCapability = false,
+): { options: Record<string, string[]>; failures: ManagedOptionProbeFailure[]; failedIds: Set<string> } {
+  const targets = detailedManagedOptionProbeTargets(portal, discovered, alreadyRead, discoveryRoleCapability);
+  const options = { ...alreadyRead };
+  const failures: ManagedOptionProbeFailure[] = [];
+  const failedIds = new Set<string>();
+  const counts = new Map<string, number>();
+  for (const field of discovered) {
+    const id = managedOptionProbeControlId(field);
+    if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+
+  const closedIds = new Set<string>();
+  const validReads = new Map<string, string[][]>();
+  const invalidReads = new Map<string, Set<string>>();
+  for (const result of results) {
+    for (const item of result?.extracted ?? []) {
+      const closedId = item.selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_-]*)"\]:is\(\[role="combobox"\],\[aria-haspopup="listbox"\]\)$/)?.[1];
+      if (closedId && managedExtractedValue(item.value)) closedIds.add(closedId);
+      const id = typeof item.label === 'string' && item.label.startsWith(MANAGED_OPTION_EXTRACT_PREFIX)
+        ? item.label.slice(MANAGED_OPTION_EXTRACT_PREFIX.length)
+        : optionProbeIdForSelector(item.selector);
+      if (!id) continue;
+      const parsed = parsedManagedOptionLines(item.value);
+      if (parsed.options) validReads.set(id, [...(validReads.get(id) ?? []), parsed.options]);
+      if (parsed.invalid) {
+        const reasons = invalidReads.get(id) ?? new Set<string>();
+        reasons.add(parsed.invalid);
+        invalidReads.set(id, reasons);
+      }
+    }
+  }
+
+  const batchFailureById = new Map<string, string>();
+  for (const failure of batchFailures) {
+    for (const id of failure.controlIds) batchFailureById.set(id, failure.reason);
+  }
+  const fail = (controlId: string, reason: string) => {
+    if (failedIds.has(controlId)) return;
+    failedIds.add(controlId);
+    failures.push({ controlId, reason });
+    delete options[controlId];
+  };
+
+  // Validate lists the earlier discovery pass supplied too. A merged union of two different live
+  // lists is not an exact option list, even if each individual read was otherwise usable.
+  for (const [controlId, reads] of validReads) {
+    if (new Set(reads.map((read) => JSON.stringify(read))).size > 1) {
+      fail(controlId, 'the live control returned conflicting option lists across bounded reads');
+    }
+  }
+
+  for (const target of targets) {
+    if (failedIds.has(target.controlId)) continue;
+    if ((counts.get(target.controlId) ?? 0) > 1) {
+      fail(target.controlId, 'the same durable selector identified more than one discovered field');
+      continue;
+    }
+    if (batchFailureById.has(target.controlId)) {
+      fail(target.controlId, `the option probe request failed: ${batchFailureById.get(target.controlId)}`);
+      continue;
+    }
+    if (targets.indexOf(target) >= MANAGED_OPTION_PROBE_MAX_CONTROLS) {
+      fail(target.controlId, `the form exceeded the bounded ${MANAGED_OPTION_PROBE_MAX_CONTROLS}-control option probe`);
+      continue;
+    }
+    const isClosed = target.kind === 'native' || closedIds.has(target.controlId);
+    if (!isClosed && !target.expectsClosed) continue;
+    if (!isClosed) {
+      fail(target.controlId, 'the field is expected to be a closed control but its live selector did not confirm that identity');
+      continue;
+    }
+    const reads = validReads.get(target.controlId) ?? [];
+    const distinct = new Map(reads.map((read) => [JSON.stringify(read), read]));
+    if (distinct.size > 1) {
+      fail(target.controlId, 'the live control returned conflicting option lists across bounded reads');
+      continue;
+    }
+    const read = [...distinct.values()][0];
+    if (!read) {
+      const invalid = [...(invalidReads.get(target.controlId) ?? [])];
+      const detail = invalid.includes('windowed')
+        ? 'the option list was windowed at the render cap'
+        : invalid.includes('loading')
+          ? 'the option list was still loading after the bounded warm/read'
+          : 'the option list returned no readable choices';
+      fail(target.controlId, detail);
+      continue;
+    }
+    options[target.controlId] = read;
+  }
+  return { options, failures, failedIds };
 }
 
 function managedGreenhouseScopedReactSelectFill(
@@ -1340,18 +1568,133 @@ function greenhouseReactSelectValue(
   return snapped ?? ladder.find((value) => value.trim().length > 0);
 }
 
+function normalizedFailedFieldLabel(value: string): string {
+  return normalizeReviewQuestionLabel(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+type ManagedFieldTarget = {
+  controlId?: string;
+  selector?: string;
+  label?: string;
+};
+
+function managedClosedFieldFamily(label: string): string | undefined {
+  const normalized = normalizedFailedFieldLabel(label);
+  if (!normalized) return undefined;
+  if (/\bhow did you hear\b|\bwhere did you hear\b|\bwhere have you learned\b|\breferral source\b/.test(normalized)) return 'referral';
+  if (/\bcurrent immigration status\b|\bbasis of (?:your )?current work authorization\b|\bcurrent visa status\b/.test(normalized)) return 'immigration-status';
+  if (/\bvisa sponsorship\b|\brequire sponsorship\b|\bimmigration support or sponsorship\b|\bneed sponsorship\b/.test(normalized)) return 'sponsorship';
+  if (/\b(?:eligible|authorized|authorised|legally)\b.*\bwork\b|\bwork authorization\b/.test(normalized)
+    && !/\bcurrent immigration status\b|\bbasis of (?:your )?current work authorization\b/.test(normalized)) return 'work-authorization';
+  if (/\bapplied\b.*\b(?:past|previously|before|role|position)\b|\bpreviously applied\b/.test(normalized)) return 'prior-application';
+  if (/\boffer deadlines?\b/.test(normalized)) return 'offer-deadline';
+  if (/\bgender identity\b|\bwhat gender\b/.test(normalized)) return 'demographic-gender';
+  if (/\btransgender\b/.test(normalized)) return 'demographic-transgender';
+  if (/\bsexual orientation\b/.test(normalized)) return 'demographic-sexual-orientation';
+  if (/\bdisab/.test(normalized)) return 'demographic-disability';
+  if (/\bveteran\b|\bserved in the military\b/.test(normalized)) return 'demographic-veteran';
+  if (/\brace\b|\bethnicit/.test(normalized)) return 'demographic-race';
+  // Academic families are deliberately applicant-field shapes, not keyword buckets. Employer
+  // questions such as "GPA requirement for scholarship", "degree comfortable onsite", and
+  // "university recruiting event" contain the same nouns but are not asking for the applicant's
+  // stored academic fact. Exact failed labels are still caught before this family mapping.
+  const unrelatedAcademicPolicy = /\b(?:scholarship|requirement|minimum|required|eligibility|qualif(?:y|ication)|policy|program)\b/.test(normalized);
+  if (!unrelatedAcademicPolicy
+    && /^(?:(?:please )?(?:indicate|provide|enter|report|select|choose) )?(?:(?:what is) )?(?:your )?(?:(?:overall|cumulative|current|undergraduate|college) )?(?:gpa|grade point average|grade average)(?: (?:range|band))?(?:(?: out of| on a) \d+(?: \d+)?(?: scale)?)?(?: if applicable)?$/.test(normalized)) return 'education-gpa';
+  if (/^(?:degree|education level|degree type|type of degree|highest level of education)$/.test(normalized)
+    || /^(?:what|which) (?:is )?(?:your )?(?:current )?(?:degree|education level)(?: are you currently pursuing)?$/.test(normalized)
+    || /^what (?:degree|education level) are you currently pursuing$/.test(normalized)) return 'education-degree';
+  if (/^(?:school|university|college|academic institution)$/.test(normalized)
+    || /^(?:which|what) (?:school|university|college|academic institution)(?: do did you attend| are you currently attending| did you attend)?$/.test(normalized)
+    || /^(?:school|university|college|academic institution) (?:name|attended)$/.test(normalized)) return 'education-school';
+  if (/^(?:(?:what is|please provide) )?(?:your )?(?:expected )?graduation year$/.test(normalized)
+    || /^year of graduation$/.test(normalized)) return 'education-graduation-year';
+  if (/^(?:(?:what is|please provide) )?(?:your )?(?:expected )?graduation month$/.test(normalized)
+    || /^month of graduation$/.test(normalized)) return 'education-graduation-month';
+  return undefined;
+}
+
+function packetTargetFailed(packet: SubmissionPacket, target: ManagedFieldTarget): boolean {
+  const targetLabel = normalizedFailedFieldLabel(target.label ?? '');
+  const targetFamily = managedClosedFieldFamily(target.label ?? '');
+  return packet.failedFields?.some((field) => {
+    if (target.controlId && field.controlId === target.controlId) return true;
+    if (target.selector && field.selector && field.selector === target.selector) return true;
+    const failedLabel = normalizedFailedFieldLabel(field.label);
+    if (!targetLabel || !failedLabel) return false;
+    if (targetLabel === failedLabel) return true;
+    const failedFamily = managedClosedFieldFamily(field.label);
+    return Boolean(targetFamily && failedFamily && targetFamily === failedFamily);
+  }) === true;
+}
+
+function packetControlFailed(packet: SubmissionPacket, controlId: string): boolean {
+  return packetTargetFailed(packet, { controlId });
+}
+
+function packetLabelFailed(packet: SubmissionPacket, label: string): boolean {
+  return packetTargetFailed(packet, { label });
+}
+
+function packetQuestionFailed(packet: SubmissionPacket, item: SubmissionPacket['questions'][number]): boolean {
+  const selector = reviewQuestionPortalSelector(item);
+  const selectorId = selector?.match(/^#([A-Za-z0-9][A-Za-z0-9_-]*)$/)?.[1]
+    ?? selector?.match(/^\[id=["']([A-Za-z0-9][A-Za-z0-9_-]*)["']\]$/)?.[1];
+  return packetTargetFailed(packet, {
+    controlId: selectorId,
+    selector,
+    label: item.question,
+  });
+}
+
+function packetHasFailedReferralField(packet: SubmissionPacket): boolean {
+  return packet.failedFields?.some((field) => isReferralSourceQuestion(field.label)) === true;
+}
+
+function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: SubmissionPacket): boolean {
+  if (!packet.failedFields?.length) return false;
+  if (action.text && packetLabelFailed(packet, action.text)) return true;
+  if (packetHasFailedReferralField(packet) && action.label?.startsWith('greenhouse_referral')) return true;
+  const fixedEducation: Array<[string, RegExp]> = [
+    ['school--0', /^education_school/],
+    ['degree--0', /^education_degree/],
+    ['discipline--0', /^education_discipline/],
+    ['end-month--0', /^education_(?:end_month|graduation_month)/],
+    ['end-year--0', /^education_(?:end_year|graduation_year|expected_graduation_year)/],
+  ];
+  if (fixedEducation.some(([id, label]) => packetControlFailed(packet, id) && label.test(action.label ?? ''))) return true;
+  const selector = action.selector ?? '';
+  return packet.failedFields.some((field) => {
+    if (field.selector && selector === field.selector) return true;
+    const escapedId = field.controlId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:#${escapedId}(?![A-Za-z0-9_-])|\\[id=["']${escapedId}["']\\])`).test(selector);
+  });
+}
+
+function managedFillByLabelUnlessFailed(
+  actions: ManagedBrowserAction[],
+  packet: SubmissionPacket,
+  text: string,
+  value: string | undefined,
+  label: string,
+) {
+  if (packetLabelFailed(packet, text)) return;
+  managedFillByLabel(actions, text, value, label);
+}
+
 /** The four fixed education controls, the value each will be given, and the label it reports under. */
 function greenhouseEducationComboboxFields(
   packet: SubmissionPacket,
-): Array<{ inputId: string; value: string | undefined; label: string }> {
-  const fields: Array<{ inputId: string; ladder: string[]; label: string }> = [
-    { inputId: 'school--0', ladder: greenhouseSchoolAliases(packet.school), label: 'education_school_combo:0' },
-    { inputId: 'degree--0', ladder: greenhouseDegreeAliases(packet.degree), label: 'education_degree_combo:0' },
-    { inputId: 'discipline--0', ladder: greenhouseDisciplineAliases(packet), label: 'education_discipline_combo:0' },
-    { inputId: 'end-month--0', ladder: packet.graduationMonth ? [packet.graduationMonth] : [], label: 'education_end_month_combo' },
+): Array<{ inputId: string; questionLabel: string; value: string | undefined; label: string }> {
+  const fields: Array<{ inputId: string; questionLabel: string; ladder: string[]; label: string }> = [
+    { inputId: 'school--0', questionLabel: 'School', ladder: greenhouseSchoolAliases(packet.school), label: 'education_school_combo:0' },
+    { inputId: 'degree--0', questionLabel: 'Degree', ladder: greenhouseDegreeAliases(packet.degree), label: 'education_degree_combo:0' },
+    { inputId: 'discipline--0', questionLabel: 'Discipline', ladder: greenhouseDisciplineAliases(packet), label: 'education_discipline_combo:0' },
+    { inputId: 'end-month--0', questionLabel: 'Graduation Month', ladder: packet.graduationMonth ? [packet.graduationMonth] : [], label: 'education_end_month_combo' },
   ];
   return fields.map((field) => ({
     inputId: field.inputId,
+    questionLabel: field.questionLabel,
     value: greenhouseReactSelectValue(packet, field.inputId, field.ladder),
     label: field.label,
   }));
@@ -1434,9 +1777,12 @@ function pushGreenhouseEducationTaxonomyWarmActions(
 function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
   const fields = greenhouseEducationComboboxFields(packet);
   for (const field of fields) {
+    if (packetControlFailed(packet, field.inputId) || packetLabelFailed(packet, field.questionLabel)) continue;
     managedGreenhouseReactSelectFill(actions, field.inputId, field.value, field.label);
   }
-  managedFill(actions, '#end-year--0', packet.graduationYear, 'education_end_year_field');
+  if (!packetControlFailed(packet, 'end-year--0') && !packetLabelFailed(packet, 'Graduation Year')) {
+    managedFill(actions, '#end-year--0', packet.graduationYear, 'education_end_year_field');
+  }
 }
 
 function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
@@ -1453,6 +1799,7 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
   const selectorLimit = databricks ? 3 : QUESTION_COMBOBOX_SELECTOR_LIMIT;
   const labelPrefix = databricks ? 'databricks_graduation_date_combo' : 'education_graduation_date_combo';
   for (const label of labels) {
+    if (packetLabelFailed(packet, label)) continue;
     for (const value of values) {
       for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, selectorLimit)) {
         managedGreenhouseScopedReactSelectFill(
@@ -1478,6 +1825,7 @@ function pushGreenhouseFixedQuestionComboboxActions(actions: ManagedBrowserActio
     { label: 'What is your GPA?', value: packet.gpa },
   ];
   for (const item of fixedQuestions) {
+    if (packetLabelFailed(packet, item.label)) continue;
     pushGreenhouseQuestionComboboxLabelActions(actions, item.label, item.value ?? '', 'greenhouse_fixed_question', packet.jdText);
   }
 }
@@ -1504,6 +1852,7 @@ function pushGreenhousePreferredLocationFallbackActions(actions: ManagedBrowserA
   ];
   let index = 0;
   for (const label of labels) {
+    if (packetLabelFailed(packet, label)) continue;
     for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
       managedGreenhouseScopedReactSelectFill(
         actions,
@@ -2415,6 +2764,7 @@ const GREENHOUSE_REFERRAL_LABEL_PREFIXES = [
 ] as const;
 
 function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  if (packetHasFailedReferralField(packet)) return;
   const value = packet.referralSourceDefault?.trim();
   if (!value) return;
   for (const alias of GREENHOUSE_REFERRAL_LABEL_PREFIXES) {
@@ -2738,6 +3088,7 @@ function greenhouseAkunaRequiredAliasPriority(alias: string): number {
 function pushGreenhouseAkunaSafeTextActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
   if (!packetLooksAkuna(packet)) return;
   for (const item of packet.questions) {
+    if (packetQuestionFailed(packet, item)) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
     const value = item.answer.trim();
     if (!questionText || !value) continue;
@@ -2812,6 +3163,7 @@ function pushGreenhouseKnownQuestionAliases(
     })
     : packet.questions;
   for (const item of items) {
+    if (packetQuestionFailed(packet, item)) continue;
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
     // An unanswered question drives no action. R-096 makes a required field the applicant has not
     // answered yet a real question record, and greenhouseKnownQuestionAliases has one branch keyed
@@ -2826,6 +3178,11 @@ function pushGreenhouseKnownQuestionAliases(
         ? []
         : greenhouseKnownQuestionAliases(item.question, answer);
     for (const alias of aliases) {
+      // The source reviewed question is not necessarily the control this fallback targets. A stale
+      // immigration answer, for example, can generate the canonical Akuna immigration alias even
+      // when that exact live control just failed its option probe. Guard the intended alias target
+      // before producing any scoped fill, rather than trying to infer intent from action text later.
+      if (packetTargetFailed(packet, { label: alias })) continue;
       const key = `${alias}\n${answer.trim()}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -2906,6 +3263,7 @@ function pushGreenhouseDemographicAliases(actions: ManagedBrowserAction[], packe
     if (!value) continue;
     if (packetHasGreenhouseReviewedDemographicAnswer(packet, item.key)) continue;
     for (const alias of item.aliases) {
+      if (packetLabelFailed(packet, alias)) continue;
       actions.push({
         type: 'fillByLabelText',
         text: alias,
@@ -3816,35 +4174,37 @@ function pushFixedFieldActions(
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
     if (!packetLooksAkuna(packet)) {
       pushGreenhouseEducationComboboxActions(actions, packet);
-      managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
-      managedFillByLabel(actions, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
-      managedFillByLabel(actions, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
+      managedFillByLabelUnlessFailed(actions, packet, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
+      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
+      managedFillByLabelUnlessFailed(actions, packet, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
     }
     if (packetLooksDatabricks(packet)) {
-      managedFillByLabel(actions, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
+      managedFillByLabelUnlessFailed(actions, packet, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
     }
     if (!packetLooksAkuna(packet)) {
-      managedFillByLabel(actions, 'End date month', packet.graduationMonth, 'education_end_month');
-      managedFillByLabel(actions, 'End date year', packet.graduationYear, 'education_end_year');
-      managedFillByLabel(actions, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
-      managedFillByLabel(actions, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
-      managedFillByLabel(actions, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
+      managedFillByLabelUnlessFailed(actions, packet, 'End date month', packet.graduationMonth, 'education_end_month');
+      managedFillByLabelUnlessFailed(actions, packet, 'End date year', packet.graduationYear, 'education_end_year');
+      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
+      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
+      managedFillByLabelUnlessFailed(actions, packet, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
       // Same value the id-scoped fill uses, for the same reason: this lands in the SAME react-select
       // (fillByLabelText resolves the label's container to its one input), so handing it the stored
       // sentence leaves unmatched search text sitting in a control that was about to be filled
       // correctly.
-      managedFillByLabel(
-        actions,
-        'Discipline',
-        greenhouseReactSelectValue(packet, 'discipline--0', greenhouseDisciplineAliases(packet)),
-        'education_discipline_label',
-      );
+      if (!packetControlFailed(packet, 'discipline--0') && !packetLabelFailed(packet, 'Discipline')) {
+        managedFillByLabel(
+          actions,
+          'Discipline',
+          greenhouseReactSelectValue(packet, 'discipline--0', greenhouseDisciplineAliases(packet)),
+          'education_discipline_label',
+        );
+      }
     }
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) {
-      managedFillByLabel(actions, 'GPA', packet.gpa, 'gpa');
-      managedFillByLabel(actions, 'What is your GPA?', packet.gpa, 'gpa_question');
+      managedFillByLabelUnlessFailed(actions, packet, 'GPA', packet.gpa, 'gpa');
+      managedFillByLabelUnlessFailed(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question');
     }
     pushGreenhousePreferredLocationFallbackActions(actions, packet);
     for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {
@@ -4189,6 +4549,7 @@ export function buildManagedPortalActions(
   // values after filling, so a missing or unaccepted value returns as a blocker instead of being
   // reported as completed.
   for (const item of canFillReviewedQuestions('managed') && mayReplayReviewedQuestions ? packet.questions : []) {
+    if (packetQuestionFailed(packet, item)) continue;
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
     if (!answer.trim()) continue;
     const questionText = normalizeReviewQuestionLabel(item.question);
@@ -4354,6 +4715,13 @@ export function buildManagedPortalActions(
   // a run that explicitly asked not to submit, and captured the preview of step 4 - so the student
   // was shown an empty attestation page as the evidence of what she was approving.
   if (submit && portalFamily(portal) === 'paylocity') pushPaylocityTraversal(actions, packet);
+
+  // Last-line invariant. Builder-specific guards above keep the intent legible; this exact-id and
+  // exact-label filter ensures a newly added fallback cannot silently bypass them later.
+  if (packet.failedFields?.length) {
+    const allowed = actions.filter((action) => !managedActionTargetsFailedField(action, packet));
+    actions.splice(0, actions.length, ...allowed);
+  }
 
   /* THE BUDGET. Applied to every family, not just Greenhouse - see
    * trimSpeculativeManagedActionsToBudget for the measurement that made that necessary, and for why

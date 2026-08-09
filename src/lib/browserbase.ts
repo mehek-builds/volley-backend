@@ -6,6 +6,8 @@ import { FINAL_SUBMIT_CHOOSER_POLICY, type FinalSubmitChooserPolicy } from './fi
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
 export const MANAGED_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY;
+/** Stratus result capability that proves discovered controls include their live DOM role. */
+export const MANAGED_DISCOVERY_ROLE_CAPABILITY = 'discovery-control-role-v1';
 
 export type ManagedBrowserAction = {
   type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover' | 'confirmAndSubmit';
@@ -50,6 +52,11 @@ export type ManagedDiscoveredQuestion = {
   label: string;
   selector: string;
   inputType: string;
+  // The DOM role is distinct from inputType. Greenhouse React-selects are text inputs whose role
+  // is combobox, while end-year--0 is a genuine text input. This optional wire field lets the
+  // backend distinguish those controls without treating every text input or every --0 id as closed.
+  // It remains optional during the runner rollout, and its absence never closes a dynamic control.
+  role?: string | null;
   maxLength: number | null;
   // The managed provider's `discover` action does not report option lists and, as of 2026-08-08,
   // shows no sign of learning to: it enumerates text-shaped inputs and returns four fields per
@@ -76,6 +83,8 @@ export type ManagedBrowserResult = {
   blockers?: string[];
   skipped?: string[];
   discovered?: ManagedDiscoveredQuestion[];
+  /** Additive runner features this exact result contract supports. Absence means unsupported. */
+  capabilities?: string[];
   extracted?: Array<{ selector: string; label?: string; value: string | null }>;
   continuationToken?: string;
   continuationExpiresAt?: string;

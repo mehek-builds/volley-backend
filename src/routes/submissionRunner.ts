@@ -53,11 +53,12 @@ import {
   buildManagedPortalActions,
   budgetDroppedReviewedQuestions,
   attachManagedFieldOptions,
-  buildManagedDiscoveredOptionProbeActions,
-  managedOptionProbeTargets,
+  buildManagedDiscoveredOptionProbeBatches,
+  managedOptionProbeAnalysis,
+  managedOptionProbeControlId,
   managedUnreportedFillLabels,
-  mergeManagedFieldOptions,
   managedResultFieldOptions,
+  managedResultSupportsDiscoveryRole,
   CaptchaUnresolvedError,
   clickFinalSubmit,
   detectPortal,
@@ -1361,11 +1362,19 @@ export function mergeDiscoveredPortalQuestions(
   discovered: readonly ApplicationReviewQuestion[],
   stored: readonly ApplicationReviewQuestion[],
   invalidatedQuestionKeys: readonly string[],
+  invalidatedFieldIds: ReadonlySet<string> = new Set(),
 ): ApplicationReviewQuestion[] {
   const invalidated = new Set(invalidatedQuestionKeys);
   return normalizeApplicationReviewQuestions([
     ...discovered,
-    ...stored.filter((question) => !invalidated.has(normalizeReviewQuestionLabel(question.question).toLowerCase())),
+    ...stored.filter((question) => {
+      if (invalidated.has(normalizeReviewQuestionLabel(question.question).toLowerCase())) return false;
+      const controlId = managedOptionProbeControlId({
+        label: question.question,
+        selector: question.portal_selector,
+      });
+      return !controlId || !invalidatedFieldIds.has(controlId);
+    }),
   ]);
 }
 
@@ -1509,7 +1518,7 @@ async function prepareManaged(
   // provider's discover action reports no options at all, so a control offering "Computer Science"
   // was handed the stored major, matched nothing, and came back required-and-empty.
   const discoveryFieldOptions = managedResultFieldOptions(discoveryResult);
-  /* THE THIRD CALL, and the reason the option snapping finally reaches a custom question.
+  /* THE THIRD STAGE, and the reason option snapping reaches every confirmed closed control.
    *
    * The discovery pass probes four ids compiled into this repo, because those four are Greenhouse's
    * own and are knowable before any page is read. Every other closed control on a Greenhouse form is
@@ -1524,36 +1533,68 @@ async function prepareManaged(
    * runner's 120-action ceiling, and the ids this reads are its own output, so there is neither room
    * nor information until it has returned.
    *
-   * Read-only: open the control, read the listbox, press Escape. Nothing is typed, nothing is
-   * uploaded, nothing is sent, and the control is left as it was found. A failure here is not a
-   * failure of the run - the option list is absent exactly as it was before this existed, and the
-   * alias ladder decides - so it is logged rather than added to discoveryFailures, which exists for
-   * the stronger claim that the run never saw the form's questions at all. */
-  const optionProbeActions = buildManagedDiscoveredOptionProbeActions(
+   * Native selects are read without clicking. Custom lists are identity-checked, opened, read and
+   * closed twice so an async first read can warm the second. Whole controls are batched under the
+   * provider's 120-action ceiling. Any missing, windowed, conflicting or failed closed-control read
+   * is removed before resolution, so a blind alias is never sent in its place. */
+  const discoveryRoleCapability = managedResultSupportsDiscoveryRole(discoveryResult);
+  const optionProbeBatches = buildManagedDiscoveredOptionProbeBatches(
     portal,
     discoveryResult?.discovered ?? [],
     discoveryFieldOptions,
+    discoveryRoleCapability,
   );
-  const optionProbeResult = optionProbeActions.length > 0
-    ? await runManagedBrowser(applicationUrl, optionProbeActions, { screenshot: false })
+  const optionProbeResults = [];
+  const optionProbeBatchFailures: Array<{ controlIds: string[]; reason: string }> = [];
+  for (const actions of optionProbeBatches) {
+    const controlIds = [...new Set(actions.flatMap((action) => {
+      const label = action.label ?? '';
+      const id = label.startsWith('options:')
+        ? label.slice('options:'.length)
+        : label.match(/^closed_control:(.+)$/)?.[1];
+      return id ? [id] : [];
+    }))];
+    const result = await runManagedBrowser(applicationUrl, actions, { screenshot: false })
       .catch((error: unknown) => {
+        const reason = describeDiscoveryFailure(error);
+        optionProbeBatchFailures.push({ controlIds, reason });
         fastify.log.error(
           {
             applicationId: row.id,
             portal,
-            error: describeDiscoveryFailure(error),
-            controls: managedOptionProbeTargets(portal, discoveryResult?.discovered ?? [], discoveryFieldOptions),
+            error: reason,
+            controls: controlIds,
           },
-          'Option probe pass failed, so the closed controls on this form fall back to the alias ladder',
+          'Option probe batch failed, so its closed controls are blocked from blind fallback',
         );
         return null;
-      })
-    : null;
-  const fieldOptions = mergeManagedFieldOptions(
+      });
+    optionProbeResults.push(result);
+  }
+  const optionProbe = managedOptionProbeAnalysis(
+    portal,
+    discoveryResult?.discovered ?? [],
     discoveryFieldOptions,
-    managedResultFieldOptions(optionProbeResult),
+    [discoveryResult, ...optionProbeResults],
+    optionProbeBatchFailures,
+    discoveryRoleCapability,
   );
-  const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions);
+  if (optionProbe.failures.length > 0) {
+    discoveryFailures.push(
+      `closed-control option discovery failed: ${optionProbe.failures.map(({ controlId, reason }) => `${controlId}: ${reason}`).join('; ').slice(0, 800)}`,
+    );
+  }
+  const fieldOptions = optionProbe.options;
+  const failedFields = (discoveryResult?.discovered ?? []).flatMap((field) => {
+    const controlId = managedOptionProbeControlId(field);
+    if (!controlId || !optionProbe.failedIds.has(controlId)) return [];
+    return [{ controlId, label: field.label, selector: field.selector, inputType: field.inputType }];
+  });
+  const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
+    .filter((field) => {
+      const controlId = managedOptionProbeControlId(field);
+      return !controlId || !optionProbe.failedIds.has(controlId);
+    });
   const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
   const coverLetterOutcome = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
   packet = coverLetterOutcome.packet;
@@ -1577,7 +1618,13 @@ async function prepareManaged(
     portal,
     savedAnswers,
   );
-  const mergedQuestions = mergeDiscoveredPortalQuestions(discoveredQuestions, storedQuestions, invalidatedQuestionKeys);
+  const failedQuestionKeys = failedFields.map((field) => normalizeReviewQuestionLabel(field.label).toLowerCase());
+  const mergedQuestions = mergeDiscoveredPortalQuestions(
+    discoveredQuestions,
+    storedQuestions,
+    [...invalidatedQuestionKeys, ...failedQuestionKeys],
+    optionProbe.failedIds,
+  );
   packet.questions = mergedQuestions.map((q) => ({
     question: q.question,
     answer: q.answer,
@@ -1588,6 +1635,7 @@ async function prepareManaged(
   // instead of the profile's own phrasing. It only ever gets ONE attempt at a react-select (a second
   // click closes the menu the first one opened), so the first value has to be the right one.
   packet.fieldOptions = fieldOptions;
+  packet.failedFields = failedFields;
 
   const fillActions = buildManagedPortalActions(portal, packet);
   /* Which reviewed questions this run will not even attempt.
