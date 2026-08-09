@@ -126,23 +126,41 @@ const SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION =
 const NON_US_WORK_SCOPE =
   /\b(canada|canadian|united kingdom|uk|britain|british|england|european union|eu|australia|australian|india|indian|united arab emirates|uae|dubai|singapore|germany|france|ireland|netherlands|hungary|hungarian|japan|korea|china)\b/i;
 const US_WORK_SCOPE = /\b(?:united states|usa|america(?:n)?)\b|\bu\.s\.(?=\s|$|[?,;:)])/i;
-/* THE ABBREVIATION, MATCHED WITHOUT REGARD TO CASE, BECAUSE PRODUCTION NEVER SEES THE CAPITALS.
+/* THE COUNTRY ABBREVIATION, SPELLED THE WAY IT ACTUALLY ARRIVES.
  *
- * Measured on the owner's live packets on 2026-08-09: all 519 stored question labels are
- * all-lowercase by the time they reach this file, and refreshKnownQuestionAnswers (below) re-runs
- * resolveKnownAnswer over that stored text on every send. A case-SENSITIVE \bUS\b therefore could
- * not fire on a real application at all, so truveta's "...require visa sponsorship to continue
- * working in the us?" and Roblox's "...authorized to work in the us?" were both read as naming no
- * country, and refused for saying nothing about scope while saying "us" twice.
+ * This pattern is case-SENSITIVE on purpose: "us" is also the commonest pronoun on a job form
+ * ("how did you hear about us?", "tell us about a project", "why are you interested in us?"), and
+ * reading one of those as a country would put a US work-authorization answer on a form that never
+ * mentioned the United States. The capital letters were the whole distinction.
  *
- * The capitals were doing real work, though: they were the only thing keeping the English pronoun
- * out of a country test ("tell us whether...", "are you able to work with us?"). Case is replaced
- * by SHAPE, which survives lowercasing. The pronoun is not preceded by "the", and it is not
- * followed by an eligibility noun, so every alternative below is closed to it. The
- * questionDiscovery tests pin both pronoun spellings.
+ * MEASURED, on 2026-08-09, against every question label Litos has ever stored: 504 distinct
+ * labels, 491 of them entirely lowercase, and this pattern matches ZERO of them. It cannot match
+ * one. The extension lowercases every label it captures before it is sent
+ * (student-outreach-extension/src/lib/adapters/generic.ts: `clean(parts.join(' ')).toLowerCase()`
+ * on every label path), so the resolver is never handed a capital letter to distinguish on. The
+ * guard exists, it is tested, and the tests pass only because they are written with the employer's
+ * original casing - which is the one input the pipeline never produces.
+ *
+ * The consequence is not theoretical. "are you legally authorized to work in the united states?"
+ * is answered from work_authorized twelve times over in the corpus; "are you legally authorized to
+ * work in the us?" - the SAME question, Roblox's wording - is refused, and it was one of the two
+ * stops on the 2026-08-09 Roblox run. Refusing one spelling of the United States while answering
+ * the other is not a safety property, it is a dead regex.
+ *
+ * So the case-folded arm below is added rather than the flag being flipped, because the pronoun
+ * problem is real and the two arms need different shapes to survive it:
+ *   - the preposition arm REQUIRES the article. "in the us" cannot be a pronoun; "in us" can
+ *     ("why are you interested in us?"), which is why the case-folded arm does not accept it.
+ *   - the noun arm requires an immigration noun immediately after. "us work authorization" is the
+ *     country; "tell us whether ..." is not, and the existing pronoun test covers it.
+ * Measured over the same 504 labels the case-folded arm matches 6, none of them a pronoun, and of
+ * those 6 only 4 are work-eligibility questions at all - the other two are a state-of-residence
+ * select and a veteran-status question, neither of which ever consults a country scope.
  */
 const US_ABBREVIATION_SCOPE =
-  /\b(?:in|within|throughout|across)\s+(?:the\s+)?us\b|\bthe\s+us\s*[?.,;:)]|\bus\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/i;
+  /\b(?:in|within|throughout|across)\s+(?:the\s+)?US\b|\bUS\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/;
+const US_ABBREVIATION_SCOPE_CASE_FOLDED =
+  /\b(?:in|within|throughout|across)\s+the\s+us\b|\bus\s+(?:work|employment|visa|immigration|authori[sz]ation)\b/i;
 /* The employer defers the country to the posting instead of naming it.
  *
  * Broadened on 2026-08-09, measured: the three fixed phrasings it held missed Deepgram's "the
@@ -223,39 +241,88 @@ export function legalConsentSkipReason(label: string): string {
  */
 const SPONSORSHIP_EXEMPTION_QUESTION = /\bexempt\b[^?]{0,40}\bsponsor/i;
 
+/* A COMPOUND QUESTION WHOSE OTHER HALF IS NOT ON FILE.
+ *
+ * "Are you currently located in the US, or do you have US work authorization?" is one form field
+ * asking two different things joined by OR, and only the second one has a column behind it. That
+ * asymmetry is the problem: "Yes" happens to be true whenever work_authorized is true, but "No"
+ * would also deny that she lives in the country, which nothing stored records. A rule that is
+ * sound in one direction and a false statement in the other is not a rule, so the question goes
+ * back to her.
+ *
+ * Written against the ONE label in the corpus with this shape, not against "or" in general.
+ * "Are you authorized to work in the US (e.g. you are a citizen, a permanent resident, or hold a
+ * visa)?" is a parenthetical gloss on a single question, not two questions, and must keep
+ * answering; requiring a residence clause immediately before the "or" is what separates them.
+ */
+const RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY =
+  /\b(?:currently\s+)?(?:located|residing|living)\s+in\b[^?]{0,60}\bor\b/i;
+
+/* THE ONE STORED PAIR THAT DESCRIBES NOBODY.
+ *
+ * work_authorized and needs_sponsorship are two independent selects in Settings, so nothing stops
+ * a half-finished profile holding a combination no person is in. Three of the four are real:
+ * authorized with no sponsorship needed (citizen or permanent resident), authorized WITH
+ * sponsorship needed later (a student on CPT/OPT, which is this account), and not authorized and
+ * needing sponsorship. The fourth - not authorized AND needing no sponsorship - is not a person.
+ *
+ * It matters because the pair is answered by two DIFFERENT branches below, one column each, and
+ * neither can see what the other is about to say. On that fourth combination the two branches put
+ * "No, I am not allowed to work here" and "No, I need nothing from you" on the same page, and an
+ * employer reading them together concludes something false whichever one they believe. The whole
+ * family is held until the profile says something coherent.
+ */
+function storedEligibilityIsSelfContradictory(ap: ApplicationProfileLike): boolean {
+  return ap.work_authorized === false && ap.needs_sponsorship === false;
+}
+
 function workEligibilityAnswer(
   label: string,
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
-  const explicitlyUsScoped = US_WORK_SCOPE.test(label) || US_ABBREVIATION_SCOPE.test(label);
+  const explicitlyUsScoped = US_WORK_SCOPE.test(label)
+    || US_ABBREVIATION_SCOPE.test(label)
+    || US_ABBREVIATION_SCOPE_CASE_FOLDED.test(label);
   if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
   const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
   const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
+  if (
+    (asksAuthorization || asksSponsorship)
+    && (storedEligibilityIsSelfContradictory(ap) || RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY.test(label))
+  ) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
   const namesAnotherCountry = NON_US_WORK_SCOPE.test(label) || JOB_LOCATION_SCOPE.test(label);
   /* THE COUNTRY GATE IS NOT SYMMETRIC, AND THE ASYMMETRY IS THE ENTIRE RULE.
    *
-   * The gate above it exists because the legacy booleans were collected without a country, so an
-   * unscoped question cannot be answered from them. That is true of the answers that CLAIM
-   * something - "yes I am authorized", "no I need no sponsorship" - because a claim of eligibility
-   * in a country nobody named is a false legal declaration waiting to happen, and it is the defect
-   * R-004 was opened for.
+   * The positive US-scope requirement below exists because the legacy booleans were collected
+   * without a country, so an unscoped question cannot be answered from them. That is true of the
+   * answers that CLAIM something - "yes I am authorized", "no I need no sponsorship" - because a
+   * claim of eligibility in a country nobody named is a false legal declaration waiting to happen,
+   * and it is the defect R-004 was opened for.
    *
    * It is not true of "yes, I need sponsorship". That answer discloses a limitation rather than
    * asserting a permission: it can only ever narrow what an employer will offer, never obtain
-   * something under false pretenses, and it is what needs_sponsorship literally records. Requiring
-   * the employer to spell "United States" before Litos will repeat a stored "yes" cost fourteen of
-   * twenty-five packets in the 2026-08-08 run their sponsorship answer, including Cloudflare
-   * ("...to work at Cloudflare?"), Redwood Materials (which lists only US visa categories),
-   * IMC, Five Rings, Point72, Anduril and DRW. Not one of those employers named a country, and
-   * every one of them was told nothing instead of being told the truth.
+   * something under false pretenses, and it is what needs_sponsorship literally records. Getting it
+   * wrong in that direction costs a handoff; getting it wrong in the other direction is a false
+   * statement about work eligibility on a real application, and only one of those is worth a gate.
    *
-   * The two exceptions stay exceptions. A label that NAMES another country, or that defers to "the
-   * country where the job is located", is refused even in this direction: "yes I need sponsorship"
-   * is wrong AND costly for a role in the one country where she may not, and the posting's own
-   * location is a JD inference, which is exactly what be1bccf removed. And a label phrased
-   * backwards is refused, because "yes" there is a claim again, not a disclosure.
+   * Measured on 2026-08-09 against the production corpus, replaying all 297 distinct stored labels
+   * with the real profile: requiring the employer to spell the country out before Litos will repeat
+   * a stored "yes" refused 13 sponsorship labels it is the answer to, including Cloudflare ("...to
+   * work at Cloudflare?"), Reddit, Redwood Materials (whose list is nothing but US visa categories),
+   * IMC, Five Rings, Point72, Anduril, DRW and Virtu. Not one of those employers named a country,
+   * and every one of them was told nothing instead of being told the truth.
+   *
+   * The exceptions stay exceptions, and there are now four. A label that NAMES another country, or
+   * that defers to the posting's own country, is refused even in this direction: "yes I need
+   * sponsorship" is wrong AND costly for a role in the one country where she may not, and the
+   * posting's location is a JD inference, which is what be1bccf was right to remove. A label phrased
+   * backwards is refused, because "yes" there is a claim again. And the two guards above this line,
+   * from 97207e2, run first and are untouched by any of it: a compound label whose other half has no
+   * column, and the stored pair that describes nobody, are held whichever direction the answer runs.
    */
   const disclosesSponsorshipNeed = ap.needs_sponsorship === true
     && !UNRESTRICTED_WORK_AUTHORIZATION_QUESTION.test(label)
