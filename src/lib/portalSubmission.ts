@@ -42,7 +42,10 @@ type PortalFamily =
   | 'oraclecloud'
   | 'ultipro'
   | 'recruitee'
-  | 'teamtailor';
+  | 'teamtailor'
+  | 'personio'
+  | 'pinpoint'
+  | 'comeet';
 type ControlledPortal =
   | 'controlled_test'
   | 'controlled_lever'
@@ -91,7 +94,7 @@ function portalFamily(portal: SupportedPortal): PortalFamily {
 // compile time and not only at runtime. That is what lets the jobs board's own union be checked
 // against this one by the type checker instead of by a test that someone can forget to run.
 type MultiStepFamily = 'paylocity' | 'smartrecruiters';
-type CaptchaGatedFamily = 'jazzhr' | 'bamboohr';
+type CaptchaGatedFamily = 'jazzhr' | 'bamboohr' | 'comeet';
 type ConsentGatedFamily = 'teamtailor';
 
 const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
@@ -106,7 +109,18 @@ const MULTI_STEP_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // loaded. BambooHR's fields are otherwise clean and fully fillable, which is exactly why the ceiling
 // has to be written down - the form LOOKS like a one-run submit and is not.
 const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
-  ['jazzhr', 'bamboohr'] satisfies CaptchaGatedFamily[],
+  ['jazzhr', 'bamboohr', 'comeet'] satisfies CaptchaGatedFamily[],
+);
+
+// These forms are fillable, but their final action belongs to the applicant. Personio tenants can
+// mark fields required without the native required attribute, so the shared readiness reader cannot
+// prove the form complete. Pinpoint puts a required privacy-processing consent directly before
+// submit. Both were confirmed on two unrelated public tenants on 2026-08-09. Keeping them out of
+// autonomous submission also keeps them out of polling through AUTONOMOUS_PORTAL_FAMILIES.
+type ManualFinalReviewFamily = 'personio' | 'pinpoint';
+
+const MANUAL_FINAL_REVIEW_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
+  ['personio', 'pinpoint'] satisfies ManualFinalReviewFamily[],
 );
 
 // Teamtailor puts an applicant privacy acknowledgement beside the send control on every live
@@ -169,6 +183,7 @@ export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
   return !MULTI_STEP_FAMILIES.has(family)
     && !CAPTCHA_GATED_FAMILIES.has(family)
     && !CONSENT_GATED_FAMILIES.has(family)
+    && !MANUAL_FINAL_REVIEW_FAMILIES.has(family)
     && !ACCOUNT_WALLED_FAMILIES.has(family);
 }
 
@@ -183,7 +198,7 @@ export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
 // discovers the last step needs her anyway. Fewer jobs that all work beats more jobs that mostly do.
 export type AutonomousPortalFamily = Exclude<
   PortalFamily,
-  MultiStepFamily | CaptchaGatedFamily | ConsentGatedFamily | AccountWalledFamily
+  MultiStepFamily | CaptchaGatedFamily | ConsentGatedFamily | ManualFinalReviewFamily | AccountWalledFamily
 >;
 
 export const AUTONOMOUS_PORTAL_FAMILIES = [
@@ -239,6 +254,12 @@ export function portalHandoffReason(portal: SupportedPortal): string | null {
   if (MULTI_STEP_FAMILIES.has(family)) {
     return 'Litos filled in this application and stopped on the last page. That page asks you to confirm the details are true, and it can ask about your background and your right to work, so those answers need to be yours.';
   }
+  if (family === 'personio') {
+    return 'Litos filled this Personio application, but Personio does not expose every required field to the final safety check. Review the form and send it yourself.';
+  }
+  if (family === 'pinpoint') {
+    return 'Litos filled this Pinpoint application and left the privacy-processing choice for you. Review the notice, make your choice, and send it yourself.';
+  }
   return null;
 }
 
@@ -262,6 +283,9 @@ export function unattendedHandoffReason(portal: SupportedPortal): string | null 
   }
   if (MULTI_STEP_FAMILIES.has(family)) {
     return 'This company asks its questions over several pages, and the last one needs answers only you can give. Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
+  }
+  if (MANUAL_FINAL_REVIEW_FAMILIES.has(family)) {
+    return 'This company requires a final review on its application page, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.';
   }
   return null;
 }
@@ -2651,6 +2675,17 @@ const TEAMTAILOR_RESUME_SELECTOR = '#upload_resume_field input[type="file"]';
 // file selector replace the resume with the cover letter.
 const TEAMTAILOR_COVER_LETTER_SELECTOR = 'input[type="file"][name="teamtailorCoverLetterThatDoesNotExist"]';
 
+// Personio, Pinpoint, and Comeet were captured on two unrelated live tenants per family on
+// 2026-08-09. Only stable platform-owned names and ids are used here. None of the three is allowed
+// to auto-submit: Personio does not expose requiredness as native HTML, Pinpoint requires a privacy
+// processing choice, and Comeet renders reCAPTCHA on both captured forms.
+const PERSONIO_RESUME_SELECTOR = 'input[type="file"][name="documents.cv"]';
+const PERSONIO_COVER_LETTER_SELECTOR = 'input[type="file"][name="documents.cover-letter"]';
+const PINPOINT_RESUME_SELECTOR = 'input[type="file"][name="application_form[application][cv]"]';
+const PINPOINT_COVER_LETTER_SELECTOR = 'input[type="file"][name="application_form[application][cover_letter]"]';
+const COMEET_RESUME_SELECTOR = 'input[type="file"][name="cv"]';
+const COMEET_COVER_LETTER_SELECTOR = 'input[type="file"][name="coverLetter"]';
+
 // NOT filled: input[name^="nickname_"], BambooHR's honeypot, labelled "Please leave this field
 // blank" and concealed the same zero-height-ancestor way Breezy's is.
 //
@@ -2687,6 +2722,9 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   controlled_bamboohr: BAMBOOHR_COVER_LETTER_SELECTOR,
   recruitee: RECRUITEE_COVER_LETTER_SELECTOR,
   teamtailor: TEAMTAILOR_COVER_LETTER_SELECTOR,
+  personio: PERSONIO_COVER_LETTER_SELECTOR,
+  pinpoint: PINPOINT_COVER_LETTER_SELECTOR,
+  comeet: COMEET_COVER_LETTER_SELECTOR,
   // The account-walled four never reach a form, so there is no file input of any kind to find. A
   // never-matching selector is the honest answer to "can this portal accept a cover-letter file"
   // here, and it keeps hasCoverLetterUpload() from having to special-case them.
@@ -3078,6 +3116,41 @@ function pushFixedFieldActions(
     managedUpload(actions, TEAMTAILOR_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, TEAMTAILOR_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
     // candidate[consent_given] and candidate[consent_given_future_jobs] stay with the applicant.
+  } else if (family === 'personio') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="first_name"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="last_name"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="email"]', packet.email, 'email');
+    managedFill(actions, 'input[name="phone"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="location"]', packet.city, 'location');
+    managedFill(actions, 'input[name="public_profile"]', packet.linkedinUrl ?? packet.portfolioUrl, 'public_profile');
+    managedUpload(actions, PERSONIO_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, PERSONIO_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // Do not touch salary_expectations, available_from, or custom_attribute_* fields. Their labels
+    // and answer semantics are tenant-defined and the discovery/review path owns them.
+  } else if (family === 'pinpoint') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="application_form[application][first_name]"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="application_form[application][last_name]"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="application_form[application][email]"]', packet.email, 'email');
+    managedFill(actions, 'input[name="application_form[application][phone]"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="application_form[application][town]"]', packet.city, 'location');
+    managedFill(actions, 'input[name="application_form[application][linkedin_url]"][type="text"]', packet.linkedinUrl, 'linkedin');
+    managedUpload(actions, PINPOINT_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, PINPOINT_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // application[process_information] is the required privacy-processing consent. It is never
+    // checked here, even when a reviewed question happens to contain affirmative wording.
+  } else if (family === 'comeet') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, 'input[name="firstName"]', parts[0], 'first_name');
+    managedFill(actions, 'input[name="lastName"]', parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, 'input[name="email"]', packet.email, 'email');
+    managedFill(actions, 'input[name="phone"]', packet.phone, 'phone');
+    managedFill(actions, 'input[name="websiteUrl"]', packet.portfolioUrl ?? packet.linkedinUrl ?? packet.githubUrl, 'portfolio');
+    managedUpload(actions, COMEET_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, COMEET_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
+    // The phone-country combobox, personal note, and tenant questions stay in the generic reviewed
+    // question path. Both captured tenants render g-recaptcha-response, so submit stays gated.
   } else {
     const parts = packet.fullName.trim().split(/\s+/);
     const firstName = parts[0] ?? '';
@@ -3448,6 +3521,14 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   recruitee: /^(?!www\.)[^.]+\.recruitee\.com$/i,
   // career.teamtailor.com is Teamtailor's own public tenant. Product, API, and docs hosts are out.
   teamtailor: /^(?!(?:www|app|api|partner|docs|support)\.)[^.]+\.teamtailor\.com$/i,
+  // Personio tenants use {tenant}.jobs.personio.de or .com. Requiring the jobs label prevents a
+  // company or employee product on another Personio host from being mistaken for an application.
+  personio: /^[a-z0-9-]+\.jobs\.personio\.(?:de|com)$/i,
+  pinpoint: /^(?!www\.)[a-z0-9-]+\.pinpointhq\.com$/i,
+  // The public www.comeet.com posting is only a wrapper. The actual form is a token-bearing iframe
+  // on www.comeet.co, and that token cannot be derived from the posting URL. Only the real form URL
+  // is supported so the backend never promises a fill it cannot reach.
+  comeet: /^www\.comeet\.co$/i,
 };
 
 // Host alone is not enough for a portal whose host space also serves a login page, a marketing site
@@ -3474,7 +3555,17 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   ultipro: /^\/[^/]+\/JobBoard\//i,
   recruitee: /^\/o\/[^/]+(?:\/c\/new)?\/?$/i,
   teamtailor: /^\/jobs\/[^/]+(?:\/applications\/new)?\/?$/i,
+  personio: /^\/job\/\d+(?:\/apply)?\/?$/i,
+  pinpoint: /^\/(?:[a-z]{2}\/)?postings\/[0-9a-f-]+(?:\/applications\/new)?\/?$/i,
+  comeet: /^\/jobs\/[A-Z0-9.]+\/[A-Z0-9.-]+\/apply\/?$/i,
 };
+
+// Comeet's public .com job page is only a wrapper. The real .co application URL is usable only
+// with the opaque token issued into its iframe query string. Inspect the raw query so validation
+// never decodes, trims, re-encodes, or otherwise changes token bytes.
+function hasComeetApplicationToken(url: URL): boolean {
+  return /(?:^\?|&)token=[^&]+(?:&|$)/.test(url.search);
+}
 
 function databricksGreenhouseJobId(url: URL): string | undefined {
   if (!/^(?:www\.)?databricks\.com$/i.test(url.hostname)) return undefined;
@@ -3541,12 +3632,13 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     // serves logins, marketing pages, or in Oracle's case entire unrelated products.
     const applyPath = APPLY_PATHS[portal as PortalFamily];
     if (applyPath && !applyPath.test(url.pathname)) continue;
+    if (portal === 'comeet' && !hasComeetApplicationToken(url)) continue;
     return portal as SupportedPortal;
   }
   // Names the platforms it can actually DO something useful on. The account-walled four are
   // recognised by the loop above and explained by portalHandoffReason, but listing them here would
   // read as a promise to fill them, which is the opposite of what recognising them is for.
-  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR, BambooHR, Recruitee and Teamtailor.');
+  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR, BambooHR, Recruitee, Teamtailor, Personio, Pinpoint and Comeet.');
 }
 
 /**
@@ -3587,7 +3679,24 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
   } catch {
     return undefined;
   }
-  if (isPortalSupported(rawUrl)) return rawUrl;
+  if (isPortalSupported(rawUrl)) {
+    const portal = detectPortal(rawUrl);
+    const family = portalFamily(portal);
+    if (family === 'personio') {
+      const url = new URL(portalApplicationUrl(portal, rawUrl));
+      const language = url.searchParams.get('language');
+      url.search = '';
+      if (language && /^[a-z]{2}$/i.test(language)) url.searchParams.set('language', language.toLowerCase());
+      return url.toString();
+    }
+    if (family === 'pinpoint') {
+      const url = new URL(portalApplicationUrl(portal, rawUrl));
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    }
+    return rawUrl;
+  }
   return undefined;
 }
 
@@ -3640,16 +3749,21 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   const url = new URL(rawUrl);
   // Treat the platform's optional trailing slash as formatting, not another path segment. Without
   // this normalization, an already-canonical form URL received the same suffix a second time.
-  if (portal === 'ashby' || portal === 'recruitee' || portal === 'teamtailor') {
+  const family = portalFamily(portal);
+  if (family === 'ashby' || family === 'recruitee' || family === 'teamtailor'
+    || family === 'personio' || family === 'pinpoint') {
     url.pathname = url.pathname.replace(/\/$/, '');
   }
-  if (portal === 'ashby' && !url.pathname.endsWith('/application')) {
+  if (family === 'ashby' && !url.pathname.endsWith('/application')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/application`;
   }
-  if (portal === 'recruitee' && !url.pathname.endsWith('/c/new')) {
+  if (family === 'recruitee' && !url.pathname.endsWith('/c/new')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/c/new`;
   }
-  if (portal === 'teamtailor' && !url.pathname.endsWith('/applications/new')) {
+  if (family === 'personio' && !url.pathname.endsWith('/apply')) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
+  }
+  if ((family === 'teamtailor' || family === 'pinpoint') && !url.pathname.endsWith('/applications/new')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/applications/new`;
   }
   return url.toString();
@@ -3992,6 +4106,35 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="candidate[phone]"]'], packet.phone, 'phone', filledFields);
     await uploadFirst(page, [TEAMTAILOR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, [TEAMTAILOR_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'personio') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="first_name"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="last_name"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['input[name="location"]'], packet.city, 'location', filledFields);
+    await fillFirst(page, ['input[name="public_profile"]'], packet.linkedinUrl ?? packet.portfolioUrl, 'public_profile', filledFields);
+    await uploadFirst(page, [PERSONIO_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [PERSONIO_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'pinpoint') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="application_form[application][first_name]"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="application_form[application][last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="application_form[application][email]"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="application_form[application][phone]"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['input[name="application_form[application][town]"]'], packet.city, 'location', filledFields);
+    await fillFirst(page, ['input[name="application_form[application][linkedin_url]"][type="text"]'], packet.linkedinUrl, 'linkedin', filledFields);
+    await uploadFirst(page, [PINPOINT_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [PINPOINT_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  } else if (family === 'comeet') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, ['input[name="firstName"]'], parts[0], 'first_name', filledFields);
+    await fillFirst(page, ['input[name="lastName"]'], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
+    await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
+    await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.linkedinUrl ?? packet.githubUrl, 'portfolio', filledFields);
+    await uploadFirst(page, [COMEET_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [COMEET_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
   } else {
     await fillFirst(page, ['input[name="_systemfield_name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="_systemfield_email"]'], packet.email, 'email', filledFields);
