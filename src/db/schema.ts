@@ -698,6 +698,46 @@ export const application_profile = pgTable('application_profile', {
   onsite_locations: jsonb('onsite_locations'),
   relocation_willingness: text('relocation_willingness'),
 
+  /* ---- when the internship can actually run (2026-08-09) ----
+   *
+   * THE GAP THESE CLOSE. Counted across all 112 stored packets, the single largest cluster of
+   * required-and-blank questions is this one fact asked five ways: "what dates are you available for
+   * an internship" (blocking a live truveta packet), "when do you plan on ending your internship"
+   * (6 postings), and the start-date pair. `availability_date` has held a value the whole time and
+   * the resolver has always refused to read it, correctly: it carries no recruiting cycle and no
+   * expiry, so a date typed for Summer 2026 would answer a Summer 2027 form forever, and that is a
+   * commitment to an employer the student never made and could be held to.
+   *
+   * WHY FOUR COLUMNS AND NOT ONE MORE DATE. Every one of them is a check the legacy field cannot
+   * pass, and a record missing any of them answers nothing at all:
+   *
+   *   availability_window_start   ISO YYYY-MM-DD, the earliest she could begin.
+   *   availability_window_end     ISO YYYY-MM-DD, the latest she is available through.
+   *   availability_cycle          "Summer 2027". The SCOPE. A window is only allowed to answer a
+   *                               posting whose own job description names this same cycle; a
+   *                               posting that names none is refused rather than assumed to match.
+   *   availability_valid_through  ISO YYYY-MM-DD. The EXPIRY, set by her and not derived from the
+   *                               window: a student who accepts an offer in March wants her Summer
+   *                               answer to stop being given, and only she knows that date.
+   *
+   * ISO, not the free text `high_school_grad_date` and `education_start_date` use. Those report a
+   * month that already happened; these are compared against a posting and against today, and
+   * widening "June 2027" into a day would be Litos choosing the edge of her commitment.
+   *
+   * PLAINTEXT and NOT in ENCRYPTED_FIELDS, unlike `availability_date` directly above. The reason is
+   * the read path: these are read by lib/applicationFacts.ts off the RAW row, which is what lets the
+   * resolver survive this migration not having run, and a decrypt step there would hand ciphertext
+   * to an employer's form. A recruiting-cycle window is scheduling data, in the same class as the
+   * onboarding facts above it, not the movement fact a bare personal date is.
+   *
+   * null on all four means never asked. The resolver refuses and the question reaches the student,
+   * which is the behaviour today and the correct one.
+   */
+  availability_window_start: text('availability_window_start'),
+  availability_window_end: text('availability_window_end'),
+  availability_cycle: text('availability_cycle'),
+  availability_valid_through: text('availability_valid_through'),
+
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });
 

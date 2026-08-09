@@ -97,6 +97,20 @@ export function preparedRunHandoffExpired(
 export function submitRequestDisposition(
   status: ApplicationReviewState['status'],
   submissionWasClaimed = false,
+  /* THE KEY TO THE ONE LOCK THAT HAD NONE.
+   *
+   * needs_attention AFTER a claim is refused below, and rightly: the run may have reached the
+   * employer, so a second one could file a duplicate. Skydio packet 13bccb2d landed in exactly that
+   * state, and its attention_reason told the applicant to check the portal "before trying again" -
+   * an instruction this function would then refuse. A lock with no key is not a safety property, it
+   * is a trap, and the packet had no way forward at all.
+   *
+   * The key is her own answer after looking, recorded on unverified_submission.resolution.
+   * 'not_sent' means she checked and the employer does not have it, which is the only thing that
+   * makes a second run safe, and it is the only thing that unlocks this. 'sent' does not unlock it;
+   * that answer moves the packet to submitted through its own path. An unresolved record does not
+   * unlock it either, because "we do not know" is precisely the state the lock exists for. */
+  unverifiedResolution?: 'sent' | 'not_sent',
 ): 'start' | 'in_flight' | 'submitted' | 'reject' {
   if (status === 'submitted') return 'submitted';
   // A SECOND SUBMIT IS THE ONE THING THIS STATE MUST NOT ALLOW. The form has already been sent to
@@ -117,6 +131,9 @@ export function submitRequestDisposition(
   // click it represents an uncertain external side effect, so another run could create a duplicate
   // employer application and must stay blocked.
   if (status === 'needs_attention' && !submissionWasClaimed) return 'start';
+  // The claimed half of needs_attention, opened only by the applicant's own "I looked and it is not
+  // there". See the parameter's note: without this the state has no exit of any kind.
+  if (status === 'needs_attention' && unverifiedResolution === 'not_sent') return 'start';
   if (['resume_ready', 'questions_ready', 'ready_to_submit', 'failed'].includes(status)) return 'start';
   return 'reject';
 }

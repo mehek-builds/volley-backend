@@ -79,6 +79,26 @@ export type ManagedBrowserResult = {
    * in the action list tried to send a real application to a real employer with no authorization
    * behind it, which is exactly what happened to three packets on 2026-08-08. */
   blockedSubmits?: number;
+  /* WHAT THE PAGE SAID AFTER THE SUBMIT CLICK, read by the runner off the state the ATS renders
+   * rather than inferred here from scraped prose. See lib/managedSubmitOutcome.ts, which is the only
+   * thing allowed to interpret it, and managed-browser.js's readSubmitOutcome, which produces it.
+   *
+   * Absent on a runner deployed before this shipped. Absent means "the run did not say", which is
+   * different from every value it can take, and the reader degrades to the old body scrape rather
+   * than to a wrong answer. */
+  submitOutcome?: {
+    pressed?: boolean;
+    state?: 'confirmed' | 'rejected' | 'unknown' | 'not_attempted';
+    source?: 'ats_state' | 'live_region' | 'page_text' | null;
+    evidence?: string | null;
+    message?: string | null;
+    formStillPresent?: boolean | null;
+  } | null;
+  /* Whether the run is holding a second phase open for a security-code continuation. The RUNNER
+   * decides this, because it is the only party that has seen the page; the caller used to guess it
+   * from a text sweep that reads an employer's own "check your email for confirmation" as a
+   * challenge. */
+  continuationOffered?: boolean;
 };
 
 type ManagedBrowserError = string | { message?: string; code?: string };

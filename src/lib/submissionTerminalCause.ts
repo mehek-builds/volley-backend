@@ -77,6 +77,13 @@ export function attentionCategoriesForReasons(reasons: readonly string[]): Appli
      * as an application already sitting with an employer. */
     if (/security code was emailed|asked for a security code by email/.test(normalized)) {
       categories.add('security_code');
+    } else if (/does not know whether this application went through|pressed send on .*and could not confirm what came back|could not confirm what came back/.test(normalized)) {
+      /* SECOND, immediately after the other state that may already be with an employer, and ahead of
+       * everything that says nothing was sent. A submit whose outcome is unknown is not a breakage
+       * and must never land in the "Litos broke, try again" bucket: trying again is the one action
+       * that could turn one application into two. Skydio packet 13bccb2d filed as 'unknown', which
+       * is the bucket with no next step attached to it. */
+      categories.add('unverified_submission');
     } else if (/^captcha requires your attention$|prove you are human/.test(normalized)) {
       categories.add('captcha');
     } else if (/you have already applied to/.test(normalized)) {

@@ -118,6 +118,12 @@ const statusBodySchema = z.object({
   status: z.literal('failed'),
   error: z.string().max(2000).optional(),
 });
+/* Her answer after she has looked, and nothing more. Deliberately a BOOLEAN rather than a status:
+   the applicant is being asked one question about one page in front of her, not asked to pick a
+   state for a packet. Litos turns it into the state. */
+const unverifiedOutcomeBodySchema = z.object({
+  found: z.boolean(),
+});
 const extensionStartBodySchema = z.object({
   authorization: z.enum(['standing_consent', 'user_initiated']),
 });
@@ -172,7 +178,9 @@ function approvedReviewSpec(review: unknown, approvedAt: string) {
   return sql`jsonb_set(${reviewSpec(review)}, '{_cover_letter,approved_at}', ${JSON.stringify(approvedAt)}::jsonb, true)`;
 }
 
-function freshSubmitRequestReview(
+/* Exported for its own test. Which state a re-run clears and which it carries forward is the whole
+ * of the duplicate-safety story, and it was being asserted only indirectly, through routes. */
+export function freshSubmitRequestReview(
   current: ApplicationReviewState,
   questions: ApplicationReviewQuestion[],
 ): ApplicationReviewState {
@@ -196,6 +204,16 @@ function freshSubmitRequestReview(
     verification: undefined,
     receipt: undefined,
     stall: undefined,
+    /* THE ANSWER EXPIRES WITH THE RUN THAT PROMPTED IT.
+     *
+     * "I looked and it is not there" is true about ONE attempt. Leaving it on the row makes it true
+     * forever: the next uncertain run lands in claimed needs_attention still carrying the stale
+     * not_sent, submitRequestDisposition reads it and returns 'start', and the post-click duplicate
+     * lock for that posting is off permanently, after a single honest answer.
+     *
+     * The route's own comment says the packet is "re-runnable exactly once". This is the line that
+     * makes that true. */
+    unverified_submission: undefined,
   };
 }
 
@@ -364,7 +382,10 @@ async function refuseDuplicateApplication(
   const refused = applyReviewPatch(current, {
     status: 'needs_attention',
     attention_reason: verdict.reason,
-    attention_categories: ['duplicate_application'],
+    // Derived from the match rather than hardcoded. A refusal grounded in an UNVERIFIED twin is not
+    // a duplicate_application: nobody knows yet whether there is a duplicate to be had, and filing
+    // it as one would be the same false certainty the sentence itself is careful to avoid.
+    attention_categories: [verdict.match.certainty === 'unverified' ? 'unverified_submission' : 'duplicate_application'],
     submission_error: undefined,
   }, () => now);
   await db.update(generated_resumes)
@@ -772,7 +793,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       let current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       current = await repairReviewPortalFromMonitoredJob(row, current);
-      const disposition = submitRequestDisposition(current.status, Boolean(current.submission_claimed_at));
+      const disposition = submitRequestDisposition(
+        current.status,
+        Boolean(current.submission_claimed_at),
+        current.unverified_submission?.resolution,
+      );
       if (disposition === 'submitted') {
         return reply.status(200).send({ application_id: row.id, review: current, cover_letter: storedCoverLetter(row) });
       }
@@ -803,6 +828,24 @@ export async function applicationRoutes(fastify: FastifyInstance) {
             restartable: true,
             run_revision: current.run_revision ?? null,
           }
+          /* A REFUSAL THAT SAYS WHY, when the thing holding this packet is an unresolved submit.
+           *
+           * The generic sentence below is the one Skydio packet 13bccb2d would have got: the
+           * applicant was told by attention_reason to check the portal and try again, and trying
+           * again returned "cannot start another submission run from its current state" with no
+           * cause and no exit. The refusal is correct - the employer may already hold this
+           * application - but a correct refusal that names neither the reason nor the way out is
+           * indistinguishable from a bug. */
+          : current.unverified_submission && !current.unverified_submission.resolution
+            ? {
+              error: 'Litos pressed Send on this one and could not confirm what came back, so it will '
+                + 'not send it a second time until you have looked. Open the employer’s page, then tell '
+                + 'Litos whether the application is there: POST /applications/:id/submission/unverified '
+                + 'with found true or false. If it is not there, Litos will send this one for you.',
+              code: 'SUBMISSION_OUTCOME_UNVERIFIED',
+              restartable: false,
+              unverified_submission: current.unverified_submission,
+            }
           : {
             error: 'This application cannot start another submission run from its current state',
             code: 'SUBMISSION_RUN_NOT_RESTARTABLE',
@@ -1433,6 +1476,98 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'The application state changed before the failure update was recorded' });
       }
       return reply.send({ application_id: row.id, review: next });
+    },
+  );
+
+  /* THE WAY OUT OF "LITOS DOES NOT KNOW".
+   *
+   * Skydio packet 13bccb2d, 2026-08-09: a submit that was cut off mid-flight, submitted_at null,
+   * receipt null, and a status the submit route refuses to re-run. The applicant was told to check
+   * the portal and try again; trying again was refused; building a fresh application for the same
+   * posting would have been refused by the duplicate guard if the first one HAD landed. Three walls
+   * and no door.
+   *
+   * This is the door, and the only thing it accepts is what she SAW. Litos never decides this for
+   * her: an application that may already be with an employer is not a thing to guess about, and both
+   * wrong guesses are expensive - a false "sent" loses her the application silently, a false "not
+   * sent" spends one of her attempts at an employer who caps them.
+   *
+   *   found true  -> recorded as submitted, with the receipt source naming her as the witness. Litos
+   *                  does not manufacture a confirmation it never saw.
+   *   found false -> the claim is released and the packet becomes re-runnable exactly once through
+   *                  the ordinary route. Nothing is sent by this call itself.
+   */
+  fastify.post(
+    '/applications/:id/submission/unverified',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const parsed = unverifiedOutcomeBodySchema.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: 'Say whether you found the application, with found true or false' });
+      }
+      const current = readApplicationReview(row.spec as StoredSpec);
+      if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      const pending = current.unverified_submission;
+      if (!pending) {
+        return reply.status(409).send({
+          error: 'This application is not waiting on an unverified submission',
+          status: current.status,
+        });
+      }
+      if (pending.resolution) {
+        // Idempotent rather than an error. The same answer twice is a retry, not a mistake.
+        return reply.status(200).send({ application_id: row.id, already_resolved: true, review: current });
+      }
+      const now = new Date().toISOString();
+      const resolved = { ...pending, resolution: parsed.data.found ? 'sent' as const : 'not_sent' as const, resolved_at: now };
+      /* applyReviewPatch, not a spread. Both arms land on a terminal or attention state, and the
+         shared merge is where withTerminalCause enforces that such a state always carries a cause -
+         a rule that exists because three production rows reached 'failed' with attention_reason
+         unset when a route built its own review object. */
+      const next: ApplicationReviewState = parsed.data.found
+        ? applyReviewPatch(current, {
+          status: 'submitted',
+          submitted_at: pending.at,
+          submission_error: undefined,
+          attention_reason: undefined,
+          attention_categories: undefined,
+          unverified_submission: resolved,
+          receipt: {
+            /* NAMED FOR WHAT IT IS. Litos did not see this confirmation and must never write a
+               sentence implying it did; the applicant did, and the receipt says so. */
+            confirmation_text: 'Confirmed by you: you found this application in the employer\u2019s portal '
+              + 'after Litos pressed Send and lost the answer.',
+            final_url: pending.portal_url ?? current.portal_url ?? '',
+            captured_at: now,
+            source: 'attended_handoff',
+          },
+        }, () => now)
+        : applyReviewPatch(current, {
+          status: 'needs_attention',
+          unverified_submission: resolved,
+          // Released, because she has looked and the employer does not have it. This is the single
+          // fact that makes another run safe, and it is the only thing that releases the claim.
+          submission_claimed_at: undefined,
+          submission_claim_id: undefined,
+          attention_reason: 'You checked and the employer does not have this one, so nothing was sent. '
+            + 'Litos can send it again whenever you are ready.',
+          attention_categories: ['unverified_submission'],
+        }, () => now);
+      const updated = await db.update(generated_resumes)
+        .set({ spec: reviewSpec(next) })
+        .where(and(
+          eq(generated_resumes.id, row.id),
+          // Conditional on the record still being unresolved, so two clients answering at once
+          // cannot both win and leave the packet in the loser's state.
+          sql`${generated_resumes.spec}->'_review'->'unverified_submission'->>'resolution' is null`,
+        ))
+        .returning({ id: generated_resumes.id });
+      if (updated.length === 0) {
+        return reply.status(409).send({ error: 'This application was resolved somewhere else first' });
+      }
+      return reply.status(200).send({ application_id: row.id, review: next });
     },
   );
 }

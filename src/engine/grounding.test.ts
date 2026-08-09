@@ -9,6 +9,9 @@ import {
   isRankingAsk,
   extractRankedItems,
   claimedUnheldItems,
+  contestedMetrics,
+  contestedMetricsUsed,
+  unsupportedCommitments,
 } from './grounding';
 
 test('a number present in the source is grounded', () => {
@@ -167,4 +170,150 @@ test('R-042: symbol-bearing items match whole, never by prefix', () => {
   assert.deepEqual(claimedUnheldItems('C++ is my strongest language.', ['C']), []);
   assert.deepEqual(claimedUnheldItems('I write JavaScript daily.', ['Java']), []);
   assert.deepEqual(claimedUnheldItems('I have shipped C# services in production.', ['C#']), ['C#']);
+});
+
+/* ------------------------------------------------------------------------------------------------
+ * A PROMISE IN THE LETTER. Packet fbc1d407 (truveta, Software Engineering Intern), 2026-08-09.
+ * ---------------------------------------------------------------------------------------------- */
+
+// The exact sentence that shipped. She lives in Dubai and is enrolled in Los Angeles, and she never
+// said either half of it: Truveta's form asks whether the applicant will be in the Seattle area and
+// the letter answered in prose, where nothing could check it.
+const TRUVETA_PROMISE =
+  'I am based in Los Angeles but able to work from the Greater Seattle area for this internship, '
+  + 'and I am currently enrolled in my undergraduate program with an expected graduation date of May 2028.';
+
+test('the letter sentence that promised Greater Seattle is caught', () => {
+  assert.deepEqual(unsupportedCommitments(TRUVETA_PROMISE), [TRUVETA_PROMISE]);
+});
+
+test('the other real promises across the stored letters are caught', () => {
+  // Every one of these was generated and stored in production. They are the whole of what the check
+  // found across all 136 stored letters, so this list is the regression surface, not a sample.
+  const shipped = [
+    "I'm based in the Los Angeles area currently but am able to work in the Greater Seattle area for this internship.",
+    "I'm available for the fall term and can commit to full-time hours in office in Austin.",
+    "I'm available for a 12-14 week internship in Austin this fall.",
+    "I'm based in the Los Angeles area with the flexibility to work in-office in the Greater Seattle area.",
+    "I'm available for a fall internship in Austin.",
+    "I'm a U.S. citizen and available for a twelve-week internship this fall.",
+    "I'm available for either fall term listed.",
+  ];
+  for (const sentence of shipped) {
+    assert.deepEqual(unsupportedCommitments(sentence), [sentence], sentence);
+  }
+});
+
+test('relocation, exclusivity and a start date are promises too', () => {
+  for (const sentence of [
+    'I would relocate to Austin for the right team.',
+    'Truveta is the only offer I am pursuing and I will work exclusively with your team.',
+    'My start date is flexible.',
+    'I can start on June 1.',
+    'I am willing to commute to the Bellevue office three days a week.',
+    'I have signed no non-compete.',
+  ]) {
+    assert.equal(unsupportedCommitments(sentence).length, 1, sentence);
+  }
+});
+
+test('past-tense achievements and facts on file are not promises', () => {
+  /* The failure direction that matters second. Blocking is a hard gate on a real letter, so a check
+   * that trips on ordinary prose costs Mehek working letters. Every line here is drawn from the same
+   * 136 stored letters and every one must pass clean, including "in person" in a past-tense claim
+   * and the graduation date, which is a fact she gave Litos rather than a promise she is making. */
+  for (const sentence of [
+    'I conducted 47 user interviews in person and analyzed 8,300+ behavioral data points.',
+    'I am currently enrolled in my undergraduate program with an expected graduation date of May 2028.',
+    "I'm looking for an internship where I can work alongside experienced engineers on systems operating at real scale.",
+    'I would welcome the chance to apply my Python and product engineering background to health data infrastructure.',
+    'At Cinematica Labs I built threshold alerting across 96 pairs from 8 dropout indicators.',
+    'That work required the kind of collaborative, deadline-driven execution this internship calls for.',
+    'I made the results available for the whole team on a shared dashboard.',
+    'I am applying for the Software Engineering Intern role at Truveta.',
+  ]) {
+    assert.deepEqual(unsupportedCommitments(sentence), [], sentence);
+  }
+});
+
+test('only the offending sentence is returned, not the whole letter', () => {
+  const letter = `I am applying for the Software Engineering Intern role at Truveta. ${TRUVETA_PROMISE} I built a Chrome extension end to end.`;
+  assert.deepEqual(unsupportedCommitments(letter), [TRUVETA_PROMISE]);
+});
+
+/* ------------------------------------------------------------------------------------------------
+ * ONE METRIC, TWO PROJECTS. The same letter credited "2.3s to 0.1s" to Traeco and to Tonee.
+ * ---------------------------------------------------------------------------------------------- */
+
+// Her real experience bank, trimmed to the entries that matter. Both bullets are stored exactly like
+// this, which is the finding: the duplication is in the DATA. The generator repeated the source
+// faithfully and every number in that letter passed ungroundedNumbers honestly.
+const BANK = [
+  {
+    org: 'Traeco - AI Agent Cost Infrastructure',
+    text: 'Built LLM-agent cost infrastructure with LangChain and the OpenAI API, instrumenting evaluation harnesses for accuracy that cut agent response latency from 2.3s to 0.1s.'
+      + ' Structured an ambiguous, fast-moving AI market into testable hypotheses through 50+ customer discovery interviews.',
+  },
+  {
+    org: 'Tonee - AI Texting Tone Detector',
+    text: 'Evaluated 3 technical architectures for mobile performance; authored specification reducing latency from 2.3s to 0.1s.'
+      + ' Conducted 47 user interviews and analyzed 8,300+ behavioral data points, increasing accuracy from 78% to 89%.',
+  },
+  // Same project, second title. Normalizing on the org means these do not contest each other.
+  {
+    org: 'Tonee – AI Texting Tone Detector',
+    text: 'Evaluated 3 technical architectures for mobile performance; authored specification reducing latency from 2.3s to 0.1s.',
+  },
+  {
+    org: 'SoFi',
+    text: 'Analyzed digital product funnel for 80K monthly users; synthesized behavioral data and 50+ interviews.',
+  },
+  { org: 'Spark SC', text: 'Secured $14K from 7 sponsors and managed $27K budget for 12 events.' },
+  {
+    org: 'Cinematica Labs',
+    text: 'Managed tracking across 24 mentor-founder pods; shipped 3 initiatives contributing to a 14-point NPS increase.',
+  },
+  {
+    org: 'Einstein Bros. Bagels',
+    text: 'Designed and A/B tested UX flows with 24 participants; achieved 9.6% higher completion.',
+  },
+];
+
+test('a figure two different projects both claim belongs to neither', () => {
+  const { labels } = contestedMetrics(BANK);
+  assert.deepEqual(labels, ['0.1', '2.3']);
+});
+
+test('a single number two orgs happen to share is left alone', () => {
+  /* The reason the threshold is two shared numbers and not one. All three of these pairs exist in
+   * her real bank and all three are innocent: $14K of sponsorship against a 14-point NPS rise, 24
+   * pods against 24 usability participants, 50+ interviews at two different places. Flagging them
+   * would strip true claims out of good letters. */
+  const { labels } = contestedMetrics(BANK);
+  for (const innocent of ['14', '24', '50']) {
+    assert.equal(labels.includes(innocent), false, innocent);
+  }
+});
+
+test('two spellings of the same org do not contest each other', () => {
+  // The en-dash and hyphen spellings of Tonee are one project. If org normalization regressed, every
+  // Tonee figure would be declared contested and the letter would lose all of them.
+  const tonee = BANK.filter((entry) => entry.org.toLowerCase().startsWith('tonee'));
+  assert.deepEqual(contestedMetrics(tonee).labels, []);
+});
+
+test('a bank with no duplicated attribution contests nothing', () => {
+  assert.deepEqual(contestedMetrics(BANK.filter((entry) => !entry.org.toLowerCase().startsWith('tonee'))).labels, []);
+});
+
+test('a draft that reuses the contested figure is caught, and one that drops it is clean', () => {
+  const { signatures } = contestedMetrics(BANK);
+  const reused = 'At Traeco I cut agent response latency from 2.3s to 0.1s, and at Tonee I authored a specification that reduced latency from 2.3s to 0.1s.';
+  assert.deepEqual(contestedMetricsUsed(reused, signatures).sort(), ['0.1', '2.3']);
+  const dropped = 'At Traeco I instrumented evaluation harnesses across 50+ customer discovery interviews, and at Tonee I raised accuracy from 78% to 89%.';
+  assert.deepEqual(contestedMetricsUsed(dropped, signatures), []);
+});
+
+test('nothing contested means nothing to check', () => {
+  assert.deepEqual(contestedMetricsUsed('Cut latency from 2.3s to 0.1s.', new Set()), []);
 });

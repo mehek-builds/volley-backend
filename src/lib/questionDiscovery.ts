@@ -8,6 +8,13 @@ import {
   type StoredSalaryProfile,
 } from './salary';
 import { referralSourceForApplication, type ReferralSourceEvidence } from './referralSource';
+import {
+  availabilityWindowForPosting,
+  formatWindowDate,
+  formatWindowRange,
+  readCycle,
+  type AvailabilityWindowFacts,
+} from './availabilityWindow';
 
 // R-055 fix: the dashboard-driven submission flow used to never discover a posting's custom
 // questions (GPA, sponsorship, GitHub, essays, ...) - only the Chrome extension did, client-side.
@@ -23,7 +30,7 @@ import { referralSourceForApplication, type ReferralSourceEvidence } from './ref
 // controls. Values that are not stored here still stay blank, and SSN/driver-license fields remain
 // hard-blocked.
 
-export type ApplicationProfileLike = StoredSalaryProfile & {
+export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFacts & {
   full_name?: string;
   phone?: string;
   address_city?: string;
@@ -36,6 +43,9 @@ export type ApplicationProfileLike = StoredSalaryProfile & {
   work_authorized?: boolean;
   needs_sponsorship?: boolean;
   date_of_birth?: string;
+  /* LEGACY, AND NOT AUTHORITY FOR ANYTHING. Kept in the read shape as reference data. The scoped
+   * replacement is AvailabilityWindowFacts above (see lib/availabilityWindow.ts); these two carry no
+   * cycle and no expiry, so no branch in this file may answer a commitment from them. */
   availability_date?: string;
   availability_term?: string;
   current_employer?: string;
@@ -1053,6 +1063,35 @@ const INTERNSHIP_AVAILABILITY_QUESTION =
   /\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\b(?:can|could|will|would)\s+you\s+commit\b[^?]{0,160}\b(?:hours?|weeks?|months?|schedule|season)\b/i;
 const INTERNSHIP_SEASON_QUESTION =
   /\bconfirm\b[^?]{0,100}\bseason\b[^?]{0,100}\bapplying\b|\bseason\b[^?]{0,100}\bapplying\b/i;
+/* ---- the three availability questions the scoped window is allowed to answer ----
+ *
+ * Each was counted across the owner's 112 stored packets. They are separated from
+ * INTERNSHIP_AVAILABILITY_QUESTION below, which stays refused, because these ask for DATES and that
+ * one asks for a CADENCE. A window of "1 June to 20 August" is a true answer to "what dates are you
+ * available"; it is not an answer to "can you commit to 40 hours a week", because nothing in the
+ * window records hours. Two questions, two different facts, and only one of them is on file.
+ */
+// "what dates are you available for an internship" - the truveta label blocking packet fbc1d407.
+const AVAILABILITY_WINDOW_QUESTION =
+  /\bwhat\s+dates?\b[^?]{0,100}\bavailab\w*\b|\bavailab\w*\b[^?]{0,100}\bwhat\s+dates?\b|\bdates?\s+(?:of|for)\s+(?:your\s+)?availabilit\w*\b|\bavailabilit\w*\s+dates?\b|\bdate\s+range\b[^?]{0,80}\bavailab\w*\b/i;
+// "when do you plan on ending your internship", asked by 6 postings. Before this it matched nothing
+// at all and fell through to the essay drafter, which is the worst of the three outcomes.
+const INTERNSHIP_END_QUESTION =
+  /\b(?:when|what\s+date)\b[^?]{0,100}\b(?:end|ending|finish|finishing|conclude|concluding|last\s+day)\b[^?]{0,100}\bintern(?:ship)?\b|\bintern(?:ship)?\b[^?]{0,80}\b(?:end\s+date|last\s+day)\b|\bend\s+date\s+of\s+(?:the\s+|your\s+)?intern(?:ship)?\b/i;
+/* THE DISQUALIFIER. Any label that also asks about hours, days per week or a full/part-time
+ * schedule is asking for something the window does not hold, so it is handed straight back to the
+ * cadence refusal. This is what keeps Anduril's "willing to work in-person for 12 weeks" and
+ * Faire's "commit to being in-office three days per week" out of the branch below. */
+const AVAILABILITY_CADENCE_VOCAB =
+  /\bfull[\s-]?time\b|\bpart[\s-]?time\b|\bhours?\s+(?:per|a)\s+week\b|\b\d+\s*hours?\b|\bdays?\s+(?:per|a)\s+week\b|\bcommit\w*\b|\bin[\s-]?person\b|\bon[\s-]?site\b|\bin[\s-]?office\b/i;
+/* "please confirm when you will complete your university studies" - 7 postings.
+ *
+ * NOT an availability question and deliberately NOT answered from the window. The end of her degree
+ * is her graduation date, which is already on file and is already what education_end_date answers
+ * from. Routing it anywhere near the availability model would put a job date into an education
+ * field, which is the exact defect education_start_date was added to stop. */
+const STUDIES_COMPLETION_QUESTION =
+  /\b(?:complete|completing|completion|finish|finishing|conclude)\b[^?]{0,60}\b(?:university|college|undergraduate|academic|degree)\b[^?]{0,40}\b(?:stud(?:y|ies)|programme|program|course|education|degree)\b|\b(?:university|college|undergraduate|academic)\s+stud(?:y|ies)\b[^?]{0,60}\b(?:complete|completion|finish|end)\b/i;
 const INTERNSHIP_JOIN_QUESTION =
   /\bwhen\b[^?]{0,120}\b(?:able|available|start|join)\b[^?]{0,120}\bintern\b|\bintern\b[^?]{0,120}\b(?:able|available|start|join)\b/i;
 const SOFTWARE_ENGINEERING_AREA_QUESTION =
@@ -1493,6 +1532,11 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (GRADUATION_MONTH_QUESTION.test(l)) return 'graduation_month';
   if (GRADUATION_YEAR_QUESTION.test(l)) return 'graduation_year';
   if (GRADUATION_DATE_QUESTION.test(l)) return 'graduation_date';
+  /* "please confirm when you will complete your university studies", 7 postings. It matched nothing
+   * in this function and nothing in resolveKnownAnswer, so it fell all the way to the essay drafter.
+   * The end of her degree is the graduation date, which education_end_date already answers from -
+   * this is not an availability question and must never be answered from the availability window. */
+  if (STUDIES_COMPLETION_QUESTION.test(l)) return 'education_end_date';
   // Explicit phrasings that unambiguously ask for the institution's NAME. Everything else has to
   // clear labelNamesProfileField further down: the bare keyword is not enough on its own.
   if (/\bwhich\s+(?:school|university|college|institution)\b|\b(?:school|university|college|institution)\s+(?:name|(?:you\s+|are\s+you\s+)?(?:currently\s+)?(?:attend(?:ing|ed)?|enrolled(?:\s+in)?))\b|\bname\s+of\s+(?:your\s+)?(?:school|university|college|institution)\b|^university\s*\/\s*institution\b/i.test(l)) return 'school';
@@ -1723,22 +1767,74 @@ function studyYearAnswer(ap: ApplicationProfileLike): string | null {
 
 function postingSeasonAnswer(label: string, jdText: string | undefined): { value: string } | null {
   if (!INTERNSHIP_SEASON_QUESTION.test(label)) return null;
-  const match = (jdText ?? '').match(/\b(spring|summer|fall|winter)\s+((?:20)\d{2})\b/i);
-  if (!match) return null;
-  const season = match[1].toLowerCase().replace(/^\w/u, (letter) => letter.toUpperCase());
-  return { value: `${season} ${match[2]}` };
+  // readCycle is the one place this codebase decides what cycle a posting is for, so the season it
+  // reports here and the season the availability window is checked against cannot drift apart.
+  const cycle = readCycle(jdText);
+  return cycle ? { value: cycle } : null;
 }
 
-function internshipJoinAnswer(label: string): { skipReason: string } | null {
+/**
+ * The scoped window, or nothing.
+ *
+ * Every caller below funnels through this so there is ONE place that decides whether a stored
+ * declaration may speak for this posting. It returns null when nothing is stored, when the record is
+ * incomplete, when it has lapsed, when the posting does not name its cycle, and when the cycle it
+ * names is not the one she declared for. See lib/availabilityWindow.ts for why each of those is a
+ * refusal rather than a best guess.
+ */
+function scopedAvailabilityWindow(ap: ApplicationProfileLike, jdText: string | undefined) {
+  return availabilityWindowForPosting(ap, jdText, new Date());
+}
+
+function internshipJoinAnswer(
+  label: string,
+  inputType: string,
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+): { value: string } | { skipReason: string } | null {
   if (!INTERNSHIP_JOIN_QUESTION.test(label)) return null;
-  // availability_date has no expiry or posting scope. Even an exact stored date may have described
-  // a past recruiting cycle, so it is reference data rather than authority for a new commitment.
+  /* "When are you able to join us as an intern?" is answered by the START of a window that is
+   * provably about this posting's cycle, and by nothing else. availability_date still cannot answer
+   * it: it has no expiry and no posting scope, so an exact stored date may describe a recruiting
+   * cycle that ended, and replaying it would commit her to a season she never applied for. */
+  const scoped = scopedAvailabilityWindow(ap, jdText);
+  if (scoped) return { value: formatWindowDate(scoped.start, inputType) };
   return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
 }
 
+/**
+ * The dates an internship could run, from the scoped window and from nothing else.
+ *
+ * Returns null - NOT a refusal - for a label that also asks about hours or a schedule, so the
+ * cadence branch downstream keeps ownership of those. A refusal here would be the same answer, but
+ * it would take the question away from the rule whose reasoning actually fits it.
+ */
+function availabilityWindowAnswer(
+  label: string,
+  inputType: string,
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+): { value: string } | { skipReason: string } | null {
+  const asksRange = AVAILABILITY_WINDOW_QUESTION.test(label);
+  const asksEnd = INTERNSHIP_END_QUESTION.test(label);
+  if (!asksRange && !asksEnd) return null;
+  if (AVAILABILITY_CADENCE_VOCAB.test(label)) return null;
+  const scoped = scopedAvailabilityWindow(ap, jdText);
+  if (!scoped) {
+    return { skipReason: `internship availability dates left for you: "${label.slice(0, 60)}"` };
+  }
+  // A question that asks only when it ENDS gets the end. A question that asks for the dates gets
+  // both, because both are what it asked for.
+  const value = asksRange
+    ? formatWindowRange(scoped, inputType)
+    : formatWindowDate(scoped.end, inputType);
+  return { value };
+}
+
 function internshipAvailabilityAnswer(label: string): { skipReason: string } {
-  // The legacy term is free text without a verified effective window, expiry, employer, season or
-  // cadence scope. Matching words cannot prove the commitment is still current for this posting.
+  // UNCHANGED, and staying that way. This branch owns the CADENCE questions - "available full-time
+  // for Summer 2027", "commit to 40 hours per week for 12 weeks". A window records two dates and no
+  // hours, so it cannot answer any of them, and the legacy free-text term never could either.
   return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
 }
 
@@ -2533,7 +2629,7 @@ export function resolveKnownAnswer(
   const internshipSeason = postingSeasonAnswer(label, jdText);
   if (internshipSeason) return internshipSeason;
 
-  const internshipJoin = internshipJoinAnswer(label);
+  const internshipJoin = internshipJoinAnswer(label, inputType, ap, jdText);
   if (internshipJoin) return internshipJoin;
 
   /* MOVED ABOVE THE INTERNSHIP-AVAILABILITY BRANCH, and the move is the whole of the Faire fix.
@@ -2552,6 +2648,16 @@ export function resolveKnownAnswer(
    * isLocationCommitmentQuestion requires an office/onsite/commute word. */
   const routineLocationCommitment = routineLocationCommitmentAnswer(label, ap);
   if (routineLocationCommitment) return routineLocationCommitment;
+
+  /* THE DATE QUESTIONS, AND ONLY THEM, AND ONLY FROM A WINDOW THAT COVERS THIS POSTING.
+   *
+   * Placed here rather than higher for the same reason routineLocationCommitmentAnswer is placed
+   * above the cadence branch: the label has to have survived every location rule first, so a
+   * question about where she sits can never be answered with a date. Placed ABOVE the cadence
+   * branch because that one refuses on wording these labels share ("available ... internship"), and
+   * it would otherwise refuse a question the record can honestly answer. */
+  const availabilityWindow = availabilityWindowAnswer(label, inputType, ap, jdText);
+  if (availabilityWindow) return availabilityWindow;
 
   if (INTERNSHIP_AVAILABILITY_QUESTION.test(label)) {
     return internshipAvailabilityAnswer(label);
@@ -2643,9 +2749,21 @@ export function resolveKnownAnswer(
     case 'date_of_birth':
       return ap.date_of_birth ? { value: ap.date_of_birth } : null;
     case 'availability_term':
+      /* DELIBERATELY STILL REFUSED, with a window stored or without one.
+       *
+       * "Length or term of availability (10-14 weeks)" asks for a length of engagement. The window
+       * records the OUTER BOUNDS she is free between, and subtracting one date from the other to
+       * produce "11 weeks" would turn "I am free from June to August" into "I will work eleven
+       * weeks", which is a longer promise than she made and the arithmetic is ours, not hers. */
       return { skipReason: `availability duration left for you: "${label.slice(0, 60)}"` };
-    case 'availability_date':
+    case 'availability_date': {
+      /* "When can you start?", "Earliest start date". Answered from the START of a window that is
+       * provably about this posting's cycle, and from nothing else - never from availability_date,
+       * which is what this case used to have to refuse in full. */
+      const scoped = scopedAvailabilityWindow(ap, jdText);
+      if (scoped) return { value: formatWindowDate(scoped.start, inputType) };
       return { skipReason: `availability date left for you: "${label.slice(0, 60)}"` };
+    }
     case 'current_employer':
       return ap.current_employer ? { value: ap.current_employer } : null;
     case 'most_recent_employer':

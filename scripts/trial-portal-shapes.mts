@@ -8,12 +8,27 @@
  * out of the stratus-browser-cloud checkout.
  *
  *   BASE=http://localhost:3999 npx tsx scripts/trial-portal-shapes.mts
- *   BASE=https://trylitos.com  npx tsx scripts/trial-portal-shapes.mts select-jd-decoy
+ *   BASE=https://trylitos.com LITOS_QA_PORTAL_SECRET=... npx tsx scripts/trial-portal-shapes.mts select-jd-decoy
  *
- *   BASE           harness origin. Defaults to http://localhost:3999.
- *   STRATUS_REPO   checkout of stratus-browser-cloud, for the managed engine. Defaults to
- *                  ../stratus-browser-cloud. Missing means the managed cases SKIP, loudly, and
- *                  count as failures rather than quietly disappearing.
+ *   BASE                     harness origin. Defaults to http://localhost:3999.
+ *   LITOS_QA_PORTAL_SECRET   the shared secret that opens /qa/ on a deployed harness origin. It is
+ *                            appended to every fixture URL as ?litos_qa_key=. Required for any BASE
+ *                            that is not loopback, and this script refuses to start without it
+ *                            rather than letting all twelve cases fail as 404s that look like
+ *                            product regressions.
+ *   STRATUS_REPO             checkout of stratus-browser-cloud, for the managed engine. Defaults to
+ *                            ../stratus-browser-cloud. Missing means the managed cases SKIP, loudly,
+ *                            and count as failures rather than quietly disappearing.
+ *
+ * WHY THE SECRET IS IN THE QUERY STRING. Until 2026-08-09 the fixtures answered 200 to anonymous
+ * internet traffic: https://trylitos.com/qa/portal-submission?board=ashby&shape=security-code served
+ * a complete fabricated job application from the marketing domain of a product whose pitch is
+ * trustworthy handling of real applications. They cannot simply be blocked, because the managed
+ * engine below runs in a Vercel sandbox and a remote browser cannot reach localhost, so the pages
+ * have to stay reachable from the public internet for the managed cases to run at all. The website
+ * (role-quick-website, lib/qa-gate.ts) therefore gates them on a shared secret, and a query
+ * parameter is the only form that survives a plain navigation, which is all the managed runner does.
+ * The header form (x-litos-qa-key) exists there too and is no use here for the same reason.
  *
  * THREE ENGINES, AND THE REASON THERE ARE THREE.
  *
@@ -63,6 +78,21 @@ const require = createRequire(import.meta.url);
 const BASE = process.env.BASE ?? 'http://localhost:3999';
 const STRATUS_REPO = process.env.STRATUS_REPO ?? resolve(process.cwd(), '..', 'stratus-browser-cloud');
 
+/* The query parameter the website's gate reads. Its name is pinned by an assertion on that side
+   (role-quick-website, tests/route-integrity.test.mjs), because renaming it in one repo and not the
+   other is a silent 404 on every case rather than an error anyone would read. */
+const QA_KEY_PARAM = 'litos_qa_key';
+const QA_KEY = process.env.LITOS_QA_PORTAL_SECRET?.trim() || null;
+
+function loopback(origin: string): boolean {
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+  } catch {
+    return false;
+  }
+}
+
 /* The applicant this trial fills as. Real shape, invented person. The phone is deliberately the
    +971 number Cresta rejected, because case 8 turns on what gets written into a phone field that
    already has a country selector holding +971. */
@@ -98,7 +128,25 @@ type ManagedRun = {
   events: string[];
   /** One entry per data-litos-qa-* attribute the run extracted. */
   state: Record<string, string | null>;
+  /** What the run says happened to the submit click, read off the page by the runner itself. */
+  submitOutcome: {
+    pressed?: boolean;
+    state?: string;
+    source?: string | null;
+    evidence?: string | null;
+    message?: string | null;
+    formStillPresent?: boolean | null;
+  } | null;
+  /** Whether the run is holding a second phase open. Undefined on a runner that predates the field. */
+  continuationOffered: boolean | undefined;
 };
+
+/* `allowSubmit` is the caller's one-word declaration that a run may press the button, and without
+   it the runner installs a guard that swallows every submit the page attempts. Threaded through
+   here because the no-challenge shape is the first case whose whole subject is what happens AFTER
+   the press. Nothing leaves the harness origin: the shape form has no action attribute and makes no
+   network write of any kind, which is the same property every other case relies on. */
+type ManagedOptions = { allowSubmit?: boolean };
 
 type Ctx = {
   gate: (shape: string, query?: Record<string, string>) => Promise<{ blocking: string[]; stale: string[] }>;
@@ -108,6 +156,7 @@ type Ctx = {
     actions: ManagedBrowserAction[],
     reads: Array<[key: string, attribute: string]>,
     query?: Record<string, string>,
+    options?: ManagedOptions,
   ) => Promise<ManagedRun>;
 };
 
@@ -448,6 +497,58 @@ const CASES: Case[] = [
       };
     },
   },
+  {
+    id: 'submit-no-challenge',
+    defect: '13. a form that submits cleanly, with no challenge',
+    engine: 'managed',
+    async run(ctx) {
+      /* Skydio packet 13bccb2d, one stage on from case 12. This is the only case here that measures
+         a run going RIGHT, and it is the one that broke: the two-phase security-code work made a
+         managed submit wait for a phase 1 that a form with no challenge never produces, and the
+         packet came back "Managed browser continuation timed out" with submitted_at null, receipt
+         null and nobody able to say whether the application had been sent.
+
+         RUN A is a fill run, and it is here to make sure the confirmation cannot be manufactured.
+         The shape page carries a sentence matching the confirmation regex before anything has been
+         submitted, so a reader that scrapes the page body reports this blank form as filed. The
+         only correct answer is that no submit was attempted.
+
+         RUN B presses the button. Both halves of the fix are asserted: the outcome is read off
+         Ashby's own success container rather than guessed from prose, and the run is not holding a
+         second phase open for a challenge that does not exist. */
+      const runA = await ctx.managed('submit-no-challenge', fillOnlyAshbyActions(), [], { board: 'ashby' });
+      const decoyResisted = (runA.submitOutcome?.state ?? 'missing') === 'not_attempted';
+
+      const runB = await ctx.managed(
+        'submit-no-challenge',
+        submittingAshbyActions(),
+        [['attempts', 'data-litos-qa-submit-attempts']],
+        { board: 'ashby' },
+        { allowSubmit: true },
+      );
+      const outcome = runB.submitOutcome;
+      const confirmed = outcome?.state === 'confirmed';
+      const readOffTheAts = outcome?.source === 'ats_state'
+        && String(outcome?.evidence ?? '').includes('ashby-application-form-success-container');
+      // The sentence is the EMPLOYER'S, carried as evidence a person can read. Skydio's own.
+      const carriesMessage = /thank you for submitting your application/i.test(String(outcome?.message ?? ''));
+      const singlePhase = runB.continuationOffered === false;
+
+      return {
+        pass: decoyResisted && confirmed && readOffTheAts && carriesMessage && singlePhase,
+        detail:
+          `fill run over a page carrying a confirmation-shaped sentence reports `
+          + `${JSON.stringify(runA.submitOutcome?.state ?? null)} (wanted "not_attempted"); `
+          + `submit run reports ${JSON.stringify(outcome?.state ?? null)} from `
+          + `${JSON.stringify(outcome?.source ?? null)} at ${JSON.stringify(outcome?.evidence ?? null)}, `
+          + `message ${JSON.stringify(String(outcome?.message ?? '').slice(0, 80))}, `
+          + `form still on screen: ${outcome?.formStillPresent}; `
+          + `continuation held open for a challenge that does not exist: `
+          + `${JSON.stringify(runB.continuationOffered)} (wanted false); `
+          + `presses=${runB.state.attempts ?? 'n/a'}`,
+      };
+    },
+  },
 ];
 
 /* ─── action lists, taken from the real builder rather than typed here ───────────────────────── */
@@ -499,6 +600,30 @@ function eeoActions(pairs: Array<[question: string, answer: string]>): ManagedBr
   return picked;
 }
 
+/* THE ASHBY SUBMIT LIST, STRAIGHT OUT OF THE PRODUCTION BUILDER, both with and without the click.
+ *
+ * `buildManagedPortalActions('controlled_ashby', packet, true)` is byte for byte what production
+ * queued for packet 13bccb2d: eight fills and uploads, then one click on
+ * `button[type="submit"], input[type="submit"]`, which is what isFinalSubmitAction recognises as the
+ * final submit. Nine actions in total against a MANAGED_ACTION_LIMIT of 120, and no action is added
+ * by anything in this fix - the outcome read is a page evaluation inside the runner, not an action.
+ *
+ * The fill list is the same nine minus the click, taken by dropping the LAST action rather than by
+ * calling the builder with `false`, so the two lists cannot drift into being different runs.
+ */
+function submittingAshbyActions(): ManagedBrowserAction[] {
+  const all = buildManagedPortalActions('controlled_ashby', packetFor(), true);
+  const last = all[all.length - 1];
+  if (last?.type !== 'click') {
+    throw new Error(`the production Ashby builder no longer ends in a submit click, it ends in ${last?.type}`);
+  }
+  return all;
+}
+
+function fillOnlyAshbyActions(): ManagedBrowserAction[] {
+  return submittingAshbyActions().slice(0, -1);
+}
+
 /* Both file uploads, in the order the production builder emits them. Not filtered to the cover
    letter alone: the misfiling failure - the letter landing in the resume control, or the resume in
    the cover-letter control - is only visible when both documents are in flight, and it is the
@@ -542,9 +667,11 @@ type SandboxResult = {
   blockers: string[];
   skipped: string[];
   extracted: Array<{ label?: string; value: string | null }>;
+  submitOutcome?: ManagedRun['submitOutcome'];
+  continuationOffered?: boolean;
 };
 
-function runManagedLocally(url: string, actions: ManagedBrowserAction[]): SandboxResult {
+function runManagedLocally(url: string, actions: ManagedBrowserAction[], options: ManagedOptions = {}): SandboxResult {
   const dir = mkdtempSync(join(tmpdir(), 'litos-shape-'));
   // The runner does require('playwright'); this repo ships playwright-core, which is the same
   // library without the browser downloader. One shim module, so the runner text stays untouched.
@@ -560,7 +687,7 @@ function runManagedLocally(url: string, actions: ManagedBrowserAction[]): Sandbo
   writeFileSync(join(dir, 'runner.cjs'), sandboxRunnerSource());
   writeFileSync(
     join(dir, 'stratus-input.json'),
-    JSON.stringify({ url, actions, waitUntil: 'domcontentloaded' }),
+    JSON.stringify({ url, actions, waitUntil: 'domcontentloaded', allowSubmit: options.allowSubmit === true }),
   );
   const run = spawnSync(process.execPath, ['runner.cjs'], { cwd: dir, encoding: 'utf8', timeout: 300_000 });
   if (run.status !== 0) {
@@ -606,10 +733,25 @@ function shapeUrl(shape: string, query: Record<string, string> = {}): string {
   for (const [key, value] of Object.entries(query)) {
     if (key !== 'board') target.searchParams.set(key, value);
   }
+  /* Last, so it is on every URL this script hands to any engine. Appended whenever it is set, not
+     only for a remote BASE: a local dev server ignores an unrecognised parameter, and a rule with
+     an exception in it is a rule that gets the exception wrong. */
+  if (QA_KEY) target.searchParams.set(QA_KEY_PARAM, QA_KEY);
   return target.toString();
 }
 
 async function main() {
+  /* Loudly, and before a browser is launched. Without the key a deployed harness origin answers 404
+     to every fixture URL, so all twelve cases fail on a blank page and read as a product regression.
+     That misreading has already cost this repo a day once, over a stale stratus checkout. */
+  if (!loopback(BASE) && !QA_KEY) {
+    console.log(
+      `BASE is ${BASE}, which is not loopback, and LITOS_QA_PORTAL_SECRET is unset.\n`
+      + `Every /qa/ fixture there answers 404 without it, so this run would report twelve\n`
+      + `failures that are not product failures. Set the same value the website project has.`,
+    );
+    process.exit(2);
+  }
   const only = process.argv.slice(2);
   const selected = only.length > 0 ? CASES.filter((entry) => only.includes(entry.id)) : CASES;
   if (selected.length === 0) {
@@ -639,7 +781,7 @@ async function main() {
         await page.close();
       }
     },
-    async managed(shape, actions, reads, query) {
+    async managed(shape, actions, reads, query, options) {
       /* The reads are appended to the SAME action list, so the real runner performs them at the end
          of the real run. That is the whole reason the fixture mirrors its state onto attributes:
          `extract` is the only DOM read the managed runner has, and a verdict has to come from the
@@ -657,7 +799,7 @@ async function main() {
           type: 'extract', selector: '#litos-qa-log', attribute, label: `qa:${key}`, optional: true,
         })),
       ];
-      const result = runManagedLocally(shapeUrl(shape, query), withReads);
+      const result = runManagedLocally(shapeUrl(shape, query), withReads, options ?? {});
       const read = (label: string) => result.extracted.find((entry) => entry.label === label)?.value ?? null;
       const state: Record<string, string | null> = {};
       for (const [key] of reads) state[key] = read(`qa:${key}`);
@@ -668,6 +810,8 @@ async function main() {
         skipped: result.skipped ?? [],
         events,
         state,
+        submitOutcome: result.submitOutcome ?? null,
+        continuationOffered: result.continuationOffered,
       };
     },
   };
