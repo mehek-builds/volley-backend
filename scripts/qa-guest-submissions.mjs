@@ -8,10 +8,13 @@ import pg from 'pg';
 import { chromium } from 'playwright-core';
 import {
   assertDisposableDatabaseMarker,
+  assertControlledManagedReceivingProofRow,
   assertRemoteManagedRunner,
   assertControlledSecurityCodeTarget,
   controlledEmailCaptureTarget,
+  controlledReceiptCaptureTarget,
   controlledManagedReceivingProof,
+  controlledQaPacketSpec,
   managedApplicationAlias,
   securityCodeCase,
   securityCodeMailboxUrl,
@@ -43,6 +46,10 @@ const emailCaptureTarget = securityCodeMode ? controlledEmailCaptureTarget(
   process.env.LITOS_QA_EMAIL_CAPTURE_URL,
   process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN,
 ) : null;
+const receiptCaptureTarget = securityCodeMode ? controlledReceiptCaptureTarget(
+  process.env.LITOS_QA_RECEIPT_CAPTURE_URL,
+  process.env.LITOS_QA_RECEIPT_CAPTURE_TOKEN,
+) : null;
 const runnerOrigin = securityCodeMode ? assertRemoteManagedRunner({
   provider: process.env.BROWSER_PROVIDER,
   baseUrl: process.env.STRATUS_BASE_URL,
@@ -61,6 +68,12 @@ if (securityCodeMode && !inboundSecret) throw new Error('The inbound application
 if (securityCodeMode && process.env.LITOS_QA_EMAIL_CAPTURE_ENABLED !== 'true') {
   throw new Error('Provisioning blocker: LITOS_QA_EMAIL_CAPTURE_ENABLED=true is required');
 }
+if (securityCodeMode && process.env.LITOS_QA_RECEIPT_CAPTURE_ENABLED !== 'true') {
+  throw new Error('Provisioning blocker: LITOS_QA_RECEIPT_CAPTURE_ENABLED=true is required');
+}
+if (securityCodeMode && emailCaptureTarget.origin === receiptCaptureTarget.origin) {
+  throw new Error('Provisioning blocker: email and receipt capture adapters must use different loopback ports');
+}
 if (securityCodeMode) {
   assertControlledSecurityCodeTarget({
     apiBase,
@@ -76,6 +89,7 @@ if (securityCodeMode) {
 }
 
 const capturedEmails = [];
+const capturedReceipts = [];
 const captureServer = securityCodeMode ? createServer((request, response) => {
   if (request.method !== 'POST' || request.url !== emailCaptureTarget.pathname
     || request.headers['x-litos-qa-capture-token'] !== process.env.LITOS_QA_EMAIL_CAPTURE_TOKEN) {
@@ -99,10 +113,66 @@ const captureServer = securityCodeMode ? createServer((request, response) => {
     }
   });
 }) : null;
+const receiptCaptureServer = securityCodeMode ? createServer((request, response) => {
+  if (request.method !== 'POST' || request.url !== receiptCaptureTarget.pathname
+    || request.headers['x-litos-qa-receipt-token'] !== process.env.LITOS_QA_RECEIPT_CAPTURE_TOKEN
+    || request.headers['content-type'] !== 'image/png') {
+    response.writeHead(403).end();
+    return;
+  }
+  const objectKey = request.headers['x-litos-qa-receipt-key'];
+  const claimedDigest = request.headers['x-litos-qa-receipt-sha256'];
+  if (typeof objectKey !== 'string'
+    || !/^users\/[A-Za-z0-9_-]+\/submission-runs\/[A-Za-z0-9_-]+\/receipt\.png$/.test(objectKey)
+    || typeof claimedDigest !== 'string' || !/^[a-f0-9]{64}$/.test(claimedDigest)) {
+    response.writeHead(400).end();
+    return;
+  }
+  const hash = createHash('sha256');
+  let bytes = 0;
+  let rejected = false;
+  request.on('data', (chunk) => {
+    bytes += chunk.length;
+    if (bytes > 20 * 1024 * 1024) {
+      rejected = true;
+      request.destroy();
+      return;
+    }
+    hash.update(chunk);
+  });
+  request.on('end', () => {
+    if (rejected || bytes < 8) {
+      response.writeHead(400).end();
+      return;
+    }
+    const sha256 = hash.digest('hex');
+    if (sha256 !== claimedDigest || Number(request.headers['content-length']) !== bytes) {
+      response.writeHead(400).end();
+      return;
+    }
+    const evidence = {
+      source: 'controlled_qa_loopback',
+      url: `urn:litos:qa-receipt:${sha256}`,
+      bytes,
+      sha256,
+      object_key: objectKey,
+    };
+    // Keep only proof metadata. The PNG is never persisted and there is deliberately no read route.
+    capturedReceipts.push(evidence);
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ source: evidence.source, url: evidence.url, bytes, sha256 }));
+  });
+}) : null;
 if (captureServer) {
   await new Promise((resolve, reject) => {
     captureServer.once('error', reject);
     captureServer.listen(Number(emailCaptureTarget.port), '127.0.0.1', resolve);
+  });
+}
+if (receiptCaptureServer) {
+  await new Promise((resolve, reject) => {
+    receiptCaptureServer.once('error', reject);
+    receiptCaptureServer.listen(Number(receiptCaptureTarget.port), '127.0.0.1', resolve);
   });
 }
 
@@ -243,7 +313,7 @@ try {
       throw new Error(`disposable QA database marker lookup failed: ${errorDetail(error)}`);
     }
     assertDisposableDatabaseMarker(markerResult.rows[0], databaseMarker);
-    activeRun = { run: null, stage: 'seed_controlled_managed_receiving_proof' };
+    activeRun = { run: null, stage: 'verify_preseeded_controlled_managed_receiving_proof' };
     const receivingProof = controlledManagedReceivingProof({
       routeMode: process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE,
       domain: managedDomain,
@@ -253,22 +323,14 @@ try {
       webhookSecret: process.env.RESEND_WEBHOOK_SECRET,
       databaseMarker,
     });
-    await client.query(
-      `insert into application_email_receiving_proofs
-         (provider_message_hash, route_fingerprint, proof_version, domain, verified_at)
-       values ($1, $2, $3, $4, now())
-       on conflict (route_fingerprint) do update
-         set provider_message_hash = excluded.provider_message_hash,
-             proof_version = excluded.proof_version,
-             domain = excluded.domain,
-             verified_at = now()`,
-      [
-        receivingProof.provider_message_hash,
-        receivingProof.route_fingerprint,
-        receivingProof.proof_version,
-        receivingProof.domain,
-      ],
+    const proofResult = await client.query(
+      `select provider_message_hash, route_fingerprint, proof_version, domain, verified_at
+         from application_email_receiving_proofs
+        where route_fingerprint = $1 and domain = $2 and proof_version = $3
+        limit 1`,
+      [receivingProof.route_fingerprint, receivingProof.domain, receivingProof.proof_version],
     );
+    assertControlledManagedReceivingProofRow(proofResult.rows[0], receivingProof);
     activeRun = { run: null, stage: 'verify_managed_application_email_route' };
     const health = await api('/health');
     assert.equal(health.application_email?.deliverable, true, 'managed application email route is not deliverable');
@@ -344,50 +406,14 @@ try {
       currently_enrolled: true,
       coursework: [],
     };
-    const spec = {
-      school: education.school,
-      degree: education.degree,
-      grad_date: education.grad_date,
-      coursework: '',
-      experience: [{
-        type: 'job',
-        org: 'Northwind Labs',
-        title: 'Software Engineering Intern',
-        date_range: 'Summer 2026',
-        bullets: [
-          'Built TypeScript workflows that automated internal application review steps.',
-          'Added dashboard states that surfaced missing applicant inputs before submit.',
-          'Tested controlled portal submissions across browser and API checkpoints.',
-        ],
-      }],
-      skills: ['TypeScript'],
-      _contact: { full_name: `Guest Tester ${run}`, email },
-      _review: {
-        jd_text: 'Controlled software engineering internship used only for Litos submission QA.',
-        role: 'Software Engineering Intern',
-        portal_url: runPortalUrl,
-        ats_name: 'controlled_test',
-        status: 'ready_to_submit',
-        edited_terms: [],
-        questions: [],
-        skipped_reasons: [],
-        updated_at: now,
-      },
-      ...(alias ? {
-        _applicant_email: {
-          address: alias,
-          source: 'litos_alias',
-          reason: 'deliverable',
-          tracked: true,
-          decided_at: now,
-        },
-        _application_email: {
-          alias,
-          forwards_to: qaForwardTo,
-          mode: 'litos_application_alias',
-        },
-      } : {}),
-    };
+    const spec = controlledQaPacketSpec({
+      run,
+      email,
+      portalUrl: runPortalUrl,
+      alias,
+      forwardTo: qaForwardTo,
+      now,
+    });
     stage = 'seed_packet_and_alias';
     activeRun.stage = stage;
     await client.query(
@@ -475,6 +501,10 @@ try {
 
     assert.match(finalState.review.receipt.confirmation_text, /thank you|received/i);
     assert.match(finalState.review.receipt.reference_id, /^LITOS-QA-/);
+    const capturedReceipt = capturedReceipts.find((entry) => entry.url === finalState.review.receipt.screenshot_url);
+    assert.ok(capturedReceipt, 'controlled local receipt adapter did not capture the submission screenshot');
+    assert.ok(capturedReceipt.bytes >= 8, 'controlled local receipt adapter captured an empty screenshot');
+    assert.match(capturedReceipt.sha256, /^[a-f0-9]{64}$/);
 
     await page.evaluate(() => {
       window.localStorage.removeItem('rq_token');
@@ -506,6 +536,9 @@ try {
       continuation_fingerprint: finalState.review.verification?.continuation_fingerprint ?? null,
       continuation_resumed: finalState.review.verification?.continuation_resumed ?? false,
       receipt_source: finalState.review.receipt?.source ?? null,
+      receipt_capture_source: capturedReceipt.source,
+      receipt_capture_bytes: capturedReceipt.bytes,
+      receipt_capture_sha256: capturedReceipt.sha256,
       email_message_received: Boolean(inboundEvidence),
       email_message_forwarded: Boolean(inboundEvidence?.response?.forwarded),
       email_capture_adapter: securityCodeMode ? emailCaptureTarget.origin : null,
@@ -533,6 +566,7 @@ try {
     browser.close(),
     client.end(),
     captureServer ? new Promise((resolve, reject) => captureServer.close((error) => error ? reject(error) : resolve())) : undefined,
+    receiptCaptureServer ? new Promise((resolve, reject) => receiptCaptureServer.close((error) => error ? reject(error) : resolve())) : undefined,
   ]);
 }
 

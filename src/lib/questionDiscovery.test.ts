@@ -490,6 +490,32 @@ test('send-time refresh replaces stale EEO prose with stored profile answers', (
   assert.equal(questionRequiresHumanAttention(questions[0]), false);
 });
 
+/* R-118. The refresh is why a hand-edited packet could never fix the Deepgram blocker: the stored
+ * answer is thrown away and re-resolved from the profile on every run, so a "May 2028" typed into
+ * the dashboard was overwritten with "2028" before the next send. That makes this function, and not
+ * the packet row, the thing the fix has to land in.
+ *
+ * Both rows below are the real prod shape of packet 59fb48ae-382c-4157-9b3d-d4c12883cc62. */
+test('R-118: send-time refresh gives a graduation year the month the profile states', () => {
+  const profile = { grad_date: 'May 2028', grad_year: 2028 };
+  const refreshed = refreshKnownQuestionAnswers([
+    { question: 'expected graduation year', answer: '2028' },
+    { question: 'expected graduation year', answer: 'May 2028' },
+  ], profile, undefined);
+  assert.equal(refreshed[0].answer, 'May 2028');
+  assert.equal(refreshed[1].answer, 'May 2028');
+
+  // A profile with only a year is left with only a year, through the same call.
+  assert.equal(
+    refreshKnownQuestionAnswers(
+      [{ question: 'expected graduation year', answer: '2028' }],
+      { grad_date: '2028', grad_year: 2028 },
+      undefined,
+    )[0].answer,
+    '2028',
+  );
+});
+
 test('send-time refresh clears stale refused answers across the reviewer examples', () => {
   const stale = refreshKnownQuestionAnswers([
     { question: 'Can you work onsite in our Chicago office five days per week?', answer: 'Yes' },
@@ -1420,7 +1446,11 @@ test('stored academic and onsite facts answer repeated select-shaped live questi
   assert.deepEqual(resolveKnownAnswer('Are you currently enrolled in a degree program?', 'radio', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Will you be returning to a degree program after this internship?', 'select', profile, undefined), { value: 'Yes' });
   assert.deepEqual(resolveKnownAnswer('Graduation Month', 'select', profile, undefined), { value: 'May' });
-  assert.deepEqual(resolveKnownAnswer('Graduation Year', 'select', profile, undefined), { value: '2028' });
+  // CHANGED, and the change is the point: a graduation-year answer now carries the month the
+  // profile really states. The managed provider reports every control as text, so a bare "2028" was
+  // the only thing a react-datepicker ever got and it filled nothing. See graduationYearFieldAnswer.
+  // The bare year is still what a year SELECT receives, via profileFieldCandidates' ladder.
+  assert.deepEqual(resolveKnownAnswer('Graduation Year', 'select', profile, undefined), { value: 'May 2028' });
   assert.deepEqual(
     resolveKnownAnswer('If you are enrolled in university, what degree are you currently pursuing?', 'select', profile, undefined),
     { value: 'Bachelor\'s Degree' },

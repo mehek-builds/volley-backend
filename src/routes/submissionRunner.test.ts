@@ -1233,6 +1233,25 @@ test('a remembered exact score does not survive changed closed-list options in d
   )[0]?.answer, '');
 });
 
+test('a failed live GPA selector cannot be restored from a stale stored question', () => {
+  const failedId = 'question_37228964002';
+  const merged = mergeDiscoveredPortalQuestions(
+    [],
+    [{
+      id: 'stale-gpa',
+      question: 'Overall GPA',
+      answer: '3.89',
+      kind: 'required',
+      required: true,
+      portal_selector: `#${failedId}`,
+      portal_input_type: 'select-one',
+    }],
+    [],
+    new Set([failedId]),
+  );
+  assert.deepEqual(merged, []);
+});
+
 /* R-101, the reporting half. The DRW Software Developer Intern run of 2026-08-08 recorded
  * `questions: 0`, twenty-seven "is required and is still empty" lines, `submission_error: null`
  * and no stall. Every sentence in it was true and the run as a whole was not: it named twenty-seven
@@ -1306,6 +1325,40 @@ test('a scan that threw with no message is still a failure, not a silent success
   assert.doesNotMatch(runner, /attentionCount:[^\n]*honestyReasons\.length/);
 });
 
+/* A QUESTION THE BUDGET DROPPED MAY NOT BE SENT OVER.
+ *
+ * buildManagedPortalActions used to refuse a prepare run whose reviewed questions could not all fit,
+ * which cost the applicant the fixed fields, the preview and the evidence reads on the packets most
+ * likely to need them. It now trims instead - a prepare run has no submit button to withhold - and
+ * that trade is only acceptable while every dropped question is surfaced and blocks the send.
+ *
+ * Without the gate the failure is completely silent: a dropped question is not in filled_fields, it
+ * produces no provider blocker unless the employer happens to mark it required, and on the preview
+ * screenshot it is a blank that looks like every other optional blank. Standing consent then turns
+ * `safe` into a click in the same call, and an answer she gave Litos goes to the employer missing.
+ *
+ * Asserted against the source for the same reason as the test below: prepareManaged needs a remote
+ * runner, a database and blob storage, so the wiring is what can be pinned here. Mutation-checked -
+ * removing the gate leaves every behavioural test in the suite green. */
+test('a question the action budget dropped blocks the send and is named to the applicant', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+
+  // Computed from the finished action list, through the helper that separates a budget drop from a
+  // family that never fills questions at all. The undiscriminating helper here would mark every
+  // SmartRecruiters, JazzHR and BambooHR packet unsendable over a pre-existing scope limit.
+  assert.match(runner, /budgetDroppedReviewedQuestions\(packet, fillActions\)/);
+  assert.doesNotMatch(runner, /reviewedQuestionsWithoutActions\(packet, fillActions\)/);
+
+  // It reaches her attention list...
+  assert.match(runner, /\.\.\.budgetShortfallReasons/);
+  assert.match(runner, /left untouched and nothing has been sent/);
+  // ...and it gates the send, not just the display.
+  assert.match(runner, /&& unattemptedQuestions\.length === 0/);
+  // Logged as an error too: a run that cannot hold the questions it was given is a product defect
+  // before it is the applicant's problem.
+  assert.match(runner, /The action budget could not hold every reviewed question/);
+});
+
 /* NEITHER prepare path may throw the question scan's failure away.
  *
  * prepareManaged learned this on 2026-08-08, from a DRW packet whose discovery call was rejected
@@ -1334,22 +1387,23 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   // Both scans record what went wrong rather than returning an empty result that says nothing,
   // and both normalize the thrown value so an empty Error message cannot become an empty record.
   assert.equal(runner.match(/discoveryFailures\.push\(message\)/g)?.length, 2);
-  /* THREE normalizers, TWO of which can hold the send, and the difference is the point.
+  /* THREE normalizers. The option-probe normalizer can hold the send too, but its failure is
+   * aggregated separately so one failed batch names every affected durable control once.
    *
    * The third is the option-probe pass: a read-only third managed call that opens each closed
    * control the discovery pass found and reads its real option list. It normalizes its error for the
-   * same reason the other two do - an empty `new Error()` message logs as nothing - but it must NOT
-   * push into discoveryFailures. A failed option read leaves the form exactly as legible as it was
-   * before that pass existed: the control has no options, and the alias ladder answers it. Holding
-   * the send on that would turn a degraded read into a stopped application.
-   *
-   * The count above is the assertion that matters and is deliberately still 2. */
+   * same reason the other two do. Unlike the old fallback, a missing option list is not permission
+   * to send a guessed alias into a closed employer control. */
   assert.equal(runner.match(/describeDiscoveryFailure\(error\)/g)?.length, 3);
-  assert.doesNotMatch(
-    runner,
-    /Option probe pass failed[\s\S]{0,400}discoveryFailures\.push/,
-    'a missing option list degrades to the alias ladder; it is not evidence the form was never read',
-  );
+  assert.match(runner, /closed-control option discovery failed:/);
+  assert.match(runner, /const discoveryRoleCapability = managedResultSupportsDiscoveryRole\(discoveryResult\)/);
+  assert.match(runner, /buildManagedDiscoveredOptionProbeBatches\([\s\S]{0,300}discoveryRoleCapability/);
+  assert.match(runner, /managedOptionProbeAnalysis\([\s\S]{0,500}discoveryRoleCapability/);
+  const analysisIndex = runner.indexOf('managedOptionProbeAnalysis(');
+  const filterIndex = runner.indexOf('.filter((field) =>', analysisIndex);
+  const resolutionIndex = runner.indexOf('discoverAndResolveQuestions(', filterIndex);
+  assert.ok(analysisIndex > 0 && filterIndex > analysisIndex && resolutionIndex > filterIndex,
+    'failed closed fields must be removed before any alias resolution can run');
   assert.equal(
     runner.match(/'Question discovery pass failed, so this run cannot see the questions this form asks'/g)?.length,
     2,

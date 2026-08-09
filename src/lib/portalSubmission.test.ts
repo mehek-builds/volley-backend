@@ -4,6 +4,7 @@ import test from 'node:test';
 import { DOMParser } from '@xmldom/xmldom';
 import type { Page } from 'playwright-core';
 import { CONTROLLED_PORTAL_BINDING_PARAM, controlledPortalBinding } from './controlledTestPortal';
+import { resolveKnownAnswer } from './questionDiscovery';
 import {
   AUTONOMOUS_PORTAL_FAMILIES,
   blockersRequireCoverLetter,
@@ -22,20 +23,26 @@ import {
   managedAnswerLossReasons,
   ashbyControlWithinFieldPath,
   managedResultFieldOptions,
+  managedResultSupportsDiscoveryRole,
   attachManagedFieldOptions,
   buildManagedDiscoveredOptionProbeActions,
+  buildManagedDiscoveredOptionProbeBatches,
   escapeHatchOptionFor,
   managedOptionProbeControlId,
   managedOptionProbeTargets,
+  managedOptionProbeAnalysis,
   managedUnreportedFillLabels,
   managedUnexplainedAnswers,
   managedUnexplainedAnswerReasons,
   mergeManagedFieldOptions,
   MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL,
+  MANAGED_OPTION_PROBE_MAX_CONTROLS,
   reactSelectListboxSelector,
   GREENHOUSE_OPTION_PROBE_IDS,
   MANAGED_ACTION_LIMIT,
   ManagedActionBudgetError,
+  budgetDroppedReviewedQuestions,
+  reviewedQuestionsWithoutActions,
   PORTAL_FAMILIES,
   MANAGED_OPTION_EXTRACT_PREFIX,
   managedResultHasCoverLetterUpload,
@@ -48,7 +55,7 @@ import {
 } from './portalSubmission';
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 import { resolveProfileField } from './profileFieldResolution';
-import type { ManagedDiscoveredQuestion } from './browserbase';
+import { MANAGED_DISCOVERY_ROLE_CAPABILITY, type ManagedDiscoveredQuestion } from './browserbase';
 import type { ReferralSourceEvidence } from './referralSource';
 
 const JOB_BOARD_REFERRAL_EVIDENCE: ReferralSourceEvidence = {
@@ -1868,6 +1875,68 @@ test('Greenhouse replays Samsara required selects with exact live options', () =
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('majoring in stem') && label.endsWith('Yes')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('ai policy for interviewers') && label.endsWith('Yes')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('gender identity') && label.endsWith('Woman')));
+});
+
+/* THE MOST-REPEATED UNSUBMITTABLE PACKET IN THE CORPUS, pinned at the action list.
+ *
+ * Twenty prod packets across eight employers reported, for the control discovered as
+ * "are you hispanic/latino? hispanic_ethnicity":
+ *
+ *   no option matched "Decline to self-identify", left for you to choose
+ *
+ * Its list reads ["Yes", "No", "Decline To Self Identify"], so the answer and the option are the
+ * same refusal one hyphen apart. This question gets ONE attempt - comboboxValueLimit is 1 and every
+ * alias after the first is never sent - so the assertion that matters is not that the right spelling
+ * is somewhere in the ladder, it is that it is the value that actually goes out. */
+test('the one attempt at a self-identification opt-out uses the list\'s own spelling', () => {
+  // The answer as the resolver now produces it. The measured packet stored "#hispanic_ethnicity"
+  // with input type text, so the action that reaches the page is a single fill of this string and
+  // there is no second attempt behind it.
+  assert.deepEqual(
+    resolveKnownAnswer('are you hispanic/latino? hispanic_ethnicity', 'text', { eeo_prefs: {} }, undefined),
+    { value: 'Decline To Self Identify' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('veteran status veteran_status', 'text', { eeo_prefs: {} }, undefined),
+    { value: "I don't wish to answer" },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('disability status disability_status', 'text', { eeo_prefs: {} }, undefined),
+    { value: 'I do not want to answer' },
+  );
+  // A stated answer is untouched: the substitution only ever swaps one refusal for the same refusal.
+  assert.deepEqual(
+    resolveKnownAnswer('gender', 'text', { eeo_prefs: { gender: 'Female' } }, undefined),
+    { value: 'Female' },
+  );
+
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Together AI is hiring a Systems Research Engineer Intern.',
+    questions: [
+      {
+        question: 'are you hispanic/latino? hispanic_ethnicity',
+        answer: 'Decline To Self Identify',
+        portal_selector: '#hispanic_ethnicity',
+        portal_input_type: 'text',
+      },
+      { question: 'gender', answer: 'Decline to self-identify' },
+    ],
+  });
+  const valuesFor = (question: string) => actions
+    .filter((action) => typeof action.label === 'string' && action.label.toLowerCase().includes(question))
+    .map((action) => action.value)
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+  const hispanic = valuesFor('hispanic_ethnicity');
+  assert.ok(hispanic.length > 0, 'nothing was attempted at the hispanic/latino question');
+  assert.deepEqual([...new Set(hispanic)], ['Decline To Self Identify']);
+  // The combobox ladder gets the same treatment, and it matters there for the same reason: the
+  // value limit is one, so the first candidate is the only candidate.
+  assert.ok(valuesFor(':gender').includes('Decline To Self Identify'));
 });
 
 test('Greenhouse replays Databricks choice questions through React-select buckets', () => {
@@ -4022,7 +4091,14 @@ test('the discovery run never exceeds the runner action ceiling, on any portal',
  * is a trim, never a higher MAX_ACTIONS: the last time a list was allowed to grow past the runner's
  * ceiling it rejected every managed run for weeks with nobody seeing it. */
 test('the fill run never exceeds the runner action ceiling, on any portal at any question count', () => {
-  for (const questionCount of [0, 8, 30, 120]) {
+  /* 400 is here for the protected FLOOR, not for realism. The trims skip protected actions and the
+     final truncation stops when only protected ones remain, so if that floor could itself exceed the
+     ceiling, prepare would return an over-budget list and the runner would answer HTTP 400 - the
+     original failure of this whole line of work, reached by a different route. The floor is fixed
+     cost (core fills, evidence reads, option probes) and does not grow with the question count, so
+     the way to demonstrate that is to push the question count far past anything real and show the
+     list still lands inside the ceiling. */
+  for (const questionCount of [0, 8, 30, 120, 400]) {
     const packet = andurilPacket({
       city: 'Los Angeles',
       country: 'United States',
@@ -4035,21 +4111,176 @@ test('the fill run never exceeds the runner action ceiling, on any portal at any
       })),
     });
     for (const portal of EVERY_MANAGED_PORTAL) {
-      for (const submit of [false, true]) {
-        try {
-          const actions = buildManagedPortalActions(portal, packet, submit);
-          assert.ok(
-            actions.length <= MANAGED_ACTION_LIMIT,
-            `${portal} ${submit ? 'submit' : 'prepare'} run with ${questionCount} questions is ${actions.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
-          );
-        } catch (error) {
-          assert.ok(error instanceof ManagedActionBudgetError, `${portal} returned an unexpected budget failure`);
-          assert.equal(error.submitActionAppended, false);
-          assert.match(error.blocker, /did not press submit/i);
-        }
+      /* PREPARE MAY NOT THROW, asserted separately from submit rather than allowing either outcome
+         on both. The looser version of this test accepted a budget error from either path, so it
+         would have stayed green through a prepare run that stopped dead - which is the behaviour
+         that costs the applicant her fixed fields, her preview and her evidence reads on exactly the
+         packets big enough to need them. A prepare run has no submit button to withhold, so there is
+         nothing for it to protect by refusing. */
+      const prepared = buildManagedPortalActions(portal, packet, false);
+      assert.ok(
+        prepared.length <= MANAGED_ACTION_LIMIT,
+        `${portal} prepare run with ${questionCount} questions is ${prepared.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
+      );
+
+      // Submit is the path that may stop, because it is the one that can send.
+      try {
+        const actions = buildManagedPortalActions(portal, packet, true);
+        assert.ok(
+          actions.length <= MANAGED_ACTION_LIMIT,
+          `${portal} submit run with ${questionCount} questions is ${actions.length} actions, and the runner rejects anything over ${MANAGED_ACTION_LIMIT}`,
+        );
+      } catch (error) {
+        assert.ok(error instanceof ManagedActionBudgetError, `${portal} returned an unexpected budget failure`);
+        assert.equal(error.submitActionAppended, false);
+        assert.match(error.blocker, /did not press submit/i);
       }
     }
   }
+});
+
+/* WHAT PREPARE GIVES UP INSTEAD OF STOPPING, and the fact that it says so.
+ *
+ * The submit path refuses a packet whose reviewed questions cannot all fit, because sending an
+ * application with an answer quietly missing from it is the failure this budget exists to prevent.
+ * Prepare cannot send anything, so refusing there costs the applicant everything the run would have
+ * given her - the fixed fields, the preview, the evidence reads - and protects nothing.
+ *
+ * So prepare drops questions. That is only acceptable while every dropped question is named, which
+ * is what these assertions are for: the count that fits, the count that did not, and the guarantee
+ * that the two together account for every question in the packet. A version of this that trimmed
+ * quietly would pass a ceiling test and be the exact bug the ceiling test was written to catch.
+ */
+test('a prepare run too big to hold every question drops them visibly rather than stopping', () => {
+  const questionCount = 200;
+  const packet = andurilPacket({
+    questions: Array.from({ length: questionCount }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: index % 2 === 0 ? 'Yes' : 'No',
+    })),
+  });
+
+  // Submit stops, because it is the path that could send an application missing an answer.
+  assert.throws(
+    () => buildManagedPortalActions('greenhouse', packet, true),
+    (error: unknown) => error instanceof ManagedActionBudgetError && error.submitActionAppended === false,
+  );
+
+  // Prepare does not, and still fits: an over-budget list is rejected by the runner with HTTP 400
+  // before a browser opens, so "does not throw" would otherwise have become "does not run".
+  const actions = buildManagedPortalActions('greenhouse', packet, false);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `prepare returned ${actions.length} actions`);
+
+  // And every question it could not attempt is named.
+  const unattempted = reviewedQuestionsWithoutActions(packet, actions);
+  assert.ok(unattempted.length > 0, 'a 200-question packet cannot fit, so something must be reported');
+  for (const question of unattempted) {
+    assert.ok(
+      !actions.some((action) => (action.label ?? '').includes(question.slice(0, 60))),
+      `"${question}" was reported as unattempted but has an action`,
+    );
+  }
+  // Nothing is lost between the two counts: what fits plus what did not is the whole packet.
+  const attempted = new Set(
+    actions.flatMap((action) => {
+      const match = /^question(?:_[a-z_]+)?:(?:\d+:)*(Screener question number \d+)/.exec(action.label ?? '');
+      return match ? [match[1]!] : [];
+    }),
+  );
+  assert.equal(attempted.size + unattempted.length, questionCount);
+});
+
+test('a packet that fits reports nothing unattempted, so the signal means something', () => {
+  // The other half. A reporter that always returns something is as useless as one that never does.
+  const packet = andurilPacket({
+    questions: Array.from({ length: 6 }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: index % 2 === 0 ? 'Yes' : 'No',
+    })),
+  });
+  for (const portal of EVERY_MANAGED_PORTAL) {
+    const actions = buildManagedPortalActions(portal, packet, false);
+    assert.deepEqual(
+      budgetDroppedReviewedQuestions(packet, actions),
+      [],
+      `${portal} reported a budget drop on a packet that comfortably fits`,
+    );
+  }
+});
+
+/* THE SCOPE GAP IS NOT A BUDGET DROP, and conflating them would have been expensive.
+ *
+ * Thirteen families never attempt a reviewed question at any size - the multi-step ones fill page
+ * one and stop, several newer adapters carry fixed fields only. reviewedQuestionsWithoutActions
+ * reports every question on those, correctly and uselessly: it is answering "what has no action",
+ * and the answer is "all of them, and it always was". Feeding that into the send gate would have
+ * marked every SmartRecruiters, JazzHR, BambooHR, Jobvite, iCIMS, Oracle Cloud, UltiPro, Zoho,
+ * Bullhorn, SuccessFactors, Taleo, ADP and Avature packet permanently unsendable over a scope limit
+ * that predates this budget entirely.
+ *
+ * Both directions are pinned, because a discriminator that never fires is the same bug as one that
+ * always does. */
+test('a family that never fills questions is not reported as a budget drop', () => {
+  const small = andurilPacket({
+    questions: Array.from({ length: 6 }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: 'Yes',
+    })),
+  });
+  const scopeLimited = buildManagedPortalActions('smartrecruiters', small, false);
+  // It genuinely attempts none of them, so the raw reporter says so...
+  assert.equal(reviewedQuestionsWithoutActions(small, scopeLimited).length, 6);
+  // ...and the budget reporter does not, because nothing here was dropped to make room.
+  assert.deepEqual(budgetDroppedReviewedQuestions(small, scopeLimited), []);
+
+  // While a family that DOES fill questions and then runs out of room reports the ones it lost.
+  const huge = andurilPacket({
+    questions: Array.from({ length: 200 }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: 'Yes',
+    })),
+  });
+  const dropped = budgetDroppedReviewedQuestions(huge, buildManagedPortalActions('greenhouse', huge, false));
+  assert.ok(dropped.length > 0, 'a 200-question Greenhouse packet must report the questions it lost');
+});
+
+/* THE COUPLING THAT MAKES THE SUPPRESSION ABOVE SAFE, which nothing else records.
+ *
+ * budgetDroppedReviewedQuestions stays silent for a family that attempts no reviewed question at
+ * all, because reporting every question on those would mark each of their packets permanently
+ * unsendable over a scope limit that predates the budget. That silence is only harmless while none
+ * of them can send by itself: an answered question that is never typed, on a family that then
+ * auto-submits under standing consent, is an application going to an employer with an answer
+ * missing and nothing anywhere saying so.
+ *
+ * Today that holds - all thirteen are multi-step or CAPTCHA-gated, and portalCanAutoSubmit refuses
+ * every one - so the suppression is safe by luck rather than by construction. This is the assertion
+ * that turns it into construction. If a future adapter learns to fill questions, this passes
+ * unchanged; if one of these families is granted auto-submit while still filling none, this fails
+ * and names the exact combination that would let an answer go missing quietly.
+ */
+test('a family that never fills reviewed questions is never allowed to submit by itself', () => {
+  const packet = andurilPacket({
+    questions: Array.from({ length: 4 }, (_, index) => ({
+      question: `Screener question number ${index + 1}: do you have experience with distributed systems?`,
+      answer: 'Yes',
+    })),
+  });
+  const silent: string[] = [];
+  for (const portal of EVERY_MANAGED_PORTAL) {
+    const actions = buildManagedPortalActions(portal, packet, false);
+    const attemptsAny = actions.some((action) => (action.label ?? '').startsWith('question'));
+    if (attemptsAny) continue;
+    silent.push(portal);
+    assert.equal(
+      portalCanAutoSubmit(portal),
+      false,
+      `${portal} attempts none of the reviewed questions AND can auto-submit, so a stored answer `
+      + 'would reach the employer missing with nothing reported',
+    );
+  }
+  // The set is not empty, so the assertion above is actually exercised rather than vacuous.
+  assert.ok(silent.length > 0, 'expected some families to fill no reviewed questions');
 });
 
 function selectHeavyGreenhousePacket(questionCount: number) {
@@ -4123,43 +4354,83 @@ test('Greenhouse select-heavy prepare and submit keep one complete fill chain pe
   }
 });
 
-test('Greenhouse select-heavy prepare and submit block before submit when safe chains cannot fit', () => {
+test('Greenhouse select-heavy submit blocks before submit when safe chains cannot fit', () => {
+  /* SUBMIT ONLY. This test asserted the same throw for prepare, and that was the behaviour until the
+     prepare path stopped stopping: a prepare run cannot press the button, so refusing there bought
+     nothing and cost the applicant the fixed fields, the preview and the evidence reads on the one
+     packet shape big enough to need them. The refusal that matters - never send an application with
+     an answer missing from it - is the submit half, and it is unchanged. What prepare does instead
+     is asserted directly below. */
   const packet = selectHeavyGreenhousePacket(20);
-  for (const submit of [false, true]) {
-    assert.throws(
-      () => buildManagedPortalActions('greenhouse', packet, submit),
-      (error: unknown) => {
-        assert.ok(error instanceof ManagedActionBudgetError);
-        assert.equal(error.code, 'MANAGED_ACTION_BUDGET');
-        assert.equal(error.submitActionAppended, false);
-        assert.equal(error.blocker, error.message);
-        assert.match(error.message, /20 reviewed questions/);
-        return true;
-      },
+  assert.throws(
+    () => buildManagedPortalActions('greenhouse', packet, true),
+    (error: unknown) => {
+      assert.ok(error instanceof ManagedActionBudgetError);
+      assert.equal(error.code, 'MANAGED_ACTION_BUDGET');
+      assert.equal(error.submitActionAppended, false);
+      assert.equal(error.blocker, error.message);
+      assert.match(error.message, /20 reviewed questions/);
+      return true;
+    },
+  );
+});
+
+test('Greenhouse select-heavy prepare fills what fits, keeps the core fields, and names the rest', () => {
+  const packet = selectHeavyGreenhousePacket(20);
+  const actions = buildManagedPortalActions('greenhouse', packet, false);
+  // Fits, because an over-budget list is rejected by the runner before a browser opens.
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `prepare returned ${actions.length} actions`);
+  // The fixed application fields survive the extra pass that gives up questions.
+  assertGreenhouseCoreApplicationActions(actions);
+  // And the questions it could not hold are named rather than dropped quietly.
+  const dropped = budgetDroppedReviewedQuestions(packet, actions);
+  assert.ok(dropped.length > 0, 'twenty select-heavy questions cannot fit, so some must be reported');
+  for (const question of packet.questions) {
+    const attempted = viableReviewedQuestionAttempt(actions, question.question);
+    const reported = dropped.some((text) => question.question.toLowerCase().startsWith(text.toLowerCase().slice(0, 40)));
+    assert.ok(
+      attempted || reported,
+      `"${question.question}" was neither attempted nor reported as dropped`,
     );
   }
 });
 
-test('Greenhouse 16 to 18 question boundaries preserve core fields or block before submit', () => {
+test('Greenhouse 16 to 18 question boundaries preserve core fields on both paths', () => {
+  /* The boundary where select-heavy questions stop fitting. The core application fields survive it
+     on both paths, and that is the assertion this test exists for.
+     What differs either side of the boundary is only what happens to the QUESTIONS: submit refuses
+     the run, prepare gives some up and names them. Neither is allowed to cost a fixed field. */
   for (const questionCount of [16, 17, 18]) {
     const packet = selectHeavyGreenhousePacket(questionCount);
-    for (const submit of [false, true]) {
-      try {
-        const actions = buildManagedPortalActions('greenhouse', packet, submit);
-        assert.ok(actions.length <= MANAGED_ACTION_LIMIT);
-        assertGreenhouseCoreApplicationActions(actions);
-        for (const item of packet.questions) {
-          assert.ok(
-            viableReviewedQuestionAttempt(actions, item.question),
-            `${questionCount}-question ${submit ? 'submit' : 'prepare'} lost ${item.question}`,
-          );
-        }
-        if (submit) assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
-      } catch (error) {
-        assert.ok(error instanceof ManagedActionBudgetError);
-        assert.equal(error.submitActionAppended, false);
-        assert.match(error.blocker, /did not press submit/i);
+
+    const prepared = buildManagedPortalActions('greenhouse', packet, false);
+    assert.ok(prepared.length <= MANAGED_ACTION_LIMIT);
+    assertGreenhouseCoreApplicationActions(prepared);
+    const dropped = budgetDroppedReviewedQuestions(packet, prepared);
+    for (const item of packet.questions) {
+      const attempted = viableReviewedQuestionAttempt(prepared, item.question);
+      const reported = dropped.some((text) => item.question.toLowerCase().startsWith(text.toLowerCase().slice(0, 40)));
+      assert.ok(
+        attempted || reported,
+        `${questionCount}-question prepare lost ${item.question} without reporting it`,
+      );
+    }
+
+    try {
+      const actions = buildManagedPortalActions('greenhouse', packet, true);
+      assert.ok(actions.length <= MANAGED_ACTION_LIMIT);
+      assertGreenhouseCoreApplicationActions(actions);
+      for (const item of packet.questions) {
+        assert.ok(
+          viableReviewedQuestionAttempt(actions, item.question),
+          `${questionCount}-question submit lost ${item.question}`,
+        );
       }
+      assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
+    } catch (error) {
+      assert.ok(error instanceof ManagedActionBudgetError);
+      assert.equal(error.submitActionAppended, false);
+      assert.match(error.blocker, /did not press submit/i);
     }
   }
 });
@@ -4483,26 +4754,36 @@ test('the probe can name Greenhouse\'s own self-identification controls', () => 
   // And the probe pass therefore reads them.
   assert.deepEqual(
     managedOptionProbeTargets('greenhouse', [
-      { label: 'are you hispanic/latino? hispanic_ethnicity', selector: '[data-litos-discovered-14]' },
-      { label: 'disability status disability_status', selector: '[data-litos-discovered-16]' },
-    ]),
+      {
+        label: 'are you hispanic/latino? hispanic_ethnicity',
+        selector: '[data-litos-discovered-14]',
+        inputType: 'text',
+        role: 'combobox',
+      },
+      {
+        label: 'disability status disability_status',
+        selector: '[data-litos-discovered-16]',
+        inputType: 'text',
+        role: 'combobox',
+      },
+    ], {}, true),
     ['hispanic_ethnicity', 'disability_status'],
   );
 });
 
 test('the probe reads the controls discovery found, and never the four it already read', () => {
   const discovered = [
-    { label: 'Overall GPA*', selector: '#question_37228964002', required: true },
+    { label: 'Overall GPA*', selector: '#question_37228964002', inputType: 'text', role: 'combobox', required: true },
     { label: 'Discipline*', selector: '#discipline--0', required: true },
     { label: 'School*', selector: '#school--0', required: true },
     { label: 'Country*', selector: '#country', required: true },
     { label: 'Location (City)*', selector: '#candidate-location', required: true },
-    { label: 'How would you describe your gender identity? 4001608008', selector: '[data-litos-discovered-21]' },
-    { label: 'Are you interested in our Women\'s Winternship program?*', selector: '#question_37228970002', required: true },
+    { label: 'How would you describe your gender identity? 4001608008', selector: '[data-litos-discovered-21]', role: 'combobox' },
+    { label: 'Are you interested in our Women\'s Winternship program?*', selector: '#question_37228970002', inputType: 'text', role: 'combobox', required: true },
   ];
-  const targets = managedOptionProbeTargets('greenhouse', discovered);
-  // The education controls are the discovery pass's job, because their taxonomies load over the
-  // network and need the warming round that lives there.
+  const alreadyRead = { 'school--0': ['USC'], 'discipline--0': ['Computer Science'] };
+  const targets = managedOptionProbeTargets('greenhouse', discovered, alreadyRead, true);
+  // The education controls are skipped only when the earlier pass produced a usable list.
   assert.equal(targets.includes('school--0'), false);
   assert.equal(targets.includes('discipline--0'), false);
   // Structural controls the fixed-field pass owns. Country renders 244 rows (discarded at the render
@@ -4513,30 +4794,72 @@ test('the probe reads the controls discovery found, and never the four it alread
   assert.deepEqual(targets, ['question_37228964002', 'question_37228970002', '4001608008']);
   // And a list already read is not read again.
   assert.deepEqual(
-    managedOptionProbeTargets('greenhouse', discovered, { question_37228964002: VIRTU_GPA_OPTIONS }),
+    managedOptionProbeTargets('greenhouse', discovered, { ...alreadyRead, question_37228964002: VIRTU_GPA_OPTIONS }, true),
     ['question_37228970002', '4001608008'],
   );
+  assert.equal(managedOptionProbeTargets('greenhouse', discovered, {}).includes('school--0'), true,
+    'a windowed hardcoded read must be retried and then fail closed');
   // Not a Greenhouse form, no react-select listbox convention to read.
   assert.deepEqual(managedOptionProbeTargets('lever', discovered), []);
+});
+
+test('the backend consumes the real Stratus text-plus-combobox-role wire shape', () => {
+  const fromStratus: ManagedDiscoveredQuestion = {
+    label: 'Overall GPA* question_37228964002',
+    selector: '#question_37228964002',
+    inputType: 'text',
+    role: 'combobox',
+    maxLength: null,
+    options: null,
+    required: true,
+  };
+  const advertised = {
+    title: '', url: '', text: '', discovered: [fromStratus],
+    capabilities: [MANAGED_DISCOVERY_ROLE_CAPABILITY],
+  };
+  assert.equal(managedResultSupportsDiscoveryRole(advertised), true);
+  assert.equal(managedResultSupportsDiscoveryRole({ ...advertised, capabilities: [] }), false);
+  assert.equal(managedResultSupportsDiscoveryRole({ ...advertised, capabilities: undefined }), false);
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', [fromStratus], {}, true), ['question_37228964002']);
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', [fromStratus]), [],
+    'role metadata without the advertised runner capability cannot activate dynamic probing');
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', [{ ...fromStratus, role: null }], {}, true), [],
+    'a dynamic text input is not closed unless the deployed runner reports its DOM role');
+});
+
+test('the probe keeps plain end-year text open while retaining its normal final fill', () => {
+  const discovered = [
+    { label: 'End date year* end-year--0', selector: '#end-year--0', inputType: 'text', required: true },
+    { label: 'End date month* end-month--0', selector: '#end-month--0', inputType: 'text', role: 'combobox', required: true },
+  ];
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', discovered), ['end-month--0']);
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket());
+  assert.ok(actions.some((action) => action.type === 'fill'
+    && action.selector === '#end-year--0'
+    && action.value === '2028'
+    && action.label === 'education_end_year_field'));
 });
 
 test('the probe pass opens, reads and closes each control, and cannot exceed the runner ceiling', () => {
   const discovered = Array.from({ length: 60 }, (_, i) => ({
     label: `Question ${i}*`,
     selector: `#question_9${String(i).padStart(6, '0')}`,
+    inputType: 'text',
+    role: 'combobox',
     required: true,
   }));
-  const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', discovered);
+  const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', discovered, {}, true);
   assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${actions.length} actions is over the runner's ceiling`);
   assert.equal(actions.length % MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL, 0);
-  // Nothing is typed, uploaded or sent. The whole pass is open / read / Escape.
-  assert.deepEqual([...new Set(actions.map((a) => a.type))], ['click', 'extract', 'press']);
+  // Nothing is typed, uploaded or sent. The identity read precedes two open / read / Escape rounds.
+  assert.deepEqual([...new Set(actions.map((a) => a.type))], ['extract', 'click', 'press']);
   assert.equal(actions.every((a) => a.optional === true), true);
   const first = 'question_9000000';
-  const open = actions.findIndex((a) => a.label === `option_probe_open:${first}:3`);
+  const identity = actions.findIndex((a) => a.label === `closed_control:${first}`);
+  const open = actions.findIndex((a) => a.label === `option_probe_open:${first}:1`);
   const read = actions.findIndex((a) => a.label === `${MANAGED_OPTION_EXTRACT_PREFIX}${first}`);
-  const close = actions.findIndex((a) => a.label === `option_probe_close:${first}:3`);
-  assert.ok(open >= 0 && read === open + 1 && close === open + 2);
+  const close = actions.findIndex((a) => a.label === `option_probe_close:${first}:1`);
+  assert.ok(identity >= 0 && open === identity + 1 && read === open + 1 && close === open + 2);
   assert.equal(actions[read]!.selector, reactSelectListboxSelector(first));
   assert.equal(actions[read]!.attribute, undefined);
   assert.equal(actions[close]!.value, 'Escape');
@@ -4552,12 +4875,328 @@ test('a real Greenhouse form fits the probe pass with room to spare', () => {
   // This is the largest form in the owner's 25-application run, so 75 is close to the worst case.
   const drw = [
     ...['school--0', 'degree--0', 'discipline--0', 'start-month--0', 'end-month--0', 'country', 'candidate-location']
-      .map((id) => ({ label: `${id}*`, selector: `#${id}`, required: true })),
-    ...Array.from({ length: 24 }, (_, i) => ({ label: `Q${i}*`, selector: `#question_679988${String(i + 20).padStart(2, '0')}`, required: true })),
+      .map((id) => ({
+        label: `${id}*`,
+        selector: `#${id}`,
+        inputType: id === 'start-month--0' ? 'text' : undefined,
+        role: id === 'start-month--0' ? 'combobox' : undefined,
+        required: true,
+      })),
+    ...Array.from({ length: 24 }, (_, i) => ({ label: `Q${i}*`, selector: `#question_679988${String(i + 20).padStart(2, '0')}`, inputType: 'text', role: 'combobox', required: true })),
   ];
-  const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', drw);
-  assert.equal(actions.length, 25 * MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL);
-  assert.ok(actions.length < MANAGED_ACTION_LIMIT);
+  const batches = buildManagedDiscoveredOptionProbeBatches('greenhouse', drw, {
+    'school--0': ['USC'],
+    'degree--0': ['Bachelors'],
+    'discipline--0': ['Computer Science'],
+    'end-month--0': ['May'],
+  }, true);
+  assert.equal(batches.flat().length, 25 * MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL);
+  assert.ok(batches.length > 1, 'the async retry must batch rather than truncate a real select-heavy form');
+  assert.equal(batches.every((batch) => batch.length <= MANAGED_ACTION_LIMIT), true);
+});
+
+test('a native select is read without clicking and resolves from its exact options', () => {
+  const discovered = [{
+    label: 'When did you graduate from High School?*',
+    selector: '#question_12345678',
+    inputType: 'select-one',
+    required: true,
+  }];
+  const [batch] = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered, {}, true);
+  assert.deepEqual(batch?.map((action) => action.type), ['extract']);
+  assert.equal(batch?.[0]?.selector, '[id="question_12345678"]:is(select)');
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
+    title: '', url: '', text: '',
+    extracted: [{ selector: '[id="question_12345678"]:is(select)', value: IMC_HIGH_SCHOOL_OPTIONS.join('\n') }],
+  }], [], true);
+  assert.deepEqual(analysis.options.question_12345678, IMC_HIGH_SCHOOL_OPTIONS);
+  assert.deepEqual(analysis.failures, []);
+});
+
+test('custom closed controls warm once, read twice, and fail closed when still loading', () => {
+  const discovered = [{
+    label: 'Overall GPA*',
+    selector: '#question_37228964002',
+    inputType: 'text',
+    role: 'combobox',
+    required: true,
+  }];
+  const [batch] = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered, {}, true);
+  assert.equal(batch?.filter((action) => action.label?.startsWith('option_probe_open:')).length, 2);
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: '[id="question_37228964002"]:is([role="combobox"],[aria-haspopup="listbox"])', value: 'question_37228964002' },
+      { selector: reactSelectListboxSelector('question_37228964002'), value: 'Loading...' },
+      { selector: reactSelectListboxSelector('question_37228964002'), value: 'Loading...' },
+    ],
+  }], [], true);
+  assert.equal(analysis.failedIds.has('question_37228964002'), true);
+  assert.match(analysis.failures[0]?.reason ?? '', /still loading/);
+  assert.equal(analysis.options.question_37228964002, undefined);
+});
+
+test('a successful async second read yields one evidence-backed option list', () => {
+  const discovered = [{ label: 'Overall GPA*', selector: '#question_37228964002', inputType: 'text', role: 'combobox' }];
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: '[id="question_37228964002"]:is([role="combobox"],[aria-haspopup="listbox"])', value: 'question_37228964002' },
+      { selector: reactSelectListboxSelector('question_37228964002'), value: 'Loading...' },
+      { selector: reactSelectListboxSelector('question_37228964002'), value: VIRTU_GPA_OPTIONS.join('\n') },
+    ],
+  }], [], true);
+  assert.deepEqual(analysis.options.question_37228964002, VIRTU_GPA_OPTIONS);
+  assert.deepEqual(analysis.failures, []);
+});
+
+test('windowed, conflicting, duplicate, and failed referral probes cannot fall back to aliases', () => {
+  const fields = [
+    { label: 'Which university are you currently attending?*', selector: '#question_11111111', inputType: 'select-one', options: undefined as string[] | undefined },
+    { label: 'What degree are you currently pursuing?*', selector: '#question_22222222', inputType: 'select-one', options: undefined as string[] | undefined },
+    { label: 'Duplicate degree*', selector: '#question_22222222', inputType: 'select-one', options: undefined as string[] | undefined },
+    { label: 'How did you hear about this job?*', selector: '#question_33333333', inputType: 'select-one', options: undefined as string[] | undefined },
+  ];
+  const hundred = Array.from({ length: 100 }, (_, index) => `School ${index}`).join('\n');
+  const analysis = managedOptionProbeAnalysis('greenhouse', fields, {}, [
+    { title: '', url: '', text: '', extracted: [
+      { selector: '[id="question_11111111"]:is(select)', value: hundred },
+      { selector: '[id="question_22222222"]:is(select)', value: 'Bachelors\nMasters' },
+      { selector: '[id="question_22222222"]:is(select)', value: 'Bachelor\nMaster' },
+    ] },
+  ], [{ controlIds: ['question_33333333'], reason: 'provider timeout' }]);
+  assert.equal(analysis.failedIds.has('question_11111111'), true);
+  assert.equal(analysis.failedIds.has('question_22222222'), true);
+  assert.equal(analysis.failedIds.has('question_33333333'), true);
+  assert.equal(analysis.options.question_33333333, undefined, 'referral must not fall back to a channel alias');
+  assert.match(analysis.failures.map((failure) => failure.reason).join(' '), /windowed|durable selector|provider timeout/);
+  const attached = attachManagedFieldOptions(fields, { question_22222222: POINT72_DEGREE_OPTIONS });
+  assert.equal(attached[1]?.options, undefined);
+  assert.equal(attached[2]?.options, undefined);
+});
+
+test('option probing batches whole controls and explicitly fails beyond its global bound', () => {
+  const discovered = Array.from({ length: MANAGED_OPTION_PROBE_MAX_CONTROLS + 1 }, (_, index) => ({
+    label: `Question ${index}`,
+    selector: `#question_8${String(index).padStart(7, '0')}`,
+    inputType: 'text',
+    role: 'combobox',
+  }));
+  const batches = buildManagedDiscoveredOptionProbeBatches('greenhouse', discovered, {}, true);
+  assert.equal(batches.every((batch) => batch.length <= MANAGED_ACTION_LIMIT), true);
+  assert.equal(batches.flat().length % MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL, 0);
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [], [], true);
+  const overflowId = `question_8${String(MANAGED_OPTION_PROBE_MAX_CONTROLS).padStart(7, '0')}`;
+  assert.equal(analysis.failedIds.has(overflowId), true);
+  assert.match(analysis.failures.find((failure) => failure.controlId === overflowId)?.reason ?? '', /exceeded the bounded/);
+});
+
+test('two windowed school reads produce no USC fill or Enter in the final action list', () => {
+  const school = [{ label: 'School* school--0', selector: '#school--0', inputType: 'combobox', required: true }];
+  const window100 = Array.from({ length: 100 }, (_, index) => `University ${index}`).join('\n');
+  const analysis = managedOptionProbeAnalysis('greenhouse', school, {}, [{
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: '[id="school--0"]:is([role="combobox"],[aria-haspopup="listbox"])', value: 'school--0' },
+      { selector: reactSelectListboxSelector('school--0'), value: window100 },
+      { selector: reactSelectListboxSelector('school--0'), value: window100 },
+    ],
+  }]);
+  assert.equal(analysis.failedIds.has('school--0'), true);
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    failedFields: [{ controlId: 'school--0', label: 'School* school--0', selector: '#school--0', inputType: 'combobox' }],
+  }));
+  const schoolActions = actions.filter((action) => action.selector === '#school--0'
+    || action.label?.startsWith('education_school_combo'));
+  assert.deepEqual(schoolActions, []);
+  assert.equal(actions.some((action) => action.selector === '#school--0' && action.value === 'Enter'), false);
+  assert.equal(actions.some((action) => /University of Southern California/.test(action.value ?? '')), false);
+});
+
+test('a stale stored Overall GPA answer cannot produce a final action after probe failure', () => {
+  const failedId = 'question_37228964002';
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    failedFields: [{ controlId: failedId, label: 'Overall GPA*', selector: `#${failedId}`, inputType: 'select-one' }],
+    questions: [{
+      question: 'Overall GPA',
+      answer: '3.89',
+      portalSelector: `#${failedId}`,
+      portalInputType: 'select-one',
+    }],
+  }));
+  const staleGpaActions = actions.filter((action) => action.value === '3.89');
+  assert.deepEqual(staleGpaActions, []);
+  assert.equal(actions.some((action) => action.selector?.includes(failedId)), false);
+});
+
+test('a referral probe 503 suppresses every final referral action for that control', () => {
+  const failedId = 'question_33333333';
+  const discovered = [{
+    label: 'How did you hear about this job?*',
+    selector: `#${failedId}`,
+    inputType: 'select-one',
+    required: true,
+  }];
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [], [{
+    controlIds: [failedId],
+    reason: 'Stratus managed browser request failed with status 503',
+  }]);
+  assert.equal(analysis.failedIds.has(failedId), true);
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    failedFields: discovered.map((field) => ({ controlId: failedId, ...field })),
+    questions: [{
+      question: 'How did you hear about this job?',
+      answer: 'Job board',
+      portalSelector: `#${failedId}`,
+      portalInputType: 'select-one',
+    }],
+  }));
+  const referralActions = actions.filter((action) => action.label?.startsWith('greenhouse_referral')
+    || /how did you hear/i.test(action.label ?? '')
+    || action.selector?.includes(failedId));
+  assert.deepEqual(referralActions, []);
+  assert.ok(actions.some((action) => action.label?.startsWith('education_degree_combo')),
+    'only the failed referral channel is suppressed; unrelated exact channels remain');
+});
+
+test('failed closed question families suppress Akuna and known aliases without suppressing unrelated success', () => {
+  const cases = [
+    {
+      failed: 'current immigration status or basis of your current work authorization',
+      question: 'Please provide your current immigration status or basis of your current work authorization.',
+      answer: 'F-1 CPT',
+      forbidden: /immigration status|work authorization/i,
+    },
+    {
+      failed: 'Are you legally authorized to work in the United States?',
+      question: 'Are you currently eligible to legally work in the United States?',
+      answer: 'Yes',
+      forbidden: /eligible to legally work|authorized to work/i,
+    },
+    {
+      failed: 'Do you now, or will you in the future, require visa sponsorship?',
+      question: 'Will you now or in the future require immigration support or sponsorship?',
+      answer: 'Yes',
+      forbidden: /visa sponsorship|immigration support or sponsorship/i,
+    },
+    {
+      failed: 'Have you applied to this role at Akuna previously?',
+      question: 'Have you applied to an Akuna position in the past?',
+      answer: 'No',
+      forbidden: /applied.*(?:past|previously)/i,
+    },
+    {
+      failed: 'Do you have any offer deadlines that we should be aware of?',
+      question: 'Do you have any offer deadlines?',
+      answer: 'No',
+      forbidden: /offer deadlines/i,
+    },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+      jdText: 'Akuna Capital software engineer internship',
+      failedFields: [{
+        controlId: `question_9000000${index}`,
+        label: item.failed,
+        selector: `#question_9000000${index}`,
+        inputType: 'combobox',
+      }],
+      questions: [
+        { question: item.question, answer: item.answer },
+        { question: 'Are you able to work onsite three days a week?', answer: 'Yes' },
+      ],
+    }));
+    const failedAliasActions = actions.filter((action) => item.forbidden.test(`${action.text ?? ''} ${action.label ?? ''}`));
+    assert.deepEqual(failedAliasActions, [], item.failed);
+    assert.ok(actions.some((action) => /onsite three days/i.test(`${action.text ?? ''} ${action.label ?? ''}`)),
+      `unrelated onsite answer was suppressed for ${item.failed}`);
+  }
+});
+
+test('a failed demographic control suppresses its aliases while unrelated demographic fills remain', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    failedFields: [{
+      controlId: '4001608008',
+      label: 'What gender identity do you most closely identify with?',
+      selector: '[data-litos-discovered-21]',
+      inputType: 'combobox',
+    }],
+    eeoPrefs: { gender: 'Woman', veteran_status: 'I am not a protected veteran' },
+  }));
+  assert.equal(actions.some((action) => /greenhouse_demographic/.test(action.label ?? '')
+    && /gender identity/i.test(`${action.text ?? ''} ${action.label ?? ''}`)), false);
+  assert.ok(actions.some((action) => /greenhouse_demographic/.test(action.label ?? '')
+    && /veteran|military/i.test(`${action.text ?? ''} ${action.label ?? ''}`)));
+});
+
+test('academic keywords in unrelated employer questions do not suppress applicant academic fields', () => {
+  const cases = [
+    { label: 'GPA requirement for scholarship', action: /^gpa(?:_|$)/ },
+    { label: 'Degree comfortable onsite', action: /^education_degree/ },
+    { label: 'University recruiting event', action: /^education_school/ },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+      failedFields: [{
+        controlId: `question_8100000${index}`,
+        label: item.label,
+        selector: `#question_8100000${index}`,
+        inputType: 'select-one',
+      }],
+    }));
+    assert.ok(actions.some((action) => item.action.test(action.label ?? '')), item.label);
+  }
+});
+
+test('failed Five Rings and measured applicant GPA variants suppress every final GPA alias', () => {
+  const variants = [
+    'Please indicate your overall GPA.',
+    'Please provide your cumulative GPA',
+    'Please select your GPA range',
+    'What is your current grade point average?',
+    'Overall GPA',
+    'Please report your college GPA on a 4.0 scale',
+  ];
+  for (const [index, label] of variants.entries()) {
+    const failedId = `question_8300000${index}`;
+    const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+      failedFields: [{
+        controlId: failedId,
+        label,
+        selector: `#${failedId}`,
+        inputType: 'select-one',
+      }],
+      // A stale semantically equivalent record must not regenerate generic GPA or
+      // "What is your GPA?" aliases after the exact live control failed.
+      questions: [{ question: 'What is your GPA?', answer: '3.89' }],
+    }));
+    assert.equal(actions.some((action) => action.value === '3.89'), false, label);
+    assert.equal(actions.some((action) => action.selector?.includes(failedId)), false, label);
+    assert.ok(actions.some((action) => action.label?.startsWith('education_degree')),
+      `unrelated degree fill was suppressed for ${label}`);
+  }
+});
+
+test('failed exact applicant GPA, degree, and university controls still suppress their fallback families', () => {
+  const cases = [
+    { label: 'Overall GPA', forbidden: /^gpa(?:_|$)/ },
+    { label: 'What degree are you currently pursuing?', forbidden: /^education_degree/ },
+    { label: 'Which University do/did you attend?', forbidden: /^education_school/ },
+  ];
+  for (const [index, item] of cases.entries()) {
+    const failedId = `question_8200000${index}`;
+    const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+      failedFields: [{
+        controlId: failedId,
+        label: item.label,
+        selector: `#${failedId}`,
+        inputType: 'select-one',
+      }],
+    }));
+    assert.equal(actions.some((action) => item.forbidden.test(action.label ?? '')), false, item.label);
+    assert.equal(actions.some((action) => action.selector?.includes(failedId)), false, item.label);
+    assert.ok(actions.some((action) => action.label === 'first_name'), 'unrelated core fill must remain');
+  }
 });
 
 test('two passes of reads become one map, and an empty read never overwrites a real list', () => {

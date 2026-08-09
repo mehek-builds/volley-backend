@@ -30,6 +30,7 @@ import {
   withSecurityCode,
   withSecurityCodeAttempt,
 } from '../lib/securityCode';
+import { storeReceiptScreenshot } from '../lib/receiptScreenshot';
 import {
   connectToSession,
   continueManagedBrowser,
@@ -51,13 +52,15 @@ import {
   detectCaptchaProvider,
   captchaProviderForFamily,
   buildManagedPortalActions,
+  budgetDroppedReviewedQuestions,
   attachManagedFieldOptions,
-  buildManagedDiscoveredOptionProbeActions,
-  managedOptionProbeTargets,
+  buildManagedDiscoveredOptionProbeBatches,
+  managedOptionProbeAnalysis,
+  managedOptionProbeControlId,
   managedUnexplainedAnswers,
   managedUnexplainedAnswerReasons,
-  mergeManagedFieldOptions,
   managedResultFieldOptions,
+  managedResultSupportsDiscoveryRole,
   CaptchaUnresolvedError,
   clickFinalSubmit,
   detectPortal,
@@ -1408,11 +1411,19 @@ export function mergeDiscoveredPortalQuestions(
   discovered: readonly ApplicationReviewQuestion[],
   stored: readonly ApplicationReviewQuestion[],
   invalidatedQuestionKeys: readonly string[],
+  invalidatedFieldIds: ReadonlySet<string> = new Set(),
 ): ApplicationReviewQuestion[] {
   const invalidated = new Set(invalidatedQuestionKeys);
   return normalizeApplicationReviewQuestions([
     ...discovered,
-    ...stored.filter((question) => !invalidated.has(normalizeReviewQuestionLabel(question.question).toLowerCase())),
+    ...stored.filter((question) => {
+      if (invalidated.has(normalizeReviewQuestionLabel(question.question).toLowerCase())) return false;
+      const controlId = managedOptionProbeControlId({
+        label: question.question,
+        selector: question.portal_selector,
+      });
+      return !controlId || !invalidatedFieldIds.has(controlId);
+    }),
   ]);
 }
 
@@ -1556,7 +1567,7 @@ async function prepareManaged(
   // provider's discover action reports no options at all, so a control offering "Computer Science"
   // was handed the stored major, matched nothing, and came back required-and-empty.
   const discoveryFieldOptions = managedResultFieldOptions(discoveryResult);
-  /* THE THIRD CALL, and the reason the option snapping finally reaches a custom question.
+  /* THE THIRD STAGE, and the reason option snapping reaches every confirmed closed control.
    *
    * The discovery pass probes four ids compiled into this repo, because those four are Greenhouse's
    * own and are knowable before any page is read. Every other closed control on a Greenhouse form is
@@ -1571,36 +1582,68 @@ async function prepareManaged(
    * runner's 120-action ceiling, and the ids this reads are its own output, so there is neither room
    * nor information until it has returned.
    *
-   * Read-only: open the control, read the listbox, press Escape. Nothing is typed, nothing is
-   * uploaded, nothing is sent, and the control is left as it was found. A failure here is not a
-   * failure of the run - the option list is absent exactly as it was before this existed, and the
-   * alias ladder decides - so it is logged rather than added to discoveryFailures, which exists for
-   * the stronger claim that the run never saw the form's questions at all. */
-  const optionProbeActions = buildManagedDiscoveredOptionProbeActions(
+   * Native selects are read without clicking. Custom lists are identity-checked, opened, read and
+   * closed twice so an async first read can warm the second. Whole controls are batched under the
+   * provider's 120-action ceiling. Any missing, windowed, conflicting or failed closed-control read
+   * is removed before resolution, so a blind alias is never sent in its place. */
+  const discoveryRoleCapability = managedResultSupportsDiscoveryRole(discoveryResult);
+  const optionProbeBatches = buildManagedDiscoveredOptionProbeBatches(
     portal,
     discoveryResult?.discovered ?? [],
     discoveryFieldOptions,
+    discoveryRoleCapability,
   );
-  const optionProbeResult = optionProbeActions.length > 0
-    ? await runManagedBrowser(applicationUrl, optionProbeActions, { screenshot: false })
+  const optionProbeResults = [];
+  const optionProbeBatchFailures: Array<{ controlIds: string[]; reason: string }> = [];
+  for (const actions of optionProbeBatches) {
+    const controlIds = [...new Set(actions.flatMap((action) => {
+      const label = action.label ?? '';
+      const id = label.startsWith('options:')
+        ? label.slice('options:'.length)
+        : label.match(/^closed_control:(.+)$/)?.[1];
+      return id ? [id] : [];
+    }))];
+    const result = await runManagedBrowser(applicationUrl, actions, { screenshot: false })
       .catch((error: unknown) => {
+        const reason = describeDiscoveryFailure(error);
+        optionProbeBatchFailures.push({ controlIds, reason });
         fastify.log.error(
           {
             applicationId: row.id,
             portal,
-            error: describeDiscoveryFailure(error),
-            controls: managedOptionProbeTargets(portal, discoveryResult?.discovered ?? [], discoveryFieldOptions),
+            error: reason,
+            controls: controlIds,
           },
-          'Option probe pass failed, so the closed controls on this form fall back to the alias ladder',
+          'Option probe batch failed, so its closed controls are blocked from blind fallback',
         );
         return null;
-      })
-    : null;
-  const fieldOptions = mergeManagedFieldOptions(
+      });
+    optionProbeResults.push(result);
+  }
+  const optionProbe = managedOptionProbeAnalysis(
+    portal,
+    discoveryResult?.discovered ?? [],
     discoveryFieldOptions,
-    managedResultFieldOptions(optionProbeResult),
+    [discoveryResult, ...optionProbeResults],
+    optionProbeBatchFailures,
+    discoveryRoleCapability,
   );
-  const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions);
+  if (optionProbe.failures.length > 0) {
+    discoveryFailures.push(
+      `closed-control option discovery failed: ${optionProbe.failures.map(({ controlId, reason }) => `${controlId}: ${reason}`).join('; ').slice(0, 800)}`,
+    );
+  }
+  const fieldOptions = optionProbe.options;
+  const failedFields = (discoveryResult?.discovered ?? []).flatMap((field) => {
+    const controlId = managedOptionProbeControlId(field);
+    if (!controlId || !optionProbe.failedIds.has(controlId)) return [];
+    return [{ controlId, label: field.label, selector: field.selector, inputType: field.inputType }];
+  });
+  const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
+    .filter((field) => {
+      const controlId = managedOptionProbeControlId(field);
+      return !controlId || !optionProbe.failedIds.has(controlId);
+    });
   const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
   const coverLetterOutcome = await packetForCoverLetterCapability(row, coverLetterSupported, fastify);
   packet = coverLetterOutcome.packet;
@@ -1624,7 +1667,13 @@ async function prepareManaged(
     portal,
     savedAnswers,
   );
-  const mergedQuestions = mergeDiscoveredPortalQuestions(discoveredQuestions, storedQuestions, invalidatedQuestionKeys);
+  const failedQuestionKeys = failedFields.map((field) => normalizeReviewQuestionLabel(field.label).toLowerCase());
+  const mergedQuestions = mergeDiscoveredPortalQuestions(
+    discoveredQuestions,
+    storedQuestions,
+    [...invalidatedQuestionKeys, ...failedQuestionKeys],
+    optionProbe.failedIds,
+  );
   packet.questions = mergedQuestions.map((q) => ({
     question: q.question,
     answer: q.answer,
@@ -1635,8 +1684,26 @@ async function prepareManaged(
   // instead of the profile's own phrasing. It only ever gets ONE attempt at a react-select (a second
   // click closes the menu the first one opened), so the first value has to be the right one.
   packet.fieldOptions = fieldOptions;
+  packet.failedFields = failedFields;
 
   const fillActions = buildManagedPortalActions(portal, packet);
+  /* Which reviewed questions this run will not even attempt.
+   *
+   * On a form small enough to fit the runner's action ceiling this is empty and costs nothing. On
+   * one that does not fit, the builder trims rather than throwing - a prepare run cannot press
+   * submit, so there is no send to protect and a partly filled form she can finish beats a dead
+   * packet - and this is what stops that trade being made behind her back. Read off the finished
+   * action list rather than predicted from the budget, because every silent drop this module has
+   * shipped looked correct in the arithmetic that produced it. */
+  const unattemptedQuestions = budgetDroppedReviewedQuestions(packet, fillActions);
+  if (unattemptedQuestions.length > 0) {
+    fastify.log.error({
+      applicationId: row.id,
+      portal,
+      actionCount: fillActions.length,
+      unattemptedQuestions,
+    }, 'The action budget could not hold every reviewed question, so some were not attempted');
+  }
   const result = await runManagedBrowser(applicationUrl, fillActions);
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
   /* A value Litos typed that the run then never accounted for.
@@ -1764,7 +1831,45 @@ async function prepareManaged(
   const answerLossReasons = managedAnswerLossReasons({
     skipped: [...(result.skipped ?? []), ...(discoveryResult?.skipped ?? [])],
   });
+  /* A value that WAS typed and whose outcome the run never accounted for.
+   *
+   * Third of three, and the three are not the same fact, which is why all three are here. Read in
+   * order of how much the run knows:
+   *
+   *   answerLossReasons        Litos typed it, the page rejected it, the run SAID SO. Known bad,
+   *                            not a gate: a required control that lost its value already comes
+   *                            back as the employer's own "is required and is still empty".
+   *   unexplainedAnswerReasons Litos typed it and the run accounted for it in NEITHER a fill nor
+   *                            an explanation. Outcome unknown, and not a gate for the same reason
+   *                            as the line above: whatever happened, if the control was required
+   *                            the employer's blocker gates it, and if it was optional this is not
+   *                            worth refusing a complete application over.
+   *   budgetShortfallReasons   Litos never typed it at all. THIS ONE GATES, below.
+   *
+   * The uncertainty runs the other way for the third: the first two ran the action and the form
+   * had its say, so the employer's own required-field blocker is a reliable backstop. A question
+   * with no action never reached the form, so nothing downstream can notice it - no filled_fields
+   * entry, no provider blocker unless the employer happens to mark it required, and a preview
+   * screenshot showing a blank that looks like every other optional blank. */
   const unexplainedAnswerReasons = managedUnexplainedAnswerReasons(unexplainedAnswers);
+  /* The questions the action budget could not hold, in her words.
+   *
+   * Unlike answerLossReasons directly above, this DOES gate the send, and the difference is which
+   * way the uncertainty runs. A value that did not stick is a value Litos tried to type and the page
+   * did not keep; if that control was required, the employer's own blocker already says so. A
+   * question with no action was never typed at all, on a form Litos was handed an answer for, and
+   * nothing else in this function will notice: it is not in filled_fields, it produces no provider
+   * blocker unless the employer happens to mark it required, and the preview screenshot shows a
+   * blank that looks like every other optional blank. Sending that under standing consent is the
+   * silent drop this whole budget exists to prevent, one layer up. */
+  const budgetShortfallReasons = unattemptedQuestions.length > 0
+    ? [
+      `This application asks more questions than Litos can fill in one pass, so ${unattemptedQuestions.length} `
+      + `of them ${unattemptedQuestions.length === 1 ? 'was' : 'were'} left untouched and nothing has been sent: `
+      + `${unattemptedQuestions.map((q) => `"${q.slice(0, 60)}"`).join(', ').slice(0, 400)}. `
+      + 'Open it when you have a minute and finish those by hand.',
+    ]
+    : [];
   const attentionReasons = [
     ...blockers,
     ...discoveryAttention,
@@ -1772,6 +1877,7 @@ async function prepareManaged(
     ...coverLetterAttention,
     ...answerLossReasons,
     ...unexplainedAnswerReasons,
+    ...budgetShortfallReasons,
     ...honestyReasons,
   ];
   const attentionCategories = attentionCategoriesForReasons(attentionReasons);
@@ -1794,6 +1900,10 @@ async function prepareManaged(
     && evidenceBlockers.length === 0
     && discoveryFailures.length === 0
     && coverLetterAttention.length === 0
+    // A question the run never attempted is an answer she gave Litos and Litos did not use. The
+    // submit path refuses outright rather than trade one away; this is the same refusal on the path
+    // that has no submit button to withhold, and it is what makes the trim above safe to allow.
+    && unattemptedQuestions.length === 0
     && unansweredRequiredQuestions.length === 0;
   /* A FILL RUN THAT FOUND A SECURITY-CODE SCREEN HAS SUBMITTED THIS APPLICATION.
    *
@@ -2733,12 +2843,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     }
     if (!receiptResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();
-    const blob = await put(
+    const blob = await storeReceiptScreenshot(
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
       Buffer.from(receiptResult.screenshot, 'base64'),
-      // A receipt is the proof an application was actually submitted, so a collision here would
-      // fail the run at the worst possible moment: after the employer already has it.
-      { access: 'public', contentType: 'image/png', addRandomSuffix: true },
     );
     /* THE SUBMIT LANDED AND THE EMPLOYER ASKED FOR A CODE, so this is not 'submitted'.
      *
@@ -2909,10 +3016,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     const receipt = await readReceipt(page);
     const capturedAt = new Date().toISOString();
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
-    const blob = await put(
+    const blob = await storeReceiptScreenshot(
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
       screenshot,
-      { access: 'public', contentType: 'image/png', addRandomSuffix: true },
     );
     await writeReview(row, nextReview(claimedReview, {
       status: 'submitted',

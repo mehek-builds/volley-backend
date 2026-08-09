@@ -38,6 +38,10 @@ test('a portal with no react-select comboboxes costs one action', () => {
   assert.deepEqual(buildManagedPrescriptActions('lever').map((action) => action.type), ['discover']);
 });
 
+test('dynamic role probing stays off unless this exact Stratus result advertises the role wire', () => {
+  assert.match(ROUTE, /buildManagedDiscoveredOptionProbeActions\([\s\S]{0,300}managedResultSupportsDiscoveryRole\(result\)/);
+});
+
 test('the scan asks for no screenshot', () => {
   // runManagedBrowser renders a full-page PNG by default and nothing on this path would look at it.
   assert.match(ROUTE, /runManagedBrowser\(\s*target\.applyUrl,\s*buildManagedPrescriptActions\(portal\),\s*\{ screenshot: false \}\s*\)/);

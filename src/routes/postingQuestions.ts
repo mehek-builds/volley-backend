@@ -30,6 +30,7 @@ import {
   canonicalMonitoredPortalUrl,
   detectPortal,
   managedResultFieldOptions,
+  managedResultSupportsDiscoveryRole,
   type SupportedPortal,
 } from '../lib/portalSubmission';
 import {
@@ -166,7 +167,12 @@ export async function scanPostingQuestions(
    * has reported them. Read-only exactly like the pass above: open, read the listbox, Escape, and
    * skipped entirely when there is nothing left to read. A failure leaves the stored scan saying
    * what it said before, which is a control with no options rather than a wrong list. */
-  const probeActions = buildManagedDiscoveredOptionProbeActions(portal, result.discovered ?? [], scanFieldOptions);
+  const probeActions = buildManagedDiscoveredOptionProbeActions(
+    portal,
+    result.discovered ?? [],
+    scanFieldOptions,
+    managedResultSupportsDiscoveryRole(result),
+  );
   const probeResult = probeActions.length > 0
     ? await runManagedBrowser(target.applyUrl, probeActions, { screenshot: false }).catch(() => null)
     : null;
