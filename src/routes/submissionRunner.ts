@@ -1138,6 +1138,20 @@ export function unansweredRequiredBlockerLabels(
 }
 
 /**
+ * A thrown value turned into a sentence that is never empty.
+ *
+ * `new Error()` carries `message === ''`, and both prepare paths feed this string to
+ * discoveryHonestyReasons, which tests it for truthiness. An empty message therefore renders NO
+ * admission at all: the run is correctly held back from sending, and the applicant is shown a
+ * packet that stops without saying why. The fallback is deliberately plain rather than a stack
+ * trace, since this text is read by her, not by us; the log line carries the rest.
+ */
+export function describeDiscoveryFailure(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw.trim() || 'the scan failed without reporting a reason';
+}
+
+/**
  * What the run owes the applicant about its own blind spots, in her words.
  *
  * Two separate admissions, and they are not the same failure. The first is "the scan did not run";
@@ -1203,7 +1217,10 @@ async function prepareManaged(
   const discoveryFailures: string[] = [];
   const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet))
     .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
+      // Normalized rather than taken raw, because `new Error()` carries `message === ''` and an
+      // empty string reaches discoveryHonestyReasons as falsy: the run would be correctly held back
+      // and the applicant would be shown no reason for it.
+      const message = describeDiscoveryFailure(error);
       discoveryFailures.push(message);
       fastify.log.error(
         { applicationId: row.id, portal, error: message },
@@ -1634,7 +1651,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     // does not narrow across a closure it cannot prove ran.
     const discoveryFailures: string[] = [];
     const discovered = await discoverPageQuestions(page).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
+      // Normalized rather than taken raw, because `new Error()` carries `message === ''` and an
+      // empty string reaches discoveryHonestyReasons as falsy: the run would be correctly held back
+      // and the applicant would be shown no reason for it.
+      const message = describeDiscoveryFailure(error);
       discoveryFailures.push(message);
       fastify.log.error(
         { applicationId: row.id, portal, error: message },
@@ -1696,13 +1716,19 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     // does not measure required-and-empty blockers against the question list the way prepareManaged
     // does; the admission that matters here is the first one, and it is the one this run can make.
     const honestyReasons = discoveryHonestyReasons(discoveryFailures[0], []);
-    // Same reasoning as the managed path above: the required-answer check moved off the run and on
-    // to the send, and this is the direct-Playwright path's send decision. The failed scan is
-    // counted in with the attention reasons rather than given its own parameter, because that is
-    // exactly what it is: something the applicant has to be told before this packet is sent.
+    /* Same reasoning as the managed path above: the required-answer check moved off the run and on
+     * to the send, and this is the direct-Playwright path's send decision.
+     *
+     * Counted as `discoveryFailures.length`, NOT `honestyReasons.length`. The two are equal today
+     * and it would be tempting to use the array that is already built, but discoveryHonestyReasons
+     * renders PROSE and drops a falsy message: `new Error()` carries `message === ''`, so a scan
+     * that threw one would produce no sentence, contribute nothing to this count, and leave `safe`
+     * true. That is the bug this whole change exists to remove, reintroduced through the back door
+     * of the presentation layer. The send decision reads the failure itself; the applicant-facing
+     * text is downstream of it and cannot weaken it. */
     const safe = directPreparationIsSafe({
       blockerCount: sanitizedBlockers.length + evidenceBlockers.length,
-      attentionCount: discoveryAttention.length + honestyReasons.length,
+      attentionCount: discoveryAttention.length + discoveryFailures.length,
       unansweredRequiredCount: blankRequiredQuestionLabels(mergedQuestions).length,
       verificationStatus: verification.status,
     });

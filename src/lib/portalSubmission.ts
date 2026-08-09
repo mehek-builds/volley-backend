@@ -3152,6 +3152,14 @@ export function buildManagedPortalActions(
    *      other, and is the whole of the trim on the other thirteen families;
    *   3. the tail truncation, which is the blunt last resort and the only pass that can take a
    *      primary fill. Reaching it means the packet has more questions than 120 actions can hold.
+   *
+   * What pass 2 means for Greenhouse, stated precisely because the loose version of it is wrong.
+   * On every packet measured here it changes nothing: pass 1 already lands under budget (116 at
+   * every question count up to 30), so pass 2 finds a list it has no work to do on. It is NOT
+   * true that pass 2 can never affect Greenhouse. On a packet pass 1 cannot get under budget, pass
+   * 2 now runs where truncation used to, and the list that survives is different. That is the
+   * intended order - give up a redundant guess before letting the blunt pass take a whole group off
+   * the tail - but it is a behaviour change on that path, not an identity.
    */
   const canAppendSubmit = submit && portalCanAutoSubmit(portal);
   const familyActionLimit = portalFamily(portal) === 'greenhouse' && packetLooksAkuna(packet)

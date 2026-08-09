@@ -6,6 +6,7 @@ import {
   applicationContextForQuestionResolution,
   attentionBlockersForManagedResult,
   atsApiSubmissionEnabled,
+  describeDiscoveryFailure,
   discoverAndResolveQuestions,
   discoveryHonestyReasons,
   isProviderSessionFailureMessage,
@@ -1159,6 +1160,30 @@ test('a run that discovered nothing and a run that could not look are different 
   assert.match(discoveryHonestyReasons(undefined, ['A', 'B'])[0]!, /^2 required fields have/);
 });
 
+test('a scan that threw with no message is still a failure, not a silent success', () => {
+  /* THE BACK DOOR. `new Error()` carries `message === ''`, and discoveryHonestyReasons tests its
+     argument for truthiness, so an empty message renders NO admission. A send decision counted off
+     that array would read zero reasons, call the packet safe, and auto-submit under standing
+     consent a form whose questions were never read - which is the exact bug the swallow fix exists
+     to remove, reintroduced through the presentation layer.
+
+     Two independent guarantees, because either alone leaves a hole: the message is normalized so
+     the applicant always gets a sentence, and prepareDirect counts discoveryFailures.length rather
+     than honestyReasons.length so the send decision never depends on prose at all. */
+  assert.equal(describeDiscoveryFailure(new Error()), 'the scan failed without reporting a reason');
+  assert.equal(describeDiscoveryFailure(new Error('   ')), 'the scan failed without reporting a reason');
+  assert.equal(describeDiscoveryFailure(''), 'the scan failed without reporting a reason');
+  assert.equal(describeDiscoveryFailure(new Error('page closed')), 'page closed');
+  assert.equal(describeDiscoveryFailure('page closed'), 'page closed');
+
+  // Normalized, it renders a real admission instead of nothing.
+  assert.equal(discoveryHonestyReasons(describeDiscoveryFailure(new Error()), []).length, 1);
+  // And the send decision is counted off the failure itself, not off the sentence.
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(runner, /attentionCount: discoveryAttention\.length \+ discoveryFailures\.length/);
+  assert.doesNotMatch(runner, /attentionCount:[^\n]*honestyReasons\.length/);
+});
+
 /* NEITHER prepare path may throw the question scan's failure away.
  *
  * prepareManaged learned this on 2026-08-08, from a DRW packet whose discovery call was rejected
@@ -1184,8 +1209,10 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   assert.doesNotMatch(runner, /discoverPageQuestions\(page\)\s*\.catch\(\(\) => \[\]\)/);
   assert.doesNotMatch(runner, /buildManagedDiscoveryActions\([^)]*\)\)\s*\.catch\(\(\) => null\)/);
 
-  // Both scans record what went wrong rather than returning an empty result that says nothing.
+  // Both scans record what went wrong rather than returning an empty result that says nothing,
+  // and both normalize the thrown value so an empty Error message cannot become an empty record.
   assert.equal(runner.match(/discoveryFailures\.push\(message\)/g)?.length, 2);
+  assert.equal(runner.match(/describeDiscoveryFailure\(error\)/g)?.length, 2);
   assert.equal(
     runner.match(/'Question discovery pass failed, so this run cannot see the questions this form asks'/g)?.length,
     2,
@@ -1194,8 +1221,8 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   // Both turn it into something the applicant reads...
   assert.equal(runner.match(/discoveryHonestyReasons\(discoveryFailures\[0\]/g)?.length, 2);
   assert.match(runner, /\.\.\.coverLetterAttention,\s*\.\.\.honestyReasons\b/);
-  // ...and neither can be called safe while it stands. The managed path names the failure directly;
-  // the direct path counts the same admission in with its other attention reasons.
+  // ...and neither can be called safe while it stands. BOTH gates read the failure array itself,
+  // never the rendered prose, so a message that renders to nothing cannot restore `safe`.
   assert.match(runner, /&& discoveryFailures\.length === 0/);
-  assert.match(runner, /attentionCount: discoveryAttention\.length \+ honestyReasons\.length/);
+  assert.match(runner, /attentionCount: discoveryAttention\.length \+ discoveryFailures\.length/);
 });
