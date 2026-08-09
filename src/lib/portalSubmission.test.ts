@@ -2585,6 +2585,68 @@ test('the budget may never delete the fixed education row, however large the for
   assert.ok(actions.some((action) => action.selector === '#end-year--0'));
 });
 
+/* R-118. The fill run warms Greenhouse's education taxonomies before it types into them.
+ *
+ * School, Degree and Discipline fetch their option lists over the network when their menu is first
+ * opened. The discovery pass gets a warming round for free, because buildManagedDiscoveryActions
+ * asks for `probeOptions` and those probes are pushed AHEAD of the education fills. The fill run
+ * asks for no probe, so its education fill was the first thing on a fresh page to touch those
+ * controls and was racing that fetch with the runner's 1200ms allowance and nothing in front of it.
+ *
+ * Measured on the live Flow Traders form, 2026-08-09: cold, Degree's menu answered a typed search
+ * after 965ms; warmed, after 603ms. Production lost that race on Point72, Flow Traders and Together
+ * AI on 2026-08-09 and reported `no option matched "Bachelor's Degree"` on a control whose list
+ * holds exactly that string.
+ */
+test('the fill run opens the education taxonomies once before it fills them', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket());
+  const labels = actions.map((action) => action.label ?? '');
+  for (const inputId of ['school--0', 'degree--0', 'discipline--0']) {
+    const warm = labels.indexOf(`education_taxonomy_warm:${inputId}`);
+    const close = labels.indexOf(`education_taxonomy_warm_close:${inputId}`);
+    assert.ok(warm >= 0, `${inputId} is never warmed`);
+    assert.equal(close, warm + 1, `${inputId} must be closed by the action after it opens it`);
+    assert.equal(actions[close]!.value, 'Escape', 'Escape, so the control is left exactly as it was found');
+    assert.equal(actions[warm]!.optional, true);
+  }
+  // Before the fills it exists for, and before the name/email/phone/resume actions whose round trips
+  // are what turn two actions of warming into a second of real elapsed time.
+  assert.ok(
+    labels.indexOf('education_taxonomy_warm:school--0') < labels.indexOf('first_name'),
+    'the warm-up must precede the fixed fields, not sit next to the fills it is warming',
+  );
+  assert.ok(labels.indexOf('education_taxonomy_warm:discipline--0') < labels.indexOf('education_school_combo:0'));
+  // End date month renders its twelve rows from the document, so it is not warmed.
+  assert.ok(!labels.some((label) => label.startsWith('education_taxonomy_warm:end-month')));
+});
+
+test('a control the packet cannot answer is not warmed, and the discovery pass is not warmed twice', () => {
+  // No stored degree means no degree fill, so two actions of warming would buy nothing.
+  const labels = buildManagedPortalActions('greenhouse', andurilPacket({ degree: undefined }))
+    .map((action) => action.label ?? '');
+  assert.ok(!labels.includes('education_taxonomy_warm:degree--0'));
+  assert.ok(labels.includes('education_taxonomy_warm:school--0'));
+  // The discovery pass already opens all four controls twice, to READ them. Warming them a third
+  // time would spend six actions of a list that has measured at exactly the 120 ceiling.
+  const discovery = buildManagedDiscoveryActions('greenhouse', andurilPacket()).map((action) => action.label ?? '');
+  assert.ok(!discovery.some((label) => label.startsWith('education_taxonomy_warm')));
+  assert.ok(discovery.some((label) => label.startsWith('option_probe_open:school--0')));
+});
+
+test('the budget trim may not take the education warm-up', () => {
+  // Same claim as the fixed education row above, and for a sharper reason: a trimmed FILL leaves the
+  // control visibly empty, while a trimmed WARM-UP leaves the fill running against a menu that has
+  // not loaded, so the run reports "no option matched" about an answer that was correct.
+  const actions = buildManagedPortalActions('greenhouse', overBudgetGreenhousePacket() as never);
+  assert.ok(actions.length <= 120, `the budget must still be respected, got ${actions.length}`);
+  for (const inputId of ['school--0', 'degree--0', 'discipline--0']) {
+    assert.ok(
+      actions.some((action) => action.label === `education_taxonomy_warm:${inputId}`),
+      `${inputId} lost its warm-up to the trim`,
+    );
+  }
+});
+
 test('a control whose label offers "Other if not listed" gets that option, last and only last', () => {
   // Measured read-only on the live Virtu Software Engineer Internship form, 2026-08-09. Its question
   // "Which university are you currently attending? Select "Other" if not listed" is not the
@@ -4386,6 +4448,46 @@ test('the control id comes off the selector first and the label second', () => {
   // employment in 2028?".
   assert.equal(managedOptionProbeControlId({ label: 'Will you be ready for full-time employment in 2028?', selector: '[data-litos-discovered-4]' }), undefined);
   assert.equal(managedOptionProbeControlId({ label: '', selector: '' }), undefined);
+});
+
+/* R-118. Greenhouse's own four self-identification controls carry a NAMED id, not a numeric one.
+ *
+ * They reach discovery as `[data-litos-discovered-14]` with the id concatenated onto the visible
+ * question, so neither the `question_<digits>` handle nor the six-digit one names them and the probe
+ * pass skipped all four. Measured on the live Flow Traders form, 2026-08-09: hispanic_ethnicity
+ * offers "Decline To Self Identify" and disability_status offers "I do not want to answer", and both
+ * production runs that day reported `no option matched "Decline to self-identify"` on them.
+ */
+test('the probe can name Greenhouse\'s own self-identification controls', () => {
+  const cases: Array<[string, string]> = [
+    ['are you hispanic/latino? hispanic_ethnicity', 'hispanic_ethnicity'],
+    ['gender gender', 'gender'],
+    ['veteran status veteran_status', 'veteran_status'],
+    ['disability status disability_status', 'disability_status'],
+    ['Race Race', 'race'],
+  ];
+  for (const [label, expected] of cases) {
+    assert.equal(managedOptionProbeControlId({ label, selector: '[data-litos-discovered-14]' }), expected, label);
+  }
+  // Not a general "last underscored word is an id" rule: that would read a control id off any
+  // question whose text happens to end in one.
+  assert.equal(
+    managedOptionProbeControlId({ label: 'Which of these best describes your work_style?', selector: '[data-litos-discovered-9]' }),
+    undefined,
+  );
+  // The id still has to be at the END of the label, where discovery concatenates it.
+  assert.equal(
+    managedOptionProbeControlId({ label: 'gender identity is asked about below', selector: '[data-litos-discovered-9]' }),
+    undefined,
+  );
+  // And the probe pass therefore reads them.
+  assert.deepEqual(
+    managedOptionProbeTargets('greenhouse', [
+      { label: 'are you hispanic/latino? hispanic_ethnicity', selector: '[data-litos-discovered-14]' },
+      { label: 'disability status disability_status', selector: '[data-litos-discovered-16]' },
+    ]),
+    ['hispanic_ethnicity', 'disability_status'],
+  );
 });
 
 test('the probe reads the controls discovery found, and never the four it already read', () => {
