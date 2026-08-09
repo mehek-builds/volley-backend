@@ -8,12 +8,27 @@
  * out of the stratus-browser-cloud checkout.
  *
  *   BASE=http://localhost:3999 npx tsx scripts/trial-portal-shapes.mts
- *   BASE=https://trylitos.com  npx tsx scripts/trial-portal-shapes.mts select-jd-decoy
+ *   BASE=https://trylitos.com LITOS_QA_PORTAL_SECRET=... npx tsx scripts/trial-portal-shapes.mts select-jd-decoy
  *
- *   BASE           harness origin. Defaults to http://localhost:3999.
- *   STRATUS_REPO   checkout of stratus-browser-cloud, for the managed engine. Defaults to
- *                  ../stratus-browser-cloud. Missing means the managed cases SKIP, loudly, and
- *                  count as failures rather than quietly disappearing.
+ *   BASE                     harness origin. Defaults to http://localhost:3999.
+ *   LITOS_QA_PORTAL_SECRET   the shared secret that opens /qa/ on a deployed harness origin. It is
+ *                            appended to every fixture URL as ?litos_qa_key=. Required for any BASE
+ *                            that is not loopback, and this script refuses to start without it
+ *                            rather than letting all twelve cases fail as 404s that look like
+ *                            product regressions.
+ *   STRATUS_REPO             checkout of stratus-browser-cloud, for the managed engine. Defaults to
+ *                            ../stratus-browser-cloud. Missing means the managed cases SKIP, loudly,
+ *                            and count as failures rather than quietly disappearing.
+ *
+ * WHY THE SECRET IS IN THE QUERY STRING. Until 2026-08-09 the fixtures answered 200 to anonymous
+ * internet traffic: https://trylitos.com/qa/portal-submission?board=ashby&shape=security-code served
+ * a complete fabricated job application from the marketing domain of a product whose pitch is
+ * trustworthy handling of real applications. They cannot simply be blocked, because the managed
+ * engine below runs in a Vercel sandbox and a remote browser cannot reach localhost, so the pages
+ * have to stay reachable from the public internet for the managed cases to run at all. The website
+ * (role-quick-website, lib/qa-gate.ts) therefore gates them on a shared secret, and a query
+ * parameter is the only form that survives a plain navigation, which is all the managed runner does.
+ * The header form (x-litos-qa-key) exists there too and is no use here for the same reason.
  *
  * THREE ENGINES, AND THE REASON THERE ARE THREE.
  *
@@ -62,6 +77,21 @@ import {
 const require = createRequire(import.meta.url);
 const BASE = process.env.BASE ?? 'http://localhost:3999';
 const STRATUS_REPO = process.env.STRATUS_REPO ?? resolve(process.cwd(), '..', 'stratus-browser-cloud');
+
+/* The query parameter the website's gate reads. Its name is pinned by an assertion on that side
+   (role-quick-website, tests/route-integrity.test.mjs), because renaming it in one repo and not the
+   other is a silent 404 on every case rather than an error anyone would read. */
+const QA_KEY_PARAM = 'litos_qa_key';
+const QA_KEY = process.env.LITOS_QA_PORTAL_SECRET?.trim() || null;
+
+function loopback(origin: string): boolean {
+  try {
+    const host = new URL(origin).hostname.toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+  } catch {
+    return false;
+  }
+}
 
 /* The applicant this trial fills as. Real shape, invented person. The phone is deliberately the
    +971 number Cresta rejected, because case 8 turns on what gets written into a phone field that
@@ -703,10 +733,25 @@ function shapeUrl(shape: string, query: Record<string, string> = {}): string {
   for (const [key, value] of Object.entries(query)) {
     if (key !== 'board') target.searchParams.set(key, value);
   }
+  /* Last, so it is on every URL this script hands to any engine. Appended whenever it is set, not
+     only for a remote BASE: a local dev server ignores an unrecognised parameter, and a rule with
+     an exception in it is a rule that gets the exception wrong. */
+  if (QA_KEY) target.searchParams.set(QA_KEY_PARAM, QA_KEY);
   return target.toString();
 }
 
 async function main() {
+  /* Loudly, and before a browser is launched. Without the key a deployed harness origin answers 404
+     to every fixture URL, so all twelve cases fail on a blank page and read as a product regression.
+     That misreading has already cost this repo a day once, over a stale stratus checkout. */
+  if (!loopback(BASE) && !QA_KEY) {
+    console.log(
+      `BASE is ${BASE}, which is not loopback, and LITOS_QA_PORTAL_SECRET is unset.\n`
+      + `Every /qa/ fixture there answers 404 without it, so this run would report twelve\n`
+      + `failures that are not product failures. Set the same value the website project has.`,
+    );
+    process.exit(2);
+  }
   const only = process.argv.slice(2);
   const selected = only.length > 0 ? CASES.filter((entry) => only.includes(entry.id)) : CASES;
   if (selected.length === 0) {
