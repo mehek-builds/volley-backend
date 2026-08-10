@@ -416,9 +416,30 @@ type StructuredCountryEvidence = {
   codes: string[];
   us: boolean;
   nonUs: boolean;
+  regions?: PortalRegion[];
   invalid?: boolean;
   hardInvalid?: boolean;
 };
+
+type PortalRegion = 'US' | 'EMEA' | 'APAC' | 'LATAM';
+
+// Closed ISO membership for the broad office groups ATS portals publish. These are legal-scope
+// constraints, not loose geographic hints: a Canadian workplace cannot satisfy EMEA merely because
+// both are non-US, and a British workplace cannot satisfy APAC.
+const PORTAL_REGION_COUNTRY_CODES: Record<PortalRegion, ReadonlySet<string>> = {
+  US: new Set(['US']),
+  EMEA: new Set((
+    'AD AE AL AM AO AT AX AZ BA BE BF BG BH BI BJ BW BY CD CF CG CH CI CM CV CY CZ DE DJ DK DZ EE EG EH ER ES ET FI FO FR GA GB GE GG GH GI GM GN GQ GR GW HR HU IE IL IM IQ IR IS IT JE JO KE KM KW LB LI LR LS LT LU LV LY MA MC MD ME MG MK ML MR MT MU MW MZ NA NE NG NL NO OM PL PS PT QA RE RO RS RU RW SA SC SD SE SH SI SJ SK SL SM SN SO SS ST SY SZ TD TG TN TR TZ UA UG VA YE YT ZA ZM ZW'
+  ).split(' ')),
+  APAC: new Set((
+    'AF AS AU BD BN BT CC CK CN CX FJ FM GU HK HM ID IN IO JP KH KI KP KR KZ LA LK MH MM MN MO MP MV MY NC NF NP NR NU NZ PF PG PH PK PW SB SG TH TJ TK TL TM TO TV TW UZ VN VU WF WS'
+  ).split(' ')),
+  LATAM: new Set((
+    'AG AI AR AW BB BL BM BO BQ BR BS BZ CL CO CR CU CW DM DO EC FK GD GF GP GS GT GY HN HT JM KN KY LC MF MQ MS MX NI PA PE PR PY SR SV SX TC TT UY VC VE VG VI'
+  ).split(' ')),
+};
+
+const PORTAL_COUNTRY_PART_SEPARATOR = /\s*[|,\/;•\n]\s*|\s+\b(?:and|or)\b\s+/i;
 
 function exactStructuredCountryCode(value: string, acceptsBareIsoCode: boolean): string | undefined {
   const normalized = normalise(value).trim();
@@ -587,15 +608,29 @@ function structuredJobContextValues(context: Record<string, unknown>): Array<{
 }
 
 function portalCountryEvidence(value: string): StructuredCountryEvidence {
-  const codes = new Set(value
-    .split('|')
-    .map((part) => exactPortalCountryCodePart(part))
-    .filter((code): code is string => Boolean(code)));
-  const scope = countryFromPortal(value);
+  const codes = new Set<string>();
+  const regions = new Set<PortalRegion>();
+  for (const part of value.split(PORTAL_COUNTRY_PART_SEPARATOR).map((item) => item.trim()).filter(Boolean)) {
+    const code = exactPortalCountryCodePart(part);
+    if (code) {
+      codes.add(code);
+      continue;
+    }
+    const normalized = normalise(part).trim();
+    const namedRegion = (['EMEA', 'APAC', 'LATAM'] as const).find(
+      (region) => ` ${normalized} `.includes(` ${region} `),
+    );
+    if (namedRegion) {
+      regions.add(namedRegion);
+      continue;
+    }
+    if (countryFromPortal(part) === 'us') regions.add('US');
+  }
   return {
     codes: [...codes],
-    us: codes.has('US') || scope === 'us',
-    nonUs: [...codes].some((code) => code !== 'US') || scope === 'non_us',
+    regions: [...regions],
+    us: codes.has('US') || regions.has('US'),
+    nonUs: [...codes].some((code) => code !== 'US') || [...regions].some((region) => region !== 'US'),
   };
 }
 
@@ -620,10 +655,15 @@ function legalCountryEvidenceFromJobContext(context: Record<string, unknown>): {
     return { country: 'unknown', code: undefined };
   }
   const codes = new Set(evidence.flatMap((item) => item.codes));
+  const regions = new Set(evidence.flatMap((item) => item.regions ?? []));
   const hasUs = evidence.some((item) => item.us);
   const hasNonUs = evidence.some((item) => item.nonUs);
   if (codes.size > 1 || (hasUs && hasNonUs)) return { country: 'unknown', code: undefined };
   const code = codes.size === 1 ? [...codes][0] : undefined;
+  if (regions.size > 1) return { country: 'unknown', code: undefined };
+  if (code && [...regions].some((region) => !PORTAL_REGION_COUNTRY_CODES[region].has(code))) {
+    return { country: 'unknown', code: undefined };
+  }
   if (code) return { country: code === 'US' ? 'us' : 'non_us', code };
   if (hasUs) return { country: 'us', code: undefined };
   if (hasNonUs) return { country: 'non_us', code: undefined };

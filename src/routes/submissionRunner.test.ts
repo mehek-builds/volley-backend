@@ -734,6 +734,7 @@ test('portal country metadata reaches managed send resolution without borrowing 
       { country_code: 'GB', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
       { country_code: 'CA', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
       { country_code: 'IN', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
+      { country_code: 'BR', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
     ],
   };
 
@@ -766,6 +767,9 @@ test('portal country metadata reaches managed send resolution without borrowing 
     [{ portal_country: 'United Kingdom Office', location: 'London' }, 'No'],
     [{ portal_country: 'EMEA', location: 'London' }, 'No'],
     [{ portal_country: 'United States Recruiting' }, 'Yes'],
+    [{ portal_country: 'EMEA | United Kingdom', location: 'London' }, 'No'],
+    [{ portal_country: 'APAC / India', location: 'Mumbai' }, 'No'],
+    [{ portal_country: 'LATAM; Brazil', location: 'Sao Paulo' }, 'No'],
   ] as const) {
     const resolved = await discoverAndResolveQuestions(
       fields,
@@ -799,6 +803,12 @@ test('portal country metadata reaches managed send resolution without borrowing 
     { portal_country: 'LATAM', location: 'Boston' },
     { portal_country: 'EMEA' },
     { portal_country: 'United States Recruiting', location: 'London' },
+    { portal_country: 'EMEA', location: 'Toronto' },
+    { portal_country: 'APAC', location: 'London' },
+    { portal_country: 'LATAM', location: 'Mumbai' },
+    { portal_country: 'EMEA | Canada', location: 'Toronto' },
+    { portal_country: 'APAC, EMEA', location: 'London' },
+    { portal_country: 'United States / Canada', location: 'Toronto' },
   ]) {
     const mixed = await discoverAndResolveQuestions(
       fields,

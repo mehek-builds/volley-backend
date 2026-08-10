@@ -319,6 +319,12 @@ describe('exact-country resolver', () => {
       { portal_country: 'APAC', location: 'San Francisco, CA' },
       { portal_country: 'LATAM', location: 'Boston' },
       { portal_country: 'United States Recruiting', location: 'London' },
+      { portal_country: 'EMEA', location: 'Toronto' },
+      { portal_country: 'APAC', location: 'London' },
+      { portal_country: 'LATAM', location: 'Mumbai' },
+      { portal_country: 'EMEA | Canada', location: 'Toronto' },
+      { portal_country: 'APAC, EMEA', location: 'London' },
+      { portal_country: 'United States / Canada', location: 'Toronto' },
     ]) {
       assert.equal(postingCountryFromJobContext(context), 'unknown', JSON.stringify(context));
       assert.equal(postingCountryCodeFromJobContext(context), undefined, JSON.stringify(context));
@@ -369,6 +375,16 @@ describe('exact-country resolver', () => {
       postingCountryFromJobContext(broadUsOnly),
       postingCountryCodeFromJobContext(broadUsOnly),
     ), { value: 'Yes' });
+
+    for (const [context, code] of [
+      [{ portal_country: 'EMEA | United Kingdom', location: 'London' }, 'GB'],
+      [{ portal_country: 'APAC / India', location: 'Mumbai' }, 'IN'],
+      [{ portal_country: 'LATAM; Brazil', location: 'Sao Paulo' }, 'BR'],
+      [{ portal_country: 'EMEA and GB', location: 'London' }, 'GB'],
+    ] as const) {
+      assert.equal(postingCountryFromJobContext(context), 'non_us', JSON.stringify(context));
+      assert.equal(postingCountryCodeFromJobContext(context), code, JSON.stringify(context));
+    }
   });
 
   test('structured ATS country metadata reaches the exact country resolver', () => {
