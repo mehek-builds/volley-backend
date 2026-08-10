@@ -7,6 +7,7 @@ import {
   isCoreIdentityField,
   labelMarksRequired,
   fitToBudget,
+  frozenJobEmployerContext,
   frozenJobLocationContext,
   graduationDateAnswer,
   isOpenEndedQuestion,
@@ -884,7 +885,12 @@ test('an office commitment is answered from the stored standing preference, and 
   );
   assert.ok(relocation && 'skipReason' in relocation);
   assert.deepEqual(
-    resolveKnownAnswer('are you willing to relocate to San Francisco?', 'text', { relocation_willingness: 'no' }, undefined),
+    resolveKnownAnswer(
+      'are you willing to relocate to San Francisco?',
+      'text',
+      { relocation_willingness: 'no' },
+      frozenJobLocationContext(['San Francisco, CA']),
+    ),
     { value: 'No' },
   );
   assert.deepEqual(
@@ -1327,7 +1333,12 @@ test('referral source is relayed when stored and refused when it is not', () => 
      It is the most-asked question in the corpus (25 distinct labels, 20 employers), which is why it
      went to onboarding rather than to an ask at Apply. */
   assert.deepEqual(
-    resolveKnownAnswer('How did you first hear about Five Rings?', 'text', { referral_source_default: 'LinkedIn' }, undefined),
+    resolveKnownAnswer(
+      'How did you first hear about Five Rings?',
+      'text',
+      { referral_source_default: 'LinkedIn' },
+      frozenJobEmployerContext('Five Rings'),
+    ),
     { value: 'LinkedIn' },
   );
   const unstored = resolveKnownAnswer('How did you first hear about Five Rings?', 'text', {}, undefined);
@@ -2507,7 +2518,12 @@ test('the referral question needs packet evidence even when its label names the 
     'how did you hear about this job?* question_2',
   ]) {
     assert.deepEqual(
-      resolveKnownAnswer(normalizeDiscoveredLabel(raw), 'text', { ...MEHEK, referral_source_evidence: evidence }, undefined),
+      resolveKnownAnswer(
+        normalizeDiscoveredLabel(raw),
+        'text',
+        { ...MEHEK, referral_source_evidence: evidence },
+        /anduril/i.test(raw) ? frozenJobEmployerContext('Anduril') : undefined,
+      ),
       { value: 'Company website' },
       raw,
     );

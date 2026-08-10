@@ -135,24 +135,24 @@ describe('stored application facts reach the control on the real employer questi
     }
   });
 
-  test('previously applied to this employer: Akuna, IMC, Point72 (4 postings, 3 companies)', () => {
+  test('prior applications resolve only against an exact declared employer target', () => {
     const labels = {
       akunaEver: 'have you ever applied to a full time or internship position with akuna in the past?',
       akunaRole: 'have you applied to this role at akuna previously?',
       imc: 'have you applied to this role or another role @imc within the last 12-18 months? as a reminder, if you have already applied you will not be reconsidered.',
       point72: 'have you previously applied to work at point72?',
     };
-    // The declaration that she has applied nowhere answers all four with No.
+    // A complete empty declaration still cannot validate arbitrary target text in a live label.
     const none: ApplicationProfileLike = { prior_application_employers: [] };
     for (const [name, label] of Object.entries(labels)) {
-      assert.equal(filled(label, none, { inputType: 'select', options: YES_NO }), 'No', name);
+      assert.match(heldFor(label, none), /prior application question left for you/, name);
     }
-    // A named match answers Yes for that employer and No for the others.
-    const applied: ApplicationProfileLike = { prior_application_employers: ['Akuna Capital', 'Jane Street'] };
+    // An exact named match answers Yes. Unrelated and help-text-tailed labels remain held.
+    const applied: ApplicationProfileLike = { prior_application_employers: ['Akuna', 'Jane Street'] };
     assert.equal(filled(labels.akunaEver, applied, { inputType: 'select', options: YES_NO }), 'Yes');
     assert.equal(filled(labels.akunaRole, applied, { inputType: 'select', options: YES_NO }), 'Yes');
-    assert.equal(filled(labels.point72, applied, { inputType: 'select', options: YES_NO }), 'No');
-    assert.equal(filled(labels.imc, applied, { inputType: 'select', options: YES_NO }), 'No');
+    assert.match(heldFor(labels.point72, applied), /prior application question left for you/);
+    assert.match(heldFor(labels.imc, applied), /prior application question left for you/);
   });
 
   test('an unanswered application history is held, not drafted into a claim', () => {
@@ -326,10 +326,10 @@ describe('the reader survives the migration not having run', () => {
   test('an empty declared list is preserved, because it is an answer', () => {
     const row = { user_id: 'u', prior_application_employers: [] } as never;
     assert.deepEqual(factStringList(row, 'prior_application_employers'), []);
-    // Which is what turns every "have you applied here before?" into a No.
-    assert.equal(
-      filled('have you previously applied to work at point72?', { prior_application_employers: [] }, { inputType: 'select', options: YES_NO }),
-      'No',
+    // It remains distinguishable in storage without authorizing arbitrary target extraction.
+    assert.match(
+      heldFor('have you previously applied to work at point72?', { prior_application_employers: [] }),
+      /prior application question left for you/,
     );
   });
 

@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   classifyField,
+  frozenJobEmployerContext,
+  frozenJobLocationContext,
   isGovernmentEmploymentQuestion,
   isPriorApplicationQuestion,
   isRelocationQuestion,
@@ -730,25 +732,29 @@ describe('prior government employment, answered from the experience bank', () =>
     assert.equal(isGovernmentEmploymentQuestion('Did GEICO once employ you?'), false);
   });
 
-  test('NASA mentions stay with prior-application, referral, relocation, and unrelated families', () => {
+  test('NASA mentions route only when their sibling target has exact context evidence', () => {
     const profile: ApplicationProfileLike = {
       prior_application_employers: ['NASA'],
       referral_source_default: 'LinkedIn',
       relocation_willingness: 'yes',
     };
+    const context = frozenJobEmployerContext('NASA');
     const cases = [
-      ['Have you previously applied to work at NASA?', 'Yes'],
-      ['Have you previously applied to NASA?', 'Yes'],
-      ['How did you hear about the NASA role?', 'LinkedIn'],
-      ['Are you willing to relocate for the NASA role?', 'Yes'],
+      ['Have you previously applied to work at NASA?', 'Yes', undefined],
+      ['Have you previously applied to NASA?', 'Yes', undefined],
+      ['How did you hear about NASA?', 'LinkedIn', context],
     ] as const;
-    for (const [label, expected] of cases) {
-      const resolved = resolveKnownAnswer(label, 'text', profile, undefined);
+    for (const [label, expected, questionContext] of cases) {
+      const resolved = resolveKnownAnswer(label, 'text', profile, questionContext);
       assert.deepEqual(resolved, { value: expected }, label);
       assert.deepEqual(
-        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, undefined),
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, questionContext),
         [{ question: label, answer: expected }],
       );
+    }
+    for (const label of ['How did you hear about the NASA role?', 'Are you willing to relocate for the NASA role?']) {
+      const held = resolveKnownAnswer(label, 'text', profile, context);
+      assert.ok(held && 'skipReason' in held, label);
     }
     const unrelated = resolveKnownAnswer('Why are you interested in NASA?', 'text', profile, undefined);
     assert.ok(!unrelated || !('skipReason' in unrelated) || !/prior government employment/.test(unrelated.skipReason));
@@ -794,6 +800,7 @@ describe('prior government employment, answered from the experience bank', () =>
       onsite_commitment: 'anywhere',
       experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
     };
+    const context = [frozenJobEmployerContext('NASA'), frozenJobLocationContext(['Boston, MA'])].join('\n');
     const valid = [
       ['Did you previously apply to NASA?', 'Yes'],
       ['Did you ever apply to NASA?', 'Yes'],
@@ -816,21 +823,21 @@ describe('prior government employment, answered from the experience bank', () =>
       ['How did you learn about NASA?', 'LinkedIn'],
       ['What is your referral source for NASA?', 'LinkedIn'],
       ['What was the referral source for NASA?', 'LinkedIn'],
-      ['Would you be willing to relocate for NASA?', 'Yes'],
-      ['Would you be open to relocating for NASA?', 'Yes'],
-      ['Would you consider relocating for NASA?', 'Yes'],
-      ['Are you comfortable relocating for NASA?', 'Yes'],
-      ['Do you agree to relocate for NASA?', 'Yes'],
-      ['Would you relocate for NASA?', 'Yes'],
-      ['Would relocating for NASA be acceptable to you?', 'Yes'],
+      ['Would you be willing to relocate to Boston?', 'Yes'],
+      ['Would you be open to relocating to Boston?', 'Yes'],
+      ['Would you consider relocating to Boston?', 'Yes'],
+      ['Are you comfortable relocating to Boston?', 'Yes'],
+      ['Do you agree to relocate to Boston?', 'Yes'],
+      ['Would you relocate to Boston?', 'Yes'],
+      ['Would relocating to Boston be acceptable to you?', 'Yes'],
     ] as const;
     for (const [label, expected] of valid) {
       if (/appl(?:y|ied)/i.test(label)) assert.equal(isPriorApplicationQuestion(label), true, label);
-      if (/hear|learn|referral/i.test(label)) assert.equal(classifyField(label), 'referral_source_default', label);
+      if (/hear|learn|referral/i.test(label)) assert.equal(classifyField(label), null, label);
       if (/relocat/i.test(label)) assert.equal(isRelocationQuestion(label), true, label);
-      assert.deepEqual(resolveKnownAnswer(label, 'text', profile, undefined), { value: expected }, label);
+      assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: expected }, label);
       assert.deepEqual(
-        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, undefined),
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
         [{ question: label, answer: expected }],
       );
     }
@@ -859,18 +866,68 @@ describe('prior government employment, answered from the experience bank', () =>
       if (/appl(?:y|ied)/i.test(label)) assert.equal(isPriorApplicationQuestion(label), true, label);
       if (/hear|learn|referral/i.test(label)) assert.equal(classifyField(label), null, label);
       if (/relocat/i.test(label)) assert.equal(isRelocationQuestion(label), true, label);
-      const resolved = resolveKnownAnswer(label, 'text', profile, undefined);
+      const resolved = resolveKnownAnswer(label, 'text', profile, context);
       assert.ok(resolved && 'skipReason' in resolved, label);
-      assert.match(resolved.skipReason, /compound application question/, label);
     }
     assert.deepEqual(
       refreshKnownQuestionAnswers(
         compound.map((question) => ({ question, answer: 'Yes' })),
         profile,
-        undefined,
+        context,
       ),
       compound.map((question) => ({ question, answer: '' })),
     );
+  });
+
+  test('sibling targets consume exact packet evidence and reject every unparsed tail', () => {
+    const profile: ApplicationProfileLike = {
+      prior_application_employers: ['Acme'],
+      referral_source_default: 'LinkedIn',
+      relocation_willingness: 'yes',
+    };
+    const context = [frozenJobEmployerContext('Acme'), frozenJobLocationContext(['Boston, MA'])].join('\n');
+    const valid = [
+      ['Have you applied to Acme?', 'Yes'],
+      ['How did you hear about Acme?', 'LinkedIn'],
+      ['Do you agree to relocate to Boston?', 'Yes'],
+    ] as const;
+    for (const [label, expected] of valid) {
+      assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: expected }, label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
+        [{ question: label, answer: expected }],
+        label,
+      );
+    }
+
+    const refused = [
+      'Have you applied to Acme why did you leave',
+      'Have you applied to Acme please explain why',
+      'Did you ever apply for Acme describe the outcome',
+      'How did you hear about Acme why do you want to work here',
+      'Where did you learn about Acme who referred you',
+      'What is your referral source for Acme explain your answer',
+      'Would you relocate for Acme travel 50 percent',
+      'Are you comfortable relocating for Acme work weekends',
+      'Do you agree to relocate to Boston start immediately',
+    ];
+    for (const label of refused) {
+      const held = resolveKnownAnswer(label, 'text', profile, context);
+      assert.ok(held && 'skipReason' in held, label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], profile, context),
+        [{ question: label, answer: '' }],
+        label,
+      );
+    }
+
+    for (const [label, wrongContext] of [
+      ['How did you hear about Acme?', frozenJobEmployerContext('Other Corp')],
+      ['Do you agree to relocate to Boston?', frozenJobLocationContext(['Chicago, IL'])],
+    ] as const) {
+      const held = resolveKnownAnswer(label, 'text', profile, wrongContext);
+      assert.ok(held && 'skipReason' in held, label);
+    }
   });
 
   test('unsupported named-employer history noun forms refuse and clear stale answers', () => {

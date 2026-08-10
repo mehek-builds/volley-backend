@@ -200,6 +200,7 @@ test('question resolution context includes stored job locations', () => {
   const context = applicationContextForQuestionResolution(
     {
       job_context: {
+        company: 'Acme',
         location: 'Mountain View, CA',
         locations: ['San Francisco, CA', 'New York, NY'],
       },
@@ -209,6 +210,7 @@ test('question resolution context includes stored job locations', () => {
     } as never,
   );
   assert.match(context, /Build data infrastructure/);
+  assert.match(context, /\[LITOS FROZEN JOB EMPLOYER\] Acme/);
   assert.match(context, /Mountain View, CA/);
   assert.match(context, /San Francisco, CA/);
 });

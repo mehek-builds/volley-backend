@@ -124,6 +124,7 @@ import {
   refreshKnownQuestionAnswers,
   resolveKnownAnswer,
   fitToBudget,
+  frozenJobEmployerContext,
   frozenJobLocationContext,
   WORK_ELIGIBILITY_QUESTION,
   workEligibilitySkipReason,
@@ -1088,7 +1089,8 @@ export function applicationContextForQuestionResolution(row: ResumeRow, current:
   const safeLocations = classifiedLocations.length > 0 && classifiedLocations.every((item) => item.country === 'us')
     ? frozenJobLocationContext(classifiedLocations.map((item) => item.value))
     : '';
-  return [current.role, current.jd_text, safeLocations]
+  const packetEmployer = frozenJobEmployerContext(jobContextCompany(row));
+  return [current.role, current.jd_text, packetEmployer, safeLocations]
     .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
     .join('\n');
 }

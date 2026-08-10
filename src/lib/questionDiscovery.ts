@@ -591,7 +591,7 @@ function previouslyAppliedAnswer(
   label: string,
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
-  const parsed = parsePriorApplicationQuestion(label);
+  const parsed = parsePriorApplicationQuestion(label, ap);
   if (!parsed) return null;
   if (!parsed.valid || !parsed.target) {
     return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
@@ -605,6 +605,22 @@ function previouslyAppliedAnswer(
   if (declared.length === 0) return { value: 'No' };
   const matched = declared.some((employer) => employerMatchesTarget(normalizeEmployerName(employer), parsed.target!));
   return { value: matched ? 'Yes' : 'No' };
+}
+
+function referralAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+  jdText?: string,
+): { value: string } | { skipReason: string } | null {
+  const parsed = parseReferralQuestion(label, jdText);
+  if (!parsed) return null;
+  if (!parsed.valid) {
+    return { skipReason: `how you heard about this role is yours to answer: "${label.slice(0, 60)}"` };
+  }
+  const source = referralSourceForApplication(ap.referral_source_default, ap.referral_source_evidence);
+  return source
+    ? { value: source }
+    : { skipReason: `how you heard about this role is yours to answer: "${label.slice(0, 60)}"` };
 }
 
 function outstandingOfferAnswer(
@@ -866,7 +882,7 @@ function onsiteCommitmentAnswer(
 ): { value: string } | { skipReason: string } {
   const held = { skipReason: onsiteCommitmentSkipReason(label) };
 
-  const relocation = parseRelocationQuestion(label);
+  const relocation = parseRelocationQuestion(label, jdText);
   if (relocation) {
     if (!relocation.valid) return held;
     const willing = ap.relocation_willingness;
@@ -916,12 +932,20 @@ function routineLocationCommitmentAnswer(
   ap: ApplicationProfileLike,
   jdText?: string,
 ): { value: string } | { skipReason: string } | null {
-  return parseRelocationQuestion(label) || isLocationCommitmentQuestion(label)
+  return parseRelocationQuestion(label, jdText) || isLocationCommitmentQuestion(label)
     ? onsiteCommitmentAnswer(label, ap, jdText)
     : null;
 }
 
 const FROZEN_JOB_LOCATION_PREFIX = '[LITOS FROZEN JOB LOCATION] ';
+const FROZEN_JOB_EMPLOYER_PREFIX = '[LITOS FROZEN JOB EMPLOYER] ';
+
+/** Encode the exact packet employer for question-family routing. This is identity evidence only,
+ * never an answer by itself. */
+export function frozenJobEmployerContext(employer: string): string {
+  const value = employer.trim();
+  return value ? `${FROZEN_JOB_EMPLOYER_PREFIX}${value}` : '';
+}
 
 /** Encode structured job locations for question resolution without making arbitrary JD prose
  * location evidence. Kept here so the producer and consumer share the exact marker. */
@@ -940,6 +964,16 @@ function frozenJobLocationsFromContext(context: string | undefined): string[] {
     .filter((line) => line.startsWith(FROZEN_JOB_LOCATION_PREFIX))
     .map((line) => line.slice(FROZEN_JOB_LOCATION_PREFIX.length).trim())
     .filter(Boolean);
+}
+
+function frozenJobEmployerFromContext(context: string | undefined): string | undefined {
+  if (!context) return undefined;
+  const employers = context
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith(FROZEN_JOB_EMPLOYER_PREFIX))
+    .map((line) => line.slice(FROZEN_JOB_EMPLOYER_PREFIX.length).trim())
+    .filter(Boolean);
+  return employers.length === 1 ? employers[0] : undefined;
 }
 
 /* AGE_ATTESTATION_QUESTION is no longer in this list, and that is the whole of the second half of
@@ -1782,47 +1816,45 @@ function normalizedSiblingQuestionLabel(label: string): string {
 type SiblingQuestionFamily = 'prior_application' | 'referral' | 'relocation';
 type ParsedSiblingQuestion = { family: SiblingQuestionFamily; valid: boolean; target?: string };
 
-function structurallySafeSiblingTarget(raw: string): string | null {
-  const target = raw
-    .trim()
-    .replace(/^(?:a|an|the|this|our)\s+/i, '')
-    .replace(/\s+(?:role|job|position|opportunity|internship|company|organization|organisation)$/i, '')
-    .trim();
-  if (!target) return null;
-  if (targetFromBareGovernmentPhrase(target)?.kind === 'named') return target;
-  if (labelNamesKnownGovernmentEmployer(target)) return null;
-  if (/[,;?!]|\b(?:and|or)\b/i.test(target)) return null;
-  if (/^(?:us|company|employer|role|job|position|opportunity|internship|organization|organisation)$/i.test(target)) return null;
-  return target.split(/\s+/).length <= 8 ? target : null;
+function exactKnownTarget(raw: string, candidates: readonly string[]): string | null {
+  const identity = normalizeIdentity(raw);
+  if (!identity) return null;
+  const matches = candidates
+    .map((candidate) => ({ raw: candidate.trim(), identity: normalizeIdentity(candidate) }))
+    .filter((candidate) => candidate.raw && candidate.identity === identity)
+    .sort((left, right) => right.identity.length - left.identity.length);
+  return matches[0]?.raw ?? null;
 }
 
-function priorApplicationTarget(remainder: string): string | null {
-  const productionImc = remainder.match(/^to\s+this\s+role\s+or\s+another\s+role\s+@([a-z0-9&.'’-]+)\s+within\s+the\s+last\s+\d+(?:\s*[-–]\s*\d+)?\s+months(?:\?\s+as\s+a\s+reminder,[\s\S]+)?$/i);
-  if (productionImc) return productionImc[1];
-  const withoutTime = remainder
-    .replace(/\s+(?:before|previously|in\s+the\s+past|within\s+the\s+last(?:\s+\d+(?:\s*[-–]\s*\d+)?\s+months?)?)$/i, '')
-    .trim();
-  const workAt = withoutTime.match(/^to\s+work\s+(?:at|for)\s+(.+)$/i);
-  if (workAt) return workAt[1].trim();
-  const roleAt = withoutTime.match(/^(?:to|for)\s+(?:(?:a|an|the|this|any)\s+)?(?:full[\s-]?time\s+or\s+internship\s+)?(?:role|position|job|internship)\s+(?:at|with|for)\s+(.+)$/i);
-  if (roleAt) return roleAt[1].trim();
-  const direct = withoutTime.match(/^(?:at|for|to|with)\s+(.+)$/i);
-  return direct?.[1]?.trim() ?? null;
-}
-
-function parsePriorApplicationQuestion(label: string): ParsedSiblingQuestion | null {
+function parsePriorApplicationQuestion(
+  label: string,
+  ap?: ApplicationProfileLike,
+): ParsedSiblingQuestion | null {
   const value = normalizedSiblingQuestionLabel(label);
   const stem = value.match(/^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\b\s*(.*)$/i)
     ?? value.match(/^did\s+you\s+(?:(?:ever|previously)\s+)?apply\b\s*(.*)$/i);
   if (!stem) return null;
-  const target = priorApplicationTarget(stem[1]?.trim() ?? '');
-  const safe = target ? structurallySafeSiblingTarget(target) : null;
-  return safe
-    ? { family: 'prior_application', valid: true, target: normalizeEmployerName(safe) }
-    : { family: 'prior_application', valid: false };
+  const remainder = normalizeIdentity(stem[1]?.trim() ?? '');
+  const temporal = String.raw`(?:before|previously|in the past|within the last \d+(?: \d+)? months?)`;
+  const candidates = ap?.prior_application_employers ?? [];
+  for (const candidate of [...candidates].sort((a, b) => normalizeIdentity(b).length - normalizeIdentity(a).length)) {
+    const target = normalizeIdentity(candidate);
+    if (!target) continue;
+    const escaped = regexpEscape(target);
+    const shapes = [
+      new RegExp(`^(?:at|for|to|with) ${escaped}(?: ${temporal})?$`),
+      new RegExp(`^to work (?:at|for) ${escaped}(?: ${temporal})?$`),
+      new RegExp(`^(?:to|for) (?:(?:a|an|the|this|any) )?(?:full time or internship )?(?:role|position|job|internship) (?:at|with|for) ${escaped}(?: ${temporal})?$`),
+      new RegExp(`^to this role or another role ${escaped} within the last \d+(?: \d+)? months?$`),
+    ];
+    if (shapes.some((shape) => shape.test(remainder))) {
+      return { family: 'prior_application', valid: true, target: normalizeEmployerName(candidate) };
+    }
+  }
+  return { family: 'prior_application', valid: false };
 }
 
-function parseReferralQuestion(label: string): ParsedSiblingQuestion | null {
+function parseReferralQuestion(label: string, jdText?: string): ParsedSiblingQuestion | null {
   const value = normalizedSiblingQuestionLabel(label);
   const direct = value.match(/^(?:how|where)\s+did\s+you\s+(?:first\s+)?hear\s+(?:about|of)\b\s*(.*)$/i)
     ?? value.match(/^(?:how\s+did|where\s+(?:did|have))\s+you\s+(?:first\s+)?learn(?:ed)?\s+(?:about|of)\b\s*(.*)$/i);
@@ -1833,13 +1865,15 @@ function parseReferralQuestion(label: string): ParsedSiblingQuestion | null {
   if (/^(?:this|the|our)\s+(?:role|job|position|opportunity|internship|company|organization|organisation)$|^us$/i.test(rawTarget)) {
     return { family: 'referral', valid: true };
   }
-  const target = structurallySafeSiblingTarget(rawTarget);
+  if (!rawTarget) return { family: 'referral', valid: true };
+  const packetEmployer = frozenJobEmployerFromContext(jdText);
+  const target = packetEmployer ? exactKnownTarget(rawTarget, [packetEmployer]) : null;
   return target
     ? { family: 'referral', valid: true, target: normalizeEmployerName(target) }
     : { family: 'referral', valid: false };
 }
 
-function parseRelocationQuestion(label: string): ParsedSiblingQuestion | null {
+function parseRelocationQuestion(label: string, jdText?: string): ParsedSiblingQuestion | null {
   const value = normalizedSiblingQuestionLabel(label);
   const regular = value.match(/^(?:(?:are|would|will|can|could)\s+you\s+(?:be\s+)?(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*|(?:would|could)\s+you\s+consider\s+relocat\w*|are\s+you\s+comfortable\s+(?:with\s+)?relocat\w*|do\s+you\s+agree\s+to\s+relocate|do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move))\b\s*(.*)$/i);
   const gerund = value.match(/^would\s+relocating\b\s*(.*)$/i);
@@ -1851,17 +1885,29 @@ function parseRelocationQuestion(label: string): ParsedSiblingQuestion | null {
     detail = acceptable[1].trim();
   }
   if (!detail) return { family: 'relocation', valid: true };
+  if (/^(?:for|to)\s+(?:this|the|our)\s+(?:role|job|position|opportunity|internship)$/i.test(detail)) {
+    return { family: 'relocation', valid: true };
+  }
   const scoped = detail.match(/^(?:for|to\s+work\s+(?:at|for)|to\s+join|to)\s+(.+)$/i);
-  const target = scoped ? structurallySafeSiblingTarget(scoped[1]) : null;
+  const locations = frozenJobLocationsFromContext(jdText);
+  const locationTargets = locations.flatMap((location) => {
+    const city = location.split(',')[0]?.trim();
+    return city && normalizeIdentity(city) !== normalizeIdentity(location) ? [location, city] : [location];
+  });
+  const target = scoped ? exactKnownTarget(scoped[1], locationTargets) : null;
   return target
-    ? { family: 'relocation', valid: true, target: normalizeEmployerName(target) }
+    ? { family: 'relocation', valid: true, target: normalizeIdentity(target) }
     : { family: 'relocation', valid: false };
 }
 
-function parseSiblingQuestion(label: string): ParsedSiblingQuestion | null {
-  return parsePriorApplicationQuestion(label)
-    ?? parseReferralQuestion(label)
-    ?? parseRelocationQuestion(label);
+function parseSiblingQuestion(
+  label: string,
+  ap?: ApplicationProfileLike,
+  jdText?: string,
+): ParsedSiblingQuestion | null {
+  return parsePriorApplicationQuestion(label, ap)
+    ?? parseReferralQuestion(label, jdText)
+    ?? parseRelocationQuestion(label, jdText);
 }
 
 export function isPriorApplicationQuestion(label: string): boolean {
@@ -1872,19 +1918,33 @@ export function isRelocationQuestion(label: string): boolean {
   return parseRelocationQuestion(label) !== null;
 }
 
-function siblingQuestionRefusal(label: string): { skipReason: string } | null {
-  const parsed = parseSiblingQuestion(label);
+function siblingQuestionRefusal(
+  label: string,
+  ap?: ApplicationProfileLike,
+  jdText?: string,
+): { skipReason: string } | null {
+  const parsed = parseSiblingQuestion(label, ap, jdText);
   if (!parsed || parsed.valid) return null;
   if (parsed.family === 'prior_application') {
     return {
       skipReason: `prior application question left for you, because this is a compound application question: "${label.slice(0, 60)}"`,
     };
   }
+  if (parsed.family === 'referral') {
+    return { skipReason: `how you heard about this role is yours to answer: "${label.slice(0, 60)}"` };
+  }
+  if (parsed.family === 'relocation') {
+    return { skipReason: onsiteCommitmentSkipReason(label) };
+  }
   return { skipReason: `compound application question left for you: "${label.slice(0, 60)}"` };
 }
 
-function belongsToNonEmploymentQuestionFamily(label: string): boolean {
-  return Boolean(parseSiblingQuestion(label)?.valid);
+function belongsToNonEmploymentQuestionFamily(
+  label: string,
+  ap?: ApplicationProfileLike,
+  jdText?: string,
+): boolean {
+  return Boolean(parseSiblingQuestion(label, ap, jdText)?.valid);
 }
 
 function labelHasUnprovenNoncurrentGovernmentStatus(label: string): boolean {
@@ -1959,8 +2019,9 @@ export function governmentEmploymentSkipReason(label: string, because: string): 
 function governmentEmploymentAnswer(
   label: string,
   ap: ApplicationProfileLike,
+  jdText?: string,
 ): { value: string } | { skipReason: string } | null {
-  if (belongsToNonEmploymentQuestionFamily(label)) return null;
+  if (belongsToNonEmploymentQuestionFamily(label, ap, jdText)) return null;
   if (labelHasUnprovenNoncurrentGovernmentStatus(label)) {
     return {
       skipReason: governmentEmploymentSkipReason(
@@ -3289,7 +3350,7 @@ export function resolveKnownAnswer(
   const politicallyExposed = politicallyExposedAnswer(label, ap);
   if (politicallyExposed) return politicallyExposed;
 
-  const siblingRefusal = siblingQuestionRefusal(label);
+  const siblingRefusal = siblingQuestionRefusal(label, ap, jdText);
   if (siblingRefusal) return siblingRefusal;
 
   /* Up here for the same reason as the two above it, and AFTER them on purpose: the PEP question
@@ -3300,7 +3361,7 @@ export function resolveKnownAnswer(
    * "military" in that gloss put it through EEO_QUESTION, which answered an employment-history
    * question with "Decline to self-identify". Verified against the real resolver on 2026-08-09,
    * and it is what makes the placement a safety property rather than a preference. */
-  const governmentEmployment = governmentEmploymentAnswer(label, ap);
+  const governmentEmployment = governmentEmploymentAnswer(label, ap, jdText);
   if (governmentEmployment) return governmentEmployment;
 
   const pronouns = pronounsAnswer(label, ap);
@@ -3321,6 +3382,9 @@ export function resolveKnownAnswer(
 
   const previouslyApplied = previouslyAppliedAnswer(label, ap);
   if (previouslyApplied) return previouslyApplied;
+
+  const referral = referralAnswer(label, ap, jdText);
+  if (referral) return referral;
 
   const outstandingOffer = outstandingOfferAnswer(label, inputType, ap);
   if (outstandingOffer) return outstandingOffer;
