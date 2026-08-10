@@ -2102,16 +2102,24 @@ function parsePriorApplicationQuestion(
   if (/^(?:employment|work)$/.test(employmentWithoutTemporal ?? '')) {
     return { family: 'prior_application', valid: true, globalPriorApplicationHistory: true };
   }
-  const typedEmployment = employmentWithoutTemporal?.match(/^(.+)\s+(?:employment|work)$/)?.[1]?.trim();
-  if (typedEmployment && typedEmployment.split(/\s+/).length <= 6) {
-    return { family: 'prior_application', valid: false };
+  const packetEmploymentReference = (scope: string): boolean => (
+    /^(?:here|with us|at us|(?:at|with) (?:(?:our|this|current|the current) (?:company|employer|organization|firm)))$/.test(scope)
+    || (packetEmployer
+      ? siblingEmployerAliases(packetEmployer).some((alias) => new RegExp(`^(?:at|with) ${regexpEscape(alias)}$`).test(scope))
+      : false)
+  );
+  const typedEmployment = employmentWithoutTemporal?.match(/^(.+)\s+(?:employment|work)(?:\s+(.+))?$/);
+  if (typedEmployment) {
+    const descriptor = typedEmployment[1]?.trim() ?? '';
+    const scope = typedEmployment[2]?.trim();
+    if (descriptor.split(/\s+/).length <= 6 && (!scope || packetEmploymentReference(scope))) {
+      return { family: 'prior_application', valid: false };
+    }
+    return null;
   }
   const employmentScope = employmentWithoutTemporal?.match(/^(?:employment|work)\s+(.+)$/)?.[1]?.trim();
   if (employmentScope) {
-    const packetReference = /^(?:here|with us|at us|(?:at|with) (?:this|the|our|current|the current) (?:company|employer))$/.test(employmentScope)
-      || (packetEmployer
-        ? siblingEmployerAliases(packetEmployer).some((alias) => new RegExp(`^(?:at|with) ${regexpEscape(alias)}$`).test(employmentScope))
-        : false);
+    const packetReference = packetEmploymentReference(employmentScope);
     if (packetReference) {
       return {
         family: 'prior_application',
@@ -2141,23 +2149,20 @@ function parsePriorApplicationQuestion(
     .replace(/\s+(?:before|previously|already|yet|ever|earlier|so far|to date|in the past|within the last \d+(?: \d+)? months?)$/, '')
     .trim();
   const organizationalUnitObject = boundedToObject?.match(
-    /^(.*\b(teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies)))(?: (in|at|based in|located in|located at|within|for) (.+))?$/,
+    /^(.*\b(teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies)))(?: (in|at|based in|based at|located in|located at|within|for) (.+))?$/,
   );
   if (organizationalUnitObject) {
     const fullUnit = organizationalUnitObject[1];
     const head = organizationalUnitObject[2];
     const preposition = organizationalUnitObject[3];
     const complement = organizationalUnitObject[4]?.trim();
-    const ambiguousHead = /^(?:functions?|practices?)$/.test(head);
+    const singularAmbiguousHead = /^(?:function|practice)$/.test(head);
+    const pluralAmbiguousHead = /^(?:functions|practices)$/.test(head);
     const unitPrefix = fullUnit.slice(0, -head.length).trim();
-    const employerUnitPrefix = unitPrefix.replace(/^the\s+/, '');
-    const organizationalQualifier = /^our(?:\s+|$)/.test(unitPrefix)
-      || (packetEmployer
-        ? siblingEmployerAliases(packetEmployer).some((alias) => (
-          employerUnitPrefix === alias || employerUnitPrefix.startsWith(`${alias} `)
-        ))
-        : false);
-    if (ambiguousHead && !organizationalQualifier) return null;
+    const boundedSingularModifier = unitPrefix && unitPrefix.split(/\s+/).length <= 6;
+    const explicitUnitContext = /\b(?:teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|subsidiar(?:y|ies))\b/.test(unitPrefix);
+    if (singularAmbiguousHead && !boundedSingularModifier) return null;
+    if (pluralAmbiguousHead && !explicitUnitContext) return null;
     if (!preposition) return { family: 'prior_application', valid: false };
     const locationTargets = frozenJobRelocationLocationsFromContext(jdText).flatMap((location) => {
       const city = location.split(',')[0]?.trim();
@@ -2169,7 +2174,7 @@ function parsePriorApplicationQuestion(
     );
     const validComplement = /^(?:located in|located at)$/.test(preposition)
       ? exactLocation
-      : preposition === 'for'
+      : /^(?:for|based at)$/.test(preposition)
         ? exactEmployer
         : exactLocation || exactEmployer;
     if (validComplement) return { family: 'prior_application', valid: false };
