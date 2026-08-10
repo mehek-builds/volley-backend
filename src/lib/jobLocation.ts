@@ -1,4 +1,4 @@
-import { isIsoCountryCode } from './workEligibility';
+import { ISO_COUNTRY_CODES, isIsoCountryCode } from './workEligibility';
 
 /**
  * IS THIS JOB IN THE UNITED STATES?
@@ -429,17 +429,35 @@ type PortalRegion = 'US' | 'EMEA' | 'APAC' | 'LATAM';
 const PORTAL_REGION_COUNTRY_CODES: Record<PortalRegion, ReadonlySet<string>> = {
   US: new Set(['US']),
   EMEA: new Set((
-    'AD AE AL AM AO AT AX AZ BA BE BF BG BH BI BJ BW BY CD CF CG CH CI CM CV CY CZ DE DJ DK DZ EE EG EH ER ES ET FI FO FR GA GB GE GG GH GI GM GN GQ GR GW HR HU IE IL IM IQ IR IS IT JE JO KE KM KW LB LI LR LS LT LU LV LY MA MC MD ME MG MK ML MR MT MU MW MZ NA NE NG NL NO OM PL PS PT QA RE RO RS RU RW SA SC SD SE SH SI SJ SK SL SM SN SO SS ST SY SZ TD TG TN TR TZ UA UG VA YE YT ZA ZM ZW'
+    'AD AE AL AM AO AT AX AZ BA BE BF BG BH BI BJ BW BY CD CF CG CH CI CM CV CY CZ DE DJ DK DZ EE EG EH ER ES ET FI FO FR GA GB GE GG GH GI GL GM GN GQ GR GW HR HU IE IL IM IQ IR IS IT JE JO KE KM KW LB LI LR LS LT LU LV LY MA MC MD ME MG MK ML MR MT MU MW MZ NA NE NG NL NO OM PL PS PT QA RE RO RS RU RW SA SC SD SE SH SI SJ SK SL SM SN SO SS ST SY SZ TD TF TG TN TR TZ UA UG VA YE YT ZA ZM ZW'
   ).split(' ')),
   APAC: new Set((
-    'AF AS AU BD BN BT CC CK CN CX FJ FM GU HK HM ID IN IO JP KH KI KP KR KZ LA LK MH MM MN MO MP MV MY NC NF NP NR NU NZ PF PG PH PK PW SB SG TH TJ TK TL TM TO TV TW UZ VN VU WF WS'
+    'AF AS AU BD BN BT CC CK CN CX FJ FM GU HK HM ID IN IO JP KG KH KI KP KR KZ LA LK MH MM MN MO MP MV MY NC NF NP NR NU NZ PF PG PH PK PN PW SB SG TH TJ TK TL TM TO TV TW UM UZ VN VU WF WS'
   ).split(' ')),
   LATAM: new Set((
     'AG AI AR AW BB BL BM BO BQ BR BS BZ CL CO CR CU CW DM DO EC FK GD GF GP GS GT GY HN HT JM KN KY LC MF MQ MS MX NI PA PE PR PY SR SV SX TC TT UY VC VE VG VI'
   ).split(' ')),
 };
 
-const PORTAL_COUNTRY_PART_SEPARATOR = /\s*[|,\/;•\n]\s*|\s+\b(?:and|or)\b\s+/i;
+const INTENTIONALLY_UNSCOPED_PORTAL_COUNTRY_CODES = new Set(['AQ', 'BV', 'CA', 'PM']);
+
+export function portalRegionMembershipsForCountryCode(code: string): Array<PortalRegion | 'UNSCOPED'> {
+  const normalized = code.trim().toUpperCase();
+  const memberships: Array<PortalRegion | 'UNSCOPED'> = (Object.entries(PORTAL_REGION_COUNTRY_CODES) as Array<[
+    PortalRegion,
+    ReadonlySet<string>,
+  ]>).flatMap(([region, codes]) => (codes.has(normalized) ? [region] : []));
+  if (INTENTIONALLY_UNSCOPED_PORTAL_COUNTRY_CODES.has(normalized)) memberships.push('UNSCOPED');
+  return memberships;
+}
+
+for (const code of ISO_COUNTRY_CODES) {
+  if (portalRegionMembershipsForCountryCode(code).length !== 1) {
+    throw new Error(`ISO country ${code} must have exactly one portal-region classification`);
+  }
+}
+
+const PORTAL_COUNTRY_PART_SEPARATOR = /\s*[|,\/;&+•\n]\s*|\s+\b(?:and|or)\b\s+/i;
 
 function exactStructuredCountryCode(value: string, acceptsBareIsoCode: boolean): string | undefined {
   const normalized = normalise(value).trim();

@@ -8,10 +8,12 @@ import {
   normalizeCountryWorkEligibility,
   legacyUsProjection,
   namedCountryCode,
+  ISO_COUNTRY_CODES,
   type CountryWorkEligibility,
 } from './workEligibility';
 import {
   jobCountry,
+  portalRegionMembershipsForCountryCode,
   postingCountryCodeFromJobContext,
   postingCountryFromJobContext,
 } from './jobLocation';
@@ -385,6 +387,33 @@ describe('exact-country resolver', () => {
       assert.equal(postingCountryFromJobContext(context), 'non_us', JSON.stringify(context));
       assert.equal(postingCountryCodeFromJobContext(context), code, JSON.stringify(context));
     }
+  });
+
+  test('portal list separators and ISO region membership are closed and exhaustive', () => {
+    for (const separator of ['|', ',', '/', ';', '\n', '•', ' and ', ' or ', '&', '+']) {
+      const context = { portal_country: `EMEA${separator}US`, location: 'London' };
+      assert.equal(postingCountryFromJobContext(context), 'unknown', separator);
+      assert.equal(postingCountryCodeFromJobContext(context), undefined, separator);
+    }
+    for (const portal_country of [
+      'EMEA & US',
+      'EMEA&APAC',
+      'APAC & United States',
+      'LATAM & USA',
+      'EMEA + US',
+      'EMEA+APAC',
+    ]) {
+      const context = { portal_country, location: 'London' };
+      assert.equal(postingCountryFromJobContext(context), 'unknown', portal_country);
+      assert.equal(postingCountryCodeFromJobContext(context), undefined, portal_country);
+    }
+
+    for (const code of ISO_COUNTRY_CODES) {
+      assert.equal(portalRegionMembershipsForCountryCode(code).length, 1, code);
+    }
+    assert.deepEqual(portalRegionMembershipsForCountryCode('KG'), ['APAC']);
+    assert.deepEqual(portalRegionMembershipsForCountryCode('CA'), ['UNSCOPED']);
+    assert.equal(postingCountryCodeFromJobContext({ portal_country: 'APAC & KG' }), 'KG');
   });
 
   test('structured ATS country metadata reaches the exact country resolver', () => {
