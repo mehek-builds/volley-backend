@@ -564,7 +564,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         && !review.applicant_snapshot) {
         return reply.status(409).send({ error: 'This application must be prepared again before Chrome can fill it' });
       }
-      const auditVerdict = await currentPacketAudit(row);
+      const auditVerdict = await currentAcknowledgedPacketAudit(row);
       if (!auditVerdict.valid) {
         return reply.status(409).send({ error: auditVerdict.reason, code: auditVerdict.code });
       }

@@ -25,9 +25,9 @@ test('packet audit endpoint is owner scoped and persists only with exact packet 
   assert.match(route, /mintDownloadToken/);
 });
 
-test('extension packet refuses missing or stale server audit before disclosure', () => {
+test('extension packet refuses missing, stale, or unacknowledged server audit before disclosure', () => {
   const route = routeSlice("'/applications/:id/submission/extension-packet'", "'/applications/:id/submission/extension-start'");
-  const audit = route.indexOf('currentPacketAudit(row)');
+  const audit = route.indexOf('currentAcknowledgedPacketAudit(row)');
   const response = route.indexOf('resume_url:');
   assert.ok(audit >= 0 && response > audit);
   assert.match(route, /packet_audit: auditVerdict\.audit/);
