@@ -6640,7 +6640,7 @@ export function managedNetworkAccessRestrictionReason(
   const reputationEvidence = exactSmartRecruitersHeading
     || /unusual activity|bot activity|automated traffic|traffic from (?:this|your) ip|ip address.{0,80}(?:blocked|flagged)|network reputation/.test(normalized);
   if (!blocked || !reputationEvidence) return null;
-  if (/prove you are human|verification code|security code|\bsign in\b|\blog in\b|\blogin required\b/.test(normalized)) return null;
+  if (/captcha|\bchallenge\b|prove you are human|verify (?:that )?you are not (?:a )?robot|verification code|security code|\bauthenticat(?:e|ion|ing)\b|\bsign in\b|\blog in\b|\blogin required\b/.test(normalized)) return null;
   return MANAGED_NETWORK_ACCESS_RESTRICTION_REASON;
 }
 

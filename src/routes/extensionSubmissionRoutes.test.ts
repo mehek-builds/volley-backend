@@ -21,11 +21,15 @@ test('attended extension refill returns the exact owned generated packet and a f
   );
   assert.match(route, /preHandler: requireAuth/);
   assert.match(route, /const row = await ownedResume\(request, reply\)/);
+  assert.match(route, /extensionPacketQuerySchema\.safeParse\(request\.query\)/);
+  assert.match(route, /extensionHandoffPacketMatches\(/);
   assert.match(route, /row\.resume_object_key/);
   assert.match(route, /mintDownloadToken\([\s\S]*?row\.resume_object_key/);
   assert.match(route, /resume_id: row\.id/);
   assert.match(route, /application: \{ id: row\.id, spec: stored \}/);
   assert.doesNotMatch(route, /resume\/generate/);
+  assert.ok(route.indexOf('ownedResume(request, reply)') < route.indexOf('extensionHandoffPacketMatches('));
+  assert.ok(route.indexOf('extensionHandoffPacketMatches(') < route.indexOf('mintDownloadToken('));
 });
 
 test('extension outcomes only mark confirmed claims applied', () => {

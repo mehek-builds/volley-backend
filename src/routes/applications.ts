@@ -57,6 +57,7 @@ import {
 } from '../lib/submissionEducationGuard';
 import { resumeFileNameForRole } from '../lib/resumeFileName';
 import { sendUnsupportedPortalApplicationEmail } from '../lib/unsupportedPortalEmailFallback';
+import { extensionHandoffPacketMatches } from '../lib/extensionHandoffPacket';
 import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import {
   duplicateApplicationResponse,
@@ -68,6 +69,7 @@ import { findComposioVerificationCode } from '../lib/emailVerification';
 import { registerWorkdayVerificationRoute } from './workdayVerification';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
+const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(4000) });
 const questionSchema = z.object({
   id: z.string().min(1).max(200),
   question: z.string().min(1).max(4000),
@@ -412,11 +414,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     '/applications/:id/submission/extension-packet',
     { preHandler: requireAuth },
     async (request: FastifyRequest, reply: FastifyReply) => {
+      const query = extensionPacketQuerySchema.safeParse(request.query);
+      if (!query.success) return reply.status(400).send({ error: 'The current company form URL is required' });
       const row = await ownedResume(request, reply);
       if (!row) return;
       const stored = row.spec as StoredSpec;
       const review = readApplicationReview(stored);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      if (!extensionHandoffPacketMatches({
+        frozenUrl: review.portal_url,
+        currentUrl: query.data.current_url,
+        frozenAtsName: review.ats_name,
+        status: review.status,
+        submissionClaimedAt: review.submission_claimed_at,
+      })) {
+        return reply.status(409).send({ error: 'This saved application does not match the company form open in Chrome' });
+      }
       if (!row.resume_object_key) return reply.status(409).send({ error: 'This application has no generated resume to attach' });
 
       const contact = (stored._contact ?? {}) as StoredContact;

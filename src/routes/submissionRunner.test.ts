@@ -559,6 +559,21 @@ test('network reputation handoff is cross-ATS but never swallows real security g
     { text: 'Sign in. Access denied until your account login is complete.' },
     packet,
   ), ['CAPTCHA requires your attention']);
+
+  for (const securityText of [
+    'Access denied after unusual activity. Complete the CAPTCHA to continue.',
+    'Request blocked after unusual activity. Verify you are not a robot.',
+    'Access denied after unusual activity. Complete the challenge.',
+    'Request blocked after unusual activity. Authenticate to continue.',
+    'Access denied after unusual activity. Authentication is required.',
+  ]) {
+    assert.deepEqual(attentionBlockersForManagedResult(
+      'greenhouse',
+      ['CAPTCHA requires your attention'],
+      { text: securityText },
+      packet,
+    ), ['CAPTCHA requires your attention'], securityText);
+  }
 });
 
 test('future sponsorship onboarding answer supplies work eligibility for US applications', () => {
