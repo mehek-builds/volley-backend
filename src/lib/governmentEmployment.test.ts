@@ -1051,6 +1051,16 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you applied with us before?',
       'Have you applied for this company?',
       'Have you applied to this role before?',
+      'Have you previously applied?',
+      'Have you ever applied?',
+      'Did you previously apply?',
+      'Did you ever apply?',
+      'Have you applied previously?',
+      'Did you apply previously?',
+      'Have you applied here?',
+      'Did you apply here?',
+      'Ever applied',
+      'Applied here',
     ];
     for (const label of priorLabels) {
       assert.equal(isPriorApplicationQuestion(label), true, label);
@@ -1089,10 +1099,14 @@ describe('prior government employment, answered from the experience bank', () =>
       'Source of your application',
       'Referral',
       'How did you hear about this employer?',
+      'Source',
+      'Application referral',
+      'How did you find us?',
     ];
     for (const label of referralLabels) {
       const profile: ApplicationProfileLike = { referral_source_default: 'LinkedIn' };
-      const packetBound = label === 'Referral' || /this employer/i.test(label);
+      const packetBound = /^(?:Referral|Source|Application referral|How did you find us\?)$/i.test(label)
+        || /this employer/i.test(label);
       assert.equal(classifyField(label), packetBound ? null : 'referral_source_default', label);
       assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: 'LinkedIn' }, label);
       assert.deepEqual(
@@ -1122,6 +1136,28 @@ describe('prior government employment, answered from the experience bank', () =>
       'Able to relocate',
       'Can you move to Boston?',
       'Open to moving to Boston',
+      'Are you open to relocation?',
+      'Would you be open to relocation?',
+      'Are you able to relocate?',
+      'Would you be able to relocate?',
+      'Could you relocate?',
+      'Are you open to relocating to Boston?',
+      'Would you be open to relocating to Boston?',
+      'Are you able to relocate to Boston?',
+      'Would you be able to relocate to Boston?',
+      'Could you relocate to Boston?',
+      'Are you open to moving to Boston?',
+      'Would you be open to moving to Boston?',
+      'Are you able to move to Boston?',
+      'Would you be able to move to Boston?',
+      'Could you move to Boston?',
+      'Could you be open to moving to Boston?',
+      'Could you be able to move to Boston?',
+      'Could you be open to relocating to Boston?',
+      'Could you be able to relocate to Boston?',
+      'Would you be open to move to Boston?',
+      'Open to move to Boston',
+      'Able to move to Boston',
     ];
     for (const label of relocationLabels) {
       const profile: ApplicationProfileLike = { relocation_willingness: 'yes' };
@@ -1163,6 +1199,15 @@ describe('prior government employment, answered from the experience bank', () =>
       'Able to relocate explain your answer',
       'Can you move to Boston work weekends',
       'Open to moving to Boston start immediately',
+      'Have you ever applied describe the outcome',
+      'Did you previously apply please explain why',
+      'Applied here describe the outcome',
+      'Source explain your answer',
+      'Application referral who referred you',
+      'How did you find us and why do you want to work here',
+      'Are you open to moving to Boston work weekends',
+      'Would you be able to move to Boston start immediately',
+      'Could you relocate to Boston travel 50 percent',
     ];
     const profile: ApplicationProfileLike = {
       prior_application_employers: ['Acme'],
