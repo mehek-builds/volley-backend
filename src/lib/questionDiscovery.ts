@@ -1764,13 +1764,18 @@ function normalizedGovernmentEmploymentLabel(label: string): string {
   return label.trim().replace(/\s+/g, ' ').replace(/[?.!]+$/g, '').trim();
 }
 
-function labelHasFormerKnownGovernmentEmployer(label: string): boolean {
-  if (!/\bformer(?:ly)?\b/i.test(label)) return false;
+function labelNamesKnownGovernmentEmployer(label: string): boolean {
   const identity = ` ${normalizeIdentity(label)} `;
   for (const alias of [...VETTED_GOVERNMENT_EMPLOYERS.keys()].sort((left, right) => right.length - left.length)) {
     if (identity.includes(` ${alias} `)) return true;
   }
   return false;
+}
+
+function labelHasUnprovenNoncurrentGovernmentStatus(label: string): boolean {
+  const identity = normalizeIdentity(label);
+  if (!/\b(?:former|formerly|past|ex)\b|\bno longer\b/.test(identity)) return false;
+  return labelNamesKnownGovernmentEmployer(label);
 }
 
 function currentGovernmentEmploymentTarget(label: string): GovernmentEmploymentTarget | null {
@@ -1840,10 +1845,18 @@ function governmentEmploymentAnswer(
   label: string,
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
+  if (labelHasUnprovenNoncurrentGovernmentStatus(label)) {
+    return {
+      skipReason: governmentEmploymentSkipReason(
+        label,
+        'the profile has no chronology proving that employment ended',
+      ),
+    };
+  }
   if (!isGovernmentEmploymentQuestion(label)) {
     if ((GOVERNMENT_EMPLOYER_SCOPE.test(label)
       || governmentLabelNamesKnownEmployer(label)
-      || labelHasFormerKnownGovernmentEmployer(label))
+      || labelNamesKnownGovernmentEmployer(label))
       && !NOT_HER_GOVERNMENT_EMPLOYMENT.test(label)) {
       return {
         skipReason: governmentEmploymentSkipReason(

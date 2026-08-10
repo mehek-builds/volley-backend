@@ -663,6 +663,70 @@ describe('prior government employment, answered from the experience bank', () =>
     );
   });
 
+  test('every named noncurrent status holds across punctuation, aliases, and current-employer evidence', () => {
+    const currentFederal: ApplicationProfileLike = {
+      current_employer: 'NASA',
+      experience_bank: [
+        { type: 'job', org: 'NASA', title: 'Research Intern' },
+        { type: 'job', org: 'FAA', title: 'Policy Intern' },
+        { type: 'job', org: 'Department of Energy', title: 'Analyst' },
+      ],
+    };
+    const labels = [
+      'Are you an ex-NASA employee?',
+      'Are you an ex employee of FAA?',
+      'Ex-employee: U.S. Department of Energy?',
+      'Past NASA employee?',
+      'Past employee of Federal Aviation Administration?',
+      'Past Department of Energy employment?',
+      'Are you no longer a NASA employee?',
+      'Are you no longer employed by FAA?',
+      'Is United States Department of Energy no longer your employer?',
+      'Did you formerly work for National Aeronautics and Space Administration?',
+      'Was FAA your former-employer?',
+    ];
+    for (const label of labels) {
+      assert.equal(answer(label, currentFederal), 'SKIP', label);
+      const resolved = resolveKnownAnswer(label, 'checkbox', currentFederal, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+      assert.match(resolved.skipReason, /no chronology proving that employment ended/, label);
+    }
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        labels.map((question) => ({ question, answer: 'Yes' })),
+        currentFederal,
+        undefined,
+      ),
+      labels.map((question) => ({ question, answer: '' })),
+    );
+  });
+
+  test('unsupported wording naming a registry employer refuses instead of preserving stale answers', () => {
+    const nasa: ApplicationProfileLike = {
+      current_employer: 'NASA',
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const labels = [
+      'Did NASA once employ you?',
+      'NASA service history?',
+      'What is your relationship to Federal Aviation Administration?',
+    ];
+    for (const label of labels) {
+      assert.equal(isGovernmentEmploymentQuestion(label), false, label);
+      const resolved = resolveKnownAnswer(label, 'checkbox', nasa, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+    }
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        labels.map((question) => ({ question, answer: 'Yes' })),
+        nasa,
+        undefined,
+      ),
+      labels.map((question) => ({ question, answer: '' })),
+    );
+    assert.equal(isGovernmentEmploymentQuestion('Did GEICO once employ you?'), false);
+  });
+
   test('governmental agency variants preserve broad and federal level binding', () => {
     const federal: ApplicationProfileLike = {
       experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
