@@ -6646,13 +6646,15 @@ export function managedNetworkAccessRestrictionReason(
   if (!blocked || !reputationEvidence
     || (pageEvidence.filledFields?.length ?? 0) > 0
     || (pageEvidence.discovered?.length ?? 0) > 0) return null;
-  const asksForHumanInteraction = /captcha|\bchallenge\b|\bhuman\b|\brobot\b|\bbot\b|\bidentity\b|\bverif(?:y|ies|ied|ication)\b|one[ -]?time|passcode|security code|\botp\b|\bauthenticat(?:e|ion|ing)\b|\bsign[ -]?in\b|\blog[ -]?(?:in|on)\b|\baccount (?:is )?required\b|\bsession expired\b|\bpassword\b|\bmfa\b|\b2fa\b|single sign[ -]?on|\bsso\b/.test(normalized)
+  const asksForHumanInteraction = /captcha|\bchallenge\b|\bhuman\b|\brobot\b|\bbot\b|\bidentity\b|\bverif(?:y|ies|ied|ication)\b|one[ -]?time|passcode|passkey|security code|\botp\b|\bauthenticat(?:e|ion|ing)\b|\bsign[ -]?in\b|\blog[ -]?(?:in|on)\b|\baccount (?:is )?required\b|\bsession expired\b|\bpassword\b|\bmfa\b|\b2fa\b|single sign[ -]?on|\bsso\b/.test(normalized)
     || /\b(?:confirm|prove)(?: that)? you(?:'re| are) (?:a )?(?:real )?person\b/.test(normalized)
     || /\b(?:complete|pass) (?:the |a )?security check\b/.test(normalized)
     || /\b(?:tick|check|click|select|mark)(?: the| this| a)? checkbox\b/.test(normalized)
     || /\b(?:press|click)(?: and |-)hold\b/.test(normalized)
     || /\b(?:create|register)(?: for)? (?:an? )?account\b|\bsign up\b|\bregister to continue\b/.test(normalized)
-    || /\bcontinue with (?:google|apple|microsoft|linkedin|facebook|github|sso)\b/.test(normalized);
+    || /\bcontinue with (?:google|apple|microsoft|linkedin|facebook|github|sso)\b/.test(normalized)
+    || /\b(?:accept|agree to)(?: the)? (?:terms(?: and conditions)?|privacy (?:policy|notice)|consent)\b/.test(normalized)
+    || /\b(?:terms and conditions|privacy (?:policy|notice)).{0,40}\b(?:must be accepted|required|to (?:continue|proceed))\b/.test(normalized);
   if (asksForHumanInteraction) return null;
   return MANAGED_NETWORK_ACCESS_RESTRICTION_REASON;
 }
