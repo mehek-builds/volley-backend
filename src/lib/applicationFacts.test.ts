@@ -147,14 +147,18 @@ describe('stored application facts reach the control on the real employer questi
     for (const [name, label] of Object.entries(labels)) {
       assert.match(heldFor(label, none), /prior application question left for you/, name);
     }
-    assert.equal(
-      filled(labels.akunaEver, none, { inputType: 'select', options: YES_NO, context: frozenJobEmployerContext('Akuna Capital') }),
-      'No',
+    const noneTyped = resolveKnownAnswer(
+      labels.akunaEver,
+      'select',
+      none,
+      frozenJobEmployerContext('Akuna Capital'),
     );
+    assert.ok(noneTyped && 'skipReason' in noneTyped);
     // An exact named match answers Yes. Unrelated and help-text-tailed labels remain held.
     const applied: ApplicationProfileLike = { prior_application_employers: ['Akuna', 'Jane Street'] };
     const akunaContext = frozenJobEmployerContext('Akuna Capital');
-    assert.equal(filled(labels.akunaEver, applied, { inputType: 'select', options: YES_NO, context: akunaContext }), 'Yes');
+    const appliedTyped = resolveKnownAnswer(labels.akunaEver, 'select', applied, akunaContext);
+    assert.ok(appliedTyped && 'skipReason' in appliedTyped);
     assert.equal(filled(labels.akunaRole, applied, { inputType: 'select', options: YES_NO, context: akunaContext }), 'Yes');
     assert.equal(
       filled(labels.point72, applied, { inputType: 'select', options: YES_NO, context: frozenJobEmployerContext('Point72') }),

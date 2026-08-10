@@ -813,7 +813,6 @@ describe('prior government employment, answered from the experience bank', () =>
       ['Have you applied to NASA in the past?', 'Yes'],
       ['Have you previously applied to NASA before?', 'Yes'],
       ['Have you ever applied for a role at NASA?', 'Yes'],
-      ['Have you applied for an internship with NASA?', 'Yes'],
       ['Have you ever applied at NASA?', 'Yes'],
       ['Have you applied for NASA?', 'Yes'],
       ['Did you apply for NASA before?', 'Yes'],
@@ -1130,15 +1129,30 @@ describe('prior government employment, answered from the experience bank', () =>
       }
     }
     for (const declared of [['Other Corp'], []] as const) {
-      const label = 'Did you apply for any internship previously?';
-      const profile: ApplicationProfileLike = { prior_application_employers: [...declared] };
-      const held = resolveKnownAnswer(label, 'text', profile, context);
-      assert.ok(held && 'skipReason' in held, label);
-      assert.deepEqual(
-        refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], profile, context),
-        [{ question: label, answer: '' }],
-        label,
-      );
+      for (const label of [
+        'Did you apply for any internship previously?',
+        'Have you applied for internships before?',
+        'Have you applied for any internships before?',
+        'Have you applied to any internships before?',
+        'Did you apply for full-time positions previously?',
+        'Have you applied for part time jobs before?',
+        'Have you submitted an application for an internship?',
+        'Have you submitted applications for internships?',
+        'Did you submit application for any internships before?',
+        'Have you applied for contract roles before?',
+        'Have you applied for temporary jobs before?',
+        'Have you applied for seasonal positions before?',
+        'Have you applied for an internship with NASA?',
+      ]) {
+        const profile: ApplicationProfileLike = { prior_application_employers: [...declared] };
+        const held = resolveKnownAnswer(label, 'text', profile, context);
+        assert.ok(held && 'skipReason' in held, label);
+        assert.deepEqual(
+          refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], profile, context),
+          [{ question: label, answer: '' }],
+          label,
+        );
+      }
     }
 
     const referralLabels = [
@@ -1162,6 +1176,7 @@ describe('prior government employment, answered from the experience bank', () =>
       'Where did you discover this job?',
       'How did you become aware of this vacancy?',
       'Where did you come across this opening?',
+      'How were you made aware of this job?',
     ];
     for (const label of referralLabels) {
       const profile: ApplicationProfileLike = { referral_source_default: 'LinkedIn' };
@@ -1214,6 +1229,7 @@ describe('prior government employment, answered from the experience bank', () =>
       'Open to mobility',
       'Would you consider a move?',
       'Are you open to a move?',
+      'Are you willing to move if required?',
     ];
     for (const label of relocationLabels) {
       const profile: ApplicationProfileLike = { relocation_willingness: 'yes' };
@@ -1377,6 +1393,9 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you previously submitted an application for machine learning methods?',
       'Have you applied for any machine learning methods before?',
       'Have you previously submitted an application for any project?',
+      'Have you applied for internship projects?',
+      'Did you apply full time-series methods previously?',
+      'Have you submitted applications for seasonal forecasting projects?',
       'How did you find this project?',
       'Where did you discover this vulnerability?',
       'How did you become aware of this issue?',
