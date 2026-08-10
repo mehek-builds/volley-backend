@@ -11,6 +11,7 @@ import {
   discoveryHonestyReasons,
   isProviderSessionFailureMessage,
   mergeDiscoveredPortalQuestions,
+  managedExtensionHandoffUrl,
   packetUsesControlledResumeFixture,
   preparationEvidenceBlockers,
   reconcileManagedProviderBlockers,
@@ -629,7 +630,23 @@ test('network reputation handoff is cross-ATS but never swallows real security g
   ), ['CAPTCHA requires your attention']);
 });
 
-test('managed network handoff persists only the exact form URL observed by the blocked run', () => {
+test('managed SmartRecruiters attended handoff persists only an exact form URL observed by a blocked run', () => {
+  const form = 'https://jobs.smartrecruiters.com/oneclick-ui/company/SeekaTechnology/publication/123e4567-e89b-12d3-a456-426614174000';
+  const posting = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648206-software-engineer-internship';
+  assert.equal(managedExtensionHandoffUrl('smartrecruiters', form, null, true), form);
+  assert.equal(managedExtensionHandoffUrl('smartrecruiters', posting, null, true), undefined);
+  assert.equal(managedExtensionHandoffUrl('smartrecruiters', undefined, null, true), undefined);
+  assert.equal(managedExtensionHandoffUrl('greenhouse', 'https://boards.greenhouse.io/acme/jobs/123', null, true), undefined);
+  assert.equal(
+    managedExtensionHandoffUrl(
+      'greenhouse',
+      'https://boards.greenhouse.io/acme/jobs/123',
+      'network restriction',
+      false,
+    ),
+    'https://boards.greenhouse.io/embed/job_app?for=acme&token=123',
+  );
+
   const prepareManagedSource = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   assert.match(
     prepareManagedSource,
@@ -637,7 +654,7 @@ test('managed network handoff persists only the exact form URL observed by the b
   );
   assert.match(
     prepareManagedSource,
-    /extension_handoff_url: networkAccessRestriction[\s\S]*?canonicalSupportedPortalUrl\(result\.url, portal\)[\s\S]*?: undefined/,
+    /extension_handoff_url: managedExtensionHandoffUrl\([\s\S]*?portal,[\s\S]*?result\.url,[\s\S]*?networkAccessRestriction,[\s\S]*?captchaAttention,[\s\S]*?\)/,
   );
   assert.doesNotMatch(
     prepareManagedSource,
