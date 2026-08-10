@@ -735,6 +735,7 @@ describe('prior government employment, answered from the experience bank', () =>
     };
     const cases = [
       ['Have you previously applied to work at NASA?', 'Yes'],
+      ['Have you previously applied to NASA?', 'Yes'],
       ['How did you hear about the NASA role?', 'LinkedIn'],
       ['Are you willing to relocate for the NASA role?', 'Yes'],
     ] as const;
@@ -748,6 +749,38 @@ describe('prior government employment, answered from the experience bank', () =>
     }
     const unrelated = resolveKnownAnswer('Why are you interested in NASA?', 'text', profile, undefined);
     assert.ok(!unrelated || !('skipReason' in unrelated) || !/prior government employment/.test(unrelated.skipReason));
+  });
+
+  test('employment-history subjects do not route by embedded application, referral, or relocation keywords', () => {
+    const nasa: ApplicationProfileLike = {
+      prior_application_employers: ['NASA'],
+      referral_source_default: 'LinkedIn',
+      relocation_willingness: 'yes',
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const labels = [
+      'Have you worked for NASA in application support?',
+      'Were you employed by NASA on application systems?',
+      'Have you worked for NASA on a referral program?',
+      'Were you employed by NASA on referral systems?',
+      'Have you worked for NASA on relocation software?',
+      'Please describe your NASA service history.',
+      'Please describe your NASA work history.',
+      'What is your relationship to FAA?',
+    ];
+    for (const label of labels) {
+      const resolved = resolveKnownAnswer(label, 'text', nasa, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+      assert.match(resolved.skipReason, /prior government employment/, label);
+    }
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        labels.map((question) => ({ question, answer: 'Yes' })),
+        nasa,
+        undefined,
+      ),
+      labels.map((question) => ({ question, answer: '' })),
+    );
   });
 
   test('short aliases require exact uppercase spelling and never turn Jane Doe into DOE', () => {

@@ -568,8 +568,9 @@ function highSchoolGraduationAnswer(
 
 /** The employer a "have you applied here before?" question is actually asking about. */
 function employerNamedInApplicationQuestion(label: string): string | undefined {
+  const directSingleName = label.match(/\bapplied\s+to\s+([a-z0-9&.'’-]+)\s*(?:before|previously|in\s+the\s+past)?\s*[?.!]*$/i);
   const match = label.match(/(?:\bwith\b|\bat\b|\bto\s+work\s+(?:at|for)\b|@)\s*([a-z0-9][a-z0-9 .&'’-]{1,40})/i);
-  const raw = match?.[1]
+  const raw = (directSingleName?.[1] ?? match?.[1])
     ?.replace(/\b(?:before|previously|in\s+the\s+past|within\s+the\s+last|or\s+another\s+role|as\s+an?)\b[\s\S]*$/i, '')
     .replace(/[.,;:?]+$/g, '')
     .trim();
@@ -1463,7 +1464,7 @@ const GOVERNMENT_EMPLOYMENT_RELATIONSHIP =
 /* These words make the government reference the subject matter of work, not the employer. A
  * vetted government job elsewhere in the bank cannot answer any of them. */
 const GOVERNMENT_WORK_SUBJECT =
-  /\bprojects?\b|\bcontracts?\b|\bcontractors?\b|\bfunctions?\b|\bdisciplines?\b|\bgovernment\s+relations\b/i;
+  /\bprojects?\b|\bcontracts?\b|\bcontractors?\b|\bfunctions?\b|\bdisciplines?\b|\bgovernment\s+relations\b|\bapplication\s+(?:support|systems?)\b|\breferral\s+(?:programs?|systems?)\b|\brelocation\s+software\b/i;
 
 /* Labels that name a government and are still not "were you employed by one". Everything here is
  * either a real corpus label (relatives, PEP, export control) or a shape whose answer is a legal
@@ -1779,10 +1780,35 @@ function labelNamesKnownGovernmentEmployer(label: string): boolean {
 }
 
 function labelHasApplicantEmploymentStatusRelationship(label: string): boolean {
-  if (/\bappl(?:y|ied|ication)\b|\brefer(?:ral|red|rence)?\b|\brelocat\w*\b/i.test(label)) return false;
   if (GOVERNMENT_EMPLOYMENT_RELATIONSHIP.test(label)) return true;
   const identity = normalizeIdentity(label);
-  return /\bemploy\s+you\b|\byour\s+(?:(?:former|past|current|ex)\s+)?employer\b|\b(?:former|formerly|past|ex)\b[^?]{0,80}\b(?:employee|employer|employment|employed|work|worked|job)\b|\b(?:employee|employer|employment|employed|work|worked|job)\b[^?]{0,80}\b(?:former|formerly|past|ex)\b|\bno\s+longer\b[^?]{0,80}\b(?:employee|employer|employed|work|working)\b|\b(?:employee|employer|employed|work|working)\b[^?]{0,80}\bno\s+longer\b|\bjob\s+(?:at|with|for)\b/.test(identity);
+  return /\bemploy\s+you\b|\byour\s+(?:(?:former|past|current|ex)\s+)?employer\b|\b(?:former|formerly|past|ex)\b[^?]{0,80}\b(?:employee|employer|employment|employed|work|worked|job)\b|\b(?:employee|employer|employment|employed|work|worked|job)\b[^?]{0,80}\b(?:former|formerly|past|ex)\b|\bno\s+longer\b[^?]{0,80}\b(?:employee|employer|employed|work|working)\b|\b(?:employee|employer|employed|work|working)\b[^?]{0,80}\bno\s+longer\b|\bjob\s+(?:at|with|for)\b|\b(?:service|work)\s+history\b|\brelationship\s+to\b/.test(identity);
+}
+
+/** Complete question shapes owned by resolvers that run after government-employment handling.
+ * Keywords alone are not enough: an employment-history question may describe application support,
+ * a referral system, or relocation software without asking about applying, hearing, or moving. */
+function isCompletePriorApplicationQuestion(label: string): boolean {
+  const value = normalizedGovernmentEmploymentLabel(label);
+  return /^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\s+(?:to|for|with)\s+.+$/i.test(value)
+    || /^have\s+you\s+applied\s+.+\s+(?:previously|before|in\s+the\s+past)$/i.test(value);
+}
+
+function isCompleteReferralQuestion(label: string): boolean {
+  const value = normalizedGovernmentEmploymentLabel(label);
+  return /^(?:how\s+did\s+you\s+(?:first\s+)?hear\s+about|where\s+(?:did|have)\s+you\s+learn(?:ed)?\s+about|what\s+(?:is|was)\s+(?:your\s+)?referral\s+source\b)/i.test(value);
+}
+
+function isCompleteRelocationQuestion(label: string): boolean {
+  const value = normalizedGovernmentEmploymentLabel(label);
+  return /^(?:are|would|will|can|could)\s+you\s+(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*\b/i.test(value)
+    || /^do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move)\b/i.test(value);
+}
+
+function belongsToNonEmploymentQuestionFamily(label: string): boolean {
+  return isCompletePriorApplicationQuestion(label)
+    || isCompleteReferralQuestion(label)
+    || isCompleteRelocationQuestion(label);
 }
 
 function labelHasUnprovenNoncurrentGovernmentStatus(label: string): boolean {
@@ -1858,6 +1884,7 @@ function governmentEmploymentAnswer(
   label: string,
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
+  if (belongsToNonEmploymentQuestionFamily(label)) return null;
   if (labelHasUnprovenNoncurrentGovernmentStatus(label)) {
     return {
       skipReason: governmentEmploymentSkipReason(
