@@ -265,7 +265,7 @@ test('Class A: how did you hear about this job requires packet-specific evidence
   );
   assert.equal(
     answer('How did you first hear about Five Rings?', ['University event', 'Careers Page', 'Referral'], evidenced),
-    'Careers Page',
+    null,
   );
   // No same-channel option means review, never a generic value that can overwrite the truth.
   assert.equal(
@@ -713,7 +713,7 @@ test('the stored major snaps onto the Greenhouse discipline taxonomy', () => {
   assert.equal(unprobed?.value, 'Computer Science & Business Administration, Finance Emphasis');
 });
 
-test('the referral answer snaps onto an employer-named referral list', () => {
+test('an employer-named referral list waits for packet employer context', () => {
   // Verbatim from the Anduril form: the question names the employer, and the option list is the
   // one the control actually offers.
   const ap: ApplicationProfileLike = {
@@ -728,8 +728,7 @@ test('the referral answer snaps onto an employer-named referral list', () => {
     },
     ap,
   );
-  assert.equal(snapped?.value, 'Company Website');
-  assert.equal(snapped?.matchedOption, true);
+  assert.equal(snapped, null);
 });
 
 /* ─── EEO self-identification ───────────────────────────────────────────────────────────────────
@@ -1078,14 +1077,14 @@ const FIVE_RINGS_REFERRAL_OPTIONS = [
 
 test('the employer\'s own site is found under whatever the employer calls it', () => {
   const evidenced = { ...STORED_PROFILE, referral_source_evidence: EMPLOYER_SITE_EVIDENCE };
-  assert.equal(answer('How did you hear about Anduril?', ANDURIL_REFERRAL_OPTIONS, evidenced), 'Anduril Website');
+  assert.equal(answer('How did you hear about Anduril?', ANDURIL_REFERRAL_OPTIONS, evidenced), null);
   assert.equal(
     answer('How did you hear about this internship?', ['Virtu Careers Site', 'Social Media - LinkedIn', 'Job Posting', 'Career Fair', 'Other'], evidenced),
     'Virtu Careers Site',
   );
   assert.equal(
     answer('How did you hear about DV Trading?', ['LinkedIn', 'DV Recruitment', 'DV Employee', 'DV Website', 'Campus Event', 'Other'], evidenced),
-    'DV Website',
+    null,
   );
   assert.equal(
     answer('How did you hear about this job?', ['DRW Careers Page', 'Employee Referral', 'LinkedIn', 'Newspaper', 'Other'], evidenced),

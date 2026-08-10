@@ -20,6 +20,7 @@ import { deleteBlobsForUser, mintDownloadToken } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import { decryptRow } from './applicationProfile';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
+import { deleteAnalyticsProfile } from '../lib/serverAnalytics';
 
 // The privacy policy promises the student can export or delete everything we hold. Until now
 // nothing here backed that claim: there was no delete path in the codebase at all, so the only
@@ -143,7 +144,21 @@ export async function accountRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'Could not delete your account. Please contact support.' });
     }
 
-    fastify.log.info({ userId, deletedFiles }, 'account deleted at user request');
+    /* The privacy policy promises the PostHog profile goes too.
+     *
+     * Deliberately AFTER the account row is gone and deliberately not able to
+     * fail the request: the destructive, irreversible part has already
+     * succeeded, and returning 500 here would tell someone their deletion
+     * failed when their data is in fact deleted. A profile that outlives its
+     * account is a promise to fix, not a reason to alarm the person who just
+     * asked to leave. Failures are logged loudly instead.
+     *
+     * Awaited for the same serverless reason as everywhere else: this handler
+     * resolves at response flush and the container may freeze immediately
+     * after, so un-awaited cleanup would simply not happen. */
+    const analyticsDeleted = await deleteAnalyticsProfile(userId, fastify.log);
+
+    fastify.log.info({ userId, deletedFiles, analyticsDeleted }, 'account deleted at user request');
     return reply.status(200).send({ deleted: true, resume_files_deleted: deletedFiles });
   });
 }

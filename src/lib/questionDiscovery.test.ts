@@ -7,7 +7,9 @@ import {
   isCoreIdentityField,
   labelMarksRequired,
   fitToBudget,
+  frozenJobEmployerContext,
   frozenJobLocationContext,
+  frozenJobRelocationLocationContext,
   graduationDateAnswer,
   isOpenEndedQuestion,
   isPolarQuestion,
@@ -880,7 +882,12 @@ test('an office commitment is answered from the stored standing preference, and 
   );
   assert.ok(relocation && 'skipReason' in relocation);
   assert.deepEqual(
-    resolveKnownAnswer('are you willing to relocate to San Francisco?', 'text', { relocation_willingness: 'no' }, undefined),
+    resolveKnownAnswer(
+      'are you willing to relocate to San Francisco?',
+      'text',
+      { relocation_willingness: 'no' },
+      frozenJobRelocationLocationContext(['San Francisco, CA']),
+    ),
     { value: 'No' },
   );
   assert.deepEqual(
@@ -956,38 +963,16 @@ test('the standing onsite preference is scoped to the US and says nothing about 
     );
     assert.ok(held && 'skipReason' in held, label);
   }
-  /* Held because the posting is foreign, MIXED, or names nothing that is a place at all. Two cases
-     that used to sit on this list have moved to the answered list below, and the move is the point
-     of 2026-08-09's Anduril fix rather than a relaxation of it:
-
-     ['San Francisco, CA', 'New York, NY'] - two US offices. 'anywhere' is a MAXIMAL commitment
-       scoped to the United States, so it covers both, and which of the two she ends up in does not
-       have to be decided to answer "will you work in person". Anduril's 2027 intern posting lists
-       SIX US offices in one semicolon-joined string and was refused on this rule alone.
-     ['Boise, ID'] - one US office, absent from the finite metro table. The table's rule is that an
-       unrecognised place must not become US-safe BY OMISSION, and that still holds: this is
-       recognised POSITIVELY, from a structured `City, ST` posting field carrying a US state code.
-
-     ['US market'] stays held and is the reason vettedWorkplaceCountry requires a comma: it reads as
-     American to a country classifier and is not an office. */
+  /* Frozen posting evidence is held when it is foreign, mixed, multiple, unknown, or not a place.
+     A broad country classifier is deliberately not evidence, and more than one vetted workplace
+     is deliberately not a single workplace commitment. */
   for (const locations of [
     ['Paris, France'],
     ['Paris, France', 'San Francisco, CA'],
-    ['US market'],
-  ]) {
-    const held = resolveKnownAnswer(
-      'Can you commit to working in-person five days per week?',
-      'select',
-      committed,
-      frozenJobLocationContext(locations),
-    );
-    assert.ok(held && 'skipReason' in held, locations.join(' | '));
-  }
-  for (const locations of [
-    ['San Francisco, CA'],
     ['San Francisco, CA', 'New York, NY'],
     ['Boise, ID'],
-    // Anduril's 2027 Software Engineer Intern posting, verbatim, after the semicolon split.
+    ['US market'],
+    // Anduril's 2027 Software Engineer Intern posting names multiple workplaces.
     [
       'Atlanta, Georgia, United States',
       'Boston, Massachusetts, United States',
@@ -997,17 +982,23 @@ test('the standing onsite preference is scoped to the US and says nothing about 
       'Seattle, Washington, United States',
     ],
   ]) {
-    assert.deepEqual(
-      resolveKnownAnswer(
-        'Can you commit to working in-person five days per week?',
-        'select',
-        committed,
-        frozenJobLocationContext(locations),
-      ),
-      { value: 'Yes' },
-      locations.join(' | '),
+    const held = resolveKnownAnswer(
+      'Can you commit to working in-person five days per week?',
+      'select',
+      committed,
+      frozenJobLocationContext(locations),
     );
+    assert.ok(held && 'skipReason' in held, locations.join(' | '));
   }
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Can you commit to working in-person five days per week?',
+      'select',
+      committed,
+      frozenJobLocationContext(['San Francisco, CA']),
+    ),
+    { value: 'Yes' },
+  );
   // The US metros on the same list are answered.
   for (const label of [
     'Are you available to work from our office in Chicago?',
@@ -1339,7 +1330,12 @@ test('referral source is relayed when stored and refused when it is not', () => 
      It is the most-asked question in the corpus (25 distinct labels, 20 employers), which is why it
      went to onboarding rather than to an ask at Apply. */
   assert.deepEqual(
-    resolveKnownAnswer('How did you first hear about Five Rings?', 'text', { referral_source_default: 'LinkedIn' }, undefined),
+    resolveKnownAnswer(
+      'How did you first hear about Five Rings?',
+      'text',
+      { referral_source_default: 'LinkedIn' },
+      frozenJobEmployerContext('Five Rings'),
+    ),
     { value: 'LinkedIn' },
   );
   const unstored = resolveKnownAnswer('How did you first hear about Five Rings?', 'text', {}, undefined);
@@ -2528,7 +2524,12 @@ test('the referral question needs packet evidence even when its label names the 
     'how did you hear about this job?* question_2',
   ]) {
     assert.deepEqual(
-      resolveKnownAnswer(normalizeDiscoveredLabel(raw), 'text', { ...MEHEK, referral_source_evidence: evidence }, undefined),
+      resolveKnownAnswer(
+        normalizeDiscoveredLabel(raw),
+        'text',
+        { ...MEHEK, referral_source_evidence: evidence },
+        /anduril/i.test(raw) ? frozenJobEmployerContext('Anduril') : undefined,
+      ),
       { value: 'Company website' },
       raw,
     );

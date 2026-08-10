@@ -21,8 +21,12 @@
  * interview. Those are not comparable, so the tie goes to asking again.
  */
 
-import { normalizeReviewQuestionLabel } from './questionDiscovery';
-import { isLocationCommitmentQuestion, PREVIOUSLY_APPLIED_QUESTION } from './questionDiscovery';
+import {
+  isLocationCommitmentQuestion,
+  isPriorApplicationQuestion,
+  isRelocationQuestion,
+  normalizeReviewQuestionLabel,
+} from './questionDiscovery';
 import { labelNamesOfficeMetro } from './officeMetros';
 import { isSelfDeclarationQuestion } from './selfDeclaration';
 
@@ -100,8 +104,6 @@ const POSTING_SCOPED_QUESTION = new RegExp(
  * label name an office" would let one file treat a label as placed while the other treats it as
  * placeless, and those two readings disagree about whether an answer may travel. */
 
-const RELOCATION_QUESTION = /\brelocat\w*\b|\bwilling\s+to\s+move\b|\bplan\s+to\s+move\b/i;
-
 /**
  * 'reusable' for the onsite commitments that carry their own scope, and null for everything else,
  * INCLUDING a placeless onsite label. Null means "this rule has nothing to say", and the caller's
@@ -109,7 +111,7 @@ const RELOCATION_QUESTION = /\brelocat\w*\b|\bwilling\s+to\s+move\b|\bplan\s+to\
  */
 function onsiteCommitmentReuseScope(label: string): AnswerReuseScope | null {
   if (!isLocationCommitmentQuestion(label)) return null;
-  if (RELOCATION_QUESTION.test(label)) return 'reusable';
+  if (isRelocationQuestion(label)) return 'reusable';
   return labelNamesOfficeMetro(label) ? 'reusable' : null;
 }
 
@@ -173,7 +175,7 @@ export function answerReuseScope(label: string, context: AnswerReuseContext = {}
    * given to a firm she has never approached would be replayed as a "No" to a firm she applied to
    * last month, which is a false statement about her own record - the exact class of harm that a
    * drafted 600-word essay opening "I have not applied to Akuna in the past" already caused once. */
-  if (PREVIOUSLY_APPLIED_QUESTION.test(value)) return 'posting_specific';
+  if (isPriorApplicationQuestion(value)) return 'posting_specific';
 
   /* Positive test 1: an onsite commitment whose label names the place it is about. It runs before
    * the self-declaration line because that line refuses, and a placed onsite commitment is the one
