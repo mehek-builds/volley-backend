@@ -783,6 +783,75 @@ describe('prior government employment, answered from the experience bank', () =>
     );
   });
 
+  test('complete sibling questions route downstream while compound questions hold', () => {
+    const profile: ApplicationProfileLike = {
+      prior_application_employers: ['NASA'],
+      referral_source_default: 'LinkedIn',
+      relocation_willingness: 'yes',
+      onsite_commitment: 'anywhere',
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const valid = [
+      ['Did you previously apply to NASA?', 'Yes'],
+      ['Did you apply to NASA before?', 'Yes'],
+      ['Where did you hear about NASA?', 'LinkedIn'],
+      ['How did you learn about NASA?', 'LinkedIn'],
+    ] as const;
+    for (const [label, expected] of valid) {
+      assert.deepEqual(resolveKnownAnswer(label, 'text', profile, undefined), { value: expected }, label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, undefined),
+        [{ question: label, answer: expected }],
+      );
+    }
+
+    const compound = [
+      'How did you hear about NASA, and have you worked for NASA?',
+      'Are you willing to relocate for NASA, and can you work onsite three days per week?',
+      'Are you willing to relocate for NASA and work onsite three days per week?',
+    ];
+    for (const label of compound) {
+      const resolved = resolveKnownAnswer(label, 'text', profile, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+      assert.match(resolved.skipReason, /compound application question/, label);
+    }
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        compound.map((question) => ({ question, answer: 'Yes' })),
+        profile,
+        undefined,
+      ),
+      compound.map((question) => ({ question, answer: '' })),
+    );
+  });
+
+  test('unsupported named-employer history noun forms refuse and clear stale answers', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const labels = [
+      'NASA employment history',
+      'NASA employment record',
+      'NASA career history',
+      'Work experience at NASA',
+      'Professional history with NASA',
+      'Prior experience at NASA',
+    ];
+    for (const label of labels) {
+      const resolved = resolveKnownAnswer(label, 'text', nasa, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+      assert.match(resolved.skipReason, /prior government employment/, label);
+    }
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        labels.map((question) => ({ question, answer: 'Yes' })),
+        nasa,
+        undefined,
+      ),
+      labels.map((question) => ({ question, answer: '' })),
+    );
+  });
+
   test('short aliases require exact uppercase spelling and never turn Jane Doe into DOE', () => {
     const federal: ApplicationProfileLike = {
       experience_bank: [{ type: 'job', org: 'Department of Energy', title: 'Analyst' }],

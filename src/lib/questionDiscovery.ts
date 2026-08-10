@@ -568,7 +568,7 @@ function highSchoolGraduationAnswer(
 
 /** The employer a "have you applied here before?" question is actually asking about. */
 function employerNamedInApplicationQuestion(label: string): string | undefined {
-  const directSingleName = label.match(/\bapplied\s+to\s+([a-z0-9&.'’-]+)\s*(?:before|previously|in\s+the\s+past)?\s*[?.!]*$/i);
+  const directSingleName = label.match(/\bappl(?:y|ied)\s+to\s+([a-z0-9&.'’-]+)\s*(?:before|previously|in\s+the\s+past)?\s*[?.!]*$/i);
   const match = label.match(/(?:\bwith\b|\bat\b|\bto\s+work\s+(?:at|for)\b|@)\s*([a-z0-9][a-z0-9 .&'’-]{1,40})/i);
   const raw = (directSingleName?.[1] ?? match?.[1])
     ?.replace(/\b(?:before|previously|in\s+the\s+past|within\s+the\s+last|or\s+another\s+role|as\s+an?)\b[\s\S]*$/i, '')
@@ -1235,7 +1235,7 @@ export function isLocationChoiceQuestion(label: string): boolean {
   return LOCATION_CHOICE_QUESTION.test(label);
 }
 
-export const REFERRAL_QUESTION = /how did you .*hear|how did you hear|first hear|referral source|hear about (this|us|the)|where have you learned about|source of/i;
+export const REFERRAL_QUESTION = /how did you .*hear|how did you learn|where did you hear|how did you hear|first hear|referral source|hear about (this|us|the)|where (?:did|have) you learn(?:ed)? about|source of/i;
 export const START_DATE_QUESTION = /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
 // Greenhouse renders its education block as one row per school: "School", "Degree", "Discipline",
 // "Start date month", "Start date year", "End date month", "End date year" (handles school--0,
@@ -1782,27 +1782,52 @@ function labelNamesKnownGovernmentEmployer(label: string): boolean {
 function labelHasApplicantEmploymentStatusRelationship(label: string): boolean {
   if (GOVERNMENT_EMPLOYMENT_RELATIONSHIP.test(label)) return true;
   const identity = normalizeIdentity(label);
-  return /\bemploy\s+you\b|\byour\s+(?:(?:former|past|current|ex)\s+)?employer\b|\b(?:former|formerly|past|ex)\b[^?]{0,80}\b(?:employee|employer|employment|employed|work|worked|job)\b|\b(?:employee|employer|employment|employed|work|worked|job)\b[^?]{0,80}\b(?:former|formerly|past|ex)\b|\bno\s+longer\b[^?]{0,80}\b(?:employee|employer|employed|work|working)\b|\b(?:employee|employer|employed|work|working)\b[^?]{0,80}\bno\s+longer\b|\bjob\s+(?:at|with|for)\b|\b(?:service|work)\s+history\b|\brelationship\s+to\b/.test(identity);
+  return /\bemploy\s+you\b|\byour\s+(?:(?:former|past|current|ex)\s+)?employer\b|\b(?:former|formerly|past|ex)\b[^?]{0,80}\b(?:employee|employer|employment|employed|work|worked|job)\b|\b(?:employee|employer|employment|employed|work|worked|job)\b[^?]{0,80}\b(?:former|formerly|past|ex)\b|\bno\s+longer\b[^?]{0,80}\b(?:employee|employer|employed|work|working)\b|\b(?:employee|employer|employed|work|working)\b[^?]{0,80}\bno\s+longer\b|\bjob\s+(?:at|with|for)\b|\b(?:service|work|employment|career|professional)\s+(?:history|record)\b|\b(?:work|prior)\s+experience\s+(?:at|with|for)\b|\brelationship\s+to\b/.test(identity);
 }
 
 /** Complete question shapes owned by resolvers that run after government-employment handling.
  * Keywords alone are not enough: an employment-history question may describe application support,
  * a referral system, or relocation software without asking about applying, hearing, or moving. */
+function normalizedSiblingQuestionLabel(label: string): string {
+  return normalizedGovernmentEmploymentLabel(label);
+}
+
+function hasCompoundSiblingClause(label: string): boolean {
+  return /(?:[?;,]|\b(?:and|or)\b)\s*(?:(?:have|has|had|did|do|does|are|is|was|were|can|could|will|would|should)\s+you\b|(?:where|how|what|which|when)\b|(?:describe|provide|explain|list|state|tell)\b)/i.test(label)
+    || /\b(?:and|or)\s+(?:work|worked|working|be|commute|report)\b[^?]{0,80}\b(?:office|onsite|on[\s-]?site|in[\s-]?person|employ|employment)\b/i.test(label);
+}
+
 function isCompletePriorApplicationQuestion(label: string): boolean {
-  const value = normalizedGovernmentEmploymentLabel(label);
+  const value = normalizedSiblingQuestionLabel(label);
+  if (hasCompoundSiblingClause(value)) return false;
   return /^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\s+(?:to|for|with)\s+.+$/i.test(value)
+    || /^did\s+you\s+previously\s+apply\s+(?:to|for|with)\s+.+$/i.test(value)
+    || /^did\s+you\s+apply\s+(?:to|for|with)\s+.+\s+(?:before|previously|in\s+the\s+past)$/i.test(value)
     || /^have\s+you\s+applied\s+.+\s+(?:previously|before|in\s+the\s+past)$/i.test(value);
 }
 
 function isCompleteReferralQuestion(label: string): boolean {
-  const value = normalizedGovernmentEmploymentLabel(label);
-  return /^(?:how\s+did\s+you\s+(?:first\s+)?hear\s+about|where\s+(?:did|have)\s+you\s+learn(?:ed)?\s+about|what\s+(?:is|was)\s+(?:your\s+)?referral\s+source\b)/i.test(value);
+  const value = normalizedSiblingQuestionLabel(label);
+  if (hasCompoundSiblingClause(value)) return false;
+  return /^(?:how\s+did\s+you\s+(?:first\s+)?hear\s+about|where\s+did\s+you\s+hear\s+about|how\s+did\s+you\s+learn\s+about|where\s+(?:did|have)\s+you\s+learn(?:ed)?\s+about|what\s+(?:is|was)\s+(?:your\s+)?referral\s+source\b)[\s\S]*$/i.test(value);
 }
 
 function isCompleteRelocationQuestion(label: string): boolean {
-  const value = normalizedGovernmentEmploymentLabel(label);
-  return /^(?:are|would|will|can|could)\s+you\s+(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*\b/i.test(value)
-    || /^do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move)\b/i.test(value);
+  const value = normalizedSiblingQuestionLabel(label);
+  if (hasCompoundSiblingClause(value)) return false;
+  return /^(?:are|would|will|can|could)\s+you\s+(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*\b[\s\S]*$/i.test(value)
+    || /^do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move)\b[\s\S]*$/i.test(value);
+}
+
+function startsLikeSiblingQuestion(label: string): boolean {
+  const value = normalizedSiblingQuestionLabel(label);
+  return /^(?:(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\b|did\s+you\s+(?:previously\s+apply|apply\b)|how\s+did\s+you\s+(?:(?:first\s+)?hear|learn)\s+about\b|where\s+(?:did\s+you\s+hear|(?:did|have)\s+you\s+learn(?:ed)?)\s+about\b|(?:are|would|will|can|could)\s+you\s+(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*\b|do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move)\b)/i.test(value);
+}
+
+function compoundSiblingQuestionAnswer(label: string): { skipReason: string } | null {
+  const value = normalizedSiblingQuestionLabel(label);
+  if (!startsLikeSiblingQuestion(value) || !hasCompoundSiblingClause(value)) return null;
+  return { skipReason: `compound application question left for you: "${label.slice(0, 60)}"` };
 }
 
 function belongsToNonEmploymentQuestionFamily(label: string): boolean {
@@ -1967,7 +1992,7 @@ export const HIGH_SCHOOL_GRADUATION_QUESTION =
 // role @IMC within the last 12-18 months?". About APPLICATIONS, not employment, which is why it is
 // separate from PRIOR_EMPLOYER_OR_PROGRAM_QUESTION above.
 export const PREVIOUSLY_APPLIED_QUESTION =
-  /\b(?:have|had)\s+you\s+(?:ever\s+|previously\s+)?applied\b|\bpreviously\s+applied\b|\bapplied\s+(?:to|for|with)\b[\s\S]{0,160}\b(?:previously|before|in\s+the\s+past|within\s+the\s+last)\b/i;
+  /\b(?:have|had)\s+you\s+(?:ever\s+|previously\s+)?applied\b|\bdid\s+you\s+(?:previously\s+apply|apply\b[\s\S]{0,160}\b(?:before|previously|in\s+the\s+past))\b|\bpreviously\s+applied\b|\bapplied\s+(?:to|for|with)\b[\s\S]{0,160}\b(?:previously|before|in\s+the\s+past|within\s+the\s+last)\b/i;
 
 // Further education AFTER the current degree. Checked before every graduation-date rule so that
 // "when is your potential master's graduation date?" cannot be handed the undergraduate date -
@@ -3215,6 +3240,9 @@ export function resolveKnownAnswer(
 
   const politicallyExposed = politicallyExposedAnswer(label, ap);
   if (politicallyExposed) return politicallyExposed;
+
+  const compoundSibling = compoundSiblingQuestionAnswer(label);
+  if (compoundSibling) return compoundSibling;
 
   /* Up here for the same reason as the two above it, and AFTER them on purpose: the PEP question
    * and Astranis's export-control paragraph both contain the word "government", and both are
