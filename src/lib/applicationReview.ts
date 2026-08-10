@@ -17,6 +17,13 @@ export type ApplicationReviewQuestion = {
 
 export type ApplicationAttentionCategory =
   | 'captcha'
+  /* The portal will not expose an application form until the applicant signs in, creates an
+   * account, or completes the account recovery step. This is not a required application field and
+   * it is not evidence that anything has reached the employer. */
+  | 'account_login'
+  /* The portal is waiting for the applicant to make a legal privacy choice before it exposes the
+   * application form. Litos may describe and hand off this gate, but never operates it. */
+  | 'privacy_consent'
   /* The employer emailed a security code and will not file the application until it is entered and
    * the form is submitted again. Distinct from 'captcha' on purpose: a CAPTCHA is a widget on the
    * page and the applicant has to go and solve it there, while this is an email round trip that

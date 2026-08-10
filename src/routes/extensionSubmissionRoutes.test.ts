@@ -68,6 +68,8 @@ test('extension outcomes only mark confirmed claims applied', () => {
   assert.match(source, /parsed\.data\.outcome === 'confirmed'[\s\S]*?pipeline_stage: 'applied'/);
   assert.match(source, /current\.submission_claim_id !== parsed\.data\.claim_id/);
   assert.match(source, /extensionReceiptUrlSchema/);
+  assert.match(source, /extensionEmployerReceiptIsSufficient\(/);
+  assert.match(source, /outcome === 'confirmed'/);
 });
 
 test('attended handoff can record a user-confirmed submission without an ATS key', () => {

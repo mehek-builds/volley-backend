@@ -5,7 +5,12 @@ import {
   extensionHandoffVersion,
   extensionStartHandoffBinding,
 } from './extensionHandoffPacket';
-import { CAPTCHA_BLOCKER, MANAGED_NETWORK_ACCESS_RESTRICTION_REASON } from './portalSubmission';
+import {
+  CAPTCHA_BLOCKER,
+  ICIMS_ATTENDED_GATE_REASON,
+  JOBVITE_ATTENDED_GATE_REASON,
+  MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
+} from './portalSubmission';
 
 const SEEKA_POSTING = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648206-software-engineer-internship';
 const SEEKA_FORM = 'https://jobs.smartrecruiters.com/oneclick-ui/company/SeekaTechnology/publication/123e4567-e89b-12d3-a456-426614174000';
@@ -85,6 +90,44 @@ test('a CAPTCHA reason does not broaden attended recovery for another ATS', () =
     frozenAtsName: 'lever',
     status: 'needs_attention',
     attentionReason: CAPTCHA_BLOCKER,
+  }), false);
+});
+
+test('Jobvite attended recovery requires the exact measured gate URL and typed cause', () => {
+  const job = 'https://jobs.jobvite.com/worldfirst/job/oknrAfws/apply';
+  const input = {
+    frozenUrl: job,
+    frozenHandoffUrl: job,
+    currentUrl: job,
+    frozenAtsName: 'jobvite',
+    status: 'needs_attention' as const,
+    attentionReason: JOBVITE_ATTENDED_GATE_REASON,
+  };
+  assert.equal(extensionHandoffPacketMatches(input), true);
+  assert.equal(extensionHandoffPacketMatches({ ...input, frozenHandoffUrl: undefined }), false);
+  assert.equal(extensionHandoffPacketMatches({ ...input, attentionReason: 'The form was not reached' }), false);
+  assert.equal(extensionHandoffPacketMatches({
+    ...input,
+    currentUrl: 'https://jobs.jobvite.com/worldfirst/job/oknrAfwt/apply',
+  }), false);
+});
+
+test('iCIMS attended recovery requires the exact measured login URL and typed cause', () => {
+  const login = 'https://jobs-express.icims.com/jobs/48173/sales-associate/login';
+  const input = {
+    frozenUrl: 'https://jobs-express.icims.com/jobs/48173/sales-associate/job',
+    frozenHandoffUrl: login,
+    currentUrl: login,
+    frozenAtsName: 'icims',
+    status: 'needs_attention' as const,
+    attentionReason: ICIMS_ATTENDED_GATE_REASON,
+  };
+  assert.equal(extensionHandoffPacketMatches(input), true);
+  assert.equal(extensionHandoffPacketMatches({ ...input, frozenHandoffUrl: undefined }), false);
+  assert.equal(extensionHandoffPacketMatches({ ...input, attentionReason: 'Litos could not verify the exact account gate' }), false);
+  assert.equal(extensionHandoffPacketMatches({
+    ...input,
+    currentUrl: 'https://jobs-express.icims.com/jobs/48174/sales-associate/login',
   }), false);
 });
 

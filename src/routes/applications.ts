@@ -49,7 +49,12 @@ import {
   isPortalSupported,
 } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
-import { canStartExtensionSubmission, extensionOutcomePatch, isSafeExtensionReceiptUrl } from '../lib/extensionSubmission';
+import {
+  canStartExtensionSubmission,
+  extensionEmployerReceiptIsSufficient,
+  extensionOutcomePatch,
+  isSafeExtensionReceiptUrl,
+} from '../lib/extensionSubmission';
 import {
   candidateEducationFromParsedProfile,
   educationDriftResponse,
@@ -689,16 +694,24 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'This extension submission is no longer active' });
       }
       const now = new Date().toISOString();
+      const outcome = parsed.data.outcome === 'confirmed' && !extensionEmployerReceiptIsSufficient({
+        portalUrl: current.portal_url,
+        atsName: current.ats_name,
+        confirmationText: parsed.data.confirmation_text,
+        finalUrl: parsed.data.final_url,
+      })
+        ? 'unknown' as const
+        : parsed.data.outcome;
       // Through applyReviewPatch, not a bare spread. extensionOutcomePatch's 'failed' arm writes
       // attention_reason: undefined, so the spread persisted a terminal state with no stated cause
       // in exactly the way the server runner used to.
-      const next = applyReviewPatch(current, extensionOutcomePatch(parsed.data.outcome, now, {
+      const next = applyReviewPatch(current, extensionOutcomePatch(outcome, now, {
         confirmationText: parsed.data.confirmation_text,
         finalUrl: parsed.data.final_url,
       }), () => now);
       const updated = await db.update(generated_resumes).set({
         spec: reviewSpec(next),
-        ...(parsed.data.outcome === 'confirmed' ? { pipeline_stage: 'applied', pipeline_stage_at: new Date(now) } : {}),
+        ...(outcome === 'confirmed' ? { pipeline_stage: 'applied', pipeline_stage_at: new Date(now) } : {}),
       }).where(and(
         eq(generated_resumes.id, row.id),
         eq(generated_resumes.user_id, request.jwtPayload!.userId),
