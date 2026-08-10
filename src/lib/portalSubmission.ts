@@ -5309,6 +5309,8 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
     if (greenhouseJobId) return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
     const embeddedBoardUrl = embeddedGreenhouseApplicationUrl(url);
     if (embeddedBoardUrl) return embeddedBoardUrl;
+    const greenhouseApplicationUrl = greenhouseEmbedApplicationUrl(rawUrl);
+    if (greenhouseApplicationUrl) return greenhouseApplicationUrl;
     const portal = detectPortal(rawUrl);
     if (portal === 'zoho_recruit') {
       url.search = '';
@@ -6616,6 +6618,46 @@ export async function detectCaptchaProvider(page: Page): Promise<CaptchaProvider
 // contract between two files, not a local string, and re-typing the literal at the match site is how
 // that contract silently breaks.
 export const CAPTCHA_BLOCKER = 'CAPTCHA requires your attention';
+
+export const MANAGED_NETWORK_ACCESS_RESTRICTION_REASON =
+  'The application site temporarily blocked Litos\'s secure browser because of its network activity. This is not a CAPTCHA, and nothing was sent. Open this application in Chrome and Litos will refill the exact saved packet there.';
+
+/**
+ * SmartRecruiters sometimes rejects a datacenter IP before it renders an application form. Its
+ * page mentions bots and unusual activity, which made the managed provider report CAPTCHA even
+ * though there is no challenge a person can solve. Treat only the complete restriction page as
+ * this condition. A normal form mentioning access or activity in an employer question must not be
+ * intercepted.
+ */
+export function managedNetworkAccessRestrictionReason(
+  portal: SupportedPortal,
+  pageText: string | undefined,
+  pageTitle: string | undefined,
+  pageEvidence: { filledFields?: readonly string[]; discovered?: readonly unknown[] } = {},
+): string | null {
+  const normalized = `${pageText ?? ''} ${pageTitle ?? ''}`.toLowerCase().replace(/\s+/g, ' ').trim();
+  const normalizedTitle = (pageTitle ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const exactSmartRecruitersHeading = portalFamily(portal) === 'smartrecruiters'
+    && normalizedTitle === 'access is temporarily restricted';
+  const blocked = exactSmartRecruitersHeading
+    || /\baccess denied\b|\brequest (?:has been )?blocked\b|\btemporarily blocked\b/.test(normalized);
+  const reputationEvidence = exactSmartRecruitersHeading
+    || /automated traffic.{0,80}(?:ip|network)|traffic from (?:this|your) ip|(?:this|your) ip address.{0,80}(?:blocked|flagged|reputation)|network reputation|datacenter (?:ip|network)|proxy (?:ip|network)/.test(normalized);
+  if (!blocked || !reputationEvidence
+    || (pageEvidence.filledFields?.length ?? 0) > 0
+    || (pageEvidence.discovered?.length ?? 0) > 0) return null;
+  const asksForHumanInteraction = /captcha|\bchallenge\b|\bhuman\b|\brobot\b|\bbot\b|\bidentity\b|\bverif(?:y|ies|ied|ication)\b|one[ -]?time|passcode|passkey|security code|\botp\b|\bauthenticat(?:e|ion|ing)\b|\bsign[ -]?in\b|\blog[ -]?(?:in|on)\b|\baccount (?:is )?required\b|\bsession expired\b|\bpassword\b|\bmfa\b|\b2fa\b|single sign[ -]?on|\bsso\b/.test(normalized)
+    || /\b(?:confirm|prove)(?: that)? you(?:'re| are) (?:a )?(?:real )?person\b/.test(normalized)
+    || /\b(?:complete|pass) (?:the |a )?security check\b/.test(normalized)
+    || /\b(?:tick|check|click|select|mark)(?: the| this| a)? checkbox\b/.test(normalized)
+    || /\b(?:press|click)(?: and |-)hold\b/.test(normalized)
+    || /\b(?:create|register)(?: for)? (?:an? )?account\b|\bsign up\b|\bregister to continue\b/.test(normalized)
+    || /\bcontinue with (?:google|apple|microsoft|linkedin|facebook|github|sso)\b/.test(normalized)
+    || /\b(?:accept|agree to)(?: the)? (?:terms(?: and conditions)?|privacy (?:policy|notice)|consent)\b/.test(normalized)
+    || /\b(?:terms and conditions|privacy (?:policy|notice)).{0,40}\b(?:must be accepted|required|to (?:continue|proceed))\b/.test(normalized);
+  if (asksForHumanInteraction) return null;
+  return MANAGED_NETWORK_ACCESS_RESTRICTION_REASON;
+}
 
 export function blockersIncludeCaptcha(blockers: readonly string[]): boolean {
   return blockers.includes(CAPTCHA_BLOCKER);
