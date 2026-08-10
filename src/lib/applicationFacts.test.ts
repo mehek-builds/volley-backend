@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyField, resolveKnownAnswer, type ApplicationProfileLike } from './questionDiscovery';
+import { classifyField, frozenJobEmployerContext, resolveKnownAnswer, type ApplicationProfileLike } from './questionDiscovery';
 import { resolveProfileField } from './profileFieldResolution';
 import {
   APPLICATION_FACT_COLUMNS,
@@ -28,7 +28,7 @@ import {
 function filled(
   label: string,
   ap: ApplicationProfileLike,
-  control: { inputType?: string; options?: string[] } = {},
+  control: { inputType?: string; options?: string[]; context?: string } = {},
 ): string | null {
   return resolve(label, ap, control)?.value ?? null;
 }
@@ -36,12 +36,12 @@ function filled(
 function resolve(
   label: string,
   ap: ApplicationProfileLike,
-  control: { inputType?: string; options?: string[] } = {},
+  control: { inputType?: string; options?: string[]; context?: string } = {},
 ) {
   return resolveProfileField(
     { label, inputType: control.inputType ?? 'text', options: control.options },
     ap,
-    undefined,
+    control.context,
   );
 }
 
@@ -142,16 +142,24 @@ describe('stored application facts reach the control on the real employer questi
       imc: 'have you applied to this role or another role @imc within the last 12-18 months? as a reminder, if you have already applied you will not be reconsidered.',
       point72: 'have you previously applied to work at point72?',
     };
-    // A complete empty declaration still cannot validate arbitrary target text in a live label.
+    // A complete empty declaration does not answer without exact packet-employer context.
     const none: ApplicationProfileLike = { prior_application_employers: [] };
     for (const [name, label] of Object.entries(labels)) {
       assert.match(heldFor(label, none), /prior application question left for you/, name);
     }
+    assert.equal(
+      filled(labels.akunaEver, none, { inputType: 'select', options: YES_NO, context: frozenJobEmployerContext('Akuna Capital') }),
+      'No',
+    );
     // An exact named match answers Yes. Unrelated and help-text-tailed labels remain held.
     const applied: ApplicationProfileLike = { prior_application_employers: ['Akuna', 'Jane Street'] };
-    assert.equal(filled(labels.akunaEver, applied, { inputType: 'select', options: YES_NO }), 'Yes');
-    assert.equal(filled(labels.akunaRole, applied, { inputType: 'select', options: YES_NO }), 'Yes');
-    assert.match(heldFor(labels.point72, applied), /prior application question left for you/);
+    const akunaContext = frozenJobEmployerContext('Akuna Capital');
+    assert.equal(filled(labels.akunaEver, applied, { inputType: 'select', options: YES_NO, context: akunaContext }), 'Yes');
+    assert.equal(filled(labels.akunaRole, applied, { inputType: 'select', options: YES_NO, context: akunaContext }), 'Yes');
+    assert.equal(
+      filled(labels.point72, applied, { inputType: 'select', options: YES_NO, context: frozenJobEmployerContext('Point72') }),
+      'No',
+    );
     assert.match(heldFor(labels.imc, applied), /prior application question left for you/);
   });
 

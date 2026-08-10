@@ -9,6 +9,7 @@ import {
   fitToBudget,
   frozenJobEmployerContext,
   frozenJobLocationContext,
+  frozenJobRelocationLocationContext,
   graduationDateAnswer,
   isOpenEndedQuestion,
   isPolarQuestion,
@@ -889,7 +890,7 @@ test('an office commitment is answered from the stored standing preference, and 
       'are you willing to relocate to San Francisco?',
       'text',
       { relocation_willingness: 'no' },
-      frozenJobLocationContext(['San Francisco, CA']),
+      frozenJobRelocationLocationContext(['San Francisco, CA']),
     ),
     { value: 'No' },
   );

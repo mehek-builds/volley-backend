@@ -24,6 +24,11 @@ import {
   type ResumeRow,
 } from './submissionRunner';
 import { savedAnswerKey } from '../lib/answerReuse';
+import {
+  refreshKnownQuestionAnswers,
+  resolveKnownAnswer,
+  type ApplicationProfileLike,
+} from '../lib/questionDiscovery';
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { describeRequiredBlocker } from '../lib/fieldLabel';
@@ -215,7 +220,7 @@ test('question resolution context includes stored job locations', () => {
   assert.match(context, /San Francisco, CA/);
 });
 
-test('question resolution context excludes mixed-country job locations', () => {
+test('mixed-country context keeps relocation targets separate from US-only onsite evidence', () => {
   const context = applicationContextForQuestionResolution(
     {
       job_context: {
@@ -227,8 +232,65 @@ test('question resolution context excludes mixed-country job locations', () => {
     } as never,
   );
   assert.match(context, /Build data infrastructure/);
-  assert.doesNotMatch(context, /Mountain View, CA/);
-  assert.doesNotMatch(context, /Toronto/);
+  assert.match(context, /\[LITOS FROZEN JOB RELOCATION LOCATION\] Mountain View, CA/);
+  assert.match(context, /\[LITOS FROZEN JOB RELOCATION LOCATION\] Toronto, Canada/);
+  assert.doesNotMatch(context, /\[LITOS FROZEN JOB LOCATION\]/);
+});
+
+test('real packet context binds sibling targets and refuses flattened tails', () => {
+  const review = {
+    role: 'Software Engineer',
+    jd_text: 'Build data infrastructure.',
+  } as ApplicationReviewState;
+  const context = applicationContextForQuestionResolution(
+    {
+      job_context: {
+        company: 'Acme',
+        locations: ['Boston, MA', 'London, UK', 'Paris, France', 'Toronto, Canada'],
+      },
+    } as ResumeRow,
+    review,
+  );
+  const profile: ApplicationProfileLike = {
+    prior_application_employers: ['Acme'],
+    referral_source_default: 'LinkedIn',
+    relocation_willingness: 'yes',
+  };
+  for (const [label, expected] of [
+    ['Have you applied to Acme?', 'Yes'],
+    ['How did you hear about Acme?', 'LinkedIn'],
+    ['Do you agree to relocate to Boston?', 'Yes'],
+    ['Are you willing to relocate to London?', 'Yes'],
+    ['Would you relocate to Paris?', 'Yes'],
+    ['Would you consider relocating to Toronto?', 'Yes'],
+  ] as const) {
+    assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: expected }, label);
+    assert.deepEqual(
+      refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
+      [{ question: label, answer: expected }],
+      label,
+    );
+  }
+
+  for (const label of [
+    'Have you applied to Acme why did you leave',
+    'Have you applied to Acme please explain why',
+    'Did you ever apply for Acme describe the outcome',
+    'How did you hear about Acme why do you want to work here',
+    'Where did you learn about Acme who referred you',
+    'What is your referral source for Acme explain your answer',
+    'Would you relocate for Acme travel 50 percent',
+    'Are you comfortable relocating for Acme work weekends',
+    'Do you agree to relocate to Boston start immediately',
+  ]) {
+    const held = resolveKnownAnswer(label, 'text', profile, context);
+    assert.ok(held && 'skipReason' in held, label);
+    assert.deepEqual(
+      refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], profile, context),
+      [{ question: label, answer: '' }],
+      label,
+    );
+  }
 });
 
 test('attention categories distinguish captcha from document and attestation blockers', () => {

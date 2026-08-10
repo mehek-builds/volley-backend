@@ -590,8 +590,9 @@ function employerMatchesTarget(declared: string, target: string): boolean {
 function previouslyAppliedAnswer(
   label: string,
   ap: ApplicationProfileLike,
+  jdText?: string,
 ): { value: string } | { skipReason: string } | null {
-  const parsed = parsePriorApplicationQuestion(label, ap);
+  const parsed = parsePriorApplicationQuestion(label, jdText);
   if (!parsed) return null;
   if (!parsed.valid || !parsed.target) {
     return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
@@ -939,12 +940,23 @@ function routineLocationCommitmentAnswer(
 
 const FROZEN_JOB_LOCATION_PREFIX = '[LITOS FROZEN JOB LOCATION] ';
 const FROZEN_JOB_EMPLOYER_PREFIX = '[LITOS FROZEN JOB EMPLOYER] ';
+const FROZEN_JOB_RELOCATION_LOCATION_PREFIX = '[LITOS FROZEN JOB RELOCATION LOCATION] ';
 
 /** Encode the exact packet employer for question-family routing. This is identity evidence only,
  * never an answer by itself. */
 export function frozenJobEmployerContext(employer: string): string {
   const value = employer.trim();
   return value ? `${FROZEN_JOB_EMPLOYER_PREFIX}${value}` : '';
+}
+
+/** Encode every exact structured role location for relocation questions. Kept separate from the
+ * US-only onsite marker because foreign and mixed postings are still valid relocation targets. */
+export function frozenJobRelocationLocationContext(locations: readonly string[]): string {
+  return locations
+    .map((location) => location.trim())
+    .filter(Boolean)
+    .map((location) => `${FROZEN_JOB_RELOCATION_LOCATION_PREFIX}${location}`)
+    .join('\n');
 }
 
 /** Encode structured job locations for question resolution without making arbitrary JD prose
@@ -974,6 +986,15 @@ function frozenJobEmployerFromContext(context: string | undefined): string | und
     .map((line) => line.slice(FROZEN_JOB_EMPLOYER_PREFIX.length).trim())
     .filter(Boolean);
   return employers.length === 1 ? employers[0] : undefined;
+}
+
+function frozenJobRelocationLocationsFromContext(context: string | undefined): string[] {
+  if (!context) return [];
+  return context
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith(FROZEN_JOB_RELOCATION_LOCATION_PREFIX))
+    .map((line) => line.slice(FROZEN_JOB_RELOCATION_LOCATION_PREFIX.length).trim())
+    .filter(Boolean);
 }
 
 /* AGE_ATTESTATION_QUESTION is no longer in this list, and that is the whole of the second half of
@@ -1828,7 +1849,7 @@ function exactKnownTarget(raw: string, candidates: readonly string[]): string | 
 
 function parsePriorApplicationQuestion(
   label: string,
-  ap?: ApplicationProfileLike,
+  jdText?: string,
 ): ParsedSiblingQuestion | null {
   const value = normalizedSiblingQuestionLabel(label);
   const stem = value.match(/^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\b\s*(.*)$/i)
@@ -1836,9 +1857,10 @@ function parsePriorApplicationQuestion(
   if (!stem) return null;
   const remainder = normalizeIdentity(stem[1]?.trim() ?? '');
   const temporal = String.raw`(?:before|previously|in the past|within the last \d+(?: \d+)? months?)`;
-  const candidates = ap?.prior_application_employers ?? [];
-  for (const candidate of [...candidates].sort((a, b) => normalizeIdentity(b).length - normalizeIdentity(a).length)) {
-    const target = normalizeIdentity(candidate);
+  const packetEmployer = frozenJobEmployerFromContext(jdText);
+  const employerTokens = packetEmployer ? normalizeEmployerName(packetEmployer).split(' ').filter(Boolean) : [];
+  const candidates = employerTokens.map((_, index) => employerTokens.slice(0, employerTokens.length - index).join(' '));
+  for (const target of candidates) {
     if (!target) continue;
     const escaped = regexpEscape(target);
     const shapes = [
@@ -1848,7 +1870,7 @@ function parsePriorApplicationQuestion(
       new RegExp(`^to this role or another role ${escaped} within the last \d+(?: \d+)? months?$`),
     ];
     if (shapes.some((shape) => shape.test(remainder))) {
-      return { family: 'prior_application', valid: true, target: normalizeEmployerName(candidate) };
+      return { family: 'prior_application', valid: true, target };
     }
   }
   return { family: 'prior_application', valid: false };
@@ -1889,7 +1911,7 @@ function parseRelocationQuestion(label: string, jdText?: string): ParsedSiblingQ
     return { family: 'relocation', valid: true };
   }
   const scoped = detail.match(/^(?:for|to\s+work\s+(?:at|for)|to\s+join|to)\s+(.+)$/i);
-  const locations = frozenJobLocationsFromContext(jdText);
+  const locations = frozenJobRelocationLocationsFromContext(jdText);
   const locationTargets = locations.flatMap((location) => {
     const city = location.split(',')[0]?.trim();
     return city && normalizeIdentity(city) !== normalizeIdentity(location) ? [location, city] : [location];
@@ -1902,10 +1924,9 @@ function parseRelocationQuestion(label: string, jdText?: string): ParsedSiblingQ
 
 function parseSiblingQuestion(
   label: string,
-  ap?: ApplicationProfileLike,
   jdText?: string,
 ): ParsedSiblingQuestion | null {
-  return parsePriorApplicationQuestion(label, ap)
+  return parsePriorApplicationQuestion(label, jdText)
     ?? parseReferralQuestion(label, jdText)
     ?? parseRelocationQuestion(label, jdText);
 }
@@ -1920,10 +1941,9 @@ export function isRelocationQuestion(label: string): boolean {
 
 function siblingQuestionRefusal(
   label: string,
-  ap?: ApplicationProfileLike,
   jdText?: string,
 ): { skipReason: string } | null {
-  const parsed = parseSiblingQuestion(label, ap, jdText);
+  const parsed = parseSiblingQuestion(label, jdText);
   if (!parsed || parsed.valid) return null;
   if (parsed.family === 'prior_application') {
     return {
@@ -1941,10 +1961,9 @@ function siblingQuestionRefusal(
 
 function belongsToNonEmploymentQuestionFamily(
   label: string,
-  ap?: ApplicationProfileLike,
   jdText?: string,
 ): boolean {
-  return Boolean(parseSiblingQuestion(label, ap, jdText)?.valid);
+  return Boolean(parseSiblingQuestion(label, jdText)?.valid);
 }
 
 function labelHasUnprovenNoncurrentGovernmentStatus(label: string): boolean {
@@ -2021,7 +2040,7 @@ function governmentEmploymentAnswer(
   ap: ApplicationProfileLike,
   jdText?: string,
 ): { value: string } | { skipReason: string } | null {
-  if (belongsToNonEmploymentQuestionFamily(label, ap, jdText)) return null;
+  if (belongsToNonEmploymentQuestionFamily(label, jdText)) return null;
   if (labelHasUnprovenNoncurrentGovernmentStatus(label)) {
     return {
       skipReason: governmentEmploymentSkipReason(
@@ -3350,7 +3369,7 @@ export function resolveKnownAnswer(
   const politicallyExposed = politicallyExposedAnswer(label, ap);
   if (politicallyExposed) return politicallyExposed;
 
-  const siblingRefusal = siblingQuestionRefusal(label, ap, jdText);
+  const siblingRefusal = siblingQuestionRefusal(label, jdText);
   if (siblingRefusal) return siblingRefusal;
 
   /* Up here for the same reason as the two above it, and AFTER them on purpose: the PEP question
@@ -3380,7 +3399,7 @@ export function resolveKnownAnswer(
   const highSchool = highSchoolGraduationAnswer(label, ap);
   if (highSchool) return highSchool;
 
-  const previouslyApplied = previouslyAppliedAnswer(label, ap);
+  const previouslyApplied = previouslyAppliedAnswer(label, ap, jdText);
   if (previouslyApplied) return previouslyApplied;
 
   const referral = referralAnswer(label, ap, jdText);

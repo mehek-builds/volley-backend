@@ -6,6 +6,7 @@ import {
   classifyField,
   frozenJobEmployerContext,
   frozenJobLocationContext,
+  frozenJobRelocationLocationContext,
   isGovernmentEmploymentQuestion,
   isPriorApplicationQuestion,
   isRelocationQuestion,
@@ -740,8 +741,8 @@ describe('prior government employment, answered from the experience bank', () =>
     };
     const context = frozenJobEmployerContext('NASA');
     const cases = [
-      ['Have you previously applied to work at NASA?', 'Yes', undefined],
-      ['Have you previously applied to NASA?', 'Yes', undefined],
+      ['Have you previously applied to work at NASA?', 'Yes', context],
+      ['Have you previously applied to NASA?', 'Yes', context],
       ['How did you hear about NASA?', 'LinkedIn', context],
     ] as const;
     for (const [label, expected, questionContext] of cases) {
@@ -800,7 +801,10 @@ describe('prior government employment, answered from the experience bank', () =>
       onsite_commitment: 'anywhere',
       experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
     };
-    const context = [frozenJobEmployerContext('NASA'), frozenJobLocationContext(['Boston, MA'])].join('\n');
+    const context = [
+      frozenJobEmployerContext('NASA'),
+      frozenJobRelocationLocationContext(['Boston, MA']),
+    ].join('\n');
     const valid = [
       ['Did you previously apply to NASA?', 'Yes'],
       ['Did you ever apply to NASA?', 'Yes'],
@@ -885,7 +889,10 @@ describe('prior government employment, answered from the experience bank', () =>
       referral_source_default: 'LinkedIn',
       relocation_willingness: 'yes',
     };
-    const context = [frozenJobEmployerContext('Acme'), frozenJobLocationContext(['Boston, MA'])].join('\n');
+    const context = [
+      frozenJobEmployerContext('Acme'),
+      frozenJobRelocationLocationContext(['Boston, MA']),
+    ].join('\n');
     const valid = [
       ['Have you applied to Acme?', 'Yes'],
       ['How did you hear about Acme?', 'LinkedIn'],
@@ -923,10 +930,28 @@ describe('prior government employment, answered from the experience bank', () =>
 
     for (const [label, wrongContext] of [
       ['How did you hear about Acme?', frozenJobEmployerContext('Other Corp')],
-      ['Do you agree to relocate to Boston?', frozenJobLocationContext(['Chicago, IL'])],
+      ['Do you agree to relocate to Boston?', frozenJobRelocationLocationContext(['Chicago, IL'])],
     ] as const) {
       const held = resolveKnownAnswer(label, 'text', profile, wrongContext);
       assert.ok(held && 'skipReason' in held, label);
+    }
+
+    const shortNameLabel = 'Have you applied to Akuna before?';
+    const akunaContext = frozenJobEmployerContext('Akuna Capital');
+    for (const [declared, expected] of [
+      [['Akuna Capital'], 'Yes'],
+      [[], 'No'],
+      [['Jane Street'], 'No'],
+    ] as const) {
+      const shortProfile: ApplicationProfileLike = { prior_application_employers: [...declared] };
+      assert.deepEqual(
+        resolveKnownAnswer(shortNameLabel, 'text', shortProfile, akunaContext),
+        { value: expected },
+      );
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: shortNameLabel, answer: 'stale' }], shortProfile, akunaContext),
+        [{ question: shortNameLabel, answer: expected }],
+      );
     }
   });
 
