@@ -1978,6 +1978,48 @@ function parsePriorApplicationQuestion(
   }
   const priorWindow = String.raw`(?:(?:within|in|over) (?:the )?(?:last|past)|(?:last|past)) (?:\d+(?: \d+)? )?(?:days?|weeks?|months?|years?)`;
   const priorTime = String.raw`(?:before|previously|in the past|ever|${priorWindow})`;
+  const organizationalUnitApplication = (raw: string): 'organizational' | 'unrelated' | null => {
+    const match = raw.match(
+      /^(.*\b(teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies)))(?: (in|at|based in|based at|located in|located at|within|for) (.+))?$/,
+    );
+    if (!match) return null;
+    const fullUnit = match[1];
+    const head = match[2];
+    const preposition = match[3];
+    const complement = match[4]?.trim();
+    const unitPrefix = fullUnit.slice(0, -head.length).trim();
+    if (/^(?:functions?|practices?)$/.test(head)) {
+      const technicalModifier = /\b(?:activation|loss|objective|mathematical|statistical|coding|secure coding|programming|api|database|algorithmic)\b/.test(unitPrefix);
+      if (technicalModifier) return 'unrelated';
+      let semanticModifier = unitPrefix.replace(/^(?:a|an|the|another|any)\s+/, '');
+      const contextualOwner = semanticModifier.match(/^(?:our|this|current)\s+(.+)$/);
+      if (contextualOwner) {
+        semanticModifier = contextualOwner[1];
+      } else {
+        const alias = packetEmployer
+          ? siblingEmployerAliases(packetEmployer).find((candidate) => semanticModifier.startsWith(`${candidate} `))
+          : undefined;
+        if (alias) semanticModifier = semanticModifier.slice(alias.length).trim();
+      }
+      const organizationalModifier = /^(?:consulting|products?|business development|corporate(?: finance| development)?|organizational|client services?|advisory|finance|legal|tax|audit|strateg(?:y|ies)|risks?|compliance|operations?|human resources?|hr|people|talent|recruiting|sales|marketing|customer (?:success|support)|supply chains?|procurement|accounting|treasur(?:y|ies)|investor relations?|communications?|public relations?|security governance|quality assurance|program management|project management|it|information technology|commercial|regulatory affairs?|research and development|r and d|partnerships?|business operations|revenue operations|go to market|strategy and operations)$/.test(semanticModifier);
+      if (!organizationalModifier) return 'unrelated';
+    }
+    if (!preposition) return 'organizational';
+    const locationTargets = frozenJobRelocationLocationsFromContext(jdText).flatMap((location) => {
+      const city = location.split(',')[0]?.trim();
+      return city && normalizeIdentity(city) !== normalizeIdentity(location) ? [location, city] : [location];
+    });
+    const exactLocation = Boolean(complement && exactKnownTarget(complement, locationTargets));
+    const exactEmployer = Boolean(
+      complement && packetEmployer && exactKnownTarget(complement, siblingEmployerAliases(packetEmployer)),
+    );
+    const validComplement = /^(?:located in|located at)$/.test(preposition)
+      ? exactLocation
+      : /^for$/.test(preposition)
+        ? exactEmployer
+        : exactLocation || exactEmployer;
+    return validComplement ? 'organizational' : 'unrelated';
+  };
   const applicationObjectKind = (remainder: string): 'global' | 'packet' | 'typed' | null => {
     const withoutTemporal = remainder.replace(new RegExp(`\\s+${priorTime}$`), '');
     const objectMatch = withoutTemporal.match(/^(?:at|for|to|with)\s+(.+)$/);
@@ -2131,6 +2173,14 @@ function parsePriorApplicationQuestion(
     }
     return null;
   }
+  const nestedUnitRemainder = remainder
+    .replace(new RegExp(`\\s+${priorTime}$`), '')
+    .match(/^(?:to|for) (?:(?:a|an|the|this|that|any) )?(?:[a-z0-9]+ ){0,4}(?:roles?|positions?|openings?|jobs?) (?:within|in|at) (.+)$/)?.[1];
+  if (nestedUnitRemainder) {
+    const classification = organizationalUnitApplication(nestedUnitRemainder);
+    if (classification === 'organizational') return { family: 'prior_application', valid: false };
+    if (classification === 'unrelated') return null;
+  }
   const objectKind = applicationObjectKind(remainder);
   if (globalRemainder || objectKind === 'global') {
     return { family: 'prior_application', valid: true, globalPriorApplicationHistory: true };
@@ -2147,50 +2197,10 @@ function parsePriorApplicationQuestion(
   const boundedToObject = toObject?.[1]
     .replace(new RegExp(`\\s+(?:${priorTime}|already|yet|earlier|so far|to date)$`), '')
     .trim();
-  const organizationalUnitObject = boundedToObject?.match(
-    /^(.*\b(teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies)))(?: (in|at|based in|based at|located in|located at|within|for) (.+))?$/,
-  );
-  if (organizationalUnitObject) {
-    const fullUnit = organizationalUnitObject[1];
-    const head = organizationalUnitObject[2];
-    const preposition = organizationalUnitObject[3];
-    const complement = organizationalUnitObject[4]?.trim();
-    const unitPrefix = fullUnit.slice(0, -head.length).trim();
-    if (/^(?:functions?|practices?)$/.test(head)) {
-      const technicalModifier = /\b(?:activation|loss|objective|mathematical|statistical|coding|secure coding|programming|api|database|algorithmic)\b/.test(unitPrefix);
-      if (technicalModifier) return null;
-      let semanticModifier = unitPrefix.replace(/^(?:a|an|the|another|any)\s+/, '');
-      const contextualOwner = semanticModifier.match(/^(?:our|this|current)\s+(.+)$/);
-      if (contextualOwner) {
-        semanticModifier = contextualOwner[1];
-      } else {
-        const alias = packetEmployer
-          ? siblingEmployerAliases(packetEmployer).find((candidate) => semanticModifier.startsWith(`${candidate} `))
-          : undefined;
-        semanticModifier = alias
-          ? semanticModifier.slice(alias.length).trim()
-          : semanticModifier;
-      }
-      const organizationalModifier = /^(?:consulting|products?|business development|corporate(?: finance)?|organizational|client services?|advisory|finance|legal|tax|audit|strateg(?:y|ies)|risks?|compliance|operations?|human resources?|hr|people|talent|recruiting|sales|marketing|customer (?:success|support)|supply chains?|procurement|accounting|treasur(?:y|ies)|investor relations?|communications?|public relations?|security governance|quality assurance|program management|project management)$/.test(semanticModifier);
-      if (!organizationalModifier) return null;
-    }
-    if (!preposition) return { family: 'prior_application', valid: false };
-    const locationTargets = frozenJobRelocationLocationsFromContext(jdText).flatMap((location) => {
-      const city = location.split(',')[0]?.trim();
-      return city && normalizeIdentity(city) !== normalizeIdentity(location) ? [location, city] : [location];
-    });
-    const exactLocation = Boolean(complement && exactKnownTarget(complement, locationTargets));
-    const exactEmployer = Boolean(
-      complement && packetEmployer && exactKnownTarget(complement, siblingEmployerAliases(packetEmployer)),
-    );
-    const validComplement = /^(?:located in|located at)$/.test(preposition)
-      ? exactLocation
-      : /^for$/.test(preposition)
-        ? exactEmployer
-        : /^based at$/.test(preposition)
-          ? exactLocation || exactEmployer
-        : exactLocation || exactEmployer;
-    if (validComplement) return { family: 'prior_application', valid: false };
+  if (boundedToObject) {
+    const classification = organizationalUnitApplication(boundedToObject);
+    if (classification === 'organizational') return { family: 'prior_application', valid: false };
+    if (classification === 'unrelated') return null;
   }
   if (isSkillOrWorkApplicationObject(remainder)) return null;
   const aliases = packetEmployer ? siblingEmployerAliases(packetEmployer) : [];
