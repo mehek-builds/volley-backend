@@ -52,6 +52,11 @@ export const APPLICATION_FACT_COLUMNS = [
   // The main-first schema PR migrates this encrypted text column before the feature deploys. Keep
   // the standard undefined-column fallback for staging databases and incomplete local schemas.
   'work_eligibility_by_country',
+  // Added by scripts/apply-setup-gaps-asked-schema.mjs. Listed here because the deploy may lead the
+  // migration, and this is the column whose ABSENCE has to be distinguishable from NULL: absent
+  // suppresses the gaps step entirely (the flow behaves as it does today), null routes to it. See
+  // routes/onboarding.ts gapsAskedFrom.
+  'setup_gaps_asked_at',
 ] as const;
 
 export type ApplicationFactColumn = (typeof APPLICATION_FACT_COLUMNS)[number];

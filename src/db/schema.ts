@@ -529,6 +529,23 @@ export const application_profile = pgTable('application_profile', {
    * start being asked a question they were silently answering before. */
   referral_source_default: text('referral_source_default'),
 
+  /* WHEN THE SETUP GAPS SCREEN WAS ASKED, which is what makes that screen exitable.
+   *
+   * The gaps screen is derived from what is still missing (routes/onboarding.ts SETUP_GAP_FIELDS),
+   * and every field on it is optional and skippable. #116 removed the step from the flow for
+   * exactly that reason: gating on "still missing" derives 'gaps' FOREVER for anyone who skips it,
+   * because skipping leaves the fields missing. Deriving the step again without a record of having
+   * ASKED would reintroduce that bug verbatim.
+   *
+   * So this is the one thing about the screen that is stored rather than derived, for the same
+   * reason users.onboarding_completed_at is: "I was asked and chose not to answer" is an act, and
+   * no amount of looking at the profile can infer it. Set by POST /onboarding/gaps-asked on both
+   * Save and Skip - both mean asked, and only the profile itself records which.
+   *
+   * NULL means never asked. Absent (this migration has not run) is a THIRD state and is treated as
+   * asked, so the step disappears rather than becoming inescapable: see gapsAskedFrom. */
+  setup_gaps_asked_at: timestamp('setup_gaps_asked_at', { withTimezone: true }),
+
   /* ---- application facts asked once in onboarding (2026-08-08) ----
    *
    * Measured, not guessed. Every column below was counted across the 25 most recent production
