@@ -115,6 +115,34 @@ test('managed receiving rejects applicant replies before any relay ledger insert
   assert.match(service, /return \/\^\[a-z0-9\].*\\\.resend\\\.app\$\/i\.test\(domain\)/);
 });
 
+test('employer mail is stored before the strict forwarding whitelist is applied', () => {
+  const processor = service.slice(
+    service.indexOf('export async function processInboundApplicationEmail'),
+    service.indexOf('export async function applicationEmailHealth'),
+  );
+  const ledgerInsert = processor.indexOf("direction: 'inbound'");
+  const decision = processor.indexOf('applicationEmailForwardingDecision(storedClassification)');
+  const claim = processor.indexOf('forwarding_claimed_at: new Date()');
+  const send = processor.indexOf('sendEmail(forwardEmailPayload');
+  assert.ok(ledgerInsert >= 0);
+  assert.ok(decision > ledgerInsert);
+  assert.ok(claim > decision);
+  assert.ok(send > claim);
+  assert.match(processor, /reason: forwardingDecision\.reason/);
+  assert.match(service, /classification === 'submission_confirmation' \|\| classification === 'interview_request'/);
+  assert.match(processor, /onConflictDoNothing\(\{ target: application_email_messages\.dedupe_key \}\)/);
+  assert.match(processor, /sql`\(\$\{application_email_messages\.forwarding_claimed_at\} is null or/);
+  assert.match(processor, /storedApplicationEmailClassification\(message\.classification\)/);
+  assert.match(processor, /subject: message\.subject \?\? undefined/);
+  assert.doesNotMatch(
+    processor.slice(processor.indexOf('await sendEmail(forwardEmailPayload'), processor.indexOf("if (storedClassification === 'submission_confirmation'")),
+    /inbound: input/,
+  );
+  const verificationReader = readFileSync('src/lib/emailVerification.ts', 'utf8');
+  assert.match(verificationReader, /from\(application_email_messages\)/);
+  assert.match(verificationReader, /extractLitosVerificationCode\(rows/);
+});
+
 test('the forwarding destination is a stored preference, not the login address', () => {
   const schemaSource = readFileSync('src/db/schema.ts', 'utf8');
   assert.match(schemaSource, /application_email_forward_to: text\('application_email_forward_to'\)/);

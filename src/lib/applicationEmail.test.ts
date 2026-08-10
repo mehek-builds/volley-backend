@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   applicationAliasFor,
+  applicationEmailForwardingDecision,
   applicationEmailRouteLabel,
   applicationEmailRouteGenerationFingerprint,
   classifyApplicationEmail,
@@ -208,6 +209,57 @@ test('application email classifier recognizes employer outcomes', () => {
   assert.equal(
     classifyApplicationEmail('Your verification code', 'Use passcode 123456.'),
     'verification_code',
+  );
+  assert.equal(
+    classifyApplicationEmail('Interview confirmed', 'Your interview is scheduled for Tuesday at 10:00.'),
+    'interview_request',
+  );
+  assert.equal(
+    classifyApplicationEmail('Phone screen invitation', 'We invite you to a phone screen with the team.'),
+    'interview_request',
+  );
+});
+
+test('application email forwarding is a strict outcome whitelist', () => {
+  assert.deepEqual(applicationEmailForwardingDecision('submission_confirmation'), { forward: true });
+  assert.deepEqual(applicationEmailForwardingDecision('interview_request'), { forward: true });
+  for (const classification of ['verification_code', 'recruiter_reply', 'applicant_reply', 'other'] as const) {
+    assert.deepEqual(
+      applicationEmailForwardingDecision(classification),
+      { forward: false, reason: 'internal_only' },
+      classification,
+    );
+  }
+});
+
+test('security codes and generic recruiter follow-ups are never promoted to interview mail', () => {
+  assert.equal(
+    classifyApplicationEmail('Confirm your interview', 'Use security code 123456 to continue.'),
+    'verification_code',
+  );
+  assert.equal(
+    classifyApplicationEmail('Following up after your interview', 'Our recruiter will share next steps soon.'),
+    'recruiter_reply',
+  );
+  assert.equal(
+    classifyApplicationEmail('Your application update', 'We decided not to proceed after your interview.'),
+    'other',
+  );
+  assert.equal(
+    classifyApplicationEmail('Interview feedback details', 'We are not moving forward.'),
+    'other',
+  );
+  assert.equal(
+    classifyApplicationEmail('Your interview details', 'We decided to pursue other candidates.'),
+    'other',
+  );
+  assert.equal(
+    classifyApplicationEmail('Interview feedback', 'Our decision update is scheduled for Tuesday.'),
+    'other',
+  );
+  assert.equal(
+    classifyApplicationEmail('A note from the hiring team', 'We enjoyed learning about your background.'),
+    'recruiter_reply',
   );
 });
 

@@ -34,6 +34,10 @@ export type ApplicationEmailClassification =
   | 'applicant_reply'
   | 'other';
 
+export type ApplicationEmailForwardingDecision =
+  | { forward: true }
+  | { forward: false; reason: 'internal_only' };
+
 export type InboundApplicationEmail = {
   provider?: string;
   providerMessageId?: string;
@@ -410,19 +414,53 @@ export async function resolveApplicantEmail(input: {
 
 export function classifyApplicationEmail(subject = '', text = ''): ApplicationEmailClassification {
   const haystack = `${subject}\n${text}`.toLowerCase();
-  if (/\b(interview|schedule a call|speak with|availability|availability for a call|calendar)\b/.test(haystack)) {
-    return 'interview_request';
-  }
   if (/\b(verification code|security code|one[- ]?time|otp|passcode|confirm your email)\b/.test(haystack)) {
     return 'verification_code';
   }
   if (/\b(thank you for applying|thanks for applying|application (?:has been )?received|we received your application|successfully submitted|application submitted)\b/.test(haystack)) {
     return 'submission_confirmation';
   }
+  const interviewStage = '(?:interview|phone screen|technical screen|onsite interview)';
+  const interviewRequestOrConfirmation =
+    new RegExp(`\\b(?:schedule|reschedule|book|confirm)\\b.{0,40}\\b(?:${interviewStage}|call)\\b`).test(haystack)
+    || new RegExp(`\\b${interviewStage}\\b.{0,40}\\b(?:scheduled|confirmed|rescheduled)\\b`).test(haystack)
+    || new RegExp(`\\b${interviewStage}\\s+(?:invitation|request)\\b`).test(haystack)
+    || new RegExp(`\\b(?:invite|invitation)\\b.{0,50}\\b${interviewStage}\\b`).test(haystack)
+    || new RegExp(`\\b${interviewStage}\\b.{0,40}\\bavailability\\b`).test(haystack)
+    || new RegExp(`\\bavailability\\b.{0,40}\\b(?:for|to schedule)\\b.{0,30}\\b(?:${interviewStage}|call)\\b`).test(haystack)
+    || /\b(?:share|send|select|choose)\b.{0,30}\b(?:availability|time slot|timeslot)\b.{0,30}\b(?:interview|call|screen)\b/.test(haystack);
+  if (interviewRequestOrConfirmation) return 'interview_request';
   if (/\b(recruiter|talent|hiring team|next steps|following up)\b/.test(haystack)) {
     return 'recruiter_reply';
   }
   return 'other';
+}
+
+/**
+ * Employer mail is always stored, but only terminal submission receipts and interview logistics
+ * leave Litos automatically. Verification codes remain available to the managed-session reader,
+ * and recruiter or miscellaneous messages remain available in the application email ledger.
+ */
+export function applicationEmailForwardingDecision(
+  classification: ApplicationEmailClassification,
+): ApplicationEmailForwardingDecision {
+  return classification === 'submission_confirmation' || classification === 'interview_request'
+    ? { forward: true }
+    : { forward: false, reason: 'internal_only' };
+}
+
+function storedApplicationEmailClassification(value: string): ApplicationEmailClassification {
+  switch (value) {
+    case 'submission_confirmation':
+    case 'interview_request':
+    case 'verification_code':
+    case 'recruiter_reply':
+    case 'applicant_reply':
+    case 'other':
+      return value;
+    default:
+      return 'other';
+  }
 }
 
 function escapeHtml(value: string): string {
@@ -828,16 +866,43 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
   }).onConflictDoNothing({ target: application_email_messages.dedupe_key }).returning({
     id: application_email_messages.id,
     forwarded_at: application_email_messages.forwarded_at,
+    from_email: application_email_messages.from_email,
+    subject: application_email_messages.subject,
+    text: application_email_messages.text,
+    html: application_email_messages.html,
+    classification: application_email_messages.classification,
+    received_at: application_email_messages.received_at,
   });
   const message = inserted[0] ?? (await db
     .select({
       id: application_email_messages.id,
       forwarded_at: application_email_messages.forwarded_at,
+      from_email: application_email_messages.from_email,
+      subject: application_email_messages.subject,
+      text: application_email_messages.text,
+      html: application_email_messages.html,
+      classification: application_email_messages.classification,
+      received_at: application_email_messages.received_at,
     })
     .from(application_email_messages)
     .where(eq(application_email_messages.dedupe_key, dedupeKey))
     .limit(1))[0];
-  if (!message || message.forwarded_at) return { accepted: true, alias: aliasRow.alias, classification, forwarded: false };
+  const storedClassification = message
+    ? storedApplicationEmailClassification(message.classification)
+    : classification;
+  const forwardingDecision = applicationEmailForwardingDecision(storedClassification);
+  if (!forwardingDecision.forward) {
+    return {
+      accepted: true,
+      alias: aliasRow.alias,
+      classification: storedClassification,
+      forwarded: false,
+      reason: forwardingDecision.reason,
+    };
+  }
+  if (!message || message.forwarded_at) {
+    return { accepted: true, alias: aliasRow.alias, classification: storedClassification, forwarded: false };
+  }
 
   const messageId = message.id;
   let forwarded = false;
@@ -856,8 +921,15 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     await sendEmail(forwardEmailPayload({
       alias: aliasRow.alias,
       forwardTo: aliasRow.forward_to,
-      inbound: input,
-      classification,
+      inbound: {
+        from: message.from_email ?? undefined,
+        to: [aliasRow.alias],
+        subject: message.subject ?? undefined,
+        text: message.text ?? undefined,
+        html: message.html ?? undefined,
+        receivedAt: message.received_at ?? undefined,
+      },
+      classification: storedClassification,
     }));
     forwarded = true;
     await db.update(application_email_messages)
@@ -871,15 +943,15 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     throw error;
   }
 
-  if (classification === 'submission_confirmation' && aliasRow.generated_resume_id) {
+  if (storedClassification === 'submission_confirmation' && aliasRow.generated_resume_id) {
     await markSubmittedFromConfirmation({
       applicationId: aliasRow.generated_resume_id,
       alias: aliasRow.alias,
-      subject: input.subject,
-      receivedAt,
+      subject: message.subject ?? undefined,
+      receivedAt: message.received_at ?? receivedAt,
     });
   }
-  return { accepted: true, alias: aliasRow.alias, classification, forwarded };
+  return { accepted: true, alias: aliasRow.alias, classification: storedClassification, forwarded };
 }
 
 export type ApplicationEmailHealth = {
