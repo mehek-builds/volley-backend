@@ -36,14 +36,17 @@ test('attended extension refill returns the exact owned generated packet and a f
   assert.ok(route.indexOf('extensionHandoffPacketMatches(') < route.indexOf('mintDownloadToken('));
 });
 
-test('attended extension start rejects a stale packet version and a changed answer refresh', () => {
+test('attended extension start validates every supplied binding and rejects a changed answer refresh', () => {
   const route = source.slice(
     source.indexOf("'/applications/:id/submission/extension-start'"),
     source.indexOf("'/applications/:id/submission/extension-outcome'"),
   );
-  assert.match(route, /precheckReview\?\.extension_handoff_url/);
-  assert.match(route, /extensionHandoffPacketMatches\(/);
-  assert.match(route, /currentVersion !== parsed\.data\.handoff_version/);
+  assert.match(route, /extensionStartHandoffBinding\(/);
+  assert.match(route, /required: Boolean\(precheckReview\.extension_handoff_url\)/);
+  assert.match(route, /binding === 'missing'/);
+  assert.match(route, /binding === 'mismatch'/);
+  assert.match(route, /binding === 'stale'/);
+  assert.match(route, /parsed\.data\.handoff_version && !isDeepStrictEqual\(refreshedQuestions, current\.questions\)/);
   assert.match(route, /isDeepStrictEqual\(refreshedQuestions, current\.questions\)/);
   assert.match(route, /generated_resumes\.spec\} = \$\{JSON\.stringify\(precheckRow\.spec\)\}::jsonb/);
   assert.match(route, /row\.resume_object_key !== precheckRow\.resume_object_key/);

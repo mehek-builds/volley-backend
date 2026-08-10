@@ -40,6 +40,57 @@ export function extensionHandoffVersion(input: {
   })).digest('hex');
 }
 
+export type ExtensionStartHandoffBindingResult =
+  | 'not_provided'
+  | 'valid'
+  | 'missing'
+  | 'mismatch'
+  | 'stale';
+
+/** Validate the packet binding echoed by Chrome before an attended submission is claimed. */
+export function extensionStartHandoffBinding(input: {
+  required: boolean;
+  handoffVersion?: string;
+  currentUrl?: string;
+  applicationId: string;
+  userId: string;
+  resumeObjectKey: string;
+  spec: unknown;
+  jobContext: unknown;
+  review: Pick<ApplicationReviewState,
+    | 'portal_url'
+    | 'extension_handoff_url'
+    | 'ats_name'
+    | 'status'
+    | 'attention_reason'
+    | 'submission_claimed_at'>;
+}): ExtensionStartHandoffBindingResult {
+  const hasVersion = Boolean(input.handoffVersion);
+  const hasUrl = Boolean(input.currentUrl);
+  if (!hasVersion && !hasUrl) return input.required ? 'missing' : 'not_provided';
+  if (!hasVersion || !hasUrl) return 'missing';
+
+  if (!extensionHandoffPacketMatches({
+    frozenUrl: input.review.portal_url,
+    frozenHandoffUrl: input.review.extension_handoff_url,
+    currentUrl: input.currentUrl!,
+    frozenAtsName: input.review.ats_name,
+    status: input.review.status,
+    attentionReason: input.review.attention_reason,
+    submissionClaimedAt: input.review.submission_claimed_at,
+  })) return 'mismatch';
+
+  const currentVersion = extensionHandoffVersion({
+    applicationId: input.applicationId,
+    userId: input.userId,
+    resumeObjectKey: input.resumeObjectKey,
+    spec: input.spec,
+    jobContext: input.jobContext,
+    currentUrl: input.currentUrl!,
+  });
+  return currentVersion && currentVersion === input.handoffVersion ? 'valid' : 'stale';
+}
+
 function smartRecruitersTenant(rawUrl: string): string | null {
   try {
     const url = new URL(rawUrl);

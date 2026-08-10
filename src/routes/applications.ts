@@ -57,7 +57,11 @@ import {
 } from '../lib/submissionEducationGuard';
 import { resumeFileNameForRole } from '../lib/resumeFileName';
 import { sendUnsupportedPortalApplicationEmail } from '../lib/unsupportedPortalEmailFallback';
-import { extensionHandoffPacketMatches, extensionHandoffVersion } from '../lib/extensionHandoffPacket';
+import {
+  extensionHandoffPacketMatches,
+  extensionHandoffVersion,
+  extensionStartHandoffBinding,
+} from '../lib/extensionHandoffPacket';
 import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import {
   duplicateApplicationResponse,
@@ -509,30 +513,25 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         eq(generated_resumes.user_id, userId),
       )).limit(1);
       const precheckReview = precheckRow ? readApplicationReview(precheckRow.spec) : null;
-      if (precheckRow && precheckReview?.extension_handoff_url) {
-        if (!parsed.data.handoff_version || !parsed.data.current_url) {
-          return reply.status(409).send({ error: 'Reload this saved application before submitting from Chrome' });
-        }
-        if (!extensionHandoffPacketMatches({
-          frozenUrl: precheckReview.portal_url,
-          frozenHandoffUrl: precheckReview.extension_handoff_url,
+      if (precheckRow && precheckReview) {
+        const binding = extensionStartHandoffBinding({
+          required: Boolean(precheckReview.extension_handoff_url),
+          handoffVersion: parsed.data.handoff_version,
           currentUrl: parsed.data.current_url,
-          frozenAtsName: precheckReview.ats_name,
-          status: precheckReview.status,
-          attentionReason: precheckReview.attention_reason,
-          submissionClaimedAt: precheckReview.submission_claimed_at,
-        })) {
-          return reply.status(409).send({ error: 'This saved application does not match the company form open in Chrome' });
-        }
-        const currentVersion = extensionHandoffVersion({
           applicationId: precheckRow.id,
           userId,
           resumeObjectKey: precheckRow.resume_object_key ?? '',
           spec: precheckRow.spec,
           jobContext: precheckRow.job_context,
-          currentUrl: parsed.data.current_url,
+          review: precheckReview,
         });
-        if (!currentVersion || currentVersion !== parsed.data.handoff_version) {
+        if (binding === 'missing') {
+          return reply.status(409).send({ error: 'Reload this saved application before submitting from Chrome' });
+        }
+        if (binding === 'mismatch') {
+          return reply.status(409).send({ error: 'This saved application does not match the company form open in Chrome' });
+        }
+        if (binding === 'stale') {
           return reply.status(409).send({ error: 'The saved application changed. Reload it before submitting.' });
         }
       }
@@ -604,7 +603,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           packetCountry,
           packetCountryCode,
         );
-        if (current.extension_handoff_url && !isDeepStrictEqual(refreshedQuestions, current.questions)) {
+        if (parsed.data.handoff_version && !isDeepStrictEqual(refreshedQuestions, current.questions)) {
           return { kind: 'changed' as const };
         }
         const sensitive = sensitiveQuestionFor(refreshedQuestions, sensitiveProfile, current.jd_text, packetCountry, packetCountryCode);

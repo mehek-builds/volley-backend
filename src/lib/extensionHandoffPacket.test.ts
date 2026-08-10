@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { extensionHandoffPacketMatches, extensionHandoffVersion } from './extensionHandoffPacket';
+import {
+  extensionHandoffPacketMatches,
+  extensionHandoffVersion,
+  extensionStartHandoffBinding,
+} from './extensionHandoffPacket';
 import { MANAGED_NETWORK_ACCESS_RESTRICTION_REASON } from './portalSubmission';
 
 const SEEKA_POSTING = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648206-software-engineer-internship';
@@ -111,6 +115,71 @@ test('a generic other ATS handoff requires exact canonical application identity'
     frozenAtsName: 'lever',
     status: 'ready_to_submit',
   }), false);
+});
+
+test('generic extension-start validates a complete immutable handoff binding', () => {
+  const currentUrl = 'https://jobs.lever.co/acme/abc123/apply';
+  const packet = {
+    applicationId: 'application-1',
+    userId: 'user-1',
+    resumeObjectKey: 'users/user-1/resumes/application-1.pdf',
+    spec: {
+      summary: 'Tailored summary',
+      _review: {
+        portal_url: 'https://jobs.lever.co/acme/abc123',
+        ats_name: 'lever',
+        status: 'ready_to_submit' as const,
+        questions: [{ question: 'Why?', answer: 'Because.' }],
+      },
+    },
+    jobContext: { company: 'Acme', role: 'Engineer' },
+    currentUrl,
+  };
+  const review = packet.spec._review;
+  const handoffVersion = extensionHandoffVersion(packet)!;
+  const validate = (overrides: Partial<Parameters<typeof extensionStartHandoffBinding>[0]> = {}) => extensionStartHandoffBinding({
+    required: false,
+    handoffVersion,
+    ...packet,
+    review,
+    ...overrides,
+  });
+
+  assert.equal(validate(), 'valid');
+  assert.equal(validate({ handoffVersion: undefined, currentUrl: undefined }), 'not_provided');
+  assert.equal(validate({ handoffVersion: undefined }), 'missing');
+  assert.equal(validate({ currentUrl: undefined }), 'missing');
+  assert.equal(validate({ currentUrl: 'https://jobs.lever.co/acme/different/apply' }), 'mismatch');
+  assert.equal(validate({ spec: { ...packet.spec, summary: 'Changed after fetch' } }), 'stale');
+  assert.equal(validate({
+    spec: { ...packet.spec, _review: { ...review, questions: [{ question: 'Why?', answer: 'Changed.' }] } },
+  }), 'stale');
+  assert.equal(validate({ resumeObjectKey: `${packet.resumeObjectKey}.new` }), 'stale');
+  assert.equal(validate({ jobContext: { ...packet.jobContext, role: 'Designer' } }), 'stale');
+  assert.equal(validate({ jobContext: { ...packet.jobContext, company: 'Other employer' } }), 'stale');
+  assert.equal(validate({
+    spec: { ...packet.spec, _review: { ...review, status: 'questions_ready' } },
+    review: { ...review, status: 'questions_ready' },
+  }), 'stale');
+});
+
+test('SmartRecruiters recovery cannot bypass its required extension-start binding', () => {
+  const packet = {
+    required: true,
+    applicationId: 'application-1',
+    userId: 'user-1',
+    resumeObjectKey: 'users/user-1/resumes/application-1.pdf',
+    spec: { _review: { status: 'needs_attention' } },
+    jobContext: { company: 'SEEKA Technology' },
+    review: {
+      portal_url: SEEKA_POSTING,
+      extension_handoff_url: SEEKA_FORM,
+      ats_name: 'smartrecruiters',
+      status: 'needs_attention' as const,
+      attention_reason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
+    },
+  };
+  assert.equal(extensionStartHandoffBinding(packet), 'missing');
 });
 
 test('claimed, submitted, in-flight, and security-code packets are never disclosed for refill', () => {
