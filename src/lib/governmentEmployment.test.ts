@@ -1123,6 +1123,9 @@ describe('prior government employment, answered from the experience bank', () =>
       'How did you find us?',
       'How did you find out about us?',
       'How did you discover us?',
+      'How did you become aware of this opportunity?',
+      'How did you find this job?',
+      'How did you come across this opportunity?',
     ];
     for (const label of referralLabels) {
       const profile: ApplicationProfileLike = { referral_source_default: 'LinkedIn' };
@@ -1168,6 +1171,8 @@ describe('prior government employment, answered from the experience bank', () =>
       'Would you be open to move to Boston?',
       'Open to move to Boston',
       'Will you move to Boston?',
+      'Would you move?',
+      'Would you move for this role?',
     ];
     for (const label of relocationLabels) {
       const profile: ApplicationProfileLike = { relocation_willingness: 'yes' };
@@ -1270,18 +1275,19 @@ describe('prior government employment, answered from the experience bank', () =>
     }
 
     const unrecognizedSiblingIntent = [
-      'Prior application details',
       'How were you referred to us?',
       'Who referred you and in what capacity?',
       'Would moving to Boston affect your availability?',
-      'Relocation preference details',
-      'Applicant from a previous application',
       'Please provide prior applicant information',
       'How did the recruiter refer you?',
       'Please provide your recruiting source',
       'Please specify the source of application',
-      'Mobility details for relocating',
       'Please confirm your ability to move to Boston',
+      'Past applications',
+      'Application history',
+      'Any earlier applications?',
+      'Mobility willingness',
+      'Geographic mobility',
     ];
     for (const label of unrecognizedSiblingIntent) {
       const held = resolveKnownAnswer(label, 'text', profile, context);
@@ -1300,6 +1306,26 @@ describe('prior government employment, answered from the experience bank', () =>
       'Experience building referral program systems',
       'Candidate source code experience',
       'Employee relocation assistance benefit',
+      'Any earlier applications',
+      'Previous applicant tracking system experience',
+      'Past applications of machine learning',
+      'Application history analytics experience',
+      'Recruiting source analytics experience',
+      'Source of application telemetry experience',
+      'Referral marketing experience',
+      'Geographic mobility research experience',
+      'Mobility willingness modeling experience',
+      'Relocating data services experience',
+      'Do you have experience with previous application architecture?',
+      'What is your referral marketing experience?',
+      'Please describe your recruiting source analytics experience',
+      'Do you have experience managing relocation logistics?',
+      'What relocation research projects have you completed?',
+      'Can you move files between systems?',
+      'Prior application details',
+      'Relocation preference details',
+      'Applicant from a previous application',
+      'Mobility details for relocating',
     ]) {
       const resolved = resolveKnownAnswer(unrelated, 'text', profile, context);
       assert.equal(resolved, null, unrelated);
