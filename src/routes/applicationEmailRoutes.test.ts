@@ -115,29 +115,35 @@ test('managed receiving rejects applicant replies before any relay ledger insert
   assert.match(service, /return \/\^\[a-z0-9\].*\\\.resend\\\.app\$\/i\.test\(domain\)/);
 });
 
+/* Storing and disposing are two functions now, so this reads across both instead of inside one.
+ *
+ * The property is exactly what it always was: the ledger row is written FIRST, and only then does
+ * anything decide whether that message may leave Litos. What moved is where the deciding happens -
+ * handleStoredEmployerMessage - and why: resolution of a submission confirmation had to stop being a
+ * side effect of a successful first forward. */
 test('employer mail is stored before the strict forwarding whitelist is applied', () => {
-  const processor = service.slice(
-    service.indexOf('export async function processInboundApplicationEmail'),
-    service.indexOf('export async function applicationEmailHealth'),
-  );
+  const handlerStart = service.indexOf('export async function handleStoredEmployerMessage');
+  const processorStart = service.indexOf('export async function processInboundApplicationEmail');
+  const handler = service.slice(handlerStart, processorStart);
+  const processor = service.slice(processorStart, service.indexOf('export async function reconcileSubmissionConfirmations'));
   const ledgerInsert = processor.indexOf("direction: 'inbound'");
-  const decision = processor.indexOf('applicationEmailForwardingDecision(storedClassification)');
-  const claim = processor.indexOf('forwarding_claimed_at: new Date()');
-  const send = processor.indexOf('sendEmail(forwardEmailPayload');
+  const handoff = processor.indexOf('return handleStoredEmployerMessage({');
   assert.ok(ledgerInsert >= 0);
-  assert.ok(decision > ledgerInsert);
+  assert.ok(handoff > ledgerInsert, 'the message must be in the ledger before anything decides what to do with it');
+  const decision = handler.indexOf('applicationEmailForwardingDecision(classification)');
+  const claim = handler.indexOf('deps.claimForwarding(');
+  const send = handler.indexOf('deps.forward(');
+  assert.ok(decision >= 0);
   assert.ok(claim > decision);
   assert.ok(send > claim);
-  assert.match(processor, /reason: forwardingDecision\.reason/);
+  assert.match(handler, /reason: forwardingDecision\.reason/);
   assert.match(service, /classification === 'submission_confirmation' \|\| classification === 'interview_request'/);
   assert.match(processor, /onConflictDoNothing\(\{ target: application_email_messages\.dedupe_key \}\)/);
-  assert.match(processor, /sql`\(\$\{application_email_messages\.forwarding_claimed_at\} is null or/);
+  assert.match(service, /sql`\(\$\{application_email_messages\.forwarding_claimed_at\} is null or/);
   assert.match(processor, /storedApplicationEmailClassification\(message\.classification\)/);
-  assert.match(processor, /subject: message\.subject \?\? undefined/);
-  assert.doesNotMatch(
-    processor.slice(processor.indexOf('await sendEmail(forwardEmailPayload'), processor.indexOf("if (storedClassification === 'submission_confirmation'")),
-    /inbound: input/,
-  );
+  // The forward is built from the STORED row, never from the raw webhook body.
+  assert.match(handler, /subject: message\.subject \?\? undefined/);
+  assert.doesNotMatch(handler, /inbound: input/);
   const verificationReader = readFileSync('src/lib/emailVerification.ts', 'utf8');
   assert.match(verificationReader, /from\(application_email_messages\)/);
   assert.match(verificationReader, /extractLitosVerificationCode\(rows/);
