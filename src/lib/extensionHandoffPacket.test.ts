@@ -48,7 +48,17 @@ test('a generic other ATS handoff requires exact canonical application identity'
 });
 
 test('claimed, submitted, in-flight, and security-code packets are never disclosed for refill', () => {
-  for (const status of ['submitted', 'submitting', 'preparing', 'filling', 'awaiting_security_code'] as const) {
+  for (const status of [
+    'resume_ready',
+    'submit_requested',
+    'preparing',
+    'filling',
+    'awaiting_security_code',
+    'submitting',
+    'submission_claimed',
+    'submitted',
+    'failed',
+  ] as const) {
     assert.equal(extensionHandoffPacketMatches({
       frozenUrl: SEEKA_POSTING,
       currentUrl: SEEKA_FORM,

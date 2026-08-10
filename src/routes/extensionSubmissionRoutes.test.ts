@@ -21,6 +21,7 @@ test('attended extension refill returns the exact owned generated packet and a f
   );
   assert.match(route, /preHandler: requireAuth/);
   assert.match(route, /const row = await ownedResume\(request, reply\)/);
+  assert.match(source, /eq\(generated_resumes\.user_id, request\.jwtPayload!\.userId\)/);
   assert.match(route, /extensionPacketQuerySchema\.safeParse\(request\.query\)/);
   assert.match(route, /extensionHandoffPacketMatches\(/);
   assert.match(route, /row\.resume_object_key/);
