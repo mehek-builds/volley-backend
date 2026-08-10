@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { extensionHandoffPacketMatches } from './extensionHandoffPacket';
+import { extensionHandoffPacketMatches, extensionHandoffVersion } from './extensionHandoffPacket';
+import { MANAGED_NETWORK_ACCESS_RESTRICTION_REASON } from './portalSubmission';
 
 const SEEKA_POSTING = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648206-software-engineer-internship';
 const SEEKA_FORM = 'https://jobs.smartrecruiters.com/oneclick-ui/company/SeekaTechnology/publication/123e4567-e89b-12d3-a456-426614174000';
@@ -8,28 +9,93 @@ const SEEKA_FORM = 'https://jobs.smartrecruiters.com/oneclick-ui/company/SeekaTe
 test('the exact SEEKA posting may continue to its same-employer SmartRecruiters form', () => {
   assert.equal(extensionHandoffPacketMatches({
     frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
     currentUrl: SEEKA_FORM,
     frozenAtsName: 'smartrecruiters',
     status: 'needs_attention',
+    attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
   }), true);
 });
 
 test('a SmartRecruiters packet cannot be loaded into another employer form', () => {
   assert.equal(extensionHandoffPacketMatches({
     frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
     currentUrl: SEEKA_FORM.replaceAll('SeekaTechnology', 'OtherEmployer'),
     frozenAtsName: 'smartrecruiters',
     status: 'needs_attention',
+    attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
   }), false);
 });
 
 test('a form cannot override the frozen ATS identity', () => {
   assert.equal(extensionHandoffPacketMatches({
     frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
     currentUrl: SEEKA_FORM,
     frozenAtsName: 'greenhouse',
     status: 'needs_attention',
+    attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
   }), false);
+});
+
+test('a caller-supplied application id cannot select another publication from the same SmartRecruiters tenant', () => {
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
+    currentUrl: SEEKA_FORM.replace('123e4567-e89b-12d3-a456-426614174000', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'),
+    frozenAtsName: 'smartrecruiters',
+    status: 'needs_attention',
+    attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
+  }), false);
+});
+
+test('a legacy SmartRecruiters packet without a runner-observed form URL is not disclosed', () => {
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: SEEKA_POSTING,
+    currentUrl: SEEKA_FORM,
+    frozenAtsName: 'smartrecruiters',
+    status: 'needs_attention',
+    attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
+  }), false);
+});
+
+test('SmartRecruiters refill is limited to the exact network-reputation recovery state', () => {
+  for (const candidate of [
+    { status: 'needs_attention' as const, attentionReason: 'A required field is empty.' },
+    { status: 'questions_ready' as const, attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON },
+    { status: 'ready_for_final_approval' as const, attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON },
+  ]) {
+    assert.equal(extensionHandoffPacketMatches({
+      frozenUrl: SEEKA_POSTING,
+      frozenHandoffUrl: SEEKA_FORM,
+      currentUrl: SEEKA_FORM,
+      frozenAtsName: 'smartrecruiters',
+      ...candidate,
+    }), false);
+  }
+});
+
+test('handoff version changes after any packet, PDF, owner, application, or form mutation', () => {
+  const packet = {
+    applicationId: 'application-1',
+    userId: 'user-1',
+    resumeObjectKey: 'users/user-1/resumes/application-1.pdf',
+    spec: { _review: { questions: [{ question: 'Why?', answer: 'Because.' }] } },
+    jobContext: { company: 'SEEKA Technology', role: 'Software Engineer Internship' },
+    currentUrl: SEEKA_FORM,
+  };
+  const version = extensionHandoffVersion(packet);
+  assert.match(version ?? '', /^[a-f0-9]{64}$/);
+  assert.notEqual(extensionHandoffVersion({ ...packet, applicationId: 'application-2' }), version);
+  assert.notEqual(extensionHandoffVersion({ ...packet, userId: 'user-2' }), version);
+  assert.notEqual(extensionHandoffVersion({ ...packet, resumeObjectKey: `${packet.resumeObjectKey}.new` }), version);
+  assert.notEqual(extensionHandoffVersion({ ...packet, spec: { _review: { questions: [] } } }), version);
+  assert.notEqual(extensionHandoffVersion({ ...packet, jobContext: { company: 'Other employer' } }), version);
+  assert.notEqual(extensionHandoffVersion({
+    ...packet,
+    currentUrl: SEEKA_FORM.replace('123e4567-e89b-12d3-a456-426614174000', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'),
+  }), version);
 });
 
 test('a generic other ATS handoff requires exact canonical application identity', () => {
@@ -61,16 +127,20 @@ test('claimed, submitted, in-flight, and security-code packets are never disclos
   ] as const) {
     assert.equal(extensionHandoffPacketMatches({
       frozenUrl: SEEKA_POSTING,
+      frozenHandoffUrl: SEEKA_FORM,
       currentUrl: SEEKA_FORM,
       frozenAtsName: 'smartrecruiters',
       status,
+      attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
     }), false, status);
   }
   assert.equal(extensionHandoffPacketMatches({
     frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
     currentUrl: SEEKA_FORM,
     frozenAtsName: 'smartrecruiters',
     status: 'needs_attention',
+    attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
     submissionClaimedAt: '2026-08-10T00:00:00.000Z',
   }), false);
 });

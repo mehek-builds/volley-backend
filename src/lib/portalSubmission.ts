@@ -6631,16 +6631,20 @@ export function managedNetworkAccessRestrictionReason(
   portal: SupportedPortal,
   pageText: string | undefined,
   pageTitle: string | undefined,
+  pageEvidence: { filledFields?: readonly string[]; discovered?: readonly unknown[] } = {},
 ): string | null {
   const normalized = `${pageText ?? ''} ${pageTitle ?? ''}`.toLowerCase().replace(/\s+/g, ' ').trim();
+  const normalizedTitle = (pageTitle ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
   const exactSmartRecruitersHeading = portalFamily(portal) === 'smartrecruiters'
-    && normalized.includes('access is temporarily restricted');
+    && normalizedTitle === 'access is temporarily restricted';
   const blocked = exactSmartRecruitersHeading
     || /\baccess denied\b|\brequest (?:has been )?blocked\b|\btemporarily blocked\b/.test(normalized);
   const reputationEvidence = exactSmartRecruitersHeading
-    || /unusual activity|bot activity|automated traffic|traffic from (?:this|your) ip|ip address.{0,80}(?:blocked|flagged)|network reputation/.test(normalized);
-  if (!blocked || !reputationEvidence) return null;
-  if (/captcha|\bchallenge\b|prove you are human|verify (?:that )?you are not (?:a )?robot|verification code|security code|\bauthenticat(?:e|ion|ing)\b|\bsign in\b|\blog in\b|\blogin required\b/.test(normalized)) return null;
+    || /automated traffic.{0,80}(?:ip|network)|traffic from (?:this|your) ip|(?:this|your) ip address.{0,80}(?:blocked|flagged|reputation)|network reputation|datacenter (?:ip|network)|proxy (?:ip|network)/.test(normalized);
+  if (!blocked || !reputationEvidence
+    || (pageEvidence.filledFields?.length ?? 0) > 0
+    || (pageEvidence.discovered?.length ?? 0) > 0) return null;
+  if (/captcha|\bchallenge\b|\bhuman\b|\brobot\b|\bverif(?:y|ies|ied|ication)\b|one[ -]?time|passcode|security code|\botp\b|\bauthenticat(?:e|ion|ing)\b|\bsign[ -]?in\b|\blog[ -]?(?:in|on)\b|\baccount (?:is )?required\b|\bsession expired\b|\bpassword\b|\bmfa\b|\b2fa\b|single sign[ -]?on|\bsso\b/.test(normalized)) return null;
   return MANAGED_NETWORK_ACCESS_RESTRICTION_REASON;
 }
 

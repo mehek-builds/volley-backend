@@ -65,6 +65,7 @@ import {
   managedResultSupportsDiscoveryRole,
   CaptchaUnresolvedError,
   clickFinalSubmit,
+  canonicalSupportedPortalUrl,
   detectPortal,
   managedResultRequiresCaptchaAttention,
   isManagedCaptchaEvidenceExtract,
@@ -982,10 +983,11 @@ export function attentionBlockersForManagedResult(
     title?: string;
     text?: string;
     filledFields?: string[];
+    discovered?: unknown[];
   },
   packet: SubmissionPacket,
 ): string[] {
-  const accessRestriction = managedNetworkAccessRestrictionReason(portal, result.text, result.title);
+  const accessRestriction = managedNetworkAccessRestrictionReason(portal, result.text, result.title, result);
   if (accessRestriction) {
     return [
       ...blockers.filter((blocker) => blocker !== CAPTCHA_BLOCKER),
@@ -1817,6 +1819,7 @@ async function prepareManaged(
     ),
     result,
   );
+  const networkAccessRestriction = managedNetworkAccessRestrictionReason(portal, result.text, result.title, result);
   // A blocker naming a field the stored profile CAN answer is a Litos defect, never work for the
   // applicant. Twenty-five prod packets carried exactly these lines (GPA, university, education
   // level, graduation month and year, referral source) with the resolved answer already sitting
@@ -2031,6 +2034,9 @@ async function prepareManaged(
       })
       : {}),
     submission_run_id: runId,
+    extension_handoff_url: networkAccessRestriction
+      ? canonicalSupportedPortalUrl(result.url, portal)
+      : undefined,
     filled_fields: filledFields,
     // The other half of filled_fields, and it was always empty before: what the runner tried and
     // could not leave on the form. See managedAnswerLossReasons.

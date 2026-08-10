@@ -57,7 +57,7 @@ import {
 } from '../lib/submissionEducationGuard';
 import { resumeFileNameForRole } from '../lib/resumeFileName';
 import { sendUnsupportedPortalApplicationEmail } from '../lib/unsupportedPortalEmailFallback';
-import { extensionHandoffPacketMatches } from '../lib/extensionHandoffPacket';
+import { extensionHandoffPacketMatches, extensionHandoffVersion } from '../lib/extensionHandoffPacket';
 import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import {
   duplicateApplicationResponse,
@@ -129,6 +129,8 @@ const unverifiedOutcomeBodySchema = z.object({
 });
 const extensionStartBodySchema = z.object({
   authorization: z.enum(['standing_consent', 'user_initiated']),
+  handoff_version: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  current_url: z.string().url().max(4000).optional(),
 });
 const extensionReceiptUrlSchema = z.string().url().max(4000).refine(isSafeExtensionReceiptUrl, 'Confirmation URL must use HTTPS');
 const extensionOutcomeBodySchema = z.object({
@@ -423,9 +425,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       if (!extensionHandoffPacketMatches({
         frozenUrl: review.portal_url,
+        frozenHandoffUrl: review.extension_handoff_url,
         currentUrl: query.data.current_url,
         frozenAtsName: review.ats_name,
         status: review.status,
+        attentionReason: review.attention_reason,
         submissionClaimedAt: review.submission_claimed_at,
       })) {
         return reply.status(409).send({ error: 'This saved application does not match the company form open in Chrome' });
@@ -447,9 +451,19 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ? quality.groundingRemoved.filter((value): value is string => typeof value === 'string')
         : [];
       const fileName = resumeFileNameForRole(contact.full_name, job.role);
+      const handoffVersion = extensionHandoffVersion({
+        applicationId: row.id,
+        userId: request.jwtPayload!.userId,
+        resumeObjectKey: row.resume_object_key,
+        spec: row.spec,
+        jobContext: row.job_context,
+        currentUrl: query.data.current_url,
+      });
+      if (!handoffVersion) return reply.status(409).send({ error: 'This company form cannot receive the saved application packet' });
 
       return reply.send({
         resume_id: row.id,
+        handoff_version: handoffVersion,
         resume_url: `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(
           request.jwtPayload!.userId,
           row.resume_object_key,
@@ -495,6 +509,33 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         eq(generated_resumes.user_id, userId),
       )).limit(1);
       const precheckReview = precheckRow ? readApplicationReview(precheckRow.spec) : null;
+      if (precheckRow && precheckReview?.extension_handoff_url) {
+        if (!parsed.data.handoff_version || !parsed.data.current_url) {
+          return reply.status(409).send({ error: 'Reload the exact saved application packet before submitting from Chrome' });
+        }
+        if (!extensionHandoffPacketMatches({
+          frozenUrl: precheckReview.portal_url,
+          frozenHandoffUrl: precheckReview.extension_handoff_url,
+          currentUrl: parsed.data.current_url,
+          frozenAtsName: precheckReview.ats_name,
+          status: precheckReview.status,
+          attentionReason: precheckReview.attention_reason,
+          submissionClaimedAt: precheckReview.submission_claimed_at,
+        })) {
+          return reply.status(409).send({ error: 'This saved application does not match the company form open in Chrome' });
+        }
+        const currentVersion = extensionHandoffVersion({
+          applicationId: precheckRow.id,
+          userId,
+          resumeObjectKey: precheckRow.resume_object_key ?? '',
+          spec: precheckRow.spec,
+          jobContext: precheckRow.job_context,
+          currentUrl: parsed.data.current_url,
+        });
+        if (!currentVersion || currentVersion !== parsed.data.handoff_version) {
+          return reply.status(409).send({ error: 'The saved application packet changed. Reload it before submitting.' });
+        }
+      }
       if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
         const verdict = await refuseDuplicateApplication(precheckRow, precheckReview, userId, fastify.log);
         if (verdict.kind === 'duplicate') return reply.status(409).send(duplicateApplicationResponse(verdict));
@@ -519,7 +560,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         )).limit(1);
         const row = rows[0];
         if (!row) return { kind: 'not_found' as const };
-        if (!precheckRow || !sameApplicationPacketSpec(row.spec, precheckRow.spec)) {
+        if (!precheckRow
+          || !precheckRow.resume_object_key
+          || row.resume_object_key !== precheckRow.resume_object_key
+          || !isDeepStrictEqual(row.job_context, precheckRow.job_context)
+          || !sameApplicationPacketSpec(row.spec, precheckRow.spec)) {
           return { kind: 'changed' as const };
         }
         const current = readApplicationReview(row.spec);
@@ -559,6 +604,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           packetCountry,
           packetCountryCode,
         );
+        if (current.extension_handoff_url && !isDeepStrictEqual(refreshedQuestions, current.questions)) {
+          return { kind: 'changed' as const };
+        }
         const sensitive = sensitiveQuestionFor(refreshedQuestions, sensitiveProfile, current.jd_text, packetCountry, packetCountryCode);
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         /* THE FIFTH SEND SITE, and the one blankRequiredQuestionLabels' own list did not name.
@@ -597,6 +645,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           eq(generated_resumes.id, row.id),
           eq(generated_resumes.user_id, userId),
           sql`${generated_resumes.spec} = ${JSON.stringify(precheckRow.spec)}::jsonb`,
+          sql`${generated_resumes.resume_object_key} is not distinct from ${precheckRow.resume_object_key}`,
+          sql`${generated_resumes.job_context} is not distinct from ${JSON.stringify(precheckRow.job_context ?? null)}::jsonb`,
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
           sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
         )).returning({ id: generated_resumes.id });
@@ -841,6 +891,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         .set({ spec: reviewSpec(next) })
         .where(and(
           eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
           sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
         ))
         .returning({ id: generated_resumes.id });

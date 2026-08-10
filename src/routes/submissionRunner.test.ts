@@ -566,6 +566,11 @@ test('network reputation handoff is cross-ATS but never swallows real security g
     'Access denied after unusual activity. Complete the challenge.',
     'Request blocked after unusual activity. Authenticate to continue.',
     'Access denied after unusual activity. Authentication is required.',
+    'Access denied. Your IP address was flagged. Verify your identity to continue.',
+    'Request blocked because of automated traffic from this IP. Enter your password to continue.',
+    'Access is temporarily restricted. Sign-on verification is required.',
+    'Access denied after unusual activity. Please verify you are human.',
+    'Request blocked after unusual activity. Complete the human verification.',
   ]) {
     assert.deepEqual(attentionBlockersForManagedResult(
       'greenhouse',
@@ -574,6 +579,41 @@ test('network reputation handoff is cross-ATS but never swallows real security g
       packet,
     ), ['CAPTCHA requires your attention'], securityText);
   }
+
+  assert.deepEqual(attentionBlockersForManagedResult(
+    'smartrecruiters',
+    ['CAPTCHA requires your attention'],
+    { text: 'Access is temporarily restricted for applicants who answered this question.', filledFields: [] },
+    packet,
+  ), ['CAPTCHA requires your attention']);
+  assert.deepEqual(attentionBlockersForManagedResult(
+    'smartrecruiters',
+    ['CAPTCHA requires your attention'],
+    { title: 'Access is temporarily restricted', text: 'Application form', filledFields: ['email'] },
+    packet,
+  ), ['CAPTCHA requires your attention']);
+  assert.deepEqual(attentionBlockersForManagedResult(
+    'smartrecruiters',
+    ['CAPTCHA requires your attention'],
+    { title: 'Access is temporarily restricted', text: '', filledFields: [], discovered: [{ label: 'Email' }] },
+    packet,
+  ), ['CAPTCHA requires your attention']);
+});
+
+test('managed network handoff persists only the exact form URL observed by the blocked run', () => {
+  const prepareManagedSource = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(
+    prepareManagedSource,
+    /const networkAccessRestriction = managedNetworkAccessRestrictionReason\(portal, result\.text, result\.title, result\)/,
+  );
+  assert.match(
+    prepareManagedSource,
+    /extension_handoff_url: networkAccessRestriction[\s\S]*?canonicalSupportedPortalUrl\(result\.url, portal\)[\s\S]*?: undefined/,
+  );
+  assert.doesNotMatch(
+    prepareManagedSource,
+    /extension_handoff_url:[^\n]*current\.portal_url/,
+  );
 });
 
 test('future sponsorship onboarding answer supplies work eligibility for US applications', () => {

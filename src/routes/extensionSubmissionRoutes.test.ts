@@ -24,13 +24,41 @@ test('attended extension refill returns the exact owned generated packet and a f
   assert.match(source, /eq\(generated_resumes\.user_id, request\.jwtPayload!\.userId\)/);
   assert.match(route, /extensionPacketQuerySchema\.safeParse\(request\.query\)/);
   assert.match(route, /extensionHandoffPacketMatches\(/);
+  assert.match(route, /frozenHandoffUrl: review\.extension_handoff_url/);
   assert.match(route, /row\.resume_object_key/);
   assert.match(route, /mintDownloadToken\([\s\S]*?row\.resume_object_key/);
   assert.match(route, /resume_id: row\.id/);
+  assert.match(route, /handoff_version: handoffVersion/);
+  assert.match(route, /extensionHandoffVersion\([\s\S]*?applicationId: row\.id[\s\S]*?resumeObjectKey: row\.resume_object_key[\s\S]*?spec: row\.spec[\s\S]*?jobContext: row\.job_context/);
   assert.match(route, /application: \{ id: row\.id, spec: stored \}/);
   assert.doesNotMatch(route, /resume\/generate/);
   assert.ok(route.indexOf('ownedResume(request, reply)') < route.indexOf('extensionHandoffPacketMatches('));
   assert.ok(route.indexOf('extensionHandoffPacketMatches(') < route.indexOf('mintDownloadToken('));
+});
+
+test('attended extension start rejects a stale packet version and a changed answer refresh', () => {
+  const route = source.slice(
+    source.indexOf("'/applications/:id/submission/extension-start'"),
+    source.indexOf("'/applications/:id/submission/extension-outcome'"),
+  );
+  assert.match(route, /precheckReview\?\.extension_handoff_url/);
+  assert.match(route, /extensionHandoffPacketMatches\(/);
+  assert.match(route, /currentVersion !== parsed\.data\.handoff_version/);
+  assert.match(route, /isDeepStrictEqual\(refreshedQuestions, current\.questions\)/);
+  assert.match(route, /generated_resumes\.spec\} = \$\{JSON\.stringify\(precheckRow\.spec\)\}::jsonb/);
+  assert.match(route, /row\.resume_object_key !== precheckRow\.resume_object_key/);
+  assert.match(route, /isDeepStrictEqual\(row\.job_context, precheckRow\.job_context\)/);
+  assert.match(route, /generated_resumes\.resume_object_key\} is not distinct from \$\{precheckRow\.resume_object_key\}/);
+  assert.match(route, /generated_resumes\.job_context\} is not distinct from/);
+});
+
+test('review writes compare the complete packet, not only its status', () => {
+  const route = source.slice(
+    source.indexOf("'/applications/:id/review'"),
+    source.indexOf("'/applications/:id/submit-request'"),
+  );
+  assert.match(route, /eq\(generated_resumes\.user_id, request\.jwtPayload!\.userId\)/);
+  assert.match(route, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
 });
 
 test('extension outcomes only mark confirmed claims applied', () => {
