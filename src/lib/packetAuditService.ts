@@ -1,6 +1,6 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
-import { generated_resumes } from '../db/schema';
+import { generated_resumes, profiles } from '../db/schema';
 import { scorePosting, type CandidateFacts } from '../engine/clauseMatch';
 import { scoreJdMatch, segmentJd, type JdContext, type JdTerm } from '../engine/jdMatch';
 import { resumeSpecText } from '../engine/resumeValidate';
@@ -14,15 +14,59 @@ import {
 } from './applicationReview';
 import {
   createPacketAudit,
+  createApplicantSnapshotEvidencePointer,
   createResumeEvidencePointer,
   packetAuditIsSubmissionReady,
   verifyCurrentPacketAudit,
   type PacketAudit,
+  type PacketAuditEvidencePointer,
 } from './packetAudit';
 import { resolveBlobUrl } from './resumeAccess';
 import { pdfGenerationBindingIsCurrent } from './pdfGenerationBinding';
+import { resolveFrozenApplicantEmail } from './applicationEmail';
+import { resumeEmailOfRecord } from './resumeEmail';
 
 type ResumeRow = typeof generated_resumes.$inferSelect;
+
+type PacketEmailIdentityDeps = {
+  loadCurrentResumeEmail?: (userId: string) => Promise<string | undefined>;
+  resolveCurrentApplicantEmail?: typeof resolveFrozenApplicantEmail;
+};
+
+export async function verifyCurrentPacketEmailIdentities(
+  row: ResumeRow,
+  deps: PacketEmailIdentityDeps = {},
+): Promise<void> {
+  let currentResumeEmail: string | undefined;
+  if (deps.loadCurrentResumeEmail) {
+    currentResumeEmail = await deps.loadCurrentResumeEmail(row.user_id);
+  } else {
+    const [profile] = await db.select({ parsed_json: profiles.parsed_json })
+      .from(profiles)
+      .where(eq(profiles.user_id, row.user_id))
+      .limit(1);
+    currentResumeEmail = resumeEmailOfRecord(profile?.parsed_json);
+  }
+  const stored = row.spec && typeof row.spec === 'object' && !Array.isArray(row.spec)
+    ? row.spec as Record<string, unknown>
+    : {};
+  const contact = stored._contact && typeof stored._contact === 'object' && !Array.isArray(stored._contact)
+    ? stored._contact as Record<string, unknown>
+    : {};
+  const storedResumeEmail = String(contact.email ?? '').trim().toLowerCase();
+  if (!currentResumeEmail || currentResumeEmail !== storedResumeEmail) {
+    throw new Error('The personal resume email changed or is missing. Regenerate this packet before applying.');
+  }
+  const resolved = await (deps.resolveCurrentApplicantEmail ?? resolveFrozenApplicantEmail)({
+    userId: row.user_id,
+    applicationId: row.id,
+    spec: row.spec,
+  });
+  const review = readApplicationReview(row.spec);
+  if (!review || resolved.address !== review.applicant_email?.address) {
+    throw new Error('The current tracked Litos routing email does not match this packet.');
+  }
+}
 
 export type PacketAuditFailure = {
   valid: false;
@@ -64,14 +108,21 @@ function hasCurrentGenerationBinding(row: ResumeRow, pdfBytes: Buffer): boolean 
   const binding = quality && typeof quality === 'object' && !Array.isArray(quality)
     ? (quality as Record<string, unknown>).pdfGenerationBinding
     : null;
-  return pdfGenerationBindingIsCurrent(binding, row.spec, row.resume_object_key, pdfBytes);
+  const contact = row.spec && typeof row.spec === 'object' && !Array.isArray(row.spec)
+    ? (row.spec as Record<string, unknown>)._contact
+    : null;
+  const resumeEmail = contact && typeof contact === 'object' && !Array.isArray(contact)
+    ? String((contact as Record<string, unknown>).email ?? '').trim().toLowerCase()
+    : '';
+  return Boolean(resumeEmail)
+    && pdfGenerationBindingIsCurrent(binding, row.spec, row.resume_object_key, pdfBytes, resumeEmail);
 }
 
 function editableSpec(value: unknown): ResumeSpec {
   return normalizeSpec(value);
 }
 
-type EvidencePointer = { path: string; quote: string; sha256: string };
+type EvidencePointer = PacketAuditEvidencePointer;
 
 function specStrings(spec: ResumeSpec): EvidencePointer[] {
   const values: Array<{ path: string; quote: string }> = [];
@@ -116,18 +167,37 @@ function evidenceForTerm(
   return undefined;
 }
 
-function evidenceForClause(text: string, basis: string, spec: ResumeSpec): EvidencePointer | undefined {
-  if (basis === 'degree') return spec.degree ? createResumeEvidencePointer(spec, '/degree') : undefined;
-  if (basis === 'graduation') return spec.grad_date ? createResumeEvidencePointer(spec, '/grad_date') : undefined;
-  if (basis === 'experience-years') {
-    const index = spec.experience.findIndex((entry) => entry.date_range.trim());
-    return index >= 0
-      ? createResumeEvidencePointer(spec, `/experience/${index}/date_range`)
-      : undefined;
+function evidenceForClause(
+  clause: { text: string; evidence?: string; basis: string },
+  spec: ResumeSpec,
+  review: ApplicationReviewState,
+): EvidencePointer[] | undefined {
+  if (clause.basis === 'degree') {
+    const evidence = spec.degree ? [createResumeEvidencePointer(spec, '/degree')] : [];
+    if (/\b(currently\s+enrolled|enrolled|pursuing|currently\s+studying)\b/i.test(clause.text)) {
+      const profileValue = review.applicant_snapshot?.profile.currently_enrolled;
+      const path = typeof profileValue === 'boolean'
+        ? '/profile/currently_enrolled'
+        : '/application_profile/currently_enrolled';
+      evidence.push(createApplicantSnapshotEvidencePointer(review.applicant_snapshot, path));
+    }
+    return evidence.length > 0 ? evidence : undefined;
   }
-  const quoted = text.trim().replace(/^"|"$/g, '');
-  return specStrings(spec).find((value) => value.quote === quoted)
+  if (clause.basis === 'graduation') {
+    return spec.grad_date ? [createResumeEvidencePointer(spec, '/grad_date')] : undefined;
+  }
+  if (clause.basis === 'experience-years') {
+    const professionalOnly = /\b(professional|work|industry|full[- ]time)\s+experience\b/i.test(clause.text);
+    const evidence = spec.experience
+      .map((entry, index) => ({ entry, index }))
+      .filter(({ entry }) => entry.date_range.trim() && (!professionalOnly || entry.type === 'job'))
+      .map(({ index }) => createResumeEvidencePointer(spec, `/experience/${index}/date_range`));
+    return evidence.length > 0 ? evidence : undefined;
+  }
+  const quoted = (clause.evidence ?? '').trim().replace(/^"|"$/g, '');
+  const evidence = specStrings(spec).find((value) => value.quote === quoted)
     ?? specStrings(spec).find((value) => normalized(value.quote).includes(normalized(quoted)));
+  return evidence ? [evidence] : undefined;
 }
 
 function exactOccurrence(jdText: string, display: string, preferred?: number): { start: number; end: number } | null {
@@ -162,7 +232,60 @@ function jobContext(value: unknown): JdContext {
   };
 }
 
-async function scoreAuditEvidence(row: ResumeRow, review: ApplicationReviewState) {
+const MONTHS: Record<string, number> = {
+  jan: 0, january: 0, feb: 1, february: 1, mar: 2, march: 2, apr: 3, april: 3,
+  may: 4, jun: 5, june: 5, jul: 6, july: 6, aug: 7, august: 7, sep: 8,
+  sept: 8, september: 8, oct: 9, october: 9, nov: 10, november: 10, dec: 11, december: 11,
+};
+
+function datePoint(value: string, end: boolean, now: Date): number | null {
+  const clean = value.trim().replace(/\./g, '');
+  if (/^(?:present|current|now)$/i.test(clean)) return now.getUTCFullYear() * 12 + now.getUTCMonth();
+  const monthYear = clean.match(/^([A-Za-z]+)\s+((?:19|20)\d{2})$/);
+  if (monthYear) {
+    const month = MONTHS[monthYear[1].toLowerCase()];
+    return month == null ? null : Number(monthYear[2]) * 12 + month;
+  }
+  const year = clean.match(/^((?:19|20)\d{2})$/);
+  if (year) return (Number(year[1]) + (end ? 1 : 0)) * 12;
+  return null;
+}
+
+export function monthsOfExperienceFromSpec(
+  spec: ResumeSpec,
+  now = new Date(),
+  professionalOnly = false,
+): number | null {
+  if (professionalOnly && spec.experience.some((entry) => entry.type == null)) return null;
+  const experience = professionalOnly
+    ? spec.experience.filter((entry) => entry.type === 'job')
+    : spec.experience;
+  if (experience.length === 0) return 0;
+  const intervals: Array<{ start: number; end: number }> = [];
+  for (const entry of experience) {
+    const parts = entry.date_range.replace(/[\u2013\u2014]/g, '-').split(/\s+(?:-|to)\s+/i);
+    if (parts.length !== 2) return null;
+    const start = datePoint(parts[0], false, now);
+    const end = datePoint(parts[1], true, now);
+    if (start == null || end == null || end < start) return null;
+    intervals.push({ start, end });
+  }
+  intervals.sort((a, b) => a.start - b.start || a.end - b.end);
+  let total = 0;
+  let current = intervals[0];
+  for (const interval of intervals.slice(1)) {
+    if (interval.start <= current.end) {
+      current.end = Math.max(current.end, interval.end);
+    } else {
+      total += current.end - current.start;
+      current = interval;
+    }
+  }
+  total += current.end - current.start;
+  return total;
+}
+
+export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationReviewState) {
   const spec = editableSpec(row.spec);
   const context = jobContext(row.job_context);
   const facts: CandidateFacts = {
@@ -171,6 +294,11 @@ async function scoreAuditEvidence(row: ResumeRow, review: ApplicationReviewState
     gradDate: spec.grad_date,
     resumeText: resumeSpecText(spec),
     bullets: spec.experience.flatMap((entry) => entry.bullets),
+    monthsOfExperience: monthsOfExperienceFromSpec(spec),
+    monthsOfProfessionalExperience: monthsOfExperienceFromSpec(spec, new Date(), true),
+    currentlyEnrolled: review.applicant_snapshot?.profile.currently_enrolled
+      ?? review.applicant_snapshot?.application_profile.currently_enrolled
+      ?? null,
   };
   const scored = await scorePosting(
     review.jd_text,
@@ -193,16 +321,17 @@ async function scoreAuditEvidence(row: ResumeRow, review: ApplicationReviewState
   const clauses = auditableClauses.map((clause, index) => {
     const offset = offsets[index]!;
     let rawEvidence = clause.verdict === 'met' && clause.evidence
-      ? evidenceForClause(clause.evidence, clause.basis, spec)
+      ? evidenceForClause(clause, spec, review)
       : undefined;
     if (clause.verdict === 'met' && !rawEvidence && offset.start >= 0) {
-      rawEvidence = match.matched
+      const fallbackEvidence = match.matched
         .filter((term) => {
           const occurrence = exactOccurrence(review.jd_text.slice(offset.start, offset.end), term.display);
           return occurrence !== null;
         })
         .map((term) => termEvidence.get(term.term))
         .find((value): value is EvidencePointer => Boolean(value));
+      rawEvidence = fallbackEvidence ? [fallbackEvidence] : undefined;
     }
     return {
       text: clause.text,
@@ -248,7 +377,8 @@ async function scoreAuditEvidence(row: ResumeRow, review: ApplicationReviewState
     if (occurrence && clauseFor(occurrence, 'missing')) terms.missing.push(occurrence);
   }
   const degraded = scored.clauses.some((clause) => clause.verdict === 'pending'
-    || (clause.verdict === 'unscoreable' && clause.basis !== 'none'));
+    || (clause.verdict === 'unscoreable' && clause.basis !== 'none')
+    || (clause.verdict === 'unscoreable' && /\b\d+(?:\.\d+)?\+?\s*(?:years?|yrs?)\b/i.test(clause.text)));
   return {
     spec,
     clauses,
@@ -260,6 +390,12 @@ async function scoreAuditEvidence(row: ResumeRow, review: ApplicationReviewState
 }
 
 function auditInput(row: ResumeRow, review: ApplicationReviewState, pdfBytes: Buffer) {
+  const stored = row.spec && typeof row.spec === 'object' && !Array.isArray(row.spec)
+    ? row.spec as Record<string, unknown>
+    : {};
+  const contact = stored._contact && typeof stored._contact === 'object' && !Array.isArray(stored._contact)
+    ? stored._contact as Record<string, unknown>
+    : {};
   return {
     ownerId: row.user_id,
     applicationId: row.id,
@@ -267,18 +403,72 @@ function auditInput(row: ResumeRow, review: ApplicationReviewState, pdfBytes: Bu
     spec: editableSpec(row.spec),
     jobContext: row.job_context,
     questions: normalizeApplicationReviewQuestions(review.questions),
+    applicantSnapshot: review.applicant_snapshot ?? null,
+    resumeEmail: String(contact.email ?? '').trim().toLowerCase(),
+    applicantEmail: String(review.applicant_email?.address ?? '').trim().toLowerCase(),
     pdfObjectKey: row.resume_object_key,
     pdfBytes,
   };
 }
 
+function packetEmailIdentityIssue(row: ResumeRow, review: ApplicationReviewState): string | null {
+  const stored = row.spec && typeof row.spec === 'object' && !Array.isArray(row.spec)
+    ? row.spec as Record<string, unknown>
+    : {};
+  const contact = stored._contact && typeof stored._contact === 'object' && !Array.isArray(stored._contact)
+    ? stored._contact as Record<string, unknown>
+    : {};
+  const resumeEmail = String(contact.email ?? '').trim().toLowerCase();
+  const applicantEmail = String(review.applicant_email?.address ?? '').trim().toLowerCase();
+  if (!resumeEmail) return 'The packet has no personal resume email. Regenerate it from the current profile.';
+  if (!applicantEmail || review.applicant_email?.source !== 'litos_alias' || review.applicant_email.tracked !== true) {
+    return 'The packet has no verified Litos routing email. Regenerate it before applying.';
+  }
+  if (resumeEmail === applicantEmail) return 'The resume email and portal routing email must be separate.';
+  const pinned = stored._applicant_email && typeof stored._applicant_email === 'object' && !Array.isArray(stored._applicant_email)
+    ? stored._applicant_email as Record<string, unknown>
+    : {};
+  if (String(pinned.address ?? '').trim().toLowerCase() !== applicantEmail
+    || pinned.source !== 'litos_alias' || pinned.tracked !== true) {
+    return 'The stored applicant email does not match the tracked Litos routing identity.';
+  }
+  const applicationIdentity = stored._application_email
+    && typeof stored._application_email === 'object' && !Array.isArray(stored._application_email)
+    ? stored._application_email as Record<string, unknown>
+    : {};
+  if (String(applicationIdentity.alias ?? '').trim().toLowerCase() !== applicantEmail
+    || applicationIdentity.mode !== 'litos_application_alias') {
+    return 'The application email route is not bound to this packet.';
+  }
+  const snapshotEmail = review.applicant_snapshot?.profile.email?.trim().toLowerCase();
+  if (snapshotEmail !== applicantEmail) {
+    return 'The frozen portal applicant email does not match the Litos routing email.';
+  }
+  return null;
+}
+
 export async function currentPacketAudit(
   row: ResumeRow,
-  options: { questions?: readonly ApplicationReviewQuestion[]; loadPdf?: PdfLoader } = {},
+  options: {
+    questions?: readonly ApplicationReviewQuestion[];
+    loadPdf?: PdfLoader;
+    validateApplicantEmail?: (row: ResumeRow) => Promise<void>;
+  } = {},
 ): Promise<PacketAuditVerdict> {
   const review = readApplicationReview(row.spec);
   if (!review?.packet_audit || !packetAuditIsSubmissionReady(review.packet_audit)) {
     return { valid: false, code: 'PACKET_AUDIT_REQUIRED', reason: 'Audit this exact packet before submitting.' };
+  }
+  const emailIssue = packetEmailIdentityIssue(row, review);
+  if (emailIssue) return { valid: false, code: 'PACKET_AUDIT_STALE', reason: emailIssue };
+  try {
+    await (options.validateApplicantEmail ?? verifyCurrentPacketEmailIdentities)(row);
+  } catch (error) {
+    return {
+      valid: false,
+      code: 'PACKET_AUDIT_STALE',
+      reason: error instanceof Error ? error.message : 'The tracked Litos routing email is no longer current.',
+    };
   }
   let loaded: { bytes: Buffer; contentType?: string };
   try {
@@ -314,7 +504,11 @@ export async function currentPacketAudit(
 
 export async function currentAcknowledgedPacketAudit(
   row: ResumeRow,
-  options: { questions?: readonly ApplicationReviewQuestion[]; loadPdf?: PdfLoader } = {},
+  options: {
+    questions?: readonly ApplicationReviewQuestion[];
+    loadPdf?: PdfLoader;
+    validateApplicantEmail?: (row: ResumeRow) => Promise<void>;
+  } = {},
 ): Promise<PacketAuditVerdict> {
   const verdict = await currentPacketAudit(row, options);
   if (!verdict.valid) return verdict;
@@ -338,10 +532,13 @@ export async function currentAcknowledgedPacketAudit(
 
 export async function createAndPersistPacketAudit(
   row: ResumeRow,
-  options: { loadPdf?: PdfLoader } = {},
+  options: { loadPdf?: PdfLoader; validateApplicantEmail?: (row: ResumeRow) => Promise<void> } = {},
 ): Promise<{ audit: PacketAudit; persisted: boolean; pdfBytes: Buffer }> {
   const review = readApplicationReview(row.spec);
   if (!review) throw new Error('Application review is not available for this resume');
+  const emailIssue = packetEmailIdentityIssue(row, review);
+  if (emailIssue) throw new Error(emailIssue);
+  await (options.validateApplicantEmail ?? verifyCurrentPacketEmailIdentities)(row);
   const loaded = await (options.loadPdf ?? defaultPdfLoader)(row.resume_object_key);
   if (!validStoredPdf(loaded)) throw new Error('The stored resume is not a verified PDF');
   if (!hasCurrentGenerationBinding(row, loaded.bytes)) {

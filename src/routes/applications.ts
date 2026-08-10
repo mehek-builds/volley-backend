@@ -67,6 +67,7 @@ import {
   extensionHandoffPacketMatches,
   extensionHandoffVersion,
   extensionStartHandoffBinding,
+  verifiedDashboardHandoffUrl,
 } from '../lib/extensionHandoffPacket';
 import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import {
@@ -79,6 +80,7 @@ import { findComposioVerificationCode } from '../lib/emailVerification';
 import { registerWorkdayVerificationRoute } from './workdayVerification';
 import { createAndPersistPacketAudit, currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
 import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
+import { resumeEmailOfRecord, resumePacketEmailIsCurrent } from '../lib/resumeEmail';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
@@ -537,6 +539,77 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     },
   );
 
+  fastify.post(
+    '/applications/:id/submission/manual-handoff',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const review = readApplicationReview(row.spec);
+      if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+
+      // This action-time read is the dashboard's sole authority to navigate. It deliberately
+      // repeats every live packet check instead of trusting the audit object or URL held in React:
+      // currentAcknowledgedPacketAudit revalidates the exact PDF/spec/JD/answers, current personal
+      // resume email, and active owner/application Litos alias before any company URL is disclosed.
+      const audit = await currentAcknowledgedPacketAudit(row);
+      if (!audit.valid) return reply.status(409).send({ error: audit.reason, code: audit.code });
+
+      // PDF and alias verification perform external reads. Re-read the owner-scoped row after
+      // those awaits and reject unless the complete saved packet is still byte-for-byte the one
+      // that was audited. The URL below is derived only from this refreshed row, never the earlier
+      // snapshot, so a concurrent portal/job/status/claim mutation cannot release a stale URL.
+      const refreshed = await ownedResume(request, reply);
+      if (!refreshed) return;
+      if (refreshed.resume_object_key !== row.resume_object_key
+        || !isDeepStrictEqual(refreshed.spec, row.spec)) {
+        return reply.status(409).send({
+          error: 'This application changed while its company handoff was being verified. Reload it before continuing.',
+          code: 'MANUAL_HANDOFF_STALE',
+        });
+      }
+      const refreshedReview = readApplicationReview(refreshed.spec);
+      if (!refreshedReview) {
+        return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      }
+
+      const url = verifiedDashboardHandoffUrl({
+        applicationId: refreshed.id,
+        userId: refreshed.user_id,
+        frozenUrl: refreshedReview.portal_url,
+        frozenHandoffUrl: refreshedReview.extension_handoff_url,
+        frozenHandoffBinding: refreshedReview.extension_handoff_binding,
+        frozenAtsName: refreshedReview.ats_name,
+        status: refreshedReview.status,
+        attentionReason: refreshedReview.attention_reason,
+        attentionCategories: refreshedReview.attention_categories,
+        submissionClaimedAt: refreshedReview.submission_claimed_at,
+        submissionClaimId: refreshedReview.submission_claim_id,
+        submissionPacketVersion: refreshedReview.submission_packet_version,
+        submissionAttemptedAt: refreshedReview.submission_attempted_at,
+        submittedAt: refreshedReview.submitted_at,
+        receipt: refreshedReview.receipt,
+        unverifiedSubmission: refreshedReview.unverified_submission,
+      });
+      if (!url) {
+        return reply.status(409).send({
+          error: 'This application no longer has a verified company handoff. Reload it before continuing.',
+          code: 'MANUAL_HANDOFF_STALE',
+        });
+      }
+
+      return reply.send({
+        manual_handoff: {
+          url,
+          audit_digest: audit.audit.audit_digest,
+          packet_version: audit.audit.packet_version,
+          pdf_sha256: audit.audit.bindings.pdf.sha256,
+          size_bytes: audit.audit.bindings.pdf.sizeBytes,
+        },
+      });
+    },
+  );
+
   fastify.get(
     '/applications/:id/submission/extension-packet',
     { preHandler: requireAuth },
@@ -911,6 +984,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const userId = request.jwtPayload!.userId;
       const bank = await readExperienceBankOrSeedFromBaseResume(userId);
       const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
+      const currentResumeEmail = resumeEmailOfRecord(profileRows[0]?.parsed_json);
+      if (!resumePacketEmailIsCurrent(contact.email, currentResumeEmail)) {
+        return reply.status(409).send({
+          error: 'Your personal resume email changed or is missing. Regenerate this application packet before editing it.',
+          code: 'resume_email_regeneration_required',
+        });
+      }
       const parsed = profileRows[0]?.parsed_json as {
         school?: string;
         degree?: string;
@@ -962,6 +1042,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const rendered = await renderResumePdf(edited, { ...contact, full_name: contact.full_name }, review.jd_text);
       const visual = validateResumeVisualLayout(rendered.layout);
       const parsedPdf = await extractPdfText(rendered.buffer);
+      const applicantIdentity = stored._applicant_email && typeof stored._applicant_email === 'object'
+        ? stored._applicant_email as { address?: unknown; source?: unknown }
+        : null;
       const pdfIssues = [
         ...leadAlignmentIssues(rendered.spec, review.jd_text, {
           context: { company: applicationCompany(row), role: review.role },
@@ -970,6 +1053,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues,
         ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
         ...findPdfTextFidelityIssues(parsedPdf.text, rendered.spec, { ...contact, full_name: contact.full_name }),
+        ...(applicantIdentity?.source === 'litos_alias'
+          && typeof applicantIdentity.address === 'string'
+          && parsedPdf.text.toLowerCase().includes(applicantIdentity.address.toLowerCase())
+          ? ['the tracked application routing email must not appear on the resume PDF']
+          : []),
       ];
       if (pdfIssues.length > 0) {
         return reply.status(422).send({ error: 'The edited resume does not fit the one-page layout.', issues: pdfIssues });
@@ -995,7 +1083,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...(stored._cover_letter ? { _cover_letter: stored._cover_letter } : {}),
         _quality: {
           ...(stored._quality as Record<string, unknown> | undefined),
-          pdfGenerationBinding: createPdfGenerationBinding(rendered.spec, blob.pathname, rendered.buffer),
+          pdfGenerationBinding: createPdfGenerationBinding(rendered.spec, blob.pathname, rendered.buffer, contact.email ?? ''),
           atsCoverage: validation.ats_keyword_coverage_pct,
           visualWarnings: visual.warnings,
           groundingRemoved: grounded.removed,
@@ -1445,11 +1533,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ),
       };
       let handoff_url: string | undefined;
+      let handoff_packet_valid = true;
       if (review.status === 'needs_attention' && review.browser_session_id) {
-        try {
-          handoff_url = await getLiveViewUrl(review.browser_session_id);
-        } catch {
-          handoff_url = undefined;
+        const audit = await currentAcknowledgedPacketAudit(row);
+        handoff_packet_valid = audit.valid;
+        if (audit.valid) {
+          try {
+            handoff_url = await getLiveViewUrl(review.browser_session_id);
+          } catch {
+            handoff_url = undefined;
+          }
         }
       }
       return reply.send({
@@ -1457,6 +1550,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         review,
         cover_letter: storedCoverLetter(row),
         handoff_url,
+        handoff_packet_valid,
         configured: isBrowserbaseConfigured(),
       });
     },

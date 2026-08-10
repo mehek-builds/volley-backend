@@ -110,6 +110,7 @@ import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { resolveBlobUrl } from '../lib/resumeAccess';
 import { currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
+import { createDashboardHandoffBinding } from '../lib/extensionHandoffPacket';
 import { decryptRow } from './applicationProfile';
 import { readExperienceBank } from '../db/experienceBank';
 import { declaredSkillsList } from './profile';
@@ -2084,6 +2085,30 @@ async function prepareManaged(
       'A fill run reached an emailed security-code screen, so this application was submitted without authorization',
     );
   }
+  const extensionHandoffUrl = managedExtensionHandoffUrl(
+    portal,
+    result.url,
+    networkAccessRestriction,
+    captchaAttention,
+  );
+  const preparedAttentionReason = [
+    ...(securityCode ? [securityCodeAttentionReason(securityCode)] : []),
+    ...attentionReasons,
+  ].join('\n') || undefined;
+  const preparedAttentionCategories = securityCode
+    ? ['security_code' as const, ...attentionCategories.filter((category) => category !== 'security_code')]
+    : attentionCategories.length > 0 ? attentionCategories : undefined;
+  const extensionHandoffBinding = extensionHandoffUrl
+    ? createDashboardHandoffBinding({
+      applicationId: row.id,
+      userId: row.user_id,
+      frozenUrl: current.portal_url,
+      frozenHandoffUrl: extensionHandoffUrl,
+      frozenAtsName: current.ats_name,
+      attentionReason: preparedAttentionReason,
+      attentionCategories: preparedAttentionCategories,
+    })
+    : undefined;
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
     ...(securityCode
@@ -2119,12 +2144,8 @@ async function prepareManaged(
       })
       : {}),
     submission_run_id: runId,
-    extension_handoff_url: managedExtensionHandoffUrl(
-      portal,
-      result.url,
-      networkAccessRestriction,
-      captchaAttention,
-    ),
+    extension_handoff_url: extensionHandoffUrl,
+    extension_handoff_binding: extensionHandoffBinding,
     filled_fields: filledFields,
     // The other half of filled_fields, and it was always empty before: what the runner tried and
     // could not leave on the form. See managedAnswerLossReasons.
@@ -2162,13 +2183,8 @@ async function prepareManaged(
     // here that says an application has already reached the employer. The blockers below it are
     // still worth reading - they describe the form that was sent - but a list of empty fields shown
     // above "this was submitted" reads as a form that was not.
-    attention_reason: [
-      ...(securityCode ? [securityCodeAttentionReason(securityCode)] : []),
-      ...attentionReasons,
-    ].join('\n') || undefined,
-    attention_categories: securityCode
-      ? ['security_code' as const, ...attentionCategories.filter((category) => category !== 'security_code')]
-      : attentionCategories.length > 0 ? attentionCategories : undefined,
+    attention_reason: preparedAttentionReason,
+    attention_categories: preparedAttentionCategories,
     handoff_expires_at: new Date(Date.now() + HANDOFF_WINDOW_MS).toISOString(),
     submission_error: undefined,
   });
@@ -2212,11 +2228,24 @@ async function prepareManagedAttendedAccountGate(
   const attentionReason = hold?.reason
     ?? 'Litos could not verify the exact account gate for this application, so it did not enter any information or send anything. Open the saved company page in Chrome to continue.';
   const attentionCategories = hold?.categories ?? ['form_not_reached' as const];
+  const extensionHandoffUrl = hold ? canonicalSupportedPortalUrl(result.url, portal) : undefined;
+  const extensionHandoffBinding = extensionHandoffUrl
+    ? createDashboardHandoffBinding({
+      applicationId: row.id,
+      userId: row.user_id,
+      frozenUrl: current.portal_url,
+      frozenHandoffUrl: extensionHandoffUrl,
+      frozenAtsName: current.ats_name,
+      attentionReason,
+      attentionCategories,
+    })
+    : undefined;
   const review = nextReview(current, {
     status: 'needs_attention',
     submission_run_id: runId,
     filled_fields: [],
-    extension_handoff_url: hold ? canonicalSupportedPortalUrl(result.url, portal) : undefined,
+    extension_handoff_url: extensionHandoffUrl,
+    extension_handoff_binding: extensionHandoffBinding,
     ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
     ...(packet.applicantSnapshot ? { applicant_snapshot: packet.applicantSnapshot } : {}),
     verification: { status: hold?.kind === 'security_code' ? 'handoff' : 'not_needed' },

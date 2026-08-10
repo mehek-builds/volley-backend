@@ -12,13 +12,15 @@ const applicationsRoute = readFileSync('src/routes/applications.ts', 'utf8');
 
 test('application packet generation uses the Litos alias as the employer-facing email', () => {
   assert.match(resumeRoute, /applicationAliasFor\(userId, resumeId\)/);
-  assert.match(resumeRoute, /applicationContact = applicationEmail[\s\S]*email: applicationEmail\.alias/);
+  assert.match(resumeRoute, /const applicationContact = contactOfRecord/);
+  assert.match(resumeRoute, /const portalApplicantEmail = applicationEmail\?\.alias/);
   assert.match(resumeRoute, /_contact: applicationContact/);
   assert.match(resumeRoute, /_applicant_email: pinnedApplicantEmail/);
   assert.match(resumeRoute, /_application_email: applicationEmail/);
   assert.match(resumeRoute, /ensureApplicationEmailAlias/);
   assert.match(resumeRoute, /applicant_email: pinnedApplicantEmail/);
-  assert.match(resumeRoute, /address: applicationContact\.email/);
+  assert.match(resumeRoute, /address: portalApplicantEmail/);
+  assert.match(resumeRoute, /if \(body\.application && !applicationEmail\)/);
   assert.match(resumeRoute, /if \(body\.application\) \{[\s\S]*application_identity_persistence_failed/);
 });
 
@@ -74,6 +76,7 @@ test('the alias never reaches a form or a rendered resume without the deliverabi
   assert.match(runner, /resolveFrozenApplicantEmail\(\{/);
   assert.match(resumeRoute, /applicationAliasDeliverability\(\)/);
   assert.match(resumeRoute, /aliasDeliverability\?\.deliverable \? applicationAliasFor\(userId, resumeId\) : null/);
+  assert.match(service, /pinned\.source !== 'litos_alias' \|\| pinned\.tracked !== true/);
   assert.match(service, /if \(!check\.deliverable\) return \{ \.\.\.fallback, reason: check\.reason \}/);
 });
 

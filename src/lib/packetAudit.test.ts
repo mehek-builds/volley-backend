@@ -66,9 +66,9 @@ function validInput(): CreatePacketAuditInput {
   const typescriptEvidence = createResumeEvidencePointer(spec, '/experience/0/bullets/0');
   const editedEvidence = createResumeEvidencePointer(spec, '/experience/0/bullets/1');
   const clauses: PacketAuditClauseInput[] = [
-    { ...degreeClause, verdict: 'covered', evidence: degreeEvidence },
-    { ...typescriptClause, verdict: 'covered', evidence: typescriptEvidence },
-    { ...editedClause, verdict: 'covered', evidence: editedEvidence },
+    { ...degreeClause, verdict: 'covered', evidence: [degreeEvidence] },
+    { ...typescriptClause, verdict: 'covered', evidence: [typescriptEvidence] },
+    { ...editedClause, verdict: 'covered', evidence: [editedEvidence] },
     { ...missingClause, verdict: 'missing' },
     { ...unscoreableClause, verdict: 'unscoreable' },
   ];
@@ -81,6 +81,11 @@ function validInput(): CreatePacketAuditInput {
     questions: [
       { id: 'q1', question: 'Are you authorized to work?', answer: 'Yes', required: true },
     ],
+    applicantSnapshot: {
+      profile: { currently_enrolled: true, email: 'app-application-1@apply.trylitos.com' },
+    },
+    resumeEmail: 'student@usc.edu',
+    applicantEmail: 'app-application-1@apply.trylitos.com',
     pdfObjectKey: 'users/owner-1/resumes/application-1.pdf',
     pdfBytes: Buffer.from('%PDF-1.7 exact packet bytes'),
     editedTerms: ['deployment pipeline'],
@@ -103,6 +108,9 @@ function currentInput(input: CreatePacketAuditInput, audit: PacketAudit) {
     spec: input.spec,
     jobContext: input.jobContext,
     questions: input.questions,
+    applicantSnapshot: input.applicantSnapshot,
+    resumeEmail: input.resumeEmail,
+    applicantEmail: input.applicantEmail,
     pdfObjectKey: input.pdfObjectKey,
     pdfBytes: input.pdfBytes,
     audit,
@@ -194,7 +202,7 @@ test('the current-packet verifier rejects stale owner and application identity',
   assert.equal(verifyCurrentPacketAudit({ ...currentInput(input, audit), applicationId: 'application-2' }).reason, 'application_mismatch');
 });
 
-test('the current-packet verifier rejects stale JD, spec, job, answers, and PDF bindings', () => {
+test('the current-packet verifier rejects stale JD, spec, job, answers, applicant facts, and PDF bindings', () => {
   const input = validInput();
   const audit = createPacketAudit(input);
   const base = currentInput(input, audit);
@@ -205,6 +213,9 @@ test('the current-packet verifier rejects stale JD, spec, job, answers, and PDF 
     { ...base, spec: changedSpec },
     { ...base, jobContext: { company: 'Other Company', role: 'Software Engineer', job_id: 'job-1' } },
     { ...base, questions: [{ id: 'q1', question: 'Are you authorized to work?', answer: 'No', required: true }] },
+    { ...base, applicantSnapshot: { profile: { currently_enrolled: false } } },
+    { ...base, resumeEmail: 'changed@usc.edu' },
+    { ...base, applicantEmail: 'app-changed@apply.trylitos.com' },
     { ...base, pdfObjectKey: 'users/owner-1/resumes/another.pdf' },
     { ...base, pdfBytes: Buffer.from('%PDF-1.7 changed packet bytes') },
   ];
@@ -214,6 +225,25 @@ test('the current-packet verifier rejects stale JD, spec, job, answers, and PDF 
     assert.equal(result.reason, 'packet_stale');
     assert.notEqual(result.packetVersion, audit.packet_version);
   }
+});
+
+test('packet identities are separate, immutable, and covered by packet version', () => {
+  const input = validInput();
+  const audit = createPacketAudit(input);
+  assert.deepEqual(audit.identities, {
+    resume_email: 'student@usc.edu',
+    applicant_email: 'app-application-1@apply.trylitos.com',
+  });
+  assert.match(audit.bindings.resumeContactEmailSha256, /^[a-f0-9]{64}$/u);
+  assert.match(audit.bindings.applicantEmailSha256, /^[a-f0-9]{64}$/u);
+  expectInvalid((changed) => { changed.applicantEmail = changed.resumeEmail; }, /must be separate identities/);
+
+  const missingIdentity = structuredClone(audit) as unknown as Record<string, unknown>;
+  delete missingIdentity.identities;
+  assert.equal(packetAuditIsSubmissionReady(missingIdentity), false);
+  const missingHash = structuredClone(audit) as unknown as { bindings: Record<string, unknown> };
+  delete missingHash.bindings.resumeContactEmailSha256;
+  assert.equal(packetAuditIsSubmissionReady(missingHash), false);
 });
 
 test('degraded and rejected requirement results cannot create an audit', () => {
@@ -232,15 +262,15 @@ test('empty or inexact clause sets cannot claim completeness', () => {
 });
 
 test('covered clauses require exact saved-spec evidence and gaps cannot borrow it', () => {
-  expectInvalid((input) => { delete input.clauses[0].evidence; }, /missing saved ResumeSpec evidence/);
+  expectInvalid((input) => { delete input.clauses[0].evidence; }, /missing frozen packet evidence/);
   expectInvalid((input) => {
-    input.clauses[0].evidence = { ...input.clauses[0].evidence!, quote: 'A fabricated degree' };
+    input.clauses[0].evidence = [{ ...input.clauses[0].evidence![0], quote: 'A fabricated degree' }];
   }, /quote does not match/);
   expectInvalid((input) => {
-    input.clauses[0].evidence = { ...input.clauses[0].evidence!, sha256: '0'.repeat(64) };
+    input.clauses[0].evidence = [{ ...input.clauses[0].evidence![0], sha256: '0'.repeat(64) }];
   }, /sha256 does not match/);
   expectInvalid((input) => {
-    input.clauses.find((clause) => clause.verdict === 'missing')!.evidence = createResumeEvidencePointer(spec, '/skills/0');
+    input.clauses.find((clause) => clause.verdict === 'missing')!.evidence = [createResumeEvidencePointer(spec, '/skills/0')];
   }, /missing verdict must not carry/);
 });
 
@@ -257,7 +287,7 @@ test('edited color requires both exact JD support and exact saved-spec evidence'
   }, /not declared in editedTerms/);
   expectInvalid((input) => {
     delete input.terms.edited[0].evidence;
-  }, /missing saved ResumeSpec evidence/);
+  }, /missing frozen packet evidence/);
   expectInvalid((input) => {
     input.terms.edited[0].evidence = createResumeEvidencePointer(spec, '/experience/0/bullets/0');
   }, /absent from its exact saved ResumeSpec evidence/);

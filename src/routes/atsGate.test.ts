@@ -18,6 +18,11 @@ describe('contactHeaderFrom', () => {
     assert.equal(c.full_name, 'Mehek Mandal');
   });
 
+  test('does not fall back to a generic parsed email when resume email is absent', () => {
+    const c = contactHeaderFrom({ full_name: 'Mehek Mandal', email: 'login@example.com' }, undefined, undefined);
+    assert.equal(c.email, undefined);
+  });
+
   test('an empty harvest is a header with no links, not a broken one', () => {
     const c = contactHeaderFrom({ full_name: 'Mehek Mandal' }, {}, 'me@usc.edu');
     assert.equal(c.linkedin_url, undefined);

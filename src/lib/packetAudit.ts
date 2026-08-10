@@ -4,6 +4,7 @@ import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 export const PACKET_AUDIT_VERSION = 'packet_audit_v1' as const;
 
 export type PacketAuditEvidencePointer = {
+  source: 'resume_spec' | 'applicant_snapshot';
   path: string;
   sha256: string;
   quote: string;
@@ -16,7 +17,7 @@ export type PacketAuditClauseInput = {
   start: number;
   end: number;
   verdict: PacketAuditClauseVerdict;
-  evidence?: PacketAuditEvidencePointer;
+  evidence?: PacketAuditEvidencePointer[];
 };
 
 export type PacketAuditTermInput = {
@@ -44,6 +45,9 @@ export type PacketAuditBindings = {
   specSha256: string;
   jobContextSha256: string;
   questionsSha256: string;
+  applicantSnapshotSha256: string;
+  resumeContactEmailSha256: string;
+  applicantEmailSha256: string;
   pdf: PacketAuditPdfBinding;
 };
 
@@ -61,7 +65,7 @@ export type PacketAuditHighlightTerm = PacketAuditTerm & {
 };
 
 export type PacketAuditClause = PacketAuditClauseInput & {
-  evidence?: PacketAuditEvidencePointer;
+  evidence?: PacketAuditEvidencePointer[];
   highlight_terms: PacketAuditHighlightTerm[];
 };
 
@@ -73,6 +77,10 @@ export type PacketAudit = {
   rejectedCount: 0;
   bindings: PacketAuditBindings;
   packet_version: string;
+  identities: {
+    resume_email: string;
+    applicant_email: string;
+  };
   clauses: PacketAuditClause[];
   editedTerms: string[];
   terms: {
@@ -90,6 +98,9 @@ type PacketBindingInput = {
   spec: unknown;
   jobContext: unknown;
   questions: unknown;
+  applicantSnapshot: unknown;
+  resumeEmail: string;
+  applicantEmail: string;
   pdfObjectKey: string;
   pdfBytes: Uint8Array;
 };
@@ -190,7 +201,7 @@ function jsonPointerSegments(path: string): string[] | null {
   return decoded;
 }
 
-function resolvePointer(root: unknown, path: string): string | null {
+function resolvePointerValue(root: unknown, path: string): unknown | null {
   const segments = jsonPointerSegments(path);
   if (!segments) return null;
   let current: unknown = root;
@@ -206,7 +217,12 @@ function resolvePointer(root: unknown, path: string): string | null {
     if (!Object.prototype.hasOwnProperty.call(current, segment)) return null;
     current = (current as Record<string, unknown>)[segment];
   }
-  return typeof current === 'string' ? current : null;
+  return current ?? null;
+}
+
+function resolvePointer(root: unknown, path: string): string | null {
+  const value = resolvePointerValue(root, path);
+  return typeof value === 'string' ? value : null;
 }
 
 export function createResumeEvidencePointer(spec: unknown, path: string): PacketAuditEvidencePointer {
@@ -215,19 +231,39 @@ export function createResumeEvidencePointer(spec: unknown, path: string): Packet
   if (quote === null || !quote.trim()) {
     throw new PacketAuditValidationError([`evidence path ${path} does not resolve to a saved nonempty ResumeSpec string`]);
   }
-  return { path, quote, sha256: createHash('sha256').update(quote).digest('hex') };
+  return { source: 'resume_spec', path, quote, sha256: createHash('sha256').update(quote).digest('hex') };
+}
+
+export function createApplicantSnapshotEvidencePointer(snapshot: unknown, path: string): PacketAuditEvidencePointer {
+  const value = resolvePointerValue(snapshot, path);
+  if (value === null || !['string', 'boolean', 'number'].includes(typeof value)) {
+    throw new PacketAuditValidationError([`evidence path ${path} does not resolve to a frozen applicant fact`]);
+  }
+  const quote = typeof value === 'string' ? value : JSON.stringify(value);
+  if (!quote.trim()) {
+    throw new PacketAuditValidationError([`evidence path ${path} resolves to an empty frozen applicant fact`]);
+  }
+  return { source: 'applicant_snapshot', path, quote, sha256: createHash('sha256').update(quote).digest('hex') };
 }
 
 function evidenceIssues(
   evidence: PacketAuditEvidencePointer | undefined,
   normalizedSpec: ResumeSpec,
+  applicantSnapshot: unknown,
   label: string,
 ): string[] {
-  if (!evidence) return [`${label} is missing saved ResumeSpec evidence`];
-  const quote = resolvePointer(normalizedSpec, evidence.path);
-  if (quote === null) return [`${label} evidence path does not resolve to a saved ResumeSpec string`];
+  if (!evidence) return [`${label} is missing frozen packet evidence`];
+  const raw = evidence.source === 'resume_spec'
+    ? resolvePointerValue(normalizedSpec, evidence.path)
+    : evidence.source === 'applicant_snapshot'
+      ? resolvePointerValue(applicantSnapshot, evidence.path)
+      : null;
+  if (raw === null || !['string', 'boolean', 'number'].includes(typeof raw)) {
+    return [`${label} evidence path does not resolve to its declared frozen source`];
+  }
+  const quote = typeof raw === 'string' ? raw : JSON.stringify(raw);
   if (!quote.trim()) return [`${label} evidence resolves to an empty saved ResumeSpec string`];
-  if (quote !== evidence.quote) return [`${label} evidence quote does not match the saved ResumeSpec value`];
+  if (quote !== evidence.quote) return [`${label} evidence quote does not match its frozen source value`];
   if (!/^[a-f0-9]{64}$/u.test(evidence.sha256)
     || createHash('sha256').update(quote).digest('hex') !== evidence.sha256) {
     return [`${label} evidence sha256 does not match the saved ResumeSpec value`];
@@ -241,11 +277,17 @@ function bindingIssues(input: PacketBindingInput): string[] {
   if (!input.applicationId.trim()) issues.push('applicationId is required');
   if (!input.jdText.trim()) issues.push('jdText is required');
   if (!input.pdfObjectKey.trim()) issues.push('pdfObjectKey is required');
+  if (!input.resumeEmail.trim()) issues.push('resumeEmail is required');
+  if (!input.applicantEmail.trim()) issues.push('applicantEmail is required');
+  if (input.resumeEmail.trim().toLowerCase() === input.applicantEmail.trim().toLowerCase()) {
+    issues.push('resumeEmail and applicantEmail must be separate identities');
+  }
   if (!(input.pdfBytes instanceof Uint8Array) || input.pdfBytes.byteLength === 0) issues.push('pdfBytes must be nonempty');
   try {
     canonicalPacketJson(normalizeSpec(input.spec));
     canonicalPacketJson(input.jobContext);
     canonicalPacketJson(input.questions);
+    canonicalPacketJson(input.applicantSnapshot);
   } catch (error) {
     issues.push(error instanceof Error ? error.message : 'packet bindings are not canonical JSON');
   }
@@ -261,6 +303,9 @@ function packetBindings(input: PacketBindingInput): PacketAuditBindings {
     specSha256: packetAuditSha256(normalizedSpec),
     jobContextSha256: packetAuditSha256(input.jobContext),
     questionsSha256: packetAuditSha256(input.questions),
+    applicantSnapshotSha256: packetAuditSha256(input.applicantSnapshot),
+    resumeContactEmailSha256: packetAuditSha256(input.resumeEmail.trim().toLowerCase()),
+    applicantEmailSha256: packetAuditSha256(input.applicantEmail.trim().toLowerCase()),
     pdf: {
       objectKey: input.pdfObjectKey,
       sha256: byteSha256(input.pdfBytes),
@@ -300,8 +345,14 @@ function buildClauses(
     if (index > 0 && clause.start < clauses[index - 1].end) issues.push(`${label} overlaps another JD clause`);
     if (!['covered', 'missing', 'unscoreable'].includes(clause.verdict)) issues.push(`${label} has an invalid verdict`);
     if (clause.verdict === 'covered') {
-      issues.push(...evidenceIssues(clause.evidence, normalizedSpec, label));
-    } else if (clause.evidence) {
+      if (!Array.isArray(clause.evidence) || clause.evidence.length === 0) {
+        issues.push(`${label} is missing frozen packet evidence`);
+      } else {
+        clause.evidence.forEach((evidence, evidenceIndex) => {
+          issues.push(...evidenceIssues(evidence, normalizedSpec, input.applicantSnapshot, `${label} evidence ${evidenceIndex}`));
+        });
+      }
+    } else if (clause.evidence !== undefined) {
       issues.push(`${label} ${clause.verdict} verdict must not carry resume evidence`);
     }
   }
@@ -343,7 +394,8 @@ function buildTerms(
       if (tone === 'missing') {
         if (term.evidence) issues.push(`${label} must not carry resume evidence`);
       } else {
-        issues.push(...evidenceIssues(term.evidence, normalizedSpec, label));
+        issues.push(...evidenceIssues(term.evidence, normalizedSpec, input.applicantSnapshot, label));
+        if (term.evidence?.source !== 'resume_spec') issues.push(`${label} must use saved ResumeSpec evidence`);
         if (term.evidence && !normalizedTextContains(term.evidence.quote, key)) {
           issues.push(`${label} is absent from its exact saved ResumeSpec evidence`);
         }
@@ -395,6 +447,10 @@ export function createPacketAudit(input: CreatePacketAuditInput): PacketAudit {
     rejectedCount: 0,
     bindings,
     packet_version: packetVersion(bindings),
+    identities: {
+      resume_email: input.resumeEmail.trim().toLowerCase(),
+      applicant_email: input.applicantEmail.trim().toLowerCase(),
+    },
     clauses,
     editedTerms: [...new Set(input.editedTerms.map(normalizedHighlightKey))].sort(),
     terms,
@@ -409,11 +465,18 @@ export function packetAuditIsSubmissionReady(audit: unknown): audit is PacketAud
     if (candidate.version !== PACKET_AUDIT_VERSION || candidate.status !== 'passed'
       || candidate.complete !== true || candidate.degraded !== false || candidate.rejectedCount !== 0
       || !Array.isArray(candidate.clauses) || candidate.clauses.length === 0
-      || !candidate.bindings || typeof candidate.bindings !== 'object') return false;
+      || !candidate.bindings || typeof candidate.bindings !== 'object'
+      || !candidate.identities || typeof candidate.identities !== 'object'
+      || typeof candidate.identities.resume_email !== 'string'
+      || typeof candidate.identities.applicant_email !== 'string') return false;
     if (typeof candidate.packet_version !== 'string' || typeof candidate.audit_digest !== 'string'
       || !/^[a-f0-9]{64}$/u.test(candidate.packet_version)
       || !/^[a-f0-9]{64}$/u.test(candidate.audit_digest)) return false;
     if (packetVersion(candidate.bindings) !== candidate.packet_version) return false;
+    if (packetAuditSha256(candidate.identities.resume_email.trim().toLowerCase())
+        !== candidate.bindings.resumeContactEmailSha256
+      || packetAuditSha256(candidate.identities.applicant_email.trim().toLowerCase())
+        !== candidate.bindings.applicantEmailSha256) return false;
     const { audit_digest: storedDigest, ...withoutDigest } = candidate as PacketAudit;
     return auditDigest(withoutDigest) === storedDigest;
   } catch {

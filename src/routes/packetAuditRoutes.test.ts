@@ -44,10 +44,39 @@ test('packet acknowledgement binds the exact rendered audit and PDF with an exac
   assert.match(route, /acknowledged: true/);
 });
 
+test('manual dashboard navigation comes only from an action-time current acknowledged packet check', () => {
+  const route = routeSlice("'/applications/:id/submission/manual-handoff'", "'/applications/:id/submission/extension-packet'");
+  const ownership = route.indexOf('ownedResume(request, reply)');
+  const audit = route.indexOf('currentAcknowledgedPacketAudit(row)');
+  const refresh = route.indexOf('const refreshed = await ownedResume(request, reply)', audit);
+  const binding = route.indexOf('verifiedDashboardHandoffUrl({');
+  const response = route.indexOf('manual_handoff:');
+  assert.ok(ownership >= 0 && audit > ownership && refresh > audit && binding > refresh && response > binding);
+  assert.match(route, /refreshed\.resume_object_key !== row\.resume_object_key/);
+  assert.match(route, /!isDeepStrictEqual\(refreshed\.spec, row\.spec\)/);
+  assert.match(route, /frozenUrl: refreshedReview\.portal_url/);
+  assert.match(route, /frozenHandoffUrl: refreshedReview\.extension_handoff_url/);
+  assert.match(route, /frozenAtsName: refreshedReview\.ats_name/);
+  assert.match(route, /status: refreshedReview\.status/);
+  assert.match(route, /attentionReason: refreshedReview\.attention_reason/);
+  assert.match(route, /attentionCategories: refreshedReview\.attention_categories/);
+  assert.match(route, /submissionClaimedAt: refreshedReview\.submission_claimed_at/);
+  assert.match(route, /submissionClaimId: refreshedReview\.submission_claim_id/);
+  assert.match(route, /submissionPacketVersion: refreshedReview\.submission_packet_version/);
+  assert.match(route, /submissionAttemptedAt: refreshedReview\.submission_attempted_at/);
+  assert.match(route, /submittedAt: refreshedReview\.submitted_at/);
+  assert.match(route, /receipt: refreshedReview\.receipt/);
+  assert.match(route, /unverifiedSubmission: refreshedReview\.unverified_submission/);
+  assert.match(route, /audit_digest: audit\.audit\.audit_digest/);
+  assert.match(route, /packet_version: audit\.audit\.packet_version/);
+  assert.match(route, /pdf_sha256: audit\.audit\.bindings\.pdf\.sha256/);
+  assert.match(route, /size_bytes: audit\.audit\.bindings\.pdf\.sizeBytes/);
+});
+
 test('resume generation and edits persist an immutable exact spec-to-PDF binding', () => {
-  assert.match(resume, /pdfGenerationBinding: createPdfGenerationBinding\(spec, objectKey, pdfBuffer\)/);
+  assert.match(resume, /pdfGenerationBinding: createPdfGenerationBinding\(spec, objectKey, pdfBuffer, applicationContact\.email \?\? ''\)/);
   const edit = routeSlice("'/applications/:id/resume'", "'/applications/:id/review'");
-  assert.match(edit, /pdfGenerationBinding: createPdfGenerationBinding\(rendered\.spec, blob\.pathname, rendered\.buffer\)/);
+  assert.match(edit, /pdfGenerationBinding: createPdfGenerationBinding\(rendered\.spec, blob\.pathname, rendered\.buffer, contact\.email \?\? ''\)/);
   assert.match(edit, /JSON\.stringify\(row\.spec\)/);
   assert.match(edit, /generated_resumes\.resume_object_key/);
 });
@@ -74,4 +103,20 @@ test('every employer-bound path names the current packet audit gate', () => {
   const runnerAudit = runnerSubmit.indexOf('currentAcknowledgedPacketAudit(row)');
   const employerClaim = runnerSubmit.indexOf('claimSubmission(');
   assert.ok(runnerAudit >= 0 && employerClaim > runnerAudit);
+});
+
+test('submission polling hides a retained handoff when the current packet identity is no longer valid', () => {
+  assert.match(applications, /review\.status === 'needs_attention'[\s\S]*currentAcknowledgedPacketAudit\(row\)/);
+  assert.match(applications, /handoff_packet_valid = audit\.valid/);
+  assert.match(applications, /if \(audit\.valid\)[\s\S]*getLiveViewUrl/);
+});
+
+test('resume edits refuse a stale personal email before rendering or storing a replacement PDF', () => {
+  const editRoute = routeSlice("'/applications/:id/resume'", "'/applications/:id/review'");
+  const identityCheck = editRoute.indexOf('const currentResumeEmail = resumeEmailOfRecord');
+  assert.ok(identityCheck >= 0);
+  assert.ok(identityCheck < editRoute.indexOf('await renderResumePdf'));
+  assert.ok(identityCheck < editRoute.indexOf('await put('));
+  assert.match(editRoute, /!resumePacketEmailIsCurrent\(contact\.email, currentResumeEmail\)/);
+  assert.match(editRoute, /resume_email_regeneration_required/);
 });

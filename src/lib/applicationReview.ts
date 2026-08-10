@@ -321,6 +321,11 @@ export type ApplicationReviewState = {
    * an opaque publication UUID that cannot be derived from its public posting URL, so an attended
    * refill may use this URL only when it exactly matches the form currently open in Chrome. */
   extension_handoff_url?: string;
+  /** Server-owned digest of the exact attended URL and typed cause observed for this application. */
+  extension_handoff_binding?: {
+    version: 'dashboard_handoff_v1';
+    sha256: string;
+  };
   attention_reason?: string;
   attention_categories?: ApplicationAttentionCategory[];
   /* The TYPED half of attention_reason, which is prose and always will be.

@@ -60,6 +60,7 @@ import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
+import { resumeEmailOfRecord } from '../lib/resumeEmail';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -446,9 +447,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     /* THE CONTACT BLOCK, RESOLVED AGAINST THE ACCOUNT, not taken from the caller as gospel.
        See lib/resumeContactOfRecord.ts for the 28 production packets that made this necessary. */
+    const resumeEmail = resumeEmailOfRecord(profileRows[0]?.parsed_json);
+    if (!resumeEmail) {
+      return reply.status(422).send({
+        error: 'Add a personal resume email to your profile before generating this resume.',
+        code: 'resume_email_required',
+      });
+    }
     const contactOfRecord = resumeContactOfRecord({
-      requested: body.contact,
-      accountEmail: request.jwtPayload!.email,
+      requested: { ...body.contact, email: resumeEmail },
+      accountEmail: resumeEmail,
       profile: applicationRecord,
     });
 
@@ -474,13 +482,12 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       }));
     }
 
-    /* THE ALIAS IS PRINTED ON THE PDF, which is why the deliverability check has to run here too
-     * and not only at submission time.
+    /* THE ALIAS IS FROZEN FOR THE EMPLOYER FORM, which is why the deliverability check has to run
+     * here and not only at submission time.
      *
-     * applicationContact below is the contact block rendered into the resume file, and that file
-     * is frozen the moment it is generated. An alias on a domain that cannot receive mail is
-     * therefore not merely a bad form field, it is a bad address baked into the document the
-     * employer keeps. The check is cached per domain with a TTL, so this costs one lookup an hour
+     * applicationContact below is the personal contact block rendered into the resume file, while
+     * the independently generated alias is frozen into the portal snapshot. The check is cached per
+     * domain with a TTL, so this costs one lookup an hour
      * across the whole deployment rather than one per generation, and it turns itself back on
      * without a deploy once the MX record exists. */
     const aliasDeliverability = body.application && contactOfRecord.email
@@ -499,18 +506,17 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         mode: 'litos_application_alias',
       }
       : null;
-    if (body.application && contactOfRecord.email && !applicationEmail) {
-      fastify.log.warn(
-        { reason: aliasDeliverability?.reason ?? 'alias_not_configured', domain: aliasDeliverability?.domain ?? null },
-        'application email alias skipped: the alias domain cannot receive mail, using the real address',
-      );
+    if (body.application && !applicationEmail) {
+      return reply.status(422).send({
+        error: 'Litos could not create the tracked application email for this packet. Try again before applying.',
+        code: 'applicant_email_regeneration_required',
+      });
     }
-    const applicationContact = applicationEmail
-      ? { ...contactOfRecord, email: applicationEmail.alias }
-      : contactOfRecord;
-    const pinnedApplicantEmail: ApplicantEmailChoice | null = body.application && applicationContact.email
+    const applicationContact = contactOfRecord;
+    const portalApplicantEmail = applicationEmail?.alias;
+    const pinnedApplicantEmail: ApplicantEmailChoice | null = body.application && portalApplicantEmail
       ? {
-        address: applicationContact.email,
+        address: portalApplicantEmail,
         source: applicationEmail ? 'litos_alias' : body.contact.email ? 'contact_email' : 'account_email',
         reason: applicationEmail ? 'deliverable' : aliasDeliverability?.reason ?? 'alias_unavailable',
         tracked: Boolean(applicationEmail),
@@ -858,6 +864,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       layoutIssues.push(...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues);
       layoutIssues.push(...findPdfSafeMarginIssues(parsedPdf.pages, visualLayout));
       layoutIssues.push(...findPdfTextFidelityIssues(parsedPdf.text, spec, applicationContact));
+      if (pinnedApplicantEmail?.source === 'litos_alias'
+        && parsedPdf.text.toLowerCase().includes(pinnedApplicantEmail.address.toLowerCase())) {
+        layoutIssues.push('the tracked application routing email must not appear on the resume PDF');
+      }
     } catch (err) {
       // Fail closed when validation cannot run. Returning or storing an unverified PDF would
       // turn a parser failure into a false quality pass and repeat R-017's failure mode.
@@ -969,6 +979,29 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ? monitoredApplicationUrl ?? canonicalSupportedPortalUrl(body.application.portal_url, body.application.ats_name) ?? body.application.portal_url
       : undefined;
     const canonicalApplicationPortalSupported = isPortalSupported(canonicalApplicationPortalUrl);
+    const parsedProfile = (profileRows[0]?.parsed_json && typeof profileRows[0].parsed_json === 'object'
+      ? profileRows[0].parsed_json
+      : {}) as Record<string, unknown>;
+    const portalApplicationProfile = body.application ? await loadApplicationProfileLike(userId) : null;
+    const parsedExperience = Array.isArray(parsedProfile.experience)
+      ? parsedProfile.experience.flatMap((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+        const value = entry as Record<string, unknown>;
+        const company = typeof value.company === 'string' ? value.company.trim() : '';
+        const title = typeof value.title === 'string' ? value.title.trim() : '';
+        if (!company || !title) return [];
+        return [{
+          company,
+          title,
+          start: typeof value.start === 'string' ? value.start.trim() : '',
+          end: typeof value.end === 'string' ? value.end.trim() : '',
+          description: typeof value.description === 'string' ? value.description.trim() : '',
+        }];
+      })
+      : [];
+    const gradYear = typeof parsedProfile.grad_year === 'number'
+      ? parsedProfile.grad_year
+      : Number(String(education.grad_date ?? '').match(/(?:19|20)\d{2}/)?.[0] ?? 0);
     let applicationReview: ApplicationReviewState = {
       jd_text: jdText,
       role: body.role,
@@ -983,6 +1016,24 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       } : {}),
       status: body.application ? 'ready_to_submit' as const : 'resume_ready' as const,
       ...(pinnedApplicantEmail ? { applicant_email: pinnedApplicantEmail } : {}),
+      ...(body.application && pinnedApplicantEmail && portalApplicationProfile ? {
+        applicant_snapshot: {
+          profile: {
+            full_name: applicationContact.full_name,
+            email: pinnedApplicantEmail.address,
+            experience: parsedExperience,
+            skills: declaredSkills,
+            school: education.school,
+            ...(education.degree ? { degree: education.degree } : {}),
+            ...(education.grad_date ? { grad_date: education.grad_date } : {}),
+            grad_year: gradYear,
+            ...(typeof parsedProfile.currently_enrolled === 'boolean'
+              ? { currently_enrolled: parsedProfile.currently_enrolled }
+              : {}),
+          },
+          application_profile: portalApplicationProfile,
+        },
+      } : {}),
       edited_terms: deriveEditedTerms(spec, bank),
       questions: [],
       skipped_reasons: [],
@@ -1001,7 +1052,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ...(applicationEmail ? { _application_email: applicationEmail } : {}),
       _review: applicationReview,
       _quality: {
-        pdfGenerationBinding: createPdfGenerationBinding(spec, objectKey, pdfBuffer),
+        pdfGenerationBinding: createPdfGenerationBinding(spec, objectKey, pdfBuffer, applicationContact.email ?? ''),
         specIssues: [],
         /* Its own key rather than folded into specIssues, which means "the model wrote something
            the validator rejected". This is a fact about the ACCOUNT, not about the generated

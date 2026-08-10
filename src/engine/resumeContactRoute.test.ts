@@ -156,7 +156,9 @@ describe('every path that can produce or send one of these packets is closed', (
   const baseResumeRoute = readFileSync('src/routes/baseResume.ts', 'utf8');
 
   test('generation resolves the contact against the account and refuses before the model call', () => {
-    assert.match(resumeRoute, /resumeContactOfRecord\(\{[\s\S]*accountEmail: request\.jwtPayload!\.email/);
+    assert.match(resumeRoute, /const resumeEmail = resumeEmailOfRecord\(profileRows\[0\]\?\.parsed_json\)/);
+    assert.match(resumeRoute, /if \(!resumeEmail\)[\s\S]*code: 'resume_email_required'/);
+    assert.match(resumeRoute, /resumeContactOfRecord\(\{[\s\S]*accountEmail: resumeEmail/);
     assert.match(resumeRoute, /if \(resumeContactIssues\(contactOfRecord\)\.length > 0\)/);
     assert.match(resumeRoute, /code: 'resume_quality_hold'/);
     // Refused BEFORE the spec is generated, or the refusal costs a Claude call and a render.
@@ -169,7 +171,7 @@ describe('every path that can produce or send one of these packets is closed', (
     assert.match(resumeRoute, /body\.application && contactOfRecord\.email/);
     assert.doesNotMatch(resumeRoute, /body\.application && body\.contact\.email/);
     // The stored block is the resolved one, not the request's.
-    assert.match(resumeRoute, /applicationContact = applicationEmail[\s\S]*: contactOfRecord;/);
+    assert.match(resumeRoute, /const applicationContact = contactOfRecord;/);
   });
 
   test('the packet records the contact verdict instead of leaving an empty array to be misread', () => {
@@ -201,7 +203,8 @@ describe('every path that can produce or send one of these packets is closed', (
   test('the main resume prints the stored phone and reports the guard as its own cause', () => {
     assert.match(baseResumeRoute, /phone: str\(appProfile\?\.phone\)/);
     // The decrypted row, not the raw one: phone is in ENCRYPTED_FIELDS and the raw column is base64.
-    assert.match(baseResumeRoute, /contactHeaderFrom\(profile\.parsed_json, applicationRecord, email\)/);
+    assert.match(baseResumeRoute, /const resumeEmail = resumeEmailOfRecord\(profile\.parsed_json\)/);
+    assert.match(baseResumeRoute, /contactHeaderFrom\([\s\S]*profile\.parsed_json,[\s\S]*applicationRecord,[\s\S]*resumeEmail/);
     assert.match(baseResumeRoute, /err instanceof ResumeContactError/);
   });
 });
