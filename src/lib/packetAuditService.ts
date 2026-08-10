@@ -20,12 +20,13 @@ import {
   type PacketAudit,
 } from './packetAudit';
 import { resolveBlobUrl } from './resumeAccess';
+import { pdfGenerationBindingIsCurrent } from './pdfGenerationBinding';
 
 type ResumeRow = typeof generated_resumes.$inferSelect;
 
 export type PacketAuditFailure = {
   valid: false;
-  code: 'PACKET_AUDIT_REQUIRED' | 'PACKET_AUDIT_STALE' | 'PACKET_PDF_INVALID';
+  code: 'PACKET_AUDIT_REQUIRED' | 'PACKET_AUDIT_STALE' | 'PACKET_AUDIT_ACK_REQUIRED' | 'PACKET_PDF_INVALID';
   reason: string;
 };
 
@@ -54,6 +55,16 @@ export function validStoredPdf(input: { bytes: Buffer; contentType?: string }): 
   if (input.bytes.length < 5 || input.bytes.subarray(0, 5).toString('ascii') !== '%PDF-') return false;
   if (input.contentType && !/^application\/pdf(?:\s*;|$)/i.test(input.contentType.trim())) return false;
   return true;
+}
+
+function hasCurrentGenerationBinding(row: ResumeRow, pdfBytes: Buffer): boolean {
+  const quality = row.spec && typeof row.spec === 'object' && !Array.isArray(row.spec)
+    ? (row.spec as Record<string, unknown>)._quality
+    : null;
+  const binding = quality && typeof quality === 'object' && !Array.isArray(quality)
+    ? (quality as Record<string, unknown>).pdfGenerationBinding
+    : null;
+  return pdfGenerationBindingIsCurrent(binding, row.spec, row.resume_object_key, pdfBytes);
 }
 
 function editableSpec(value: unknown): ResumeSpec {
@@ -282,6 +293,13 @@ export async function currentPacketAudit(
   if (!validStoredPdf(loaded)) {
     return { valid: false, code: 'PACKET_PDF_INVALID', reason: 'The stored resume is not a verified PDF.' };
   }
+  if (!hasCurrentGenerationBinding(row, loaded.bytes)) {
+    return {
+      valid: false,
+      code: 'PACKET_PDF_INVALID',
+      reason: 'The stored resume PDF is not bound to this exact saved resume. Generate it again.',
+    };
+  }
   const input = auditInput(row, {
     ...review,
     questions: options.questions
@@ -294,6 +312,30 @@ export async function currentPacketAudit(
     : { valid: false, code: 'PACKET_AUDIT_STALE', reason: verification.reason };
 }
 
+export async function currentAcknowledgedPacketAudit(
+  row: ResumeRow,
+  options: { questions?: readonly ApplicationReviewQuestion[]; loadPdf?: PdfLoader } = {},
+): Promise<PacketAuditVerdict> {
+  const verdict = await currentPacketAudit(row, options);
+  if (!verdict.valid) return verdict;
+  const acknowledgement = readApplicationReview(row.spec)?.packet_audit_acknowledgement;
+  const audit = verdict.audit;
+  if (!acknowledgement
+    || acknowledgement.ownerSha256 !== audit.bindings.ownerSha256
+    || acknowledgement.applicationId !== audit.bindings.applicationId
+    || acknowledgement.audit_digest !== audit.audit_digest
+    || acknowledgement.packet_version !== audit.packet_version
+    || acknowledgement.pdfSha256 !== audit.bindings.pdf.sha256
+    || acknowledgement.pdfSizeBytes !== audit.bindings.pdf.sizeBytes) {
+    return {
+      valid: false,
+      code: 'PACKET_AUDIT_ACK_REQUIRED',
+      reason: 'Review the exact resume PDF and requirement evidence before submitting.',
+    };
+  }
+  return verdict;
+}
+
 export async function createAndPersistPacketAudit(
   row: ResumeRow,
   options: { loadPdf?: PdfLoader } = {},
@@ -302,6 +344,9 @@ export async function createAndPersistPacketAudit(
   if (!review) throw new Error('Application review is not available for this resume');
   const loaded = await (options.loadPdf ?? defaultPdfLoader)(row.resume_object_key);
   if (!validStoredPdf(loaded)) throw new Error('The stored resume is not a verified PDF');
+  if (!hasCurrentGenerationBinding(row, loaded.bytes)) {
+    throw new Error('The stored resume PDF is not bound to this exact saved resume. Generate it again.');
+  }
   const scored = await scoreAuditEvidence(row, review);
   const audit = createPacketAudit({
     ...auditInput(row, review, loaded.bytes),

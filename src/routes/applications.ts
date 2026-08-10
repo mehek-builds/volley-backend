@@ -77,11 +77,18 @@ import {
 import { resolveFrozenApplicantEmail } from '../lib/applicationEmail';
 import { findComposioVerificationCode } from '../lib/emailVerification';
 import { registerWorkdayVerificationRoute } from './workdayVerification';
-import { createAndPersistPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
+import { createAndPersistPacketAudit, currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
+import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(4000) });
+const packetAuditAcknowledgementSchema = z.object({
+  audit_digest: z.string().regex(/^[a-f0-9]{64}$/),
+  packet_version: z.string().regex(/^[a-f0-9]{64}$/),
+  pdf_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  size_bytes: z.number().int().positive(),
+});
 const questionSchema = z.object({
   id: z.string().min(1).max(200),
   question: z.string().min(1).max(4000),
@@ -480,6 +487,56 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     },
   );
 
+  fastify.post(
+    '/applications/:id/packet-audit/acknowledge',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const parsed = packetAuditAcknowledgementSchema.safeParse(request.body);
+      if (!parsed.success) return reply.status(400).send({ error: 'Invalid packet audit acknowledgement' });
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const review = readApplicationReview(row.spec);
+      if (!review || review.submission_claimed_at || review.status === 'submitted') {
+        return reply.status(409).send({ error: 'This application cannot be acknowledged in its current state' });
+      }
+      const verdict = await currentPacketAudit(row);
+      if (!verdict.valid) return reply.status(409).send({ error: verdict.reason, code: verdict.code });
+      const audit = verdict.audit;
+      if (parsed.data.audit_digest !== audit.audit_digest
+        || parsed.data.packet_version !== audit.packet_version
+        || parsed.data.pdf_sha256 !== audit.bindings.pdf.sha256
+        || parsed.data.size_bytes !== audit.bindings.pdf.sizeBytes) {
+        return reply.status(409).send({
+          error: 'The rendered packet no longer matches the saved application. Reload it before continuing.',
+          code: 'PACKET_AUDIT_STALE',
+        });
+      }
+      const acknowledgement = {
+        ownerSha256: audit.bindings.ownerSha256,
+        applicationId: audit.bindings.applicationId,
+        audit_digest: audit.audit_digest,
+        packet_version: audit.packet_version,
+        pdfSha256: audit.bindings.pdf.sha256,
+        pdfSizeBytes: audit.bindings.pdf.sizeBytes,
+        acknowledged_at: new Date().toISOString(),
+      };
+      const next: ApplicationReviewState = { ...review, packet_audit_acknowledgement: acknowledgement };
+      const updated = await db.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
+        eq(generated_resumes.id, row.id),
+        eq(generated_resumes.user_id, request.jwtPayload!.userId),
+        sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+        sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
+      )).returning({ id: generated_resumes.id });
+      if (!updated.length) {
+        return reply.status(409).send({
+          error: 'The saved application changed before the acknowledgement was recorded.',
+          code: 'PACKET_AUDIT_STALE',
+        });
+      }
+      return reply.send({ acknowledged: true });
+    },
+  );
+
   fastify.get(
     '/applications/:id/submission/extension-packet',
     { preHandler: requireAuth },
@@ -610,7 +667,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         }
       }
       if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
-        const auditVerdict = await currentPacketAudit(precheckRow);
+        const auditVerdict = await currentAcknowledgedPacketAudit(precheckRow);
         if (!auditVerdict.valid) {
           return reply.status(409).send({ error: auditVerdict.reason, code: auditVerdict.code });
         }
@@ -769,7 +826,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.submission_claim_id !== parsed.data.claim_id || current.status !== 'submitting') {
         return reply.status(409).send({ error: 'This extension submission is no longer active' });
       }
-      const outcomeAudit = await currentPacketAudit(row);
+      const outcomeAudit = await currentAcknowledgedPacketAudit(row);
       if (!outcomeAudit.valid || current.submission_packet_version !== outcomeAudit.audit.packet_version) {
         return reply.status(409).send({
           error: outcomeAudit.valid
@@ -938,6 +995,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...(stored._cover_letter ? { _cover_letter: stored._cover_letter } : {}),
         _quality: {
           ...(stored._quality as Record<string, unknown> | undefined),
+          pdfGenerationBinding: createPdfGenerationBinding(rendered.spec, blob.pathname, rendered.buffer),
           atsCoverage: validation.ats_keyword_coverage_pct,
           visualWarnings: visual.warnings,
           groundingRemoved: grounded.removed,
@@ -950,6 +1008,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         .where(and(
           eq(generated_resumes.id, row.id),
           eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
           sql`${generated_resumes.spec}->'_review'->>'status' = ${review.status}`,
         ))
         .returning({ id: generated_resumes.id });
@@ -1180,7 +1240,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.portal_url && !isPortalSupported(current.portal_url) && sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
-      const submitAudit = await currentPacketAudit(row, { questions: normalizedSubmittedQuestions });
+      const submitAudit = await currentAcknowledgedPacketAudit(row, { questions: normalizedSubmittedQuestions });
       if (!submitAudit.valid) {
         return reply.status(409).send({ error: submitAudit.reason, code: submitAudit.code });
       }
@@ -1415,7 +1475,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!current || current.status !== 'needs_attention') {
         return reply.status(409).send({ error: 'This application is not waiting on you' });
       }
-      const handoffAudit = await currentPacketAudit(row);
+      const handoffAudit = await currentAcknowledgedPacketAudit(row);
       if (!handoffAudit.valid) {
         return reply.status(409).send({
           error: handoffAudit.reason,
@@ -1605,7 +1665,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         stored,
         applicationCompany(row),
       ));
-      const approvalAudit = await currentPacketAudit(row, { questions: approvalReview.questions });
+      const approvalAudit = await currentAcknowledgedPacketAudit(row, { questions: approvalReview.questions });
       if (!approvalAudit.valid) approvalIssues.push(approvalAudit.reason);
       if (approvalIssues.length > 0) {
         return reply.status(422).send({
@@ -1684,7 +1744,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     async (request: FastifyRequest, reply: FastifyReply) => {
       const row = await ownedResume(request, reply);
       if (!row) return;
-      const securityCodeAudit = await currentPacketAudit(row);
+      const securityCodeAudit = await currentAcknowledgedPacketAudit(row);
       if (!securityCodeAudit.valid) {
         return reply.status(409).send({
           error: securityCodeAudit.reason,

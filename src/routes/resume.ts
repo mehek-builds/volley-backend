@@ -35,6 +35,7 @@ import {
   resumeQualityHoldResponseSchema,
 } from './resumeResponseSchema';
 import { extractPdfText } from '../lib/pdfText';
+import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
 import { PRODUCT_NAME } from '../lib/product';
 import { applyResumePolicy, educationFrom, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
 import { academicRecordRowFor } from './profile';
@@ -1000,6 +1001,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ...(applicationEmail ? { _application_email: applicationEmail } : {}),
       _review: applicationReview,
       _quality: {
+        pdfGenerationBinding: createPdfGenerationBinding(spec, objectKey, pdfBuffer),
         specIssues: [],
         /* Its own key rather than folded into specIssues, which means "the model wrote something
            the validator rejected". This is a fact about the ACCOUNT, not about the generated

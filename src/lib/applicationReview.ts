@@ -462,6 +462,16 @@ export type ApplicationReviewState = {
   applicant_snapshot?: AutofillApplicantSnapshot;
   /** Server-owned proof that the exact JD, saved resume, answers, and stored PDF were audited. */
   packet_audit?: PacketAudit;
+  /** Applicant acknowledgement of the exact rendered packet audit and PDF bytes. */
+  packet_audit_acknowledgement?: {
+    ownerSha256: string;
+    applicationId: string;
+    audit_digest: string;
+    packet_version: string;
+    pdfSha256: string;
+    pdfSizeBytes: number;
+    acknowledged_at: string;
+  };
   filled_fields?: string[];
   preview_screenshot_url?: string;
   submission_authorization?: {
