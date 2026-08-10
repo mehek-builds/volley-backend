@@ -120,44 +120,79 @@ test('managed receiving rejects applicant replies before any relay ledger insert
   assert.match(service, /return \/\^\[a-z0-9\].*\\\.resend\\\.app\$\/i\.test\(domain\)/);
 });
 
+/* Storing and disposing are two functions now, so this reads across both instead of inside one.
+ *
+ * The property is exactly what it always was: the ledger row is written FIRST, and only then does
+ * anything decide whether that message may leave Litos. What moved is where the deciding happens -
+ * handleStoredEmployerMessage - and why: resolution of a submission confirmation had to stop being a
+ * side effect of a successful first forward. The second property is newer: whatever is decided, the
+ * row is annotated with it, so a message that was stored and withheld can never again be mistaken
+ * for one nothing has looked at. */
 test('employer mail is stored before the forwarding decision, and every decision is recorded', () => {
-  const processor = service.slice(
-    service.indexOf('export async function processInboundApplicationEmail'),
-    service.indexOf('export async function applicationEmailHealth'),
-  );
+  const handlerStart = service.indexOf('export async function handleStoredEmployerMessage');
+  const processorStart = service.indexOf('export async function processInboundApplicationEmail');
+  const handler = service.slice(handlerStart, processorStart);
+  const processor = service.slice(processorStart, service.indexOf('export async function reconcileSubmissionConfirmations'));
   const ledgerInsert = processor.indexOf("direction: 'inbound'");
-  const decision = processor.indexOf('applicationEmailForwardingDecision(storedClassification, {');
-  const claim = processor.indexOf('forwarding_claimed_at: new Date()');
-  const send = processor.indexOf('sendEmail(forwardEmailPayload');
+  const handoff = processor.indexOf('return handleStoredEmployerMessage({');
   assert.ok(ledgerInsert >= 0);
-  assert.ok(decision > ledgerInsert);
+  assert.ok(handoff > ledgerInsert, 'the message must be in the ledger before anything decides what to do with it');
+  const decision = handler.indexOf('applicationEmailForwardingDecision(classification, {');
+  const claim = handler.indexOf('deps.claimForwarding(');
+  const send = handler.indexOf('deps.forward(');
+  assert.ok(decision >= 0);
   assert.ok(claim > decision);
   assert.ok(send > claim);
-  assert.match(processor, /reason: forwardingDecision\.reason/);
-  /* THE WHITELIST IS NOW A WITHHOLD LIST, and this is the assertion that says so.
+  assert.match(handler, /reason: forwardingDecision\.reason/);
+  /* THE WHITELIST IS A WITHHOLD LIST NOW, and this is the assertion that says so.
    *
    * It used to pin the literal `classification === 'submission_confirmation' || classification ===
-   * 'interview_request'`, which is the two-outcome allowlist that forwarded nothing for a day and
-   * silently dropped an offer letter. What has to stay true is the shape: the default answer is to
-   * deliver, and a refusal has to name a reason from a closed set. */
+   * 'interview_request'`, the two-outcome allowlist that forwarded nothing for a day and silently
+   * dropped an offer letter. What has to stay true is the shape: the default answer is to deliver,
+   * and a refusal has to name a reason from a closed set. */
   assert.match(service, /if \(classification === 'applicant_reply'\) return \{ forward: false, reason: 'applicant_reply' \}/);
   assert.match(service, /classification === 'verification_code' && context\.securityCodeInFlight === true/);
   assert.match(service, /\n {2}return \{ forward: true \};\n\}/);
-  // A withheld message is annotated on its own row, so it can never look unprocessed again.
-  assert.match(processor, /await recordForwardDecision\(message\.id, `withheld:\$\{forwardingDecision\.reason\}`\)/);
-  assert.match(processor, /await recordForwardDecision\(message\.id, 'forward'\)/);
+  assert.doesNotMatch(service, /classification === 'submission_confirmation' \|\| classification === 'interview_request'/);
+  // Every decision is annotated on the row, and the withhold is annotated before the early return.
+  assert.match(handler, /deps\.recordDecision\(\{ messageId: message\.id, decision: `withheld:\$\{forwardingDecision\.reason\}` \}\)/);
+  assert.match(handler, /await deps\.recordDecision\(\{ messageId: message\.id, decision: 'forward' \}\)/);
+  const withheldRecord = handler.indexOf('decision: `withheld:');
+  assert.ok(withheldRecord > decision && withheldRecord < claim, 'the drop is recorded before the function returns from it');
+  assert.ok(handler.indexOf("decision: 'forward'") < claim, 'a lost claim still leaves the decision on the row');
   assert.match(service, /set\(\{ forward_decision: decision \}\)/);
   assert.match(processor, /onConflictDoNothing\(\{ target: application_email_messages\.dedupe_key \}\)/);
-  assert.match(processor, /sql`\(\$\{application_email_messages\.forwarding_claimed_at\} is null or/);
+  assert.match(service, /sql`\(\$\{application_email_messages\.forwarding_claimed_at\} is null or/);
   assert.match(processor, /storedApplicationEmailClassification\(message\.classification\)/);
-  assert.match(processor, /subject: message\.subject \?\? undefined/);
-  assert.doesNotMatch(
-    processor.slice(processor.indexOf('await sendEmail(forwardEmailPayload'), processor.indexOf("if (storedClassification === 'submission_confirmation'")),
-    /inbound: input/,
-  );
+  // The forward is built from the STORED row, never from the raw webhook body.
+  assert.match(handler, /subject: message\.subject \?\? undefined/);
+  assert.doesNotMatch(handler, /inbound: input/);
   const verificationReader = readFileSync('src/lib/emailVerification.ts', 'utf8');
   assert.match(verificationReader, /from\(application_email_messages\)/);
   assert.match(verificationReader, /extractLitosVerificationCode\(rows/);
+});
+
+/* EVERY PLACE forward_decision IS TOUCHED SURVIVES ITS OWN MIGRATION NOT HAVING RUN, because on
+ * Vercel a merge is a deploy and the two land in either order.
+ *
+ * The three that only annotate degrade to "unmeasurable" and carry on. The fourth is the ledger
+ * INSERT, which cannot degrade: Drizzle names every declared column in an INSERT, so an unmigrated
+ * database rejects the statement that stores employer mail. That one is repeated without the
+ * column instead. The behaviour is measured in applicationEmailForwardDecision.test.ts against a
+ * database with the column dropped; these assertions are here so the shim is not deleted by
+ * somebody tidying up before the migration has run everywhere. */
+test('forward_decision is written by code that works before its migration', () => {
+  // The writer: swallows undefined_column and nothing else.
+  assert.match(service, /set\(\{ forward_decision: decision \}\)[\s\S]{0,200}if \(!isUndefinedColumnError\(error\)\) throw error;/);
+  // The health count: null when it cannot be taken, never 0.
+  assert.match(service, /like 'withheld:%'[\s\S]{0,600}\.catch\(\(\) => null\)/);
+  // The ledger route: falls back to the pre-migration shape rather than 500ing the inbox.
+  assert.match(route, /forward_decision: application_email_messages\.forward_decision/);
+  assert.match(route, /if \(!isUndefinedColumnError\(error\)\) throw error;[\s\S]{0,400}forward_decision: null as string \| null/);
+  // The insert: repeated without the column, because storing the message may not depend on it.
+  assert.match(service, /async function insertLedgerRowBeforeForwardDecision/);
+  assert.match(service, /return insertLedgerRowBeforeForwardDecision\(ledgerValues\)/);
+  assert.doesNotMatch(service, /insert into application_email_messages[\s\S]{0,600}forward_decision/);
 });
 
 test('the forwarding destination is a stored preference, not the login address', () => {

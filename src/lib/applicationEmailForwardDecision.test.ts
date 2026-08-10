@@ -216,3 +216,37 @@ test('the health probe can see the withheld message, which last_inbound_message_
   // it could not report the outage.
   assert.ok(health.last_inbound_message_at);
 });
+
+/* THE DEPLOY THAT LEADS ITS MIGRATION, measured rather than asserted.
+ *
+ * On Vercel a merge is a deploy, so this code can be live for as long as it takes somebody to run
+ * `npm run db:application-email-forward-decision`. The tolerance is only worth having if it is the
+ * real Drizzle error being caught, and the last time this repo trusted a bare `error.code ===
+ * '42703'` it was measured to never match, because Drizzle wraps the pg error in a
+ * DrizzleQueryError whose own code is undefined. So this drops the column for real and drives the
+ * live path through it.
+ *
+ * LAST IN THE FILE ON PURPOSE: it leaves the fixture without the column.
+ */
+test('mail is still delivered on a database that has not run the migration', async () => {
+  await pglite.exec('alter table application_email_messages drop column forward_decision');
+  captureSends();
+  const result = await service.processInboundApplicationEmail({
+    provider: 'resend',
+    providerMessageId: 'pre-migration-1',
+    from: 'no-reply@myworkday.com',
+    to: [ALIAS],
+    subject: 'Verify your account',
+    text: 'Verify your account to finish your candidate profile.',
+    receivedAt: new Date(),
+  });
+  // The writer swallows the one error that means "the migration has not run", and only that one.
+  assert.equal(result.classification, 'account_registration');
+  assert.equal(result.forwarded, true, 'a missing annotation column must never cost the applicant her mail');
+  assert.equal(sends.length, 1);
+
+  // And the reader reports "unmeasurable", never "none": those are different answers.
+  const health = await service.applicationEmailHealth();
+  assert.equal(health.withheld_messages_recent, null);
+  assert.ok(health.last_inbound_message_at, 'the rest of the probe still works');
+});

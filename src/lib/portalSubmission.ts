@@ -24,7 +24,7 @@ import {
   selfIdentificationDeclineWording,
 } from './profileFieldResolution';
 import type { Locator } from 'playwright-core';
-import { browserApplicationCapability } from './browserApplicationCapabilities';
+import { browserApplicationCapability, type BrowserApplicationFamily } from './browserApplicationCapabilities';
 import { isControlledTestPortalUrl } from './controlledTestPortal';
 import { chooseCanonicalFinalSubmit } from './finalSubmitChooserPolicy';
 import {
@@ -48,7 +48,10 @@ function quoteAttr(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
-type PortalFamily =
+/* Exported for one reason: portalSupportInvariants.test.ts enumerates it and asserts that
+ * portalCanAutoSubmit and isAutonomousPortalFamily agree on every member. That agreement is what
+ * makes the CAPTCHA corroboration rule safe, and it is not otherwise enforced anywhere. */
+export type PortalFamily =
   | 'greenhouse'
   | 'lever'
   | 'ashby'
@@ -423,18 +426,39 @@ export function managedPortalReceiptCapability(portal: SupportedPortal): Managed
   return portalCanAutoSubmit(portal) ? 'confirmation_possible' : 'unavailable_before_handoff';
 }
 
+/* The families whose submit capability is decided by the researched capability table rather than by
+ * the deny sets above. portalCanAutoSubmit branches to browserApplicationCapability for exactly
+ * these, and the table denies programmaticSubmit on every one of them today.
+ *
+ * They have to be subtracted here or the type disagrees with the function. zoho_recruit and bullhorn
+ * are in no deny set, so before this line AutonomousPortalFamily claimed both were autonomous while
+ * portalCanAutoSubmit answered false for both, and the array below could not be complete. If the
+ * table ever grants one of them programmaticSubmit, the two answers part company in the other
+ * direction and portalSupportInvariants.test.ts is what says so. */
+type CapabilityReviewedFamily = Extract<PortalFamily, BrowserApplicationFamily>;
+
 // The portal families Litos can carry all the way to a confirmation on its own.
 //
 // Subtracted from PortalFamily rather than hand-listed, so a portal that later turns out to be
-// multi-step or CAPTCHA-gated leaves this type the moment it is added to either set above. There is
-// no second list to remember to update, which is the only version of this that stays true.
+// multi-step or CAPTCHA-gated leaves this type the moment it is added to either set above.
+//
+// The TYPE is subtracted; the VALUE below is still hand-listed, and `satisfies` proves only that
+// every entry belongs, never that every member is present. The completeness half is asserted in
+// portalSupportInvariants.test.ts, which is what makes "no second list to remember to update" true
+// rather than merely intended: a family that lands in none of the sets above joins this type, and if
+// nobody adds it to the array that test stops compiling.
 //
 // This is what the jobs board is allowed to source from. Surfacing a posting Litos cannot finish is
 // worse than not surfacing it at all: the student picks it, tailors a resume to it, and only then
 // discovers the last step needs her anyway. Fewer jobs that all work beats more jobs that mostly do.
 export type AutonomousPortalFamily = Exclude<
   PortalFamily,
-  MultiStepFamily | CaptchaGatedFamily | ConsentGatedFamily | ManualFinalReviewFamily | AccountWalledFamily
+  MultiStepFamily
+  | CaptchaGatedFamily
+  | ConsentGatedFamily
+  | ManualFinalReviewFamily
+  | AccountWalledFamily
+  | CapabilityReviewedFamily
 >;
 
 export const AUTONOMOUS_PORTAL_FAMILIES = [
@@ -6751,6 +6775,27 @@ export function managedCaptchaProvider(
 }
 
 /**
+ * EVERYTHING ON THIS PAGE THAT IS POSITIVE EVIDENCE A HUMAN IS BEING ASKED SOMETHING.
+ *
+ * Named once and shared, because "what counts as evidence" was previously spelled out inline in
+ * the corroboration check and therefore applied to some portals and not others. Each entry is a
+ * direct observation rather than an inference: an open bframe is the image grid a person is looking
+ * at, a rendered widget or anchor is a control that has not declared itself invisible, and an
+ * unexplained challenge sitekey is a widget nothing on the page accounted for.
+ *
+ * Empty means the page said nothing about a challenge. It does NOT mean there is no challenge - a
+ * page that returned no readable text at all produces an empty list too, and that is precisely the
+ * shape the caller has to be able to tell apart from a seen widget.
+ */
+export function managedCaptchaPageEvidence(evidence: ManagedCaptchaEvidence): string[] {
+  return [
+    ...(evidence.bframeSrc ? [evidence.bframeSrc] : []),
+    ...renderedCaptchaEvidence(evidence),
+    ...unexplainedChallengeSitekeys(evidence),
+  ];
+}
+
+/**
  * Does this repo's own read of the page back up the REMOTE RUNNER's claim that a human is needed?
  *
  * WHAT THIS IS, stated precisely, because it used to be described as something it is not. It is a
@@ -6767,33 +6812,74 @@ export function managedCaptchaProvider(
  * defence in depth, it is one check wearing two names, which is worse than one check because it
  * reads as two.
  *
- * Outside the autonomous families the provider's word stands unchallenged - JazzHR and BambooHR
- * really do gate every form, portalCanAutoSubmit already refuses to submit them, and there is
- * nothing to protect.
+ * THIS IS A PAGE QUESTION, so it is now answered the same way for every family. It used to return
+ * true for any portal outside AUTONOMOUS_PORTAL_FAMILIES before looking at a single extract.
+ *
+ * That carve-out was not only a mistake, and the honest version of this note has to say so. It was
+ * written when the exception meant JazzHR and BambooHR, two families measured by hand and known to
+ * gate every form, and for them it was correct. It was also, in effect, the belt for every family
+ * nobody had measured yet: an unmeasured portal kept the runner's CAPTCHA claim, and keeping a
+ * blocker is the cautious direction. What made it wrong was that it silently extended that trust to
+ * families added years after the reasoning was written, so the set it protected and the set it was
+ * argued for drifted apart with nothing to notice. Measured consequence: packet 1d1de862 (SEEKA,
+ * smartrecruiters) carries a CAPTCHA claim and an open human_verification stall on a page whose own
+ * preview recorded no readable text whatsoever, which is the signature of an interstitial rather
+ * than a widget.
+ *
+ * So the belt is kept where it was actually earned and dropped where it was merely inherited. The
+ * three families that CANNOT auto-submit on any path keep their blocker unconditionally, one layer
+ * up in corroborateManagedCaptchaBlockers, which is where a family ceiling belongs. Everything else
+ * has to show the page.
  *
  * Uncorroborating is safe at the point it is used. It drops a blocker off a PREPARE result, which
  * fills a form and screenshots it; it never presses submit. The submit path runs its own probe
  * afterwards, and portalCanAutoSubmit still stands in front of that. The cost of a false negative
  * here is a preview the applicant reviews anyway. The cost of the false positive was the product.
+ *
+ * `portal` is still taken, and still ignored on purpose: the caller passes the portal it is judging
+ * and the answer is deliberately independent of it. Removing the parameter would only hide that
+ * this is a page question rather than a family question.
  */
 export function managedCaptchaVerdictIsCorroborated(
   portal: SupportedPortal,
   result: ManagedBrowserResult | null,
 ): boolean {
+  void portal;
   const evidence = readManagedCaptchaEvidence(result);
   if (isInvisibleRecaptchaEvidence(evidence)) return false;
-  if (!isAutonomousPortalFamily(portalFamily(portal))) return true;
-  return evidence.bframeSrc !== null
-    || renderedCaptchaEvidence(evidence).length > 0
-    || unexplainedChallengeSitekeys(evidence).length > 0;
+  return managedCaptchaPageEvidence(evidence).length > 0;
 }
 
+/**
+ * WHETHER THE RUN STOPS, which is a different question from whether the page agrees.
+ *
+ * The verdict above is about markup. This is about the packet, and it has one more input: a family
+ * whose forms Litos can never finish on its own. On jazzhr, bamboohr and comeet, dropping the
+ * CAPTCHA blocker does not merely lose a warning, it makes `blockers.length === 0` in prepareManaged
+ * and therefore `safe`, which renders a green "Send it" button, or submits outright under standing
+ * consent. She presses it, the approve gate accepts, and the submit path immediately bounces her
+ * back to needs_attention because portalCanAutoSubmit is false for those three. A send button that
+ * cannot work is the failure this module already names as its worst: it is the same shape as the
+ * Cresta cover-letter refusal, pointed the other way.
+ *
+ * So a family ceiling keeps its blocker whatever the page read said, and it costs nothing to do so:
+ * these are exactly the families that cannot auto-submit anyway, so no application is delayed by a
+ * blocker that was going to stop at the handoff regardless. It also keeps the whole of the real fix,
+ * because smartrecruiters, jobvite, icims and oraclecloud are not on that list and still have to
+ * show the page.
+ *
+ * This is deliberately NOT inside managedCaptchaVerdictIsCorroborated. That function answers "does
+ * this repo's read of the markup back the runner up", and a family fact is not evidence about a
+ * page; folding it in would put a family carve-out back into the one place the carve-out did damage,
+ * and would make an assumed stop indistinguishable from an observed one.
+ */
 export function corroborateManagedCaptchaBlockers(
   portal: SupportedPortal,
   blockers: readonly string[],
   result: ManagedBrowserResult | null,
 ): string[] {
   if (!blockersIncludeCaptcha(blockers)) return [...blockers];
+  if (isCaptchaGatedFamily(portal)) return [...blockers];
   if (managedCaptchaVerdictIsCorroborated(portal, result)) return [...blockers];
   return blockers.filter((blocker) => blocker !== CAPTCHA_BLOCKER);
 }
