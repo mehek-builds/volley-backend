@@ -88,60 +88,163 @@ const CITATION_STOPWORDS = new Set(
     .split(/\s+/),
 );
 
-/* Crude singularisation, matching the intent of resumeCovers in jdMatch: a posting that writes
-   "shipping consumer products" and a bullet that writes "shipped consumer product" are talking
-   about the same thing, and the check would be worthless if it were not. Nothing here maps one word
-   onto a DIFFERENT word - only a word onto its own other form. */
-function citationTerms(text: string): Set<string> {
-  const terms = new Set<string>();
-  for (const raw of foldForCitation(text).match(/[a-z][a-z0-9+#]{2,}/g) ?? []) {
-    if (CITATION_STOPWORDS.has(raw)) continue;
-    const stem = raw
-      .replace(/(?:ing|ed|es|s)$/, '')
-      .replace(/([a-z])\1$/, '$1');
-    /* THREE, not four. A four-character floor silently deleted the shortest and most load-bearing
-       words in this domain: gpu, sql, api, aws, git, and "end". Measured on the Redwood Materials
-       packet, the ask "You'll own a scoped project end to end" and the bullet "Shipped consumer
-       mobile app end-to-end; designed feature set and UX in Figma" were reported as having nothing
-       in common, because the only word they share is three letters long. That is a false
-       accusation of an arbitrary pairing against a citation that is exactly right.
-       Two stays out: it is where the initialisms stop and the prepositions start. */
-    if (stem.length >= 3) terms.add(stem);
-  }
-  return terms;
-}
-
-/* Words that can truthfully occur in both almost any software posting and almost any technical
- * resume bullet, but cannot decide which experience is most like the job. They may strengthen a
- * citation after a specific match exists; they can never create a candidate by themselves. */
-const LEAD_DECISION_STOPWORDS = new Set([
-  'application', 'build', 'built', 'create', 'created', 'data', 'develop', 'developed', 'engineer',
-  'engineering', 'feature', 'implement', 'implemented', 'intern', 'internship', 'project', 'research',
-  'software', 'solution', 'system', 'technology', 'tool', 'work',
-]);
-
+/**
+ * The forms the suffix rules below cannot reach. The first four are irregular: English does not
+ * spell their past tense by adding letters to the end.
+ *
+ * THE `programm-` GROUP IS NOT IRREGULAR, IT IS A DISAMBIGUATION, and it is here because the suffix
+ * rules are RIGHT about it and right is not good enough. "programming" strips its -ing to
+ * "programm" and the double-letter rule then correctly restores "program", because English doubles
+ * a final consonant before a suffix. The trouble is that the word it correctly restores is a
+ * homonym: `program` the verb (to write code) and `program` the noun (a scheme, a cohort, a
+ * curriculum) are one string and two unrelated meanings. So "You have strong problem solving and
+ * programming skills" shared a token with "Analyzed 183 program surveys using RICE prioritization"
+ * and handed a software internship to a Program Management entry.
+ *
+ * Stopping `program` in LEAD_DECISION_STOPWORDS was tried first and measured identically on this
+ * corpus, and it is the worse fix, because it deletes BOTH senses for every posting rather than
+ * separating them. Measured on the four probes: with the stopword, "programming" no longer matches
+ * "programmer" at all, and "programming skills" still wrongly matches "program surveys". With the
+ * split, "programming" matches "programmed" and "programmer" on `programm`, "program" still matches
+ * "program" for a genuine programme-management posting, and the two senses no longer touch.
+ *
+ * Only the doubled spellings are listed. They arise from nothing but the code sense, which is what
+ * makes the enumeration closed rather than a guess.
+ */
 const LEAD_IRREGULAR_TERMS = new Map<string, string>([
   ['built', 'build'],
   ['shipped', 'ship'],
   ['shipping', 'ship'],
   ['wrote', 'write'],
+  ['programming', 'programm'],
+  ['programmed', 'programm'],
+  ['programmer', 'programm'],
+  ['programmers', 'programm'],
 ]);
 
-/** Normalized only for the private comparison. The citation stored on the packet remains verbatim. */
-function leadDecisionTerms(text: string): Set<string> {
+/**
+ * ONE CUT, USED BY BOTH SIDES OF THIS FILE. The selector below decides which entry leads; the check
+ * further down decides whether the stored citation is honest. They are the same question asked
+ * twice, so they must agree on what a word is.
+ *
+ * THEY DID NOT. Selection tokenized with `[a-z][a-z0-9+#.]{2,}` and validation with
+ * `[a-z][a-z0-9+#]{2,}`: one character class apart, and that character was the full stop. A word
+ * ending a sentence kept its period in the selector and lost it in the check, so the two halves of
+ * this module read the same posting differently.
+ *
+ * MEASURED ON PACKET 1d1de862 (SEEKA, "Software Engineer Internship - Testing, Technical Analysis,
+ * and Automation"). The posting asks "Work on automation projects to improve development and
+ * testing efficiency and reliability." and an AI Engineer bullet reads "...surfaced reliability gaps
+ * for prioritization". The shared word is `reliability`, and it did not count, because the JD's copy
+ * carried the sentence's period and the bullet's did not. In the same packet
+ * "...recommend improvements." matched "...inform UX improvements." - both sentence-final, both
+ * padded identically - and a Product Management entry therefore led a test-automation posting on a
+ * word the two documents only shared by punctuation. The period also made the token 13 characters
+ * against `automation`'s 10, which decided the old length tie-break. One character class, three
+ * consequences.
+ *
+ * THE RULE. A dot at the END of a token is a full stop and is cut off. A dot INSIDE one is the
+ * punctuation that says "technical name", and such a token yields BOTH its joined form and each of
+ * its parts: `Node.js` gives `nodejs` and `node`, `ASP.NET` gives `aspnet`, `asp` and `net`. The
+ * joined form is what makes `Node.js` and `node.js` one term, and it is the treatment normalizeTerm
+ * already gives dots in jdMatch. The parts are what keep a posting that writes `Node.js` matching a
+ * bullet that writes `Node`, which the old validation tokenizer did by splitting and which a
+ * joined-only rule would have quietly taken away. Neither is stemmed: a name is not English, and
+ * without that guard `node.js` loses the 's' it is spelled with and keys as `nodej`.
+ *
+ * A BARE `-js` SPELLING IS ALSO A NAME. No English plural ends in `js`, so `nodejs`, `reactjs` and
+ * `vuejs` are exempt from singularisation too; before this they keyed as `nodej`, `reactj` and
+ * `vuej` and matched nothing at all.
+ *
+ * `C++` and `C#` keep the characters they are spelled with. Hyphens remain separators on both sides,
+ * which is what already made "real-time" and "real time" read alike.
+ *
+ * Stemming is otherwise crude singularisation, matching the intent of resumeCovers in jdMatch: a
+ * posting that writes "shipping consumer products" and a bullet that writes "shipped consumer
+ * product" are talking about the same thing, and the check would be worthless if it were not.
+ * Nothing here maps one word onto a DIFFERENT word - only a word onto its own other form.
+ */
+function comparisonTerms(text: string): Set<string> {
   const terms = new Set<string>();
-  for (const raw of foldForCitation(text).match(/[a-z][a-z0-9+#.]{2,}/g) ?? []) {
-    if (CITATION_STOPWORDS.has(raw)) continue;
-    const irregular = LEAD_IRREGULAR_TERMS.get(raw);
-    const stem = irregular ?? raw
+  /* THREE, not four. A four-character floor silently deleted the shortest and most load-bearing
+     words in this domain: gpu, sql, api, aws, git, and "end". Measured on the Redwood Materials
+     packet, the ask "You'll own a scoped project end to end" and the bullet "Shipped consumer
+     mobile app end-to-end; designed feature set and UX in Figma" were reported as having nothing
+     in common, because the only word they share is three letters long. That is a false accusation
+     of an arbitrary pairing against a citation that is exactly right.
+     Two stays out: it is where the initialisms stop and the prepositions start, and it is also
+     where `e.g` lands once its dots are gone, which is the right place for it. */
+  const add = (term: string) => {
+    if (term.length >= 3 && !CITATION_STOPWORDS.has(term)) terms.add(term);
+  };
+  for (const raw of foldForCitation(text).match(/[a-z][a-z0-9+#.]*/g) ?? []) {
+    const trimmed = raw.replace(/\.+$/, '');
+    const token = trimmed.replace(/\./g, '');
+    if (!token || CITATION_STOPWORDS.has(token)) continue;
+    if (trimmed.includes('.')) {
+      add(token);
+      for (const part of trimmed.split('.')) add(part);
+      continue;
+    }
+    if (/js$/.test(token)) {
+      add(token);
+      continue;
+    }
+    add(LEAD_IRREGULAR_TERMS.get(token) ?? token
       .replace(/ies$/, 'y')
       .replace(/(?:ing|ed)$/, '')
       .replace(/(?:es|s)$/, '')
-      .replace(/([a-z])\1$/, '$1');
-    if (stem.length >= 3) terms.add(stem);
+      .replace(/([a-z])\1$/, '$1'));
   }
   return terms;
 }
+
+/**
+ * Words that can truthfully occur in both almost any software posting and almost any technical
+ * resume bullet, but cannot decide which experience is most like the job. They may strengthen a
+ * citation after a specific match exists; they can never create a candidate by themselves.
+ *
+ * EVERY MEMBER OF THE SECOND GROUP WAS COUNTED BEFORE IT WAS ADDED. Two counts are quoted, both
+ * over the 158 packets this applicant has generated: how many winning citations the word appeared
+ * in, and - the one that decides whether it belongs here - how many leads move when it is added,
+ * holding everything else in this file fixed. A word that changes nothing is not on this list.
+ *
+ *   through     11 citations, moves 3 leads. A preposition. It joined "Work closely with a mentor
+ *               to guide you through the internship" to "identified 6 resource bottlenecks through
+ *               utilization analysis" and put a Program Management internship on top of a Cloudflare
+ *               software posting, then joined DRW's "immediate responsibility through assignments"
+ *               to the same bullet on a Quantitative Trading posting. The module header above
+ *               already records that a generic overlap score was tried and rejected for ranking a
+ *               Program Management internship first on "intern", "through" and "system". Two of
+ *               those three were stopworded at the time and this one was not, so the documented
+ *               failure came back.
+ *   critical    10 citations, moves 5 leads. An intensifier. "Superior numerical, analytical, and
+ *               critical thinking skills" and "Demonstrated critical thinking skills" were both
+ *               proved by "...enabling smooth real-time experience critical for content
+ *               consumption": two unrelated senses of one word. On the five Palantir packets it
+ *               displaced "Build custom applications, LLM workflows, and production solutions
+ *               engineered for a specific customer" proved by "Built LLM-agent cost infrastructure".
+ *   cros        7 citations, moves 7 leads (the two are inseparable; each alone moves 2). This is
+ *   functional  "cross-functional", which the shared tokenizer cuts at the hyphen and reduces the
+ *               double letter of, so the compound has to be stopped in both halves or either half
+ *               re-creates the candidate. It describes how a team is arranged rather than what it
+ *               does, appears in most postings, and appears in this applicant's Program Management
+ *               bullet, so it ranked that entry first on GPU, frontend and data-science postings.
+ *
+ * Words that measured as frequent but NOT generic stayed out. `technical` leads this corpus (23
+ * citations, 23 of them the only supported word) and is not here: it separates technical work from
+ * non-technical work, which is exactly the distinction this selector exists to draw, and stopping
+ * it would leave 23 packets with no supported citation at all. `week` was measured and moves 0
+ * leads, so it is not here either. `program` was on this list and has been taken off: it moves 7
+ * leads, but it is not a generic word, it is two words sharing a spelling, and LEAD_IRREGULAR_TERMS
+ * separates them at the stemmer for the same 7 leads without deleting either sense.
+ */
+const LEAD_DECISION_STOPWORDS = new Set([
+  'application', 'build', 'built', 'create', 'created', 'data', 'develop', 'developed', 'engineer',
+  'engineering', 'feature', 'implement', 'implemented', 'intern', 'internship', 'project', 'research',
+  'software', 'solution', 'system', 'technology', 'tool', 'work',
+  'critical', 'cros', 'functional', 'through',
+]);
 
 interface LeadCandidate {
   entryIndex: number;
@@ -150,6 +253,8 @@ interface LeadCandidate {
   requirement: string;
   supportedTerms: string[];
   specificTerms: string[];
+  /** How much of this resume the supported terms distinguish. See distinguishingPower. */
+  distinguishing: number;
 }
 
 export interface JdLeadSelectionResult {
@@ -158,20 +263,63 @@ export interface JdLeadSelectionResult {
   supported_terms: string[];
 }
 
+/**
+ * HOW MUCH A TERM DISTINGUISHES ONE ENTRY FROM THE REST, which is the only question a tie-break
+ * between entries can usefully ask. A word that occurs in the bullets of every entry on the resume
+ * is equally available to all of them and therefore cannot be the reason one of them leads; a word
+ * only one entry uses is exactly the evidence that separates them. The score is, per supported
+ * term, the number of experience entries that do NOT contain it, summed: an integer, so the
+ * comparison is exact and independent of the order candidates happen to be visited in.
+ *
+ * WHAT THIS REPLACED, AND WHY IT HAD TO GO. The tie-break here used to be the total CHARACTER COUNT
+ * of the matched terms - longer string wins. Length is a proxy for nothing: it prefers `stakeholder`
+ * to `python` and `improvements.` to `automation`, and on packet 1d1de862 it did exactly that, since
+ * a trailing full stop padded a coincidental match to 13 characters against a real one at 10. Every
+ * one of that packet's four entries tied at one supported term, so two characters of punctuation
+ * chose the lead experience on a test-automation posting.
+ *
+ * RARITY ACROSS THE POSTING'S OWN ASKS WAS TRIED FIRST AND MEASURED WORSE. Scoring a term by how
+ * few of the posting's asks mention it sounds like the same idea and is not: it rewards whichever
+ * word the posting happens to say once, and on the truveta packet it promoted `program` - the stem
+ * of "programming language" - over `technical`, handing a software internship to a Program
+ * Management entry. Over the 158 packets this applicant has generated it left 32 leads in the wrong
+ * discipline against 30 for the rule above.
+ */
+function distinguishingPower(terms: string[], entryTermCounts: Map<string, number>, entryCount: number): number {
+  return terms.reduce((sum, term) => sum + (entryCount - (entryTermCounts.get(term) ?? entryCount)), 0);
+}
+
+/**
+ * THE LAST LINE OF THIS FUNCTION IS THE MODEL'S OWN ENTRY ORDER, AND IT IS NOW REACHABLE.
+ *
+ * That is deliberate: when two entries prove the same ask with the same number of terms and the
+ * same distinguishing power, there is no evidence left to separate them, and the model's ordering
+ * is the best remaining signal. It was also true before this change and simply never fired, because
+ * a sum of character lengths almost never ties, while a sum of small integers often does. Measured
+ * over the 158 packets, under every permutation of the experience list: base decided the same lead
+ * on 158/158, this chain on 153/158. Of the 5, four are Flow Traders packets where both candidates
+ * are engineering entries and the discipline is the same either way; one, Skydio 13bccb2d, is a
+ * Product Management posting where the two candidates are a Founder entry and an AI Engineer entry,
+ * so the order the model emitted decides whether that lead is in the right discipline.
+ *
+ * IT MATTERS FOR MEASUREMENT TOO. Stored packets carry their experience list post-selection, so the
+ * previously chosen lead sits at index 0, and on those 5 an A/B re-run reproduces the stored answer
+ * partly because of where the entry already sat rather than because of the evidence. Any figure
+ * quoted from that A/B carries an uncertainty of one packet for this reason.
+ */
 function candidateIsBetter(next: LeadCandidate, current: LeadCandidate | null): boolean {
   if (!current) return true;
   /* Evidence strength leads. This prevents one coincidental word in the first ask from beating an
-   * entry that repeats the posting's actual domain language. Posting order then breaks equal
-   * evidence, followed by the model's stable entry order as the final deterministic tie-break. */
+   * entry that repeats the posting's actual domain language. How far those words separate this
+   * entry from the others breaks equal counts, then posting order, then the model's stable entry
+   * order as the final deterministic tie-break. */
   if (next.specificTerms.length !== current.specificTerms.length) {
     return next.specificTerms.length > current.specificTerms.length;
   }
   if (next.supportedTerms.length !== current.supportedTerms.length) {
     return next.supportedTerms.length > current.supportedTerms.length;
   }
-  const nextSpecificChars = next.specificTerms.reduce((sum, term) => sum + term.length, 0);
-  const currentSpecificChars = current.specificTerms.reduce((sum, term) => sum + term.length, 0);
-  if (nextSpecificChars !== currentSpecificChars) return nextSpecificChars > currentSpecificChars;
+  if (next.distinguishing !== current.distinguishing) return next.distinguishing > current.distinguishing;
   if (next.askIndex !== current.askIndex) return next.askIndex < current.askIndex;
   return next.entryIndex < current.entryIndex;
 }
@@ -198,20 +346,38 @@ export function selectJdAlignedLead(
     };
   }
 
+  const askTermSets = asks.map((ask) => comparisonTerms(ask));
+  /* How many of this resume's entries use each term, for the tie-break. Built once here rather than
+   * per candidate: it is a property of the document, not of any one pairing. */
+  const entryTermCounts = new Map<string, number>();
+  for (const entry of spec.experience) {
+    for (const term of comparisonTerms(entry.bullets.join(' '))) {
+      entryTermCounts.set(term, (entryTermCounts.get(term) ?? 0) + 1);
+    }
+  }
+
   let best: LeadCandidate | null = null;
   for (let entryIndex = 0; entryIndex < spec.experience.length; entryIndex++) {
     const entry = spec.experience[entryIndex]!;
     for (let askIndex = 0; askIndex < asks.length; askIndex++) {
       const requirement = asks[askIndex]!;
-      const requirementTerms = leadDecisionTerms(requirement);
+      const requirementTerms = askTermSets[askIndex]!;
       for (const evidence of entry.bullets) {
-        const evidenceTerms = leadDecisionTerms(evidence);
+        const evidenceTerms = comparisonTerms(evidence);
         const supportedTerms = [...requirementTerms].filter((term) => evidenceTerms.has(term));
         const specificTerms = supportedTerms.filter((term) => !LEAD_DECISION_STOPWORDS.has(term));
         // No broad-word fallback. If the domain-bearing intersection is empty, this bullet does
         // not support ordering, even if it shares "build software systems" with the posting.
         if (specificTerms.length === 0) continue;
-        const candidate = { entryIndex, askIndex, evidence, requirement, supportedTerms, specificTerms };
+        const candidate = {
+          entryIndex,
+          askIndex,
+          evidence,
+          requirement,
+          supportedTerms,
+          specificTerms,
+          distinguishing: distinguishingPower(specificTerms, entryTermCounts, spec.experience.length),
+        };
         if (candidateIsBetter(candidate, best)) best = candidate;
       }
     }
@@ -267,8 +433,118 @@ export function selectJdAlignedLead(
 export const MIN_SHARED_CITATION_TERMS = 1;
 
 export function sharedCitationTerms(a: string, b: string): string[] {
-  const left = citationTerms(a);
-  return [...citationTerms(b)].filter((term) => left.has(term));
+  const left = comparisonTerms(a);
+  return [...comparisonTerms(b)].filter((term) => left.has(term));
+}
+
+/**
+ * A REQUIREMENT IS SOMETHING ASKED OF THE APPLICANT. A clause that offers something TO her is a
+ * benefit, and no experience entry is evidence for one - there is no bullet a person can write that
+ * proves they are owed mentorship.
+ *
+ * MEASURED. Both Cloudflare packets cite, as the requirement their lead entry proves, "Work closely
+ * with a mentor to guide you through the internship and help with career goals." A Program
+ * Management internship won a software posting on `mentor` plus `through`, out of a sentence that
+ * asks the applicant for nothing. The colour bar already refuses to paint a term whose only home in
+ * the posting is a perk; the lead decision was never held to the same bar.
+ *
+ * NOTE WHAT IS NOT A PERK. An eligibility gate - graduation timing, work authorization, availability
+ * - asks something OF the applicant and stays in the pool, even though no bullet can prove one. It
+ * is a bad citation, not a benefit, and the distinction is not academic: deleting one cost two
+ * packets their correct lead. See the second measured limit below.
+ *
+ * THE TEST IS GRAMMATICAL, NOT TOPICAL: it asks whether the APPLICANT APPEARS AS THE BENEFICIARY OF
+ * THE CLAUSE'S MAIN PREDICATE. It is not a list of banned subjects, because "mentor", "training",
+ * "benefits" and "compensation" are all perfectly good things to require work ON, and a filter that
+ * keyed off those words would delete the most role-defining asks any HR, payroll, benefits,
+ * insurance or compensation employer states.
+ *
+ *   1. She is the OBJECT of a transfer verb: "guide you", "help you", "invest in your growth". She
+ *      receives; she does not do. "Work with your mentor to ship a production feature" names the
+ *      same person and does not match, because there she is the agent.
+ *   2. She is the stated RECIPIENT: "you'll receive", "you will be paired with". A bare imperative
+ *      does not match: DRW's "Be given immediate responsibility through assignments like position
+ *      tracking, calculating risk" states real work and names no recipient, so it survives.
+ *   3. She is the INDIRECT OBJECT of an offer: "we offer you", "provides you with".
+ *   4. The clause is a STATEMENT ABOUT the terms of the engagement rather than an instruction. All
+ *      three of its parts are required: it opens with a determiner, so it predicates over a thing
+ *      instead of telling her to do something; a term-of-engagement noun stands in that opening
+ *      subject; and a copula follows it. "The annual base salary for this position is $225,000."
+ *      passes all three. "Own the benefits enrollment service used by 3 million members." fails the
+ *      first, "The engineer will own the benefits service" fails the third.
+ *
+ * EVERY TEST READS THE MAIN PREDICATE ONLY, meaning the clause up to its first relative pronoun.
+ * What follows one modifies a noun, not the clause: in "Build internal tooling THAT GIVES YOU
+ * feedback on every commit" the offer belongs to the tooling and the instruction belongs to her.
+ * Without this the module deleted that ask, and "Design a CI system that gives you a green signal",
+ * and any other requirement whose deliverable is described by what it does for its user.
+ *
+ * IT FAILS TOWARD KEEPING, AND THAT LIMIT WAS MEASURED TWICE, NOT ASSUMED.
+ *   - A wider version of rule 3 fired on an offering SUBJECT with no named recipient ("we provide",
+ *     "this role provides"). It cost real asks: cresta's "This role provides mentorship and exposure
+ *     to customer-facing technical problem solving in a fast-moving AI/Product environment" is
+ *     phrased as an offer but states what the work IS, and dropping it moved six packets off a
+ *     correct lead. So a clause like "we host social activities" survives here.
+ *   - Rule 4 was a bare noun list with no structural guard, and it deleted eligibility gates as well
+ *     as perks. Virtu's "Rising juniors, or students expected to be ready for full time employment
+ *     between December 2027 - June 2028" is a requirement OF the applicant, however unprovable, and
+ *     removing it took the last lexical bridge off two packets whose ordering was CORRECT and
+ *     shipped, turning a good resume into a resume_quality_hold. It opens with "Rising", not with a
+ *     determiner, so it now survives.
+ *
+ * WHY NOT SEPARATE THE ORDERING FROM THE CITATION, which is the other way to have saved those two
+ * packets: because the citation IS the forcing function for the ordering. See the module header. A
+ * lead that may proceed without a provable citation is a lead chosen by recency again, which is the
+ * one failure this file exists to prevent. The right repair was to stop deleting the requirement,
+ * not to stop requiring one.
+ */
+const BENEFIT_TRANSFER_VERBS =
+  'guide|guides|guiding|mentor|mentors|mentoring|coach|coaches|coaching|support|supports|supporting'
+  + '|help|helps|helping|pair|pairs|paired|pairing|match|matches|matched|matching'
+  + '|introduce|introduces|introducing|connect|connects|connecting|prepare|prepares|preparing'
+  + '|invest|invests|investing\\s+in|develop|develops|developing|grow|grows|growing';
+
+/** The applicant as beneficiary: second person in object position after a transfer verb. */
+const APPLICANT_IS_BENEFICIARY = new RegExp(
+  `\\b(?:${BENEFIT_TRANSFER_VERBS})\\s+(?:you\\b|your\\s+(?:career|growth|development|learning|skills)\\b)`,
+  'i',
+);
+
+/** The applicant as the stated recipient. "You will receive", "you'll be paired with a mentor". */
+const APPLICANT_RECEIVES =
+  /\byou(?:'ll|\s+will|\s+can)?\s+(?:also\s+)?(?:receive|enjoy|be\s+(?:given|provided|paired|matched|offered|mentored)|have\s+access\s+to)\b/i;
+
+/** The applicant as the indirect object of an offer. "provides you with", "we offer you". */
+const APPLICANT_IS_OFFERED =
+  /\b(?:offer|offers|offering|provide|provides|providing|give|gives|giving)\s+you\b/i;
+
+/* The three parts of rule 4. None of them is sufficient alone, and that is the whole point: the
+   nouns are topical, so they only count when the clause's SHAPE says it is describing rather than
+   instructing. */
+const STATEMENT_OPENER = /^\W*(?:the|a|an|our|this|these|those|your|all|each|every)\b/i;
+const ENGAGEMENT_NOUN =
+  /\b(?:salary|salaries|compensation|pay\s+range|pay\s+rate|hourly\s+rate|stipend|equity|401\s*\(?k\)?|benefits?|perks?|paid\s+(?:time\s+off|holidays?)|health\s+insurance|relocation|housing|start\s+date|end\s+date)\b/i;
+const COPULA = /\b(?:is|are|was|were|will\s+be|would\s+be|may\s+vary|ranges?|starts?\s+at)\b/i;
+
+function statesTermsOfEngagement(main: string): boolean {
+  if (!STATEMENT_OPENER.test(main)) return false;
+  const noun = main.match(ENGAGEMENT_NOUN);
+  if (!noun || noun.index === undefined) return false;
+  return COPULA.test(main.slice(noun.index + noun[0].length));
+}
+
+/** The clause up to its first relative pronoun. Everything after one modifies a noun, not the clause. */
+function mainPredicate(clause: string): string {
+  const relative = clause.match(/\b(?:that|which|who|whom|whose)\b/i);
+  return relative?.index === undefined ? clause : clause.slice(0, relative.index);
+}
+
+export function offersRatherThanRequires(clause: string): boolean {
+  const main = mainPredicate(clause.replace(/[‘’ʼ]/g, "'"));
+  return APPLICANT_IS_BENEFICIARY.test(main)
+    || APPLICANT_RECEIVES.test(main)
+    || APPLICANT_IS_OFFERED.test(main)
+    || statesTermsOfEngagement(main);
 }
 
 /**
@@ -332,6 +608,8 @@ export function leadRequirementCandidates(jdText: string, context?: JdContext): 
     // A clause too long to be one ask is a swallowed paragraph, and quoting it back would assert
     // nothing in particular. A very short one carries no content to match evidence against.
     if (value.length < 12 || value.length > MAX_REQUIREMENT_CHARS) continue;
+    // What the employer gives is not what the applicant must prove. See offersRatherThanRequires.
+    if (offersRatherThanRequires(value)) continue;
     const key = foldForCitation(value);
     if (!key || seen.has(key)) continue;
     seen.add(key);
