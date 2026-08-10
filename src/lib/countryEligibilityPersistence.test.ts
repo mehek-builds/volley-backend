@@ -41,4 +41,7 @@ test('profile declaration and sponsor filter are committed by one database trans
   assert.match(source, /db\.transaction\(async \(tx\)/);
   assert.match(source, /tx[\s\S]*insert\(application_profile\)[\s\S]*tx\.update\(users\)/);
   assert.match(source, /encryptField\(JSON\.stringify\(records\)\)/);
+  assert.match(source, /coalesce\(\$\{users\.sponsorship_required_at_onboarding\}, false\)/);
+  assert.match(source, /sponsor_only_jobs_enabled: desired\.sponsor_only_jobs_enabled[\s\S]*users\.sponsor_only_jobs_enabled/);
+  assert.match(source, /when \$\{users\.sponsorship_required_at_onboarding\} is true then \$\{users\.sponsorship_answer\}/);
 });

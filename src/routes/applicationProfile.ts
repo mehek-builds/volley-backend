@@ -196,7 +196,7 @@ export function decryptRow(row: ApplicationProfileRow) {
     }
   }
   const storedEligibility = out.work_eligibility_by_country;
-  if (typeof storedEligibility === 'string' && storedEligibility.length > 0) {
+  if (typeof storedEligibility === 'string') {
     try {
       const plaintext = looksEncrypted(storedEligibility) ? decryptField(storedEligibility) : storedEligibility;
       out.work_eligibility_by_country = normalizeCountryWorkEligibility(JSON.parse(plaintext)) ?? [];

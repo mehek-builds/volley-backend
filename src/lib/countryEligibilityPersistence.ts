@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { application_profile, users } from '../db/schema';
 import { encryptField } from './fieldCrypto';
@@ -52,8 +52,20 @@ export async function persistProfileWithCountryEligibility(
         target: application_profile.user_id,
         set: { ...profile, updated_at: now },
       });
+    const desired = sponsorshipStateForRecords(records);
     await tx.update(users).set({
-      ...sponsorshipStateForRecords(records),
+      // Historical sponsorship need and an enabled sponsor-only board are one-way safety facts.
+      // A later profile edit may add either restriction, but can never erase or unlock one.
+      sponsorship_required_at_onboarding: desired.sponsorship_required_at_onboarding
+        ? true
+        : sql`coalesce(${users.sponsorship_required_at_onboarding}, false)`,
+      sponsor_only_jobs_enabled: desired.sponsor_only_jobs_enabled
+        ? true
+        : users.sponsor_only_jobs_enabled,
+      sponsorship_answer: sql`case
+        when ${users.sponsorship_required_at_onboarding} is true then ${users.sponsorship_answer}
+        else ${desired.sponsorship_answer}
+      end`,
       sponsorship_declared_at: now,
     }).where(eq(users.id, userId));
   });
