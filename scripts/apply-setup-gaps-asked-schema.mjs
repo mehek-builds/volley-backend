@@ -14,21 +14,25 @@
  * the two questions the old gate confused: "has the student answered" (the fields) from "has the
  * student been ASKED" (this timestamp). Save and Skip both stamp it, because both mean asked.
  *
- * ADDITIVE AND NULLABLE, so it is safe to run BEFORE or AFTER the code that reads it ships, which
- * matters because a merge to main IS a production deploy on Vercel and this migration is run by
- * hand. The two orderings behave as follows, and neither is an outage:
+ * RUN THIS BEFORE MERGING THE CODE. Not "either order is fine" - that was the first draft of this
+ * header and it was wrong, in the direction that matters.
  *
- *   migration first, deploy second  Every row reads NULL. Nothing reads the column yet.
- *   deploy first, migration second  'setup_gaps_asked_at' is in APPLICATION_FACT_COLUMNS, so
- *                                   selectApplicationProfileRow's 42703 fallback drops it from the
- *                                   projection and the key is ABSENT from the row rather than null.
- *                                   routes/onboarding.ts gapsAskedFrom reads an absent key as
- *                                   ASKED, which suppresses the gaps step entirely, so the flow
- *                                   behaves exactly as production does today until this runs.
+ * The column is additive and nullable, so the migration itself is safe to run at any time. What is
+ * NOT symmetric is the deploy. `setup_gaps_asked_at` goes in APPLICATION_FACT_COLUMNS, and
+ * selectApplicationProfileRow's 42703 fallback is GROUP-WIDE: one missing column drops EVERY name in
+ * that list from the projection. So shipping the code first does not merely suppress the gaps step,
+ * it makes all two dozen other fact columns read undefined for every student on every read -
+ * attestations, onsite commitment, relocation willingness, the availability window, country work
+ * eligibility - which is the autofill profile and the submission runner's packet, not a setup screen.
  *
- * That third state is the whole reason the reader distinguishes absent from null: a step that
- * cannot record having been asked is a step nobody can leave, so in the unmigrated window the
- * correct behaviour is not to route anyone to it.
+ *   migration first, deploy second  (DO THIS) Every row reads NULL. Nothing reads the column yet.
+ *   deploy first, migration second  The gaps step is correctly suppressed - gapsAskedFrom reads an
+ *                                   absent key as ASKED, because a step that cannot record having
+ *                                   been asked is a step nobody can leave - but every other fact
+ *                                   column reads "never asked" for the length of the window.
+ *
+ * The absent-vs-null distinction in gapsAskedFrom is still worth having: it makes the gaps step fail
+ * safe rather than trap anyone. It is a seatbelt, not a licence to ship in that order.
  *
  * Run against PRODUCTION with the Neon URL, not the localhost DATABASE_URL in .env:
  *   DATABASE_URL="$(grep '^DATABASE_URL=' .env.local | cut -d= -f2-)" npm run db:setup-gaps-asked

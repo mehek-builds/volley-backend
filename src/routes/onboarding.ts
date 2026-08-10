@@ -80,8 +80,14 @@ async function reviewedSubmitCount(userId: string): Promise<number> {
 // before finishing, edits Settings mid-flow). Deriving means "Finish later" and "resume where you
 // left off" are the same code path as a fresh start, and neither can disagree with reality.
 //
-// The one thing that IS stored is completion (users.onboarding_completed_at), because it gates
-// harvest and therefore has to be an explicit act rather than an inference. See harvest.ts.
+// TWO things are stored rather than derived, and both for the same reason: they record an ACT that
+// no amount of inspecting the profile can infer.
+//   users.onboarding_completed_at              - finishing setup, because it gates harvest and so
+//                                                has to be explicit rather than inferred. See harvest.ts.
+//   application_profile.setup_gaps_asked_at    - having been SHOWN the setup gaps screen. Every field
+//                                                on it is skippable, so "answered" and "asked" are
+//                                                different facts and only the second can end the step.
+//                                                See SETUP_GAP_FIELDS and gapsAskedFrom below.
 
 type Step = 'focus' | 'sponsorship' | 'resume' | 'impact' | 'base' | 'gaps' | 'done';
 
@@ -203,7 +209,7 @@ const GAP_FIELDS = [
  *   languages,              Already collected one screen earlier, on base (BaseResumeStep writes
  *   referral_source_default both). Gating on them would re-ask what the student just answered.
  */
-const SETUP_GAP_FIELDS = ['gpa', 'gpa_scale', 'major'] as const;
+const SETUP_GAP_FIELDS: readonly (typeof GAP_FIELDS)[number][] = ['gpa', 'gpa_scale', 'major'];
 
 /** Whether the setup gaps screen has something to ask THIS student. */
 export function hasSetupGapsFrom(gaps: readonly string[]): boolean {
@@ -220,10 +226,14 @@ export function hasSetupGapsFrom(gaps: readonly string[]): boolean {
  *                  has not run and the key is simply absent from the row.
  *
  * Undefined reads as ASKED, which suppresses the step. Both repos deploy on merge and the migration
- * is run by hand, so the deploy can lead it; in that window there is nowhere to record the stamp,
+ * is run by hand, so the deploy CAN lead it; in that window there is nowhere to record the stamp,
  * and a step that cannot record having been asked is a step nobody can leave. Suppressing it makes
- * the unmigrated window behave exactly as production does today - no gaps screen at all - instead
- * of trapping every student with an unprinted GPA on a screen with no exit.
+ * the gaps step fail safe rather than trap anyone.
+ *
+ * That is a seatbelt, not a licence to deploy first. The 42703 fallback this rides on is GROUP-WIDE
+ * (lib/applicationFacts.ts), so an unmigrated column blanks every OTHER fact column too, across
+ * autofill and the submission runner. Run scripts/apply-setup-gaps-asked-schema.mjs first; this
+ * branch exists to make the window survivable, not routine.
  *
  * A missing ROW is a different thing from a missing column and reads as NOT asked: an account with
  * no application_profile row has answered nothing, and POST /onboarding/gaps-asked creates the row.
@@ -235,7 +245,7 @@ export function gapsAskedFrom(row: Record<string, unknown> | undefined): boolean
 }
 
 /** Can the stamp be recorded at all? False only in the window where the deploy leads the migration. */
-export function gapsAckSupportedFrom(row: Record<string, unknown> | undefined): boolean {
+export function gapsAskedColumnPresent(row: Record<string, unknown> | undefined): boolean {
   // No row is not evidence either way, and it is the COMMON case here: profile.ts only creates the
   // row when the parse produced a seed, so a student whose resume printed no GPA and no major - the
   // exact population this screen exists for - reaches it with no row at all. Assuming supported is
@@ -256,7 +266,7 @@ export function gapsAckSupportedFrom(row: Record<string, unknown> | undefined): 
  * `step === 'gaps'`: the rail has to count the screen from 'base', one step BEFORE they reach it.
  */
 export function includesGapsStepFrom(gaps: readonly string[], row: Record<string, unknown> | undefined): boolean {
-  if (!gapsAckSupportedFrom(row)) return false;
+  if (!gapsAskedColumnPresent(row)) return false;
   return hasSetupGapsFrom(gaps) || gapsAskedFrom(row);
 }
 
@@ -468,7 +478,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // The academic three only, and only until the screen has been shown once. See
       // SETUP_GAP_FIELDS and gapsAskedFrom for why each half is needed.
       hasSetupGaps: hasSetupGapsFrom(gaps),
-      gapsAsked: gapsAskedFrom(appProfile) || !gapsAckSupportedFrom(appProfile),
+      gapsAsked: gapsAskedFrom(appProfile),
     });
 
     return reply.status(200).send({
@@ -527,6 +537,20 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
    * way, and gapsAskedFrom already reads an absent column as asked - so a failed stamp on an
    * unmigrated database lands the student on 'done', which is where they were going.
    */
+  /* NOTE, because this is the first writer that can create an application_profile row holding no
+     student-supplied value at all. Two readers treat row EXISTENCE as the whole answer for the
+     academic three - academicsOfRecord (routes/profile.ts) and academicsOfRecordForResume
+     (engine/resumePolicy.ts) - where a blank on an existing row means "not on record" and overrides
+     what the resume parse printed. A row created by this stamp is blank by construction.
+
+     Harmless today, and not by luck: profile.ts creates the row only when academicSeedFrom produced
+     something, so "no row" already implies "the parse carried no gpa, gpa_scale or major" and there
+     is nothing for the blank to override. Measured against production 2026-08-10: of 54 accounts, 37
+     have no row and ZERO of those have academics in parsed_json.
+
+     It stops being harmless if that seed write ever starts failing silently (profile.ts catches and
+     only logs it), or if the parse gains a later-populated academic field. If either happens, seed
+     the row here from the parse rather than inserting it bare. */
   fastify.post('/onboarding/gaps-asked', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
     try {

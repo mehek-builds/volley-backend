@@ -5,6 +5,7 @@ import {
   gapsAskedFrom,
   gapsFrom,
   hasFiveTargetRoles,
+  gapsAskedColumnPresent,
   hasSetupGapsFrom,
   includesGapsStepFrom,
   hasFocusTargeting,
@@ -171,6 +172,8 @@ describe('the setup gaps step', () => {
 
   test('a student with nothing outstanding never sees it', () => {
     assert.equal(onboardingStepFrom({ ...ready, hasSetupGaps: false, gapsAsked: false }), 'done');
+    // ...and having been asked does not resurrect it once the fields are filled.
+    assert.equal(onboardingStepFrom({ ...ready, hasSetupGaps: false, gapsAsked: true }), 'done');
   });
 
   /* Completion outranks it in both directions. A finished account that later empties a GPA field in
@@ -223,6 +226,23 @@ describe('the setup gaps step', () => {
 
     test('no row at all is not asked, and the stamp creates the row', () => {
       assert.equal(gapsAskedFrom(undefined), false);
+    });
+
+    /* The column-presence probe on its own. It is the half of the rule that decides whether the
+       DEPLOY WINDOW suppresses the step, and reading it through includesGapsStepFrom alone left its
+       no-row branch asserted only by implication. */
+    test('the column probe reads a row without the key as unmigrated, and a row with it as ready', () => {
+      assert.equal(gapsAskedColumnPresent({ setup_gaps_asked_at: null }), true);
+      assert.equal(gapsAskedColumnPresent({ setup_gaps_asked_at: new Date() }), true);
+      assert.equal(gapsAskedColumnPresent({ gpa: null }), false);
+    });
+
+    /* No row is not evidence the column is missing, and must not read as such: profile.ts creates
+       the row only when the resume parse produced a seed, so the students this screen exists for
+       arrive with no row at all. Reading that as unmigrated would suppress the step for exactly the
+       population it is meant to reach. */
+    test('no row does not read as an unmigrated database', () => {
+      assert.equal(gapsAskedColumnPresent(undefined), true);
     });
   });
 
