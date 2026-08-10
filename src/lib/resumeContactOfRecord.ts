@@ -29,6 +29,7 @@ export interface ResumeContactSources {
     full_name: string;
     email?: string;
     phone?: string;
+    location?: string;
     linkedin_url?: string;
     github_url?: string;
     portfolio_url?: string;
@@ -47,6 +48,28 @@ function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+/**
+ * The header's location line, assembled from the address she gave rather than inferred.
+ *
+ * "City, State" when both are on file, and the city alone when the state is not - a bare state is
+ * not a location a reader can use, so it is never printed on its own. The country is used ONLY
+ * when there is no state, which is what makes this work for a non-US address ("Dubai, United Arab
+ * Emirates") without printing a redundant "Los Angeles, CA, United States" for a US one.
+ *
+ * NOT DERIVED FROM SCHOOL LOCATION, which is the near-miss worth naming. parsed_json carries
+ * school_location and it reads "Los Angeles, CA" for this account, so using it would have produced
+ * the right string here and the wrong rule everywhere: where someone studies is not where they
+ * live, and a resume header stating a residence the applicant never claimed is exactly the class
+ * of invented fact the profile columns exist to prevent. address_city and address_state are her
+ * own answer to "where do you live", so they are the only source read here.
+ */
+export function resumeHeaderLocation(profile: Record<string, unknown> | undefined): string | undefined {
+  const city = text(profile?.['address_city']);
+  if (!city) return undefined;
+  const region = text(profile?.['address_state']) ?? text(profile?.['address_country']);
+  return region ? `${city}, ${region}` : city;
+}
+
 export function resumeContactOfRecord(sources: ResumeContactSources): ContactHeader {
   const { requested, accountEmail, profile } = sources;
   const fromProfile = (field: string) => text(profile?.[field]);
@@ -54,6 +77,7 @@ export function resumeContactOfRecord(sources: ResumeContactSources): ContactHea
     full_name: requested.full_name,
     email: text(requested.email) ?? text(accountEmail),
     phone: text(requested.phone) ?? fromProfile('phone'),
+    location: text(requested.location) ?? resumeHeaderLocation(profile),
     linkedin_url: text(requested.linkedin_url) ?? fromProfile('linkedin_url'),
     github_url: text(requested.github_url) ?? fromProfile('github_url'),
     portfolio_url: text(requested.portfolio_url) ?? fromProfile('portfolio_url'),

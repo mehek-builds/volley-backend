@@ -7,6 +7,9 @@ export const RESUME_REQUEST_LIMITS = {
   fullName: 200,
   email: 320,
   phone: 50,
+  // "Los Angeles, CA" or "Dubai, United Arab Emirates". Generous enough for a long country name
+  // and short enough that no caller can push a paragraph into the header.
+  location: 120,
   url: 500,
 } as const;
 
@@ -55,6 +58,11 @@ export const resumeGenerateBodySchema = z.object({
     full_name: z.string().min(1).max(RESUME_REQUEST_LIMITS.fullName),
     email: optionalContactField(RESUME_REQUEST_LIMITS.email),
     phone: optionalContactField(RESUME_REQUEST_LIMITS.phone),
+    // A PREFERENCE, like every other field here: what the caller sends wins, and what it leaves
+    // blank is filled from the stored address by resumeContactOfRecord. Before this line existed
+    // there was no way for a caller to state one and no fallback behind it, so the header printed
+    // no location at all on all 158 stored packets.
+    location: optionalContactField(RESUME_REQUEST_LIMITS.location),
     linkedin_url: optionalContactField(RESUME_REQUEST_LIMITS.url),
     github_url: optionalContactField(RESUME_REQUEST_LIMITS.url),
     portfolio_url: optionalContactField(RESUME_REQUEST_LIMITS.url),

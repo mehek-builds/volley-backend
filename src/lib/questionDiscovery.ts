@@ -108,6 +108,13 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   has_outstanding_offers?: boolean;
   outstanding_offer_details?: string;
   military_service?: string;
+  /* Standardized tests, measured at 9 distinct blocked packets each (2026-08-11). Three fields
+   * because the forms ask three questions: which test, and then the score of each. undefined is
+   * "never asked" on all three and the resolver refuses, because a test score is a checkable claim
+   * about an academic record and there is no safe default for one. */
+  standardized_test_type?: 'SAT' | 'ACT' | 'Both' | 'None';
+  sat_score?: string;
+  act_score?: string;
   politically_exposed?: string;
   politically_exposed_family?: string;
   advanced_study_plan?: 'no' | 'considering' | 'committed';
@@ -569,6 +576,48 @@ function militaryServiceAnswer(label: string, ap: ApplicationProfileLike): { val
     if (pref && pref.trim()) return null;
   }
   return ap.military_service ? { value: ap.military_service } : null;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * STANDARDIZED TEST SCORES. 9 distinct blocked packets each for the type, the SAT and the ACT,
+ * counted over the 158-packet corpus on 2026-08-11.
+ *
+ * THE ORDER OF THE THREE PATTERNS IS LOAD-BEARING. "What is your SAT score?" contains the word
+ * "score" and so does "which standardized test score do you wish to report?", so the TYPE pattern
+ * is tested LAST: a label naming a specific test wants that test's number, and only a label naming
+ * no test at all is asking which test. Getting this backwards puts "SAT" into a field expecting
+ * "1520", which is a malformed answer on a required field rather than a blank one.
+ *
+ * NOTHING HERE IS DERIVED FROM ANOTHER FIELD. A stored SAT score is not evidence for the type
+ * ("Both" and "SAT" both fit it), and a type of "SAT" is not evidence of any particular number.
+ * Each of the three answers only from its own column, and refuses with a skipReason otherwise, so
+ * the question reaches the student instead of being answered with an invented figure.
+ */
+export const SAT_SCORE_QUESTION = /\bsat\b(?![- ]?(?:isf|nav))[\s\S]{0,40}\bscore\b|\bscore\b[\s\S]{0,40}\bsat\b/i;
+export const ACT_SCORE_QUESTION = /\bact\b[\s\S]{0,40}\bscore\b|\bscore\b[\s\S]{0,40}\bact\b/i;
+export const STANDARDIZED_TEST_TYPE_QUESTION =
+  /\bstandardi[sz]ed\s+test\b|\btest\s+score\s+type\b|\bwhich\s+(?:standardi[sz]ed\s+)?test\b/i;
+
+function standardizedTestAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  const leaveIt = (what: string) => ({ skipReason: `${what} left for you: "${label.slice(0, 60)}"` });
+
+  // A specific test named in the label wants that test's number, so these are matched before the
+  // "which test" pattern, which also matches many of the same labels.
+  if (SAT_SCORE_QUESTION.test(label)) {
+    return ap.sat_score ? { value: ap.sat_score } : leaveIt('SAT score');
+  }
+  if (ACT_SCORE_QUESTION.test(label)) {
+    return ap.act_score ? { value: ap.act_score } : leaveIt('ACT score');
+  }
+  if (STANDARDIZED_TEST_TYPE_QUESTION.test(label)) {
+    return ap.standardized_test_type
+      ? { value: ap.standardized_test_type }
+      : leaveIt('standardized test question');
+  }
+  return null;
 }
 
 function highSchoolGraduationAnswer(
@@ -4086,6 +4135,14 @@ export function resolveKnownAnswer(
   // field stayed empty. Falls through untouched when the question really is an EEO self-ID block.
   const militaryService = militaryServiceAnswer(label, ap);
   if (militaryService) return militaryService;
+
+  /* Before the EEO branch for the same reason militaryService is: a test-score field is a plain
+   * required input, and letting it fall through to the generic branches below is what left it
+   * empty on 9 packets. Answers only from the three stored columns, and returns a skipReason
+   * rather than null when they are unset, so an unanswered test question is reported as left for
+   * the student instead of silently reaching a keyword fallback that might type something else. */
+  const standardizedTest = standardizedTestAnswer(label, ap);
+  if (standardizedTest) return standardizedTest;
 
   if (EEO_QUESTION.test(label)) {
     /* The refusal is written in the CONTROL'S spelling when the control names its vocabulary.

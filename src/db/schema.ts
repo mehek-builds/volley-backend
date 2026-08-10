@@ -269,6 +269,38 @@ export const profiles = pgTable('profiles', {
   // outside it are hard-rejected, which is only safe BECAUSE the list is the student's own
   // statement rather than something inferred from their bullets.
   skills: jsonb('skills'),
+  /* string[] of the courses the student has ACTUALLY taken, in their own words. The authoritative
+   * source for the EDUCATION block's coursework line, exactly as `skills` above is for SKILLS.
+   *
+   * THE DEFECT THIS CLOSES, measured 2026-08-11. GET /profile returns exactly four courses:
+   *   ["Data Structures & Algorithms", "Object-Oriented Programming", "Accounting", "Finance"]
+   * and all 158 stored packets print that same four-item list, unchanged, including a Data Science
+   * internship and a quant trading internship. Two of the four are business electives.
+   *
+   * THE CAUSE IS NOT THE SELECTOR, IT IS THE POOL. llm/parse.ts is instructed that "coursework may
+   * contain only courses explicitly printed on the resume", which is the correct rule and must
+   * stay: inventing a course is a checkable false claim about an academic record. But it means the
+   * only pool a per-posting selection can draw from is the handful of courses the resume already
+   * prints, so there is nothing to select. A JD-relevant subset cannot be chosen from a set of four
+   * that is already being printed in full.
+   *
+   * So the pool has to come from the student. This column is her real course history, asked once in
+   * onboarding, and it is what makes the per-posting subset a SELECTION rather than an invention:
+   * every course offered to a posting is one she typed here.
+   *
+   * NOT on application_profile, and the reason is that table's own contract - "sensitive,
+   * encrypted, and never included in a drafting-LLM prompt". Coursework is the opposite on both
+   * counts: it is career data printed on the face of a resume, and the resume tailorer MUST see it
+   * to pick a relevant subset. Filing it there would lock it out of its only consumer. Same
+   * reasoning that put `targeting` in its own table.
+   *
+   * NOT in parsed_json either, which routes/profile.ts overwrites wholesale on every resume upload:
+   * a hand-typed course history would silently vanish the next time she swapped her resume.
+   *
+   * NULL means never asked, and the tailorer falls back to the parsed four rather than failing. An
+   * EMPTY array is a different, real state: "I have no coursework to list."
+   */
+  coursework: jsonb('coursework'),
   // The BASE resume: one ResumeSpec, built once at onboarding from the bank with no job
   // description. It is what the student reviews and approves on /start, and the fallback every
   // later generation falls back TO when a JD is thin, unreadable, or absent.
@@ -760,6 +792,49 @@ export const application_profile = pgTable('application_profile', {
   availability_window_end: text('availability_window_end'),
   availability_cycle: text('availability_cycle'),
   availability_valid_through: text('availability_valid_through'),
+
+  /* ---- standardized test scores (2026-08-11) ----
+   *
+   * THE BAR THESE NOW CLEAR, AND WHY THEY DID NOT BEFORE. The comment on the 2026-08-08 group
+   * above records the original decision verbatim: "Fields that appeared on exactly one posting
+   * (SAT/ACT scores at IMC) were deliberately left out rather than added speculatively". That was
+   * correct at 25 packets. Recounted across the full 158-packet corpus on 2026-08-11, each of the
+   * three blocks NINE distinct packets:
+   *
+   *   standardized test score type   9 packets
+   *   SAT score                      9 packets
+   *   ACT score                      9 packets
+   *
+   * Nine is four times the two-posting bar the group above was chosen by, so the speculative-add
+   * objection no longer applies: this is a measurement, not a guess.
+   *
+   * WHY THREE COLUMNS AND NOT ONE. The forms ask all three shapes and they are three different
+   * questions. A quant-trading form asks "which standardized test did you take?" as a closed list
+   * and then asks for the score of the one named; answering the type question with a number, or
+   * the SAT field with an ACT score, is a false claim about an academic record. The type is also
+   * the only one of the three that is answerable by a student who took neither ("None"), which no
+   * score field can express.
+   *
+   * SCORES ARE TEXT, NOT INTEGER. "1520", "1520 (superscored)" and "34" are all real answers, and
+   * an integer column would force a lossy read of the first. Same reasoning as gpa directly above,
+   * which is stored as earned rather than as a number.
+   *
+   * PLAINTEXT, not in ENCRYPTED_FIELDS, on the same precedent as gpa_scale, major and languages:
+   * the entire purpose of the value is to be typed into an employer form on every application, and
+   * lib/applicationFacts.ts reads these off the RAW row, so a decrypt step here would hand
+   * ciphertext to a form. gpa is encrypted and is read through a decrypt path for that reason;
+   * these are read on the raw path and so must not be.
+   *
+   * NULL means never asked on all three, and the resolver refuses rather than defaults. Inventing
+   * a test score is the single worst thing in this file's problem space: it is a checkable claim
+   * about an academic record made to an employer.
+   */
+  // One of 'SAT' | 'ACT' | 'Both' | 'None'. Her own declaration, never inferred from whether a
+  // score column happens to be populated: a student may have taken the SAT and not wish to report
+  // it, and "None" is a real answer that no score field can carry.
+  standardized_test_type: text('standardized_test_type'),
+  sat_score: text('sat_score'),
+  act_score: text('act_score'),
 
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

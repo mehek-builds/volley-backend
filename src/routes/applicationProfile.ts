@@ -131,6 +131,22 @@ export const bodySchema = z.object({
   availability_window_end: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   availability_cycle: z.string().regex(/^(?:Spring|Summer|Fall|Winter) (?:20)\d{2}$/).nullable().optional(),
   availability_valid_through: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+
+  /* ---- standardized test scores ----
+   * See schema.ts for the 9-packets-each measurement behind all three. Plaintext, so none is in
+   * ENCRYPTED_FIELDS above: they are read off the RAW row by lib/applicationFacts.ts, and a
+   * decrypt step on that path would hand ciphertext to an employer's form.
+   *
+   * The TYPE is constrained and the SCORES are free text, deliberately. The type is turned into an
+   * answer on a closed list by the resolver, so an unrecognised string must fail the save rather
+   * than read back as "never asked" - the same rule advanced_study_plan follows above. The scores
+   * cannot be constrained the same way: "1520", "34" and "1520 (superscored)" are all real answers
+   * and a numeric check would reject the third, which is the one a student is most likely to type.
+   * Trimmed, non-empty; an empty string is not a score, and null is the only way to say "not
+   * answered". */
+  standardized_test_type: z.enum(['SAT', 'ACT', 'Both', 'None']).nullable().optional(),
+  sat_score: z.string().trim().min(1).nullable().optional(),
+  act_score: z.string().trim().min(1).nullable().optional(),
 });
 
 /* The consent timestamp is SERVER-SET, never taken from the body, which is why it has no line

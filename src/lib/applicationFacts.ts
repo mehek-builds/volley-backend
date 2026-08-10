@@ -61,6 +61,13 @@ export const APPLICATION_FACT_COLUMNS = [
   // suppresses the gaps step entirely (the flow behaves as it does today), null routes to it. See
   // routes/onboarding.ts gapsAskedFrom.
   'setup_gaps_asked_at',
+  /* Added by scripts/apply-standardized-test-scores-schema.mjs (2026-08-11). Listed here for the
+     same reason as everything above it: the deploy may lead the hand-run migration, and without
+     this entry the first read after the deploy would 42703 and take the whole application profile
+     down rather than reading these three as "never asked". */
+  'standardized_test_type',
+  'sat_score',
+  'act_score',
 ] as const;
 
 export type ApplicationFactColumn = (typeof APPLICATION_FACT_COLUMNS)[number];

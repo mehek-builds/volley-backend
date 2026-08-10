@@ -65,6 +65,9 @@ function row(over: Partial<ApplicationProfile> = {}): ApplicationProfile {
     availability_window_end: null,
     availability_cycle: null,
     availability_valid_through: null,
+    standardized_test_type: null,
+    sat_score: null,
+    act_score: null,
     // Not an application fact: nothing types this into an employer's form. It records that the
     // setup gaps screen was shown, which is what lets a student leave it having skipped it.
     setup_gaps_asked_at: null,
