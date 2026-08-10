@@ -708,8 +708,8 @@ describe('prior government employment, answered from the experience bank', () =>
     };
     const labels = [
       'Did NASA once employ you?',
-      'NASA service history?',
-      'What is your relationship to Federal Aviation Administration?',
+      'Was NASA your employer?',
+      'Have you held a job at Federal Aviation Administration?',
     ];
     for (const label of labels) {
       assert.equal(isGovernmentEmploymentQuestion(label), false, label);
@@ -725,6 +725,51 @@ describe('prior government employment, answered from the experience bank', () =>
       labels.map((question) => ({ question, answer: '' })),
     );
     assert.equal(isGovernmentEmploymentQuestion('Did GEICO once employ you?'), false);
+  });
+
+  test('NASA mentions stay with prior-application, referral, relocation, and unrelated families', () => {
+    const profile: ApplicationProfileLike = {
+      prior_application_employers: ['NASA'],
+      referral_source_default: 'LinkedIn',
+      relocation_willingness: 'yes',
+    };
+    const cases = [
+      ['Have you previously applied to work at NASA?', 'Yes'],
+      ['How did you hear about the NASA role?', 'LinkedIn'],
+      ['Are you willing to relocate for the NASA role?', 'Yes'],
+    ] as const;
+    for (const [label, expected] of cases) {
+      const resolved = resolveKnownAnswer(label, 'text', profile, undefined);
+      assert.deepEqual(resolved, { value: expected }, label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, undefined),
+        [{ question: label, answer: expected }],
+      );
+    }
+    const unrelated = resolveKnownAnswer('Why are you interested in NASA?', 'text', profile, undefined);
+    assert.ok(!unrelated || !('skipReason' in unrelated) || !/prior government employment/.test(unrelated.skipReason));
+  });
+
+  test('short aliases require exact uppercase spelling and never turn Jane Doe into DOE', () => {
+    const federal: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'Department of Energy', title: 'Analyst' }],
+    };
+    assert.equal(answer('Have you worked for DOE?', federal), 'VALUE Yes');
+    assert.deepEqual(
+      refreshKnownQuestionAnswers([{ question: 'Have you worked for DOE?', answer: '' }], federal, undefined),
+      [{ question: 'Have you worked for DOE?', answer: 'Yes' }],
+    );
+    assert.equal(answer('Have you worked for Doe?', federal), 'SKIP');
+    const janeDoe = resolveKnownAnswer('Is Jane Doe your former manager?', 'checkbox', federal, undefined);
+    assert.ok(!janeDoe || !('skipReason' in janeDoe) || !/prior government employment/.test(janeDoe.skipReason));
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        [{ question: 'Is Jane Doe your former manager?', answer: 'Yes' }],
+        federal,
+        undefined,
+      ),
+      [{ question: 'Is Jane Doe your former manager?', answer: 'Yes' }],
+    );
   });
 
   test('governmental agency variants preserve broad and federal level binding', () => {

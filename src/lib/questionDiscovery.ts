@@ -1585,7 +1585,9 @@ function parsedGovernmentScope(identity: string): GovernmentEmploymentTarget | n
 }
 
 function targetFromBareGovernmentPhrase(raw: string): GovernmentEmploymentTarget | null {
-  const identity = normalizeIdentity(raw.trim().replace(/[.,;:]+$/g, '').replace(/^(?:a|an|any|the)\s+/i, ''));
+  const phrase = raw.trim().replace(/[.,;:]+$/g, '').replace(/^(?:a|an|any|the)\s+/i, '');
+  const identity = normalizeIdentity(phrase);
+  if (/^[a-z0-9]{2,4}$/.test(identity) && phrase !== identity.toUpperCase()) return null;
   return parsedGovernmentScope(identity);
 }
 
@@ -1767,15 +1769,26 @@ function normalizedGovernmentEmploymentLabel(label: string): string {
 function labelNamesKnownGovernmentEmployer(label: string): boolean {
   const identity = ` ${normalizeIdentity(label)} `;
   for (const alias of [...VETTED_GOVERNMENT_EMPLOYERS.keys()].sort((left, right) => right.length - left.length)) {
+    if (/^[a-z0-9]{2,4}$/.test(alias)) {
+      if (new RegExp(`\\b${regexpEscape(alias.toUpperCase())}\\b`).test(label)) return true;
+      continue;
+    }
     if (identity.includes(` ${alias} `)) return true;
   }
   return false;
 }
 
+function labelHasApplicantEmploymentStatusRelationship(label: string): boolean {
+  if (/\bappl(?:y|ied|ication)\b|\brefer(?:ral|red|rence)?\b|\brelocat\w*\b/i.test(label)) return false;
+  if (GOVERNMENT_EMPLOYMENT_RELATIONSHIP.test(label)) return true;
+  const identity = normalizeIdentity(label);
+  return /\bemploy\s+you\b|\byour\s+(?:(?:former|past|current|ex)\s+)?employer\b|\b(?:former|formerly|past|ex)\b[^?]{0,80}\b(?:employee|employer|employment|employed|work|worked|job)\b|\b(?:employee|employer|employment|employed|work|worked|job)\b[^?]{0,80}\b(?:former|formerly|past|ex)\b|\bno\s+longer\b[^?]{0,80}\b(?:employee|employer|employed|work|working)\b|\b(?:employee|employer|employed|work|working)\b[^?]{0,80}\bno\s+longer\b|\bjob\s+(?:at|with|for)\b/.test(identity);
+}
+
 function labelHasUnprovenNoncurrentGovernmentStatus(label: string): boolean {
   const identity = normalizeIdentity(label);
   if (!/\b(?:former|formerly|past|ex)\b|\bno longer\b/.test(identity)) return false;
-  return labelNamesKnownGovernmentEmployer(label);
+  return labelNamesKnownGovernmentEmployer(label) && labelHasApplicantEmploymentStatusRelationship(label);
 }
 
 function currentGovernmentEmploymentTarget(label: string): GovernmentEmploymentTarget | null {
@@ -1803,7 +1816,7 @@ function governmentLabelNamesKnownEmployer(label: string): boolean {
   const phrase = governmentRelationPhrase(label);
   if (!phrase) return false;
   const primary = phrase.replace(/\s*\([^()]*\)\s*$/, '').trim();
-  return VETTED_GOVERNMENT_EMPLOYERS.has(normalizeIdentity(primary));
+  return targetFromBareGovernmentPhrase(primary)?.kind === 'named';
 }
 
 function governmentEmployerMatchesTarget(
@@ -1856,7 +1869,7 @@ function governmentEmploymentAnswer(
   if (!isGovernmentEmploymentQuestion(label)) {
     if ((GOVERNMENT_EMPLOYER_SCOPE.test(label)
       || governmentLabelNamesKnownEmployer(label)
-      || labelNamesKnownGovernmentEmployer(label))
+      || (labelNamesKnownGovernmentEmployer(label) && labelHasApplicantEmploymentStatusRelationship(label)))
       && !NOT_HER_GOVERNMENT_EMPLOYMENT.test(label)) {
       return {
         skipReason: governmentEmploymentSkipReason(
