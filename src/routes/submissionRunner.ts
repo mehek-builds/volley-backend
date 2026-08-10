@@ -65,6 +65,7 @@ import {
   managedResultSupportsDiscoveryRole,
   CaptchaUnresolvedError,
   clickFinalSubmit,
+  canonicalSmartRecruitersOneClickUrl,
   canonicalSupportedPortalUrl,
   detectPortal,
   managedResultRequiresCaptchaAttention,
@@ -996,6 +997,20 @@ export function attentionBlockersForManagedResult(
   }
   if (!blockersIncludeCaptcha(blockers)) return [...blockers];
   return reconcileManagedProviderBlockers(portal, blockers, result, packet);
+}
+
+export function managedExtensionHandoffUrl(
+  portal: SupportedPortal,
+  observedUrl: string | undefined,
+  networkAccessRestriction: string | null,
+  captchaAttention: boolean,
+): string | undefined {
+  if (portal === 'smartrecruiters') {
+    return networkAccessRestriction || captchaAttention
+      ? canonicalSmartRecruitersOneClickUrl(observedUrl)
+      : undefined;
+  }
+  return networkAccessRestriction ? canonicalSupportedPortalUrl(observedUrl, portal) : undefined;
 }
 
 /**
@@ -2034,9 +2049,12 @@ async function prepareManaged(
       })
       : {}),
     submission_run_id: runId,
-    extension_handoff_url: networkAccessRestriction
-      ? canonicalSupportedPortalUrl(result.url, portal)
-      : undefined,
+    extension_handoff_url: managedExtensionHandoffUrl(
+      portal,
+      result.url,
+      networkAccessRestriction,
+      captchaAttention,
+    ),
     filled_fields: filledFields,
     // The other half of filled_fields, and it was always empty before: what the runner tried and
     // could not leave on the form. See managedAnswerLossReasons.

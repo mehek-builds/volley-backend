@@ -5,7 +5,7 @@ import {
   extensionHandoffVersion,
   extensionStartHandoffBinding,
 } from './extensionHandoffPacket';
-import { MANAGED_NETWORK_ACCESS_RESTRICTION_REASON } from './portalSubmission';
+import { CAPTCHA_BLOCKER, MANAGED_NETWORK_ACCESS_RESTRICTION_REASON } from './portalSubmission';
 
 const SEEKA_POSTING = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648206-software-engineer-internship';
 const SEEKA_FORM = 'https://jobs.smartrecruiters.com/oneclick-ui/company/SeekaTechnology/publication/123e4567-e89b-12d3-a456-426614174000';
@@ -19,6 +19,73 @@ test('the exact SEEKA posting may continue to its same-employer SmartRecruiters 
     status: 'needs_attention',
     attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
   }), true);
+});
+
+test('a managed SmartRecruiters CAPTCHA plus evidence gap may continue only on its exact frozen form', () => {
+  const attentionReason = [
+    CAPTCHA_BLOCKER,
+    'Litos could not verify that the application form loaded.',
+  ].join('\n');
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
+    currentUrl: SEEKA_FORM,
+    frozenAtsName: 'smartrecruiters',
+    status: 'needs_attention',
+    attentionReason,
+  }), true);
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
+    currentUrl: SEEKA_POSTING,
+    frozenAtsName: 'smartrecruiters',
+    status: 'needs_attention',
+    attentionReason,
+  }), false);
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
+    currentUrl: SEEKA_FORM.replace('123e4567-e89b-12d3-a456-426614174000', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'),
+    frozenAtsName: 'smartrecruiters',
+    status: 'needs_attention',
+    attentionReason,
+  }), false);
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
+    currentUrl: SEEKA_FORM,
+    frozenAtsName: 'smartrecruiters',
+    status: 'ready_for_final_approval',
+    attentionReason,
+  }), false);
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
+    currentUrl: SEEKA_FORM,
+    frozenAtsName: 'smartrecruiters',
+    status: 'needs_attention',
+    attentionReason,
+    submissionClaimedAt: '2026-08-10T00:00:00.000Z',
+  }), false);
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
+    currentUrl: SEEKA_FORM,
+    frozenAtsName: 'smartrecruiters',
+    status: 'needs_attention',
+    attentionReason: `Prefix: ${CAPTCHA_BLOCKER}`,
+  }), false);
+});
+
+test('a CAPTCHA reason does not broaden attended recovery for another ATS', () => {
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: 'https://jobs.lever.co/acme/abc123',
+    frozenHandoffUrl: 'https://jobs.lever.co/acme/abc123/apply',
+    currentUrl: 'https://jobs.lever.co/acme/abc123/apply',
+    frozenAtsName: 'lever',
+    status: 'needs_attention',
+    attentionReason: CAPTCHA_BLOCKER,
+  }), false);
 });
 
 test('a SmartRecruiters packet cannot be loaded into another employer form', () => {
@@ -84,7 +151,7 @@ test('a managed SmartRecruiters recovery cannot substitute its posting URL for t
   }), false);
 });
 
-test('SmartRecruiters refill is limited to the exact network-reputation recovery state', () => {
+test('SmartRecruiters refill is limited to an exact eligible attended-recovery state', () => {
   for (const candidate of [
     { status: 'needs_attention' as const, attentionReason: 'A required field is empty.' },
     { status: 'questions_ready' as const, attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON },
@@ -287,6 +354,50 @@ test('SmartRecruiters recovery cannot bypass its required extension-start bindin
     },
   };
   assert.equal(extensionStartHandoffBinding(packet), 'missing');
+});
+
+test('SmartRecruiters CAPTCHA recovery keeps the immutable extension-start binding', () => {
+  const attentionReason = [CAPTCHA_BLOCKER, 'The application form did not expose any fields.'].join('\n');
+  const review = {
+    portal_url: SEEKA_POSTING,
+    extension_handoff_url: SEEKA_FORM,
+    ats_name: 'smartrecruiters',
+    status: 'needs_attention' as const,
+    attention_reason: attentionReason,
+  };
+  const packet = {
+    applicationId: 'application-1',
+    userId: 'user-1',
+    resumeObjectKey: 'users/user-1/resumes/application-1.pdf',
+    spec: {
+      summary: 'Tailored summary',
+      _review: { ...review, questions: [{ question: 'Why?', answer: 'Because.' }] },
+    },
+    jobContext: { company: 'SEEKA Technology', role: 'Software Engineer Internship' },
+    currentUrl: SEEKA_FORM,
+    review,
+  };
+  const handoffVersion = extensionHandoffVersion(packet)!;
+  const validate = (overrides: Partial<Parameters<typeof extensionStartHandoffBinding>[0]> = {}) => extensionStartHandoffBinding({
+    ...packet,
+    handoffVersion,
+    ...overrides,
+  });
+
+  assert.equal(validate(), 'valid');
+  assert.equal(validate({ currentUrl: SEEKA_POSTING }), 'mismatch');
+  assert.equal(validate({ currentUrl: SEEKA_FORM.replace('123e4567-e89b-12d3-a456-426614174000', 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee') }), 'mismatch');
+  assert.equal(validate({ resumeObjectKey: `${packet.resumeObjectKey}.new` }), 'stale');
+  assert.equal(validate({ spec: { ...packet.spec, summary: 'Changed after fetch' } }), 'stale');
+  assert.equal(validate({
+    spec: {
+      ...packet.spec,
+      _review: { ...packet.spec._review, questions: [{ question: 'Why?', answer: 'Changed.' }] },
+    },
+  }), 'stale');
+  assert.equal(validate({ jobContext: { ...packet.jobContext, company: 'Other employer' } }), 'stale');
+  assert.equal(validate({ review: { ...review, status: 'submitted' } }), 'mismatch');
+  assert.equal(validate({ review: { ...review, submission_claimed_at: '2026-08-10T00:00:00.000Z' } }), 'mismatch');
 });
 
 test('claimed, submitted, in-flight, and security-code packets are never disclosed for refill', () => {

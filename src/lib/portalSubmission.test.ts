@@ -11,6 +11,7 @@ import {
   buildManagedDiscoveryActions,
   buildManagedPortalActions,
   canFillReviewedQuestions,
+  canonicalSmartRecruitersOneClickUrl,
   canonicalSupportedPortalUrl,
   coverLetterUploadSelector,
   detectPortal,
@@ -72,6 +73,16 @@ const EMPLOYER_SITE_REFERRAL_EVIDENCE: ReferralSourceEvidence = {
   kind: 'employer_career_site',
   value: 'Company website',
 };
+
+test('only an exact SmartRecruiters oneclick form can become an attended handoff URL', () => {
+  const exact = 'https://jobs.smartrecruiters.com/oneclick-ui/company/SeekaTechnology/publication/123e4567-e89b-12d3-a456-426614174000';
+  assert.equal(canonicalSmartRecruitersOneClickUrl(`${exact}?utm_source=test#application`), exact);
+  assert.equal(canonicalSmartRecruitersOneClickUrl(
+    'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648206-software-engineer-internship',
+  ), undefined);
+  assert.equal(canonicalSmartRecruitersOneClickUrl('https://jobs.lever.co/acme/abc123/apply'), undefined);
+  assert.equal(canonicalSmartRecruitersOneClickUrl(undefined), undefined);
+});
 
 function isGreenhousePreflightClick(action: { type: string; label?: string }) {
   return action.type === 'click'

@@ -5416,6 +5416,17 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
   return undefined;
 }
 
+/** Return a canonical URL only for the exact SmartRecruiters oneclick application form shape. */
+export function canonicalSmartRecruitersOneClickUrl(rawUrl: string | undefined): string | undefined {
+  const canonical = canonicalSupportedPortalUrl(rawUrl, 'smartrecruiters');
+  if (!canonical) return undefined;
+  try {
+    return isSmartRecruitersOneClickUrl(new URL(canonical)) ? canonical : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function canonicalMonitoredPortalUrl(
   rawUrl: string | undefined,
   atsName?: string | null,

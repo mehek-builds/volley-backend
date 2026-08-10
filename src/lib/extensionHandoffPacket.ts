@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { ApplicationReviewState } from './applicationReview';
 import {
   canonicalSupportedPortalUrl,
+  CAPTCHA_BLOCKER,
   detectPortal,
   MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
 } from './portalSubmission';
@@ -139,10 +140,6 @@ export function extensionHandoffPacketMatches(input: {
   submissionClaimedAt?: string;
 }): boolean {
   if (!ELIGIBLE_HANDOFF_STATES.has(input.status) || input.submissionClaimedAt) return false;
-  if (input.frozenHandoffUrl && (
-    input.status !== 'needs_attention'
-    || !input.attentionReason?.split('\n').includes(MANAGED_NETWORK_ACCESS_RESTRICTION_REASON)
-  )) return false;
   if (!input.frozenUrl) return false;
   let frozenPortal: string;
   let currentPortal: string;
@@ -154,6 +151,12 @@ export function extensionHandoffPacketMatches(input: {
   }
   if (frozenPortal !== currentPortal) return false;
   if (input.frozenAtsName && input.frozenAtsName !== frozenPortal) return false;
+  if (input.frozenHandoffUrl) {
+    const reasons = input.attentionReason?.split('\n') ?? [];
+    const eligibleRecoveryCause = reasons.includes(MANAGED_NETWORK_ACCESS_RESTRICTION_REASON)
+      || (frozenPortal === 'smartrecruiters' && reasons.includes(CAPTCHA_BLOCKER));
+    if (input.status !== 'needs_attention' || !eligibleRecoveryCause) return false;
+  }
 
   const frozenCanonical = canonicalSupportedPortalUrl(input.frozenUrl, input.frozenAtsName);
   const currentCanonical = canonicalSupportedPortalUrl(input.currentUrl, currentPortal);
