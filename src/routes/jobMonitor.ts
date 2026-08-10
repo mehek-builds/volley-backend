@@ -1186,7 +1186,12 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
          Chunked so a single board the size of Databricks still fits well
          inside Postgres's 65,535-parameter cap: 21 columns x 200 rows. */
       for (let index = 0; index < fresh.length; index += UPSERT_CHUNK) {
-        const chunk = fresh.slice(index, index + UPSERT_CHUNK).map(({ pay, ...job }) => ({
+        const chunk = fresh.slice(index, index + UPSERT_CHUNK).map(({
+          pay,
+          portal_country: portalCountry,
+          portal_company_name: _portalCompanyName,
+          ...job
+        }) => ({
           source_id: source.id,
           company_name: source.company_name,
           ...job,
@@ -1211,10 +1216,16 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
              Recomputed on every poll rather than kept from the first sighting, because employers
              edit requirements into and out of a live posting. */
           description_digest: buildDescriptionDigest(job.description),
+          /* Existing schema-compatible review metadata, not a new column. The exact ATS country
+             must survive the poll so resume generation can freeze it into job_context. A coarse
+             `job_country = non_us` cannot distinguish London from Toronto, and therefore cannot
+             select one applicant declaration truthfully. Old rows remain null until their normal
+             board refresh, so this needs no backfill or unreviewed production migration. */
+          raw_json: portalCountry ? { portal_country: portalCountry } : null,
           /* The portal's own country field first, the location string only when it published none.
              Reading the string first is what made "IN - Bengaluru" Indiana and "Amsterdam, NH" New
              Hampshire. */
-          job_country: resolveJobCountry(job.portal_country, job.location),
+          job_country: resolveJobCountry(portalCountry, job.location),
         }));
         await tx.insert(monitored_jobs).values(chunk).onConflictDoUpdate({
           target: [monitored_jobs.source_id, monitored_jobs.external_id],
@@ -1234,6 +1245,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             sponsorship_status: sql`excluded.sponsorship_status`,
             description_digest: sql`excluded.description_digest`,
             job_country: sql`excluded.job_country`,
+            raw_json: sql`excluded.raw_json`,
             /* Overwritten on every poll, not merged. An employer that REMOVES a published range
                (or edits one into a shape we decline to guess a period for) must see it disappear
                from the board on the next run; a COALESCE here would pin the old figure to the row

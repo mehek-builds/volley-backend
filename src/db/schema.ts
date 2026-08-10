@@ -1050,16 +1050,15 @@ export const monitored_jobs = pgTable('monitored_jobs', {
    * all, so a posting whose period could not be established stores null here AND in the three
    * columns above. */
   salary_interval: text('salary_interval'),
-  /* Kept as a column, deliberately NOT dropped, but no longer written (2026-07-28).
+  /* Kept as a column and now limited to small, reviewed ingestion metadata.
    *
-   * It was write-only from the day it shipped: the three normalizers set it, the upsert copied it,
-   * and nothing ever selected it - not a route, not the website. That cost 38 MB of the jobs board's
-   * 166 MB, on a 512 MB Neon Hobby database, which is what stood between the board and the ~20,400
-   * postings the 239-source list can carry.
+   * The old full provider payload was write-only and cost 38 MB of the jobs board's 166 MB, so it
+   * remains gone. The only supported shape is now `{ portal_country?: string }`, preserving the
+   * ATS's authoritative country through resume generation without adding a production column.
    *
-   * The column stays so this remains reversible and so schema.ts still matches the live table (the
-   * schema-drift check compares both directions). If a future feature genuinely needs the raw board
-   * payload, re-populate it here rather than re-adding a column. */
+   * Existing rows may be null and fill naturally on their next normal poll. No backfill is needed
+   * or safe. If a future feature needs more provider data, add only a bounded reviewed key rather
+   * than restoring the raw payload. */
   raw_json: jsonb('raw_json'),
 }, (t) => ({
   sourceExternalUnique: uniqueIndex('monitored_jobs_source_external_unique').on(t.source_id, t.external_id),

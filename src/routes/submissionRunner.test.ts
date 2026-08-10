@@ -710,6 +710,142 @@ test('discovered US work authorization and sponsorship become reviewed Yes answe
   );
 });
 
+test('portal country metadata reaches managed send resolution without borrowing another country', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in London.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const fields = [{
+    label: 'Are you authorized to work in the country where this role is located?',
+    selector: 'select[name="work_authorized"]',
+    inputType: 'select',
+    maxLength: null,
+  }];
+  const applicationProfile: ApplicationProfileLike = {
+    work_eligibility_by_country: [
+      { country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false },
+      { country_code: 'GB', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
+      { country_code: 'CA', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
+      { country_code: 'IN', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
+      { country_code: 'BR', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
+    ],
+  };
+
+  const british = await discoverAndResolveQuestions(
+    fields,
+    { user_id: 'user-1', job_context: { location: 'London', portal_country: 'GB' } } as ResumeRow,
+    current,
+    applicationProfile,
+    true,
+    'greenhouse',
+  );
+  assert.deepEqual(british.attentionReasons, []);
+  assert.deepEqual(british.questions.map(({ question, answer }) => ({ question, answer })), [{
+    question: fields[0].label,
+    answer: 'No',
+  }]);
+
+  for (const [job_context, answer] of [
+    [{ location: 'Paris, TX' }, 'Yes'],
+    [{ location: 'London, ON' }, 'No'],
+    [{ portal_country: 'US', location: 'Paris, TX' }, 'Yes'],
+    [{ location: 'Remote, United States' }, 'Yes'],
+    [{ location: 'United States - Remote' }, 'Yes'],
+    [{ location: 'Canada - Remote' }, 'No'],
+    [{ location: 'United Kingdom - Remote' }, 'No'],
+    [{ portal_country: 'US', location: 'Springfield' }, 'Yes'],
+    [{ portal_country: 'United States Locations', location: 'New York, NY' }, 'Yes'],
+    [{ portal_country: 'India Locations', location: 'Mumbai' }, 'No'],
+    [{ portal_country: 'Canada Offices', location: 'Toronto' }, 'No'],
+    [{ portal_country: 'United Kingdom Office', location: 'London' }, 'No'],
+    [{ portal_country: 'EMEA', location: 'London' }, 'No'],
+    [{ portal_country: 'United States Recruiting' }, 'Yes'],
+    [{ portal_country: 'EMEA | United Kingdom', location: 'London' }, 'No'],
+    [{ portal_country: 'APAC / India', location: 'Mumbai' }, 'No'],
+    [{ portal_country: 'LATAM; Brazil', location: 'Sao Paulo' }, 'No'],
+  ] as const) {
+    const resolved = await discoverAndResolveQuestions(
+      fields,
+      { user_id: 'user-1', job_context } as ResumeRow,
+      current,
+      applicationProfile,
+      true,
+      'greenhouse',
+    );
+    assert.deepEqual(resolved.attentionReasons, []);
+    assert.equal(resolved.questions[0]?.answer, answer);
+  }
+
+  for (const job_context of [
+    { locations: ['London', 'New York, NY'] },
+    { location: 'London office supporting US customers' },
+    { portal_country: 'GB', location: 'Paris, TX' },
+    { portal_country: 'US', location: 'London, England' },
+    { location: 'Paris, TX, France' },
+    { location: 'London, UK, supporting US customers' },
+    { location: 'Paris team aligned to Texas business hours' },
+    { location: 'Sales territory, United States' },
+    { location: 'Springfield, United States' },
+    { portal_country: 'United States Locations', location: 'London' },
+    { portal_country: 'India Locations', location: 'New York, NY' },
+    { portal_country: 'Canada Offices', location: 'London' },
+    { portal_country: 'United Kingdom Locations', location: 'New York, NY' },
+    { portal_country: 'United States Locations', locations: ['London', 'New York, NY'] },
+    { portal_country: 'EMEA', location: 'New York, NY' },
+    { portal_country: 'APAC', location: 'San Francisco, CA' },
+    { portal_country: 'LATAM', location: 'Boston' },
+    { portal_country: 'EMEA' },
+    { portal_country: 'United States Recruiting', location: 'London' },
+    { portal_country: 'EMEA', location: 'Toronto' },
+    { portal_country: 'APAC', location: 'London' },
+    { portal_country: 'LATAM', location: 'Mumbai' },
+    { portal_country: 'EMEA | Canada', location: 'Toronto' },
+    { portal_country: 'APAC, EMEA', location: 'London' },
+    { portal_country: 'United States / Canada', location: 'Toronto' },
+    { portal_country: 'EMEA & US', location: 'London' },
+    { portal_country: 'EMEA & APAC', location: 'London' },
+    { portal_country: 'APAC & United States', location: 'Mumbai' },
+    { portal_country: 'LATAM & USA', location: 'Sao Paulo' },
+    { portal_country: 'EMEA + US', location: 'London' },
+    { portal_country: 'EMEA - US', location: 'London' },
+    { portal_country: 'EMEA (US)', location: 'London' },
+    { portal_country: 'EMEA - United States', location: 'London' },
+    { portal_country: 'APAC (United States)', location: 'Mumbai' },
+    { portal_country: 'LATAM-US', location: 'Sao Paulo' },
+    ...['|', ',', '/', ';', '\n', '•', ' and ', ' or ', '&', '+'].map((separator) => ({
+      portal_country: `EMEA${separator}US`,
+      location: 'London',
+    })),
+    ...[' - ', '-'].flatMap((separator) => ['EMEA', 'APAC', 'LATAM'].map((region) => ({
+      portal_country: `${region}${separator}United States`,
+      location: region === 'APAC' ? 'Mumbai' : region === 'LATAM' ? 'Sao Paulo' : 'London',
+    }))),
+    ...['EMEA', 'APAC', 'LATAM'].map((region) => ({
+      portal_country: `${region} (United States)`,
+      location: region === 'APAC' ? 'Mumbai' : region === 'LATAM' ? 'Sao Paulo' : 'London',
+    })),
+  ]) {
+    const mixed = await discoverAndResolveQuestions(
+      fields,
+      { user_id: 'user-1', job_context } as ResumeRow,
+      current,
+      applicationProfile,
+      true,
+      'greenhouse',
+    );
+    assert.equal(mixed.questions[0]?.answer, undefined);
+    assert.equal(mixed.attentionReasons.length, 1);
+    assert.match(mixed.attentionReasons[0], /work-eligibility question left for you/i);
+  }
+});
+
 test('select and radio discoveries relay a stored onsite commitment alongside stored academic facts', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship is based in San Francisco, California.',

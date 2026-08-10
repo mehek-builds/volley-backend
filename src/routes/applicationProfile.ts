@@ -3,7 +3,13 @@ import { z } from 'zod';
 import { application_profile } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { encryptField, decryptField, looksEncrypted, FieldDecryptError } from '../lib/fieldCrypto';
-import { selectApplicationProfileRow, upsertApplicationProfile, type ApplicationProfileRow } from '../lib/applicationFacts';
+import { isUndefinedColumnError, selectApplicationProfileRow, upsertApplicationProfile, type ApplicationProfileRow } from '../lib/applicationFacts';
+import {
+  countryWorkEligibilityListSchema,
+  legacyUsProjection,
+  normalizeCountryWorkEligibility,
+} from '../lib/workEligibility';
+import { persistProfileWithCountryEligibility } from '../lib/countryEligibilityPersistence';
 
 // Fields sensitive enough to encrypt at rest per PRD-v2 Section 4: phone/address/
 // work-authorization status. Links and referral_source are not identity-sensitive
@@ -52,6 +58,7 @@ export const bodySchema = z.object({
   citizenship: z.string().nullable().optional(),
   work_authorized: z.boolean().nullable().optional(),
   needs_sponsorship: z.boolean().nullable().optional(),
+  work_eligibility_by_country: countryWorkEligibilityListSchema.nullable().optional(),
   availability_date: z.string().nullable().optional(),
   availability_term: z.string().nullable().optional(),
   desired_salary: z.string().nullable().optional(),
@@ -134,8 +141,21 @@ export function attestationConsentStamp(body: z.infer<typeof bodySchema>): { app
   return touched ? { application_attestations_consented_at: new Date() } : {};
 }
 
-function encryptRow(body: z.infer<typeof bodySchema>) {
+export function applicationProfileWriteValues(body: z.infer<typeof bodySchema>) {
   const row: Record<string, unknown> = { ...body };
+  if (Array.isArray(body.work_eligibility_by_country)) {
+    const records = body.work_eligibility_by_country;
+    // The whole declaration is one authenticated envelope. Encrypting only type and expiry would
+    // still expose the same immigration claim through country and authorization booleans.
+    row.work_eligibility_by_country = encryptField(JSON.stringify(records));
+    Object.assign(row, legacyUsProjection(records));
+  } else {
+    // Current extension builds round-trip the legacy scalar-only profile. Keep those writes until
+    // every installed client sends the scoped list. A null scoped key means "client has no scoped
+    // value", not "erase the old booleans". Once a list is present it is authoritative and the
+    // scalars above are derived from it, so stale client booleans cannot override a country row.
+    delete row.work_eligibility_by_country;
+  }
   for (const field of ENCRYPTED_FIELDS) {
     const value = row[field];
     if (typeof value === 'string' && value.length > 0) {
@@ -173,6 +193,19 @@ export function decryptRow(row: ApplicationProfileRow) {
     const value = out[field];
     if (typeof value === 'string' && value.length > 0 && looksEncrypted(value)) {
       out[field] = decryptField(value); // throws FieldDecryptError on a wrong or missing key
+    }
+  }
+  const storedEligibility = out.work_eligibility_by_country;
+  if (typeof storedEligibility === 'string') {
+    try {
+      const plaintext = looksEncrypted(storedEligibility) ? decryptField(storedEligibility) : storedEligibility;
+      out.work_eligibility_by_country = normalizeCountryWorkEligibility(JSON.parse(plaintext)) ?? [];
+    } catch (error) {
+      if (error instanceof FieldDecryptError) throw error;
+      // Corrupt or duplicate scoped data is authoritative but unusable. Never synthesize a hidden
+      // scoped key from the legacy scalars in this path: scalar-only extension GET-edit-PUT must
+      // round-trip exactly the contract it understands.
+      out.work_eligibility_by_country = [];
     }
   }
   return out;
@@ -226,17 +259,26 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Invalid request body' });
     }
 
-    const encrypted = { ...encryptRow(body), ...attestationConsentStamp(body) };
+    const encrypted = { ...applicationProfileWriteValues(body), ...attestationConsentStamp(body) };
 
     try {
-      const { droppedFactColumns } = await upsertApplicationProfile(userId, encrypted);
+      const scopedRecords = body.work_eligibility_by_country;
+      const { droppedFactColumns } = Array.isArray(scopedRecords)
+        ? (await persistProfileWithCountryEligibility(userId, encrypted, scopedRecords), { droppedFactColumns: false })
+        : await upsertApplicationProfile(userId, encrypted);
       if (droppedFactColumns) {
         fastify.log.warn(
           { userId },
           'Saved the application profile without the onboarding fact columns: this deploy is ahead of scripts/apply-application-facts-schema.mjs. Run that migration; the dropped answers read back as "never asked" until it has.',
         );
+        if (Array.isArray(body.work_eligibility_by_country)) {
+          return reply.status(503).send({ error: 'Country work eligibility is being enabled. Try again shortly.' });
+        }
       }
     } catch (err) {
+      if (Array.isArray(body.work_eligibility_by_country) && isUndefinedColumnError(err)) {
+        return reply.status(503).send({ error: 'Country work eligibility is being enabled. Try again shortly.' });
+      }
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to save application profile' });
     }

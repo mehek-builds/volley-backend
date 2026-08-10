@@ -12,13 +12,14 @@ import {
 } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { decryptField } from '../lib/fieldCrypto';
-import { ENCRYPTED_FIELDS } from './applicationProfile';
+import { decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
 import { AUTOMATIC_CAPTCHA_CONSENT_VERSION, AUTOMATIC_SUBMISSION_CONSENT_VERSION, automationConsentValues, captchaResumeGranted } from '../lib/automationConsent';
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
 import { generated_resumes } from '../db/schema';
 import { isComposioConfigured } from '../lib/composioConnections';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { verificationEmailSource } from '../lib/verificationEmailSource';
+import { countryEligibilityForRead } from '../lib/workEligibility';
 
 /**
  * How many submissions has this student personally approved AND seen reach the employer?
@@ -115,6 +116,20 @@ export function hasFiveTargetRoles(parsed: { target_roles?: unknown } | null | u
     .filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
     .map((role) => role.trim().toLowerCase());
   return new Set(roles).size >= 5;
+}
+
+export function hasWorkEligibilityDeclaration(input: {
+  sponsorship_answer?: unknown;
+  work_eligibility_by_country?: unknown;
+  work_authorized?: boolean | null;
+  needs_sponsorship?: boolean | null;
+}): boolean {
+  return (countryEligibilityForRead({
+    stored: input.work_eligibility_by_country,
+    work_authorized: input.work_authorized,
+    needs_sponsorship: input.needs_sponsorship,
+    sponsorship_answer: input.sponsorship_answer,
+  })?.length ?? 0) > 0;
 }
 
 // Asked on screen 03 only if the first application did not teach us. Order is the render order.
@@ -308,7 +323,13 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
        postings they cannot take and then quietly removing them.
        Derived from the timestamp, not from the boolean: "no, I do not need sponsorship" is a real
        answer that stores `false`, and gating on the boolean would ask that person again forever. */
-    const has_sponsorship_answer = user.sponsorship_declared_at !== null;
+    const readableEligibilityProfile = appProfile ? decryptRow(appProfile) : undefined;
+    const has_sponsorship_answer = hasWorkEligibilityDeclaration({
+      sponsorship_answer: user.sponsorship_answer,
+      work_eligibility_by_country: readableEligibilityProfile?.work_eligibility_by_country,
+      work_authorized: appProfile?.work_authorized,
+      needs_sponsorship: appProfile?.needs_sponsorship,
+    });
 
     // Period preferences remain editable in the dashboard, but they no longer gate setup. They do
     // not currently change job ranking, so requiring them here would add a screen without changing
@@ -392,6 +413,20 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     if (!gate.ok) return reply.status(gate.status).send(gate.body);
     const verificationProblem = await verificationConnectionProblem(userId, parsed.data);
     if (verificationProblem) return reply.status(verificationProblem.status).send({ error: verificationProblem.error });
+
+    const [[eligibilityUser], eligibilityRow] = await Promise.all([
+      db.select({ sponsorship_answer: users.sponsorship_answer }).from(users).where(eq(users.id, userId)).limit(1),
+      selectApplicationProfileRow(userId),
+    ]);
+    const readableEligibility = eligibilityRow ? decryptRow(eligibilityRow) : undefined;
+    if (!hasWorkEligibilityDeclaration({
+      sponsorship_answer: eligibilityUser?.sponsorship_answer,
+      work_eligibility_by_country: readableEligibility?.work_eligibility_by_country,
+      work_authorized: eligibilityRow?.work_authorized,
+      needs_sponsorship: eligibilityRow?.needs_sponsorship,
+    })) {
+      return reply.status(409).send({ error: 'Complete work eligibility before finishing setup.' });
+    }
 
     try {
       const now = new Date();

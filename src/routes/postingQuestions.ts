@@ -44,6 +44,7 @@ import {
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { DiscoveredQuestion } from '../lib/questionDiscovery';
+import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
 
 const paramsSchema = z.object({ jobId: z.string().uuid() });
 
@@ -54,6 +55,7 @@ type PostingTarget = {
   company: string;
   title: string;
   description: string;
+  location: string | null;
 };
 
 async function loadPostingTarget(jobId: string): Promise<PostingTarget | null> {
@@ -66,6 +68,7 @@ async function loadPostingTarget(jobId: string): Promise<PostingTarget | null> {
     // submission runner will, and a multi-kilobyte read on the Apply path is affordable exactly
     // once per apply.
     description: sql<string>`left(${monitored_jobs.description}, 20000)`,
+    location: monitored_jobs.location,
     ats_name: career_page_sources.ats_name,
     board_token: career_page_sources.board_token,
   })
@@ -82,6 +85,7 @@ async function loadPostingTarget(jobId: string): Promise<PostingTarget | null> {
     company: row.company_name,
     title: row.title,
     description: row.description ?? '',
+    location: row.location,
   };
 }
 
@@ -246,7 +250,13 @@ async function resolveFor(userId: string, questions: PostingQuestion[], target: 
     loadApplicationProfileLike(userId),
     loadSavedAnswers(userId),
   ]);
-  return resolvePrescript(questions, profile, saved, { company: target.company, jdText: target.description });
+  const jobContext = { location: target.location };
+  return resolvePrescript(questions, profile, saved, {
+    company: target.company,
+    jdText: target.description,
+    postingCountry: postingCountryFromJobContext(jobContext),
+    postingCountryCode: postingCountryCodeFromJobContext(jobContext),
+  });
 }
 
 function prescriptResponse(

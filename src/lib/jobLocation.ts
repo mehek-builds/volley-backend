@@ -1,3 +1,5 @@
+import { ISO_COUNTRY_CODES, isIsoCountryCode } from './workEligibility';
+
 /**
  * IS THIS JOB IN THE UNITED STATES?
  *
@@ -97,6 +99,115 @@ const NON_US = [
   'GEORGIA',
 ];
 
+/* Exact country codes for the unambiguous workplace cities already accepted by the frozen
+   location classifier above. This table is deliberately used only on structured ATS country and
+   location fields. It must never be applied to a job description, where a city can describe a
+   customer, headquarters, or travel rather than the workplace for this role. Ambiguous bare city
+   names such as Melbourne and Cambridge stay out. */
+const STRUCTURED_CITY_COUNTRY_CODES = new Map<string, string>([
+  ['LONDON', 'GB'], ['BRISTOL UK', 'GB'], ['CAMBRIDGE UK', 'GB'], ['EDINBURGH', 'GB'],
+  ['MANCHESTER UK', 'GB'], ['GLASGOW', 'GB'], ['BELFAST', 'GB'],
+  ['DUBLIN', 'IE'], ['CORK', 'IE'],
+  ['BERLIN', 'DE'], ['MUNICH', 'DE'], ['HAMBURG', 'DE'], ['FRANKFURT', 'DE'],
+  ['PARIS', 'FR'], ['MADRID', 'ES'], ['BARCELONA', 'ES'], ['LISBON', 'PT'],
+  ['AMSTERDAM', 'NL'], ['ROTTERDAM', 'NL'], ['BRUSSELS', 'BE'], ['ZURICH', 'CH'],
+  ['GENEVA', 'CH'], ['VIENNA', 'AT'], ['STOCKHOLM', 'SE'], ['OSLO', 'NO'],
+  ['COPENHAGEN', 'DK'], ['HELSINKI', 'FI'], ['WARSAW', 'PL'], ['PRAGUE', 'CZ'],
+  ['BUCHAREST', 'RO'], ['BUDAPEST', 'HU'], ['ATHENS', 'GR'], ['ISTANBUL', 'TR'],
+  ['TEL AVIV', 'IL'],
+  ['BENGALURU', 'IN'], ['BANGALORE', 'IN'], ['MUMBAI', 'IN'], ['NEW DELHI', 'IN'], ['DELHI', 'IN'],
+  ['GURGAON', 'IN'], ['GURUGRAM', 'IN'], ['HYDERABAD', 'IN'], ['CHENNAI', 'IN'],
+  ['PUNE', 'IN'], ['NOIDA', 'IN'], ['GIFT CITY', 'IN'],
+  ['TOKYO', 'JP'], ['OSAKA', 'JP'], ['SEOUL', 'KR'],
+  ['SHANGHAI', 'CN'], ['BEIJING', 'CN'], ['SHENZHEN', 'CN'],
+  ['SYDNEY', 'AU'], ['AUCKLAND', 'NZ'],
+  ['TORONTO', 'CA'], ['VANCOUVER', 'CA'], ['MONTREAL', 'CA'], ['OTTAWA', 'CA'],
+  ['MEXICO CITY', 'MX'], ['SAO PAULO', 'BR'], ['BUENOS AIRES', 'AR'], ['BOGOTA', 'CO'],
+  ['DUBAI', 'AE'], ['ABU DHABI', 'AE'], ['RIYADH', 'SA'], ['KING ABDULLAH', 'SA'],
+  ['CAIRO', 'EG'], ['LAGOS', 'NG'], ['NAIROBI', 'KE'], ['MANILA', 'PH'],
+  ['JAKARTA', 'ID'], ['BANGKOK', 'TH'], ['KUALA LUMPUR', 'MY'],
+  ['HO CHI MINH CITY', 'VN'], ['HO CHI MINH', 'VN'], ['HANOI', 'VN'], ['BELGRADE', 'RS'], ['REYKJAVIK', 'IS'],
+  ['DOHA', 'QA'], ['MILAN', 'IT'], ['MILANO', 'IT'], ['LUXEMBOURG', 'LU'],
+]);
+
+// Ambiguous bare city names that are authoritative only when followed by an exact jurisdiction.
+// They intentionally have no default country: Melbourne alone remains unknown, Melbourne, FL does not.
+const STRUCTURED_CITY_ALIASES_WITHOUT_DEFAULT = new Set(['MELBOURNE', 'BLOOMINGTON']);
+
+const CANADIAN_PROVINCE_CODES = new Set([
+  'AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'NT', 'NU', 'ON', 'PE', 'QC', 'SK', 'YT',
+]);
+
+const CANADIAN_PROVINCE_NAMES = [
+  'ALBERTA', 'BRITISH COLUMBIA', 'MANITOBA', 'NEW BRUNSWICK', 'NEWFOUNDLAND AND LABRADOR',
+  'NOVA SCOTIA', 'NORTHWEST TERRITORIES', 'NUNAVUT', 'ONTARIO', 'PRINCE EDWARD ISLAND',
+  'QUEBEC', 'SASKATCHEWAN', 'YUKON',
+];
+
+/* A city alias is only authoritative when it owns the whole structured place value. These are the
+   jurisdiction suffixes a board may append to that city. State and province aliases are generated
+   from the same authoritative lists used by the location classifier; country aliases are closed
+   to the jurisdictions represented by the city registry. */
+const STRUCTURED_JURISDICTION_SUFFIX_CODES = new Map<string, string>([
+  ...[...US_STATE_CODES].map((code) => [code, 'US'] as const),
+  ...US_STATE_NAMES.map((name) => [name, 'US'] as const),
+  ['GEORGIA', 'US'],
+  ['US', 'US'], ['USA', 'US'], ['U S', 'US'], ['U S A', 'US'],
+  ['UNITED STATES', 'US'], ['UNITED STATES OF AMERICA', 'US'],
+  ...[...CANADIAN_PROVINCE_CODES].map((code) => [code, 'CA'] as const),
+  ...CANADIAN_PROVINCE_NAMES.map((name) => [name, 'CA'] as const),
+  ['CANADA', 'CA'],
+  ['UK', 'GB'], ['U K', 'GB'], ['UNITED KINGDOM', 'GB'], ['GREAT BRITAIN', 'GB'], ['BRITAIN', 'GB'],
+  ['ENGLAND', 'GB'], ['SCOTLAND', 'GB'], ['WALES', 'GB'],
+  ['IRELAND', 'IE'], ['GERMANY', 'DE'], ['FRANCE', 'FR'], ['SPAIN', 'ES'], ['PORTUGAL', 'PT'],
+  ['NETHERLANDS', 'NL'], ['BELGIUM', 'BE'], ['SWITZERLAND', 'CH'], ['AUSTRIA', 'AT'],
+  ['SWEDEN', 'SE'], ['NORWAY', 'NO'], ['DENMARK', 'DK'], ['FINLAND', 'FI'], ['POLAND', 'PL'],
+  ['CZECH REPUBLIC', 'CZ'], ['CZECHIA', 'CZ'], ['ROMANIA', 'RO'], ['HUNGARY', 'HU'],
+  ['GREECE', 'GR'], ['TURKEY', 'TR'], ['TURKIYE', 'TR'], ['ISRAEL', 'IL'],
+  ['INDIA', 'IN'], ['JAPAN', 'JP'], ['SOUTH KOREA', 'KR'], ['KOREA', 'KR'], ['CHINA', 'CN'],
+  ['AUSTRALIA', 'AU'], ['NEW ZEALAND', 'NZ'], ['MEXICO', 'MX'], ['BRAZIL', 'BR'],
+  ['ARGENTINA', 'AR'], ['COLOMBIA', 'CO'], ['UNITED ARAB EMIRATES', 'AE'], ['UAE', 'AE'],
+  ['SAUDI ARABIA', 'SA'], ['EGYPT', 'EG'], ['NIGERIA', 'NG'], ['KENYA', 'KE'],
+  ['PHILIPPINES', 'PH'], ['INDONESIA', 'ID'], ['THAILAND', 'TH'], ['MALAYSIA', 'MY'],
+  ['VIETNAM', 'VN'], ['VIET NAM', 'VN'], ['SERBIA', 'RS'], ['ICELAND', 'IS'], ['QATAR', 'QA'],
+  ['ITALY', 'IT'], ['LUXEMBOURG', 'LU'],
+]);
+
+const STRUCTURED_JURISDICTION_SUFFIXES_LONGEST_FIRST = [...STRUCTURED_JURISDICTION_SUFFIX_CODES.keys()]
+  .sort((left, right) => right.length - left.length);
+
+const US_STATE_JURISDICTION_ALIASES = new Set([
+  ...US_STATE_CODES,
+  ...US_STATE_NAMES,
+  'GEORGIA',
+]);
+
+const CANADIAN_PROVINCE_JURISDICTION_ALIASES = new Set([
+  ...CANADIAN_PROVINCE_CODES,
+  ...CANADIAN_PROVINCE_NAMES,
+]);
+
+const STRUCTURED_COUNTRY_ALIAS_CODES = new Map(
+  [...STRUCTURED_JURISDICTION_SUFFIX_CODES].filter(([alias]) => (
+    !US_STATE_JURISDICTION_ALIASES.has(alias)
+    && !CANADIAN_PROVINCE_JURISDICTION_ALIASES.has(alias)
+  )),
+);
+
+function structuredJurisdictionSuffixCodes(suffix: string): Set<string> | undefined {
+  const codes = new Set<string>();
+  let remaining = suffix;
+  while (remaining) {
+    const alias = STRUCTURED_JURISDICTION_SUFFIXES_LONGEST_FIRST.find(
+      (candidate) => remaining === candidate || remaining.startsWith(`${candidate} `),
+    );
+    if (!alias) return undefined;
+    codes.add(STRUCTURED_JURISDICTION_SUFFIX_CODES.get(alias)!);
+    remaining = remaining.slice(alias.length).trim();
+  }
+  return codes;
+}
+
 function normalise(location: string): string {
   /* Accents folded first, or "São Paulo" becomes "S O PAULO" and matches nothing, and "Reykjavík"
      splits in the middle. Both were sitting in the surfaced pile because of it. */
@@ -133,18 +244,20 @@ export function jobCountry(location: string | null | undefined): JobCountry {
 function jobCountrySignalDetails(location: string | null | undefined): JobCountrySignalDetails {
   if (!location || !location.trim()) return { strongUs: false, weakUs: false, nonUs: false };
   const text = normalise(location);
+  const upper = location.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
 
   // 1. Unambiguous US: the country, a full state name, or a city that is only ever American.
   const strongUs = text.includes(' UNITED STATES ')
     || / (USA|U S A|U S|AMERICAS|AMER) /.test(text)
     || / US /.test(text)
     || US_STATE_NAMES.some((name) => text.includes(` ${name} `))
-    || US_CITIES.some((city) => text.includes(` ${city.replace(/[^A-Z0-9]+/g, ' ')} `));
+    || US_CITIES.some((city) => text.includes(` ${city.replace(/[^A-Z0-9]+/g, ' ')} `))
+    // Melbourne alone is Australian in the board corpus. The explicit Florida pair is not.
+    || /\bMELBOURNE\s*,\s*FL\b/.test(upper);
   const namedNonUs = NON_US.some((name) => text.includes(` ${name.replace(/[^A-Z0-9]+/g, ' ')} `));
 
   /* 3. "City, ST" and nothing else. The comma is what makes it a state rather than a country code
         or an English word: "Austin, TX" qualifies, "IN - Bengaluru" does not. */
-  const upper = location.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
   const afterComma = upper.match(/,\s*([A-Z]{2})\b/g) ?? [];
   const stateCodeUs = afterComma.some((match) => US_STATE_CODES.has(match.replace(/[^A-Z]/g, '')));
 
@@ -184,7 +297,12 @@ const US_COUNTRY_TOKENS = new Set(['US', 'USA', 'UNITED STATES', 'UNITED STATES 
 export function countryFromPortal(portalCountry: string | null | undefined): JobCountry | null {
   if (!portalCountry || !portalCountry.trim()) return null;
   const parts = portalCountry.split('|').map((part) => normalise(part).trim());
-  if (parts.some((part) => US_COUNTRY_TOKENS.has(part) || / (USA|UNITED STATES) /.test(` ${part} `))) {
+  const exactCodes = parts.flatMap((part) => {
+    const code = exactPortalCountryCodePart(part);
+    return code ? [code] : [];
+  });
+  if (exactCodes.includes('US')
+    || parts.some((part) => US_COUNTRY_TOKENS.has(part) || / (USA|UNITED STATES) /.test(` ${part} `))) {
     return 'us';
   }
   /* An office group NAMED after a foreign country ("India Locations", "EMEA"), or a two-letter code
@@ -196,6 +314,16 @@ export function countryFromPortal(portalCountry: string | null | undefined): Job
   });
   if (foreign) return 'non_us';
   return null;
+}
+
+const PORTAL_OFFICE_GROUP_SUFFIX = /\s+(?:LOCATIONS?|OFFICES?)$/;
+
+/** Exact country evidence from an ATS country field, including its closed office-group labels. */
+function exactPortalCountryCodePart(part: string): string | undefined {
+  const normalized = normalise(part).trim();
+  const country = normalized.replace(PORTAL_OFFICE_GROUP_SUFFIX, '').trim();
+  if (!country) return undefined;
+  return exactStructuredCountryCode(country, true);
 }
 
 /**
@@ -220,7 +348,7 @@ export function resolveJobCountry(
  * Deliberately NOT the comma, which is the inside of "Austin, TX", and NOT the hyphen, which is the
  * inside of "Remote - US" and "London-United Kingdom".
  */
-const LOCATION_SEGMENT_SEPARATOR = /\s*[;|\/\n]\s*|\s+\bor\b\s+|\s+\band\b\s+/i;
+const LOCATION_SEGMENT_SEPARATOR = /\s*[;|\/•\n]\s*|\s+\bor\b\s+|\s+\band\b\s+/i;
 
 /**
  * WHICH COUNTRY DOES "THE COUNTRY WHERE THIS ROLE IS LOCATED" MEAN?
@@ -255,9 +383,18 @@ export function postingCountryForLegalScope(
     .map((segment) => (segment ?? '').trim())
     .filter((segment) => segment.length > 0);
   if (segments.length === 0) return 'unknown';
-  const classified = segments.map((segment) => jobCountry(segment));
-  if (classified.some((country) => country === 'non_us')) return 'non_us';
-  if (classified.some((country) => country === 'us')) return 'us';
+  const evidence = segments.map((segment) => structuredCountryEvidence(segment, false));
+  if (evidence.some((item) => item.invalid)) return 'unknown';
+  const codes = new Set(evidence.flatMap((item) => [...item.codes]));
+  const hasUs = evidence.some((item) => item.us);
+  const hasNonUs = evidence.some((item) => item.nonUs);
+  // One legal scope means one country. A mixed segment (for example, a London office supporting
+  // US customers) and a multi-location posting (London / New York) both provide more than one
+  // country signal, so neither may borrow either stored declaration.
+  if (codes.size > 1 || (hasUs && hasNonUs)) return 'unknown';
+  if (codes.size === 1) return codes.has('US') ? 'us' : 'non_us';
+  if (hasUs) return 'us';
+  if (hasNonUs) return 'non_us';
   return 'unknown';
 }
 
@@ -272,10 +409,327 @@ export function postingCountryForLegalScope(
  */
 export function postingCountryFromJobContext(jobContext: unknown): JobCountry {
   const context = (jobContext && typeof jobContext === 'object' ? jobContext : {}) as Record<string, unknown>;
-  return postingCountryForLegalScope([
-    typeof context.location === 'string' ? context.location : null,
-    ...(Array.isArray(context.locations) ? (context.locations as unknown[]).map(
-      (value) => (typeof value === 'string' ? value : null),
-    ) : []),
-  ]);
+  return legalCountryEvidenceFromJobContext(context).country;
+}
+
+type StructuredCountryEvidence = {
+  codes: string[];
+  us: boolean;
+  nonUs: boolean;
+  regions?: PortalRegion[];
+  invalid?: boolean;
+  hardInvalid?: boolean;
+};
+
+type PortalRegion = 'US' | 'EMEA' | 'APAC' | 'LATAM';
+
+// Closed ISO membership for the broad office groups ATS portals publish. These are legal-scope
+// constraints, not loose geographic hints: a Canadian workplace cannot satisfy EMEA merely because
+// both are non-US, and a British workplace cannot satisfy APAC.
+const PORTAL_REGION_COUNTRY_CODES: Record<PortalRegion, ReadonlySet<string>> = {
+  US: new Set(['US']),
+  EMEA: new Set((
+    'AD AE AL AM AO AT AX AZ BA BE BF BG BH BI BJ BW BY CD CF CG CH CI CM CV CY CZ DE DJ DK DZ EE EG EH ER ES ET FI FO FR GA GB GE GG GH GI GL GM GN GQ GR GW HR HU IE IL IM IQ IR IS IT JE JO KE KM KW LB LI LR LS LT LU LV LY MA MC MD ME MG MK ML MR MT MU MW MZ NA NE NG NL NO OM PL PS PT QA RE RO RS RU RW SA SC SD SE SH SI SJ SK SL SM SN SO SS ST SY SZ TD TF TG TN TR TZ UA UG VA YE YT ZA ZM ZW'
+  ).split(' ')),
+  APAC: new Set((
+    'AF AS AU BD BN BT CC CK CN CX FJ FM GU HK HM ID IN IO JP KG KH KI KP KR KZ LA LK MH MM MN MO MP MV MY NC NF NP NR NU NZ PF PG PH PK PN PW SB SG TH TJ TK TL TM TO TV TW UM UZ VN VU WF WS'
+  ).split(' ')),
+  LATAM: new Set((
+    'AG AI AR AW BB BL BM BO BQ BR BS BZ CL CO CR CU CW DM DO EC FK GD GF GP GS GT GY HN HT JM KN KY LC MF MQ MS MX NI PA PE PR PY SR SV SX TC TT UY VC VE VG VI'
+  ).split(' ')),
+};
+
+const INTENTIONALLY_UNSCOPED_PORTAL_COUNTRY_CODES = new Set(['AQ', 'BV', 'CA', 'PM']);
+
+export function portalRegionMembershipsForCountryCode(code: string): Array<PortalRegion | 'UNSCOPED'> {
+  const normalized = code.trim().toUpperCase();
+  const memberships: Array<PortalRegion | 'UNSCOPED'> = (Object.entries(PORTAL_REGION_COUNTRY_CODES) as Array<[
+    PortalRegion,
+    ReadonlySet<string>,
+  ]>).flatMap(([region, codes]) => (codes.has(normalized) ? [region] : []));
+  if (INTENTIONALLY_UNSCOPED_PORTAL_COUNTRY_CODES.has(normalized)) memberships.push('UNSCOPED');
+  return memberships;
+}
+
+for (const code of ISO_COUNTRY_CODES) {
+  if (portalRegionMembershipsForCountryCode(code).length !== 1) {
+    throw new Error(`ISO country ${code} must have exactly one portal-region classification`);
+  }
+}
+
+const PORTAL_COUNTRY_PART_SEPARATOR = /\s*[|,\/;&+•\n]\s*|\s+\b(?:and|or)\b\s+/i;
+
+function isAuthoritativePortalScopePart(part: string): boolean {
+  if (exactPortalCountryCodePart(part)) return true;
+  const normalized = normalise(part).trim();
+  if ((['EMEA', 'APAC', 'LATAM'] as const).some(
+    (region) => ` ${normalized} `.includes(` ${region} `),
+  )) return true;
+  return countryFromPortal(part) === 'us';
+}
+
+function splitPortalCountryScopePart(part: string): string[] {
+  const trimmed = part.trim();
+  const parenthetical = /^(.+?)\s*\(([^()]*)\)\s*$/.exec(trimmed);
+  if (parenthetical) {
+    const candidates = [parenthetical[1].trim(), parenthetical[2].trim()];
+    if (candidates.every(isAuthoritativePortalScopePart)) return candidates;
+  }
+
+  for (let index = 1; index < trimmed.length - 1; index += 1) {
+    if (trimmed[index] !== '-') continue;
+    const candidates = [trimmed.slice(0, index).trim(), trimmed.slice(index + 1).trim()];
+    if (candidates.every(isAuthoritativePortalScopePart)) return candidates;
+  }
+  return [trimmed];
+}
+
+function portalCountryScopeParts(value: string): string[] {
+  return value
+    .split(PORTAL_COUNTRY_PART_SEPARATOR)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .flatMap(splitPortalCountryScopePart);
+}
+
+function exactStructuredCountryCode(value: string, acceptsBareIsoCode: boolean): string | undefined {
+  const normalized = normalise(value).trim();
+  if (isIsoCountryCode(value.trim())) {
+    const code = value.trim().toUpperCase();
+    if (acceptsBareIsoCode || code === 'US' || (!US_STATE_CODES.has(code) && !CANADIAN_PROVINCE_CODES.has(code))) {
+      return code;
+    }
+  }
+  return STRUCTURED_COUNTRY_ALIAS_CODES.get(normalized);
+}
+
+function exactRegisteredCityCode(normalized: string): string | undefined {
+  return STRUCTURED_CITY_COUNTRY_CODES.get(normalized);
+}
+
+function exactUsCity(normalized: string): boolean {
+  return normalized === 'NEW YORK' || US_CITIES.some((city) => normalise(city).trim() === normalized);
+}
+
+function registeredStructuredPlace(normalized: string): boolean {
+  if (normalized === 'REMOTE') return true;
+  if (exactRegisteredCityCode(normalized) || exactUsCity(normalized)) return true;
+  return STRUCTURED_CITY_ALIASES_WITHOUT_DEFAULT.has(normalized);
+}
+
+function remoteCountryCode(normalized: string): string | undefined {
+  if (normalized.startsWith('REMOTE ')) return exactStructuredCountryCode(normalized.slice(7), false);
+  if (normalized.endsWith(' REMOTE')) return exactStructuredCountryCode(normalized.slice(0, -7), false);
+  return undefined;
+}
+
+function evidenceFromCodes(codes: Set<string>): StructuredCountryEvidence {
+  return {
+    codes: [...codes],
+    us: codes.has('US'),
+    nonUs: [...codes].some((code) => code !== 'US'),
+  };
+}
+
+function parseStructuredPlaceHead(normalized: string): {
+  valid: boolean;
+  explicitCodes: Set<string>;
+  defaultCode?: string;
+} {
+  const exactCity = exactRegisteredCityCode(normalized);
+  if (exactCity) return { valid: true, explicitCodes: new Set(), defaultCode: exactCity };
+  if (exactUsCity(normalized)) return { valid: true, explicitCodes: new Set(), defaultCode: 'US' };
+  if (normalized === 'REMOTE') return { valid: true, explicitCodes: new Set() };
+
+  const words = normalized.split(' ');
+  for (let splitAt = 1; splitAt < words.length; splitAt += 1) {
+    const place = words.slice(0, splitAt).join(' ');
+    const suffix = words.slice(splitAt).join(' ');
+    if (!registeredStructuredPlace(place)) continue;
+    const suffixCodes = structuredJurisdictionSuffixCodes(suffix);
+    if (suffixCodes) return { valid: true, explicitCodes: suffixCodes };
+  }
+  return { valid: registeredStructuredPlace(normalized), explicitCodes: new Set() };
+}
+
+function structuredCountryEvidence(value: string, acceptsBareIsoCode: boolean): StructuredCountryEvidence {
+  const trimmed = value.trim();
+  if (!trimmed) return { codes: [], us: false, nonUs: false };
+
+  const components = trimmed
+    .split(/\s*[,•]\s*/)
+    .map((part) => normalise(part).trim())
+    .filter(Boolean);
+  if (components.length === 0) return { codes: [], us: false, nonUs: false };
+
+  // A country field is authoritative only when its complete value is one exact country alias or
+  // ISO code. Office-group prose and arbitrary descriptive text do not become country evidence.
+  if (acceptsBareIsoCode) {
+    const code = components.length === 1 ? exactStructuredCountryCode(components[0], true) : undefined;
+    return code ? evidenceFromCodes(new Set([code])) : { codes: [], us: false, nonUs: false };
+  }
+
+  const allCountries = components.map((component) => exactStructuredCountryCode(component, false));
+  if (allCountries.every(Boolean)) return evidenceFromCodes(new Set(allCountries as string[]));
+
+  if (components.length === 2) {
+    const [first, second] = components;
+    if (first === 'REMOTE') {
+      const code = exactStructuredCountryCode(second, false);
+      if (code) return evidenceFromCodes(new Set([code]));
+    }
+    if (second === 'REMOTE') {
+      const code = exactStructuredCountryCode(first, false);
+      if (code) return evidenceFromCodes(new Set([code]));
+    }
+  }
+
+  // A state/province hierarchy may consist entirely of exact jurisdiction segments, but never a
+  // single bare abbreviation. This covers TX, United States and ON, Canada without authorizing an
+  // arbitrary unknown place name followed by either jurisdiction.
+  if (components.length > 1) {
+    const jurisdictionSets = components.map((component) => structuredJurisdictionSuffixCodes(component));
+    if (jurisdictionSets.every(Boolean)) {
+      const codes = new Set<string>();
+      for (const jurisdiction of jurisdictionSets as Set<string>[]) {
+        for (const code of jurisdiction) codes.add(code);
+      }
+      return evidenceFromCodes(codes);
+    }
+  }
+
+  if (components.length > 1) {
+    const [place, ...jurisdictions] = components;
+    const parsedPlace = parseStructuredPlaceHead(place);
+    if (!parsedPlace.valid) return {
+      codes: [], us: false, nonUs: false, invalid: true, hardInvalid: true,
+    };
+    const codes = new Set(parsedPlace.explicitCodes);
+    for (const jurisdiction of jurisdictions) {
+      const suffixCodes = structuredJurisdictionSuffixCodes(jurisdiction);
+      if (!suffixCodes) return {
+        codes: [], us: false, nonUs: false, invalid: true, hardInvalid: true,
+      };
+      for (const code of suffixCodes) codes.add(code);
+    }
+    if (codes.size === 0 && parsedPlace.defaultCode) codes.add(parsedPlace.defaultCode);
+    return evidenceFromCodes(codes);
+  }
+
+  const normalized = components[0];
+  const exactCountry = exactStructuredCountryCode(normalized, false);
+  if (exactCountry) return evidenceFromCodes(new Set([exactCountry]));
+  const remoteCountry = remoteCountryCode(normalized);
+  if (remoteCountry) return evidenceFromCodes(new Set([remoteCountry]));
+  const exactCity = exactRegisteredCityCode(normalized);
+  if (exactCity) return evidenceFromCodes(new Set([exactCity]));
+  if (exactUsCity(normalized)) return evidenceFromCodes(new Set(['US']));
+
+  const words = normalized.split(' ');
+  for (let splitAt = 1; splitAt < words.length; splitAt += 1) {
+    const place = words.slice(0, splitAt).join(' ');
+    const suffix = words.slice(splitAt).join(' ');
+    if (!registeredStructuredPlace(place)) continue;
+    const suffixCodes = structuredJurisdictionSuffixCodes(suffix);
+    if (suffixCodes) return evidenceFromCodes(suffixCodes);
+  }
+  return {
+    codes: [],
+    us: false,
+    nonUs: false,
+    invalid: normalized === 'REMOTE' ? undefined : true,
+    hardInvalid: normalized !== 'REMOTE' && normalized.includes(' ') ? true : undefined,
+  };
+}
+
+function structuredJobContextValues(context: Record<string, unknown>): Array<{
+  value: string;
+  source: 'portal' | 'country' | 'location';
+}> {
+  const values: Array<{ value: string; source: 'portal' | 'country' | 'location' }> = [];
+  if (typeof context.portal_country === 'string') values.push({ value: context.portal_country, source: 'portal' });
+  if (typeof context.country === 'string') values.push({ value: context.country, source: 'country' });
+  if (typeof context.location === 'string') values.push({ value: context.location, source: 'location' });
+  if (Array.isArray(context.locations)) {
+    for (const value of context.locations) {
+      if (typeof value === 'string') values.push({ value, source: 'location' });
+    }
+  }
+  return values;
+}
+
+function portalCountryEvidence(value: string): StructuredCountryEvidence {
+  const codes = new Set<string>();
+  const regions = new Set<PortalRegion>();
+  for (const part of portalCountryScopeParts(value)) {
+    const code = exactPortalCountryCodePart(part);
+    if (code) {
+      codes.add(code);
+      continue;
+    }
+    const normalized = normalise(part).trim();
+    const namedRegion = (['EMEA', 'APAC', 'LATAM'] as const).find(
+      (region) => ` ${normalized} `.includes(` ${region} `),
+    );
+    if (namedRegion) {
+      regions.add(namedRegion);
+      continue;
+    }
+    if (countryFromPortal(part) === 'us') regions.add('US');
+  }
+  return {
+    codes: [...codes],
+    regions: [...regions],
+    us: codes.has('US') || regions.has('US'),
+    nonUs: [...codes].some((code) => code !== 'US') || [...regions].some((region) => region !== 'US'),
+  };
+}
+
+function legalCountryEvidenceFromJobContext(context: Record<string, unknown>): {
+  country: JobCountry;
+  code: string | undefined;
+} {
+  const evidence = structuredJobContextValues(context).flatMap((entry) => {
+    if (entry.source === 'portal') {
+      return [{ ...portalCountryEvidence(entry.value), fromCountryField: true }];
+    }
+    return entry.value.split(LOCATION_SEGMENT_SEPARATOR).map((segment) => ({
+      ...structuredCountryEvidence(segment, entry.source === 'country'),
+      fromCountryField: entry.source === 'country',
+    }));
+  });
+  const hasAuthoritativeCountryField = evidence.some(
+    (item) => item.fromCountryField && item.codes.length > 0 && !item.invalid,
+  );
+  if (evidence.some((item) => item.hardInvalid)) return { country: 'unknown', code: undefined };
+  if (!hasAuthoritativeCountryField && evidence.some((item) => item.invalid)) {
+    return { country: 'unknown', code: undefined };
+  }
+  const codes = new Set(evidence.flatMap((item) => item.codes));
+  const regions = new Set(evidence.flatMap((item) => item.regions ?? []));
+  const hasUs = evidence.some((item) => item.us);
+  const hasNonUs = evidence.some((item) => item.nonUs);
+  if (codes.size > 1 || (hasUs && hasNonUs)) return { country: 'unknown', code: undefined };
+  const code = codes.size === 1 ? [...codes][0] : undefined;
+  if (regions.size > 1) return { country: 'unknown', code: undefined };
+  if (code && [...regions].some((region) => !PORTAL_REGION_COUNTRY_CODES[region].has(code))) {
+    return { country: 'unknown', code: undefined };
+  }
+  if (code) return { country: code === 'US' ? 'us' : 'non_us', code };
+  if (hasUs) return { country: 'us', code: undefined };
+  if (hasNonUs) return { country: 'non_us', code: undefined };
+  return { country: 'unknown', code: undefined };
+}
+
+/**
+ * The posting's one exact ISO country, or undefined when its structured fields are missing,
+ * unknown, or name more than one country.
+ *
+ * This intentionally reads no job-description prose. It accepts the ATS country field and the
+ * packet's structured location fields only. Unknown pieces such as "Remote" may sit beside one
+ * exact country, but two different country codes always refuse.
+ */
+export function postingCountryCodeFromJobContext(jobContext: unknown): string | undefined {
+  const context = (jobContext && typeof jobContext === 'object' ? jobContext : {}) as Record<string, unknown>;
+  return legalCountryEvidenceFromJobContext(context).code;
 }

@@ -10,6 +10,11 @@ import {
   type SponsorshipAnswer,
 } from '../lib/sponsorship';
 import { H1B_EMPLOYERS, H1B_FISCAL_YEARS, H1B_SOURCE, LCA_QUARTERS, LCA_SOURCE } from '../lib/sponsorEmployers';
+import {
+  countryWorkEligibilityListSchema,
+} from '../lib/workEligibility';
+import { persistProfileWithCountryEligibility } from '../lib/countryEligibilityPersistence';
+import { isUndefinedColumnError } from '../lib/applicationFacts';
 
 /**
  * THE VISA-SPONSORSHIP DECLARATION AND THE FILTER IT TURNS ON.
@@ -33,6 +38,11 @@ const declareSchema = z.object({
 });
 
 const filterSchema = z.object({ enabled: z.boolean() });
+const scopedEligibilitySchema = z.object({
+  records: countryWorkEligibilityListSchema.refine((records) => records.length > 0, {
+    message: 'Add at least one country',
+  }),
+});
 
 type AccountRow = {
   declared: boolean | null;
@@ -74,6 +84,28 @@ async function readAccount(userId: string): Promise<AccountRow | null> {
 }
 
 export async function sponsorshipRoutes(fastify: FastifyInstance) {
+  /* The new onboarding writer. Every record stays editable later through application_profile, but
+   * the historical US answer still drives the permanent H-1B board filter for compatibility. A
+   * person who lists only another country gets no US filter and no US answer inferred. */
+  fastify.put('/onboarding/work-eligibility', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = scopedEligibilitySchema.safeParse(request.body);
+    if (!parsed.success) return reply.status(400).send({ error: 'Add at least one complete country work eligibility record.' });
+    const userId = request.jwtPayload!.userId;
+    const account = await readAccount(userId);
+    if (!account) return reply.status(404).send({ error: 'No such user' });
+    const records = parsed.data.records;
+    try {
+      await persistProfileWithCountryEligibility(userId, {}, records);
+      return reply.send({ records });
+    } catch (error) {
+      if (isUndefinedColumnError(error)) {
+        return reply.status(503).send({ error: 'Country work eligibility is being enabled. Try again shortly.' });
+      }
+      fastify.log.error(error);
+      return reply.status(500).send({ error: 'Failed to save work eligibility' });
+    }
+  });
+
   fastify.get('/sponsorship', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const row = await readAccount(request.jwtPayload!.userId);
     if (!row) return reply.status(404).send({ error: 'No such user' });

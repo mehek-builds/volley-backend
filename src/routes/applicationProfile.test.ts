@@ -1,8 +1,11 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { getTableColumns } from 'drizzle-orm';
-import { bodySchema, decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
+import { applicationProfileWriteValues, bodySchema, decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
 import { application_profile, type ApplicationProfile } from '../db/schema';
+import { looksEncrypted } from '../lib/fieldCrypto';
+
+process.env.ENCRYPTION_KEY ??= 'test-encryption-key-at-least-32-chars-long';
 
 // The trap these tests exist to pin: a column declared in schema.ts with no matching line in
 // bodySchema is stripped by zod SILENTLY. PUT returns 200, the value is discarded, and the client
@@ -124,6 +127,89 @@ describe('languages round-trip (PUT accepts, GET serves)', () => {
 
   test('languages is plaintext: NOT in ENCRYPTED_FIELDS, so encryptRow cannot touch it', () => {
     assert.equal((ENCRYPTED_FIELDS as readonly string[]).includes('languages'), false);
+  });
+});
+
+describe('country-scoped work eligibility round-trip', () => {
+  const records = [{
+    country_code: 'US',
+    authorized_now: true,
+    needs_sponsorship_now: false,
+    needs_sponsorship_future: true,
+    authorization_type: 'F-1 CPT',
+    authorization_expiry: '2028-05-12',
+  }, {
+    country_code: 'AE',
+    authorized_now: true,
+    needs_sponsorship_now: false,
+    needs_sponsorship_future: false,
+  }];
+
+  test('bodySchema keeps complete records and normalizes ISO codes', () => {
+    const parsed = bodySchema.parse({ work_eligibility_by_country: [{ ...records[0], country_code: 'us' }] });
+    assert.equal(parsed.work_eligibility_by_country?.[0]?.country_code, 'US');
+  });
+
+  test('rejects duplicates, incomplete booleans, and malformed expiry dates', () => {
+    assert.equal(bodySchema.safeParse({ work_eligibility_by_country: [records[0], records[0]] }).success, false);
+    assert.equal(bodySchema.safeParse({ work_eligibility_by_country: [{ country_code: 'US' }] }).success, false);
+    assert.equal(bodySchema.safeParse({ work_eligibility_by_country: [{ ...records[0], country_code: 'ZZ' }] }).success, false);
+    assert.equal(bodySchema.safeParse({
+      work_eligibility_by_country: [{ ...records[0], authorization_expiry: 'May 2028' }],
+    }).success, false);
+  });
+
+  test('PUT derives projections from scoped lists and preserves scalar-only extension writes', () => {
+    const scoped = applicationProfileWriteValues(bodySchema.parse({
+      work_eligibility_by_country: records,
+      work_authorized: false,
+      needs_sponsorship: false,
+    }));
+    assert.equal(looksEncrypted(String(scoped.work_eligibility_by_country)), true);
+    assert.doesNotMatch(String(scoped.work_eligibility_by_country), /F-1 CPT|2028-05-12/);
+    assert.equal(scoped.work_authorized, true);
+    assert.equal(scoped.needs_sponsorship, true);
+    assert.deepEqual(applicationProfileWriteValues(bodySchema.parse({
+      work_authorized: false,
+      needs_sponsorship: true,
+    })), { work_authorized: false, needs_sponsorship: true });
+    assert.deepEqual(applicationProfileWriteValues(bodySchema.parse({
+      work_eligibility_by_country: null,
+      work_authorized: true,
+      needs_sponsorship: false,
+    })), { work_authorized: true, needs_sponsorship: false });
+  });
+
+  test('GET decrypts stored scope without synthesizing a hidden key for scalar-only clients', () => {
+    const encrypted = applicationProfileWriteValues(bodySchema.parse({ work_eligibility_by_country: records }));
+    assert.deepEqual(decryptRow(row({
+      work_eligibility_by_country: encrypted.work_eligibility_by_country as string,
+    })).work_eligibility_by_country, records);
+    const old = decryptRow(row({
+      work_authorized: true,
+      needs_sponsorship: false,
+      work_eligibility_by_country: null,
+    }));
+    assert.equal(old.work_eligibility_by_country, null);
+    const ambiguous = decryptRow(row({
+      work_authorized: true,
+      needs_sponsorship: true,
+      work_eligibility_by_country: null,
+    }));
+    assert.equal(ambiguous.work_eligibility_by_country, null);
+  });
+
+  test('legacy GET-edit-PUT preserves scalar edits without creating scoped authority', () => {
+    const fetched = decryptRow(row({
+      work_authorized: true,
+      needs_sponsorship: false,
+      work_eligibility_by_country: null,
+    }));
+    const edited = bodySchema.parse({ ...fetched, work_authorized: false, needs_sponsorship: true });
+    const write = applicationProfileWriteValues(edited);
+    assert.equal('work_eligibility_by_country' in write, false);
+    assert.equal(write.work_authorized, false);
+    assert.equal(write.needs_sponsorship, true);
   });
 });
 

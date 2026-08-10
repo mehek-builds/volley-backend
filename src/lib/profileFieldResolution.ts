@@ -1014,10 +1014,11 @@ export function resolveProfileField(
   /* Passed straight through to resolveKnownAnswer, which is the only thing that reads it. See the
      parameter's own note there: it is where the POSTING is, and omitting it only ever refuses. */
   postingCountry?: JobCountry,
+  postingCountryCode?: string,
 ): ResolvedProfileField | null {
   const label = normalizeDiscoveredLabel(shape.label);
   if (!label) return null;
-  const known = resolveKnownAnswer(label, shape.inputType ?? 'text', ap, jdText, postingCountry);
+  const known = resolveKnownAnswer(label, shape.inputType ?? 'text', ap, jdText, postingCountry, postingCountryCode);
   if (!known || !('value' in known)) return null;
   const base = known.value.trim();
   if (!base) return null;
@@ -1069,12 +1070,14 @@ export function profileBackedBlockerLabels(
   blockers: readonly string[],
   ap: ApplicationProfileLike,
   jdText?: string,
+  postingCountry?: JobCountry,
+  postingCountryCode?: string,
 ): string[] {
   const out: string[] = [];
   for (const blocker of blockers) {
     const label = blocker.match(REQUIRED_BLOCKER_RE)?.[1];
     if (!label) continue;
-    if (resolveProfileField({ label }, ap, jdText)) out.push(label);
+    if (resolveProfileField({ label }, ap, jdText, postingCountry, postingCountryCode)) out.push(label);
   }
   return [...new Set(out)];
 }
