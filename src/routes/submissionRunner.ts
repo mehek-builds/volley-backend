@@ -689,6 +689,8 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     referralSourceEvidence,
     roleLocation: typeof context.location === 'string' ? context.location : undefined,
     roleLocations,
+    roleCountry: postingCountryFromJobContext(row.job_context),
+    roleCountryCode: postingCountryCodeFromJobContext(row.job_context),
     applicationProfile,
     jdText: review.jd_text,
     resume,
@@ -1252,6 +1254,7 @@ export async function discoverAndResolveQuestions(
         ap,
         questionContext,
         postingCountry,
+        postingCountryCode,
       )
       : null;
     const knownValue = resolvedField?.value ?? (known && 'value' in known ? known.value : '');

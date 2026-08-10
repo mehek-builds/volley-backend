@@ -1,5 +1,6 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   conservativeLegacyUsRecord,
   countryEligibilityForRead,
@@ -8,8 +9,9 @@ import {
   namedCountryCode,
   type CountryWorkEligibility,
 } from './workEligibility';
-import { postingCountryCodeFromJobContext } from './jobLocation';
+import { jobCountry, postingCountryCodeFromJobContext } from './jobLocation';
 import { resolveKnownAnswer, type ApplicationProfileLike } from './questionDiscovery';
+import { resolveProfileField } from './profileFieldResolution';
 
 const records: CountryWorkEligibility[] = [
   {
@@ -41,6 +43,18 @@ describe('country work eligibility contract', () => {
     assert.equal(countryWorkEligibilityListSchema.safeParse(records).success, true);
     assert.equal(countryWorkEligibilityListSchema.safeParse([records[0], records[0]]).success, false);
     assert.equal(countryWorkEligibilityListSchema.safeParse([{ country_code: 'USA' }]).success, false);
+    assert.equal(countryWorkEligibilityListSchema.safeParse([{
+      country_code: 'US',
+      authorized_now: false,
+      needs_sponsorship_now: false,
+      needs_sponsorship_future: true,
+    }]).success, false);
+    assert.equal(countryWorkEligibilityListSchema.safeParse([{
+      ...records[0], authorization_expiry: '2026-02-30',
+    }]).success, false);
+    assert.equal(countryWorkEligibilityListSchema.safeParse([{
+      ...records[0], authorization_expiry: '2020-01-01',
+    }]).success, false);
   });
 
   test('projects only the US row into the two compatibility booleans', () => {
@@ -72,6 +86,16 @@ describe('country work eligibility contract', () => {
       needs_sponsorship_future: true,
     });
     assert.equal(conservativeLegacyUsRecord({ work_authorized: true, needs_sponsorship: true }), undefined);
+    assert.equal(conservativeLegacyUsRecord({
+      work_authorized: true,
+      needs_sponsorship: false,
+      sponsorship_answer: 'needs_future',
+    }), undefined);
+    assert.equal(conservativeLegacyUsRecord({
+      work_authorized: true,
+      needs_sponsorship: false,
+      sponsorship_answer: 'needs_now',
+    }), undefined);
     assert.equal(conservativeLegacyUsRecord({
       work_authorized: false,
       needs_sponsorship: true,
@@ -141,5 +165,69 @@ describe('exact-country resolver', () => {
     );
     assert.ok(held && 'skipReason' in held);
   });
-});
 
+  test('malformed, duplicate, and expired scoped data never falls through to legacy US values', () => {
+    for (const work_eligibility_by_country of [
+      [{ country_code: 'US', authorized_now: true }],
+      [records[0], records[0]],
+      [{ ...records[0], authorization_expiry: '2020-01-01' }],
+    ]) {
+      const held = resolveKnownAnswer(
+        'Are you authorized to work in the United States?',
+        'select',
+        { work_eligibility_by_country, work_authorized: true, needs_sponsorship: false } as ApplicationProfileLike,
+        undefined,
+      );
+      assert.ok(held && 'skipReason' in held);
+    }
+  });
+
+  test('now is current-only while now or future uses both stored answers', () => {
+    const current = resolveKnownAnswer(
+      'Will you need sponsorship now to work in the United States?', 'select', profile, undefined,
+    );
+    assert.deepEqual(current, { value: 'No' });
+    const combined = resolveKnownAnswer(
+      'Will you now or in the future need sponsorship to work in the United States?', 'select', profile, undefined,
+    );
+    assert.deepEqual(combined, { value: 'Yes' });
+  });
+
+  test('US state codes and US cities never become foreign ISO countries', () => {
+    assert.equal(postingCountryCodeFromJobContext({ location: 'San Francisco, CA' }), 'US');
+    assert.equal(postingCountryCodeFromJobContext({ location: 'Bloomington, IN' }), 'US');
+    assert.equal(postingCountryCodeFromJobContext({ location: 'Melbourne, FL' }), 'US');
+    assert.equal(postingCountryCodeFromJobContext({ location: 'CA' }), undefined);
+    assert.equal(postingCountryCodeFromJobContext({ location: 'IN' }), undefined);
+    assert.equal(postingCountryCodeFromJobContext({ portal_country: 'CA' }), 'CA');
+    assert.equal(postingCountryCodeFromJobContext({ country: 'IN' }), 'IN');
+    assert.equal(postingCountryCodeFromJobContext({ location: 'Melbourne' }), undefined);
+    assert.equal(jobCountry('Melbourne, FL'), 'us');
+  });
+
+  test('direct profile resolution receives the exact posting country', () => {
+    assert.deepEqual(resolveProfileField(
+      { label: 'Will you require sponsorship?', inputType: 'select', options: ['Yes', 'No'] },
+      profile,
+      undefined,
+      'non_us',
+      'GB',
+    ), {
+      key: null,
+      value: 'Yes',
+      candidates: ['Yes'],
+      matchedOption: true,
+    });
+    assert.equal(resolveProfileField(
+      { label: 'Will you require sponsorship?', inputType: 'select', options: ['Yes', 'No'] },
+      profile,
+      undefined,
+      'non_us',
+    ), null);
+
+    const direct = readFileSync('src/lib/portalSubmission.ts', 'utf8');
+    assert.match(direct, /resolveProfileField\([\s\S]*postingCountryCodeFromJobContext/);
+    const managed = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+    assert.match(managed, /resolveProfileField\([\s\S]*postingCountryCode/);
+  });
+});

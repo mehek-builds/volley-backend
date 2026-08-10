@@ -7,7 +7,7 @@
  * present need with a future need. The backfill therefore writes only combinations whose full
  * meaning is recoverable:
  *
- *   true / false                         -> US: authorized, no sponsorship now or later
+ *   true / false, no onboarding answer   -> US: authorized, no sponsorship now or later
  *   sponsorship_answer = needs_future    -> US: authorized, no sponsorship now, sponsorship later
  *   sponsorship_answer = no              -> same as true / false
  *
@@ -43,8 +43,7 @@ try {
     where u.id = ap.user_id
       and ap.work_eligibility_by_country is null
       and (
-        (ap.work_authorized is true and ap.needs_sponsorship is false)
-        or (
+        (
           u.sponsorship_answer = 'needs_future'
           and ap.work_authorized is not false
           and ap.needs_sponsorship is not false
@@ -53,6 +52,11 @@ try {
           u.sponsorship_answer = 'no'
           and ap.work_authorized is not false
           and ap.needs_sponsorship is not true
+        )
+        or (
+          u.sponsorship_answer is null
+          and ap.work_authorized is true
+          and ap.needs_sponsorship is false
         )
       )
   `);
@@ -74,4 +78,3 @@ try {
 } finally {
   await client.end();
 }
-

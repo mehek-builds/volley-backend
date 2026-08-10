@@ -156,7 +156,7 @@ describe('country-scoped work eligibility round-trip', () => {
     }).success, false);
   });
 
-  test('PUT derives US compatibility scalars only from the scoped list', () => {
+  test('PUT derives projections from scoped lists and preserves scalar-only extension writes', () => {
     assert.deepEqual(applicationProfileWriteValues(bodySchema.parse({
       work_eligibility_by_country: records,
       work_authorized: false,
@@ -169,7 +169,12 @@ describe('country-scoped work eligibility round-trip', () => {
     assert.deepEqual(applicationProfileWriteValues(bodySchema.parse({
       work_authorized: false,
       needs_sponsorship: true,
-    })), {});
+    })), { work_authorized: false, needs_sponsorship: true });
+    assert.deepEqual(applicationProfileWriteValues(bodySchema.parse({
+      work_eligibility_by_country: null,
+      work_authorized: true,
+      needs_sponsorship: false,
+    })), { work_authorized: true, needs_sponsorship: false });
   });
 
   test('GET serves the scoped list and preserves old US values only when unambiguous', () => {

@@ -142,14 +142,16 @@ export function attestationConsentStamp(body: z.infer<typeof bodySchema>): { app
 
 export function applicationProfileWriteValues(body: z.infer<typeof bodySchema>) {
   const row: Record<string, unknown> = { ...body };
-  if (body.work_eligibility_by_country !== undefined) {
-    const records = body.work_eligibility_by_country ?? [];
+  if (Array.isArray(body.work_eligibility_by_country)) {
+    const records = body.work_eligibility_by_country;
     row.work_eligibility_by_country = records;
     Object.assign(row, legacyUsProjection(records));
   } else {
-    // These columns are a compatibility projection, not an independently editable authority.
-    delete row.work_authorized;
-    delete row.needs_sponsorship;
+    // Current extension builds round-trip the legacy scalar-only profile. Keep those writes until
+    // every installed client sends the scoped list. A null scoped key means "client has no scoped
+    // value", not "erase the old booleans". Once a list is present it is authoritative and the
+    // scalars above are derived from it, so stale client booleans cannot override a country row.
+    delete row.work_eligibility_by_country;
   }
   for (const field of ENCRYPTED_FIELDS) {
     const value = row[field];
@@ -256,7 +258,7 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
           { userId },
           'Saved the application profile without the onboarding fact columns: this deploy is ahead of scripts/apply-application-facts-schema.mjs. Run that migration; the dropped answers read back as "never asked" until it has.',
         );
-        if (body.work_eligibility_by_country !== undefined) {
+        if (Array.isArray(body.work_eligibility_by_country)) {
           return reply.status(503).send({ error: 'Country work eligibility is being enabled. Try again shortly.' });
         }
       }

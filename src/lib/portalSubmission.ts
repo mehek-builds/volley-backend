@@ -33,6 +33,11 @@ import {
   type ReferralSourceEvidence,
 } from './referralSource';
 import { embeddedGreenhouseApplicationUrl, embeddedGreenhouseJobId } from './greenhouseEmbeddedBoards';
+import {
+  postingCountryCodeFromJobContext,
+  postingCountryFromJobContext,
+  type JobCountry,
+} from './jobLocation';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
 // dots and colons), so they are matched with the [id="..."] attribute form rather than #id. Inside
@@ -389,6 +394,8 @@ export type SubmissionPacket = {
   major?: string;
   roleLocation?: string;
   roleLocations?: string[];
+  roleCountry?: JobCountry;
+  roleCountryCode?: string;
   referralSourceDefault?: string;
   referralSourceEvidence?: ReferralSourceEvidence;
   /**
@@ -5712,6 +5719,8 @@ async function fillResolvedRequiredField(
     { label, inputType: tag === 'select' ? 'select' : type, options },
     packet.applicationProfile,
     packet.jdText,
+    packet.roleCountry ?? postingCountryFromJobContext({ location: packet.roleLocation, locations: packet.roleLocations }),
+    packet.roleCountryCode ?? postingCountryCodeFromJobContext({ location: packet.roleLocation, locations: packet.roleLocations }),
   );
   if (!resolved || !resolved.value.trim()) return false;
   const value = resolved.value.trim();

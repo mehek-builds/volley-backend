@@ -353,7 +353,11 @@ function workEligibilityAnswer(
   const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
   const asksDetail = WORK_AUTHORIZATION_DETAIL_QUESTION.test(label);
   const asksCurrentSponsorship = CURRENT_SPONSORSHIP_QUESTION.test(label);
-  const asksFutureSponsorship = FUTURE_SPONSORSHIP_QUESTION.test(label);
+  // "Will you need sponsorship now?" is present tense despite its auxiliary verb. A current marker
+  // wins unless the label independently says future or later.
+  const namesFutureTime = /\b(?:in the future|future sponsorship|later)\b/i.test(label);
+  const asksFutureSponsorship = FUTURE_SPONSORSHIP_QUESTION.test(label)
+    && (!asksCurrentSponsorship || namesFutureTime);
   if (!asksAuthorization && !asksSponsorship && !asksDetail) return null;
   if (RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY.test(label)) {
     return { skipReason: workEligibilitySkipReason(label) };

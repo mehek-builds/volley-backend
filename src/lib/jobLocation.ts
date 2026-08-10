@@ -135,18 +135,20 @@ export function jobCountry(location: string | null | undefined): JobCountry {
 function jobCountrySignalDetails(location: string | null | undefined): JobCountrySignalDetails {
   if (!location || !location.trim()) return { strongUs: false, weakUs: false, nonUs: false };
   const text = normalise(location);
+  const upper = location.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
 
   // 1. Unambiguous US: the country, a full state name, or a city that is only ever American.
   const strongUs = text.includes(' UNITED STATES ')
     || / (USA|U S A|U S|AMERICAS|AMER) /.test(text)
     || / US /.test(text)
     || US_STATE_NAMES.some((name) => text.includes(` ${name} `))
-    || US_CITIES.some((city) => text.includes(` ${city.replace(/[^A-Z0-9]+/g, ' ')} `));
+    || US_CITIES.some((city) => text.includes(` ${city.replace(/[^A-Z0-9]+/g, ' ')} `))
+    // Melbourne alone is Australian in the board corpus. The explicit Florida pair is not.
+    || /\bMELBOURNE\s*,\s*FL\b/.test(upper);
   const namedNonUs = NON_US.some((name) => text.includes(` ${name.replace(/[^A-Z0-9]+/g, ' ')} `));
 
   /* 3. "City, ST" and nothing else. The comma is what makes it a state rather than a country code
         or an English word: "Austin, TX" qualifies, "IN - Bengaluru" does not. */
-  const upper = location.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
   const afterComma = upper.match(/,\s*([A-Z]{2})\b/g) ?? [];
   const stateCodeUs = afterComma.some((match) => US_STATE_CODES.has(match.replace(/[^A-Z]/g, '')));
 
@@ -282,30 +284,17 @@ export function postingCountryFromJobContext(jobContext: unknown): JobCountry {
   ]);
 }
 
-const STRUCTURED_CITY_COUNTRIES: readonly [RegExp, string][] = [
-  [/\b(?:london|manchester|edinburgh|glasgow|bristol)\b/i, 'GB'],
-  [/\b(?:toronto|vancouver|montreal|ottawa)\b/i, 'CA'],
-  [/\b(?:bengaluru|bangalore|mumbai|delhi|gurugram|gurgaon|hyderabad|chennai|pune|noida)\b/i, 'IN'],
-  [/\b(?:dubai|abu dhabi)\b/i, 'AE'],
-  [/\b(?:berlin|munich|hamburg|frankfurt)\b/i, 'DE'],
-  [/\b(?:paris|lyon)\b/i, 'FR'],
-  [/\b(?:amsterdam|rotterdam)\b/i, 'NL'],
-  [/\b(?:sydney|melbourne)\b/i, 'AU'],
-  [/\b(?:tokyo|osaka)\b/i, 'JP'],
-  [/\b(?:seoul)\b/i, 'KR'],
-  [/\b(?:hong kong)\b/i, 'HK'],
-  [/\b(?:singapore)\b/i, 'SG'],
-];
-
-function exactCountryCodeFromStructuredValue(value: string): string | undefined {
+function exactCountryCodeFromStructuredValue(value: string, acceptsBareIsoCode: boolean): string | undefined {
   const trimmed = value.trim();
   if (!trimmed) return undefined;
-  if (isIsoCountryCode(trimmed)) return trimmed.toUpperCase();
+  // A bare ISO code is authoritative only in a field the ATS declares as a country. In a location
+  // string CA and IN are US state abbreviations, not Canada and India.
+  if (acceptsBareIsoCode && isIsoCountryCode(trimmed)) return trimmed.toUpperCase();
   const named = namedCountryCode(trimmed);
   if (named) return named;
-  if (jobCountry(trimmed) === 'us') return 'US';
-  const found = new Set(STRUCTURED_CITY_COUNTRIES.filter(([pattern]) => pattern.test(trimmed)).map(([, code]) => code));
-  return found.size === 1 ? [...found][0] : undefined;
+  const us = jobCountrySignalDetails(trimmed);
+  if (us.strongUs || (trimmed.includes(',') && us.weakUs && !us.nonUs)) return 'US';
+  return undefined;
 }
 
 /**
@@ -318,16 +307,19 @@ function exactCountryCodeFromStructuredValue(value: string): string | undefined 
  */
 export function postingCountryCodeFromJobContext(jobContext: unknown): string | undefined {
   const context = (jobContext && typeof jobContext === 'object' ? jobContext : {}) as Record<string, unknown>;
-  const values = [
-    typeof context.portal_country === 'string' ? context.portal_country : null,
-    typeof context.country === 'string' ? context.country : null,
-    typeof context.location === 'string' ? context.location : null,
-    ...(Array.isArray(context.locations) ? context.locations.map((value) => (typeof value === 'string' ? value : null)) : []),
-  ].filter((value): value is string => Boolean(value));
+  const values: Array<{ value: string; acceptsBareIsoCode: boolean }> = [];
+  if (typeof context.portal_country === 'string') values.push({ value: context.portal_country, acceptsBareIsoCode: true });
+  if (typeof context.country === 'string') values.push({ value: context.country, acceptsBareIsoCode: true });
+  if (typeof context.location === 'string') values.push({ value: context.location, acceptsBareIsoCode: false });
+  if (Array.isArray(context.locations)) {
+    for (const value of context.locations) {
+      if (typeof value === 'string') values.push({ value, acceptsBareIsoCode: false });
+    }
+  }
   const codes = new Set<string>();
-  for (const value of values) {
-    for (const segment of value.split(LOCATION_SEGMENT_SEPARATOR)) {
-      const code = exactCountryCodeFromStructuredValue(segment);
+  for (const entry of values) {
+    for (const segment of entry.value.split(LOCATION_SEGMENT_SEPARATOR)) {
+      const code = exactCountryCodeFromStructuredValue(segment, entry.acceptsBareIsoCode);
       if (code) codes.add(code);
     }
   }

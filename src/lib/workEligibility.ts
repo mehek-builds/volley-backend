@@ -7,6 +7,24 @@ export function isIsoCountryCode(value: string | null | undefined): value is str
   return Boolean(value && ISO_COUNTRY_CODE_SET.has(value.trim().toUpperCase()));
 }
 
+export function isRealIsoDate(value: string): boolean {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const parsed = new Date(Date.UTC(year, month - 1, day));
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day;
+}
+
+export function authorizationExpiryIsCurrent(value: string, now: Date = new Date()): boolean {
+  if (!isRealIsoDate(value)) return false;
+  const today = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`;
+  return value >= today;
+}
+
 /**
  * One applicant declaration for one country.
  *
@@ -20,7 +38,29 @@ export const countryWorkEligibilitySchema = z.object({
   needs_sponsorship_now: z.boolean(),
   needs_sponsorship_future: z.boolean(),
   authorization_type: z.string().trim().min(1).max(120).nullable().optional(),
-  authorization_expiry: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  authorization_expiry: z.string().refine(isRealIsoDate, 'Use a real YYYY-MM-DD date').nullable().optional(),
+}).superRefine((row, ctx) => {
+  if (!row.authorized_now && !row.needs_sponsorship_now) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['needs_sponsorship_now'],
+      message: 'Someone not authorized now must declare whether sponsorship is needed before starting',
+    });
+  }
+  if (row.authorization_expiry && !authorizationExpiryIsCurrent(row.authorization_expiry)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['authorization_expiry'],
+      message: 'Authorization expiry must be today or later',
+    });
+  }
+  if (!row.authorized_now && row.authorization_expiry) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['authorization_expiry'],
+      message: 'An inactive authorization cannot have a current expiry',
+    });
+  }
 });
 
 export const countryWorkEligibilityListSchema = z.array(countryWorkEligibilitySchema).max(64).superRefine((rows, ctx) => {
@@ -61,10 +101,12 @@ export function eligibilityForCountry(
 ): CountryWorkEligibility | undefined {
   const code = countryCode?.trim().toUpperCase();
   if (!isIsoCountryCode(code)) return undefined;
-  return rows?.find((row) => row.country_code === code);
+  const parsed = countryWorkEligibilityListSchema.safeParse(rows);
+  if (!parsed.success) return undefined;
+  return parsed.data.find((row) => row.country_code === code);
 }
 
-/** Existing scalar columns remain a US compatibility view, never a second editable authority. */
+/** Existing scalar columns remain a US projection plus a temporary scalar-only client bridge. */
 export function legacyUsProjection(rows: readonly CountryWorkEligibility[] | null | undefined): {
   work_authorized: boolean | null;
   needs_sponsorship: boolean | null;
@@ -90,14 +132,6 @@ export function conservativeLegacyUsRecord(input: {
   needs_sponsorship?: boolean | null;
   sponsorship_answer?: unknown;
 }): CountryWorkEligibility | undefined {
-  if (input.work_authorized === true && input.needs_sponsorship === false) {
-    return {
-      country_code: 'US',
-      authorized_now: true,
-      needs_sponsorship_now: false,
-      needs_sponsorship_future: false,
-    };
-  }
   if (
     input.sponsorship_answer === 'needs_future'
     && input.work_authorized !== false
@@ -122,6 +156,15 @@ export function conservativeLegacyUsRecord(input: {
       needs_sponsorship_future: false,
     };
   }
+  if (input.sponsorship_answer != null) return undefined;
+  if (input.work_authorized === true && input.needs_sponsorship === false) {
+    return {
+      country_code: 'US',
+      authorized_now: true,
+      needs_sponsorship_now: false,
+      needs_sponsorship_future: false,
+    };
+  }
   return undefined;
 }
 
@@ -131,8 +174,10 @@ export function countryEligibilityForRead(input: {
   needs_sponsorship?: boolean | null;
   sponsorship_answer?: unknown;
 }): CountryWorkEligibility[] | undefined {
-  const stored = normalizeCountryWorkEligibility(input.stored);
-  if (stored !== undefined) return stored;
+  if (input.stored !== null && input.stored !== undefined) {
+    // Presence is authoritative. Malformed or duplicate scoped data must not unlock legacy values.
+    return normalizeCountryWorkEligibility(input.stored) ?? [];
+  }
   const legacy = conservativeLegacyUsRecord(input);
   return legacy ? [legacy] : undefined;
 }
