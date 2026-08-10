@@ -1782,7 +1782,7 @@ function labelNamesKnownGovernmentEmployer(label: string): boolean {
 function labelHasApplicantEmploymentStatusRelationship(label: string): boolean {
   if (GOVERNMENT_EMPLOYMENT_RELATIONSHIP.test(label)) return true;
   const identity = normalizeIdentity(label);
-  return /\bemploy\s+you\b|\byour\s+(?:(?:former|past|current|ex)\s+)?employer\b|\b(?:former|formerly|past|ex)\b[^?]{0,80}\b(?:employee|employer|employment|employed|work|worked|job)\b|\b(?:employee|employer|employment|employed|work|worked|job)\b[^?]{0,80}\b(?:former|formerly|past|ex)\b|\bno\s+longer\b[^?]{0,80}\b(?:employee|employer|employed|work|working)\b|\b(?:employee|employer|employed|work|working)\b[^?]{0,80}\bno\s+longer\b|\bjob\s+(?:at|with|for)\b|\b(?:service|work|employment|career|professional)\s+(?:history|record)\b|\b(?:work|prior)\s+experience\s+(?:at|with|for)\b|\brelationship\s+to\b/.test(identity);
+  return /\bemploy\s+you\b|\byour\s+(?:(?:former|past|current|ex)\s+)?employer\b|\b(?:former|formerly|past|ex)\b[^?]{0,80}\b(?:employee|employer|employment|employed|work|worked|job)\b|\b(?:employee|employer|employment|employed|work|worked|job)\b[^?]{0,80}\b(?:former|formerly|past|ex)\b|\bno\s+longer\b[^?]{0,80}\b(?:employee|employer|employed|work|working)\b|\b(?:employee|employer|employed|work|working)\b[^?]{0,80}\bno\s+longer\b|\bjob\s+(?:at|with|for)\b|\b(?:service|work|employment|job|career|professional|occupational)\s+(?:history|record|background|experience)\b|\bexperience\b[^?]{0,50}\b(?:working|worked|at|with|for)\b|\b(?:working|worked)\s+(?:at|with|for)\b|\brelationship\s+to\b/.test(identity);
 }
 
 /** Complete question shapes owned by resolvers that run after government-employment handling.
@@ -1792,31 +1792,42 @@ function normalizedSiblingQuestionLabel(label: string): string {
   return normalizedGovernmentEmploymentLabel(label);
 }
 
-function hasCompoundSiblingClause(label: string): boolean {
-  return /(?:[?;,]|\b(?:and|or)\b)\s*(?:(?:have|has|had|did|do|does|are|is|was|were|can|could|will|would|should)\s+you\b|(?:where|how|what|which|when)\b|(?:describe|provide|explain|list|state|tell)\b)/i.test(label)
-    || /\b(?:and|or)\s+(?:work|worked|working|be|commute|report)\b[^?]{0,80}\b(?:office|onsite|on[\s-]?site|in[\s-]?person|employ|employment)\b/i.test(label);
+function isKnownGovernmentSiblingTarget(raw: string): boolean {
+  const target = raw
+    .trim()
+    .replace(/^(?:a|an|the|this|our)\s+/i, '')
+    .replace(/\s+(?:role|job|position|opportunity|internship|company|organization|organisation)$/i, '')
+    .trim();
+  return targetFromBareGovernmentPhrase(target)?.kind === 'named';
 }
 
 function isCompletePriorApplicationQuestion(label: string): boolean {
   const value = normalizedSiblingQuestionLabel(label);
-  if (hasCompoundSiblingClause(value)) return false;
-  return /^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\s+(?:to|for|with)\s+.+$/i.test(value)
-    || /^did\s+you\s+previously\s+apply\s+(?:to|for|with)\s+.+$/i.test(value)
-    || /^did\s+you\s+apply\s+(?:to|for|with)\s+.+\s+(?:before|previously|in\s+the\s+past)$/i.test(value)
-    || /^have\s+you\s+applied\s+.+\s+(?:previously|before|in\s+the\s+past)$/i.test(value);
+  const direct = value.match(/^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\s+(?:to|for|with)\s+(.+)$/i)
+    ?? value.match(/^did\s+you\s+(?:(?:ever|previously)\s+)?apply\s+(?:to|for|with)\s+(.+)$/i);
+  if (direct && isKnownGovernmentSiblingTarget(direct[1])) return true;
+  const workAt = value.match(/^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\s+to\s+work\s+(?:at|for)\s+(.+)$/i);
+  if (workAt && isKnownGovernmentSiblingTarget(workAt[1])) return true;
+  const dated = value.match(/^did\s+you\s+apply\s+(?:to|for|with)\s+(.+)\s+(?:before|previously|in\s+the\s+past)$/i);
+  return Boolean(dated && isKnownGovernmentSiblingTarget(dated[1]));
 }
 
 function isCompleteReferralQuestion(label: string): boolean {
   const value = normalizedSiblingQuestionLabel(label);
-  if (hasCompoundSiblingClause(value)) return false;
-  return /^(?:how\s+did\s+you\s+(?:first\s+)?hear\s+about|where\s+did\s+you\s+hear\s+about|how\s+did\s+you\s+learn\s+about|where\s+(?:did|have)\s+you\s+learn(?:ed)?\s+about|what\s+(?:is|was)\s+(?:your\s+)?referral\s+source\b)[\s\S]*$/i.test(value);
+  const match = value.match(/^(?:how\s+did\s+you\s+(?:first\s+)?hear\s+about|where\s+did\s+you\s+hear\s+about|how\s+did\s+you\s+learn\s+about|where\s+(?:did|have)\s+you\s+learn(?:ed)?\s+about)\s+(.+)$/i);
+  return Boolean(match && isKnownGovernmentSiblingTarget(match[1]));
 }
 
 function isCompleteRelocationQuestion(label: string): boolean {
   const value = normalizedSiblingQuestionLabel(label);
-  if (hasCompoundSiblingClause(value)) return false;
-  return /^(?:are|would|will|can|could)\s+you\s+(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*\b[\s\S]*$/i.test(value)
-    || /^do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move)\b[\s\S]*$/i.test(value);
+  const match = value.match(/^(?:(?:are|would|will|can|could)\s+you\s+(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*|do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move))(?:\s+(.*))?$/i);
+  if (!match) return false;
+  const detail = match[1]?.trim();
+  if (!detail) return true;
+  const employer = detail.match(/^(?:for|to\s+work\s+(?:at|for)|to\s+join)\s+(.+)$/i);
+  if (employer && isKnownGovernmentSiblingTarget(employer[1])) return true;
+  const place = detail.match(/^to\s+(.+)$/i);
+  return Boolean(place && VETTED_WORKPLACE_LOCATIONS.has(normalizeIdentity(place[1])));
 }
 
 function startsLikeSiblingQuestion(label: string): boolean {
@@ -1826,7 +1837,10 @@ function startsLikeSiblingQuestion(label: string): boolean {
 
 function compoundSiblingQuestionAnswer(label: string): { skipReason: string } | null {
   const value = normalizedSiblingQuestionLabel(label);
-  if (!startsLikeSiblingQuestion(value) || !hasCompoundSiblingClause(value)) return null;
+  if (!startsLikeSiblingQuestion(value) || !labelNamesKnownGovernmentEmployer(label)) return null;
+  if (isCompletePriorApplicationQuestion(value)
+    || isCompleteReferralQuestion(value)
+    || isCompleteRelocationQuestion(value)) return null;
   return { skipReason: `compound application question left for you: "${label.slice(0, 60)}"` };
 }
 
@@ -1992,7 +2006,7 @@ export const HIGH_SCHOOL_GRADUATION_QUESTION =
 // role @IMC within the last 12-18 months?". About APPLICATIONS, not employment, which is why it is
 // separate from PRIOR_EMPLOYER_OR_PROGRAM_QUESTION above.
 export const PREVIOUSLY_APPLIED_QUESTION =
-  /\b(?:have|had)\s+you\s+(?:ever\s+|previously\s+)?applied\b|\bdid\s+you\s+(?:previously\s+apply|apply\b[\s\S]{0,160}\b(?:before|previously|in\s+the\s+past))\b|\bpreviously\s+applied\b|\bapplied\s+(?:to|for|with)\b[\s\S]{0,160}\b(?:previously|before|in\s+the\s+past|within\s+the\s+last)\b/i;
+  /\b(?:have|had)\s+you\s+(?:ever\s+|previously\s+)?applied\b|\bdid\s+you\s+(?:(?:ever|previously)\s+apply|apply\b[\s\S]{0,160}\b(?:before|previously|in\s+the\s+past))\b|\bpreviously\s+applied\b|\bapplied\s+(?:to|for|with)\b[\s\S]{0,160}\b(?:previously|before|in\s+the\s+past|within\s+the\s+last)\b/i;
 
 // Further education AFTER the current degree. Checked before every graduation-date rule so that
 // "when is your potential master's graduation date?" cannot be handed the undergraduate date -

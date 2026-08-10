@@ -793,6 +793,7 @@ describe('prior government employment, answered from the experience bank', () =>
     };
     const valid = [
       ['Did you previously apply to NASA?', 'Yes'],
+      ['Did you ever apply to NASA?', 'Yes'],
       ['Did you apply to NASA before?', 'Yes'],
       ['Where did you hear about NASA?', 'LinkedIn'],
       ['How did you learn about NASA?', 'LinkedIn'],
@@ -807,8 +808,12 @@ describe('prior government employment, answered from the experience bank', () =>
 
     const compound = [
       'How did you hear about NASA, and have you worked for NASA?',
+      'How did you hear about NASA, and why do you want to work here?',
+      'How did you hear about NASA, and who referred you?',
       'Are you willing to relocate for NASA, and can you work onsite three days per week?',
       'Are you willing to relocate for NASA and work onsite three days per week?',
+      'Are you willing to relocate for NASA and travel 25 percent?',
+      'Are you willing to relocate for NASA and work weekends?',
     ];
     for (const label of compound) {
       const resolved = resolveKnownAnswer(label, 'text', profile, undefined);
@@ -836,6 +841,13 @@ describe('prior government employment, answered from the experience bank', () =>
       'Work experience at NASA',
       'Professional history with NASA',
       'Prior experience at NASA',
+      'Professional experience with NASA',
+      'NASA employment background',
+      'NASA job history',
+      'NASA occupational history',
+      'Experience working at NASA',
+      'Experience working with NASA',
+      'Experience with NASA',
     ];
     for (const label of labels) {
       const resolved = resolveKnownAnswer(label, 'text', nasa, undefined);
