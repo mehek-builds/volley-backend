@@ -1071,13 +1071,6 @@ describe('prior government employment, answered from the experience bank', () =>
       'Did you apply with us previously?',
       'Have you applied for us before?',
       'Did you apply for us previously?',
-      'Have you submitted an application?',
-      'Have you ever submitted an application?',
-      'Have you previously submitted an application?',
-      'Did you submit an application?',
-      'Did you ever submit an application?',
-      'Submitted an application',
-      'Submitted an application before',
       'Previous applicant',
     ];
     for (const label of priorLabels) {
@@ -1113,6 +1106,15 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you applied to an employer before?',
       'Have you applied for a company before?',
       'Have you submitted an application for any role?',
+      'Have you submitted an application?',
+      'Have you ever submitted an application?',
+      'Have you previously submitted an application?',
+      'Did you submit an application?',
+      'Did you ever submit an application?',
+      'Submitted an application',
+      'Submitted an application before',
+      'Have you submitted any applications?',
+      'Did you ever submit any applications before?',
     ];
     for (const label of globalPriorLabels) {
       for (const [declared, expected] of [
@@ -1142,6 +1144,18 @@ describe('prior government employment, answered from the experience bank', () =>
         'Have you applied for contract roles before?',
         'Have you applied for temporary jobs before?',
         'Have you applied for seasonal positions before?',
+        'Have you applied for summer internships before?',
+        'Did you apply for graduate roles previously?',
+        'Have you applied for entry-level positions before?',
+        'Have you applied for co-op programs before?',
+        'Did you apply for cooperative opportunities previously?',
+        'Have you applied for permanent jobs before?',
+        'Have you submitted any applications for summer roles?',
+        'Did you submit an application for a graduate program?',
+        'Have you submitted applications for entry-level opportunities?',
+        'Have you submitted an application for a co-op position?',
+        'Did you submit any applications for cooperative programs?',
+        'Have you submitted an application for a permanent role?',
         'Have you applied for an internship with NASA?',
       ]) {
         const profile: ApplicationProfileLike = { prior_application_employers: [...declared] };
@@ -1174,6 +1188,8 @@ describe('prior government employment, answered from the experience bank', () =>
       'How did you come across this opportunity?',
       'Where did you find this job?',
       'Where did you discover this job?',
+      'Where did you first find this job?',
+      'How did you first discover this job?',
       'How did you become aware of this vacancy?',
       'Where did you come across this opening?',
       'How were you made aware of this job?',
@@ -1230,6 +1246,9 @@ describe('prior government employment, answered from the experience bank', () =>
       'Would you consider a move?',
       'Are you open to a move?',
       'Are you willing to move if required?',
+      'Would you be open to relocate if necessary?',
+      'Could you be prepared to moving if needed?',
+      'Will you be willing to move to Boston if required?',
     ];
     for (const label of relocationLabels) {
       const profile: ApplicationProfileLike = { relocation_willingness: 'yes' };
@@ -1396,6 +1415,8 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you applied for internship projects?',
       'Did you apply full time-series methods previously?',
       'Have you submitted applications for seasonal forecasting projects?',
+      'Have you submitted any applications for summer forecasting projects?',
+      'Did you apply job scheduling algorithms previously?',
       'How did you find this project?',
       'Where did you discover this vulnerability?',
       'How did you become aware of this issue?',

@@ -1919,17 +1919,27 @@ function parsePriorApplicationQuestion(
   if (/^any former applications$/i.test(value)) {
     return { family: 'prior_application', valid: false };
   }
-  const typedApplicationObject = String.raw`(?:(?:an?|any|the|this|our) )?(?:internships?|(?:(?:full time|part time|contract|temporary|seasonal|internship|full time or internship) )(?:roles?|positions?|jobs?|applications?))`;
-  const typedApplicationRemainder = (remainder: string): boolean => {
-    const matched = remainder.match(new RegExp(
-      String.raw`^(?:at|for|to|with) ${typedApplicationObject}\b(.*)$`,
-    ));
-    if (!matched) return false;
-    const tail = matched[1]?.trim() ?? '';
-    return !tail
-      || /^(?:before|previously|in the past|within the last \d+(?: \d+)? months?)$/.test(tail)
-      || /^(?:at|for|to|with)\s+\S/.test(tail)
-      || /(?:^|\s)(?:please|explain|describe|provide|specify|identify|why|how|who|and)\b/.test(tail);
+  const applicationObjectKind = (remainder: string): 'global' | 'packet' | 'typed' | null => {
+    const withoutTemporal = remainder.replace(
+      /\s+(?:before|previously|in the past|within the last \d+(?: \d+)? months?)$/,
+      '',
+    );
+    const objectMatch = withoutTemporal.match(/^(?:at|for|to|with)\s+(.+)$/);
+    if (!objectMatch) return null;
+    const object = objectMatch[1].trim();
+    const category = object.match(
+      /^(.*?)(internships?|co ops?|cooperative|roles?|jobs?|positions?|programs?|opportunit(?:y|ies))(?:\s+(?:at|for|to|with)\s+(.+))?$/,
+    );
+    if (!category) return null;
+    const descriptor = category[1].trim().replace(/^(?:an?|any|the)\s+/, '');
+    const noun = category[2];
+    const employerTail = category[3]?.trim();
+    const inherentlyTyped = /^(?:internships?|co ops?|cooperative)$/.test(noun);
+    if (inherentlyTyped || descriptor) return 'typed';
+    if (employerTail) {
+      return validatedSiblingEmployerTarget(employerTail, packetEmployer) ? 'packet' : 'typed';
+    }
+    return 'global';
   };
   const previousApplicant = value.match(/^previous applicant\b(.*)$/i);
   if (previousApplicant) {
@@ -1941,22 +1951,21 @@ function parsePriorApplicationQuestion(
       ...(packetEmployer ? { target: canonicalSiblingEmployerIdentity(packetEmployer) } : {}),
     };
   }
-  const submissionStem = value.match(/^(?:(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?submitted|did\s+you\s+(?:(?:ever|previously)\s+)?submit|(?:(?:ever|previously)\s+)?submitted)\s+(?:an?\s+)?applications?\b(.*)$/i);
+  const submissionStem = value.match(/^(?:(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?submitted|did\s+you\s+(?:(?:ever|previously)\s+)?submit|(?:(?:ever|previously)\s+)?submitted)\s+(?:(?:an?|any|the)\s+)?applications?\b(.*)$/i);
   if (submissionStem) {
     const tail = submissionStem[1]?.trim() ?? '';
     const tailIdentity = normalizeIdentity(tail);
-    if (typedApplicationRemainder(tailIdentity)) {
-      return { family: 'prior_application', valid: false };
-    }
-    const packetObject = String.raw`(?:(?:the|this|our) )?(?:application|role|position|job|company|employer)`;
+    const packetObject = String.raw`(?:the|this|our) (?:application|role|position|job|company|employer)`;
     const globalObject = String.raw`(?:an?|any) (?:role|position|job|company|employer)`;
-    const completePacket = new RegExp(`^(?:before|previously|(?:here|with us|to us|for us)(?: before| previously)?|(?:at|for|to|with) ${packetObject}(?: before| previously)?)?$`).test(tailIdentity);
+    const completePacket = new RegExp(`^(?:(?:here|with us|to us|for us)(?: before| previously)?|(?:at|for|to|with) ${packetObject}(?: before| previously)?)$`).test(tailIdentity);
     const completeGlobal = new RegExp(`^(?:at|for|to|with) ${globalObject}(?: before| previously)?$`).test(tailIdentity);
     const aliases = packetEmployer ? siblingEmployerAliases(packetEmployer) : [];
     const exactPacketObject = aliases.some((alias) => new RegExp(`^(?:at|for|to|with) ${regexpEscape(alias)}(?: before| previously)?$`).test(tailIdentity));
-    if (completeGlobal) {
+    const objectKind = applicationObjectKind(tailIdentity);
+    if (/^(?:before|previously)?$/.test(tailIdentity) || completeGlobal || objectKind === 'global') {
       return { family: 'prior_application', valid: true, globalPriorApplicationHistory: true };
     }
+    if (objectKind === 'typed') return { family: 'prior_application', valid: false };
     const complete = completePacket || exactPacketObject;
     const recognizedObjectPrefix = new RegExp(String.raw`^(?:here|with us|to us|for us|(?:at|for|to|with) (?:${packetObject}|${globalObject}))\b`).test(tailIdentity)
       || aliases.some((alias) => new RegExp(String.raw`^(?:at|for|to|with) ${regexpEscape(alias)}\b`).test(tailIdentity));
@@ -1964,7 +1973,7 @@ function parsePriorApplicationQuestion(
     if (!complete && !recognizedObjectPrefix && !instructionTail) return null;
     return {
       family: 'prior_application',
-      valid: complete && Boolean(packetEmployer),
+      valid: (complete || objectKind === 'packet') && Boolean(packetEmployer),
       ...(packetEmployer ? { target: canonicalSiblingEmployerIdentity(packetEmployer) } : {}),
     };
   }
@@ -1975,16 +1984,10 @@ function parsePriorApplicationQuestion(
   const remainder = normalizeIdentity(stem[1]?.trim() ?? '');
   const temporal = String.raw`(?:before|previously|in the past|within the last \d+(?: \d+)? months?)`;
   const targetFreeTemporal = /^(?:(?:have|had) you (?:ever|previously) applied|did you (?:ever|previously) apply|(?:ever|previously) applied)$/.test(normalizeIdentity(value));
-  const packetObject = String.raw`(?:(?:the|this|our) )?(?:application|role|position|job|company|employer)`;
+  const packetObject = String.raw`(?:the|this|our) (?:application|role|position|job|company|employer)`;
   const globalObject = String.raw`(?:an?|any) (?:role|position|job|company|employer)`;
   const targetFreeRemainder = new RegExp(`^(?:before|previously|(?:here|with us|to us|for us)(?: before| previously)?|(?:at|for|to|with) ${packetObject}(?: before| previously)?)$`).test(remainder);
-  if (typedApplicationRemainder(remainder)) {
-    return { family: 'prior_application', valid: false };
-  }
   const globalRemainder = new RegExp(`^(?:at|for|to|with) ${globalObject}(?: before| previously)?$`).test(remainder);
-  if (globalRemainder) {
-    return { family: 'prior_application', valid: true, globalPriorApplicationHistory: true };
-  }
   if (
     packetEmployer
     && (
@@ -2003,12 +2006,24 @@ function parsePriorApplicationQuestion(
     const shapes = [
       new RegExp(`^(?:at|for|to|with) ${escaped}(?: ${temporal})?$`),
       new RegExp(`^to work (?:at|for) ${escaped}(?: ${temporal})?$`),
-      new RegExp(`^(?:to|for) (?:(?:a|an|the|this|any) )?(?:full time or internship )?(?:role|position|job|internship) (?:at|with|for) ${escaped}(?: ${temporal})?$`),
+      new RegExp(`^(?:to|for) (?:(?:a|an|the|this|any) )?(?:role|position|job) (?:at|with|for) ${escaped}(?: ${temporal})?$`),
       new RegExp(`^to this role or another role ${escaped} within the last \\d+(?: \\d+)? months?(?: as a reminder if you have already applied you will not be reconsidered)?$`),
     ];
     if (shapes.some((shape) => shape.test(remainder))) {
       return { family: 'prior_application', valid: true, target: canonicalSiblingEmployerIdentity(packetEmployer!) };
     }
+  }
+  const objectKind = applicationObjectKind(remainder);
+  if (globalRemainder || objectKind === 'global') {
+    return { family: 'prior_application', valid: true, globalPriorApplicationHistory: true };
+  }
+  if (objectKind === 'typed') return { family: 'prior_application', valid: false };
+  if (objectKind === 'packet' && packetEmployer) {
+    return {
+      family: 'prior_application',
+      valid: true,
+      target: canonicalSiblingEmployerIdentity(packetEmployer),
+    };
   }
   const aliases = packetEmployer ? siblingEmployerAliases(packetEmployer) : [];
   const recognizedObjectPrefix = new RegExp(String.raw`^(?:before|previously|here|with us|to us|for us|to work (?:at|for)|(?:at|for|to|with) (?:${packetObject}|${globalObject}))\b`).test(remainder)
@@ -2043,7 +2058,7 @@ function parseReferralQuestion(label: string, jdText?: string): ParsedSiblingQue
       valid: genericTarget || Boolean(employerTarget),
     };
   }
-  const find = value.match(/^(?:how|where)\s+did\s+you\s+(?:find(?:\s+out\s+about)?|discover)\b\s*(.*)$/i);
+  const find = value.match(/^(?:how|where)\s+did\s+you\s+(?:first\s+)?(?:find(?:\s+out\s+about)?|discover)\b\s*(.*)$/i);
   if (find) {
     const target = find[1]?.trim() ?? '';
     const packetEmployer = frozenJobEmployerFromContext(jdText);
@@ -2127,6 +2142,7 @@ function parseRelocationQuestion(label: string, jdText?: string): ParsedSiblingQ
   const gerund = value.match(/^would\s+(?:relocating|moving)\b\s*(.*)$/i);
   if (!regular && !gerund) return null;
   let detail = (regular?.[1] ?? gerund?.[1] ?? '').trim();
+  detail = detail.replace(/(?:^|\s+)if\s+(?:required|necessary|needed)$/i, '').trim();
   if (gerund) {
     const acceptable = detail.match(/^(?:(.*?)\s+)?be\s+(?:acceptable|comfortable|possible)(?:\s+for\s+you|\s+to\s+you)?$/i);
     if (!acceptable) return { family: 'relocation', valid: false };
