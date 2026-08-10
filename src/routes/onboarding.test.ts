@@ -1,6 +1,13 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { gapSuggestionsFrom, gapsFrom, hasFiveTargetRoles, hasFocusTargeting, onboardingStepFrom } from './onboarding';
+import {
+  gapSuggestionsFrom,
+  gapsFrom,
+  hasFiveTargetRoles,
+  hasFocusTargeting,
+  hasWorkEligibilityDeclaration,
+  onboardingStepFrom,
+} from './onboarding';
 import { encryptField } from '../lib/fieldCrypto';
 
 process.env.ENCRYPTION_KEY ??= 'test-encryption-key-at-least-32-chars-long';
@@ -130,6 +137,29 @@ describe('onboarding step order', () => {
     for (const [expected, input] of cases) {
       assert.equal(onboardingStepFrom(input), expected);
     }
+  });
+});
+
+describe('country-scoped work eligibility onboarding', () => {
+  test('one complete country record completes the step', () => {
+    assert.equal(hasWorkEligibilityDeclaration({
+      work_eligibility_by_country: [{
+        country_code: 'GB', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true,
+      }],
+    }), true);
+  });
+
+  test('ambiguous old US scalars do not silently complete the new declaration', () => {
+    assert.equal(hasWorkEligibilityDeclaration({ work_authorized: true, needs_sponsorship: true }), false);
+    assert.equal(hasWorkEligibilityDeclaration({
+      work_authorized: true,
+      needs_sponsorship: true,
+      sponsorship_answer: 'needs_future',
+    }), true);
+  });
+
+  test('a legacy declaration timestamp remains compatible', () => {
+    assert.equal(hasWorkEligibilityDeclaration({ sponsorship_declared_at: '2026-08-10T00:00:00Z' }), true);
   });
 });
 

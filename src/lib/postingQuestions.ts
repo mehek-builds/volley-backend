@@ -221,7 +221,7 @@ export function resolvePrescript(
      `postingCountryFromJobContext`. It exists so that a question deferring to "the country where
      this role is located" can be resolved when the posting names one country and it is the United
      States. Omitting it refuses that family, which is what every caller did before it existed. */
-  context: { company?: string | null; jdText?: string; postingCountry?: JobCountry } = {},
+  context: { company?: string | null; jdText?: string; postingCountry?: JobCountry; postingCountryCode?: string } = {},
 ): PrescriptResolution {
   const reuseContext: AnswerReuseContext = { company: context.company };
   const out: PrescriptQuestion[] = [];
@@ -255,7 +255,14 @@ export function resolvePrescript(
       continue;
     }
 
-    const known = resolveKnownAnswer(label, question.input_type, profile, context.jdText, context.postingCountry);
+    const known = resolveKnownAnswer(
+      label,
+      question.input_type,
+      profile,
+      context.jdText,
+      context.postingCountry,
+      context.postingCountryCode,
+    );
     if (known && 'value' in known) {
       out.push({ ...base, ask: false, answer: known.value, remembered: false });
       continue;

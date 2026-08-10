@@ -49,6 +49,9 @@ export const APPLICATION_FACT_COLUMNS = [
   'availability_window_end',
   'availability_cycle',
   'availability_valid_through',
+  // Added by scripts/apply-country-work-eligibility-schema.mjs. Until that migration lands, a
+  // read falls back to the old US columns and every non-US country remains unknown.
+  'work_eligibility_by_country',
 ] as const;
 
 export type ApplicationFactColumn = (typeof APPLICATION_FACT_COLUMNS)[number];

@@ -5,6 +5,7 @@ import { decryptRow } from '../routes/applicationProfile';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import type { ApplicationProfileLike } from './questionDiscovery';
 import { selectApplicationProfileRow, factBoolean, factString, factStringList } from './applicationFacts';
+import { countryEligibilityForRead } from './workEligibility';
 
 export function workEligibilityFromSponsorshipAnswer(answer: unknown): {
   workAuthorized?: boolean;
@@ -145,6 +146,12 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     return undefined;
   };
   const onboardingEligibility = workEligibilityFromSponsorshipAnswer(userRow?.sponsorship_answer);
+  const scopedEligibility = countryEligibilityForRead({
+    stored: appRow?.work_eligibility_by_country,
+    work_authorized: appBoolean('work_authorized'),
+    needs_sponsorship: appBoolean('needs_sponsorship'),
+    sponsorship_answer: userRow?.sponsorship_answer,
+  });
   return {
     full_name: academicStr('full_name'),
     phone: str('phone'),
@@ -157,6 +164,7 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     citizenship: str('citizenship'),
     work_authorized: appBoolean('work_authorized') ?? onboardingEligibility.workAuthorized,
     needs_sponsorship: appBoolean('needs_sponsorship') ?? onboardingEligibility.needsSponsorship,
+    work_eligibility_by_country: scopedEligibility,
     date_of_birth: str('date_of_birth'),
     availability_date: str('availability_date'),
     availability_term: str('availability_term'),

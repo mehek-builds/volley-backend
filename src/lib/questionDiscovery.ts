@@ -18,6 +18,8 @@ import {
   readCycle,
   type AvailabilityWindowFacts,
 } from './availabilityWindow';
+import type { CountryWorkEligibility } from './workEligibility';
+import { eligibilityForCountry, namedCountryCodes } from './workEligibility';
 
 // R-055 fix: the dashboard-driven submission flow used to never discover a posting's custom
 // questions (GPA, sponsorship, GitHub, essays, ...) - only the Chrome extension did, client-side.
@@ -45,6 +47,8 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   citizenship?: string;
   work_authorized?: boolean;
   needs_sponsorship?: boolean;
+  /** The only authoritative work eligibility answers for new writes. One exact ISO country each. */
+  work_eligibility_by_country?: CountryWorkEligibility[];
   date_of_birth?: string;
   /* LEGACY, AND NOT AUTHORITY FOR ANYTHING. Kept in the read shape as reference data. The scoped
    * replacement is AvailabilityWindowFacts above (see lib/availabilityWindow.ts); these two carry no
@@ -314,111 +318,122 @@ const RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY =
  * employer reading them together concludes something false whichever one they believe. The whole
  * family is held until the profile says something coherent.
  */
-function storedEligibilityIsSelfContradictory(ap: ApplicationProfileLike): boolean {
-  return ap.work_authorized === false && ap.needs_sponsorship === false;
+const CURRENT_SPONSORSHIP_QUESTION = /\b(?:currently|now|right now|at present|before (?:you|the applicant) start)\b/i;
+const FUTURE_SPONSORSHIP_QUESTION = /\b(?:in the future|future sponsorship|later|will you (?:need|require))\b/i;
+const AUTHORIZATION_TYPE_QUESTION =
+  /\b(?:current immigration status|visa status|work permit type|authorization type|basis of (?:your )?(?:current )?work authorization)\b/i;
+const AUTHORIZATION_EXPIRY_QUESTION =
+  /\b(?:when (?:does|will) (?:your )?(?:visa|work permit|work authorization|authorization) expire|(?:visa|work permit|work authorization|authorization) exp(?:iry|iration)(?: date)?)\b/i;
+
+function selectedEligibilityCountry(
+  label: string,
+  postingCountry: JobCountry | undefined,
+  postingCountryCode: string | undefined,
+): string | undefined {
+  const named = namedCountryCodes(label);
+  if (named.length === 1) return named[0];
+  if (named.length > 1) return undefined;
+  if (US_WORK_SCOPE.test(label) || US_ABBREVIATION_SCOPE.test(label) || US_ABBREVIATION_SCOPE_CASE_FOLDED.test(label)) {
+    return 'US';
+  }
+  if (postingCountryCode) return postingCountryCode;
+  // Compatibility for callers already carrying the legal-scope classifier. It can prove US
+  // exactly, but `non_us` cannot say which country and is therefore never enough.
+  if (postingCountry === 'us') return 'US';
+  return undefined;
 }
 
 function workEligibilityAnswer(
   label: string,
   ap: ApplicationProfileLike,
   postingCountry: JobCountry | undefined,
+  postingCountryCode?: string,
 ): { value: string } | { skipReason: string } | null {
-  /* THE POINTER, FOLLOWED - ONCE, AND ONLY WHEN IT LANDS ON THE UNITED STATES.
-   *
-   * A JOB_LOCATION_SCOPE label ("the country where this role is located") names no country, so on
-   * its own it is unanswerable from two US-scoped booleans. It becomes answerable exactly when the
-   * posting's own structured location says every place this role exists is American, because then
-   * the country the employer pointed at IS the United States and the stored facts are about that
-   * country. Anything else - a foreign posting, a two-country posting, a bare "Remote", a packet
-   * with no location on it at all, or a caller that did not pass one - leaves `postingCountry`
-   * something other than 'us' and the whole family stays refused, exactly as before.
-   *
-   * The parameter is optional for a reason worth stating: every call site that has not been taught
-   * to supply a posting therefore behaves like the old code, refusing. Forgetting to thread it
-   * costs a handoff and can never cost a false answer. */
-  const deferredCountryIsUs = JOB_LOCATION_SCOPE.test(label) && postingCountry === 'us';
-  const explicitlyUsScoped = US_WORK_SCOPE.test(label)
-    || US_ABBREVIATION_SCOPE.test(label)
-    || US_ABBREVIATION_SCOPE_CASE_FOLDED.test(label)
-    || deferredCountryIsUs;
-  if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
-    return { skipReason: workEligibilitySkipReason(label) };
-  }
   const asksAuthorization = WORK_AUTHORIZATION_QUESTION.test(label);
   const asksSponsorship = SPONSORSHIP_QUESTION.test(label);
-  if (
-    (asksAuthorization || asksSponsorship)
-    && (storedEligibilityIsSelfContradictory(ap) || RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY.test(label))
-  ) {
+  const asksDetail = WORK_AUTHORIZATION_DETAIL_QUESTION.test(label);
+  const asksCurrentSponsorship = CURRENT_SPONSORSHIP_QUESTION.test(label);
+  const asksFutureSponsorship = FUTURE_SPONSORSHIP_QUESTION.test(label);
+  if (!asksAuthorization && !asksSponsorship && !asksDetail) return null;
+  if (RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY.test(label)) {
     return { skipReason: workEligibilitySkipReason(label) };
   }
-  const namesAnotherCountry = NON_US_WORK_SCOPE.test(label)
-    || (JOB_LOCATION_SCOPE.test(label) && !deferredCountryIsUs);
-  /* THE COUNTRY GATE IS NOT SYMMETRIC, AND THE ASYMMETRY IS THE ENTIRE RULE.
-   *
-   * The positive US-scope requirement below exists because the legacy booleans were collected
-   * without a country, so an unscoped question cannot be answered from them. That is true of the
-   * answers that CLAIM something - "yes I am authorized", "no I need no sponsorship" - because a
-   * claim of eligibility in a country nobody named is a false legal declaration waiting to happen,
-   * and it is the defect R-004 was opened for.
-   *
-   * It is not true of "yes, I need sponsorship". That answer discloses a limitation rather than
-   * asserting a permission: it can only ever narrow what an employer will offer, never obtain
-   * something under false pretenses, and it is what needs_sponsorship literally records. Getting it
-   * wrong in that direction costs a handoff; getting it wrong in the other direction is a false
-   * statement about work eligibility on a real application, and only one of those is worth a gate.
-   *
-   * Measured on 2026-08-09 against the production corpus, replaying all 297 distinct stored labels
-   * with the real profile: requiring the employer to spell the country out before Litos will repeat
-   * a stored "yes" refused 13 sponsorship labels it is the answer to, including Cloudflare ("...to
-   * work at Cloudflare?"), Reddit, Redwood Materials (whose list is nothing but US visa categories),
-   * IMC, Five Rings, Point72, Anduril, DRW and Virtu. Not one of those employers named a country,
-   * and every one of them was told nothing instead of being told the truth.
-   *
-   * The exceptions stay exceptions, and there are now four. A label that NAMES another country is
-   * refused even in this direction: "yes I need sponsorship" is wrong AND costly for a role in the
-   * one country where she may not. A label that DEFERS to the posting's own country is refused in
-   * this direction too, unless the posting's structured location resolves that deferral to the
-   * United States, in which case the label is US-scoped in fact and is treated as such by
-   * `deferredCountryIsUs` above; a posting that is foreign, two-country, remote-with-no-country or
-   * simply not supplied still refuses both directions. A label phrased backwards is refused,
-   * because "yes" there is a claim again. And the two guards above this line,
-   * from 97207e2, run first and are untouched by any of it: a compound label whose other half has no
-   * column, and the stored pair that describes nobody, are held whichever direction the answer runs.
-   */
-  const disclosesSponsorshipNeed = ap.needs_sponsorship === true
-    && !UNRESTRICTED_WORK_AUTHORIZATION_QUESTION.test(label)
-    && !SPONSORSHIP_EXEMPTION_QUESTION.test(label);
-  if (asksAuthorization && asksSponsorship && SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION.test(label)) {
-    if (namesAnotherCountry) return { skipReason: workEligibilitySkipReason(label) };
-    if (disclosesSponsorshipNeed) return { value: 'Yes' };
-    if (!explicitlyUsScoped) return { skipReason: workEligibilitySkipReason(label) };
-    if (typeof ap.needs_sponsorship === 'boolean') {
+
+  const countryCode = selectedEligibilityCountry(label, postingCountry, postingCountryCode);
+  if (!countryCode) return { skipReason: workEligibilitySkipReason(label) };
+
+  /* The scoped list is the authority. When it is absent, each legacy scalar may answer only the
+   * exact US yes/no claim it actually stored. A true combined sponsorship bit cannot be split into
+   * present versus future need. This bridge never answers another country or an unscoped role. */
+  const scoped = eligibilityForCountry(ap.work_eligibility_by_country, countryCode);
+  if (!scoped && ap.work_eligibility_by_country === undefined && countryCode === 'US') {
+    if (asksDetail) return { skipReason: workEligibilitySkipReason(label) };
+    if (ap.work_authorized === false && ap.needs_sponsorship === false) {
+      return { skipReason: workEligibilitySkipReason(label) };
+    }
+    if (asksAuthorization && asksSponsorship) {
+      if (!SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION.test(label)
+        || typeof ap.needs_sponsorship !== 'boolean') {
+        return { skipReason: workEligibilitySkipReason(label) };
+      }
       return { value: ap.needs_sponsorship ? 'Yes' : 'No' };
     }
-    return { skipReason: workEligibilitySkipReason(label) };
-  }
-  if (!asksAuthorization && !asksSponsorship) return null;
-  if (asksAuthorization && asksSponsorship) return { skipReason: workEligibilitySkipReason(label) };
-  if (namesAnotherCountry) return { skipReason: workEligibilitySkipReason(label) };
-  if (asksSponsorship && disclosesSponsorshipNeed) return { value: 'Yes' };
-  // The legacy booleans were collected without a country. Every answer left below this line asserts
-  // eligibility, so it is usable only when the employer's own question explicitly says United
-  // States. A JD mentioning a US office, benefit, customer or legal notice is not scope evidence,
-  // and an unscoped question is not implicitly American.
-  if (!explicitlyUsScoped) {
-    return { skipReason: workEligibilitySkipReason(label) };
-  }
-  if (asksAuthorization && UNRESTRICTED_WORK_AUTHORIZATION_QUESTION.test(label) && ap.needs_sponsorship === true) {
-    return { skipReason: workEligibilitySkipReason(label) };
-  }
-  if (asksAuthorization && typeof ap.work_authorized === 'boolean') {
-    return { value: ap.work_authorized ? 'Yes' : 'No' };
-  }
-  if (asksSponsorship && typeof ap.needs_sponsorship === 'boolean') {
+    if (asksAuthorization) {
+      if (typeof ap.work_authorized !== 'boolean'
+        || (UNRESTRICTED_WORK_AUTHORIZATION_QUESTION.test(label) && ap.needs_sponsorship === true)) {
+        return { skipReason: workEligibilitySkipReason(label) };
+      }
+      return { value: ap.work_authorized ? 'Yes' : 'No' };
+    }
+    if (typeof ap.needs_sponsorship !== 'boolean') return { skipReason: workEligibilitySkipReason(label) };
+    if (ap.needs_sponsorship && asksCurrentSponsorship !== asksFutureSponsorship) {
+      return { skipReason: workEligibilitySkipReason(label) };
+    }
+    if (SPONSORSHIP_EXEMPTION_QUESTION.test(label)) {
+      return { value: ap.needs_sponsorship ? 'No' : 'Yes' };
+    }
     return { value: ap.needs_sponsorship ? 'Yes' : 'No' };
   }
-  return { skipReason: workEligibilitySkipReason(label) };
+  const record = scoped;
+  if (!record) return { skipReason: workEligibilitySkipReason(label) };
+
+  if (AUTHORIZATION_TYPE_QUESTION.test(label)) {
+    return record.authorization_type
+      ? { value: record.authorization_type }
+      : { skipReason: workEligibilitySkipReason(label) };
+  }
+  if (AUTHORIZATION_EXPIRY_QUESTION.test(label)) {
+    return record.authorization_expiry
+      ? { value: record.authorization_expiry }
+      : { skipReason: workEligibilitySkipReason(label) };
+  }
+  if (asksDetail) return { skipReason: workEligibilitySkipReason(label) };
+
+  if (!record.authorized_now && !record.needs_sponsorship_now) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
+  if (asksAuthorization && asksSponsorship && !SPONSORSHIP_WORK_AUTHORIZATION_SUPPORT_QUESTION.test(label)) {
+    return { skipReason: workEligibilitySkipReason(label) };
+  }
+  if (asksAuthorization && asksSponsorship) {
+    return { value: (record.needs_sponsorship_now || record.needs_sponsorship_future) ? 'Yes' : 'No' };
+  }
+  if (asksAuthorization) {
+    if (UNRESTRICTED_WORK_AUTHORIZATION_QUESTION.test(label)
+      && (record.needs_sponsorship_now || record.needs_sponsorship_future)) {
+      return { skipReason: workEligibilitySkipReason(label) };
+    }
+    return { value: record.authorized_now ? 'Yes' : 'No' };
+  }
+  if (SPONSORSHIP_EXEMPTION_QUESTION.test(label)) {
+    return { value: (record.needs_sponsorship_now || record.needs_sponsorship_future) ? 'No' : 'Yes' };
+  }
+  const needsSponsorship = asksCurrentSponsorship && !asksFutureSponsorship
+    ? record.needs_sponsorship_now
+    : asksFutureSponsorship && !asksCurrentSponsorship
+      ? record.needs_sponsorship_future
+      : record.needs_sponsorship_now || record.needs_sponsorship_future;
+  return { value: needsSponsorship ? 'Yes' : 'No' };
 }
 
 export function attestationSkipReason(label: string, what: string): string {
@@ -1189,10 +1204,11 @@ export function sensitiveQuestionRequiresAttention(
   ap: ApplicationProfileLike,
   jdText: string | undefined,
   postingCountry?: JobCountry,
+  postingCountryCode?: string,
 ): boolean {
   if (!isRefusedQuestion(label)) return false;
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
-  const known = resolveKnownAnswer(label, inputType, ap, jdText, postingCountry);
+  const known = resolveKnownAnswer(label, inputType, ap, jdText, postingCountry, postingCountryCode);
   return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
 }
 
@@ -1211,10 +1227,11 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
   jdText: string | undefined,
   questionsReviewedAt?: string,
   postingCountry?: JobCountry,
+  postingCountryCode?: string,
 ): T[] {
   return questions.map((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
-    const known = label ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry) : null;
+    const known = label ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry, postingCountryCode) : null;
     const withProvenance = question as T & {
       answer_source?: unknown;
       answer_reviewed_at?: unknown;
@@ -2851,6 +2868,8 @@ export function resolveKnownAnswer(
    * packet's structured location fields and nothing else. Omitting it is always safe: every rule
    * that reads it refuses when it is undefined. */
   postingCountry?: JobCountry,
+  /** Exact ISO country from the ATS country/location fields. Undefined is fail-closed. */
+  postingCountryCode?: string,
 ): { value: string } | { skipReason: string } | null {
   /* THE SELF-DECLARATIONS COME FIRST, before every classifier in this file.
    *
@@ -2983,9 +3002,8 @@ export function resolveKnownAnswer(
   // declaration. The unconditional "No" that used to sit here was a statement about the student's
   // live job search that nothing on file supported.
 
-  if (WORK_AUTHORIZATION_DETAIL_QUESTION.test(label)) {
-    return { skipReason: workEligibilitySkipReason(label) };
-  }
+  const earlyWorkEligibility = workEligibilityAnswer(label, ap, postingCountry, postingCountryCode);
+  if (earlyWorkEligibility) return earlyWorkEligibility;
 
   if (OPTIONAL_FOLLOWUP_AFTER_NO_QUESTION.test(label)) {
     return { value: 'N/A' };
@@ -3055,9 +3073,6 @@ export function resolveKnownAnswer(
 
   const routineConsent = routineConsentAnswer(label);
   if (routineConsent) return routineConsent;
-
-  const workEligibility = workEligibilityAnswer(label, ap, postingCountry);
-  if (workEligibility) return workEligibility;
 
   /* The blanket `if (AGE_ATTESTATION_QUESTION.test(label)) return null;` that stood here is gone.
    * It is unreachable now: ageAttestationAnswer runs at the top of this function and returns a

@@ -4,6 +4,11 @@ import { application_profile } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { encryptField, decryptField, looksEncrypted, FieldDecryptError } from '../lib/fieldCrypto';
 import { selectApplicationProfileRow, upsertApplicationProfile, type ApplicationProfileRow } from '../lib/applicationFacts';
+import {
+  countryEligibilityForRead,
+  countryWorkEligibilityListSchema,
+  legacyUsProjection,
+} from '../lib/workEligibility';
 
 // Fields sensitive enough to encrypt at rest per PRD-v2 Section 4: phone/address/
 // work-authorization status. Links and referral_source are not identity-sensitive
@@ -52,6 +57,7 @@ export const bodySchema = z.object({
   citizenship: z.string().nullable().optional(),
   work_authorized: z.boolean().nullable().optional(),
   needs_sponsorship: z.boolean().nullable().optional(),
+  work_eligibility_by_country: countryWorkEligibilityListSchema.nullable().optional(),
   availability_date: z.string().nullable().optional(),
   availability_term: z.string().nullable().optional(),
   desired_salary: z.string().nullable().optional(),
@@ -134,8 +140,17 @@ export function attestationConsentStamp(body: z.infer<typeof bodySchema>): { app
   return touched ? { application_attestations_consented_at: new Date() } : {};
 }
 
-function encryptRow(body: z.infer<typeof bodySchema>) {
+export function applicationProfileWriteValues(body: z.infer<typeof bodySchema>) {
   const row: Record<string, unknown> = { ...body };
+  if (body.work_eligibility_by_country !== undefined) {
+    const records = body.work_eligibility_by_country ?? [];
+    row.work_eligibility_by_country = records;
+    Object.assign(row, legacyUsProjection(records));
+  } else {
+    // These columns are a compatibility projection, not an independently editable authority.
+    delete row.work_authorized;
+    delete row.needs_sponsorship;
+  }
   for (const field of ENCRYPTED_FIELDS) {
     const value = row[field];
     if (typeof value === 'string' && value.length > 0) {
@@ -175,6 +190,12 @@ export function decryptRow(row: ApplicationProfileRow) {
       out[field] = decryptField(value); // throws FieldDecryptError on a wrong or missing key
     }
   }
+  const eligibility = countryEligibilityForRead({
+    stored: out.work_eligibility_by_country,
+    work_authorized: typeof out.work_authorized === 'boolean' ? out.work_authorized : null,
+    needs_sponsorship: typeof out.needs_sponsorship === 'boolean' ? out.needs_sponsorship : null,
+  });
+  if (eligibility !== undefined) out.work_eligibility_by_country = eligibility;
   return out;
 }
 
@@ -226,7 +247,7 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Invalid request body' });
     }
 
-    const encrypted = { ...encryptRow(body), ...attestationConsentStamp(body) };
+    const encrypted = { ...applicationProfileWriteValues(body), ...attestationConsentStamp(body) };
 
     try {
       const { droppedFactColumns } = await upsertApplicationProfile(userId, encrypted);
@@ -235,6 +256,9 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
           { userId },
           'Saved the application profile without the onboarding fact columns: this deploy is ahead of scripts/apply-application-facts-schema.mjs. Run that migration; the dropped answers read back as "never asked" until it has.',
         );
+        if (body.work_eligibility_by_country !== undefined) {
+          return reply.status(503).send({ error: 'Country work eligibility is being enabled. Try again shortly.' });
+        }
       }
     } catch (err) {
       fastify.log.error(err);

@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { getTableColumns } from 'drizzle-orm';
-import { bodySchema, decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
+import { applicationProfileWriteValues, bodySchema, decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
 import { application_profile, type ApplicationProfile } from '../db/schema';
 
 // The trap these tests exist to pin: a column declared in schema.ts with no matching line in
@@ -25,6 +25,7 @@ function row(over: Partial<ApplicationProfile> = {}): ApplicationProfile {
     citizenship: null,
     work_authorized: null,
     needs_sponsorship: null,
+    work_eligibility_by_country: null,
     availability_date: null,
     availability_term: null,
     desired_salary: null,
@@ -123,6 +124,73 @@ describe('languages round-trip (PUT accepts, GET serves)', () => {
 
   test('languages is plaintext: NOT in ENCRYPTED_FIELDS, so encryptRow cannot touch it', () => {
     assert.equal((ENCRYPTED_FIELDS as readonly string[]).includes('languages'), false);
+  });
+});
+
+describe('country-scoped work eligibility round-trip', () => {
+  const records = [{
+    country_code: 'US',
+    authorized_now: true,
+    needs_sponsorship_now: false,
+    needs_sponsorship_future: true,
+    authorization_type: 'F-1 CPT',
+    authorization_expiry: '2028-05-12',
+  }, {
+    country_code: 'AE',
+    authorized_now: true,
+    needs_sponsorship_now: false,
+    needs_sponsorship_future: false,
+  }];
+
+  test('bodySchema keeps complete records and normalizes ISO codes', () => {
+    const parsed = bodySchema.parse({ work_eligibility_by_country: [{ ...records[0], country_code: 'us' }] });
+    assert.equal(parsed.work_eligibility_by_country?.[0]?.country_code, 'US');
+  });
+
+  test('rejects duplicates, incomplete booleans, and malformed expiry dates', () => {
+    assert.equal(bodySchema.safeParse({ work_eligibility_by_country: [records[0], records[0]] }).success, false);
+    assert.equal(bodySchema.safeParse({ work_eligibility_by_country: [{ country_code: 'US' }] }).success, false);
+    assert.equal(bodySchema.safeParse({ work_eligibility_by_country: [{ ...records[0], country_code: 'ZZ' }] }).success, false);
+    assert.equal(bodySchema.safeParse({
+      work_eligibility_by_country: [{ ...records[0], authorization_expiry: 'May 2028' }],
+    }).success, false);
+  });
+
+  test('PUT derives US compatibility scalars only from the scoped list', () => {
+    assert.deepEqual(applicationProfileWriteValues(bodySchema.parse({
+      work_eligibility_by_country: records,
+      work_authorized: false,
+      needs_sponsorship: false,
+    })), {
+      work_eligibility_by_country: records,
+      work_authorized: true,
+      needs_sponsorship: true,
+    });
+    assert.deepEqual(applicationProfileWriteValues(bodySchema.parse({
+      work_authorized: false,
+      needs_sponsorship: true,
+    })), {});
+  });
+
+  test('GET serves the scoped list and preserves old US values only when unambiguous', () => {
+    assert.deepEqual(decryptRow(row({ work_eligibility_by_country: records } as Partial<ApplicationProfile>)).work_eligibility_by_country, records);
+    const old = decryptRow(row({
+      work_authorized: true,
+      needs_sponsorship: false,
+      work_eligibility_by_country: null,
+    }));
+    assert.deepEqual(old.work_eligibility_by_country, [{
+      country_code: 'US',
+      authorized_now: true,
+      needs_sponsorship_now: false,
+      needs_sponsorship_future: false,
+    }]);
+    const ambiguous = decryptRow(row({
+      work_authorized: true,
+      needs_sponsorship: true,
+      work_eligibility_by_country: null,
+    }));
+    assert.equal(ambiguous.work_eligibility_by_country, null);
   });
 });
 

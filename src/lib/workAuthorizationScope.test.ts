@@ -18,7 +18,13 @@ const DEEPGRAM_LOCATION = 'USA | Remote';
 /* The owner account's stored work-eligibility pair, and the only two columns any of this reads.
  * A student on CPT/OPT: allowed to work now, will need sponsorship to keep working. Consented on
  * 2026-08-09 (application_attestations_consented_at). */
-const CPT_STUDENT: ApplicationProfileLike = { work_authorized: true, needs_sponsorship: true };
+const CPT_STUDENT: ApplicationProfileLike = {
+  work_authorized: true,
+  needs_sponsorship: true,
+  work_eligibility_by_country: [{
+    country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: true,
+  }],
+};
 
 test('a US posting answers both of the questions that pointed at it', () => {
   const country = postingCountryFromJobContext({ company: 'Deepgram', location: DEEPGRAM_LOCATION });
@@ -116,13 +122,10 @@ test('a US posting answers nothing when the fact itself is missing', () => {
   }
 });
 
-test('a US posting does not make an unscoped claim answerable', () => {
-  /* The posting resolves a POINTER the employer's own question created. It is not a licence to
-   * treat every silent label as American: "are you legally authorized to work?" names no country
-   * and no country was deferred to, so R-004's rule is untouched by any of this. */
+test('a structured US posting selects the matching country record', () => {
   const country = postingCountryFromJobContext({ location: DEEPGRAM_LOCATION });
   const resolved = resolveKnownAnswer('are you legally authorized to work?', 'text', CPT_STUDENT, undefined, country);
-  assert.ok(resolved && 'skipReason' in resolved);
+  assert.deepEqual(resolved, { value: 'Yes' });
 });
 
 test('a US posting does not override a label that names a different country', () => {
@@ -211,7 +214,7 @@ test('the abbreviation guard is case-folded, because the pipeline lowercases eve
   );
   assert.deepEqual(
     resolveKnownAnswer('will you now or in the future require sponsorship for work authorization?', 'text', CPT_STUDENT, undefined),
-    { value: 'Yes' },
+    { skipReason: 'work-eligibility question left for you: "will you now or in the future require sponsorship for work a"' },
   );
   // The pronoun that the capital letters used to be the only defence against is still not a country.
   const pronoun = resolveKnownAnswer(
@@ -252,16 +255,13 @@ test('the sponsorship screen describes what this resolver actually does', async 
   const abroad = resolveKnownAnswer(DEEPGRAM_AUTHORIZATION, 'text', CPT_STUDENT, undefined, londonPosting);
   assert.ok(abroad && 'skipReason' in abroad, SITE_COPY_AUTHORIZATION);
 
-  // "... gets a yes whenever you do." Including on a label that named no country at all, which is
-  // the arm the copy has to cover and a US-only sentence would have described wrongly.
-  assert.deepEqual(
-    resolveKnownAnswer('will you require sponsorship for employment visa status?', 'text', CPT_STUDENT, undefined),
-    { value: 'Yes' },
-    SITE_COPY_SPONSORSHIP,
+  const unscopedSponsorship = resolveKnownAnswer(
+    'will you require sponsorship for employment visa status?', 'text', CPT_STUDENT, undefined,
   );
+  assert.ok(unscopedSponsorship && 'skipReason' in unscopedSponsorship, SITE_COPY_SPONSORSHIP);
 
   // "Anything else is left blank for you."
-  for (const label of ['are you legally authorized to work?', 'are you legally authorized to work in canada?']) {
+  for (const label of ['are you legally authorized to work in canada?']) {
     const resolved = resolveKnownAnswer(label, 'text', CPT_STUDENT, undefined, usPosting);
     assert.ok(resolved && 'skipReason' in resolved, SITE_COPY_OTHERWISE);
   }

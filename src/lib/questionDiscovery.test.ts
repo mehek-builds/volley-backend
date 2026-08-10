@@ -54,15 +54,13 @@ test('answers work authorization and sponsorship only from explicit stored conse
    * need sponsorship" is a disclosure and not a claim of eligibility: it can only narrow what an
    * employer will offer. The country gate below still holds for every answer that asserts
    * something, including the "no" this same label takes from the opposite stored boolean. */
-  assert.deepEqual(
-    resolveKnownAnswer(
-      'will you now or in the future require sponsorship for employment visa status?',
-      'text',
-      { needs_sponsorship: true },
-      undefined,
-    ),
-    { value: 'Yes' },
+  const unscopedSponsorship = resolveKnownAnswer(
+    'will you now or in the future require sponsorship for employment visa status?',
+    'text',
+    { needs_sponsorship: true },
+    undefined,
   );
+  assert.ok(unscopedSponsorship && 'skipReason' in unscopedSponsorship);
   const unscopedNoSponsorshipNeeded = resolveKnownAnswer(
     'will you now or in the future require sponsorship for employment visa status?',
     'text',
@@ -262,15 +260,13 @@ test('recognises the lowercased US abbreviation the extension actually sends', (
    * booleans were never scoped to. See the asymmetry comment in workEligibilityAnswer. The claim
    * direction on this same unscoped label is asserted below, and it still refuses.
    */
-  assert.deepEqual(
-    resolveKnownAnswer(
-      'will you now or in the future require sponsorship for work authorization?',
-      'text',
-      { work_authorized: true, needs_sponsorship: true },
-      undefined,
-    ),
-    { value: 'Yes' },
+  const unscopedSponsorship = resolveKnownAnswer(
+    'will you now or in the future require sponsorship for work authorization?',
+    'text',
+    { work_authorized: true, needs_sponsorship: true },
+    undefined,
   );
+  assert.ok(unscopedSponsorship && 'skipReason' in unscopedSponsorship);
   const unscopedClaim = resolveKnownAnswer(
     'will you now or in the future require sponsorship for work authorization?',
     'text',
@@ -2063,6 +2059,9 @@ const PROD_OWNER_PROFILE = {
   citizenship: 'India',
   work_authorized: true,
   needs_sponsorship: true,
+  work_eligibility_by_country: [{
+    country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: true,
+  }],
   availability_date: 'August 6, 2026',
   school: 'University of Southern California, Viterbi School of Engineering',
   degree: 'Bachelor of Science in Computer Science',
@@ -2304,7 +2303,13 @@ test('"authorized to work for all employers" is not answered Yes while sponsorsh
     resolveKnownAnswer(
       'are you currently authorized to work for all employers in the united states on a full-time basis ?',
       'text',
-      { ...PROD_OWNER_PROFILE, needs_sponsorship: false },
+      {
+        ...PROD_OWNER_PROFILE,
+        needs_sponsorship: false,
+        work_eligibility_by_country: [{
+          country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false,
+        }],
+      },
       undefined,
     ),
     { value: 'Yes' },
@@ -2734,23 +2739,18 @@ const SCALE_AI_RESTRICTIVE_AGREEMENT_LABEL =
   + 'agreements, non-solicitation agreements, confidentiality or non-disclosure agreements, or any other contractual obligations '
   + 'that could limit your employment activities.';
 
-test('the stored sponsorship need answers the four 2026-08-08 labels it is the answer to', () => {
+test('stored country eligibility answers only labels that select that country', () => {
   /* An employer's own name where a country would go ("to work at Cloudflare"), a two-hundred-word
    * tail of visa categories (Redwood), and an explanatory refusal to sponsor (truveta) are all
    * things a sponsorship question is allowed to say. None of them changes what is being asked, and
    * `needs_sponsorship: true` is exactly the answer to it. */
-  for (const label of [CLOUDFLARE_SPONSORSHIP_LABEL, REDWOOD_SPONSORSHIP_LABEL, TRUVETA_SPONSORSHIP_LABEL]) {
-    assert.deepEqual(
-      resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, undefined),
-      { value: 'Yes' },
-      `lost the stored sponsorship answer for: ${label.slice(0, 70)}`,
-    );
+  for (const label of [CLOUDFLARE_SPONSORSHIP_LABEL, REDWOOD_SPONSORSHIP_LABEL]) {
+    const unresolved = resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, undefined);
+    assert.ok(unresolved && 'skipReason' in unresolved, label.slice(0, 70));
   }
+  assert.deepEqual(resolveKnownAnswer(TRUVETA_SPONSORSHIP_LABEL, 'text', PROD_OWNER_PROFILE, undefined), { value: 'Yes' });
   // truveta's is a checkbox on the live form. The control type does not change the answer.
-  assert.deepEqual(
-    resolveKnownAnswer(TRUVETA_SPONSORSHIP_LABEL, 'checkbox', PROD_OWNER_PROFILE, undefined),
-    { value: 'Yes' },
-  );
+  assert.deepEqual(resolveKnownAnswer(TRUVETA_SPONSORSHIP_LABEL, 'checkbox', PROD_OWNER_PROFILE, undefined), { value: 'Yes' });
   // And with nothing stored, all three refuse and say which question is waiting.
   for (const label of [CLOUDFLARE_SPONSORSHIP_LABEL, REDWOOD_SPONSORSHIP_LABEL, TRUVETA_SPONSORSHIP_LABEL]) {
     const empty = resolveKnownAnswer(label, 'text', {}, undefined);

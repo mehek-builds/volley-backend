@@ -1,3 +1,5 @@
+import { isIsoCountryCode, namedCountryCode } from './workEligibility';
+
 /**
  * IS THIS JOB IN THE UNITED STATES?
  *
@@ -278,4 +280,56 @@ export function postingCountryFromJobContext(jobContext: unknown): JobCountry {
       (value) => (typeof value === 'string' ? value : null),
     ) : []),
   ]);
+}
+
+const STRUCTURED_CITY_COUNTRIES: readonly [RegExp, string][] = [
+  [/\b(?:london|manchester|edinburgh|glasgow|bristol)\b/i, 'GB'],
+  [/\b(?:toronto|vancouver|montreal|ottawa)\b/i, 'CA'],
+  [/\b(?:bengaluru|bangalore|mumbai|delhi|gurugram|gurgaon|hyderabad|chennai|pune|noida)\b/i, 'IN'],
+  [/\b(?:dubai|abu dhabi)\b/i, 'AE'],
+  [/\b(?:berlin|munich|hamburg|frankfurt)\b/i, 'DE'],
+  [/\b(?:paris|lyon)\b/i, 'FR'],
+  [/\b(?:amsterdam|rotterdam)\b/i, 'NL'],
+  [/\b(?:sydney|melbourne)\b/i, 'AU'],
+  [/\b(?:tokyo|osaka)\b/i, 'JP'],
+  [/\b(?:seoul)\b/i, 'KR'],
+  [/\b(?:hong kong)\b/i, 'HK'],
+  [/\b(?:singapore)\b/i, 'SG'],
+];
+
+function exactCountryCodeFromStructuredValue(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (isIsoCountryCode(trimmed)) return trimmed.toUpperCase();
+  const named = namedCountryCode(trimmed);
+  if (named) return named;
+  if (jobCountry(trimmed) === 'us') return 'US';
+  const found = new Set(STRUCTURED_CITY_COUNTRIES.filter(([pattern]) => pattern.test(trimmed)).map(([, code]) => code));
+  return found.size === 1 ? [...found][0] : undefined;
+}
+
+/**
+ * The posting's one exact ISO country, or undefined when its structured fields are missing,
+ * unknown, or name more than one country.
+ *
+ * This intentionally reads no job-description prose. It accepts the ATS country field and the
+ * packet's structured location fields only. Unknown pieces such as "Remote" may sit beside one
+ * exact country, but two different country codes always refuse.
+ */
+export function postingCountryCodeFromJobContext(jobContext: unknown): string | undefined {
+  const context = (jobContext && typeof jobContext === 'object' ? jobContext : {}) as Record<string, unknown>;
+  const values = [
+    typeof context.portal_country === 'string' ? context.portal_country : null,
+    typeof context.country === 'string' ? context.country : null,
+    typeof context.location === 'string' ? context.location : null,
+    ...(Array.isArray(context.locations) ? context.locations.map((value) => (typeof value === 'string' ? value : null)) : []),
+  ].filter((value): value is string => Boolean(value));
+  const codes = new Set<string>();
+  for (const value of values) {
+    for (const segment of value.split(LOCATION_SEGMENT_SEPARATOR)) {
+      const code = exactCountryCodeFromStructuredValue(segment);
+      if (code) codes.add(code);
+    }
+  }
+  return codes.size === 1 ? [...codes][0] : undefined;
 }

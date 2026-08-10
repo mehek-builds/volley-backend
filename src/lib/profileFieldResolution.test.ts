@@ -42,6 +42,9 @@ const STORED_PROFILE: ApplicationProfileLike = {
   referral_source_default: 'Company website',
   work_authorized: true,
   needs_sponsorship: true,
+  work_eligibility_by_country: [{
+    country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: true,
+  }],
 };
 
 // The same person as parsed from the resume, where `major` is the full sentence rather than the
@@ -282,20 +285,32 @@ test('Class A: visa sponsorship comes from the stored boolean (Akuna x7, Virtu)'
    * a stored answer. */
   assert.equal(
     answer('Do you now, or will you in the future, need sponsorship from an employer in order to obtain, extend or renew your author', ['Yes', 'No']),
-    'Yes',
+    null,
   );
   assert.equal(
     answer('Do you now, or will you in the future, need sponsorship from an employer to work in the United States?', ['Yes', 'No']),
     'Yes',
   );
-  assert.equal(answer(label, ['Yes', 'No'], { ...STORED_PROFILE, needs_sponsorship: false }), 'No');
+  assert.equal(answer(label, ['Yes', 'No'], {
+    ...STORED_PROFILE,
+    needs_sponsorship: false,
+    work_eligibility_by_country: [{
+      country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false,
+    }],
+  }), 'No');
   // The claim direction still needs the country. "No, I need no sponsorship" asserts eligibility,
   // and the truncated label no longer says where.
   assert.equal(
     answer(
       'Do you now, or will you in the future, need sponsorship from an employer in order to obtain, extend or renew your author',
       ['Yes', 'No'],
-      { ...STORED_PROFILE, needs_sponsorship: false },
+      {
+        ...STORED_PROFILE,
+        needs_sponsorship: false,
+        work_eligibility_by_country: [{
+          country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false,
+        }],
+      },
     ),
     null,
   );

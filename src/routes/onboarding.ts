@@ -19,6 +19,7 @@ import { generated_resumes } from '../db/schema';
 import { isComposioConfigured } from '../lib/composioConnections';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { verificationEmailSource } from '../lib/verificationEmailSource';
+import { countryEligibilityForRead } from '../lib/workEligibility';
 
 /**
  * How many submissions has this student personally approved AND seen reach the employer?
@@ -115,6 +116,22 @@ export function hasFiveTargetRoles(parsed: { target_roles?: unknown } | null | u
     .filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
     .map((role) => role.trim().toLowerCase());
   return new Set(roles).size >= 5;
+}
+
+export function hasWorkEligibilityDeclaration(input: {
+  sponsorship_declared_at?: Date | string | null;
+  sponsorship_answer?: unknown;
+  work_eligibility_by_country?: unknown;
+  work_authorized?: boolean | null;
+  needs_sponsorship?: boolean | null;
+}): boolean {
+  if (input.sponsorship_declared_at != null) return true;
+  return (countryEligibilityForRead({
+    stored: input.work_eligibility_by_country,
+    work_authorized: input.work_authorized,
+    needs_sponsorship: input.needs_sponsorship,
+    sponsorship_answer: input.sponsorship_answer,
+  })?.length ?? 0) > 0;
 }
 
 // Asked on screen 03 only if the first application did not teach us. Order is the render order.
@@ -308,7 +325,13 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
        postings they cannot take and then quietly removing them.
        Derived from the timestamp, not from the boolean: "no, I do not need sponsorship" is a real
        answer that stores `false`, and gating on the boolean would ask that person again forever. */
-    const has_sponsorship_answer = user.sponsorship_declared_at !== null;
+    const has_sponsorship_answer = hasWorkEligibilityDeclaration({
+      sponsorship_declared_at: user.sponsorship_declared_at,
+      sponsorship_answer: user.sponsorship_answer,
+      work_eligibility_by_country: appProfile?.work_eligibility_by_country,
+      work_authorized: appProfile?.work_authorized,
+      needs_sponsorship: appProfile?.needs_sponsorship,
+    });
 
     // Period preferences remain editable in the dashboard, but they no longer gate setup. They do
     // not currently change job ranking, so requiring them here would add a screen without changing

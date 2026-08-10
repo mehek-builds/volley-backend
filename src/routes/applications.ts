@@ -39,7 +39,7 @@ import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
 import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication } from './submissionRunner';
-import { postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
+import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
@@ -345,10 +345,11 @@ function sensitiveQuestionFor(
   profile: ApplicationProfileLike,
   jdText: string | undefined,
   postingCountry: JobCountry | undefined,
+  postingCountryCode?: string,
 ): ApplicationReviewQuestion | undefined {
   return normalizeApplicationReviewQuestions(questions)
     .find((question) => sensitiveQuestionRequiresAttention(
-      question.question, question.answer, 'text', profile, jdText, postingCountry,
+      question.question, question.answer, 'text', profile, jdText, postingCountry, postingCountryCode,
     ));
 }
 
@@ -485,14 +486,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         if (educationIssues.length > 0) return { kind: 'education_drift' as const, issues: educationIssues };
         const sensitiveProfile = await loadSensitiveQuestionProfile(userId);
         const packetCountry = postingCountryFromJobContext(row.job_context);
+        const packetCountryCode = postingCountryCodeFromJobContext(row.job_context);
         const refreshedQuestions = refreshKnownQuestionAnswers(
           current.questions,
           sensitiveProfile,
           current.jd_text,
           current.questions_reviewed_at,
           packetCountry,
+          packetCountryCode,
         );
-        const sensitive = sensitiveQuestionFor(refreshedQuestions, sensitiveProfile, current.jd_text, packetCountry);
+        const sensitive = sensitiveQuestionFor(refreshedQuestions, sensitiveProfile, current.jd_text, packetCountry, packetCountryCode);
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         /* THE FIFTH SEND SITE, and the one blankRequiredQuestionLabels' own list did not name.
          *
@@ -906,6 +909,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         current.jd_text,
         current.questions_reviewed_at,
         postingCountryFromJobContext(row.job_context),
+        postingCountryCodeFromJobContext(row.job_context),
       );
       /* THE REQUIRED-ANSWER GATE, ON THE SEND AND NOT ON THE RUN.
        *
@@ -951,6 +955,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const sensitive = sensitiveQuestionFor(
         normalizedSubmittedQuestions, sensitiveProfile, current.jd_text,
         postingCountryFromJobContext(row.job_context),
+        postingCountryCodeFromJobContext(row.job_context),
       );
       // A supported portal needs the browser run to discover and surface the live form's
       // declarations. Blocking that run on the pre-run snapshot creates a deadlock: the question
@@ -1158,6 +1163,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           review.jd_text,
           review.questions_reviewed_at,
           postingCountryFromJobContext(row.job_context),
+          postingCountryCodeFromJobContext(row.job_context),
         ),
       };
       let handoff_url: string | undefined;
@@ -1312,6 +1318,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           current.jd_text,
           current.questions_reviewed_at,
           postingCountryFromJobContext(row.job_context),
+          postingCountryCodeFromJobContext(row.job_context),
         ),
       };
       const approvalIssues: string[] = [];
@@ -1336,6 +1343,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const sensitive = sensitiveQuestionFor(
         approvalReview.questions, sensitiveProfile, approvalReview.jd_text,
         postingCountryFromJobContext(row.job_context),
+        postingCountryCodeFromJobContext(row.job_context),
       );
       if (sensitive) {
         approvalIssues.push(`Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}`);

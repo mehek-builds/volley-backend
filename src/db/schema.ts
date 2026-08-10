@@ -457,6 +457,17 @@ export const application_profile = pgTable('application_profile', {
   // answer only from these stored values, and still holds ambiguous mixed-scope questions.
   work_authorized: boolean('work_authorized'),
   needs_sponsorship: boolean('needs_sponsorship'),
+  /* One explicit declaration per country. This is the authority for application answers.
+   *
+   * `work_authorized` and `needs_sponsorship` above remain only as a compatibility projection of
+   * the US row for older clients. They cannot represent a person who may work in India and the UAE
+   * but needs sponsorship in the UK, nor can the old sponsorship bit distinguish present need from
+   * future need. Every new writer stores the scoped records and derives the two legacy columns.
+   *
+   * jsonb keeps the declaration atomic with the rest of application_profile and lets one PUT
+   * replace the visible repeater exactly. The API validates every member and rejects duplicate
+   * country codes before anything reaches this column. */
+  work_eligibility_by_country: jsonb('work_eligibility_by_country'),
   // WHEN she can start. Stored ISO (YYYY-MM-DD) because onboarding uses <input type="date">:
   // a locale-shaped string is silently dropped by a picker expecting the other order (R-014).
   availability_date: text('availability_date'),

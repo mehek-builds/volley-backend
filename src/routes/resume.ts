@@ -54,7 +54,7 @@ import {
 } from '../lib/portalSubmission';
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPortalRepair';
-import { postingCountryFromJobContext } from '../lib/jobLocation';
+import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
 import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
@@ -181,6 +181,7 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
         review.jd_text,
         review.questions_reviewed_at,
         postingCountryFromJobContext(jobContext),
+        postingCountryCodeFromJobContext(jobContext),
       ),
     },
   };
