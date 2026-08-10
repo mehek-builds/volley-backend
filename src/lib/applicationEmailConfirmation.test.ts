@@ -4,6 +4,7 @@ import { readFileSync } from 'fs';
 import type { ApplicationReviewState } from './applicationReview';
 import { isWaitingOnHuman } from './applicationStall';
 import {
+  confirmationIsStale,
   handleStoredEmployerMessage,
   reconcileSubmissionConfirmations,
   resolvePacketFromConfirmation,
@@ -212,6 +213,102 @@ test('a packet already submitted is left exactly as it is', async () => {
   }, harness.deps);
   assert.deepEqual(outcome, { resolved: false, reason: 'already_submitted' });
   assert.equal(harness.saves.length, 0);
+});
+
+/* THE REPLAY WINDOW the reordering opens, closed before anything can wire the reconciler.
+ *
+ * Resolution now runs on every delivery, so the same receipt can arrive twice and the reconciler can
+ * replay one from weeks ago. Safe while the packet stays submitted; the moment a re-run takes it out
+ * of that state, a stale receipt would stamp itself over the new attempt and clear the very
+ * attention_reason and security_code that run had just written. */
+test('a receipt older than the packet\'s latest attempt cannot re-resolve it', async () => {
+  const reRun = review({
+    status: 'awaiting_security_code',
+    attention_reason: 'a fresh code was emailed for the second attempt',
+    submission_attempted_at: '2026-08-11T09:00:00.000Z',
+    receipt: {
+      confirmation_text: 'the first receipt',
+      final_url: ALIAS,
+      captured_at: '2026-08-10T17:36:04.157Z',
+      source: 'email_fallback',
+    },
+  });
+  const harness = resolverDeps(() => ({ review: reRun }));
+  const outcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    subject: 'Thank you for applying to Cresta',
+    receivedAt: RECEIVED_AT,
+  }, harness.deps);
+  assert.deepEqual(outcome, { resolved: false, reason: 'stale_confirmation' });
+  assert.equal(harness.saves.length, 0);
+});
+
+test('a redelivery cannot restamp a receipt the packet already holds', async () => {
+  const held = review({
+    status: 'needs_attention',
+    attention_reason: 'a later run stopped on something new',
+    receipt: {
+      confirmation_text: 'the same receipt',
+      final_url: ALIAS,
+      captured_at: RECEIVED_AT.toISOString(),
+      source: 'email_fallback',
+    },
+  });
+  const harness = resolverDeps(() => ({ review: held }));
+  const outcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    receivedAt: RECEIVED_AT,
+  }, harness.deps);
+  assert.deepEqual(outcome, { resolved: false, reason: 'stale_confirmation' });
+  assert.equal(harness.saves.length, 0);
+});
+
+/* The guard must not refuse the case it exists beside: the measured Cresta ordering, where the run
+ * attempted a submission at 17:35:04 and the employer confirmed at 17:36:04. An attempt BEFORE the
+ * receipt is what a receipt is for. */
+test('a receipt newer than the attempt it answers still resolves', async () => {
+  const harness = resolverDeps(() => ({ review: AWAITING_A_CODE }));
+  const outcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    receivedAt: RECEIVED_AT,
+  }, harness.deps);
+  assert.equal(outcome.resolved, true);
+  assert.equal(harness.saves.length, 1);
+  assert.equal(confirmationIsStale(AWAITING_A_CODE, RECEIVED_AT), false);
+  // A packet with no submission history at all is never stale.
+  assert.equal(confirmationIsStale(review(), RECEIVED_AT), false);
+  // An older managed receipt does not block a genuine later email receipt.
+  assert.equal(
+    confirmationIsStale(
+      review({
+        receipt: {
+          confirmation_text: 'earlier',
+          final_url: ALIAS,
+          captured_at: '2026-08-10T17:00:00.000Z',
+          source: 'managed_browser',
+        },
+      }),
+      RECEIVED_AT,
+    ),
+    false,
+  );
+});
+
+test('a claim taken after the confirmation arrived also makes it stale', () => {
+  assert.equal(
+    confirmationIsStale(review({ submission_claimed_at: '2026-08-11T09:00:00.000Z' }), RECEIVED_AT),
+    true,
+  );
+  assert.equal(
+    confirmationIsStale(review({ submitted_at: '2026-08-11T09:00:00.000Z' }), RECEIVED_AT),
+    true,
+  );
 });
 
 test('a packet with no review yet is not invented one', async () => {
@@ -424,15 +521,17 @@ test('a resolution failure is rethrown but does not withhold the forward', async
   assert.equal(seen.length, 1);
 });
 
-test('a receipt with no ledger row in hand resolves the packet and forwards nothing', async () => {
+/* A packet that says "submitted, from an email" owes a message anyone can go and read. Only the
+ * three FORWARDING gates were removed; the ledger row stays required, so the state and the evidence
+ * for it cannot come apart. Unreachable in practice, since a conflicting insert means the row is
+ * there to be selected, and a redelivery resolves it either way. */
+test('a confirmation with no ledger row is not resolved from thin air', async () => {
   const { deps, calls } = handlerDeps();
   const result = await handle('submission_confirmation', null, deps);
   assert.equal(result.forwarded, false);
   assert.equal(result.reason, 'message_not_stored');
-  // The alias still names the packet, so the receipt is still acted on even with no ledger row in
-  // hand: the mail arrived, and that is the fact that resolves the application.
-  assert.equal(calls.resolved.length, 1);
-  assert.equal(result.resolved, true);
+  assert.equal(calls.resolved.length, 0);
+  assert.equal(result.resolved, false);
 });
 
 // ---- reconciling the confirmations that are already stored ----

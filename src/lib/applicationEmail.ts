@@ -750,7 +750,40 @@ export type PacketReviewLookup = { review: ApplicationReviewState | null } | nul
 
 export type SubmissionConfirmationOutcome =
   | { resolved: true; review: ApplicationReviewState }
-  | { resolved: false; reason: 'packet_not_found' | 'review_missing' | 'already_submitted' };
+  | {
+    resolved: false;
+    reason: 'packet_not_found' | 'review_missing' | 'already_submitted' | 'stale_confirmation';
+  };
+
+/* A RECEIPT MAY ONLY MOVE A PACKET FORWARD, never backwards over something newer.
+ *
+ * Resolution now runs on every delivery of a confirmation rather than only on the first successful
+ * forward, which is the whole point of the reordering above. That opens a window this guard closes:
+ * the same message can arrive twice, and reconcileSubmissionConfirmations can replay a message from
+ * weeks ago. While the packet stays 'submitted' the status check alone is enough. The moment it
+ * leaves - a re-run, a restart, anything that puts a new attempt in front of an employer - a replay
+ * of the OLD confirmation would stamp its receipt over the new one and, worse, clear the
+ * attention_reason and security_code the new run had just written. The clearing in
+ * reviewFromSubmissionConfirmation is correct for the receipt that answers the CURRENT attempt and
+ * wrong for one that answers a previous one.
+ *
+ * Three timestamps decide it, and each is read as "the packet knows about something at least this
+ * recent": a receipt already captured at or after this message, or a submission attempted, claimed
+ * or completed after it. Comparison is a plain string compare on fixed-width ISO-8601 UTC, the same
+ * convention orderByStalledAt relies on: every writer of these fields produces toISOString(), so
+ * lexicographic and chronological order coincide.
+ *
+ * It is not reachable through the webhook today, because submitRequestDisposition refuses to re-run
+ * a submitted packet, so nothing takes a packet back out of 'submitted' for a stale receipt to land
+ * on. It becomes reachable the moment the reconciler is wired to anything, which is precisely why it
+ * is here now rather than in the change that wires it.
+ */
+export function confirmationIsStale(current: ApplicationReviewState, receivedAt: Date): boolean {
+  const at = receivedAt.toISOString();
+  if (current.receipt?.captured_at && current.receipt.captured_at >= at) return true;
+  return [current.submitted_at, current.submission_attempted_at, current.submission_claimed_at]
+    .some((stamp) => Boolean(stamp && stamp > at));
+}
 
 export type SubmissionConfirmationDeps = {
   loadReview?: (input: { applicationId: string; userId: string }) => Promise<PacketReviewLookup>;
@@ -820,6 +853,7 @@ export async function resolvePacketFromConfirmation(input: {
   const current = lookup.review;
   if (!current) return { resolved: false, reason: 'review_missing' };
   if (current.status === 'submitted') return { resolved: false, reason: 'already_submitted' };
+  if (confirmationIsStale(current, input.receivedAt)) return { resolved: false, reason: 'stale_confirmation' };
   const review = reviewFromSubmissionConfirmation(current, input);
   await (deps.saveReview ?? savePacketReview)({
     applicationId: input.applicationId,
@@ -987,14 +1021,25 @@ export async function handleStoredEmployerMessage(input: {
   const { aliasRow, message, classification, receivedAt } = input;
   let resolved = false;
   let resolutionError: unknown = null;
-  if (classification === 'submission_confirmation' && aliasRow.generated_resume_id) {
+  /* THE LEDGER ROW IS REQUIRED, and only the FORWARDING gates were removed.
+   *
+   * A packet reading "submitted, source email_fallback" is a claim about a message, so the message
+   * has to exist to be pointed at: the evidence and the state stay together or the next person
+   * investigating has a status with nothing behind it. This is the one thing the original ordering
+   * got right and it is kept deliberately, separate from the three gates that were wrong.
+   *
+   * It costs nothing. `message` is null only if the insert conflicted AND the follow-up select by
+   * dedupe key then found nothing, which the conflict itself says is impossible; if it ever happens
+   * it is a database anomaly, the webhook is told nothing was accepted, and the redelivery both
+   * stores the row and resolves the packet. */
+  if (classification === 'submission_confirmation' && aliasRow.generated_resume_id && message) {
     try {
       const outcome = await deps.resolveConfirmation({
         applicationId: aliasRow.generated_resume_id,
         userId: aliasRow.user_id,
         alias: aliasRow.alias,
-        subject: message?.subject ?? undefined,
-        receivedAt: message?.received_at ?? receivedAt,
+        subject: message.subject ?? undefined,
+        receivedAt: message.received_at ?? receivedAt,
       });
       resolved = outcome.resolved;
     } catch (error) {
