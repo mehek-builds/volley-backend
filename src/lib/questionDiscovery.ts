@@ -2102,6 +2102,10 @@ function parsePriorApplicationQuestion(
   if (/^(?:employment|work)$/.test(employmentWithoutTemporal ?? '')) {
     return { family: 'prior_application', valid: true, globalPriorApplicationHistory: true };
   }
+  const typedEmployment = employmentWithoutTemporal?.match(/^(.+)\s+(?:employment|work)$/)?.[1]?.trim();
+  if (typedEmployment && typedEmployment.split(/\s+/).length <= 6) {
+    return { family: 'prior_application', valid: false };
+  }
   const employmentScope = employmentWithoutTemporal?.match(/^(?:employment|work)\s+(.+)$/)?.[1]?.trim();
   if (employmentScope) {
     const packetReference = /^(?:here|with us|at us|(?:at|with) (?:this|the|our|current|the current) (?:company|employer))$/.test(employmentScope)
@@ -2137,7 +2141,7 @@ function parsePriorApplicationQuestion(
     .replace(/\s+(?:before|previously|already|yet|ever|earlier|so far|to date|in the past|within the last \d+(?: \d+)? months?)$/, '')
     .trim();
   const organizationalUnitObject = boundedToObject?.match(
-    /^(.*\b(teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies)))(?: (in|at|based in|located in|within) (.+))?$/,
+    /^(.*\b(teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies)))(?: (in|at|based in|located in|located at|within|for) (.+))?$/,
   );
   if (organizationalUnitObject) {
     const fullUnit = organizationalUnitObject[1];
@@ -2145,9 +2149,14 @@ function parsePriorApplicationQuestion(
     const preposition = organizationalUnitObject[3];
     const complement = organizationalUnitObject[4]?.trim();
     const ambiguousHead = /^(?:functions?|practices?)$/.test(head);
-    const organizationalQualifier = /\b(?:organizational|business|corporate|company|department|team|employer)\b/.test(
-      fullUnit.slice(0, -head.length).trim(),
-    );
+    const unitPrefix = fullUnit.slice(0, -head.length).trim();
+    const employerUnitPrefix = unitPrefix.replace(/^the\s+/, '');
+    const organizationalQualifier = /^our(?:\s+|$)/.test(unitPrefix)
+      || (packetEmployer
+        ? siblingEmployerAliases(packetEmployer).some((alias) => (
+          employerUnitPrefix === alias || employerUnitPrefix.startsWith(`${alias} `)
+        ))
+        : false);
     if (ambiguousHead && !organizationalQualifier) return null;
     if (!preposition) return { family: 'prior_application', valid: false };
     const locationTargets = frozenJobRelocationLocationsFromContext(jdText).flatMap((location) => {
@@ -2158,9 +2167,11 @@ function parsePriorApplicationQuestion(
     const exactEmployer = Boolean(
       complement && packetEmployer && exactKnownTarget(complement, siblingEmployerAliases(packetEmployer)),
     );
-    const validComplement = preposition === 'located in'
+    const validComplement = /^(?:located in|located at)$/.test(preposition)
       ? exactLocation
-      : exactLocation || exactEmployer;
+      : preposition === 'for'
+        ? exactEmployer
+        : exactLocation || exactEmployer;
     if (validComplement) return { family: 'prior_application', valid: false };
   }
   if (isSkillOrWorkApplicationObject(remainder)) return null;
