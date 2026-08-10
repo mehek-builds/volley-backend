@@ -77,6 +77,10 @@ export function attentionCategoriesForReasons(reasons: readonly string[]): Appli
      * as an application already sitting with an employer. */
     if (/security code was emailed|asked for a security code by email/.test(normalized)) {
       categories.add('security_code');
+    } else if (/privacy notice before the application form opens|data consent/.test(normalized)) {
+      categories.add('privacy_consent');
+    } else if (/sign in|log in|make an account|create an account|account login/.test(normalized)) {
+      categories.add('account_login');
     } else if (/does not know whether this application went through|pressed send on .*and could not confirm what came back|could not confirm what came back/.test(normalized)) {
       /* SECOND, immediately after the other state that may already be with an employer, and ahead of
        * everything that says nothing was sent. A submit whose outcome is unknown is not a breakage

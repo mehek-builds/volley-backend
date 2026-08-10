@@ -4,6 +4,9 @@ import {
   canonicalSupportedPortalUrl,
   CAPTCHA_BLOCKER,
   detectPortal,
+  ICIMS_ATTENDED_GATE_REASON,
+  ICIMS_SECURITY_CODE_GATE_REASON,
+  JOBVITE_ATTENDED_GATE_REASON,
   MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
 } from './portalSubmission';
 
@@ -154,7 +157,12 @@ export function extensionHandoffPacketMatches(input: {
   if (input.frozenHandoffUrl) {
     const reasons = input.attentionReason?.split('\n') ?? [];
     const eligibleRecoveryCause = reasons.includes(MANAGED_NETWORK_ACCESS_RESTRICTION_REASON)
-      || (frozenPortal === 'smartrecruiters' && reasons.includes(CAPTCHA_BLOCKER));
+      || (frozenPortal === 'smartrecruiters' && reasons.includes(CAPTCHA_BLOCKER))
+      || (frozenPortal === 'jobvite' && reasons.includes(JOBVITE_ATTENDED_GATE_REASON))
+      || (frozenPortal === 'icims' && (
+        reasons.includes(ICIMS_ATTENDED_GATE_REASON)
+        || reasons.includes(ICIMS_SECURITY_CODE_GATE_REASON)
+      ));
     if (input.status !== 'needs_attention' || !eligibleRecoveryCause) return false;
   }
 
@@ -173,6 +181,24 @@ export function extensionHandoffPacketMatches(input: {
     if (handoffPortal !== frozenPortal || frozenTenant !== smartRecruitersTenant(input.frozenHandoffUrl)) return false;
     const handoffCanonical = canonicalSupportedPortalUrl(input.frozenHandoffUrl, handoffPortal);
     return Boolean(handoffCanonical && currentCanonical && handoffCanonical === currentCanonical);
+  }
+  if (frozenPortal === 'jobvite' || frozenPortal === 'icims') {
+    if (!input.frozenHandoffUrl) return false;
+    let handoffPortal: string;
+    try {
+      handoffPortal = detectPortal(input.frozenHandoffUrl);
+    } catch {
+      return false;
+    }
+    if (handoffPortal !== frozenPortal) return false;
+    const handoffCanonical = canonicalSupportedPortalUrl(input.frozenHandoffUrl, handoffPortal);
+    return Boolean(
+      frozenCanonical
+      && handoffCanonical
+      && currentCanonical
+      && frozenCanonical === handoffCanonical
+      && handoffCanonical === currentCanonical,
+    );
   }
   if (frozenCanonical && currentCanonical && frozenCanonical === currentCanonical) return true;
   if (frozenCanonical && currentCanonical

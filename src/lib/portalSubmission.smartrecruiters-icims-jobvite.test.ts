@@ -2,11 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildManagedPortalActions,
+  buildManagedAttendedAccountProbeActions,
   canonicalSupportedPortalUrl,
   detectPortal,
   fillPortal,
   isAccountWalledFamily,
   managedPortalReceiptCapability,
+  managedAttendedAccountHold,
   portalApplicationUrl,
   portalCanAutoSubmit,
   portalHandoffReason,
@@ -64,6 +66,7 @@ test('rejects vendor, listing, API, malformed, and over-broad routes', () => {
     'https://jobs.smartrecruiters.com/oneclick-ui/company/Lumina1/publication/not-a-uuid',
     'https://externalhourly-omnihotels.icims.com/jobs/search',
     'https://externalhourly-omnihotels.icims.com/jobs/intro',
+    'https://jobs-express.icims.com/jobs/48173/sales-associate/apply',
     'https://login.icims.com/u/login/identifier',
     'https://community.icims.com/articles/help',
     'https://www.icims.com/jobs/1234/demo/job',
@@ -154,6 +157,81 @@ test('account-walled iCIMS and Jobvite build no actions from benign, legal, or s
     const actions = buildManagedPortalActions(family, { ...packet, questions: adversarialQuestions }, true);
     assert.deepEqual(actions, [], family);
   }
+});
+
+test('Jobvite and iCIMS managed gate probes are extract-only and never operate a user gate', () => {
+  for (const family of ['jobvite', 'icims'] as const) {
+    const actions = buildManagedAttendedAccountProbeActions(family);
+    assert.ok(actions.length > 0, family);
+    assert.ok(actions.every((action) => action.type === 'extract'), family);
+    assert.equal(actions.some((action) => action.value || action.text || action.file), false, family);
+  }
+  assert.deepEqual(buildManagedAttendedAccountProbeActions('greenhouse'), []);
+});
+
+test('Jobvite hold requires the exact captured consent control on the same job', () => {
+  const frozen = 'https://jobs.jobvite.com/worldfirst/job/oknrAfws/apply';
+  const result = {
+    title: 'Data Consent',
+    url: frozen,
+    text: 'Data Consent',
+    extracted: [{ selector: 'select#jv-country-select', label: 'jobvite_data_consent_gate', value: 'jv-country-select' }],
+  };
+  assert.deepEqual(managedAttendedAccountHold('jobvite', frozen, result), {
+    kind: 'privacy_consent',
+    reason: portalHandoffReason('jobvite'),
+    categories: ['privacy_consent'],
+  });
+  assert.equal(managedAttendedAccountHold(
+    'jobvite',
+    'https://jobs.jobvite.com/worldfirst/job/adjacentId/apply',
+    result,
+  ), null);
+  assert.equal(managedAttendedAccountHold('jobvite', frozen, { ...result, url: 'https://jobs.jobvite.com/other/job/oknrAfws/apply' }), null);
+  assert.equal(managedAttendedAccountHold('jobvite', frozen, { ...result, extracted: [] }), null);
+});
+
+test('iCIMS hold requires the exact login and hCaptcha controls on the same tenant and job', () => {
+  const frozen = 'https://jobs-express.icims.com/jobs/48173/sales-associate/login';
+  const result = {
+    title: 'Log in',
+    url: `${frozen}?mobile=true&utm_source=board`,
+    text: 'Protected by hCaptcha',
+    extracted: [
+      { selector: 'input#email[name="css_loginName"]', label: 'icims_account_login_gate', value: 'css_loginName' },
+      { selector: 'textarea[name="h-captcha-response"]', label: 'icims_hcaptcha_gate', value: 'h-captcha-response' },
+    ],
+  };
+  assert.deepEqual(managedAttendedAccountHold('icims', frozen, result), {
+    kind: 'account_login',
+    reason: portalHandoffReason('icims'),
+    categories: ['account_login', 'captcha'],
+    captchaProvider: 'hcaptcha',
+  });
+  assert.equal(managedAttendedAccountHold(
+    'icims',
+    'https://jobs-express.icims.com/jobs/48174/sales-associate/login',
+    result,
+  ), null);
+  assert.equal(managedAttendedAccountHold('icims', frozen, { ...result, url: 'https://other.icims.com/jobs/48173/sales-associate/login' }), null);
+  assert.equal(managedAttendedAccountHold('icims', frozen, { ...result, extracted: result.extracted.slice(0, 1) }), null);
+  assert.equal(managedAttendedAccountHold('icims', frozen, {
+    ...result,
+    url: 'https://jobs-express.icims.com/jobs/search',
+  }), null);
+});
+
+test('iCIMS security-code metadata is held without claiming the application was submitted', () => {
+  const frozen = 'https://jobs-express.icims.com/jobs/48173/sales-associate/login';
+  const hold = managedAttendedAccountHold('icims', frozen, {
+    title: 'Security code',
+    url: frozen,
+    text: 'Enter your security code',
+    humanVerification: { kind: 'security_code', fieldCount: 1, sentTo: 'app-123@example.com' },
+  });
+  assert.equal(hold?.kind, 'security_code');
+  assert.deepEqual(hold?.categories, ['security_code', 'account_login']);
+  assert.match(hold?.reason ?? '', /did not enter the code or submit/i);
 });
 
 test('direct SmartRecruiters never replays packet selectors outside its exact fixed controls', async () => {

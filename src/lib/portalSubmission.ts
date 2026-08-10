@@ -194,6 +194,128 @@ export function isAccountWalledFamily(portal: SupportedPortal): boolean {
   return ACCOUNT_WALLED_FAMILIES.has(portalFamily(portal));
 }
 
+export function isManagedAttendedAccountPortal(portal: SupportedPortal): boolean {
+  const family = portalFamily(portal);
+  return family === 'jobvite' || family === 'icims';
+}
+
+const JOBVITE_DATA_CONSENT_SELECTOR = 'select#jv-country-select';
+const ICIMS_LOGIN_EMAIL_SELECTOR = 'input#email[name="css_loginName"]';
+const ICIMS_HCAPTCHA_SELECTOR = 'textarea[name="h-captcha-response"]';
+const ICIMS_SECURITY_CODE_SELECTOR =
+  'input[autocomplete="one-time-code"], input[name*="verification" i], input[name*="securityCode" i]';
+
+/**
+ * Read only the exact controls captured on the two account-gated portals. These actions never
+ * type identity, choose privacy terms, solve a CAPTCHA, request a code, or submit a form.
+ */
+export function buildManagedAttendedAccountProbeActions(portal: SupportedPortal): ManagedBrowserAction[] {
+  const family = portalFamily(portal);
+  if (family === 'jobvite') {
+    return [{
+      type: 'extract',
+      selector: JOBVITE_DATA_CONSENT_SELECTOR,
+      attribute: 'id',
+      label: 'jobvite_data_consent_gate',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    }];
+  }
+  if (family === 'icims') {
+    return [
+      {
+        type: 'extract',
+        selector: ICIMS_LOGIN_EMAIL_SELECTOR,
+        attribute: 'name',
+        label: 'icims_account_login_gate',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      },
+      {
+        type: 'extract',
+        selector: ICIMS_HCAPTCHA_SELECTOR,
+        attribute: 'name',
+        label: 'icims_hcaptcha_gate',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      },
+      {
+        type: 'extract',
+        selector: ICIMS_SECURITY_CODE_SELECTOR,
+        attribute: 'name',
+        label: 'icims_security_code_gate',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      },
+    ];
+  }
+  return [];
+}
+
+export type ManagedAttendedAccountHold = {
+  kind: 'privacy_consent' | 'account_login' | 'security_code';
+  reason: string;
+  categories: Array<'privacy_consent' | 'account_login' | 'security_code' | 'captcha'>;
+  captchaProvider?: 'hcaptcha';
+};
+
+function managedExtractMatches(
+  result: ManagedBrowserResult | null | undefined,
+  label: string,
+  expected: string,
+): boolean {
+  return (result?.extracted ?? []).some((item) => item.label === label && item.value === expected);
+}
+
+/** Classify only a measured gate on the exact supported portal route. Missing evidence is unknown. */
+export function managedAttendedAccountHold(
+  portal: SupportedPortal,
+  frozenUrl: string,
+  result: ManagedBrowserResult | null | undefined,
+): ManagedAttendedAccountHold | null {
+  if (!result?.url || !isManagedAttendedAccountPortal(portal)) return null;
+  let observed: SupportedPortal;
+  try {
+    observed = detectPortal(result.url);
+  } catch {
+    return null;
+  }
+  if (portalFamily(observed) !== portalFamily(portal)) return null;
+  const frozenCanonical = canonicalSupportedPortalUrl(frozenUrl, portal);
+  const observedCanonical = canonicalSupportedPortalUrl(result.url, observed);
+  if (!frozenCanonical || !observedCanonical || frozenCanonical !== observedCanonical) return null;
+
+  const family = portalFamily(portal);
+  if (family === 'jobvite') {
+    if (!managedExtractMatches(result, 'jobvite_data_consent_gate', 'jv-country-select')) return null;
+    return {
+      kind: 'privacy_consent',
+      reason: ACCOUNT_WALLED_REASONS.jobvite,
+      categories: ['privacy_consent'],
+    };
+  }
+
+  const securityCode = result.humanVerification?.kind === 'security_code'
+    || managedExtractMatches(result, 'icims_security_code_gate', 'verificationCode')
+    || managedExtractMatches(result, 'icims_security_code_gate', 'securityCode');
+  if (securityCode) {
+    return {
+      kind: 'security_code',
+      reason: ICIMS_SECURITY_CODE_GATE_REASON,
+      categories: ['security_code', 'account_login'],
+    };
+  }
+  const login = managedExtractMatches(result, 'icims_account_login_gate', 'css_loginName');
+  const hcaptcha = managedExtractMatches(result, 'icims_hcaptcha_gate', 'h-captcha-response');
+  if (!login || !hcaptcha) return null;
+  return {
+    kind: 'account_login',
+    reason: ACCOUNT_WALLED_REASONS.icims,
+    categories: ['account_login', 'captcha'],
+    captchaProvider: 'hcaptcha',
+  };
+}
+
 export function isCaptchaGatedFamily(portal: SupportedPortal): boolean {
   return CAPTCHA_GATED_FAMILIES.has(portalFamily(portal));
 }
@@ -274,11 +396,16 @@ export function isAutonomousPortalFamily(value: string): value is AutonomousPort
 // The four account-walled platforms stop for four different reasons, and a job seeker who is told
 // "this one needs you" deserves to know which one so she knows what she is about to face. One shared
 // sentence would have been less code and less use.
+export const JOBVITE_ATTENDED_GATE_REASON =
+  'This company asks you to agree to their privacy notice before the application form opens. That choice is yours to make, so Litos stops here. Open the page and pick your country, and the form appears.';
+export const ICIMS_ATTENDED_GATE_REASON =
+  'This company asks you to make an account and prove you are human before the application form opens. Litos cannot do either of those for you, so this one needs your hands.';
+export const ICIMS_SECURITY_CODE_GATE_REASON =
+  'This iCIMS account page is waiting for a security code sent to the stored Litos application email. Litos did not enter the code or submit the application. Open the page and finish the account check in Chrome.';
+
 const ACCOUNT_WALLED_REASONS: Record<AccountWalledFamily, string> = {
-  jobvite:
-    'This company asks you to agree to their privacy notice before the application form opens. That choice is yours to make, so Litos stops here. Open the page and pick your country, and the form appears.',
-  icims:
-    'This company asks you to make an account and prove you are human before the application form opens. Litos cannot do either of those for you, so this one needs your hands.',
+  jobvite: JOBVITE_ATTENDED_GATE_REASON,
+  icims: ICIMS_ATTENDED_GATE_REASON,
   oraclecloud:
     'This company emails you a code and asks you to agree to their terms before the application form opens. Both of those need you, so Litos stops here.',
   ultipro:

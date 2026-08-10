@@ -254,8 +254,9 @@ test('submission packet only reaches for the alias through the deliverability pr
   // The old unconditional preference must not come back by any route.
   assert.doesNotMatch(runner, /applicationEmail\?\.alias \?\? contact\.email/);
   assert.doesNotMatch(runner, /ensureApplicationEmailAlias/);
-  // The choice and its reason are recorded on the review state, on both prepare paths.
-  assert.equal(runner.match(/applicant_email: packet\.applicantEmail/g)?.length, 2);
+  // The choice and its reason are recorded on both full-fill paths and the attended account-gate
+  // path. The latter validates the frozen alias before handing Jobvite or iCIMS to Chrome.
+  assert.equal(runner.match(/applicant_email: packet\.applicantEmail/g)?.length, 3);
 });
 
 test('a retired packet email releases the final claim and requires regeneration before any employer request', async () => {

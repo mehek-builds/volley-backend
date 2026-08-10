@@ -53,6 +53,7 @@ import {
   managedCaptchaProvider,
   detectCaptchaProvider,
   captchaProviderForFamily,
+  buildManagedAttendedAccountProbeActions,
   buildManagedPortalActions,
   budgetDroppedReviewedQuestions,
   attachManagedFieldOptions,
@@ -76,9 +77,11 @@ import {
   managedResultFilledFields,
   managedAnswerLossReasons,
   managedResultHasCoverLetterUpload,
+  managedAttendedAccountHold,
   navigateToApplicationForm,
   portalApplicationUrl,
   isAccountWalledFamily,
+  isManagedAttendedAccountPortal,
   isCaptchaGatedFamily,
   portalCanAutoSubmit,
   portalHandoffReason,
@@ -2112,6 +2115,63 @@ async function prepareManaged(
   }, 'Application portal prepared with Stratus Sandbox');
 }
 
+/**
+ * Capture the exact attended gate for Jobvite or iCIMS without operating it. Unlike the generic
+ * managed preparation this sends no identity, file, answer, consent, CAPTCHA, or submit action.
+ * Building the packet first is intentional: it validates the immutable generated PDF and the
+ * packet-specific Litos email before Chrome is offered the handoff.
+ */
+async function prepareManagedAttendedAccountGate(
+  row: ResumeRow,
+  current: ApplicationReviewState,
+  portal: SupportedPortal,
+  runId: string,
+  fastify: FastifyInstance,
+) {
+  await writeReview(row, nextReview(current, {
+    status: 'filling',
+    submission_run_id: runId,
+    submission_error: undefined,
+  }));
+  const packet = omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal)));
+  const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
+  const result = await runManagedBrowser(
+    applicationUrl,
+    buildManagedAttendedAccountProbeActions(portal),
+    { screenshot: false },
+  );
+  const hold = managedAttendedAccountHold(portal, current.portal_url!, result);
+  const attentionReason = hold?.reason
+    ?? 'Litos could not verify the exact account gate for this application, so it did not enter any information or send anything. Open the saved company page in Chrome to continue.';
+  const attentionCategories = hold?.categories ?? ['form_not_reached' as const];
+  const review = nextReview(current, {
+    status: 'needs_attention',
+    submission_run_id: runId,
+    filled_fields: [],
+    extension_handoff_url: hold ? canonicalSupportedPortalUrl(result.url, portal) : undefined,
+    ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
+    verification: { status: hold?.kind === 'security_code' ? 'handoff' : 'not_needed' },
+    attention_reason: attentionReason,
+    attention_categories: attentionCategories,
+    ...(hold?.captchaProvider
+      ? beginStall(current, {
+        surface: 'server_run',
+        provider: hold.captchaProvider,
+        stage: 'before_fill',
+        source: 'observed',
+      })
+      : {}),
+    submission_error: undefined,
+  });
+  await writeReview(row, review);
+  fastify.log.info({
+    applicationId: row.id,
+    portal,
+    gate: hold?.kind ?? 'unverified',
+    applicantEmailSource: packet.applicantEmail?.source,
+  }, 'Application held at an attended account gate without operating it');
+}
+
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
   const stored = row.spec as StoredSpec;
   const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
@@ -2197,6 +2257,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   }
   if (shouldUseLocalControlledBrowser(portal)) {
     await prepareControlled(row, current, runId, authorization, fastify);
+    return;
+  }
+  if (isManagedStratusProvider() && isManagedAttendedAccountPortal(portal)) {
+    await prepareManagedAttendedAccountGate(row, current, portal, runId, fastify);
     return;
   }
   // Account-walled portals stop HERE, before any browser opens, and this is a second instance of
