@@ -17,7 +17,7 @@ import { AUTOMATIC_CAPTCHA_CONSENT_VERSION, AUTOMATIC_SUBMISSION_CONSENT_VERSION
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
 import { generated_resumes } from '../db/schema';
 import { isComposioConfigured } from '../lib/composioConnections';
-import { selectApplicationProfileRow } from '../lib/applicationFacts';
+import { isUndefinedColumnError, selectApplicationProfileRow, upsertApplicationProfile } from '../lib/applicationFacts';
 import { verificationEmailSource } from '../lib/verificationEmailSource';
 import { countryEligibilityForRead } from '../lib/workEligibility';
 
@@ -83,8 +83,33 @@ async function reviewedSubmitCount(userId: string): Promise<number> {
 // The one thing that IS stored is completion (users.onboarding_completed_at), because it gates
 // harvest and therefore has to be an explicit act rather than an inference. See harvest.ts.
 
-type Step = 'focus' | 'sponsorship' | 'resume' | 'impact' | 'base' | 'done';
+type Step = 'focus' | 'sponsorship' | 'resume' | 'impact' | 'base' | 'gaps' | 'done';
 
+/* 'gaps' IS BACK IN THIS UNION, and the reason #116 took it out is the reason this is safe now.
+ *
+ * #116's diff recorded the failure exactly: "Every gap field is optional and skippable, so gating
+ * on `gaps.length` derives 'gaps' FOREVER for anyone who skipped them: targeting becomes
+ * unreachable, and worse, a student who reached targeting anyway and saved it still lands back on
+ * gaps on every reload."
+ *
+ * Two things changed, and both are load-bearing:
+ *
+ *  1. WHAT IS ASKED. It gates on SETUP_GAP_FIELDS (gpa, gpa_scale, major), not on `gaps.length`.
+ *     The old gate counted desired_salary - a field whose own label says "Optional. Left blank on
+ *     every form unless you set it." - so the screen appeared for essentially everybody and
+ *     appeared forever. It also counted languages and referral_source_default, which the base
+ *     screen now collects, so gating on them would re-ask a question the student just answered one
+ *     screen earlier.
+ *  2. WHETHER IT WAS ASKED. `gapsAsked` is a stored fact
+ *     (application_profile.setup_gaps_asked_at), not an inference from the fields being filled.
+ *     Skipping stamps it. That is the whole of what "forever" needed and did not have: skipping
+ *     left the fields empty, the fields being empty was the gate, so skipping re-derived the
+ *     screen. Asking is now a different question from answering.
+ *
+ * The step also sits immediately before 'done' rather than before the old 'targeting' gate, so
+ * even if the stamp never lands the student is one Finish away from a completed account, and
+ * `completed` short-circuits at the top of this function permanently.
+ */
 export function onboardingStepFrom(input: {
   completed: boolean;
   hasResume: boolean;
@@ -92,6 +117,10 @@ export function onboardingStepFrom(input: {
   hasFocus: boolean;
   hasSponsorshipAnswer: boolean;
   hasBaseResume: boolean;
+  /** At least one of SETUP_GAP_FIELDS is still missing. */
+  hasSetupGaps?: boolean;
+  /** The screen has been PUT IN FRONT OF the student before, answered or skipped. */
+  gapsAsked?: boolean;
 }): Step {
   if (input.completed && input.hasImpactReview !== false) return 'done';
   if (!input.hasResume) return 'resume';
@@ -99,6 +128,7 @@ export function onboardingStepFrom(input: {
   if (!input.hasFocus) return 'focus';
   if (!input.hasSponsorshipAnswer) return 'sponsorship';
   if (!input.hasBaseResume) return 'base';
+  if (input.hasSetupGaps && !input.gapsAsked) return 'gaps';
   return 'done';
 }
 
@@ -153,6 +183,83 @@ const GAP_FIELDS = [
   'desired_salary_currency',
   'referral_source_default',
 ] as const;
+
+/* The subset of GAP_FIELDS that DECIDES WHETHER THE SCREEN APPEARS. Not the same list, on purpose.
+ *
+ * The screen still RENDERS every outstanding gap it is given - if a student is routed here for a
+ * missing major, they are shown the salary and referral inputs too, because they are already on the
+ * screen and the marginal cost of one more input is a second. This list is only the gate.
+ *
+ * Why these three and not the other four:
+ *   gpa, gpa_scale, major   Academic facts every early-career form asks and no form can teach us,
+ *                           because a form asks for them rather than offering them. academicSeedFrom
+ *                           seeds all three from the resume parse, so the students who reach this
+ *                           screen are the ones whose resume did not print them - a small set, which
+ *                           is what makes a whole screen affordable.
+ *   desired_salary,         Explicitly optional; its own label reads "Left blank on every form
+ *   desired_salary_currency unless you set it." Gating on it would show the screen to every student
+ *                           who never set a salary, which is nearly all of them. This is the field
+ *                           that made the pre-#116 gate fire for everybody.
+ *   languages,              Already collected one screen earlier, on base (BaseResumeStep writes
+ *   referral_source_default both). Gating on them would re-ask what the student just answered.
+ */
+const SETUP_GAP_FIELDS = ['gpa', 'gpa_scale', 'major'] as const;
+
+/** Whether the setup gaps screen has something to ask THIS student. */
+export function hasSetupGapsFrom(gaps: readonly string[]): boolean {
+  return SETUP_GAP_FIELDS.some((f) => gaps.includes(f));
+}
+
+/* Has the screen been put in front of this student before?
+ *
+ * THREE STATES, not two, and the third is the whole reason this is a function.
+ *   a timestamp -> asked. Answered or skipped; the screen is done with them either way.
+ *   null        -> never asked. Route to it.
+ *   undefined   -> the column is not there: `setup_gaps_asked_at` is in APPLICATION_FACT_COLUMNS,
+ *                  so selectApplicationProfileRow drops it from the projection when the migration
+ *                  has not run and the key is simply absent from the row.
+ *
+ * Undefined reads as ASKED, which suppresses the step. Both repos deploy on merge and the migration
+ * is run by hand, so the deploy can lead it; in that window there is nowhere to record the stamp,
+ * and a step that cannot record having been asked is a step nobody can leave. Suppressing it makes
+ * the unmigrated window behave exactly as production does today - no gaps screen at all - instead
+ * of trapping every student with an unprinted GPA on a screen with no exit.
+ *
+ * A missing ROW is a different thing from a missing column and reads as NOT asked: an account with
+ * no application_profile row has answered nothing, and POST /onboarding/gaps-asked creates the row.
+ */
+export function gapsAskedFrom(row: Record<string, unknown> | undefined): boolean {
+  if (!row) return false;
+  if (!('setup_gaps_asked_at' in row)) return true;
+  return row['setup_gaps_asked_at'] != null;
+}
+
+/** Can the stamp be recorded at all? False only in the window where the deploy leads the migration. */
+export function gapsAckSupportedFrom(row: Record<string, unknown> | undefined): boolean {
+  // No row is not evidence either way, and it is the COMMON case here: profile.ts only creates the
+  // row when the parse produced a seed, so a student whose resume printed no GPA and no major - the
+  // exact population this screen exists for - reaches it with no row at all. Assuming supported is
+  // what keeps the rail's denominator and the route's answer agreeing for them; if the column really
+  // is missing, POST /onboarding/gaps-asked answers `recorded: false` and the client advances on its
+  // own rather than re-reading a step it can never leave.
+  if (!row) return true;
+  return 'setup_gaps_asked_at' in row;
+}
+
+/* DOES THIS STUDENT'S FLOW CONTAIN THE GAPS SCREEN? Served to /start so the step rail's denominator
+ * is the server's answer rather than a second derivation of it.
+ *
+ * `|| asked` is the part that is easy to leave out and wrong to. Without it the value is true while
+ * the student stands on the screen and false the moment they answer it, so the printed total drops
+ * from seven to six underneath them on the last screen of setup. Having been asked is permanent, so
+ * a flow that contained the screen goes on containing it. That is also why this is not simply
+ * `step === 'gaps'`: the rail has to count the screen from 'base', one step BEFORE they reach it.
+ */
+export function includesGapsStepFrom(gaps: readonly string[], row: Record<string, unknown> | undefined): boolean {
+  if (!gapsAckSupportedFrom(row)) return false;
+  return hasSetupGapsFrom(gaps) || gapsAskedFrom(row);
+}
+
 const completeBodySchema = z.object({
   automatic_submission_enabled: z.boolean().default(false),
   automatic_verification_enabled: z.boolean().default(false),
@@ -358,6 +465,10 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       hasFocus: has_focus,
       hasSponsorshipAnswer: has_sponsorship_answer,
       hasBaseResume: has_base_resume,
+      // The academic three only, and only until the screen has been shown once. See
+      // SETUP_GAP_FIELDS and gapsAskedFrom for why each half is needed.
+      hasSetupGaps: hasSetupGapsFrom(gaps),
+      gapsAsked: gapsAskedFrom(appProfile) || !gapsAckSupportedFrom(appProfile),
     });
 
     return reply.status(200).send({
@@ -376,6 +487,10 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       has_targeting,
       learned,
       gaps,
+      // Whether the flow contains the setup gaps screen, which is the step rail's denominator. The
+      // client must not re-derive this from `gaps`: see includesGapsStepFrom for the two states
+      // that look identical from the gap list alone.
+      includes_gaps_step: includesGapsStepFrom(gaps, appProfile),
       // Starting values for the gap questions, from the student's own resume. Never a stored
       // answer: see gapSuggestionsFrom for why offering one is not the inference schema.ts forbids.
       gap_suggestions: gapSuggestionsFrom(gaps, parsed),
@@ -399,6 +514,32 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // client re-deriving that rule is a client that will get it wrong.
       automatic_captcha_enabled: captchaResumeGranted(user),
     });
+  });
+
+  /* Record that the setup gaps screen was PUT IN FRONT OF the student. Save and Skip both call it.
+   *
+   * This is the exit from that screen, and it has to be a separate act from saving the fields
+   * because skipping saves nothing - which is precisely how gating on the fields alone derived
+   * 'gaps' forever before #116 removed the step. See setup_gaps_asked_at in schema.ts.
+   *
+   * NEVER 500s, and never blocks the student on a database that has not run the migration. The
+   * write is the only thing that can fail here, the client's next move is a state refresh either
+   * way, and gapsAskedFrom already reads an absent column as asked - so a failed stamp on an
+   * unmigrated database lands the student on 'done', which is where they were going.
+   */
+  fastify.post('/onboarding/gaps-asked', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    try {
+      await upsertApplicationProfile(userId, { setup_gaps_asked_at: new Date() });
+      return reply.status(200).send({ recorded: true });
+    } catch (error) {
+      // setup_gaps_asked_at is the ONLY value in this write, so upsertApplicationProfile has
+      // nothing left after stripping the fact columns and rethrows rather than reporting a success
+      // that wrote nothing. That is right for a save and wrong for this: with the column absent the
+      // step is suppressed anyway, so there is nothing to record and nothing to fail.
+      if (!isUndefinedColumnError(error)) throw error;
+      return reply.status(200).send({ recorded: false });
+    }
   });
 
   // Explicit act, not an inference: this is what turns harvest off, so the student takes it.

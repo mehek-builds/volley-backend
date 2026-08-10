@@ -2,8 +2,11 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   gapSuggestionsFrom,
+  gapsAskedFrom,
   gapsFrom,
   hasFiveTargetRoles,
+  hasSetupGapsFrom,
+  includesGapsStepFrom,
   hasFocusTargeting,
   hasWorkEligibilityDeclaration,
   onboardingStepFrom,
@@ -137,6 +140,132 @@ describe('onboarding step order', () => {
     for (const [expected, input] of cases) {
       assert.equal(onboardingStepFrom(input), expected);
     }
+  });
+});
+
+/* The step PR #116 deleted, and the two conditions that stop it being deleted again.
+ *
+ * #116's diff is the specification for this suite: "Every gap field is optional and skippable, so
+ * gating on `gaps.length` derives 'gaps' FOREVER for anyone who skipped them." Each test below is
+ * one half of why that no longer follows. */
+describe('the setup gaps step', () => {
+  const ready = {
+    completed: false,
+    hasResume: true,
+    hasFocus: true,
+    hasSponsorshipAnswer: true,
+    hasBaseResume: true,
+  };
+
+  test('an unasked student with a missing academic fact is routed to it, after the one-page review', () => {
+    assert.equal(onboardingStepFrom({ ...ready, hasSetupGaps: true, gapsAsked: false }), 'gaps');
+    // Strictly after base: the screen is the last thing before Done, not a detour from the payoff.
+    assert.equal(onboardingStepFrom({ ...ready, hasBaseResume: false, hasSetupGaps: true, gapsAsked: false }), 'base');
+  });
+
+  /* THE #116 REGRESSION, stated as directly as it can be. Skipping saves nothing, so the fields are
+     still missing on the next request; only the stamp distinguishes this state from never-asked. */
+  test('skipping is permanent: a student asked once is never routed back, fields still empty', () => {
+    assert.equal(onboardingStepFrom({ ...ready, hasSetupGaps: true, gapsAsked: true }), 'done');
+  });
+
+  test('a student with nothing outstanding never sees it', () => {
+    assert.equal(onboardingStepFrom({ ...ready, hasSetupGaps: false, gapsAsked: false }), 'done');
+  });
+
+  /* Completion outranks it in both directions. A finished account that later empties a GPA field in
+     Settings must not be dragged back into setup, and the short-circuit at the top is what does it. */
+  test('a completed account is never routed back into setup by a new gap', () => {
+    assert.equal(onboardingStepFrom({ ...ready, completed: true, hasSetupGaps: true, gapsAsked: false }), 'done');
+  });
+
+  /* Absent flags are the pre-existing callers and the unmigrated read path. Both must behave as the
+     flow did before this shipped, which is: no gaps step at all. */
+  test('callers that pass neither flag get the flow exactly as it was', () => {
+    assert.equal(onboardingStepFrom(ready), 'done');
+  });
+
+  describe('what decides whether the screen appears', () => {
+    test('the academic three gate it', () => {
+      for (const field of ['gpa', 'gpa_scale', 'major']) {
+        assert.equal(hasSetupGapsFrom([field]), true, `${field} should open the screen`);
+      }
+    });
+
+    /* The fields that made the pre-#116 gate fire for everybody, and the two the base screen now
+       collects one step earlier. Gating on any of them brings back a screen nobody can finish
+       (desired_salary) or one that re-asks what was just answered (languages, referral). */
+    test('optional and already-asked fields do not', () => {
+      assert.equal(hasSetupGapsFrom(['desired_salary', 'desired_salary_currency']), false);
+      assert.equal(hasSetupGapsFrom(['languages', 'referral_source_default']), false);
+      assert.equal(hasSetupGapsFrom([]), false);
+    });
+
+    test('a full gap list still opens it, because the academic three are in it', () => {
+      assert.equal(hasSetupGapsFrom(gapsFrom(undefined)), true);
+    });
+  });
+
+  /* THREE states, and the third is the deploy window. Both repos deploy on merge and the migration
+     is run by hand, so the code can be live against a database with no such column. */
+  describe('has the student been asked', () => {
+    test('a timestamp means asked and null means not', () => {
+      assert.equal(gapsAskedFrom({ setup_gaps_asked_at: new Date() }), true);
+      assert.equal(gapsAskedFrom({ setup_gaps_asked_at: null }), false);
+    });
+
+    /* An ABSENT key is not a null one. selectApplicationProfileRow drops the column from the
+       projection when the migration has not run, and a step that cannot record having been asked is
+       a step nobody can leave - so the unmigrated window suppresses it rather than trapping anyone. */
+    test('an absent column reads as asked, so the step disappears rather than becoming inescapable', () => {
+      assert.equal(gapsAskedFrom({ gpa: null }), true);
+    });
+
+    test('no row at all is not asked, and the stamp creates the row', () => {
+      assert.equal(gapsAskedFrom(undefined), false);
+    });
+  });
+
+  /* The rail's denominator, which is a DIFFERENT question from "where is this student now". */
+  describe('does the flow contain the screen', () => {
+    const OPEN = ['gpa', 'gpa_scale', 'major'];
+
+    test('it is counted one step early, from base, or the total grows underneath them', () => {
+      assert.equal(includesGapsStepFrom(OPEN, { setup_gaps_asked_at: null }), true);
+    });
+
+    /* The half that is easy to omit. Answering the screen empties the gap list, so a denominator
+       read from the list alone drops from seven to six on the last screen of setup - the same class
+       of defect as #285, pointing the other way. */
+    test('it stays counted after the student answers it and the gaps close', () => {
+      assert.equal(includesGapsStepFrom([], { setup_gaps_asked_at: new Date() }), true);
+    });
+
+    test('skipping keeps it counted too, and skipping is what leaves the gaps open', () => {
+      assert.equal(includesGapsStepFrom(OPEN, { setup_gaps_asked_at: new Date() }), true);
+    });
+
+    test('a student the screen was never for is never counted a seventh step', () => {
+      assert.equal(includesGapsStepFrom(['desired_salary'], { setup_gaps_asked_at: null }), false);
+      assert.equal(includesGapsStepFrom([], { setup_gaps_asked_at: null }), false);
+    });
+
+    /* The rail and the route have to agree in the deploy window as well, in BOTH directions: no
+       column and a row means the route will never answer 'gaps', so counting it would print a
+       seventh step nobody walks. */
+    test('an unmigrated database counts six, because the route will never route to it', () => {
+      assert.equal(includesGapsStepFrom(OPEN, { gpa: null }), false);
+    });
+
+    /* ...and no row at all is the student this screen exists for - profile.ts creates the row only
+       when the parse produced a seed - so they are counted and the route does send them. */
+    test('no row is counted, matching the step the route derives for them', () => {
+      assert.equal(includesGapsStepFrom(OPEN, undefined), true);
+      assert.equal(
+        onboardingStepFrom({ ...ready, hasSetupGaps: hasSetupGapsFrom(OPEN), gapsAsked: gapsAskedFrom(undefined) }),
+        'gaps',
+      );
+    });
   });
 });
 
