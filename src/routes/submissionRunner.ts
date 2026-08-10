@@ -109,6 +109,7 @@ import {
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { resolveBlobUrl } from '../lib/resumeAccess';
+import { currentPacketAudit } from '../lib/packetAuditService';
 import { decryptRow } from './applicationProfile';
 import { readExperienceBank } from '../db/experienceBank';
 import { declaredSkillsList } from './profile';
@@ -2246,6 +2247,22 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   let current = readApplicationReview(stored);
   if (!current) throw new Error('We do not have a link to the company application page');
   current = await repairReviewPortalFromMonitoredJob(row, current);
+  const packetAudit = await currentPacketAudit(row);
+  if (!packetAudit.valid) {
+    fastify.log.warn(
+      { applicationId: row.id, code: packetAudit.code },
+      'Application preparation withheld because the exact packet audit is missing or stale',
+    );
+    await writeReview(row, nextReview(current, {
+      status: 'needs_attention',
+      attention_reason: packetAudit.reason,
+      attention_categories: ['evidence_gap'],
+      submission_authorization: undefined,
+      submission_claimed_at: undefined,
+      submission_claim_id: undefined,
+    }));
+    return;
+  }
   const portalUrl = current.portal_url;
   if (!portalUrl) throw new Error('We do not have a link to the company application page');
   const portal = detectPortal(portalUrl);
@@ -2746,6 +2763,25 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
 } = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
+  const packetAudit = await currentPacketAudit(row);
+  if (!packetAudit.valid) {
+    const finishingSecurityCode = Boolean(options.securityCode) && Boolean(current.security_code);
+    fastify.log.error(
+      { applicationId: row.id, code: packetAudit.code },
+      'Submission withheld because the exact packet audit is missing or stale',
+    );
+    await writeReview(row, nextReview(current, {
+      status: finishingSecurityCode ? 'awaiting_security_code' : 'needs_attention',
+      attention_reason: finishingSecurityCode
+        ? `${securityCodeAttentionReason(current.security_code!)}\n${packetAudit.reason}`
+        : packetAudit.reason,
+      attention_categories: finishingSecurityCode ? ['security_code', 'evidence_gap'] : ['evidence_gap'],
+      submission_authorization: undefined,
+      submission_claimed_at: undefined,
+      submission_claim_id: undefined,
+    }));
+    return;
+  }
   const leadIssues = runnerLeadAlignmentIssues(row);
   if (leadIssues.length > 0) {
     fastify.log.error(

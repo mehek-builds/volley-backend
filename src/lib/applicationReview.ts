@@ -1,5 +1,6 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
+import type { PacketAudit } from './packetAudit';
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported, type AutofillApplicantSnapshot } from './portalSubmission';
 
 export type ApplicationReviewQuestion = {
@@ -434,6 +435,8 @@ export type ApplicationReviewState = {
   portal_supported?: boolean;
   submission_claimed_at?: string;
   submission_claim_id?: string;
+  /** Exact server-audited packet reserved by an extension submission claim. */
+  submission_packet_version?: string;
   /* WHICH ADDRESS THE EMPLOYER WAS GIVEN, and why that one.
    *
    * Litos prefers a per-application alias so replies come back through the product and can be
@@ -457,6 +460,8 @@ export type ApplicationReviewState = {
   };
   /** Immutable applicant facts captured by the same preparation that froze this handoff. */
   applicant_snapshot?: AutofillApplicantSnapshot;
+  /** Server-owned proof that the exact JD, saved resume, answers, and stored PDF were audited. */
+  packet_audit?: PacketAudit;
   filled_fields?: string[];
   preview_screenshot_url?: string;
   submission_authorization?: {
