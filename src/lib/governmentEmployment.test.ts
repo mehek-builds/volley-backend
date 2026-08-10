@@ -1029,6 +1029,97 @@ describe('prior government employment, answered from the experience bank', () =>
     );
   });
 
+  test('target-free sibling fields use the same complete parsers for answer and refresh', () => {
+    const context = frozenJobEmployerContext('Acme');
+    const priorLabels = [
+      'Have you applied here before?',
+      'Have you previously applied to this company?',
+      'Have you applied to us before?',
+      'Have you applied to this employer before?',
+      'Applied here before',
+      'Previously applied to this company',
+      'Applied to us before',
+      'Applied to this employer before',
+    ];
+    for (const label of priorLabels) {
+      assert.equal(isPriorApplicationQuestion(label), true, label);
+      for (const [declared, expected] of [
+        [['Acme'], 'Yes'],
+        [[], 'No'],
+        [['Other Corp'], 'No'],
+      ] as const) {
+        const profile: ApplicationProfileLike = { prior_application_employers: [...declared] };
+        assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: expected }, label);
+        assert.deepEqual(
+          refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
+          [{ question: label, answer: expected }],
+          label,
+        );
+      }
+    }
+
+    const referralLabels = [
+      'Referral Source',
+      'Your referral source',
+      'Application source',
+      'The application source',
+      'Source of application',
+      'Source of your application',
+    ];
+    for (const label of referralLabels) {
+      const profile: ApplicationProfileLike = { referral_source_default: 'LinkedIn' };
+      assert.equal(classifyField(label), 'referral_source_default', label);
+      assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: 'LinkedIn' }, label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
+        [{ question: label, answer: 'LinkedIn' }],
+        label,
+      );
+    }
+
+    const relocationLabels = [
+      'Are you willing to move?',
+      'Would you be willing to move?',
+      'Willing to relocate',
+      'Relocation willingness',
+    ];
+    for (const label of relocationLabels) {
+      const profile: ApplicationProfileLike = { relocation_willingness: 'yes' };
+      assert.equal(isRelocationQuestion(label), true, label);
+      assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: 'Yes' }, label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
+        [{ question: label, answer: 'Yes' }],
+        label,
+      );
+    }
+
+    const compounds = [
+      'Have you applied here before please explain why',
+      'Have you previously applied to this company describe the outcome',
+      'Referral Source explain your answer',
+      'Source of application and who referred you',
+      'Are you willing to move and work weekends',
+      'Would you be willing to move travel 50 percent',
+      'Willing to relocate start immediately',
+      'Relocation willingness explain your answer',
+    ];
+    const profile: ApplicationProfileLike = {
+      prior_application_employers: ['Acme'],
+      referral_source_default: 'LinkedIn',
+      relocation_willingness: 'yes',
+    };
+    for (const label of compounds) {
+      const held = resolveKnownAnswer(label, 'text', profile, context);
+      assert.ok(held && 'skipReason' in held, label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
+        [{ question: label, answer: '' }],
+        label,
+      );
+    }
+  });
+
   test('unsupported named-employer history noun forms refuse and clear stale answers', () => {
     const nasa: ApplicationProfileLike = {
       experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
