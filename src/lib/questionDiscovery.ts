@@ -604,7 +604,9 @@ function previouslyAppliedAnswer(
     return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
   }
   if (declared.length === 0) return { value: 'No' };
-  const matched = declared.some((employer) => employerMatchesTarget(normalizeEmployerName(employer), parsed.target!));
+  const matched = declared.some((employer) =>
+    employerMatchesTarget(canonicalSiblingEmployerIdentity(employer), parsed.target!),
+  );
   return { value: matched ? 'Yes' : 'No' };
 }
 
@@ -1847,6 +1849,29 @@ function exactKnownTarget(raw: string, candidates: readonly string[]): string | 
   return matches[0]?.raw ?? null;
 }
 
+function canonicalSiblingEmployerIdentity(value: string): string {
+  const government = VETTED_GOVERNMENT_EMPLOYERS.get(normalizeIdentity(value));
+  return government?.canonical ?? normalizeEmployerName(value);
+}
+
+function siblingEmployerAliases(packetEmployer: string): string[] {
+  const packetGovernment = VETTED_GOVERNMENT_EMPLOYERS.get(normalizeIdentity(packetEmployer));
+  if (packetGovernment) {
+    return [...VETTED_GOVERNMENT_EMPLOYERS.entries()]
+      .filter(([, employer]) => employer.canonical === packetGovernment.canonical)
+      .map(([alias]) => alias)
+      .sort((left, right) => right.length - left.length);
+  }
+  const tokens = normalizeEmployerName(packetEmployer).split(' ').filter(Boolean);
+  return tokens.map((_, index) => tokens.slice(0, tokens.length - index).join(' '));
+}
+
+function validatedSiblingEmployerTarget(raw: string, packetEmployer: string | undefined): string | null {
+  if (!packetEmployer) return null;
+  const matched = exactKnownTarget(raw, siblingEmployerAliases(packetEmployer));
+  return matched ? canonicalSiblingEmployerIdentity(packetEmployer) : null;
+}
+
 function parsePriorApplicationQuestion(
   label: string,
   jdText?: string,
@@ -1858,19 +1883,16 @@ function parsePriorApplicationQuestion(
   const remainder = normalizeIdentity(stem[1]?.trim() ?? '');
   const temporal = String.raw`(?:before|previously|in the past|within the last \d+(?: \d+)? months?)`;
   const packetEmployer = frozenJobEmployerFromContext(jdText);
-  const employerTokens = packetEmployer ? normalizeEmployerName(packetEmployer).split(' ').filter(Boolean) : [];
-  const candidates = employerTokens.map((_, index) => employerTokens.slice(0, employerTokens.length - index).join(' '));
-  for (const target of candidates) {
-    if (!target) continue;
-    const escaped = regexpEscape(target);
+  for (const alias of packetEmployer ? siblingEmployerAliases(packetEmployer) : []) {
+    const escaped = regexpEscape(alias);
     const shapes = [
       new RegExp(`^(?:at|for|to|with) ${escaped}(?: ${temporal})?$`),
       new RegExp(`^to work (?:at|for) ${escaped}(?: ${temporal})?$`),
       new RegExp(`^(?:to|for) (?:(?:a|an|the|this|any) )?(?:full time or internship )?(?:role|position|job|internship) (?:at|with|for) ${escaped}(?: ${temporal})?$`),
-      new RegExp(`^to this role or another role ${escaped} within the last \d+(?: \d+)? months?$`),
+      new RegExp(`^to this role or another role ${escaped} within the last \\d+(?: \\d+)? months?(?: as a reminder if you have already applied you will not be reconsidered)?$`),
     ];
     if (shapes.some((shape) => shape.test(remainder))) {
-      return { family: 'prior_application', valid: true, target };
+      return { family: 'prior_application', valid: true, target: canonicalSiblingEmployerIdentity(packetEmployer!) };
     }
   }
   return { family: 'prior_application', valid: false };
@@ -1889,7 +1911,7 @@ function parseReferralQuestion(label: string, jdText?: string): ParsedSiblingQue
   }
   if (!rawTarget) return { family: 'referral', valid: true };
   const packetEmployer = frozenJobEmployerFromContext(jdText);
-  const target = packetEmployer ? exactKnownTarget(rawTarget, [packetEmployer]) : null;
+  const target = validatedSiblingEmployerTarget(rawTarget, packetEmployer);
   return target
     ? { family: 'referral', valid: true, target: normalizeEmployerName(target) }
     : { family: 'referral', valid: false };

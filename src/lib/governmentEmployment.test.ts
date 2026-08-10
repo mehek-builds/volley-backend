@@ -955,6 +955,80 @@ describe('prior government employment, answered from the experience bank', () =>
     }
   });
 
+  test('sibling employer identity is packet-canonical after exact target validation', () => {
+    const priorCases = [
+      ['National Grid', 'Have you applied to National?', ['National Bank'], 'No'],
+      ['Bank of America', 'Have you applied to Bank?', ['Bank of England'], 'No'],
+      ['United Airlines', 'Have you applied to United?', ['United Parcel Service'], 'No'],
+      ['Akuna Capital', 'Have you applied to Akuna?', ['Akuna Capital'], 'Yes'],
+      ['Akuna Capital', 'Have you applied to Akuna?', ['Akuna Quant'], 'No'],
+      ['NASA', 'Have you applied to National Aeronautics and Space Administration?', ['NASA'], 'Yes'],
+      ['National Aeronautics and Space Administration', 'Have you applied to NASA?', ['National Aeronautics and Space Administration'], 'Yes'],
+      ['U.S. Department of Energy', 'Have you applied to DOE?', ['Department of Energy'], 'Yes'],
+      ['DOE', 'Have you applied to United States Department of Energy?', ['U.S. Department of Energy'], 'Yes'],
+    ] as const;
+    for (const [packetEmployer, label, declared, expected] of priorCases) {
+      const profile: ApplicationProfileLike = { prior_application_employers: [...declared] };
+      const context = frozenJobEmployerContext(packetEmployer);
+      assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: expected }, label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
+        [{ question: label, answer: expected }],
+        label,
+      );
+    }
+
+    const referralCases = [
+      ['NASA', 'How did you hear about National Aeronautics and Space Administration?'],
+      ['National Aeronautics and Space Administration', 'How did you hear about NASA?'],
+      ['U.S. Department of Energy', 'What is your referral source for DOE?'],
+      ['DOE', 'Where did you hear about United States Department of Energy?'],
+    ] as const;
+    for (const [packetEmployer, label] of referralCases) {
+      const profile: ApplicationProfileLike = { referral_source_default: 'LinkedIn' };
+      const context = frozenJobEmployerContext(packetEmployer);
+      assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: 'LinkedIn' }, label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
+        [{ question: label, answer: 'LinkedIn' }],
+        label,
+      );
+    }
+  });
+
+  test('the exact measured IMC reminder is one complete prior-application question', () => {
+    const label = 'Have you applied to this role or another role @IMC within the last 12-18 months? As a reminder, if you have already applied you will not be reconsidered.';
+    const context = frozenJobEmployerContext('IMC');
+    for (const [declared, expected] of [
+      [['IMC'], 'Yes'],
+      [[], 'No'],
+    ] as const) {
+      const profile: ApplicationProfileLike = { prior_application_employers: [...declared] };
+      assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: expected });
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
+        [{ question: label, answer: expected }],
+      );
+    }
+
+    const unsupportedTail = `${label} Please explain why.`;
+    const held = resolveKnownAnswer(
+      unsupportedTail,
+      'text',
+      { prior_application_employers: ['IMC'] },
+      context,
+    );
+    assert.ok(held && 'skipReason' in held);
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        [{ question: unsupportedTail, answer: 'Yes' }],
+        { prior_application_employers: ['IMC'] },
+        context,
+      ),
+      [{ question: unsupportedTail, answer: '' }],
+    );
+  });
+
   test('unsupported named-employer history noun forms refuse and clear stale answers', () => {
     const nasa: ApplicationProfileLike = {
       experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
