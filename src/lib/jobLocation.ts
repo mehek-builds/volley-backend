@@ -591,7 +591,12 @@ function portalCountryEvidence(value: string): StructuredCountryEvidence {
     .split('|')
     .map((part) => exactPortalCountryCodePart(part))
     .filter((code): code is string => Boolean(code)));
-  return evidenceFromCodes(codes);
+  const scope = countryFromPortal(value);
+  return {
+    codes: [...codes],
+    us: codes.has('US') || scope === 'us',
+    nonUs: [...codes].some((code) => code !== 'US') || scope === 'non_us',
+  };
 }
 
 function legalCountryEvidenceFromJobContext(context: Record<string, unknown>): {

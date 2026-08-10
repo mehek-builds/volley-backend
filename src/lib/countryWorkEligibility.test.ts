@@ -313,6 +313,64 @@ describe('exact-country resolver', () => {
     }
   });
 
+  test('broad ATS regions preserve scope without inventing an exact country', () => {
+    for (const context of [
+      { portal_country: 'EMEA', location: 'New York, NY' },
+      { portal_country: 'APAC', location: 'San Francisco, CA' },
+      { portal_country: 'LATAM', location: 'Boston' },
+      { portal_country: 'United States Recruiting', location: 'London' },
+    ]) {
+      assert.equal(postingCountryFromJobContext(context), 'unknown', JSON.stringify(context));
+      assert.equal(postingCountryCodeFromJobContext(context), undefined, JSON.stringify(context));
+      const held = resolveKnownAnswer(
+        'Are you authorized to work in the country where this role is located?',
+        'select',
+        profile,
+        undefined,
+        postingCountryFromJobContext(context),
+        postingCountryCodeFromJobContext(context),
+      );
+      assert.ok(held && 'skipReason' in held, JSON.stringify(context));
+    }
+
+    const consistent = { portal_country: 'EMEA', location: 'London' };
+    assert.equal(postingCountryFromJobContext(consistent), 'non_us');
+    assert.equal(postingCountryCodeFromJobContext(consistent), 'GB');
+    assert.deepEqual(resolveKnownAnswer(
+      'Are you authorized to work in the country where this role is located?',
+      'select',
+      profile,
+      undefined,
+      postingCountryFromJobContext(consistent),
+      postingCountryCodeFromJobContext(consistent),
+    ), { value: 'No' });
+
+    const broadOnly = { portal_country: 'EMEA' };
+    assert.equal(postingCountryFromJobContext(broadOnly), 'non_us');
+    assert.equal(postingCountryCodeFromJobContext(broadOnly), undefined);
+    const held = resolveKnownAnswer(
+      'Are you authorized to work in the country where this role is located?',
+      'select',
+      profile,
+      undefined,
+      postingCountryFromJobContext(broadOnly),
+      postingCountryCodeFromJobContext(broadOnly),
+    );
+    assert.ok(held && 'skipReason' in held);
+
+    const broadUsOnly = { portal_country: 'United States Recruiting' };
+    assert.equal(postingCountryFromJobContext(broadUsOnly), 'us');
+    assert.equal(postingCountryCodeFromJobContext(broadUsOnly), undefined);
+    assert.deepEqual(resolveKnownAnswer(
+      'Are you authorized to work in the country where this role is located?',
+      'select',
+      profile,
+      undefined,
+      postingCountryFromJobContext(broadUsOnly),
+      postingCountryCodeFromJobContext(broadUsOnly),
+    ), { value: 'Yes' });
+  });
+
   test('structured ATS country metadata reaches the exact country resolver', () => {
     const jobContext = { portal_country: 'GB', location: 'London' };
     assert.equal(postingCountryFromJobContext(jobContext), 'non_us');
