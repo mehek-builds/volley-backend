@@ -78,6 +78,7 @@
     "db:application-email-forwarding": "node scripts/apply-application-email-forwarding-schema.mjs",
     "db:application-email-receiving-proof": "node scripts/apply-application-email-receiving-proof-schema.mjs",
     "db:application-facts": "node scripts/apply-application-facts-schema.mjs",
+    "db:portal-credentials": "node scripts/apply-portal-credentials-schema.mjs",
     "db:country-work-eligibility": "node scripts/apply-country-work-eligibility-schema.mjs",
     "db:availability-window": "node scripts/apply-availability-window-schema.mjs",
     "db:setup-gaps-asked": "node scripts/apply-setup-gaps-asked-schema.mjs",

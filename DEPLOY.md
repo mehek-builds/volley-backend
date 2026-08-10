@@ -390,6 +390,39 @@ For a deliberate rollback to an older commit, that guard is exactly what you wan
 FORCE=1 npm run deploy:prod
 ```
 
+## Employer-portal accounts (iCIMS)
+
+iCIMS shows no application form until an account exists on the employer's tenant, so Litos can
+register one. The account address is the per-application Litos alias, which keeps verification,
+confirmation and interview mail arriving on the same route as every other employer message. The
+password is generated per tenant from the CSPRNG and stored as AES-256-GCM ciphertext in
+`portal_credentials`, under the same `ENCRYPTION_KEY` as the encrypted profile columns.
+
+**`ENCRYPTION_KEY` is not rotatable on its own** (see `src/lib/fieldCrypto.ts`). Losing it now also
+means losing every stored portal password, and those open accounts that still exist on employer
+systems. Treat it accordingly.
+
+The table has its own additive migration:
+
+```bash
+npm run db:portal-credentials
+```
+
+After its workflow is present on `main`, an operator may run `Portal credentials migration` from
+GitHub Actions. The workflow refuses non-main refs, reads the connection only from
+`SCHEMA_CHECK_DATABASE_URL`, and applies only the idempotent `portal_credentials` table and its two
+indexes.
+
+Two routes serve the owner, and only the owner: `GET /portal-credentials` lists the accounts and
+never returns a password, and `POST /portal-credentials/:id/reveal` returns exactly one password,
+rate limited hourly and counted on the row. A credential is readable only by the user who owns it.
+
+Registration itself is behind `LITOS_ICIMS_ACCOUNT_REGISTRATION`, which is off unless it is exactly
+`1` or `true`. Before turning it on: capture a live iCIMS account form and confirm the three
+unverified selectors in `src/lib/icimsAccountRegistration.ts`, and update the privacy policy on the
+website, because storing an employer-portal password is a new category of stored data. Creating an
+account is not submitting an application: `programmaticSubmit` stays false for iCIMS.
+
 ## How the database TLS config actually resolves
 
 Worth reading before touching `DATABASE_URL` or the `ssl` option, because the precedence is the
