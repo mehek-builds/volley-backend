@@ -1978,7 +1978,7 @@ function parsePriorApplicationQuestion(
   }
   const priorWindow = String.raw`(?:(?:within|in|over) (?:the )?(?:last|past)|(?:last|past)) (?:\d+(?: \d+)? )?(?:days?|weeks?|months?|years?)`;
   const priorTime = String.raw`(?:before|previously|in the past|ever|${priorWindow})`;
-  const applicationCategoryHead = String.raw`(?:internships?|fellowships?|apprenticeships?|co ops?|cooperative|roles?|jobs?|positions?|programs?|opportunit(?:y|ies)|schemes?|schools?|residenc(?:y|ies)|openings?|vacanc(?:y|ies)|placements?|traineeships?|externships?|posts?|appointments?|contracts?)`;
+  const applicationCategoryHead = String.raw`\b(?:internships?|fellowships?|apprenticeships?|co ops?|cooperative|roles?|jobs?|positions?|programs?|opportunit(?:y|ies)|schemes?|schools?|residenc(?:y|ies)|openings?|vacanc(?:y|ies)|placements?|traineeships?|externships?|posts?|appointments?|contracts?)`;
   const organizationalUnitApplication = (raw: string): 'organizational' | 'unrelated' | null => {
     const match = raw.match(
       /^(.*\b(teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies)))(?: (in|at|based in|based at|located in|located at|within|for) (.+))?$/,
