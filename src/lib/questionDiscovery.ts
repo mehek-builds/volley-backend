@@ -1858,6 +1858,7 @@ const DEFINITE_APPLICATION_DETERMINER = String.raw`(?:the|this|that|these|those|
 const DEFINITE_APPLICATION_SAFE_MODIFIER = /^(?:current|completed|complete|online|job|employment|final|official|external|fully)$/;
 const DEFINITE_APPLICATION_ANY_PHRASE = String.raw`${DEFINITE_APPLICATION_DETERMINER} (?:[a-z0-9]+ )*applications?(?: forms?)?`;
 const DEFINITE_APPLICATION_HISTORY_SUFFIX = String.raw`(?:before|previously|already|yet|ever|earlier|so far|to date|in the past)`;
+const SUBMISSION_DOMAIN_NOUN = /\b(?:visa|immigration|work authorization|permits?|mobile|software|web|app store|schools?|universit(?:y|ies)|colleges?|loans?|grants?|patents?|benefits?|tax|housing|insurance|scholarships?)\b/;
 const SUBMISSION_NEGATION = /\b(?:not|never|no|without|neither|nor|didn t|hasn t|haven t|hadn t|unsuccessfully|hardly|scarcely)\b/;
 
 function isSingleSubmissionTemporal(value: string): boolean {
@@ -1889,14 +1890,22 @@ function classifyDefiniteApplicationSubmission(value: string): 'owned' | 'unrela
   if (!match) return null;
   const prefixTemporal = (match[1] ?? match[2] ?? match[3] ?? '').trim();
   const rawObject = match[4] ?? '';
-  const objectMatch = rawObject.match(new RegExp(
+  const jobObjectMatch = rawObject.match(new RegExp(
+    `^${DEFINITE_APPLICATION_DETERMINER} ((?:[a-z0-9]+ )*)(?:job|employment|candidate) applications?(?: forms?)?(?: (.+))?$`,
+  ));
+  const genericObjectMatch = rawObject.match(new RegExp(
     `^${DEFINITE_APPLICATION_DETERMINER} ((?:[a-z0-9]+ )*)applications?(?: forms?)?(?: (.+))?$`,
   ));
+  const objectMatch = jobObjectMatch ?? genericObjectMatch;
   if (!objectMatch) return null;
   const modifiers = (objectMatch[1] ?? '').trim().split(/\s+/).filter(Boolean);
   const suffixTemporal = objectMatch[2]?.trim() ?? '';
-  if (SUBMISSION_NEGATION.test(value)) return 'unrelated';
-  if (modifiers.some((modifier) => !DEFINITE_APPLICATION_SAFE_MODIFIER.test(modifier))) return 'unrelated';
+  if (SUBMISSION_NEGATION.test(value) || SUBMISSION_DOMAIN_NOUN.test(rawObject)) return 'unrelated';
+  if (jobObjectMatch) {
+    if (modifiers.length > 6) return 'unrelated';
+  } else if (modifiers.some((modifier) => !DEFINITE_APPLICATION_SAFE_MODIFIER.test(modifier))) {
+    return 'unrelated';
+  }
   if (prefixTemporal && !isSubmissionTemporalSequence(prefixTemporal, false)) return 'unrelated';
   if (suffixTemporal && !isSubmissionTemporalSequence(suffixTemporal, true)) return 'unrelated';
   return 'owned';
@@ -2086,6 +2095,28 @@ function parsePriorApplicationQuestion(
       return { family: 'prior_application', valid: true, target: canonicalSiblingEmployerIdentity(packetEmployer!) };
     }
   }
+  const employmentObject = remainder.match(/^for\s+(.+)$/)?.[1]?.trim();
+  const employmentWithoutTemporal = employmentObject
+    ?.replace(new RegExp(` ${temporal}$`), '')
+    .trim();
+  if (/^(?:employment|work)$/.test(employmentWithoutTemporal ?? '')) {
+    return { family: 'prior_application', valid: true, globalPriorApplicationHistory: true };
+  }
+  const employmentScope = employmentWithoutTemporal?.match(/^(?:employment|work)\s+(.+)$/)?.[1]?.trim();
+  if (employmentScope) {
+    const packetReference = /^(?:here|with us|at us|(?:at|with) (?:this|the|our|current|the current) (?:company|employer))$/.test(employmentScope)
+      || (packetEmployer
+        ? siblingEmployerAliases(packetEmployer).some((alias) => new RegExp(`^(?:at|with) ${regexpEscape(alias)}$`).test(employmentScope))
+        : false);
+    return {
+      family: 'prior_application',
+      valid: Boolean(packetReference && packetEmployer),
+      ...(packetEmployer ? { target: canonicalSiblingEmployerIdentity(packetEmployer) } : {}),
+    };
+  }
+  if (employmentWithoutTemporal && /\b(?:employment|work)\b/.test(employmentWithoutTemporal)) {
+    return { family: 'prior_application', valid: false };
+  }
   const objectKind = applicationObjectKind(remainder);
   if (globalRemainder || objectKind === 'global') {
     return { family: 'prior_application', valid: true, globalPriorApplicationHistory: true };
@@ -2103,7 +2134,7 @@ function parsePriorApplicationQuestion(
     .replace(/\s+(?:before|previously|already|yet|ever|earlier|so far|to date|in the past|within the last \d+(?: \d+)? months?)$/, '')
     .trim();
   const organizationalUnitObject = boundedToObject?.match(
-    /^(.*\b(?:teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies)))(?: (in|at) (.+))?$/,
+    /^(.*\b(?:teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies)))(?: (in|at|based in|within) (.+))?$/,
   );
   if (organizationalUnitObject) {
     const preposition = organizationalUnitObject[2];
@@ -2113,9 +2144,10 @@ function parsePriorApplicationQuestion(
       const city = location.split(',')[0]?.trim();
       return city && normalizeIdentity(city) !== normalizeIdentity(location) ? [location, city] : [location];
     });
-    const validComplement = preposition === 'in'
-      ? Boolean(complement && exactKnownTarget(complement, locationTargets))
-      : Boolean(complement && packetEmployer && exactKnownTarget(complement, siblingEmployerAliases(packetEmployer)));
+    const validComplement = Boolean(complement && (
+      exactKnownTarget(complement, locationTargets)
+      || (packetEmployer && exactKnownTarget(complement, siblingEmployerAliases(packetEmployer)))
+    ));
     if (validComplement) return { family: 'prior_application', valid: false };
   }
   if (isSkillOrWorkApplicationObject(remainder)) return null;
