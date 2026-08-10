@@ -138,7 +138,6 @@ test('generic extension-start validates a complete immutable handoff binding', (
   const review = packet.spec._review;
   const handoffVersion = extensionHandoffVersion(packet)!;
   const validate = (overrides: Partial<Parameters<typeof extensionStartHandoffBinding>[0]> = {}) => extensionStartHandoffBinding({
-    required: false,
     handoffVersion,
     ...packet,
     review,
@@ -146,7 +145,7 @@ test('generic extension-start validates a complete immutable handoff binding', (
   });
 
   assert.equal(validate(), 'valid');
-  assert.equal(validate({ handoffVersion: undefined, currentUrl: undefined }), 'not_provided');
+  assert.equal(validate({ handoffVersion: undefined, currentUrl: undefined }), 'missing');
   assert.equal(validate({ handoffVersion: undefined }), 'missing');
   assert.equal(validate({ currentUrl: undefined }), 'missing');
   assert.equal(validate({ currentUrl: 'https://jobs.lever.co/acme/different/apply' }), 'mismatch');
@@ -165,7 +164,6 @@ test('generic extension-start validates a complete immutable handoff binding', (
 
 test('SmartRecruiters recovery cannot bypass its required extension-start binding', () => {
   const packet = {
-    required: true,
     applicationId: 'application-1',
     userId: 'user-1',
     resumeObjectKey: 'users/user-1/resumes/application-1.pdf',

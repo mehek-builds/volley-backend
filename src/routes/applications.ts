@@ -515,7 +515,6 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const precheckReview = precheckRow ? readApplicationReview(precheckRow.spec) : null;
       if (precheckRow && precheckReview) {
         const binding = extensionStartHandoffBinding({
-          required: Boolean(precheckReview.extension_handoff_url),
           handoffVersion: parsed.data.handoff_version,
           currentUrl: parsed.data.current_url,
           applicationId: precheckRow.id,

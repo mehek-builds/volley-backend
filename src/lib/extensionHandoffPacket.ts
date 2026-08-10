@@ -41,7 +41,6 @@ export function extensionHandoffVersion(input: {
 }
 
 export type ExtensionStartHandoffBindingResult =
-  | 'not_provided'
   | 'valid'
   | 'missing'
   | 'mismatch'
@@ -49,7 +48,6 @@ export type ExtensionStartHandoffBindingResult =
 
 /** Validate the packet binding echoed by Chrome before an attended submission is claimed. */
 export function extensionStartHandoffBinding(input: {
-  required: boolean;
   handoffVersion?: string;
   currentUrl?: string;
   applicationId: string;
@@ -67,7 +65,6 @@ export function extensionStartHandoffBinding(input: {
 }): ExtensionStartHandoffBindingResult {
   const hasVersion = Boolean(input.handoffVersion);
   const hasUrl = Boolean(input.currentUrl);
-  if (!hasVersion && !hasUrl) return input.required ? 'missing' : 'not_provided';
   if (!hasVersion || !hasUrl) return 'missing';
 
   if (!extensionHandoffPacketMatches({

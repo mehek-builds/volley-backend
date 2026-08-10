@@ -42,10 +42,10 @@ test('attended extension start validates every supplied binding and rejects a ch
     source.indexOf("'/applications/:id/submission/extension-outcome'"),
   );
   assert.match(route, /extensionStartHandoffBinding\(/);
-  assert.match(route, /required: Boolean\(precheckReview\.extension_handoff_url\)/);
   assert.match(route, /binding === 'missing'/);
   assert.match(route, /binding === 'mismatch'/);
   assert.match(route, /binding === 'stale'/);
+  assert.doesNotMatch(route, /extension_handoff_url\).*binding/);
   assert.match(route, /parsed\.data\.handoff_version && !isDeepStrictEqual\(refreshedQuestions, current\.questions\)/);
   assert.match(route, /isDeepStrictEqual\(refreshedQuestions, current\.questions\)/);
   assert.match(route, /generated_resumes\.spec\} = \$\{JSON\.stringify\(precheckRow\.spec\)\}::jsonb/);
