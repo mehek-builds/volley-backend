@@ -40,11 +40,15 @@ export const APPLICATION_FACT_COLUMNS = [
   'onsite_commitment',
   'onsite_locations',
   'relocation_willingness',
-  // The scoped, expiring availability window. Added by
-  // scripts/apply-availability-window-schema.mjs, which has NOT been run against production at the
-  // time this landed - which is exactly the case this list exists for: until it has, every read
-  // below falls back and every one of these reads undefined, which the resolver treats as "never
-  // asked" and answers by leaving the employer's question for the student.
+  /* The scoped, expiring availability window, added by scripts/apply-availability-window-schema.mjs.
+     That script HAS since run: verified against the production database 2026-08-10, all columns in
+     this list exist there.
+
+     Worth keeping in mind when reading the fallback below, because it is GROUP-WIDE: one missing
+     column drops EVERY name in this list from the projection, so an unrun migration does not only
+     disable its own feature, it makes every other fact column read undefined too. That is the right
+     trade for a read that must not 500, but it means "this list is fully migrated" is a fact worth
+     re-checking before relying on any single column, not an assumption. */
   'availability_window_start',
   'availability_window_end',
   'availability_cycle',
