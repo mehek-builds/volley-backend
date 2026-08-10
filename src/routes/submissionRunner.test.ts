@@ -579,6 +579,10 @@ test('network reputation handoff is cross-ATS but never swallows real security g
     'Request blocked because automated traffic from this IP was flagged. Create an account to continue.',
     'Access denied because automated traffic from this IP was flagged. Register to continue.',
     'Request blocked because automated traffic from this IP was flagged. Continue with Google.',
+    'Access denied because automated traffic from this IP was flagged. Confirm you are not a bot.',
+    'Request blocked because automated traffic from this IP was flagged. Complete the bot check.',
+    'Access denied because automated traffic from this IP was flagged. Confirm your identity.',
+    'Request blocked because automated traffic from this IP was flagged. Complete the identity check.',
   ]) {
     assert.deepEqual(attentionBlockersForManagedResult(
       'greenhouse',
