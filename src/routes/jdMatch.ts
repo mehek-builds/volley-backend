@@ -189,11 +189,14 @@ const requirementsSchema = z.object({
  */
 export async function postingRow(
   jobId: string | null | undefined,
-): Promise<{ location: string | null; description: string | null } | null> {
+): Promise<{ location: string | null; portal_country: string | null; description: string | null } | null> {
   if (!jobId) return null;
   const [row] = await db
     .select({
       location: monitored_jobs.location,
+      // Bounded ATS metadata persisted in monitored_jobs.raw_json. Null on rows created before the
+      // preservation path shipped, and filled by the next ordinary poll without a migration.
+      portal_country: sql<string | null>`${monitored_jobs.raw_json}->>'portal_country'`,
       // Capped at the same 60k the request schema allows, so a posting cannot arrive here longer
       // than the engine's own bound just because it skipped the schema on its way in.
       description: sql<string>`left(${monitored_jobs.description}, 60000)`,
@@ -208,7 +211,11 @@ export async function postingRow(
       ),
     )
     .limit(1);
-  return row ? { location: row.location ?? null, description: row.description ?? null } : null;
+  return row ? {
+    location: row.location ?? null,
+    portal_country: row.portal_country ?? null,
+    description: row.description ?? null,
+  } : null;
 }
 
 /**

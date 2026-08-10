@@ -175,8 +175,8 @@ test('the country a work-eligibility question means is stricter than the board f
   assert.equal(postingCountryForLegalScope(['Remote - US']), 'us');
   assert.equal(postingCountryForLegalScope(['San Francisco, CA', 'Austin, TX']), 'us');
 
-  assert.equal(postingCountryForLegalScope(['New York / Dublin']), 'non_us');
-  assert.equal(postingCountryForLegalScope(['Remote - US or London']), 'non_us');
+  assert.equal(postingCountryForLegalScope(['New York / Dublin']), 'unknown');
+  assert.equal(postingCountryForLegalScope(['Remote - US or London']), 'unknown');
   assert.equal(postingCountryForLegalScope(['Oxford or London-United Kingdom']), 'non_us');
   assert.equal(postingCountryForLegalScope(['London']), 'non_us');
 

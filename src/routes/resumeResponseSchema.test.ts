@@ -28,7 +28,13 @@ describe('resume response contract', () => {
       spec: {},
       application: {
         id: 'd6693be1-9d1d-4f61-9911-8d95f1ad1b01',
-        job_context: { company: 'Litos', role: 'Engineer', jd_hash: 'abc123', location: 'San Francisco, California' },
+        job_context: {
+          company: 'Litos',
+          role: 'Engineer',
+          jd_hash: 'abc123',
+          location: 'London',
+          portal_country: 'GB',
+        },
         spec: { _review: { status: 'ready_to_submit' } },
         download_url: 'https://api.example.com/resume/download?t=token',
         created_at: '2026-07-23T00:00:00.000Z',
@@ -57,6 +63,7 @@ describe('resume response contract', () => {
       },
     });
     assert.equal(result.success, true);
+    if (result.success) assert.equal(result.data.application?.job_context.portal_country, 'GB');
   });
 
   test('rejects a changed legacy field type', () => {

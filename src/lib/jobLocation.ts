@@ -1,4 +1,4 @@
-import { isIsoCountryCode, namedCountryCode } from './workEligibility';
+import { isIsoCountryCode, namedCountryCodes } from './workEligibility';
 
 /**
  * IS THIS JOB IN THE UNITED STATES?
@@ -98,6 +98,37 @@ const NON_US = [
      code, "Georgia, United States" the country. */
   'GEORGIA',
 ];
+
+/* Exact country codes for the unambiguous workplace cities already accepted by the frozen
+   location classifier above. This table is deliberately used only on structured ATS country and
+   location fields. It must never be applied to a job description, where a city can describe a
+   customer, headquarters, or travel rather than the workplace for this role. Ambiguous bare city
+   names such as Melbourne and Cambridge stay out. */
+const STRUCTURED_CITY_COUNTRY_CODES = new Map<string, string>([
+  ['LONDON', 'GB'], ['BRISTOL UK', 'GB'], ['CAMBRIDGE UK', 'GB'], ['EDINBURGH', 'GB'],
+  ['MANCHESTER UK', 'GB'], ['GLASGOW', 'GB'], ['BELFAST', 'GB'],
+  ['DUBLIN', 'IE'], ['CORK', 'IE'],
+  ['BERLIN', 'DE'], ['MUNICH', 'DE'], ['HAMBURG', 'DE'], ['FRANKFURT', 'DE'],
+  ['PARIS', 'FR'], ['MADRID', 'ES'], ['BARCELONA', 'ES'], ['LISBON', 'PT'],
+  ['AMSTERDAM', 'NL'], ['ROTTERDAM', 'NL'], ['BRUSSELS', 'BE'], ['ZURICH', 'CH'],
+  ['GENEVA', 'CH'], ['VIENNA', 'AT'], ['STOCKHOLM', 'SE'], ['OSLO', 'NO'],
+  ['COPENHAGEN', 'DK'], ['HELSINKI', 'FI'], ['WARSAW', 'PL'], ['PRAGUE', 'CZ'],
+  ['BUCHAREST', 'RO'], ['BUDAPEST', 'HU'], ['ATHENS', 'GR'], ['ISTANBUL', 'TR'],
+  ['TEL AVIV', 'IL'],
+  ['BENGALURU', 'IN'], ['BANGALORE', 'IN'], ['MUMBAI', 'IN'], ['DELHI', 'IN'],
+  ['GURGAON', 'IN'], ['GURUGRAM', 'IN'], ['HYDERABAD', 'IN'], ['CHENNAI', 'IN'],
+  ['PUNE', 'IN'], ['NOIDA', 'IN'], ['GIFT CITY', 'IN'],
+  ['TOKYO', 'JP'], ['OSAKA', 'JP'], ['SEOUL', 'KR'],
+  ['SHANGHAI', 'CN'], ['BEIJING', 'CN'], ['SHENZHEN', 'CN'],
+  ['SYDNEY', 'AU'], ['AUCKLAND', 'NZ'],
+  ['TORONTO', 'CA'], ['VANCOUVER', 'CA'], ['MONTREAL', 'CA'], ['OTTAWA', 'CA'],
+  ['MEXICO CITY', 'MX'], ['SAO PAULO', 'BR'], ['BUENOS AIRES', 'AR'], ['BOGOTA', 'CO'],
+  ['DUBAI', 'AE'], ['ABU DHABI', 'AE'], ['RIYADH', 'SA'], ['KING ABDULLAH', 'SA'],
+  ['CAIRO', 'EG'], ['LAGOS', 'NG'], ['NAIROBI', 'KE'], ['MANILA', 'PH'],
+  ['JAKARTA', 'ID'], ['BANGKOK', 'TH'], ['KUALA LUMPUR', 'MY'],
+  ['HO CHI MINH', 'VN'], ['HANOI', 'VN'], ['BELGRADE', 'RS'], ['REYKJAVIK', 'IS'],
+  ['DOHA', 'QA'], ['MILAN', 'IT'], ['MILANO', 'IT'], ['LUXEMBOURG', 'LU'],
+]);
 
 function normalise(location: string): string {
   /* Accents folded first, or "São Paulo" becomes "S O PAULO" and matches nothing, and "Reykjavík"
@@ -259,9 +290,17 @@ export function postingCountryForLegalScope(
     .map((segment) => (segment ?? '').trim())
     .filter((segment) => segment.length > 0);
   if (segments.length === 0) return 'unknown';
-  const classified = segments.map((segment) => jobCountry(segment));
-  if (classified.some((country) => country === 'non_us')) return 'non_us';
-  if (classified.some((country) => country === 'us')) return 'us';
+  const evidence = segments.map((segment) => structuredCountryEvidence(segment, false));
+  const codes = new Set(evidence.flatMap((item) => [...item.codes]));
+  const hasUs = evidence.some((item) => item.us);
+  const hasNonUs = evidence.some((item) => item.nonUs);
+  // One legal scope means one country. A mixed segment (for example, a London office supporting
+  // US customers) and a multi-location posting (London / New York) both provide more than one
+  // country signal, so neither may borrow either stored declaration.
+  if (codes.size > 1 || (hasUs && hasNonUs)) return 'unknown';
+  if (codes.size === 1) return codes.has('US') ? 'us' : 'non_us';
+  if (hasUs) return 'us';
+  if (hasNonUs) return 'non_us';
   return 'unknown';
 }
 
@@ -276,25 +315,72 @@ export function postingCountryForLegalScope(
  */
 export function postingCountryFromJobContext(jobContext: unknown): JobCountry {
   const context = (jobContext && typeof jobContext === 'object' ? jobContext : {}) as Record<string, unknown>;
-  return postingCountryForLegalScope([
-    typeof context.location === 'string' ? context.location : null,
-    ...(Array.isArray(context.locations) ? (context.locations as unknown[]).map(
-      (value) => (typeof value === 'string' ? value : null),
-    ) : []),
-  ]);
+  return legalCountryEvidenceFromJobContext(context).country;
 }
 
-function exactCountryCodeFromStructuredValue(value: string, acceptsBareIsoCode: boolean): string | undefined {
+type StructuredCountryEvidence = {
+  codes: string[];
+  us: boolean;
+  nonUs: boolean;
+};
+
+function structuredCountryEvidence(value: string, acceptsBareIsoCode: boolean): StructuredCountryEvidence {
   const trimmed = value.trim();
-  if (!trimmed) return undefined;
+  if (!trimmed) return { codes: [], us: false, nonUs: false };
+  const codes = new Set<string>();
   // A bare ISO code is authoritative only in a field the ATS declares as a country. In a location
   // string CA and IN are US state abbreviations, not Canada and India.
-  if (acceptsBareIsoCode && isIsoCountryCode(trimmed)) return trimmed.toUpperCase();
-  const named = namedCountryCode(trimmed);
-  if (named) return named;
-  const us = jobCountrySignalDetails(trimmed);
-  if (us.strongUs || (trimmed.includes(',') && us.weakUs && !us.nonUs)) return 'US';
-  return undefined;
+  if (acceptsBareIsoCode && isIsoCountryCode(trimmed)) codes.add(trimmed.toUpperCase());
+  for (const named of namedCountryCodes(trimmed)) codes.add(named);
+
+  const normalized = normalise(trimmed);
+  for (const [city, code] of STRUCTURED_CITY_COUNTRY_CODES) {
+    if (normalized.includes(` ${city} `)) codes.add(code);
+  }
+
+  const signals = jobCountrySignalDetails(trimmed);
+  const explicitMelbourneFlorida = /\bMELBOURNE\s*,\s*FL\b/i.test(trimmed);
+  const unambiguousWeakUs = trimmed.includes(',') && signals.weakUs && !signals.nonUs;
+  if (signals.strongUs || unambiguousWeakUs) codes.add('US');
+  return {
+    codes: [...codes],
+    us: signals.strongUs || unambiguousWeakUs || codes.has('US'),
+    nonUs: (signals.nonUs && !explicitMelbourneFlorida) || [...codes].some((code) => code !== 'US'),
+  };
+}
+
+function structuredJobContextValues(context: Record<string, unknown>): Array<{
+  value: string;
+  acceptsBareIsoCode: boolean;
+}> {
+  const values: Array<{ value: string; acceptsBareIsoCode: boolean }> = [];
+  if (typeof context.portal_country === 'string') values.push({ value: context.portal_country, acceptsBareIsoCode: true });
+  if (typeof context.country === 'string') values.push({ value: context.country, acceptsBareIsoCode: true });
+  if (typeof context.location === 'string') values.push({ value: context.location, acceptsBareIsoCode: false });
+  if (Array.isArray(context.locations)) {
+    for (const value of context.locations) {
+      if (typeof value === 'string') values.push({ value, acceptsBareIsoCode: false });
+    }
+  }
+  return values;
+}
+
+function legalCountryEvidenceFromJobContext(context: Record<string, unknown>): {
+  country: JobCountry;
+  code: string | undefined;
+} {
+  const evidence = structuredJobContextValues(context).flatMap((entry) => entry.value
+    .split(LOCATION_SEGMENT_SEPARATOR)
+    .map((segment) => structuredCountryEvidence(segment, entry.acceptsBareIsoCode)));
+  const codes = new Set(evidence.flatMap((item) => item.codes));
+  const hasUs = evidence.some((item) => item.us);
+  const hasNonUs = evidence.some((item) => item.nonUs);
+  if (codes.size > 1 || (hasUs && hasNonUs)) return { country: 'unknown', code: undefined };
+  const code = codes.size === 1 ? [...codes][0] : undefined;
+  if (code) return { country: code === 'US' ? 'us' : 'non_us', code };
+  if (hasUs) return { country: 'us', code: undefined };
+  if (hasNonUs) return { country: 'non_us', code: undefined };
+  return { country: 'unknown', code: undefined };
 }
 
 /**
@@ -307,21 +393,5 @@ function exactCountryCodeFromStructuredValue(value: string, acceptsBareIsoCode: 
  */
 export function postingCountryCodeFromJobContext(jobContext: unknown): string | undefined {
   const context = (jobContext && typeof jobContext === 'object' ? jobContext : {}) as Record<string, unknown>;
-  const values: Array<{ value: string; acceptsBareIsoCode: boolean }> = [];
-  if (typeof context.portal_country === 'string') values.push({ value: context.portal_country, acceptsBareIsoCode: true });
-  if (typeof context.country === 'string') values.push({ value: context.country, acceptsBareIsoCode: true });
-  if (typeof context.location === 'string') values.push({ value: context.location, acceptsBareIsoCode: false });
-  if (Array.isArray(context.locations)) {
-    for (const value of context.locations) {
-      if (typeof value === 'string') values.push({ value, acceptsBareIsoCode: false });
-    }
-  }
-  const codes = new Set<string>();
-  for (const entry of values) {
-    for (const segment of entry.value.split(LOCATION_SEGMENT_SEPARATOR)) {
-      const code = exactCountryCodeFromStructuredValue(segment, entry.acceptsBareIsoCode);
-      if (code) codes.add(code);
-    }
-  }
-  return codes.size === 1 ? [...codes][0] : undefined;
+  return legalCountryEvidenceFromJobContext(context).code;
 }

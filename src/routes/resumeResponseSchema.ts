@@ -45,6 +45,8 @@ export const resumeGenerateSuccessResponseSchema = z.object({
       role: z.string(),
       jd_hash: z.string(),
       location: z.string().optional(),
+      // Exact country metadata published by the monitored ATS, when it supplied one.
+      portal_country: z.string().optional(),
       // Present only for applications started from the jobs list; see resumeRequestSchema.
       job_id: z.string().uuid().optional(),
     }),

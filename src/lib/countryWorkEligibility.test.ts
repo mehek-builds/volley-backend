@@ -10,7 +10,11 @@ import {
   namedCountryCode,
   type CountryWorkEligibility,
 } from './workEligibility';
-import { jobCountry, postingCountryCodeFromJobContext } from './jobLocation';
+import {
+  jobCountry,
+  postingCountryCodeFromJobContext,
+  postingCountryFromJobContext,
+} from './jobLocation';
 import { resolveKnownAnswer, type ApplicationProfileLike } from './questionDiscovery';
 import { resolveProfileField } from './profileFieldResolution';
 
@@ -157,6 +161,43 @@ describe('exact-country resolver', () => {
     assert.ok(held && 'skipReason' in held);
   });
 
+  test('mixed structured country evidence never selects either scoped declaration', () => {
+    for (const jobContext of [
+      { locations: ['London', 'New York, NY'] },
+      { location: 'London / New York, NY' },
+      { location: 'London office supporting US customers' },
+    ]) {
+      assert.equal(postingCountryFromJobContext(jobContext), 'unknown');
+      assert.equal(postingCountryCodeFromJobContext(jobContext), undefined);
+      const held = resolveKnownAnswer(
+        'Are you authorized to work in the country where this role is located?',
+        'select',
+        profile,
+        undefined,
+        postingCountryFromJobContext(jobContext),
+        postingCountryCodeFromJobContext(jobContext),
+      );
+      assert.ok(held && 'skipReason' in held);
+    }
+  });
+
+  test('structured ATS country metadata reaches the exact country resolver', () => {
+    const jobContext = { portal_country: 'GB', location: 'London' };
+    assert.equal(postingCountryFromJobContext(jobContext), 'non_us');
+    assert.equal(postingCountryCodeFromJobContext(jobContext), 'GB');
+    assert.deepEqual(
+      resolveKnownAnswer(
+        'Are you authorized to work in the country where this role is located?',
+        'select',
+        profile,
+        undefined,
+        postingCountryFromJobContext(jobContext),
+        postingCountryCodeFromJobContext(jobContext),
+      ),
+      { value: 'No' },
+    );
+  });
+
   test('never falls back from a missing non-US row to the US record', () => {
     const held = resolveKnownAnswer(
       'Are you authorized to work in Canada?',
@@ -247,5 +288,9 @@ describe('exact-country resolver', () => {
     assert.match(direct, /resolveProfileField\([\s\S]*postingCountryCodeFromJobContext/);
     const managed = readFileSync('src/routes/submissionRunner.ts', 'utf8');
     assert.match(managed, /resolveProfileField\([\s\S]*postingCountryCode/);
+    const monitor = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+    assert.match(monitor, /raw_json: portalCountry \? \{ portal_country: portalCountry \} : null/);
+    const resume = readFileSync('src/routes/resume.ts', 'utf8');
+    assert.match(resume, /postingPortalCountry[\s\S]*portal_country: postingPortalCountry/);
   });
 });

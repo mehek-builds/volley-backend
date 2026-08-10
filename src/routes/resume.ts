@@ -376,6 +376,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
      */
     let jdText = body.jd_text;
     let postingLocation: string | null = null;
+    let postingPortalCountry: string | null = null;
     if (body.job_id) {
       /* Through the SAME scoped helper the review screen uses, not a second inline query.
        *
@@ -385,6 +386,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
        * review screen scores, which two copies of the same predicate would not guarantee. */
       const row = await postingRow(body.job_id);
       postingLocation = row?.location ?? null;
+      postingPortalCountry = row?.portal_country ?? null;
       jdText = resolveJdText(jdText, row?.description);
     }
 
@@ -956,6 +958,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       role: body.role,
       jd_hash: jdHash,
       ...(postingLocation ? { location: postingLocation } : {}),
+      ...(postingPortalCountry ? { portal_country: postingPortalCountry } : {}),
       ...(body.job_id ? { job_id: body.job_id } : {}),
     };
     const now = new Date().toISOString();

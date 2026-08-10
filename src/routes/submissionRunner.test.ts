@@ -710,6 +710,63 @@ test('discovered US work authorization and sponsorship become reviewed Yes answe
   );
 });
 
+test('portal country metadata reaches managed send resolution without borrowing another country', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in London.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const fields = [{
+    label: 'Are you authorized to work in the country where this role is located?',
+    selector: 'select[name="work_authorized"]',
+    inputType: 'select',
+    maxLength: null,
+  }];
+  const applicationProfile: ApplicationProfileLike = {
+    work_eligibility_by_country: [
+      { country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false },
+      { country_code: 'GB', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
+    ],
+  };
+
+  const british = await discoverAndResolveQuestions(
+    fields,
+    { user_id: 'user-1', job_context: { location: 'London', portal_country: 'GB' } } as ResumeRow,
+    current,
+    applicationProfile,
+    true,
+    'greenhouse',
+  );
+  assert.deepEqual(british.attentionReasons, []);
+  assert.deepEqual(british.questions.map(({ question, answer }) => ({ question, answer })), [{
+    question: fields[0].label,
+    answer: 'No',
+  }]);
+
+  for (const job_context of [
+    { locations: ['London', 'New York, NY'] },
+    { location: 'London office supporting US customers' },
+  ]) {
+    const mixed = await discoverAndResolveQuestions(
+      fields,
+      { user_id: 'user-1', job_context } as ResumeRow,
+      current,
+      applicationProfile,
+      true,
+      'greenhouse',
+    );
+    assert.equal(mixed.questions[0]?.answer, undefined);
+    assert.equal(mixed.attentionReasons.length, 1);
+    assert.match(mixed.attentionReasons[0], /work-eligibility question left for you/i);
+  }
+});
+
 test('select and radio discoveries relay a stored onsite commitment alongside stored academic facts', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship is based in San Francisco, California.',
