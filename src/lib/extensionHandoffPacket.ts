@@ -104,20 +104,22 @@ function smartRecruitersTenant(rawUrl: string): string | null {
 function applicationIdentityKey(rawUrl: string, portal: string): string | null {
   try {
     const url = new URL(rawUrl);
-    let pathIdentified = false;
     if (portal === 'lever' || portal === 'personio' || portal === 'jobvite') {
-      pathIdentified = true;
       url.pathname = url.pathname.replace(/\/apply\/?$/i, '');
     } else if (portal === 'recruitee') {
-      pathIdentified = true;
       url.pathname = url.pathname.replace(/\/c\/new\/?$/i, '');
     } else if (portal === 'teamtailor' || portal === 'pinpoint') {
-      pathIdentified = true;
       url.pathname = url.pathname.replace(/\/applications\/new\/?$/i, '');
     }
     url.pathname = url.pathname.replace(/\/$/, '');
-    if (pathIdentified) {
-      url.search = '';
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^utm_/i.test(key)
+        || (portal === 'greenhouse' && key.toLowerCase() === 'gh_src')
+        || (portal === 'lever' && key.toLowerCase() === 'lever-source')) url.searchParams.delete(key);
+    }
+    // Bullhorn's job id lives in the hash. Every other supported family either carries identity in
+    // path/query or has already been canonicalized to do so.
+    if (portal !== 'bullhorn') {
       url.hash = '';
     }
     return url.toString();

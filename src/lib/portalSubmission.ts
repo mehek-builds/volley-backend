@@ -5309,6 +5309,8 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
     if (greenhouseJobId) return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
     const embeddedBoardUrl = embeddedGreenhouseApplicationUrl(url);
     if (embeddedBoardUrl) return embeddedBoardUrl;
+    const greenhouseApplicationUrl = greenhouseEmbedApplicationUrl(rawUrl);
+    if (greenhouseApplicationUrl) return greenhouseApplicationUrl;
     const portal = detectPortal(rawUrl);
     if (portal === 'zoho_recruit') {
       url.search = '';

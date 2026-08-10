@@ -173,6 +173,59 @@ test('generic handoff versions normalize non-identity tracking state', () => {
   }), version);
 });
 
+test('Greenhouse path tracking normalizes to its token identity without crossing jobs', () => {
+  const packet = {
+    applicationId: 'application-1',
+    userId: 'user-1',
+    resumeObjectKey: 'users/user-1/resumes/application-1.pdf',
+    spec: { _review: { status: 'ready_to_submit' } },
+    jobContext: { company: 'Acme' },
+    currentUrl: 'https://boards.greenhouse.io/acme/jobs/123456',
+  };
+  const version = extensionHandoffVersion(packet);
+  assert.equal(extensionHandoffVersion({
+    ...packet,
+    currentUrl: `${packet.currentUrl}?gh_src=LinkedIn&utm_campaign=internships#application`,
+  }), version);
+  assert.notEqual(extensionHandoffVersion({
+    ...packet,
+    currentUrl: 'https://boards.greenhouse.io/acme/jobs/654321?gh_src=LinkedIn#application',
+  }), version);
+});
+
+test('query and hash job identities survive tracking normalization', () => {
+  const base = {
+    applicationId: 'application-1',
+    userId: 'user-1',
+    resumeObjectKey: 'users/user-1/resumes/application-1.pdf',
+    spec: { _review: { status: 'ready_to_submit' } },
+    jobContext: { company: 'Acme' },
+  };
+  const identities = [
+    [
+      'https://www.comeet.co/jobs/ACME/ABC/apply?token=opaque-one',
+      'https://www.comeet.co/jobs/ACME/ABC/apply?token=opaque-one&utm_source=test',
+      'https://www.comeet.co/jobs/ACME/ABC/apply?token=opaque-two',
+    ],
+    [
+      'https://recruiting.ultipro.com/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9',
+      'https://recruiting.ultipro.com/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9&utm_source=test',
+      'https://recruiting.ultipro.com/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=4fc30c2a-e2b3-42e0-bcaf-7805f741c04a',
+    ],
+    [
+      'https://www.serverlogic.com/wp-content/plugins/bullhorn-oscp/#/jobs/101',
+      'https://www.serverlogic.com/wp-content/plugins/bullhorn-oscp/?utm_source=test#/jobs/101',
+      'https://www.serverlogic.com/wp-content/plugins/bullhorn-oscp/#/jobs/202',
+    ],
+  ] as const;
+  for (const [first, tracked, second] of identities) {
+    const version = extensionHandoffVersion({ ...base, currentUrl: first });
+    assert.match(version ?? '', /^[a-f0-9]{64}$/);
+    assert.equal(extensionHandoffVersion({ ...base, currentUrl: tracked }), version);
+    assert.notEqual(extensionHandoffVersion({ ...base, currentUrl: second }), version);
+  }
+});
+
 test('generic extension-start validates a complete immutable handoff binding', () => {
   const currentUrl = 'https://jobs.lever.co/acme/abc123/apply';
   const packet = {
