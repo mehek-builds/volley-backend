@@ -64,6 +64,26 @@ test('a legacy SmartRecruiters packet without a runner-observed form URL is not 
   }), false);
 });
 
+test('a legacy SmartRecruiters packet cannot use its posting URL as the attended form', () => {
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: SEEKA_POSTING,
+    currentUrl: SEEKA_POSTING,
+    frozenAtsName: 'smartrecruiters',
+    status: 'ready_to_submit',
+  }), false);
+});
+
+test('a managed SmartRecruiters recovery cannot substitute its posting URL for the frozen form', () => {
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
+    currentUrl: SEEKA_POSTING,
+    frozenAtsName: 'smartrecruiters',
+    status: 'needs_attention',
+    attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
+  }), false);
+});
+
 test('SmartRecruiters refill is limited to the exact network-reputation recovery state', () => {
   for (const candidate of [
     { status: 'needs_attention' as const, attentionReason: 'A required field is empty.' },

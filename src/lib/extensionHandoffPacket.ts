@@ -146,10 +146,6 @@ export function extensionHandoffPacketMatches(input: {
 
   const frozenCanonical = canonicalSupportedPortalUrl(input.frozenUrl, input.frozenAtsName);
   const currentCanonical = canonicalSupportedPortalUrl(input.currentUrl, currentPortal);
-  if (frozenCanonical && currentCanonical && frozenCanonical === currentCanonical) return true;
-  if (frozenCanonical && currentCanonical
-    && applicationIdentityKey(frozenCanonical, frozenPortal) === applicationIdentityKey(currentCanonical, currentPortal)) return true;
-
   if (frozenPortal === 'smartrecruiters') {
     const frozenTenant = smartRecruitersTenant(input.frozenUrl);
     if (!frozenTenant || frozenTenant !== smartRecruitersTenant(input.currentUrl)) return false;
@@ -164,5 +160,8 @@ export function extensionHandoffPacketMatches(input: {
     const handoffCanonical = canonicalSupportedPortalUrl(input.frozenHandoffUrl, handoffPortal);
     return Boolean(handoffCanonical && currentCanonical && handoffCanonical === currentCanonical);
   }
+  if (frozenCanonical && currentCanonical && frozenCanonical === currentCanonical) return true;
+  if (frozenCanonical && currentCanonical
+    && applicationIdentityKey(frozenCanonical, frozenPortal) === applicationIdentityKey(currentCanonical, currentPortal)) return true;
   return false;
 }
