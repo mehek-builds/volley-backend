@@ -566,22 +566,6 @@ function highSchoolGraduationAnswer(
   return { value: asksWhen ? stored : 'Yes' };
 }
 
-/** The employer a "have you applied here before?" question is actually asking about. */
-function employerNamedInApplicationQuestion(label: string): string | undefined {
-  const directSingleName = label.match(/\bappl(?:y|ied)\s+to\s+([a-z0-9&.'’-]+)\s*(?:before|previously|in\s+the\s+past)?\s*[?.!]*$/i);
-  const match = label.match(/(?:\bwith\b|\bat\b|\bto\s+work\s+(?:at|for)\b|@)\s*([a-z0-9][a-z0-9 .&'’-]{1,40})/i);
-  const raw = (directSingleName?.[1] ?? match?.[1])
-    ?.replace(/\b(?:before|previously|in\s+the\s+past|within\s+the\s+last|or\s+another\s+role|as\s+an?)\b[\s\S]*$/i, '')
-    .replace(/[.,;:?]+$/g, '')
-    .trim();
-  if (!raw) return undefined;
-  if (/^(?:any|a|an|the|this|our|your|company|organization|organisation|employer|role|position|firm)$/i.test(raw)) {
-    return undefined;
-  }
-  const normalized = normalizeEmployerName(raw);
-  return normalized.length >= 3 ? normalized : undefined;
-}
-
 /**
  * Whether a declared employer and the employer named in the question are the same company.
  *
@@ -607,7 +591,11 @@ function previouslyAppliedAnswer(
   label: string,
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
-  if (!PREVIOUSLY_APPLIED_QUESTION.test(label)) return null;
+  const parsed = parsePriorApplicationQuestion(label);
+  if (!parsed) return null;
+  if (!parsed.valid || !parsed.target) {
+    return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
+  }
   const declared = ap.prior_application_employers;
   // undefined is "never asked". An empty array is the student saying she has not applied anywhere
   // before, which answers No for every employer - the two must not be collapsed.
@@ -615,11 +603,7 @@ function previouslyAppliedAnswer(
     return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
   }
   if (declared.length === 0) return { value: 'No' };
-  const target = employerNamedInApplicationQuestion(label);
-  if (!target) {
-    return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
-  }
-  const matched = declared.some((employer) => employerMatchesTarget(normalizeEmployerName(employer), target));
+  const matched = declared.some((employer) => employerMatchesTarget(normalizeEmployerName(employer), parsed.target!));
   return { value: matched ? 'Yes' : 'No' };
 }
 
@@ -882,14 +866,16 @@ function onsiteCommitmentAnswer(
 ): { value: string } | { skipReason: string } {
   const held = { skipReason: onsiteCommitmentSkipReason(label) };
 
-  if (LOCATION_QUESTION_WANTS_A_VALUE.test(label)) return held;
-
-  if (RELOCATION_COMMITMENT_QUESTION.test(label)) {
+  const relocation = parseRelocationQuestion(label);
+  if (relocation) {
+    if (!relocation.valid) return held;
     const willing = ap.relocation_willingness;
     if (willing === 'yes') return { value: 'Yes' };
     if (willing === 'no') return { value: 'No' };
     return held;
   }
+
+  if (LOCATION_QUESTION_WANTS_A_VALUE.test(label)) return held;
 
   if (isRemoteWorkQuestion(label)) return held;
 
@@ -930,7 +916,9 @@ function routineLocationCommitmentAnswer(
   ap: ApplicationProfileLike,
   jdText?: string,
 ): { value: string } | { skipReason: string } | null {
-  return isLocationCommitmentQuestion(label) ? onsiteCommitmentAnswer(label, ap, jdText) : null;
+  return parseRelocationQuestion(label) || isLocationCommitmentQuestion(label)
+    ? onsiteCommitmentAnswer(label, ap, jdText)
+    : null;
 }
 
 const FROZEN_JOB_LOCATION_PREFIX = '[LITOS FROZEN JOB LOCATION] ';
@@ -1209,9 +1197,9 @@ const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|ma
 // Postman, Fluency, Brex), all of them asking the same routine question the office wording already
 // answers Yes to.
 const LOCATION_COMMITMENT_VOCAB = /\boffices?\b|in[\s-]?office|on[\s-]?site|\bonsite\b|in[\s-]?person|\bhybrid\b|\bremote(?:ly|[\s-]?only)?\b|work\s+from\s+home|relocat|commut/i;
-/* Moving house, which is a different promise from sitting in an office and has its own column.
- * Kept in step with answerReuse.ts's RELOCATION_QUESTION, which decides the same split for replay. */
-const RELOCATION_COMMITMENT_QUESTION = /\brelocat\w*\b|\bwilling\s+to\s+move\b|\bplan\s+to\s+move\b/i;
+/* Moving house is a different promise from sitting in an office and has its own column. The
+ * canonical relocation parser below is shared with answer reuse, so resolution and replay cannot
+ * disagree about which family owns the label. */
 const STORED_ONSITE_COMMITMENT_QUESTION =
   /\b(?:able|willing|available|prepared|can|could|would)\b[^?]{0,80}\b(?:office|in[\s-]?office|on[\s-]?site|onsite|in[\s-]?person|hybrid)\b|\b(?:office|in[\s-]?office|on[\s-]?site|onsite|in[\s-]?person|hybrid)\b[^?]{0,80}\b(?:able|willing|available|prepared|can|could|would)\b/i;
 const ONSITE_DAY_COUNT_QUESTION = /\b(?:three|four|five|3|4|5)\s+days?\b/i;
@@ -1235,7 +1223,6 @@ export function isLocationChoiceQuestion(label: string): boolean {
   return LOCATION_CHOICE_QUESTION.test(label);
 }
 
-export const REFERRAL_QUESTION = /how did you .*hear|how did you learn|where did you hear|how did you hear|first hear|referral source|hear about (this|us|the)|where (?:did|have) you learn(?:ed)? about|source of/i;
 export const START_DATE_QUESTION = /availab|start(ing)?\s+date|date.*you.*start|when can you start|earliest.*start/i;
 // Greenhouse renders its education block as one row per school: "School", "Degree", "Discipline",
 // "Start date month", "Start date year", "End date month", "End date year" (handles school--0,
@@ -1793,120 +1780,111 @@ function normalizedSiblingQuestionLabel(label: string): string {
 }
 
 type SiblingQuestionFamily = 'prior_application' | 'referral' | 'relocation';
-type ParsedSiblingQuestion = { family: SiblingQuestionFamily; remainder: string; form: string };
+type ParsedSiblingQuestion = { family: SiblingQuestionFamily; valid: boolean; target?: string };
 
-const SIBLING_QUESTION_STEMS: readonly {
-  family: SiblingQuestionFamily;
-  form: string;
-  pattern: RegExp;
-}[] = [
-  {
-    family: 'prior_application',
-    form: 'have_applied',
-    pattern: /^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\b\s*(.*)$/i,
-  },
-  {
-    family: 'prior_application',
-    form: 'did_apply',
-    pattern: /^did\s+you\s+(?:(?:ever|previously)\s+)?apply\b\s*(.*)$/i,
-  },
-  {
-    family: 'referral',
-    form: 'hear_about',
-    pattern: /^(?:how|where)\s+did\s+you\s+(?:first\s+)?hear\s+about\b\s*(.*)$/i,
-  },
-  {
-    family: 'referral',
-    form: 'learn_about',
-    pattern: /^(?:how\s+did|where\s+(?:did|have))\s+you\s+learn(?:ed)?\s+about\b\s*(.*)$/i,
-  },
-  {
-    family: 'referral',
-    form: 'referral_source',
-    pattern: /^what\s+(?:is|was)\s+(?:(?:your|the)\s+)?referral\s+source\b\s*(.*)$/i,
-  },
-  {
-    family: 'relocation',
-    form: 'relocate',
-    pattern: /^(?:are|would|will|can|could)\s+you\s+(?:be\s+)?(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*\b\s*(.*)$/i,
-  },
-  {
-    family: 'relocation',
-    form: 'plan_move',
-    pattern: /^do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move)\b\s*(.*)$/i,
-  },
-];
-
-function parseSiblingQuestionStart(label: string): ParsedSiblingQuestion | null {
-  const value = normalizedSiblingQuestionLabel(label);
-  for (const parser of SIBLING_QUESTION_STEMS) {
-    const match = value.match(parser.pattern);
-    if (match) return { family: parser.family, remainder: match[1]?.trim() ?? '', form: parser.form };
-  }
-  return null;
-}
-
-function isKnownGovernmentSiblingTarget(raw: string): boolean {
+function structurallySafeSiblingTarget(raw: string): string | null {
   const target = raw
     .trim()
     .replace(/^(?:a|an|the|this|our)\s+/i, '')
     .replace(/\s+(?:role|job|position|opportunity|internship|company|organization|organisation)$/i, '')
     .trim();
-  return targetFromBareGovernmentPhrase(target)?.kind === 'named';
+  if (!target) return null;
+  if (targetFromBareGovernmentPhrase(target)?.kind === 'named') return target;
+  if (labelNamesKnownGovernmentEmployer(target)) return null;
+  if (/[,;?!]|\b(?:and|or)\b/i.test(target)) return null;
+  if (/^(?:us|company|employer|role|job|position|opportunity|internship|organization|organisation)$/i.test(target)) return null;
+  return target.split(/\s+/).length <= 8 ? target : null;
 }
 
 function priorApplicationTarget(remainder: string): string | null {
+  const productionImc = remainder.match(/^to\s+this\s+role\s+or\s+another\s+role\s+@([a-z0-9&.'’-]+)\s+within\s+the\s+last\s+\d+(?:\s*[-–]\s*\d+)?\s+months(?:\?\s+as\s+a\s+reminder,[\s\S]+)?$/i);
+  if (productionImc) return productionImc[1];
   const withoutTime = remainder
     .replace(/\s+(?:before|previously|in\s+the\s+past|within\s+the\s+last(?:\s+\d+(?:\s*[-–]\s*\d+)?\s+months?)?)$/i, '')
     .trim();
   const workAt = withoutTime.match(/^to\s+work\s+(?:at|for)\s+(.+)$/i);
   if (workAt) return workAt[1].trim();
-  const roleAt = withoutTime.match(/^(?:to|for)\s+(?:(?:a|an|the|this)\s+)?(?:full[\s-]?time\s+or\s+internship\s+)?(?:role|position|job|internship)\s+(?:at|with|for)\s+(.+)$/i);
+  const roleAt = withoutTime.match(/^(?:to|for)\s+(?:(?:a|an|the|this|any)\s+)?(?:full[\s-]?time\s+or\s+internship\s+)?(?:role|position|job|internship)\s+(?:at|with|for)\s+(.+)$/i);
   if (roleAt) return roleAt[1].trim();
-  const direct = withoutTime.match(/^(?:to|with)\s+(.+)$/i);
+  const direct = withoutTime.match(/^(?:at|for|to|with)\s+(.+)$/i);
   return direct?.[1]?.trim() ?? null;
 }
 
-function isCompletePriorApplicationQuestion(label: string): boolean {
-  const parsed = parseSiblingQuestionStart(label);
-  if (parsed?.family !== 'prior_application') return false;
-  const target = priorApplicationTarget(parsed.remainder);
-  return Boolean(target && isKnownGovernmentSiblingTarget(target));
+function parsePriorApplicationQuestion(label: string): ParsedSiblingQuestion | null {
+  const value = normalizedSiblingQuestionLabel(label);
+  const stem = value.match(/^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\b\s*(.*)$/i)
+    ?? value.match(/^did\s+you\s+(?:(?:ever|previously)\s+)?apply\b\s*(.*)$/i);
+  if (!stem) return null;
+  const target = priorApplicationTarget(stem[1]?.trim() ?? '');
+  const safe = target ? structurallySafeSiblingTarget(target) : null;
+  return safe
+    ? { family: 'prior_application', valid: true, target: normalizeEmployerName(safe) }
+    : { family: 'prior_application', valid: false };
 }
 
-function isCompleteReferralQuestion(label: string): boolean {
-  const parsed = parseSiblingQuestionStart(label);
-  if (parsed?.family !== 'referral') return false;
-  const target = parsed.form === 'referral_source'
-    ? parsed.remainder.replace(/^(?:for|regarding)\s+/i, '')
-    : parsed.remainder;
-  return Boolean(target && isKnownGovernmentSiblingTarget(target));
+function parseReferralQuestion(label: string): ParsedSiblingQuestion | null {
+  const value = normalizedSiblingQuestionLabel(label);
+  const direct = value.match(/^(?:how|where)\s+did\s+you\s+(?:first\s+)?hear\s+(?:about|of)\b\s*(.*)$/i)
+    ?? value.match(/^(?:how\s+did|where\s+(?:did|have))\s+you\s+(?:first\s+)?learn(?:ed)?\s+(?:about|of)\b\s*(.*)$/i);
+  const source = value.match(/^what\s+(?:is|was)\s+(?:(?:your|the)\s+)?referral\s+source\b\s*(.*)$/i);
+  if (!direct && !source) return null;
+  let rawTarget = (direct?.[1] ?? source?.[1] ?? '').trim();
+  if (source) rawTarget = rawTarget.replace(/^(?:for|regarding)\s+/i, '');
+  if (/^(?:this|the|our)\s+(?:role|job|position|opportunity|internship|company|organization|organisation)$|^us$/i.test(rawTarget)) {
+    return { family: 'referral', valid: true };
+  }
+  const target = structurallySafeSiblingTarget(rawTarget);
+  return target
+    ? { family: 'referral', valid: true, target: normalizeEmployerName(target) }
+    : { family: 'referral', valid: false };
 }
 
-function isCompleteRelocationQuestion(label: string): boolean {
-  const parsed = parseSiblingQuestionStart(label);
-  if (parsed?.family !== 'relocation') return false;
-  const detail = parsed.remainder;
-  if (!detail) return true;
-  const employer = detail.match(/^(?:for|to\s+work\s+(?:at|for)|to\s+join)\s+(.+)$/i);
-  if (employer && isKnownGovernmentSiblingTarget(employer[1])) return true;
-  const place = detail.match(/^to\s+(.+)$/i);
-  return Boolean(place && VETTED_WORKPLACE_LOCATIONS.has(normalizeIdentity(place[1])));
+function parseRelocationQuestion(label: string): ParsedSiblingQuestion | null {
+  const value = normalizedSiblingQuestionLabel(label);
+  const regular = value.match(/^(?:(?:are|would|will|can|could)\s+you\s+(?:be\s+)?(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*|(?:would|could)\s+you\s+consider\s+relocat\w*|are\s+you\s+comfortable\s+(?:with\s+)?relocat\w*|do\s+you\s+agree\s+to\s+relocate|do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move))\b\s*(.*)$/i);
+  const gerund = value.match(/^would\s+relocating\b\s*(.*)$/i);
+  if (!regular && !gerund) return null;
+  let detail = (regular?.[1] ?? gerund?.[1] ?? '').trim();
+  if (gerund) {
+    const acceptable = detail.match(/^(.*?)\s+be\s+(?:acceptable|comfortable|possible)(?:\s+for\s+you|\s+to\s+you)?$/i);
+    if (!acceptable) return { family: 'relocation', valid: false };
+    detail = acceptable[1].trim();
+  }
+  if (!detail) return { family: 'relocation', valid: true };
+  const scoped = detail.match(/^(?:for|to\s+work\s+(?:at|for)|to\s+join|to)\s+(.+)$/i);
+  const target = scoped ? structurallySafeSiblingTarget(scoped[1]) : null;
+  return target
+    ? { family: 'relocation', valid: true, target: normalizeEmployerName(target) }
+    : { family: 'relocation', valid: false };
 }
 
-function compoundSiblingQuestionAnswer(label: string): { skipReason: string } | null {
-  const parsed = parseSiblingQuestionStart(label);
-  if (!parsed || !labelNamesKnownGovernmentEmployer(label)) return null;
-  if (isCompletePriorApplicationQuestion(label)
-    || isCompleteReferralQuestion(label)
-    || isCompleteRelocationQuestion(label)) return null;
+function parseSiblingQuestion(label: string): ParsedSiblingQuestion | null {
+  return parsePriorApplicationQuestion(label)
+    ?? parseReferralQuestion(label)
+    ?? parseRelocationQuestion(label);
+}
+
+export function isPriorApplicationQuestion(label: string): boolean {
+  return parsePriorApplicationQuestion(label) !== null;
+}
+
+export function isRelocationQuestion(label: string): boolean {
+  return parseRelocationQuestion(label) !== null;
+}
+
+function siblingQuestionRefusal(label: string): { skipReason: string } | null {
+  const parsed = parseSiblingQuestion(label);
+  if (!parsed || parsed.valid) return null;
+  if (parsed.family === 'prior_application') {
+    return {
+      skipReason: `prior application question left for you, because this is a compound application question: "${label.slice(0, 60)}"`,
+    };
+  }
   return { skipReason: `compound application question left for you: "${label.slice(0, 60)}"` };
 }
 
 function belongsToNonEmploymentQuestionFamily(label: string): boolean {
-  return isCompletePriorApplicationQuestion(label)
-    || isCompleteReferralQuestion(label)
-    || isCompleteRelocationQuestion(label);
+  return Boolean(parseSiblingQuestion(label)?.valid);
 }
 
 function labelHasUnprovenNoncurrentGovernmentStatus(label: string): boolean {
@@ -2060,12 +2038,6 @@ const PREFERRED_NAME_QUESTION =
 // them, so the UNIVERSITY graduation date can never be replayed as a high-school one.
 export const HIGH_SCHOOL_GRADUATION_QUESTION =
   /\bhigh\s+school\b[\s\S]{0,200}\b(?:graduat\w*|diploma|ged|month\s+and\s+year|when)\b|\b(?:graduat\w*|when|month|year)\b[\s\S]{0,120}\bhigh\s+school\b/i;
-
-// "Have you previously applied to work at Point72?" / "...with Akuna in the past?" / "...another
-// role @IMC within the last 12-18 months?". About APPLICATIONS, not employment, which is why it is
-// separate from PRIOR_EMPLOYER_OR_PROGRAM_QUESTION above.
-export const PREVIOUSLY_APPLIED_QUESTION =
-  /\b(?:have|had)\s+you\s+(?:ever\s+|previously\s+)?applied\b|\bdid\s+you\s+(?:(?:ever|previously)\s+apply|apply\b[\s\S]{0,160}\b(?:before|previously|in\s+the\s+past))\b|\bpreviously\s+applied\b|\bapplied\s+(?:to|for|with)\b[\s\S]{0,160}\b(?:previously|before|in\s+the\s+past|within\s+the\s+last)\b/i;
 
 // Further education AFTER the current degree. Checked before every graduation-date rule so that
 // "when is your potential master's graduation date?" cannot be handed the undergraduate date -
@@ -2233,7 +2205,10 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (CITIZENSHIP_QUESTION.test(l)) return 'citizenship';
   if (!locationCommitment && !locationChoice && RESIDENCE_QUESTION.test(l)) return 'address_country';
 
-  if (REFERRAL_QUESTION.test(l)) return 'referral_source_default';
+  const referral = parseReferralQuestion(l);
+  if (referral?.valid) return 'referral_source_default';
+  if (referral) return null;
+  if (parseRelocationQuestion(l)) return null;
   if (SALARY_QUESTION.test(l)) return 'desired_salary';
   if (DOB_QUESTION.test(l)) return 'date_of_birth';
   if (/linkedin/i.test(l)) return 'linkedin_url';
@@ -3314,8 +3289,8 @@ export function resolveKnownAnswer(
   const politicallyExposed = politicallyExposedAnswer(label, ap);
   if (politicallyExposed) return politicallyExposed;
 
-  const compoundSibling = compoundSiblingQuestionAnswer(label);
-  if (compoundSibling) return compoundSibling;
+  const siblingRefusal = siblingQuestionRefusal(label);
+  if (siblingRefusal) return siblingRefusal;
 
   /* Up here for the same reason as the two above it, and AFTER them on purpose: the PEP question
    * and Astranis's export-control paragraph both contain the word "government", and both are

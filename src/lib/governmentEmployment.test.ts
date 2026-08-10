@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  classifyField,
   isGovernmentEmploymentQuestion,
+  isPriorApplicationQuestion,
+  isRelocationQuestion,
   refreshKnownQuestionAnswers,
   resolveKnownAnswer,
   type ApplicationProfileLike,
@@ -800,15 +803,31 @@ describe('prior government employment, answered from the experience bank', () =>
       ['Have you previously applied to NASA before?', 'Yes'],
       ['Have you ever applied for a role at NASA?', 'Yes'],
       ['Have you applied for an internship with NASA?', 'Yes'],
+      ['Have you ever applied at NASA?', 'Yes'],
+      ['Have you applied for NASA?', 'Yes'],
+      ['Did you apply for NASA before?', 'Yes'],
+      ['Did you apply at NASA before?', 'Yes'],
+      ['Have you previously applied for any role at NASA?', 'Yes'],
       ['Where did you hear about NASA?', 'LinkedIn'],
       ['Where did you first hear about NASA?', 'LinkedIn'],
+      ['How did you hear of NASA?', 'LinkedIn'],
+      ['Where did you first learn about NASA?', 'LinkedIn'],
+      ['How did you first learn of NASA?', 'LinkedIn'],
       ['How did you learn about NASA?', 'LinkedIn'],
       ['What is your referral source for NASA?', 'LinkedIn'],
       ['What was the referral source for NASA?', 'LinkedIn'],
       ['Would you be willing to relocate for NASA?', 'Yes'],
       ['Would you be open to relocating for NASA?', 'Yes'],
+      ['Would you consider relocating for NASA?', 'Yes'],
+      ['Are you comfortable relocating for NASA?', 'Yes'],
+      ['Do you agree to relocate for NASA?', 'Yes'],
+      ['Would you relocate for NASA?', 'Yes'],
+      ['Would relocating for NASA be acceptable to you?', 'Yes'],
     ] as const;
     for (const [label, expected] of valid) {
+      if (/appl(?:y|ied)/i.test(label)) assert.equal(isPriorApplicationQuestion(label), true, label);
+      if (/hear|learn|referral/i.test(label)) assert.equal(classifyField(label), 'referral_source_default', label);
+      if (/relocat/i.test(label)) assert.equal(isRelocationQuestion(label), true, label);
       assert.deepEqual(resolveKnownAnswer(label, 'text', profile, undefined), { value: expected }, label);
       assert.deepEqual(
         refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, undefined),
@@ -829,8 +848,17 @@ describe('prior government employment, answered from the experience bank', () =>
       'Are you willing to relocate for NASA and work weekends?',
       'Would you be willing to relocate for NASA and travel for work?',
       'Would you be open to relocating for NASA and work weekends?',
+      'How did you hear of NASA and why are you interested?',
+      'Where did you first learn about NASA and who told you?',
+      'Would you consider relocating for NASA and work weekends?',
+      'Are you comfortable relocating for NASA and traveling for work?',
+      'Do you agree to relocate for NASA and work onsite?',
+      'Would relocating for NASA and travel be acceptable to you?',
     ];
     for (const label of compound) {
+      if (/appl(?:y|ied)/i.test(label)) assert.equal(isPriorApplicationQuestion(label), true, label);
+      if (/hear|learn|referral/i.test(label)) assert.equal(classifyField(label), null, label);
+      if (/relocat/i.test(label)) assert.equal(isRelocationQuestion(label), true, label);
       const resolved = resolveKnownAnswer(label, 'text', profile, undefined);
       assert.ok(resolved && 'skipReason' in resolved, label);
       assert.match(resolved.skipReason, /compound application question/, label);

@@ -50,7 +50,7 @@ import {
   POLITICALLY_EXPOSED_FAMILY_QUESTION,
   POLITICALLY_EXPOSED_PERSON_QUESTION,
   POTENTIAL_ADVANCED_GRADUATION_DATE_QUESTION,
-  PREVIOUSLY_APPLIED_QUESTION,
+  isPriorApplicationQuestion,
   PRONOUNS_QUESTION,
   RESUME_PDF_ACKNOWLEDGEMENT,
   ROUTINE_APPLICANT_CONSENT_QUESTION,
@@ -128,7 +128,6 @@ const SELF_DECLARATION_QUESTIONS: readonly RegExp[] = [
   AI_INTERVIEW_POLICY_QUESTION,
   EMPLOYER_RESTRICTION_AGREEMENT_QUESTION,
   // The applicant's own record and intentions.
-  PREVIOUSLY_APPLIED_QUESTION,
   OFFER_DEADLINE_QUESTION,
   FURTHER_EDUCATION_PLAN_QUESTION,
   FURTHER_EDUCATION_DEGREE_TYPE_QUESTION,
@@ -146,6 +145,7 @@ const SELF_DECLARATION_QUESTIONS: readonly RegExp[] = [
 export function isSelfDeclarationQuestion(label: string): boolean {
   const value = (label ?? '').trim();
   if (!value) return false;
+  if (isPriorApplicationQuestion(value)) return true;
   return SELF_DECLARATION_QUESTIONS.some((pattern) => pattern.test(value));
 }
 
