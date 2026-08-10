@@ -216,11 +216,11 @@ describe('exact-country resolver', () => {
       ['Remote Canada', 'CA', 'No'],
       ['United Kingdom - Remote', 'GB', 'No'],
       ['Remote United Kingdom', 'GB', 'No'],
+      ['London', 'GB', 'No'],
       ['TX, United States', 'US', 'Yes'],
       ['Texas, United States', 'US', 'Yes'],
       ['ON, Canada', 'CA', 'No'],
       ['Ontario, Canada', 'CA', 'No'],
-      ['London', 'GB', 'No'],
       ['London, England', 'GB', 'No'],
       ['Paris, France', 'FR', 'No'],
     ];
@@ -266,6 +266,51 @@ describe('exact-country resolver', () => {
     assert.equal(postingCountryCodeFromJobContext({ portal_country: 'US', location: 'Paris, TX' }), 'US');
     assert.equal(postingCountryCodeFromJobContext({ portal_country: 'GB', location: 'London, England' }), 'GB');
     assert.equal(postingCountryCodeFromJobContext({ portal_country: 'US', location: 'Springfield' }), 'US');
+  });
+
+  test('ATS office-group country labels provide exact codes and conflicts still fail closed', () => {
+    const consistent: Array<[Record<string, unknown>, string]> = [
+      [{ portal_country: 'United States Locations', location: 'New York, NY' }, 'US'],
+      [{ portal_country: 'India Locations', location: 'Mumbai' }, 'IN'],
+      [{ portal_country: 'Canada Offices', location: 'Toronto' }, 'CA'],
+      [{ portal_country: 'United Kingdom Office', location: 'London' }, 'GB'],
+      [{ portal_country: 'United-States (Locations)', location: 'Boston' }, 'US'],
+      [{ portal_country: 'India | Recruiting', location: 'Bengaluru' }, 'IN'],
+    ];
+    for (const [context, code] of consistent) {
+      assert.equal(postingCountryCodeFromJobContext(context), code, JSON.stringify(context));
+      assert.equal(postingCountryFromJobContext(context), code === 'US' ? 'us' : 'non_us', JSON.stringify(context));
+      if (code === 'US' || code === 'GB') {
+        assert.deepEqual(resolveKnownAnswer(
+          'Are you authorized to work in the country where this role is located?',
+          'select',
+          profile,
+          undefined,
+          postingCountryFromJobContext(context),
+          postingCountryCodeFromJobContext(context),
+        ), { value: code === 'US' ? 'Yes' : 'No' }, JSON.stringify(context));
+      }
+    }
+
+    for (const context of [
+      { portal_country: 'United States Locations', location: 'London' },
+      { portal_country: 'India Locations', location: 'New York, NY' },
+      { portal_country: 'Canada Offices', location: 'London' },
+      { portal_country: 'United Kingdom Locations', location: 'New York, NY' },
+      { portal_country: 'United States Locations', locations: ['London', 'New York, NY'] },
+    ]) {
+      assert.equal(postingCountryCodeFromJobContext(context), undefined, JSON.stringify(context));
+      assert.equal(postingCountryFromJobContext(context), 'unknown', JSON.stringify(context));
+      const held = resolveKnownAnswer(
+        'Are you authorized to work in the country where this role is located?',
+        'select',
+        profile,
+        undefined,
+        postingCountryFromJobContext(context),
+        postingCountryCodeFromJobContext(context),
+      );
+      assert.ok(held && 'skipReason' in held, JSON.stringify(context));
+    }
   });
 
   test('structured ATS country metadata reaches the exact country resolver', () => {

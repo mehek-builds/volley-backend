@@ -733,6 +733,7 @@ test('portal country metadata reaches managed send resolution without borrowing 
       { country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false },
       { country_code: 'GB', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
       { country_code: 'CA', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
+      { country_code: 'IN', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
     ],
   };
 
@@ -759,6 +760,10 @@ test('portal country metadata reaches managed send resolution without borrowing 
     [{ location: 'Canada - Remote' }, 'No'],
     [{ location: 'United Kingdom - Remote' }, 'No'],
     [{ portal_country: 'US', location: 'Springfield' }, 'Yes'],
+    [{ portal_country: 'United States Locations', location: 'New York, NY' }, 'Yes'],
+    [{ portal_country: 'India Locations', location: 'Mumbai' }, 'No'],
+    [{ portal_country: 'Canada Offices', location: 'Toronto' }, 'No'],
+    [{ portal_country: 'United Kingdom Office', location: 'London' }, 'No'],
   ] as const) {
     const resolved = await discoverAndResolveQuestions(
       fields,
@@ -782,6 +787,11 @@ test('portal country metadata reaches managed send resolution without borrowing 
     { location: 'Paris team aligned to Texas business hours' },
     { location: 'Sales territory, United States' },
     { location: 'Springfield, United States' },
+    { portal_country: 'United States Locations', location: 'London' },
+    { portal_country: 'India Locations', location: 'New York, NY' },
+    { portal_country: 'Canada Offices', location: 'London' },
+    { portal_country: 'United Kingdom Locations', location: 'New York, NY' },
+    { portal_country: 'United States Locations', locations: ['London', 'New York, NY'] },
   ]) {
     const mixed = await discoverAndResolveQuestions(
       fields,

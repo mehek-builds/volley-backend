@@ -151,7 +151,9 @@ test('the portal is believed over the location string', () => {
 test('a Greenhouse office list that includes the US is a US role', () => {
   // A posting filed under both is one an American hire can take.
   assert.equal(countryFromPortal('US | Bay Area'), 'us');
+  assert.equal(countryFromPortal('United States Locations'), 'us');
   assert.equal(countryFromPortal('India Locations'), 'non_us');
+  assert.equal(countryFromPortal('Canada Offices'), 'non_us');
   assert.equal(countryFromPortal('EMEA'), 'non_us');
 });
 

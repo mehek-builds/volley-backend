@@ -297,7 +297,12 @@ const US_COUNTRY_TOKENS = new Set(['US', 'USA', 'UNITED STATES', 'UNITED STATES 
 export function countryFromPortal(portalCountry: string | null | undefined): JobCountry | null {
   if (!portalCountry || !portalCountry.trim()) return null;
   const parts = portalCountry.split('|').map((part) => normalise(part).trim());
-  if (parts.some((part) => US_COUNTRY_TOKENS.has(part) || / (USA|UNITED STATES) /.test(` ${part} `))) {
+  const exactCodes = parts.flatMap((part) => {
+    const code = exactPortalCountryCodePart(part);
+    return code ? [code] : [];
+  });
+  if (exactCodes.includes('US')
+    || parts.some((part) => US_COUNTRY_TOKENS.has(part) || / (USA|UNITED STATES) /.test(` ${part} `))) {
     return 'us';
   }
   /* An office group NAMED after a foreign country ("India Locations", "EMEA"), or a two-letter code
@@ -309,6 +314,16 @@ export function countryFromPortal(portalCountry: string | null | undefined): Job
   });
   if (foreign) return 'non_us';
   return null;
+}
+
+const PORTAL_OFFICE_GROUP_SUFFIX = /\s+(?:LOCATIONS?|OFFICES?)$/;
+
+/** Exact country evidence from an ATS country field, including its closed office-group labels. */
+function exactPortalCountryCodePart(part: string): string | undefined {
+  const normalized = normalise(part).trim();
+  const country = normalized.replace(PORTAL_OFFICE_GROUP_SUFFIX, '').trim();
+  if (!country) return undefined;
+  return exactStructuredCountryCode(country, true);
 }
 
 /**
@@ -557,30 +572,41 @@ function structuredCountryEvidence(value: string, acceptsBareIsoCode: boolean): 
 
 function structuredJobContextValues(context: Record<string, unknown>): Array<{
   value: string;
-  acceptsBareIsoCode: boolean;
+  source: 'portal' | 'country' | 'location';
 }> {
-  const values: Array<{ value: string; acceptsBareIsoCode: boolean }> = [];
-  if (typeof context.portal_country === 'string') values.push({ value: context.portal_country, acceptsBareIsoCode: true });
-  if (typeof context.country === 'string') values.push({ value: context.country, acceptsBareIsoCode: true });
-  if (typeof context.location === 'string') values.push({ value: context.location, acceptsBareIsoCode: false });
+  const values: Array<{ value: string; source: 'portal' | 'country' | 'location' }> = [];
+  if (typeof context.portal_country === 'string') values.push({ value: context.portal_country, source: 'portal' });
+  if (typeof context.country === 'string') values.push({ value: context.country, source: 'country' });
+  if (typeof context.location === 'string') values.push({ value: context.location, source: 'location' });
   if (Array.isArray(context.locations)) {
     for (const value of context.locations) {
-      if (typeof value === 'string') values.push({ value, acceptsBareIsoCode: false });
+      if (typeof value === 'string') values.push({ value, source: 'location' });
     }
   }
   return values;
+}
+
+function portalCountryEvidence(value: string): StructuredCountryEvidence {
+  const codes = new Set(value
+    .split('|')
+    .map((part) => exactPortalCountryCodePart(part))
+    .filter((code): code is string => Boolean(code)));
+  return evidenceFromCodes(codes);
 }
 
 function legalCountryEvidenceFromJobContext(context: Record<string, unknown>): {
   country: JobCountry;
   code: string | undefined;
 } {
-  const evidence = structuredJobContextValues(context).flatMap((entry) => entry.value
-    .split(LOCATION_SEGMENT_SEPARATOR)
-    .map((segment) => ({
-      ...structuredCountryEvidence(segment, entry.acceptsBareIsoCode),
-      fromCountryField: entry.acceptsBareIsoCode,
-    })));
+  const evidence = structuredJobContextValues(context).flatMap((entry) => {
+    if (entry.source === 'portal') {
+      return [{ ...portalCountryEvidence(entry.value), fromCountryField: true }];
+    }
+    return entry.value.split(LOCATION_SEGMENT_SEPARATOR).map((segment) => ({
+      ...structuredCountryEvidence(segment, entry.source === 'country'),
+      fromCountryField: entry.source === 'country',
+    }));
+  });
   const hasAuthoritativeCountryField = evidence.some(
     (item) => item.fromCountryField && item.codes.length > 0 && !item.invalid,
   );
