@@ -1978,6 +1978,7 @@ function parsePriorApplicationQuestion(
   }
   const priorWindow = String.raw`(?:(?:within|in|over) (?:the )?(?:last|past)|(?:last|past)) (?:\d+(?: \d+)? )?(?:days?|weeks?|months?|years?)`;
   const priorTime = String.raw`(?:before|previously|in the past|ever|${priorWindow})`;
+  const applicationCategoryHead = String.raw`(?:internships?|fellowships?|apprenticeships?|co ops?|cooperative|roles?|jobs?|positions?|programs?|opportunit(?:y|ies)|schemes?|schools?|residenc(?:y|ies)|openings?|vacanc(?:y|ies)|placements?|traineeships?|externships?)`;
   const organizationalUnitApplication = (raw: string): 'organizational' | 'unrelated' | null => {
     const match = raw.match(
       /^(.*\b(teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies)))(?: (in|at|based in|based at|located in|located at|within|for) (.+))?$/,
@@ -2001,7 +2002,7 @@ function parsePriorApplicationQuestion(
           : undefined;
         if (alias) semanticModifier = semanticModifier.slice(alias.length).trim();
       }
-      const organizationalModifier = /^(?:consulting|products?|business development|corporate(?: finance| development)?|organizational|client services?|advisory|finance|legal|tax|audit|strateg(?:y|ies)|risks?|compliance|operations?|human resources?|hr|people|talent|recruiting|sales|marketing|customer (?:success|support)|supply chains?|procurement|accounting|treasur(?:y|ies)|investor relations?|communications?|public relations?|security governance|quality assurance|program management|project management|it|information technology|commercial|regulatory affairs?|research and development|r and d|partnerships?|business operations|revenue operations|go to market|strategy and operations)$/.test(semanticModifier);
+      const organizationalModifier = /^(?:consulting|products?|business development|corporate(?: finance| development)?|organizational|client services?|advisory|finance|legal|tax|audit|strateg(?:y|ies)|risks?|compliance|operations?|human resources?|hr|people|talent|recruiting|sales|marketing|customer (?:success|support)|supply chains?|procurement|accounting|treasur(?:y|ies)|investor relations?|communications?|public relations?|security governance|quality assurance|program management|project management|it|information technology|commercial|regulatory affairs?|research and development|r and d|partnerships?|business operations|revenue operations|go to market|strategy and operations|clinical operations|data privacy|medical affairs?|esg|environmental(?: and)? social(?: and)? governance)$/.test(semanticModifier);
       if (!organizationalModifier) return 'unrelated';
     }
     if (!preposition) return 'organizational';
@@ -2025,9 +2026,9 @@ function parsePriorApplicationQuestion(
     const objectMatch = withoutTemporal.match(/^(?:at|for|to|with)\s+(.+)$/);
     if (!objectMatch) return null;
     const object = objectMatch[1].trim();
-    const category = object.match(
-      /^(.*?)(internships?|fellowships?|apprenticeships?|co ops?|cooperative|roles?|jobs?|positions?|programs?|opportunit(?:y|ies)|schemes?|schools?|residenc(?:y|ies)|openings?|vacanc(?:y|ies)|placements?|traineeships?|externships?)(?:\s+(?:at|for|to|with)\s+(.+))?$/,
-    );
+    const category = object.match(new RegExp(
+      `^(.*?)(${applicationCategoryHead})(?:\\s+(?:at|for|to|with)\\s+(.+))?$`,
+    ));
     if (!category) return null;
     const descriptor = category[1].trim().replace(/^(?:an?|any|the)\s+/, '');
     const noun = category[2];
@@ -2175,7 +2176,9 @@ function parsePriorApplicationQuestion(
   }
   const nestedUnitRemainder = remainder
     .replace(new RegExp(`\\s+${priorTime}$`), '')
-    .match(/^(?:to|for) (?:(?:a|an|the|this|that|any) )?(?:[a-z0-9]+ ){0,4}(?:roles?|positions?|openings?|jobs?) (?:within|in|at) (.+)$/)?.[1];
+    .match(new RegExp(
+      `^(?:to|for) (?:(?:a|an|the|this|that|any) )?(?:[a-z0-9]+ ){0,4}${applicationCategoryHead} (?:within|in|at) (.+)$`,
+    ))?.[1];
   if (nestedUnitRemainder) {
     const classification = organizationalUnitApplication(nestedUnitRemainder);
     if (classification === 'organizational') return { family: 'prior_application', valid: false };
