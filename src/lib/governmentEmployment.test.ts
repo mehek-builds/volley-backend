@@ -364,6 +364,41 @@ describe('prior government employment, answered from the experience bank', () =>
     );
   });
 
+  test('parenthetical examples must resolve to targets compatible with the primary scope', () => {
+    const federal: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const local: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'City of Los Angeles', title: 'Analyst' }],
+    };
+    const safe = [
+      'Have you worked for government (e.g., NASA, FAA, or DOE)?',
+      'Have you worked for federal government (including: NASA, FAA, or DOE)?',
+      'Have you worked for a U.S. government agency (for example: NASA or DOE)?',
+      'Have you worked for NASA (e.g., National Aeronautics and Space Administration)?',
+    ];
+    for (const label of safe) {
+      assert.equal(answer(label, federal), 'VALUE Yes', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: '' }], federal, undefined),
+        [{ question: label, answer: 'Yes' }],
+      );
+    }
+    const contradictions = [
+      ['Have you worked for federal government (e.g., City of Los Angeles)?', federal],
+      ['Have you worked for local government (e.g., NASA)?', local],
+      ['Have you worked for NASA (e.g., FAA)?', federal],
+      ['Have you worked for federal government (e.g., federal or local agencies)?', federal],
+    ] as const;
+    for (const [label, profile] of contradictions) {
+      assert.equal(answer(label, profile), 'SKIP', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], profile, undefined),
+        [{ question: label, answer: '' }],
+      );
+    }
+  });
+
   test('canonical federal aliases resolve directly and at send-time', () => {
     const cases = [
       ['Have you worked for US DOE?', 'U.S. Department of Energy'],
@@ -568,6 +603,11 @@ describe('prior government employment, answered from the experience bank', () =>
       'Are you a former employee of the federal government?',
       'Former government employment?',
       'Have you formerly worked for NASA?',
+      'Are you a former NASA employee?',
+      'Are you a former employee of FAA?',
+      'Former NASA employee?',
+      'Former employee of FAA?',
+      'Former DOE employment?',
     ];
     for (const label of labels) {
       assert.equal(answer(label, currentFederal), 'SKIP', label);
@@ -600,6 +640,15 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you been employed by a U.S. federal governmental agency?',
       'Have you worked for a United States governmental agency?',
     ];
+    const localVariants = [
+      'Have you worked for a local governmental agency?',
+      'Have you worked for a municipal governmental agency?',
+      'Have you worked for a county governmental agency?',
+    ];
+    const stateVariants = [
+      'Have you worked for a state governmental agency?',
+      'Have you been employed by state governmental agencies?',
+    ];
     for (const label of broad) {
       assert.equal(answer(label, federal), 'VALUE Yes', label);
       assert.equal(answer(label, local), 'VALUE Yes', label);
@@ -615,6 +664,22 @@ describe('prior government employment, answered from the experience bank', () =>
         refreshKnownQuestionAnswers([{ question: label, answer: '' }], federal, undefined),
         [{ question: label, answer: 'Yes' }],
       );
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], local, undefined),
+        [{ question: label, answer: '' }],
+      );
+    }
+    for (const label of localVariants) {
+      assert.equal(answer(label, local), 'VALUE Yes', label);
+      assert.equal(answer(label, federal), 'SKIP', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: '' }], local, undefined),
+        [{ question: label, answer: 'Yes' }],
+      );
+    }
+    for (const label of stateVariants) {
+      assert.equal(answer(label, local), 'SKIP', label);
+      assert.equal(answer(label, federal), 'SKIP', label);
       assert.deepEqual(
         refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], local, undefined),
         [{ question: label, answer: '' }],

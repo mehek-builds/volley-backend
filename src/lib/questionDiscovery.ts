@@ -1562,9 +1562,12 @@ const GOVERNMENT_SCOPE_PARSERS: readonly {
     pattern: /^(?:u s|us|united states)(?: federal)? governmental (?:agency|agencies)$/,
     target: { kind: 'level', level: 'federal' },
   },
-  { pattern: /^state (?:government|agency|agencies)$/, target: { kind: 'level', level: 'state' } },
   {
-    pattern: /^(?:local|municipal|city|county) government(?: (?:agency|agencies))?$/,
+    pattern: /^state (?:government(?: (?:agency|agencies))?|governmental (?:agency|agencies)|agency|agencies)$/,
+    target: { kind: 'level', level: 'state' },
+  },
+  {
+    pattern: /^(?:local|municipal|city|county) (?:government(?: (?:agency|agencies))?|governmental (?:agency|agencies))$/,
     target: { kind: 'level', level: 'local' },
   },
   {
@@ -1581,26 +1584,69 @@ function parsedGovernmentScope(identity: string): GovernmentEmploymentTarget | n
   return named ? { kind: 'named', identity } : null;
 }
 
+function targetFromBareGovernmentPhrase(raw: string): GovernmentEmploymentTarget | null {
+  const identity = normalizeIdentity(raw.trim().replace(/[.,;:]+$/g, '').replace(/^(?:a|an|any|the)\s+/i, ''));
+  return parsedGovernmentScope(identity);
+}
+
+function governmentTargetsAreCompatible(
+  primary: GovernmentEmploymentTarget,
+  example: GovernmentEmploymentTarget,
+): boolean {
+  if (primary.kind === 'any') return true;
+  if (primary.kind === 'level') {
+    if (example.kind === 'level') return example.level === primary.level;
+    if (example.kind === 'named') {
+      return VETTED_GOVERNMENT_EMPLOYERS.get(example.identity)?.level === primary.level;
+    }
+    return false;
+  }
+  if (example.kind !== 'named') return false;
+  const primaryEmployer = VETTED_GOVERNMENT_EMPLOYERS.get(primary.identity);
+  const exampleEmployer = VETTED_GOVERNMENT_EMPLOYERS.get(example.identity);
+  return Boolean(primaryEmployer && exampleEmployer && primaryEmployer.canonical === exampleEmployer.canonical);
+}
+
+function parseGovernmentExampleTargets(illustration: string): GovernmentEmploymentTarget[] | null {
+  const wholeTarget = targetFromBareGovernmentPhrase(illustration);
+  if (wholeTarget) return [wholeTarget];
+  const pieces = illustration.split(/\s*(?:,|;|\/|\band\b|\bor\b)\s*/i).filter(Boolean);
+  if (!pieces.length) return null;
+  const targets: GovernmentEmploymentTarget[] = [];
+  for (const piece of pieces) {
+    const shorthand = normalizeIdentity(piece.replace(/^(?:a|an|any|the)\s+/i, ''));
+    if (/^federal$/.test(shorthand)) targets.push({ kind: 'level', level: 'federal' });
+    else if (/^state$/.test(shorthand)) targets.push({ kind: 'level', level: 'state' });
+    else if (/^(?:local|municipal|city|county)$/.test(shorthand)) targets.push({ kind: 'level', level: 'local' });
+    else {
+      const target = targetFromBareGovernmentPhrase(piece);
+      if (!target) return null;
+      targets.push(target);
+    }
+  }
+  return targets;
+}
+
 function targetFromGovernmentPhrase(raw: string): GovernmentEmploymentTarget | null {
   let phrase = raw.trim().replace(/[.,;:]+$/g, '');
   const parenthetical = phrase.match(/^(.+?)\s*\(([^()]*)\)\s*$/);
   if (parenthetical) {
     const primary = parenthetical[1].trim();
     const detail = parenthetical[2].trim();
+    const primaryTarget = targetFromBareGovernmentPhrase(primary);
+    if (!primaryTarget) return null;
     if (/^(?:e\.?\s*g\.?|for\s+example|including|such\s+as)(?:[\s,:-]|$)/i.test(detail)) {
       const illustration = detail.replace(/^(?:e\.?\s*g\.?|for\s+example|including|such\s+as)[\s,:-]*/i, '');
-      const safeTokens = /^(?:(?:u\.?\s*s\.?|us|united\s+states|federal|state|local|municipal|city|county|government(?:al)?|agenc(?:y|ies)|public|sector|civil|service|and|or|the|a|an|any)[\s,;/]*)+$/i;
-      if (!illustration || !safeTokens.test(illustration)) return null;
-      phrase = primary;
+      const examples = parseGovernmentExampleTargets(illustration);
+      if (!examples?.length || examples.some((example) => !governmentTargetsAreCompatible(primaryTarget, example))) return null;
+      return primaryTarget;
     } else {
-      const primaryEmployer = VETTED_GOVERNMENT_EMPLOYERS.get(normalizeIdentity(primary));
-      const detailedEmployer = VETTED_GOVERNMENT_EMPLOYERS.get(normalizeIdentity(detail));
-      if (!primaryEmployer || !detailedEmployer || primaryEmployer.canonical !== detailedEmployer.canonical) return null;
-      return { kind: 'named', identity: normalizeIdentity(primary) };
+      const detailedTarget = targetFromBareGovernmentPhrase(detail);
+      if (!detailedTarget || !governmentTargetsAreCompatible(primaryTarget, detailedTarget)) return null;
+      return primaryTarget;
     }
   }
-  const identity = normalizeIdentity(phrase.replace(/^(?:a|an|any|the)\s+/i, ''));
-  return parsedGovernmentScope(identity);
+  return targetFromBareGovernmentPhrase(phrase);
 }
 
 function governmentRelationPhrase(label: string): string | null {
@@ -1691,6 +1737,28 @@ function normalizedGovernmentEmploymentLabel(label: string): string {
   return label.trim().replace(/\s+/g, ' ').replace(/[?.!]+$/g, '').trim();
 }
 
+function formerGovernmentEmploymentTarget(label: string): GovernmentEmploymentTarget | null {
+  const value = normalizedGovernmentEmploymentLabel(label);
+  const patterns: readonly { pattern: RegExp; scopeGroup: number }[] = [
+    { pattern: /^are\s+you\s+(?:an?\s+)?former\s+(.+?)\s+employee$/i, scopeGroup: 1 },
+    {
+      pattern: /^are\s+you\s+(?:an?\s+)?former\s+employee\s+(?:of|for|with)\s+(?:the\s+)?(.+)$/i,
+      scopeGroup: 1,
+    },
+    { pattern: /^former\s+(.+?)\s+employee$/i, scopeGroup: 1 },
+    {
+      pattern: /^former\s+employee\s+(?:of|for|with)\s+(?:the\s+)?(.+)$/i,
+      scopeGroup: 1,
+    },
+    { pattern: /^former\s+(.+?)\s+employment$/i, scopeGroup: 1 },
+  ];
+  for (const parser of patterns) {
+    const match = value.match(parser.pattern);
+    if (match) return targetFromGovernmentPhrase(match[parser.scopeGroup]);
+  }
+  return null;
+}
+
 function currentGovernmentEmploymentTarget(label: string): GovernmentEmploymentTarget | null {
   const value = normalizedGovernmentEmploymentLabel(label);
   for (const parser of CURRENT_GOVERNMENT_EMPLOYMENT_LABEL_PARSERS) {
@@ -1759,7 +1827,9 @@ function governmentEmploymentAnswer(
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
   if (!isGovernmentEmploymentQuestion(label)) {
-    if ((GOVERNMENT_EMPLOYER_SCOPE.test(label) || governmentLabelNamesKnownEmployer(label))
+    if ((GOVERNMENT_EMPLOYER_SCOPE.test(label)
+      || governmentLabelNamesKnownEmployer(label)
+      || formerGovernmentEmploymentTarget(label))
       && !NOT_HER_GOVERNMENT_EMPLOYMENT.test(label)) {
       return {
         skipReason: governmentEmploymentSkipReason(
