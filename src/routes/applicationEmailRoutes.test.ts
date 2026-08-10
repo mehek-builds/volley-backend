@@ -154,6 +154,25 @@ test('employer mail is stored before the forwarding decision, and every decision
   assert.match(service, /classification === 'verification_code' && context\.securityCodeInFlight === true/);
   assert.match(service, /\n {2}return \{ forward: true \};\n\}/);
   assert.doesNotMatch(service, /classification === 'submission_confirmation' \|\| classification === 'interview_request'/);
+  /* THE GATE THE WIDENED POLICY PAYS FOR, and the reason it lives here rather than at the door.
+   *
+   * routeInboundApplicationEmail returns employer_message at `sender !== forwardTo`, BEFORE it
+   * reaches its own senderAuthenticationFailed call, so an employer message's SPF, DKIM and DMARC
+   * verdicts were never consulted at all. Harmless while two classifications forwarded; a spoofing
+   * and deliverability problem the moment forwarding became the default, because the relay leaves
+   * from Litos's own verified sending identity.
+   *
+   * It must be checked ahead of the classification, since what a forgery calls itself is not
+   * evidence, and it must be reached by employer mail, which the route's own check is not. */
+  assert.match(service, /if \(context\.senderAuthenticationFailed === true\) \{\n\s*return \{ forward: false, reason: 'sender_authentication_failed' \};/);
+  const authGate = service.indexOf("context.senderAuthenticationFailed === true");
+  const codeGate = service.indexOf("classification === 'verification_code' && context.securityCodeInFlight");
+  assert.ok(authGate > 0 && codeGate > authGate, 'an untrusted sender is refused before anything else is weighed');
+  assert.match(processor, /senderAuthenticationFailed: senderAuthenticationFailed\(input\.authentication\)/);
+  assert.match(handler, /senderAuthenticationFailed: input\.senderAuthenticationFailed === true/);
+  // Absent stays fail-open, and only an explicit `fail` counts. Softfail is not a failure.
+  assert.match(service, /if \(!authentication\) return false;[\s\S]{0,200}=== 'fail'\)/);
+  assert.doesNotMatch(service, /=== 'softfail'/);
   // Every decision is annotated on the row, and the withhold is annotated before the early return.
   assert.match(handler, /deps\.recordDecision\(\{ messageId: message\.id, decision: `withheld:\$\{forwardingDecision\.reason\}` \}\)/);
   assert.match(handler, /await deps\.recordDecision\(\{ messageId: message\.id, decision: 'forward' \}\)/);
@@ -193,6 +212,14 @@ test('forward_decision is written by code that works before its migration', () =
   assert.match(service, /async function insertLedgerRowBeforeForwardDecision/);
   assert.match(service, /return insertLedgerRowBeforeForwardDecision\(ledgerValues\)/);
   assert.doesNotMatch(service, /insert into application_email_messages[\s\S]{0,600}forward_decision/);
+  /* The account export: a BARE select is the form that breaks, because Drizzle names every declared
+   * column whether or not the caller wants it. Measured against production on this branch's head as
+   * `column "forward_decision" does not exist`, taking GET /account/export down for every user. */
+  const accountRoute = readFileSync('src/routes/account.ts', 'utf8');
+  assert.match(accountRoute, /selectApplicationEmailMessagesForUser\(userId\)/);
+  assert.doesNotMatch(accountRoute, /db\.select\(\)\.from\(application_email_messages\)/);
+  assert.match(service, /export async function selectApplicationEmailMessagesForUser/);
+  assert.match(service, /forward_decision: _notMigratedYet, \.\.\.columns \} = getTableColumns\(application_email_messages\)/);
 });
 
 test('the forwarding destination is a stored preference, not the login address', () => {

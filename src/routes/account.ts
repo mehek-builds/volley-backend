@@ -20,6 +20,7 @@ import { deleteBlobsForUser, mintDownloadToken } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import { decryptRow } from './applicationProfile';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
+import { selectApplicationEmailMessagesForUser } from '../lib/applicationEmail';
 import { deleteAnalyticsProfile } from '../lib/serverAnalytics';
 
 // The privacy policy promises the student can export or delete everything we hold. Until now
@@ -44,7 +45,10 @@ export async function accountRoutes(fastify: FastifyInstance) {
     const outreach = await db.select().from(outreach_events).where(eq(outreach_events.user_id, userId));
     const fills = await db.select().from(autofill_events).where(eq(autofill_events.user_id, userId));
     const applicationEmailAliases = await db.select().from(application_email_aliases).where(eq(application_email_aliases.user_id, userId));
-    const applicationEmailMessages = await db.select().from(application_email_messages).where(eq(application_email_messages.user_id, userId));
+    // Tolerant read (lib/applicationEmail.ts), for the same reason as the line above: this was a
+    // bare select, and a bare select asks for every column the schema declares. One added column
+    // that the database has not got yet turns the whole export into a 500 for every user.
+    const applicationEmailMessages = await selectApplicationEmailMessagesForUser(userId);
     // usage_counters has no FK to users (it is keyed by a plain string so pre-auth endpoints can
     // rate-limit by email), so it has to be queried - and later deleted - by key explicitly. Both
     // keys: auth.ts rate-limits the pre-auth endpoints by EMAIL, so an export keyed only on the

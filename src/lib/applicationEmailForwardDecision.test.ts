@@ -50,6 +50,7 @@ let pool: typeof import('../db/index')['pool'];
 let schema: typeof import('../db/schema');
 let service: typeof import('./applicationEmail');
 let applicationId: string;
+let userId: string;
 let sends: Array<{ url: string; body: Record<string, unknown> }> = [];
 
 /** Every outbound send, captured. Nothing leaves the process. */
@@ -92,6 +93,7 @@ before(async () => {
   for (const statement of statements) await pglite.exec(statement);
 
   const [user] = await db.insert(schema.users).values({ email: FORWARD_TO }).returning();
+  userId = user.id;
   /* A packet that submitted once and is waiting on an emailed code, with the request timestamped
    * to the minute of the run. This is the one state in which Litos withholds anything. */
   const [application] = await db.insert(schema.generated_resumes).values({
@@ -208,9 +210,57 @@ test('an offer letter the classifier cannot name still reaches the person it was
   assert.equal(sends.length, 1);
 });
 
-test('the health probe can see the withheld message, which last_inbound_message_at cannot', async () => {
+/* THE SPOOFED OFFER. An employer message never reached routeInboundApplicationEmail's authentication
+ * check, because it returns at `sender !== forwardTo` first, so widening the forwarding policy would
+ * have relayed DMARC-failing mail onward from Litos's own verified sending identity. The gate is in
+ * the forwarding decision rather than at the door, so the message is still written down. */
+test('a DMARC-failing employer message is stored, withheld, and never sent anywhere', async () => {
+  captureSends();
+  const result = await service.processInboundApplicationEmail({
+    provider: 'resend',
+    providerMessageId: 'spoofed-offer-1',
+    from: 'people@acme.com',
+    to: [ALIAS],
+    subject: 'Your offer from Acme',
+    text: 'Congratulations. Open the attached offer and confirm your bank details.',
+    authentication: { spf: 'pass', dkim: 'fail', dmarc: 'fail' },
+    receivedAt: new Date(),
+  });
+  assert.equal(result.accepted, true);
+  assert.equal(result.forwarded, false);
+  assert.equal(result.reason, 'sender_authentication_failed');
+  assert.equal(sends.length, 0, 'nothing may leave Litos on behalf of a sender the provider rejected');
+
+  const row = await messageByProviderId('spoofed-offer-1');
+  assert.ok(row, 'a suspected forgery is evidence, and evidence is kept');
+  assert.equal(row.direction, 'inbound');
+  assert.equal(row.forwarded_at, null);
+  assert.equal(row.forward_decision, 'withheld:sender_authentication_failed');
+});
+
+/* The same message with the same words and an ordinary set of verdicts. Without this the test above
+ * would pass on a system that had simply stopped forwarding. */
+test('the identical message with passing authentication is forwarded', async () => {
+  captureSends();
+  const result = await service.processInboundApplicationEmail({
+    provider: 'resend',
+    providerMessageId: 'genuine-offer-1',
+    from: 'people@acme.com',
+    to: [ALIAS],
+    subject: 'Your offer from Acme',
+    text: 'Congratulations. Open the attached offer and confirm your bank details.',
+    authentication: { spf: 'softfail', dkim: 'pass', dmarc: 'pass' },
+    receivedAt: new Date(),
+  });
+  assert.equal(result.forwarded, true, 'an SPF softfail is what ordinary forwarded mail looks like');
+  assert.equal(sends.length, 1);
+  const row = await messageByProviderId('genuine-offer-1');
+  assert.equal(row?.forward_decision, 'forward');
+});
+
+test('the health probe can see the withheld messages, which last_inbound_message_at cannot', async () => {
   const health = await service.applicationEmailHealth();
-  assert.equal(health.withheld_messages_recent, 1);
+  assert.equal(health.withheld_messages_recent, 2);
   assert.equal(health.withheld_messages_window_hours, 24);
   // The field that used to be the only message fact here is fresh at the same moment, which is why
   // it could not report the outage.
@@ -228,7 +278,16 @@ test('the health probe can see the withheld message, which last_inbound_message_
  *
  * LAST IN THE FILE ON PURPOSE: it leaves the fixture without the column.
  */
-test('mail is still delivered on a database that has not run the migration', async () => {
+test('mail is still delivered, and the export still answers, on an unmigrated database', async () => {
+  /* The account export read BEFORE the drop, so the assertion after it is about the fallback and
+   * not about a helper that never returns the column at all. */
+  const migrated = await service.selectApplicationEmailMessagesForUser(userId);
+  assert.ok(migrated.length > 0);
+  assert.ok(
+    migrated.some((row) => typeof row.forward_decision === 'string'),
+    'with the column present the export carries the decision',
+  );
+
   await pglite.exec('alter table application_email_messages drop column forward_decision');
   captureSends();
   const result = await service.processInboundApplicationEmail({
@@ -245,7 +304,17 @@ test('mail is still delivered on a database that has not run the migration', asy
   assert.equal(result.forwarded, true, 'a missing annotation column must never cost the applicant her mail');
   assert.equal(sends.length, 1);
 
-  // And the reader reports "unmeasurable", never "none": those are different answers.
+  /* GET /account/export was a bare select, which is the form that breaks: the reviewer had Drizzle
+   * emit it against production on this branch's head and it answered `column "forward_decision"
+   * does not exist`. It is the endpoint backing the promise that she can have everything we hold. */
+  const unmigrated = await service.selectApplicationEmailMessagesForUser(userId);
+  assert.ok(unmigrated.length > migrated.length, 'the export still returns every message she holds');
+  assert.ok(
+    unmigrated.every((row) => row.forward_decision === undefined),
+    'the annotation is what is dropped, never the messages',
+  );
+
+  // And the health reader reports "unmeasurable", never "none": those are different answers.
   const health = await service.applicationEmailHealth();
   assert.equal(health.withheld_messages_recent, null);
   assert.ok(health.last_inbound_message_at, 'the rest of the probe still works');

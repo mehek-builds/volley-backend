@@ -18,6 +18,7 @@ import {
   readPinnedApplicantEmail,
   retrieveResendReceivedEmail,
   routeInboundApplicationEmail,
+  senderAuthenticationFailed,
 } from './applicationEmail';
 import type { AliasDeliverability } from './applicationEmailDeliverability';
 
@@ -351,6 +352,78 @@ test('forwarding is a list of what to WITHHOLD, and everything not on it reaches
       applicationEmailForwardingDecision(classification, { securityCodeInFlight: true }),
       { forward: true },
       classification,
+    );
+  }
+});
+
+/* THE GATE THE WIDENED POLICY PAYS FOR.
+ *
+ * routeInboundApplicationEmail returns employer_message at `sender !== forwardTo`, before it ever
+ * reaches its own authentication check, so no SPF, DKIM or DMARC verdict has ever been consulted
+ * for a message from an employer. Under a two-outcome allowlist almost nothing was forwarded and
+ * the gap did not bite. Once forwarding is the default it does: a forgery would go out from Litos's
+ * own verified sending identity, into her inbox, wearing the employer's name.
+ */
+test('a message whose sender authentication explicitly failed is never forwarded', () => {
+  for (const authentication of [
+    { spf: 'fail' },
+    { dkim: 'fail' },
+    { dmarc: 'fail' },
+    { spf: 'pass', dkim: 'pass', dmarc: 'fail' },
+  ]) {
+    assert.equal(senderAuthenticationFailed(authentication), true, JSON.stringify(authentication));
+  }
+  // The most valuable message to forge is the most valuable message to send, so the refusal is not
+  // conditional on what the message claims to be.
+  for (const classification of [
+    'submission_confirmation',
+    'interview_request',
+    'account_registration',
+    'recruiter_reply',
+    'verification_code',
+    'other',
+  ] as const) {
+    assert.deepEqual(
+      applicationEmailForwardingDecision(classification, { senderAuthenticationFailed: true }),
+      { forward: false, reason: 'sender_authentication_failed' },
+      classification,
+    );
+  }
+  // It outranks the code race too: there is no point asking who is spending a code that nobody
+  // trustworthy sent.
+  assert.deepEqual(
+    applicationEmailForwardingDecision('verification_code', {
+      senderAuthenticationFailed: true,
+      securityCodeInFlight: true,
+    }),
+    { forward: false, reason: 'sender_authentication_failed' },
+  );
+});
+
+/* PASS, SOFTFAIL AND ABSENT ARE THREE DIFFERENT THINGS, and only one of them is a failure.
+ *
+ * softfail is SPF's `~all`: the sending domain saying "probably not us, but do not reject on my
+ * account". It fires on ordinary relayed and forwarded mail, which is the shape of mail an alias
+ * receives, so treating it as a failure would withhold real employer mail on a verdict whose own
+ * definition asks receivers not to act on it. Absent is a fail-open on purpose: silence from the
+ * provider is not a statement that the sender is forged. */
+test('only an explicit failure withholds: pass, softfail and silence all deliver', () => {
+  for (const authentication of [
+    { spf: 'pass', dkim: 'pass', dmarc: 'pass' },
+    { spf: 'softfail' },
+    { spf: 'softfail', dkim: 'pass', dmarc: 'pass' },
+    { spf: 'neutral', dkim: 'none' },
+    { spf: 'permerror', dkim: 'temperror' },
+    {},
+    undefined,
+  ]) {
+    assert.equal(senderAuthenticationFailed(authentication), false, JSON.stringify(authentication ?? null));
+    assert.deepEqual(
+      applicationEmailForwardingDecision('other', {
+        senderAuthenticationFailed: senderAuthenticationFailed(authentication),
+      }),
+      { forward: true },
+      JSON.stringify(authentication ?? null),
     );
   }
 });
