@@ -279,17 +279,19 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
 
     try {
       const scopedRecords = body.work_eligibility_by_country;
-      const { droppedFactColumns } = Array.isArray(scopedRecords)
-        ? (await persistProfileWithCountryEligibility(userId, encrypted, scopedRecords), { droppedFactColumns: false })
-        : await upsertApplicationProfile(userId, encrypted);
-      if (droppedFactColumns) {
-        fastify.log.warn(
-          { userId },
-          'Saved the application profile without the onboarding fact columns: this deploy is ahead of scripts/apply-application-facts-schema.mjs. Run that migration; the dropped answers read back as "never asked" until it has.',
-        );
-        if (Array.isArray(body.work_eligibility_by_country)) {
-          return reply.status(503).send({ error: 'Country work eligibility is being enabled. Try again shortly.' });
-        }
+      /* No partial-save branch here any more, and there never really was one. upsertApplicationProfile
+         used to report `droppedFactColumns` so this handler could warn an operator that the deploy
+         was ahead of the migration. That flag could never be true: the retry behind it stripped keys
+         from the payload while Drizzle went on naming every declared column in the INSERT, so the
+         second attempt raised the same 42703 and threw. The warning below it was unreachable code
+         guarding an outcome that never happened. See lib/applicationFacts.ts.
+
+         An unmigrated column now surfaces as the 500 in the catch below, which is what it always
+         actually did. The migration is a hard prerequisite for writes: run it before the deploy. */
+      if (Array.isArray(scopedRecords)) {
+        await persistProfileWithCountryEligibility(userId, encrypted, scopedRecords);
+      } else {
+        await upsertApplicationProfile(userId, encrypted);
       }
     } catch (err) {
       if (Array.isArray(body.work_eligibility_by_country) && isUndefinedColumnError(err)) {

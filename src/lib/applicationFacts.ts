@@ -140,61 +140,54 @@ export async function selectApplicationProfileRow(userId: string): Promise<Appli
   }
 }
 
-/** The same values with every not-yet-migrated column removed, for a write that has to get through. */
-export function withoutFactColumns<T extends Record<string, unknown>>(values: T): Partial<T> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(values)) {
-    if (!FACT_COLUMN_SET.has(key)) out[key] = value;
-  }
-  return out as Partial<T>;
-}
-
-export function mayRetryWithoutFactColumns(
-  values: Record<string, unknown>,
-  required: readonly ApplicationFactColumn[] = [],
-): boolean {
-  return !required.some((column) => Object.prototype.hasOwnProperty.call(values, column));
-}
-
-/**
- * Upsert an application_profile row, retrying without the fact columns if they do not exist yet.
+/* ---- THE WRITE PATH HAS NO UNMIGRATED-DATABASE TOLERANCE, AND CANNOT HAVE ONE THIS WAY ----
  *
- * The retry DROPS the new answers rather than failing the whole save. That is the right trade for
- * the few minutes the window lasts: the student's phone number and availability still save, and
- * the unsaved fact reads back as "never asked", which is the state it was already in. Failing the
- * write instead would lose every field on the form, not just the new ones.
+ * There used to be a retry here. It stripped the fact columns out of the payload OBJECT with a
+ * `withoutFactColumns` helper and wrote again, and the comment above it promised that a student's
+ * phone number and availability would still save while only the new answers were dropped.
+ *
+ * THAT RETRY COULD NEVER FIRE, and the promise was false for the whole time it stood. Drizzle's
+ * `db.insert(table).values(...)` names EVERY COLUMN DECLARED ON THE TABLE in the emitted INSERT,
+ * filling the ones the payload omits with `default`. Removing a key from the payload does not
+ * remove the column from the SQL. So the retry emitted a statement naming
+ * `standardized_test_type` exactly like the first attempt, Postgres raised the identical 42703, and
+ * that second error was thrown from outside the try block and propagated to the caller.
+ *
+ * Measured by rendering the SQL both ways (see the regression test in applicationFacts.test.ts):
+ *   INSERT names standardized_test_type?   true
+ *   retry payload after stripping          {"address_city":"Dubai","major":"CS"}
+ *   RETRY still names standardized_test_type?   true
+ *
+ * Two things followed from that, and both were invisible:
+ *   - `droppedFactColumns` was NEVER true, so the log line telling an operator to run the migration
+ *     could not print. The one signal that would have caught an unmigrated database was dead.
+ *   - Deleting the retry changes NOTHING at runtime. It already threw; it just took a second
+ *     round trip to the database to do it.
+ *
+ * WHY THE READ PATH IS DIFFERENT AND IS STILL REAL. selectApplicationProfileRow above builds an
+ * EXPLICIT narrowed column list with `db.select(legacyColumns())`, so the fact columns genuinely do
+ * not appear in that SQL. A projection can be narrowed; an insert's column list, as this ORM emits
+ * it, cannot. That asymmetry is the whole reason one guard works and the other never did.
+ *
+ * SO THE MIGRATION IS A HARD PREREQUISITE FOR WRITES. Every column added by these migrations is
+ * additive and nullable, which is backward compatible with the code already deployed, so the safe
+ * order is MIGRATION FIRST, THEN MERGE. Run scripts/apply-application-facts-schema.mjs,
+ * apply-availability-window-schema.mjs, apply-setup-gaps-asked-schema.mjs and
+ * apply-standardized-test-scores-schema.mjs before the deploy that declares their columns. If a
+ * deploy does land first, PUT /profile/application returns 500 until the migration runs. That is
+ * the honest failure, and it is loud, which the silent one was not.
  */
 export async function upsertApplicationProfile(
   userId: string,
   values: Record<string, unknown>,
-  options: { requireFactColumns?: readonly ApplicationFactColumn[] } = {},
-): Promise<{ droppedFactColumns: boolean }> {
-  const write = async (payload: Record<string, unknown>) => {
-    await db
-      .insert(application_profile)
-      .values({ user_id: userId, ...payload, updated_at: new Date() })
-      .onConflictDoUpdate({
-        target: application_profile.user_id,
-        set: { ...payload, updated_at: new Date() },
-      });
-  };
-  try {
-    await write(values);
-    return { droppedFactColumns: false };
-  } catch (error) {
-    if (!isUndefinedColumnError(error)) throw error;
-    if (!mayRetryWithoutFactColumns(values, options.requireFactColumns)) {
-      // A required new column and its compatibility projections are one logical write. Retrying
-      // without the new column would commit only the legacy booleans and then report failure.
-      throw error;
-    }
-    const stripped = withoutFactColumns(values);
-    // Nothing left to write means the request was ONLY new answers, so there is no partial save to
-    // salvage; let the caller's 500 stand rather than report a success that wrote nothing.
-    if (Object.keys(stripped).length === 0) throw error;
-    await write(stripped);
-    return { droppedFactColumns: true };
-  }
+): Promise<void> {
+  await db
+    .insert(application_profile)
+    .values({ user_id: userId, ...values, updated_at: new Date() })
+    .onConflictDoUpdate({
+      target: application_profile.user_id,
+      set: { ...values, updated_at: new Date() },
+    });
 }
 
 /* ---- reading the stored values back out, safely ----

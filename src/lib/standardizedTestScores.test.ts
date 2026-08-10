@@ -80,57 +80,113 @@ describe('standardized test scores: stored', () => {
   });
 });
 
-describe('standardized test scores: resolved and reaching the field', () => {
-  test('a SAT question is answered with the SAT score', () => {
+/* THE ACTUAL LABELS, taken from the owner's 158 packets rather than invented.
+ *
+ * The first version of this rule was written against "What is your SAT score?", which sounds right
+ * and appears in the corpus zero times. Extracted from all 300 distinct labels, the complete set of
+ * standardized-test questions is these three. Each is required, text, and was blank on all 8 of the
+ * packets it appears in. Answering the middle one and missing the other two, which is what a
+ * "score"-keyed pattern does, is a migration that delivers a third of what it claims. */
+const CORPUS_LABELS = {
+  sat: 'provide your best result on sat',
+  act: 'provide your best result on act',
+  type: 'select your standardized test score type',
+} as const;
+
+describe('standardized test scores: the measured labels are answered', () => {
+  test('the SAT question the employer actually asks', () => {
+    assert.equal(typedValue(CORPUS_LABELS.sat, answered), '1520');
+  });
+
+  test('the ACT question the employer actually asks, and not with the SAT score', () => {
+    assert.equal(typedValue(CORPUS_LABELS.act, answered), '34');
+  });
+
+  test('the test-type question the employer actually asks', () => {
+    assert.equal(typedValue(CORPUS_LABELS.type, answered), 'Both');
+  });
+
+  /* The ordering guard, on the real labels. The type label contains the word "score" and the score
+   * labels name a test; if the type pattern ran first it would type "Both" into a field expecting a
+   * number. A malformed answer on a required field is worse than the blank it replaced. */
+  test('a label naming a specific test never receives the test type', () => {
+    assert.notEqual(typedValue(CORPUS_LABELS.sat, answered), 'Both');
+    assert.notEqual(typedValue(CORPUS_LABELS.act, answered), 'Both');
+  });
+
+  test('the phrasing keyed on "score" still works, so the pattern generalises both ways', () => {
     assert.equal(typedValue('What is your SAT score?', answered), '1520');
-    assert.equal(typedValue('SAT Score', answered), '1520');
+    assert.equal(typedValue('ACT score', answered), '34');
+  });
+});
+
+/* THE GATES THAT KEEP "act" FROM MEANING THE TEST. "act" is an ordinary English word and the name
+ * of most legislation, so a bare `\bact\b` would type a test score into a disability question. Two
+ * gates: a value word must be present, and the label must be field-name length. Measured over the
+ * corpus, `\bacts?\b` and `\bsats?\b` each appear in exactly one of the 300 labels and it is the
+ * test question both times, so these guard the forms not yet seen. */
+describe('standardized test scores: what must never match', () => {
+  const mustNotMatch = [
+    'are you protected under the americans with disabilities act?',
+    'do you require accommodation under the equality act 2010?',
+    'please rate your familiarity with the sarbanes-oxley act',
+    'how would you score your ability to act under pressure in a live trading environment',
+    'are you satisfied with your current role?',
+    'describe a time you had to act on incomplete information and what the outcome was',
+  ];
+
+  /* The property is "no test score reaches this field", NOT "nothing answers it". The disability
+     label below is correctly handled by the EEO branch, which answers "Decline to self-identify" -
+     a right answer to a self-identification question and emphatically not a number. Asserting
+     undefined there would pin the wrong thing and break the moment an unrelated rule improved. */
+  const TEST_VALUES = ['1520', '34', 'Both', 'SAT', 'ACT', 'None'];
+
+  for (const label of mustNotMatch) {
+    test(`no test score reaches: ${label.slice(0, 46)}`, () => {
+      const answer = typedValue(label, answered);
+      assert.ok(
+        answer === undefined || !TEST_VALUES.includes(answer),
+        `must not type a test value here, got: ${String(answer)}`,
+      );
+    });
+  }
+
+  /* The two gates, isolated. Each of these labels would match a bare test-name regex and is refused
+     by exactly one gate, so a future edit that drops either gate fails here. */
+  test('gate 1: a test name with no value word is refused', () => {
+    assert.equal(typedValue('did you interact with our team at the career fair?', answered), undefined);
   });
 
-  test('an ACT question is answered with the ACT score, not the SAT one', () => {
-    assert.equal(typedValue('What is your ACT score?', answered), '34');
-    assert.equal(typedValue('ACT Score', answered), '34');
+  test('gate 2: a value word and a test name in a sentence are refused on length', () => {
+    assert.equal(
+      typedValue('how would you score your ability to act under pressure in a live trading environment', answered),
+      undefined,
+    );
   });
+});
 
-  /* The ordering guard. "Which standardized test score do you wish to report?" contains the word
-   * "score", and "What is your SAT score?" contains a test name; if the type pattern were tested
-   * first it would answer the SAT field with the string "Both". A malformed answer on a required
-   * field is worse than the blank it replaced, because nothing downstream can tell it is wrong. */
-  test('a label naming a specific test gets that score, never the test type', () => {
-    assert.notEqual(typedValue('What is your SAT score?', answered), 'Both');
-    assert.notEqual(typedValue('What is your ACT score?', answered), 'Both');
-  });
-
-  test('a type question with no test named is answered with the type', () => {
-    assert.equal(typedValue('Which standardized test did you take?', answered), 'Both');
-    assert.equal(typedValue('Standardized test score type', answered), 'Both');
-  });
-
+describe('standardized test scores: nothing is invented or derived', () => {
   test('a score is never invented: unanswered leaves the question for the student', () => {
     const empty: ApplicationProfileLike = {};
-    assert.equal(typedValue('What is your SAT score?', empty), undefined);
-    assert.ok(skipped('What is your SAT score?', empty), 'must report the question as left for you');
-    assert.equal(typedValue('What is your ACT score?', empty), undefined);
-    assert.equal(typedValue('Which standardized test did you take?', empty), undefined);
+    assert.equal(typedValue(CORPUS_LABELS.sat, empty), undefined);
+    assert.ok(skipped(CORPUS_LABELS.sat, empty), 'must report the question as left for you');
+    assert.equal(typedValue(CORPUS_LABELS.act, empty), undefined);
+    assert.equal(typedValue(CORPUS_LABELS.type, empty), undefined);
   });
 
   /* Nothing is derived from anything else. A stored SAT score fits both a type of "SAT" and a type
    * of "Both", so it is not evidence for either, and a type of "SAT" is not evidence of any
    * particular number. Each answers only from its own column. */
   test('a stored SAT score does not answer the test-type question', () => {
-    const satOnly: ApplicationProfileLike = { sat_score: '1520' };
-    assert.equal(typedValue('Which standardized test did you take?', satOnly), undefined);
+    assert.equal(typedValue(CORPUS_LABELS.type, { sat_score: '1520' }), undefined);
   });
 
   test('a stored test type does not answer a score question', () => {
-    const typeOnly: ApplicationProfileLike = { standardized_test_type: 'SAT' };
-    assert.equal(typedValue('What is your SAT score?', typeOnly), undefined);
+    assert.equal(typedValue(CORPUS_LABELS.sat, { standardized_test_type: 'SAT' }), undefined);
   });
 
   test('"None" is a real answer and reaches the field', () => {
-    assert.equal(
-      typedValue('Which standardized test did you take?', { standardized_test_type: 'None' }),
-      'None',
-    );
+    assert.equal(typedValue(CORPUS_LABELS.type, { standardized_test_type: 'None' }), 'None');
   });
 });
 

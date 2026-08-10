@@ -593,10 +593,54 @@ function militaryServiceAnswer(label: string, ap: ApplicationProfileLike): { val
  * Each of the three answers only from its own column, and refuses with a skipReason otherwise, so
  * the question reaches the student instead of being answered with an invented figure.
  */
-export const SAT_SCORE_QUESTION = /\bsat\b(?![- ]?(?:isf|nav))[\s\S]{0,40}\bscore\b|\bscore\b[\s\S]{0,40}\bsat\b/i;
-export const ACT_SCORE_QUESTION = /\bact\b[\s\S]{0,40}\bscore\b|\bscore\b[\s\S]{0,40}\bact\b/i;
+/* THE LABELS ARE MEASURED, NOT IMAGINED. The first version of this rule required the word "score"
+ * next to the test name, because "What is your SAT score?" is what the question sounds like. That
+ * label does not appear in the corpus even once. Extracted from all 300 distinct labels across the
+ * owner's 158 packets, the complete set of standardized-test questions is exactly three, and every
+ * one of them was required, text, and blank on all 8 of the packets it appears in:
+ *
+ *   provide your best result on sat             8 packets
+ *   provide your best result on act             8 packets
+ *   select your standardized test score type    8 packets
+ *
+ * The employer says RESULT. A pattern keyed on "score" answers one of the three and leaves the
+ * other two exactly as blocked as they were before the column existed. */
+const TEST_RESULT_WORD = /\b(?:results?|scores?|marks?|grades?|composite|superscored?|percentile)\b/i;
+
+/* THE TWO GATES ON THE TEST NAME, and they exist because "act" is an ordinary English word and the
+ * name of half the legislation ever written. Nothing may answer "are you protected under the
+ * Americans with Disabilities Act?" with the number 34.
+ *
+ *   1. A VALUE WORD must be present. A label that names a test without asking for a figure is not
+ *      asking for the figure. This alone refuses every legal-Act label, none of which asks for a
+ *      result.
+ *   2. FIELD-NAME LENGTH, the same gate classifyField's bare-keyword fallbacks use and for the same
+ *      reason. All three real labels are six words. A disclaimer that happens to contain both "act"
+ *      and "score" is a sentence, not a field name, and is refused on length.
+ *
+ * Verified against the corpus: `\bacts?\b` and `\bsats?\b` each appear in exactly ONE of the 300
+ * distinct labels, and it is the test question in both cases. Zero false positives measured. The
+ * gates are for the forms not yet seen, not for the ones that were. */
+const TEST_LABEL_MAX_WORDS = 8;
+
+function looksLikeTestValueField(label: string): boolean {
+  if (!TEST_RESULT_WORD.test(label)) return false;
+  return label.trim().split(/\s+/).filter(Boolean).length <= TEST_LABEL_MAX_WORDS;
+}
+
+export function isSatScoreQuestion(label: string): boolean {
+  return /\bsats?\b/i.test(label) && looksLikeTestValueField(label);
+}
+
+export function isActScoreQuestion(label: string): boolean {
+  return /\bacts?\b/i.test(label) && looksLikeTestValueField(label);
+}
+
+/* The TYPE question needs no value-word gate: "standardized test" is unambiguous wording that no
+ * other kind of question uses. Matched only after both score patterns have refused, so a label
+ * naming a specific test is never answered with the type. */
 export const STANDARDIZED_TEST_TYPE_QUESTION =
-  /\bstandardi[sz]ed\s+test\b|\btest\s+score\s+type\b|\bwhich\s+(?:standardi[sz]ed\s+)?test\b/i;
+  /\bstandardi[sz]ed\s+tests?\b|\btest\s+score\s+type\b|\bwhich\s+(?:standardi[sz]ed\s+)?tests?\b/i;
 
 function standardizedTestAnswer(
   label: string,
@@ -606,10 +650,10 @@ function standardizedTestAnswer(
 
   // A specific test named in the label wants that test's number, so these are matched before the
   // "which test" pattern, which also matches many of the same labels.
-  if (SAT_SCORE_QUESTION.test(label)) {
+  if (isSatScoreQuestion(label)) {
     return ap.sat_score ? { value: ap.sat_score } : leaveIt('SAT score');
   }
-  if (ACT_SCORE_QUESTION.test(label)) {
+  if (isActScoreQuestion(label)) {
     return ap.act_score ? { value: ap.act_score } : leaveIt('ACT score');
   }
   if (STANDARDIZED_TEST_TYPE_QUESTION.test(label)) {
