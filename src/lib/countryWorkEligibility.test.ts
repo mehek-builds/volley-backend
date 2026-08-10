@@ -208,6 +208,18 @@ describe('exact-country resolver', () => {
       ['Paris, TX, United States', 'US', 'Yes'],
       ['Remote, United States', 'US', 'Yes'],
       ['Remote, Canada', 'CA', 'No'],
+      ['United States - Remote', 'US', 'Yes'],
+      ['United States, Remote', 'US', 'Yes'],
+      ['US Remote', 'US', 'Yes'],
+      ['Remote (United States)', 'US', 'Yes'],
+      ['Canada - Remote', 'CA', 'No'],
+      ['Remote Canada', 'CA', 'No'],
+      ['United Kingdom - Remote', 'GB', 'No'],
+      ['Remote United Kingdom', 'GB', 'No'],
+      ['TX, United States', 'US', 'Yes'],
+      ['Texas, United States', 'US', 'Yes'],
+      ['ON, Canada', 'CA', 'No'],
+      ['Ontario, Canada', 'CA', 'No'],
       ['London', 'GB', 'No'],
       ['London, England', 'GB', 'No'],
       ['Paris, France', 'FR', 'No'],
@@ -239,6 +251,12 @@ describe('exact-country resolver', () => {
       { location: 'Berlin support for New York customers' },
       { location: 'London • US customers' },
       { location: 'London, UK, US time zone' },
+      { location: 'Sales territory, United States' },
+      { location: 'Reports to Manager, Canada' },
+      { location: 'Coverage Department, United Kingdom' },
+      { location: 'Employer HQ, US' },
+      { location: 'Springfield, United States' },
+      { location: 'Unknownville TX' },
       { portal_country: 'GB', location: 'Paris, TX' },
       { portal_country: 'US', location: 'London, England' },
     ]) {
@@ -247,6 +265,7 @@ describe('exact-country resolver', () => {
     }
     assert.equal(postingCountryCodeFromJobContext({ portal_country: 'US', location: 'Paris, TX' }), 'US');
     assert.equal(postingCountryCodeFromJobContext({ portal_country: 'GB', location: 'London, England' }), 'GB');
+    assert.equal(postingCountryCodeFromJobContext({ portal_country: 'US', location: 'Springfield' }), 'US');
   });
 
   test('structured ATS country metadata reaches the exact country resolver', () => {

@@ -130,6 +130,10 @@ const STRUCTURED_CITY_COUNTRY_CODES = new Map<string, string>([
   ['DOHA', 'QA'], ['MILAN', 'IT'], ['MILANO', 'IT'], ['LUXEMBOURG', 'LU'],
 ]);
 
+// Ambiguous bare city names that are authoritative only when followed by an exact jurisdiction.
+// They intentionally have no default country: Melbourne alone remains unknown, Melbourne, FL does not.
+const STRUCTURED_CITY_ALIASES_WITHOUT_DEFAULT = new Set(['MELBOURNE', 'BLOOMINGTON']);
+
 const CANADIAN_PROVINCE_CODES = new Set([
   'AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'NT', 'NU', 'ON', 'PE', 'QC', 'SK', 'YT',
 ]);
@@ -189,8 +193,6 @@ const STRUCTURED_COUNTRY_ALIAS_CODES = new Map(
     && !CANADIAN_PROVINCE_JURISDICTION_ALIASES.has(alias)
   )),
 );
-
-const STRUCTURED_LOCATION_PROSE = /\b(?:CUSTOMERS?|CLIENTS?|BUSINESS|TEAMS?|SUPPORT(?:S|ED|ING)?|SERV(?:E|ES|ING)|TIME[\s-]*ZONES?|HOURS?|ALIGNED|FOR|LANGUAGE|HEADQUARTERS|TRAVEL)\b/i;
 
 function structuredJurisdictionSuffixCodes(suffix: string): Set<string> | undefined {
   const codes = new Set<string>();
@@ -400,11 +402,17 @@ type StructuredCountryEvidence = {
   us: boolean;
   nonUs: boolean;
   invalid?: boolean;
+  hardInvalid?: boolean;
 };
 
 function exactStructuredCountryCode(value: string, acceptsBareIsoCode: boolean): string | undefined {
   const normalized = normalise(value).trim();
-  if (acceptsBareIsoCode && isIsoCountryCode(value.trim())) return value.trim().toUpperCase();
+  if (isIsoCountryCode(value.trim())) {
+    const code = value.trim().toUpperCase();
+    if (acceptsBareIsoCode || code === 'US' || (!US_STATE_CODES.has(code) && !CANADIAN_PROVINCE_CODES.has(code))) {
+      return code;
+    }
+  }
   return STRUCTURED_COUNTRY_ALIAS_CODES.get(normalized);
 }
 
@@ -416,11 +424,16 @@ function exactUsCity(normalized: string): boolean {
   return normalized === 'NEW YORK' || US_CITIES.some((city) => normalise(city).trim() === normalized);
 }
 
-function plausibleStructuredPlace(normalized: string): boolean {
+function registeredStructuredPlace(normalized: string): boolean {
   if (normalized === 'REMOTE') return true;
   if (exactRegisteredCityCode(normalized) || exactUsCity(normalized)) return true;
-  const tokens = normalized.split(' ').filter(Boolean);
-  return tokens.length > 0 && tokens.length <= 5 && tokens.every((token) => /^[A-Z]+$/.test(token));
+  return STRUCTURED_CITY_ALIASES_WITHOUT_DEFAULT.has(normalized);
+}
+
+function remoteCountryCode(normalized: string): string | undefined {
+  if (normalized.startsWith('REMOTE ')) return exactStructuredCountryCode(normalized.slice(7), false);
+  if (normalized.endsWith(' REMOTE')) return exactStructuredCountryCode(normalized.slice(0, -7), false);
+  return undefined;
 }
 
 function evidenceFromCodes(codes: Set<string>): StructuredCountryEvidence {
@@ -445,19 +458,16 @@ function parseStructuredPlaceHead(normalized: string): {
   for (let splitAt = 1; splitAt < words.length; splitAt += 1) {
     const place = words.slice(0, splitAt).join(' ');
     const suffix = words.slice(splitAt).join(' ');
-    if (!plausibleStructuredPlace(place)) continue;
+    if (!registeredStructuredPlace(place)) continue;
     const suffixCodes = structuredJurisdictionSuffixCodes(suffix);
     if (suffixCodes) return { valid: true, explicitCodes: suffixCodes };
   }
-  return { valid: plausibleStructuredPlace(normalized), explicitCodes: new Set() };
+  return { valid: registeredStructuredPlace(normalized), explicitCodes: new Set() };
 }
 
 function structuredCountryEvidence(value: string, acceptsBareIsoCode: boolean): StructuredCountryEvidence {
   const trimmed = value.trim();
   if (!trimmed) return { codes: [], us: false, nonUs: false };
-  if (STRUCTURED_LOCATION_PROSE.test(trimmed)) return {
-    codes: [], us: false, nonUs: false, invalid: true,
-  };
 
   const components = trimmed
     .split(/\s*[,•]\s*/)
@@ -475,14 +485,44 @@ function structuredCountryEvidence(value: string, acceptsBareIsoCode: boolean): 
   const allCountries = components.map((component) => exactStructuredCountryCode(component, false));
   if (allCountries.every(Boolean)) return evidenceFromCodes(new Set(allCountries as string[]));
 
+  if (components.length === 2) {
+    const [first, second] = components;
+    if (first === 'REMOTE') {
+      const code = exactStructuredCountryCode(second, false);
+      if (code) return evidenceFromCodes(new Set([code]));
+    }
+    if (second === 'REMOTE') {
+      const code = exactStructuredCountryCode(first, false);
+      if (code) return evidenceFromCodes(new Set([code]));
+    }
+  }
+
+  // A state/province hierarchy may consist entirely of exact jurisdiction segments, but never a
+  // single bare abbreviation. This covers TX, United States and ON, Canada without authorizing an
+  // arbitrary unknown place name followed by either jurisdiction.
+  if (components.length > 1) {
+    const jurisdictionSets = components.map((component) => structuredJurisdictionSuffixCodes(component));
+    if (jurisdictionSets.every(Boolean)) {
+      const codes = new Set<string>();
+      for (const jurisdiction of jurisdictionSets as Set<string>[]) {
+        for (const code of jurisdiction) codes.add(code);
+      }
+      return evidenceFromCodes(codes);
+    }
+  }
+
   if (components.length > 1) {
     const [place, ...jurisdictions] = components;
     const parsedPlace = parseStructuredPlaceHead(place);
-    if (!parsedPlace.valid) return { codes: [], us: false, nonUs: false };
+    if (!parsedPlace.valid) return {
+      codes: [], us: false, nonUs: false, invalid: true, hardInvalid: true,
+    };
     const codes = new Set(parsedPlace.explicitCodes);
     for (const jurisdiction of jurisdictions) {
       const suffixCodes = structuredJurisdictionSuffixCodes(jurisdiction);
-      if (!suffixCodes) return { codes: [], us: false, nonUs: false };
+      if (!suffixCodes) return {
+        codes: [], us: false, nonUs: false, invalid: true, hardInvalid: true,
+      };
       for (const code of suffixCodes) codes.add(code);
     }
     if (codes.size === 0 && parsedPlace.defaultCode) codes.add(parsedPlace.defaultCode);
@@ -492,6 +532,8 @@ function structuredCountryEvidence(value: string, acceptsBareIsoCode: boolean): 
   const normalized = components[0];
   const exactCountry = exactStructuredCountryCode(normalized, false);
   if (exactCountry) return evidenceFromCodes(new Set([exactCountry]));
+  const remoteCountry = remoteCountryCode(normalized);
+  if (remoteCountry) return evidenceFromCodes(new Set([remoteCountry]));
   const exactCity = exactRegisteredCityCode(normalized);
   if (exactCity) return evidenceFromCodes(new Set([exactCity]));
   if (exactUsCity(normalized)) return evidenceFromCodes(new Set(['US']));
@@ -500,13 +542,17 @@ function structuredCountryEvidence(value: string, acceptsBareIsoCode: boolean): 
   for (let splitAt = 1; splitAt < words.length; splitAt += 1) {
     const place = words.slice(0, splitAt).join(' ');
     const suffix = words.slice(splitAt).join(' ');
-    if (!plausibleStructuredPlace(place)) continue;
+    if (!registeredStructuredPlace(place)) continue;
     const suffixCodes = structuredJurisdictionSuffixCodes(suffix);
     if (suffixCodes) return evidenceFromCodes(suffixCodes);
   }
-  const containsRegisteredCity = [...STRUCTURED_CITY_COUNTRY_CODES.keys()]
-    .some((city) => ` ${normalized} `.includes(` ${city} `));
-  return { codes: [], us: false, nonUs: false, invalid: containsRegisteredCity || undefined };
+  return {
+    codes: [],
+    us: false,
+    nonUs: false,
+    invalid: normalized === 'REMOTE' ? undefined : true,
+    hardInvalid: normalized !== 'REMOTE' && normalized.includes(' ') ? true : undefined,
+  };
 }
 
 function structuredJobContextValues(context: Record<string, unknown>): Array<{
@@ -531,8 +577,17 @@ function legalCountryEvidenceFromJobContext(context: Record<string, unknown>): {
 } {
   const evidence = structuredJobContextValues(context).flatMap((entry) => entry.value
     .split(LOCATION_SEGMENT_SEPARATOR)
-    .map((segment) => structuredCountryEvidence(segment, entry.acceptsBareIsoCode)));
-  if (evidence.some((item) => item.invalid)) return { country: 'unknown', code: undefined };
+    .map((segment) => ({
+      ...structuredCountryEvidence(segment, entry.acceptsBareIsoCode),
+      fromCountryField: entry.acceptsBareIsoCode,
+    })));
+  const hasAuthoritativeCountryField = evidence.some(
+    (item) => item.fromCountryField && item.codes.length > 0 && !item.invalid,
+  );
+  if (evidence.some((item) => item.hardInvalid)) return { country: 'unknown', code: undefined };
+  if (!hasAuthoritativeCountryField && evidence.some((item) => item.invalid)) {
+    return { country: 'unknown', code: undefined };
+  }
   const codes = new Set(evidence.flatMap((item) => item.codes));
   const hasUs = evidence.some((item) => item.us);
   const hasNonUs = evidence.some((item) => item.nonUs);

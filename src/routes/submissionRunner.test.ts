@@ -755,6 +755,10 @@ test('portal country metadata reaches managed send resolution without borrowing 
     [{ location: 'London, ON' }, 'No'],
     [{ portal_country: 'US', location: 'Paris, TX' }, 'Yes'],
     [{ location: 'Remote, United States' }, 'Yes'],
+    [{ location: 'United States - Remote' }, 'Yes'],
+    [{ location: 'Canada - Remote' }, 'No'],
+    [{ location: 'United Kingdom - Remote' }, 'No'],
+    [{ portal_country: 'US', location: 'Springfield' }, 'Yes'],
   ] as const) {
     const resolved = await discoverAndResolveQuestions(
       fields,
@@ -776,6 +780,8 @@ test('portal country metadata reaches managed send resolution without borrowing 
     { location: 'Paris, TX, France' },
     { location: 'London, UK, supporting US customers' },
     { location: 'Paris team aligned to Texas business hours' },
+    { location: 'Sales territory, United States' },
+    { location: 'Springfield, United States' },
   ]) {
     const mixed = await discoverAndResolveQuestions(
       fields,
