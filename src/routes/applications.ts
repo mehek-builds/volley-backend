@@ -459,7 +459,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         jobContext: row.job_context,
         currentUrl: query.data.current_url,
       });
-      if (!handoffVersion) return reply.status(409).send({ error: 'This company form cannot receive the saved application packet' });
+      if (!handoffVersion) return reply.status(409).send({ error: 'This company form cannot receive the saved application' });
 
       return reply.send({
         resume_id: row.id,
@@ -511,7 +511,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const precheckReview = precheckRow ? readApplicationReview(precheckRow.spec) : null;
       if (precheckRow && precheckReview?.extension_handoff_url) {
         if (!parsed.data.handoff_version || !parsed.data.current_url) {
-          return reply.status(409).send({ error: 'Reload the exact saved application packet before submitting from Chrome' });
+          return reply.status(409).send({ error: 'Reload this saved application before submitting from Chrome' });
         }
         if (!extensionHandoffPacketMatches({
           frozenUrl: precheckReview.portal_url,
@@ -533,7 +533,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           currentUrl: parsed.data.current_url,
         });
         if (!currentVersion || currentVersion !== parsed.data.handoff_version) {
-          return reply.status(409).send({ error: 'The saved application packet changed. Reload it before submitting.' });
+          return reply.status(409).send({ error: 'The saved application changed. Reload it before submitting.' });
         }
       }
       if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
