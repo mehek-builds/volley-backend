@@ -1,4 +1,4 @@
-import { isIsoCountryCode, namedCountryCodes } from './workEligibility';
+import { isIsoCountryCode } from './workEligibility';
 
 /**
  * IS THIS JOB IN THE UNITED STATES?
@@ -172,6 +172,26 @@ const STRUCTURED_JURISDICTION_SUFFIX_CODES = new Map<string, string>([
 const STRUCTURED_JURISDICTION_SUFFIXES_LONGEST_FIRST = [...STRUCTURED_JURISDICTION_SUFFIX_CODES.keys()]
   .sort((left, right) => right.length - left.length);
 
+const US_STATE_JURISDICTION_ALIASES = new Set([
+  ...US_STATE_CODES,
+  ...US_STATE_NAMES,
+  'GEORGIA',
+]);
+
+const CANADIAN_PROVINCE_JURISDICTION_ALIASES = new Set([
+  ...CANADIAN_PROVINCE_CODES,
+  ...CANADIAN_PROVINCE_NAMES,
+]);
+
+const STRUCTURED_COUNTRY_ALIAS_CODES = new Map(
+  [...STRUCTURED_JURISDICTION_SUFFIX_CODES].filter(([alias]) => (
+    !US_STATE_JURISDICTION_ALIASES.has(alias)
+    && !CANADIAN_PROVINCE_JURISDICTION_ALIASES.has(alias)
+  )),
+);
+
+const STRUCTURED_LOCATION_PROSE = /\b(?:CUSTOMERS?|CLIENTS?|BUSINESS|TEAMS?|SUPPORT(?:S|ED|ING)?|SERV(?:E|ES|ING)|TIME[\s-]*ZONES?|HOURS?|ALIGNED|FOR|LANGUAGE|HEADQUARTERS|TRAVEL)\b/i;
+
 function structuredJurisdictionSuffixCodes(suffix: string): Set<string> | undefined {
   const codes = new Set<string>();
   let remaining = suffix;
@@ -311,7 +331,7 @@ export function resolveJobCountry(
  * Deliberately NOT the comma, which is the inside of "Austin, TX", and NOT the hyphen, which is the
  * inside of "Remote - US" and "London-United Kingdom".
  */
-const LOCATION_SEGMENT_SEPARATOR = /\s*[;|\/\n]\s*|\s+\bor\b\s+|\s+\band\b\s+/i;
+const LOCATION_SEGMENT_SEPARATOR = /\s*[;|\/•\n]\s*|\s+\bor\b\s+|\s+\band\b\s+/i;
 
 /**
  * WHICH COUNTRY DOES "THE COUNTRY WHERE THIS ROLE IS LOCATED" MEAN?
@@ -347,6 +367,7 @@ export function postingCountryForLegalScope(
     .filter((segment) => segment.length > 0);
   if (segments.length === 0) return 'unknown';
   const evidence = segments.map((segment) => structuredCountryEvidence(segment, false));
+  if (evidence.some((item) => item.invalid)) return 'unknown';
   const codes = new Set(evidence.flatMap((item) => [...item.codes]));
   const hasUs = evidence.some((item) => item.us);
   const hasNonUs = evidence.some((item) => item.nonUs);
@@ -378,89 +399,114 @@ type StructuredCountryEvidence = {
   codes: string[];
   us: boolean;
   nonUs: boolean;
+  invalid?: boolean;
 };
 
-function explicitStructuredJurisdictionCodes(value: string, acceptsBareIsoCode: boolean): Set<string> {
-  const codes = new Set(namedCountryCodes(value));
-  const trimmed = value.trim();
+function exactStructuredCountryCode(value: string, acceptsBareIsoCode: boolean): string | undefined {
   const normalized = normalise(value).trim();
-  const upper = value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
-
-  // A bare ISO code is authoritative only in a field the ATS declares as a country. In a location
-  // value, CA and IN are state abbreviations and require location syntax.
-  if (acceptsBareIsoCode && isIsoCountryCode(trimmed)) codes.add(trimmed.toUpperCase());
-  if (/\b(?:US|USA|U\.?S\.?A?)\b/i.test(value) || normalized.includes(' UNITED STATES ')) codes.add('US');
-  if (US_STATE_NAMES.some((name) => ` ${normalized} `.includes(` ${name} `))) codes.add('US');
-  if (CANADIAN_PROVINCE_NAMES.some((name) => ` ${normalized} `.includes(` ${name} `))) codes.add('CA');
-
-  // Codes are jurisdiction evidence only after a city delimiter or as the final jurisdiction
-  // token. This keeps IN-Bengaluru as India-shaped ambiguity while accepting Paris TX and London ON.
-  const locationCodes = upper.match(/(?:,\s*|[\s\-/])([A-Z]{2})(?=$|\s*,)/g) ?? [];
-  for (const match of locationCodes) {
-    const code = match.match(/([A-Z]{2})\s*$/)?.[1];
-    if (!code) continue;
-    if (US_STATE_CODES.has(code)) codes.add('US');
-    else if (CANADIAN_PROVINCE_CODES.has(code)) codes.add('CA');
-  }
-  return codes;
+  if (acceptsBareIsoCode && isIsoCountryCode(value.trim())) return value.trim().toUpperCase();
+  return STRUCTURED_COUNTRY_ALIAS_CODES.get(normalized);
 }
 
-function structuredCityMatch(normalized: string): { city: string; code: string } | undefined {
-  const matches = [...STRUCTURED_CITY_COUNTRY_CODES]
-    .filter(([city]) => ` ${normalized} `.includes(` ${city} `))
-    .sort(([left], [right]) => right.length - left.length);
-  if (matches.length === 0) return undefined;
-  const [city, code] = matches[0];
-  return { city, code };
+function exactRegisteredCityCode(normalized: string): string | undefined {
+  return STRUCTURED_CITY_COUNTRY_CODES.get(normalized);
+}
+
+function exactUsCity(normalized: string): boolean {
+  return normalized === 'NEW YORK' || US_CITIES.some((city) => normalise(city).trim() === normalized);
+}
+
+function plausibleStructuredPlace(normalized: string): boolean {
+  if (normalized === 'REMOTE') return true;
+  if (exactRegisteredCityCode(normalized) || exactUsCity(normalized)) return true;
+  const tokens = normalized.split(' ').filter(Boolean);
+  return tokens.length > 0 && tokens.length <= 5 && tokens.every((token) => /^[A-Z]+$/.test(token));
+}
+
+function evidenceFromCodes(codes: Set<string>): StructuredCountryEvidence {
+  return {
+    codes: [...codes],
+    us: codes.has('US'),
+    nonUs: [...codes].some((code) => code !== 'US'),
+  };
+}
+
+function parseStructuredPlaceHead(normalized: string): {
+  valid: boolean;
+  explicitCodes: Set<string>;
+  defaultCode?: string;
+} {
+  const exactCity = exactRegisteredCityCode(normalized);
+  if (exactCity) return { valid: true, explicitCodes: new Set(), defaultCode: exactCity };
+  if (exactUsCity(normalized)) return { valid: true, explicitCodes: new Set(), defaultCode: 'US' };
+  if (normalized === 'REMOTE') return { valid: true, explicitCodes: new Set() };
+
+  const words = normalized.split(' ');
+  for (let splitAt = 1; splitAt < words.length; splitAt += 1) {
+    const place = words.slice(0, splitAt).join(' ');
+    const suffix = words.slice(splitAt).join(' ');
+    if (!plausibleStructuredPlace(place)) continue;
+    const suffixCodes = structuredJurisdictionSuffixCodes(suffix);
+    if (suffixCodes) return { valid: true, explicitCodes: suffixCodes };
+  }
+  return { valid: plausibleStructuredPlace(normalized), explicitCodes: new Set() };
 }
 
 function structuredCountryEvidence(value: string, acceptsBareIsoCode: boolean): StructuredCountryEvidence {
   const trimmed = value.trim();
   if (!trimmed) return { codes: [], us: false, nonUs: false };
-  const normalized = normalise(trimmed).trim();
-  const codes = explicitStructuredJurisdictionCodes(trimmed, acceptsBareIsoCode);
-  const city = structuredCityMatch(normalized);
-
-  if (city) {
-    /* A city alias supplies a country only as the whole place value. When a jurisdiction follows,
-       that explicit jurisdiction wins. Material prose around the city is not workplace evidence:
-       "London office supporting US customers" therefore stays unknown, not US or GB. */
-    if (normalized === city.city) {
-      if (codes.size === 0) codes.add(city.code);
-    } else if (normalized.startsWith(`${city.city} `)) {
-      const suffix = normalized.slice(city.city.length + 1);
-      const suffixCodes = structuredJurisdictionSuffixCodes(suffix);
-      if (!suffixCodes) return { codes: [], us: false, nonUs: false };
-      for (const suffixCode of suffixCodes) codes.add(suffixCode);
-    } else {
-      return { codes: [], us: false, nonUs: false };
-    }
-    return {
-      codes: [...codes],
-      us: codes.has('US'),
-      nonUs: [...codes].some((code) => code !== 'US'),
-    };
-  }
-
-  // Explicit jurisdiction also wins for ambiguous cities deliberately absent from the alias
-  // registry, such as Melbourne, FL. Conflicting explicit jurisdictions remain in the set so the
-  // caller fails closed instead of choosing either one.
-  if (codes.size > 0) {
-    return {
-      codes: [...codes],
-      us: codes.has('US'),
-      nonUs: [...codes].some((code) => code !== 'US'),
-    };
-  }
-
-  const signals = jobCountrySignalDetails(trimmed);
-  const unambiguousWeakUs = trimmed.includes(',') && signals.weakUs && !signals.nonUs;
-  if (signals.strongUs || unambiguousWeakUs) codes.add('US');
-  return {
-    codes: [...codes],
-    us: signals.strongUs || unambiguousWeakUs || codes.has('US'),
-    nonUs: signals.nonUs || [...codes].some((code) => code !== 'US'),
+  if (STRUCTURED_LOCATION_PROSE.test(trimmed)) return {
+    codes: [], us: false, nonUs: false, invalid: true,
   };
+
+  const components = trimmed
+    .split(/\s*[,•]\s*/)
+    .map((part) => normalise(part).trim())
+    .filter(Boolean);
+  if (components.length === 0) return { codes: [], us: false, nonUs: false };
+
+  // A country field is authoritative only when its complete value is one exact country alias or
+  // ISO code. Office-group prose and arbitrary descriptive text do not become country evidence.
+  if (acceptsBareIsoCode) {
+    const code = components.length === 1 ? exactStructuredCountryCode(components[0], true) : undefined;
+    return code ? evidenceFromCodes(new Set([code])) : { codes: [], us: false, nonUs: false };
+  }
+
+  const allCountries = components.map((component) => exactStructuredCountryCode(component, false));
+  if (allCountries.every(Boolean)) return evidenceFromCodes(new Set(allCountries as string[]));
+
+  if (components.length > 1) {
+    const [place, ...jurisdictions] = components;
+    const parsedPlace = parseStructuredPlaceHead(place);
+    if (!parsedPlace.valid) return { codes: [], us: false, nonUs: false };
+    const codes = new Set(parsedPlace.explicitCodes);
+    for (const jurisdiction of jurisdictions) {
+      const suffixCodes = structuredJurisdictionSuffixCodes(jurisdiction);
+      if (!suffixCodes) return { codes: [], us: false, nonUs: false };
+      for (const code of suffixCodes) codes.add(code);
+    }
+    if (codes.size === 0 && parsedPlace.defaultCode) codes.add(parsedPlace.defaultCode);
+    return evidenceFromCodes(codes);
+  }
+
+  const normalized = components[0];
+  const exactCountry = exactStructuredCountryCode(normalized, false);
+  if (exactCountry) return evidenceFromCodes(new Set([exactCountry]));
+  const exactCity = exactRegisteredCityCode(normalized);
+  if (exactCity) return evidenceFromCodes(new Set([exactCity]));
+  if (exactUsCity(normalized)) return evidenceFromCodes(new Set(['US']));
+
+  const words = normalized.split(' ');
+  for (let splitAt = 1; splitAt < words.length; splitAt += 1) {
+    const place = words.slice(0, splitAt).join(' ');
+    const suffix = words.slice(splitAt).join(' ');
+    if (!plausibleStructuredPlace(place)) continue;
+    const suffixCodes = structuredJurisdictionSuffixCodes(suffix);
+    if (suffixCodes) return evidenceFromCodes(suffixCodes);
+  }
+  const containsRegisteredCity = [...STRUCTURED_CITY_COUNTRY_CODES.keys()]
+    .some((city) => ` ${normalized} `.includes(` ${city} `));
+  return { codes: [], us: false, nonUs: false, invalid: containsRegisteredCity || undefined };
 }
 
 function structuredJobContextValues(context: Record<string, unknown>): Array<{
@@ -486,6 +532,7 @@ function legalCountryEvidenceFromJobContext(context: Record<string, unknown>): {
   const evidence = structuredJobContextValues(context).flatMap((entry) => entry.value
     .split(LOCATION_SEGMENT_SEPARATOR)
     .map((segment) => structuredCountryEvidence(segment, entry.acceptsBareIsoCode)));
+  if (evidence.some((item) => item.invalid)) return { country: 'unknown', code: undefined };
   const codes = new Set(evidence.flatMap((item) => item.codes));
   const hasUs = evidence.some((item) => item.us);
   const hasNonUs = evidence.some((item) => item.nonUs);
