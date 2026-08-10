@@ -1855,10 +1855,10 @@ type ParsedSiblingQuestion = {
 };
 
 const DEFINITE_APPLICATION_DETERMINER = String.raw`(?:the|this|that|these|those|your|our|current)`;
+const DEFINITE_APPLICATION_SAFE_MODIFIER = /^(?:current|completed|complete|online|job|employment|final|official|external|fully)$/;
 const DEFINITE_APPLICATION_ANY_PHRASE = String.raw`${DEFINITE_APPLICATION_DETERMINER} (?:[a-z0-9]+ )*applications?(?: forms?)?`;
 const DEFINITE_APPLICATION_HISTORY_SUFFIX = String.raw`(?:before|previously|already|yet|ever|earlier|so far|to date|in the past)`;
-const SUBMISSION_DOMAIN_NOUN = /\b(?:visa|immigration|work authorization|permits?|mobile|software|web|app store|schools?|universit(?:y|ies)|colleges?|loans?|grants?|patents?|benefits?)\b/;
-const SUBMISSION_NEGATION = /\b(?:not|never|no|without|neither|nor|didn t|hasn t|haven t|hadn t)\b/;
+const SUBMISSION_NEGATION = /\b(?:not|never|no|without|neither|nor|didn t|hasn t|haven t|hadn t|unsuccessfully|hardly|scarcely)\b/;
 
 function isSingleSubmissionTemporal(value: string): boolean {
   return /^(?:[a-z]+ly|already|just|recently|finally|successfully|ever)$/.test(value);
@@ -1869,19 +1869,36 @@ function isSubmissionSuffixTemporal(value: string): boolean {
     || /^(?:before|yet|earlier|so far|to date|in (?:the )?past)$/.test(value);
 }
 
+function isSubmissionTemporalSequence(value: string, suffix: boolean): boolean {
+  let remaining = value.trim();
+  while (remaining) {
+    const phrase = suffix && remaining.match(/^(?:so far|to date|in (?:the )?past)(?:\s+|$)/)?.[0]?.trim();
+    if (phrase) {
+      remaining = remaining.slice(phrase.length).trim();
+      continue;
+    }
+    const word = remaining.match(/^[a-z]+/)?.[0] ?? '';
+    if (!word || !(suffix ? isSubmissionSuffixTemporal(word) : isSingleSubmissionTemporal(word))) return false;
+    remaining = remaining.slice(word.length).trim();
+  }
+  return true;
+}
+
 function classifyDefiniteApplicationSubmission(value: string): 'owned' | 'unrelated' | null {
-  const match = value.match(/^(?:(?:have|has|had) you(?: ([a-z]+))? (submitted)|did you(?: ([a-z]+))? (submit)|(?:([a-z]+) )?(submitted)) (.+)$/);
+  const match = value.match(/^(?:(?:have|had) you ((?:[a-z]+ )*)submitted|did you ((?:[a-z]+ )*)submit|((?:[a-z]+ )*)submitted) (.+)$/);
   if (!match) return null;
-  const prefixTemporal = match[1] ?? match[3] ?? match[5] ?? '';
-  const rawObject = match[7] ?? '';
-  const suffixMatch = rawObject.match(/^(.*?)(?: ((?:[a-z]+ly|already|just|recently|finally|successfully|ever|before|yet|earlier|so far|to date|in (?:the )?past)))?$/);
-  const object = suffixMatch?.[1]?.trim() ?? rawObject;
-  const suffixTemporal = suffixMatch?.[2] ?? '';
-  const definiteObject = new RegExp(`^${DEFINITE_APPLICATION_ANY_PHRASE}$`).test(object);
-  if (!definiteObject) return null;
-  if (SUBMISSION_NEGATION.test(value) || SUBMISSION_DOMAIN_NOUN.test(object)) return 'unrelated';
-  if (prefixTemporal && !isSingleSubmissionTemporal(prefixTemporal)) return 'unrelated';
-  if (suffixTemporal && !isSubmissionSuffixTemporal(suffixTemporal)) return 'unrelated';
+  const prefixTemporal = (match[1] ?? match[2] ?? match[3] ?? '').trim();
+  const rawObject = match[4] ?? '';
+  const objectMatch = rawObject.match(new RegExp(
+    `^${DEFINITE_APPLICATION_DETERMINER} ((?:[a-z0-9]+ )*)applications?(?: forms?)?(?: (.+))?$`,
+  ));
+  if (!objectMatch) return null;
+  const modifiers = (objectMatch[1] ?? '').trim().split(/\s+/).filter(Boolean);
+  const suffixTemporal = objectMatch[2]?.trim() ?? '';
+  if (SUBMISSION_NEGATION.test(value)) return 'unrelated';
+  if (modifiers.some((modifier) => !DEFINITE_APPLICATION_SAFE_MODIFIER.test(modifier))) return 'unrelated';
+  if (prefixTemporal && !isSubmissionTemporalSequence(prefixTemporal, false)) return 'unrelated';
+  if (suffixTemporal && !isSubmissionTemporalSequence(suffixTemporal, true)) return 'unrelated';
   return 'owned';
 }
 
@@ -2081,20 +2098,26 @@ function parsePriorApplicationQuestion(
       target: canonicalSiblingEmployerIdentity(packetEmployer),
     };
   }
-  const forObject = remainder.match(/^for\s+(.+)$/);
-  const boundedForObject = forObject?.[1]
-    .replace(/\s+(?:before|previously|in the past|within the last \d+(?: \d+)? months?)$/, '')
-    .trim();
-  if (boundedForObject && boundedForObject.split(/\s+/).length <= 6) {
-    return { family: 'prior_application', valid: false };
-  }
   const toObject = remainder.match(/^to\s+(.+)$/);
   const boundedToObject = toObject?.[1]
     .replace(/\s+(?:before|previously|already|yet|ever|earlier|so far|to date|in the past|within the last \d+(?: \d+)? months?)$/, '')
     .trim();
-  const organizationalUnitObject = boundedToObject
-    && /\b(?:teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies))$/.test(boundedToObject);
-  if (organizationalUnitObject) return { family: 'prior_application', valid: false };
+  const organizationalUnitObject = boundedToObject?.match(
+    /^(.*\b(?:teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies)))(?: (in|at) (.+))?$/,
+  );
+  if (organizationalUnitObject) {
+    const preposition = organizationalUnitObject[2];
+    const complement = organizationalUnitObject[3]?.trim();
+    if (!preposition) return { family: 'prior_application', valid: false };
+    const locationTargets = frozenJobRelocationLocationsFromContext(jdText).flatMap((location) => {
+      const city = location.split(',')[0]?.trim();
+      return city && normalizeIdentity(city) !== normalizeIdentity(location) ? [location, city] : [location];
+    });
+    const validComplement = preposition === 'in'
+      ? Boolean(complement && exactKnownTarget(complement, locationTargets))
+      : Boolean(complement && packetEmployer && exactKnownTarget(complement, siblingEmployerAliases(packetEmployer)));
+    if (validComplement) return { family: 'prior_application', valid: false };
+  }
   if (isSkillOrWorkApplicationObject(remainder)) return null;
   const aliases = packetEmployer ? siblingEmployerAliases(packetEmployer) : [];
   const recognizedObjectPrefix = new RegExp(String.raw`^(?:before|previously|here|with us|to us|for us|to work (?:at|for)|(?:at|for|to|with) (?:${packetObject}|${globalObject}))\b`).test(remainder)
