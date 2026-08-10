@@ -457,6 +457,12 @@ export const application_profile = pgTable('application_profile', {
   // answer only from these stored values, and still holds ambiguous mixed-scope questions.
   work_authorized: boolean('work_authorized'),
   needs_sponsorship: boolean('needs_sponsorship'),
+  // The complete country-scoped declaration is encrypted as one authenticated text envelope.
+  // Country, authorization, sponsorship, authorization type, and expiry describe a person's
+  // immigration status together, so storing only the detail fields encrypted would still expose
+  // the sensitive claim through the remaining JSON. The feature layer validates the decoded list
+  // and derives the two legacy US booleans above for installed scalar-only clients.
+  work_eligibility_by_country: text('work_eligibility_by_country'),
   // WHEN she can start. Stored ISO (YYYY-MM-DD) because onboarding uses <input type="date">:
   // a locale-shaped string is silently dropped by a picker expecting the other order (R-014).
   availability_date: text('availability_date'),
