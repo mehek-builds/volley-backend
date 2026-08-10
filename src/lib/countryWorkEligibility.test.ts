@@ -416,6 +416,38 @@ describe('exact-country resolver', () => {
     assert.equal(postingCountryCodeFromJobContext({ portal_country: 'APAC & KG' }), 'KG');
   });
 
+  test('portal hyphen and parenthetical scope delimiters fail closed without breaking country names', () => {
+    const conflictingScopes = [
+      'EMEA - US',
+      'EMEA-US',
+      'EMEA (US)',
+      'EMEA(US)',
+      'EMEA - United States',
+      'APAC (United States)',
+      'LATAM-US',
+      ...[' - ', '-', ' ('].flatMap((delimiter) => (
+        ['EMEA', 'APAC', 'LATAM'].map((region) => (
+          delimiter === ' (' ? `${region}${delimiter}United States)` : `${region}${delimiter}United States`
+        ))
+      )),
+    ];
+    for (const portal_country of conflictingScopes) {
+      const context = { portal_country, location: 'London' };
+      assert.equal(postingCountryFromJobContext(context), 'unknown', portal_country);
+      assert.equal(postingCountryCodeFromJobContext(context), undefined, portal_country);
+    }
+
+    for (const [portal_country, expectedCode] of [
+      ['United-States', 'US'],
+      ['New-Zealand', 'NZ'],
+      ['South-Korea', 'KR'],
+      ['Saudi-Arabia', 'SA'],
+    ] as const) {
+      assert.equal(postingCountryCodeFromJobContext({ portal_country }), expectedCode, portal_country);
+    }
+    assert.equal(postingCountryFromJobContext({ portal_country: 'Guinea-Bissau' }), 'unknown');
+  });
+
   test('structured ATS country metadata reaches the exact country resolver', () => {
     const jobContext = { portal_country: 'GB', location: 'London' };
     assert.equal(postingCountryFromJobContext(jobContext), 'non_us');

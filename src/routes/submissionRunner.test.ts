@@ -814,9 +814,22 @@ test('portal country metadata reaches managed send resolution without borrowing 
     { portal_country: 'APAC & United States', location: 'Mumbai' },
     { portal_country: 'LATAM & USA', location: 'Sao Paulo' },
     { portal_country: 'EMEA + US', location: 'London' },
+    { portal_country: 'EMEA - US', location: 'London' },
+    { portal_country: 'EMEA (US)', location: 'London' },
+    { portal_country: 'EMEA - United States', location: 'London' },
+    { portal_country: 'APAC (United States)', location: 'Mumbai' },
+    { portal_country: 'LATAM-US', location: 'Sao Paulo' },
     ...['|', ',', '/', ';', '\n', '•', ' and ', ' or ', '&', '+'].map((separator) => ({
       portal_country: `EMEA${separator}US`,
       location: 'London',
+    })),
+    ...[' - ', '-'].flatMap((separator) => ['EMEA', 'APAC', 'LATAM'].map((region) => ({
+      portal_country: `${region}${separator}United States`,
+      location: region === 'APAC' ? 'Mumbai' : region === 'LATAM' ? 'Sao Paulo' : 'London',
+    }))),
+    ...['EMEA', 'APAC', 'LATAM'].map((region) => ({
+      portal_country: `${region} (United States)`,
+      location: region === 'APAC' ? 'Mumbai' : region === 'LATAM' ? 'Sao Paulo' : 'London',
     })),
   ]) {
     const mixed = await discoverAndResolveQuestions(

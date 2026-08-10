@@ -459,6 +459,39 @@ for (const code of ISO_COUNTRY_CODES) {
 
 const PORTAL_COUNTRY_PART_SEPARATOR = /\s*[|,\/;&+•\n]\s*|\s+\b(?:and|or)\b\s+/i;
 
+function isAuthoritativePortalScopePart(part: string): boolean {
+  if (exactPortalCountryCodePart(part)) return true;
+  const normalized = normalise(part).trim();
+  if ((['EMEA', 'APAC', 'LATAM'] as const).some(
+    (region) => ` ${normalized} `.includes(` ${region} `),
+  )) return true;
+  return countryFromPortal(part) === 'us';
+}
+
+function splitPortalCountryScopePart(part: string): string[] {
+  const trimmed = part.trim();
+  const parenthetical = /^(.+?)\s*\(([^()]*)\)\s*$/.exec(trimmed);
+  if (parenthetical) {
+    const candidates = [parenthetical[1].trim(), parenthetical[2].trim()];
+    if (candidates.every(isAuthoritativePortalScopePart)) return candidates;
+  }
+
+  for (let index = 1; index < trimmed.length - 1; index += 1) {
+    if (trimmed[index] !== '-') continue;
+    const candidates = [trimmed.slice(0, index).trim(), trimmed.slice(index + 1).trim()];
+    if (candidates.every(isAuthoritativePortalScopePart)) return candidates;
+  }
+  return [trimmed];
+}
+
+function portalCountryScopeParts(value: string): string[] {
+  return value
+    .split(PORTAL_COUNTRY_PART_SEPARATOR)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .flatMap(splitPortalCountryScopePart);
+}
+
 function exactStructuredCountryCode(value: string, acceptsBareIsoCode: boolean): string | undefined {
   const normalized = normalise(value).trim();
   if (isIsoCountryCode(value.trim())) {
@@ -628,7 +661,7 @@ function structuredJobContextValues(context: Record<string, unknown>): Array<{
 function portalCountryEvidence(value: string): StructuredCountryEvidence {
   const codes = new Set<string>();
   const regions = new Set<PortalRegion>();
-  for (const part of value.split(PORTAL_COUNTRY_PART_SEPARATOR).map((item) => item.trim()).filter(Boolean)) {
+  for (const part of portalCountryScopeParts(value)) {
     const code = exactPortalCountryCodePart(part);
     if (code) {
       codes.add(code);
