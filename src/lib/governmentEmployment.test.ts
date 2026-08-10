@@ -1126,6 +1126,8 @@ describe('prior government employment, answered from the experience bank', () =>
       'How did you become aware of this opportunity?',
       'How did you find this job?',
       'How did you come across this opportunity?',
+      'Where did you find this job?',
+      'Where did you discover this job?',
     ];
     for (const label of referralLabels) {
       const profile: ApplicationProfileLike = { referral_source_default: 'LinkedIn' };
@@ -1173,6 +1175,9 @@ describe('prior government employment, answered from the experience bank', () =>
       'Will you move to Boston?',
       'Would you move?',
       'Would you move for this role?',
+      'Would you consider moving?',
+      'Would moving be possible?',
+      'Open to mobility',
     ];
     for (const label of relocationLabels) {
       const profile: ApplicationProfileLike = { relocation_willingness: 'yes' };
@@ -1286,6 +1291,7 @@ describe('prior government employment, answered from the experience bank', () =>
       'Past applications',
       'Application history',
       'Any earlier applications?',
+      'Any past applications',
       'Mobility willingness',
       'Geographic mobility',
     ];
@@ -1326,9 +1332,25 @@ describe('prior government employment, answered from the experience bank', () =>
       'Relocation preference details',
       'Applicant from a previous application',
       'Mobility details for relocating',
+      'Have you previously applied machine learning methods?',
+      'Did you apply ML practices before?',
+      'Have you previously applied source code?',
+      'Have you applied to the App Store?',
+      'Have you previously submitted an application for machine learning methods?',
+      'How did you find this project?',
+      'Where did you discover this vulnerability?',
+      'How did you become aware of this issue?',
+      'Would you move projects?',
+      'Would moving deadlines be possible?',
+      'Open to moving data pipelines?',
     ]) {
       const resolved = resolveKnownAnswer(unrelated, 'text', profile, context);
       assert.equal(resolved, null, unrelated);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: unrelated, answer: 'stale' }], profile, context),
+        [{ question: unrelated, answer: 'stale' }],
+        unrelated,
+      );
     }
   });
 
