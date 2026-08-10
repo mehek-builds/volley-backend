@@ -137,6 +137,42 @@ test('a generic other ATS handoff requires exact canonical application identity'
   }), false);
 });
 
+test('generic path identity ignores tracking and fragments but never another job', () => {
+  const frozenUrl = 'https://jobs.lever.co/acme/abc123';
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl,
+    currentUrl: 'https://jobs.lever.co/acme/abc123/apply?lever-source=LinkedIn#application-form',
+    frozenAtsName: 'lever',
+    status: 'ready_to_submit',
+  }), true);
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl,
+    currentUrl: 'https://jobs.lever.co/acme/different/apply?lever-source=LinkedIn#application-form',
+    frozenAtsName: 'lever',
+    status: 'ready_to_submit',
+  }), false);
+});
+
+test('generic handoff versions normalize non-identity tracking state', () => {
+  const packet = {
+    applicationId: 'application-1',
+    userId: 'user-1',
+    resumeObjectKey: 'users/user-1/resumes/application-1.pdf',
+    spec: { _review: { status: 'ready_to_submit' } },
+    jobContext: { company: 'Acme' },
+    currentUrl: 'https://jobs.lever.co/acme/abc123/apply',
+  };
+  const version = extensionHandoffVersion(packet);
+  assert.equal(extensionHandoffVersion({
+    ...packet,
+    currentUrl: `${packet.currentUrl}?lever-source=LinkedIn#application-form`,
+  }), version);
+  assert.notEqual(extensionHandoffVersion({
+    ...packet,
+    currentUrl: 'https://jobs.lever.co/acme/different/apply?lever-source=LinkedIn#application-form',
+  }), version);
+});
+
 test('generic extension-start validates a complete immutable handoff binding', () => {
   const currentUrl = 'https://jobs.lever.co/acme/abc123/apply';
   const packet = {

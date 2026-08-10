@@ -25,7 +25,8 @@ export function extensionHandoffVersion(input: {
   let canonicalUrl: string | undefined;
   try {
     const portal = detectPortal(input.currentUrl);
-    canonicalUrl = canonicalSupportedPortalUrl(input.currentUrl, portal);
+    const canonical = canonicalSupportedPortalUrl(input.currentUrl, portal);
+    canonicalUrl = canonical ? applicationIdentityKey(canonical, portal) ?? canonical : undefined;
   } catch {
     return null;
   }
@@ -103,14 +104,22 @@ function smartRecruitersTenant(rawUrl: string): string | null {
 function applicationIdentityKey(rawUrl: string, portal: string): string | null {
   try {
     const url = new URL(rawUrl);
+    let pathIdentified = false;
     if (portal === 'lever' || portal === 'personio' || portal === 'jobvite') {
+      pathIdentified = true;
       url.pathname = url.pathname.replace(/\/apply\/?$/i, '');
     } else if (portal === 'recruitee') {
+      pathIdentified = true;
       url.pathname = url.pathname.replace(/\/c\/new\/?$/i, '');
     } else if (portal === 'teamtailor' || portal === 'pinpoint') {
+      pathIdentified = true;
       url.pathname = url.pathname.replace(/\/applications\/new\/?$/i, '');
     }
     url.pathname = url.pathname.replace(/\/$/, '');
+    if (pathIdentified) {
+      url.search = '';
+      url.hash = '';
+    }
     return url.toString();
   } catch {
     return null;
