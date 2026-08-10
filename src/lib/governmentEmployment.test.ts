@@ -329,6 +329,41 @@ describe('prior government employment, answered from the experience bank', () =>
     assert.equal(answer('Have you worked for government (e.g. federal, state, or local government agencies)?', nasa), 'VALUE Yes');
   });
 
+  test('safe parenthetical prefixes accept punctuation without weakening qualifier refusal', () => {
+    const nasa: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const safe = [
+      'Have you worked for government (e.g., federal, state, or local government agencies)?',
+      'Have you worked for government (for example: federal or local government agencies)?',
+      'Have you worked for government (including: federal or state government agencies)?',
+      'Have you worked for government (such as: federal agencies)?',
+    ];
+    for (const label of safe) {
+      assert.equal(answer(label, nasa), 'VALUE Yes', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: '' }], nasa, undefined),
+        [{ question: label, answer: 'Yes' }],
+      );
+    }
+    const restrictive = [
+      'Have you worked for government (e.g., federal government only)?',
+      'Have you worked for government (including: permanent roles)?',
+      'Have you worked for government (such as: non-federal agencies)?',
+    ];
+    for (const label of restrictive) {
+      assert.equal(answer(label, nasa), 'SKIP', label);
+    }
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        restrictive.map((question) => ({ question, answer: 'Yes' })),
+        nasa,
+        undefined,
+      ),
+      restrictive.map((question) => ({ question, answer: '' })),
+    );
+  });
+
   test('canonical federal aliases resolve directly and at send-time', () => {
     const cases = [
       ['Have you worked for US DOE?', 'U.S. Department of Energy'],
@@ -511,8 +546,6 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you ever been a U.S. government employee?',
       'Were you an employee of the federal government?',
       'Have you previously been an employee of a federal government agency?',
-      'Are you a former federal government employee?',
-      'Are you a former employee of the federal government?',
       'Have you worked for a federal government agency?',
       'Have you been employed by a United States federal government agency?',
     ];
@@ -521,6 +554,70 @@ describe('prior government employment, answered from the experience bank', () =>
       assert.deepEqual(
         refreshKnownQuestionAnswers([{ question: label, answer: '' }], federal, undefined),
         [{ question: label, answer: 'Yes' }],
+      );
+    }
+  });
+
+  test('former employment holds without explicit end-date chronology', () => {
+    const currentFederal: ApplicationProfileLike = {
+      current_employer: 'NASA',
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const labels = [
+      'Are you a former federal government employee?',
+      'Are you a former employee of the federal government?',
+      'Former government employment?',
+      'Have you formerly worked for NASA?',
+    ];
+    for (const label of labels) {
+      assert.equal(answer(label, currentFederal), 'SKIP', label);
+      const resolved = resolveKnownAnswer(label, 'checkbox', currentFederal, undefined);
+      assert.ok(resolved && 'skipReason' in resolved, label);
+    }
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        labels.map((question) => ({ question, answer: 'Yes' })),
+        currentFederal,
+        undefined,
+      ),
+      labels.map((question) => ({ question, answer: '' })),
+    );
+  });
+
+  test('governmental agency variants preserve broad and federal level binding', () => {
+    const federal: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const local: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'City of Los Angeles', title: 'Analyst' }],
+    };
+    const broad = [
+      'Have you worked for a governmental agency?',
+      'Have you ever been employed by governmental agencies?',
+    ];
+    const federalOnly = [
+      'Have you worked for a federal governmental agency?',
+      'Have you been employed by a U.S. federal governmental agency?',
+      'Have you worked for a United States governmental agency?',
+    ];
+    for (const label of broad) {
+      assert.equal(answer(label, federal), 'VALUE Yes', label);
+      assert.equal(answer(label, local), 'VALUE Yes', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: '' }], federal, undefined),
+        [{ question: label, answer: 'Yes' }],
+      );
+    }
+    for (const label of federalOnly) {
+      assert.equal(answer(label, federal), 'VALUE Yes', label);
+      assert.equal(answer(label, local), 'SKIP', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: '' }], federal, undefined),
+        [{ question: label, answer: 'Yes' }],
+      );
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], local, undefined),
+        [{ question: label, answer: '' }],
       );
     }
   });

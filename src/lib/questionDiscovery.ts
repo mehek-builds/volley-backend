@@ -1551,7 +1551,15 @@ const GOVERNMENT_SCOPE_PARSERS: readonly {
     target: { kind: 'level', level: 'federal' },
   },
   {
+    pattern: /^(?:(?:u s|us|united states) )?federal governmental (?:agency|agencies)$/,
+    target: { kind: 'level', level: 'federal' },
+  },
+  {
     pattern: /^(?:(?:u s|us|united states)(?: federal)?|federal) government (?:agency|agencies)$/,
+    target: { kind: 'level', level: 'federal' },
+  },
+  {
+    pattern: /^(?:u s|us|united states)(?: federal)? governmental (?:agency|agencies)$/,
     target: { kind: 'level', level: 'federal' },
   },
   { pattern: /^state (?:government|agency|agencies)$/, target: { kind: 'level', level: 'state' } },
@@ -1560,7 +1568,7 @@ const GOVERNMENT_SCOPE_PARSERS: readonly {
     target: { kind: 'level', level: 'local' },
   },
   {
-    pattern: /^(?:government(?:al)?|government (?:agency|agencies)|public sector|civil service)$/,
+    pattern: /^(?:government(?:al)?|government(?:al)? (?:agency|agencies)|public sector|civil service)$/,
     target: { kind: 'any' },
   },
 ];
@@ -1579,7 +1587,7 @@ function targetFromGovernmentPhrase(raw: string): GovernmentEmploymentTarget | n
   if (parenthetical) {
     const primary = parenthetical[1].trim();
     const detail = parenthetical[2].trim();
-    if (/^(?:e\.?\s*g\.?|for\s+example|including|such\s+as)(?:\s|$)/i.test(detail)) {
+    if (/^(?:e\.?\s*g\.?|for\s+example|including|such\s+as)(?:[\s,:-]|$)/i.test(detail)) {
       const illustration = detail.replace(/^(?:e\.?\s*g\.?|for\s+example|including|such\s+as)[\s,:-]*/i, '');
       const safeTokens = /^(?:(?:u\.?\s*s\.?|us|united\s+states|federal|state|local|municipal|city|county|government(?:al)?|agenc(?:y|ies)|public|sector|civil|service|and|or|the|a|an|any)[\s,;/]*)+$/i;
       if (!illustration || !safeTokens.test(illustration)) return null;
@@ -1640,14 +1648,6 @@ const GOVERNMENT_EMPLOYMENT_LABEL_PARSERS: readonly {
   },
   {
     pattern: /^have\s+you\s+(?:(?:ever|previously)\s+)?been\s+(?:an?\s+)?employee\s+(?:of|for|with)\s+(?:the\s+)?(.+)$/i,
-    scopeGroup: 1,
-  },
-  {
-    pattern: /^are\s+you\s+(?:an?\s+)?former\s+(.+?)\s+employee$/i,
-    scopeGroup: 1,
-  },
-  {
-    pattern: /^are\s+you\s+(?:an?\s+)?former\s+employee\s+(?:of|for|with)\s+(?:the\s+)?(.+)$/i,
     scopeGroup: 1,
   },
   {
