@@ -1178,9 +1178,13 @@ describe('prior government employment, answered from the experience bank', () =>
         'Did you submit those job applications?',
         'Submitted our current online application',
         'Have you submitted these applications?',
-        'Submitted your updated internal online job application',
-        'Did you submit those regional online applications?',
         'Have you previously submitted the application?',
+        'Have you already submitted the application?',
+        'Did you successfully submit your completed online job application?',
+        'Have you already successfully submitted your current online application yet?',
+        'Previously submitted our employment application to date',
+        'Have you ever submitted this application earlier?',
+        'Have you submitted your fully completed online employment application so far?',
         'Submitted the application before',
         'Have you submitted this online application previously?',
         'Did you submit those job applications already?',
@@ -1216,7 +1220,6 @@ describe('prior government employment, answered from the experience bank', () =>
         'Did you apply to another engineering team?',
         'Have you applied to any business unit?',
         'Have you applied to the trading division?',
-        'Did you apply to our research group?',
         'Have you applied to a regional office?',
         'Have you applied to the product function?',
         'Have you applied to a subsidiary?',
@@ -1225,7 +1228,6 @@ describe('prior government employment, answered from the experience bank', () =>
         'Have you applied to any branch previously?',
         'Have you applied to the overseas entity?',
         'Did you apply to our local chapter?',
-        'Have you applied to the source code affiliate?',
       ]) {
         const profile: ApplicationProfileLike = { prior_application_employers: [...declared] };
         const held = resolveKnownAnswer(label, 'text', profile, context);
@@ -1485,7 +1487,13 @@ describe('prior government employment, answered from the experience bank', () =>
       'Did you previously apply to data science techniques?',
       'Have you applied to statistical methods before?',
       'Did you apply to optimization algorithms?',
+      'Have you applied to problems at scale?',
+      'Did you apply to ML models in production?',
+      'Have you applied to distributed systems at scale?',
+      'Did you apply to algorithms in production?',
       'Did you apply to another machine learning practice?',
+      'Did you apply to our research group?',
+      'Have you applied to the source code affiliate?',
       'Have you applied to secure coding practices?',
       'Did you apply to a testing framework?',
       'Have you applied to research projects?',
@@ -1511,6 +1519,23 @@ describe('prior government employment, answered from the experience bank', () =>
       'Submitted the application architecture document',
       'Have you submitted this application source code review?',
       'Submitted our job application codebase review',
+      'Submitted your updated internal online job application',
+      'Did you submit those regional online applications?',
+      'Have you submitted the visa application?',
+      'Did you already submit your immigration application?',
+      'Have you previously submitted this permit application?',
+      'Submitted the mobile application',
+      'Have you submitted your software application?',
+      'Did you submit the web application?',
+      'Have you already submitted this app store application?',
+      'Submitted your school application',
+      'Have you submitted the university application?',
+      'Did you submit the college application?',
+      'Submitted your loan application',
+      'Have you submitted the grant application?',
+      'Did you submit the patent application?',
+      'Have you submitted your benefits application?',
+      'Have you submitted your regional application?',
       'Did you apply full time-series methods previously?',
       'Have you submitted applications for seasonal forecasting projects?',
       'Have you submitted any applications for summer forecasting projects?',
@@ -1532,6 +1557,18 @@ describe('prior government employment, answered from the experience bank', () =>
         unrelated,
       );
     }
+    const workAuthorizationApplication = 'Successfully submitted the work authorization application';
+    const workAuthorizationResolution = resolveKnownAnswer(workAuthorizationApplication, 'text', profile, context);
+    assert.ok(workAuthorizationResolution && 'skipReason' in workAuthorizationResolution);
+    assert.match(workAuthorizationResolution.skipReason, /work-eligibility question/);
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        [{ question: workAuthorizationApplication, answer: 'stale' }],
+        profile,
+        context,
+      ),
+      [{ question: workAuthorizationApplication, answer: '' }],
+    );
   });
 
   test('unsupported named-employer history noun forms refuse and clear stale answers', () => {

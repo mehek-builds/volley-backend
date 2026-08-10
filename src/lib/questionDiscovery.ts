@@ -1854,6 +1854,24 @@ type ParsedSiblingQuestion = {
   globalPriorApplicationHistory?: boolean;
 };
 
+const DEFINITE_APPLICATION_PREFIX_TEMPORAL = String.raw`(?:already|successfully|previously|ever)`;
+const DEFINITE_APPLICATION_SUFFIX_TEMPORAL = String.raw`(?:before|previously|already|yet|ever|earlier|so far|to date|in the past)`;
+const DEFINITE_APPLICATION_DETERMINER = String.raw`(?:the|this|that|these|those|your|our|current)`;
+const DEFINITE_APPLICATION_SAFE_MODIFIER = String.raw`(?:current|completed|fully|successfully|online|job|employment)`;
+const DEFINITE_APPLICATION_SAFE_PHRASE = String.raw`${DEFINITE_APPLICATION_DETERMINER} (?:${DEFINITE_APPLICATION_SAFE_MODIFIER} )*applications?`;
+const DEFINITE_APPLICATION_ANY_PHRASE = String.raw`${DEFINITE_APPLICATION_DETERMINER} (?:[a-z0-9]+ )*applications?`;
+const DEFINITE_APPLICATION_SUBMISSION_STEM = String.raw`(?:(?:have|had) you (?:${DEFINITE_APPLICATION_PREFIX_TEMPORAL} )*submitted|did you (?:${DEFINITE_APPLICATION_PREFIX_TEMPORAL} )*submit|(?:${DEFINITE_APPLICATION_PREFIX_TEMPORAL} )*submitted)`;
+
+function classifyDefiniteApplicationSubmission(value: string): 'owned' | 'unrelated' | null {
+  const suffix = String.raw`(?: ${DEFINITE_APPLICATION_SUFFIX_TEMPORAL})?`;
+  if (new RegExp(`^${DEFINITE_APPLICATION_SUBMISSION_STEM} ${DEFINITE_APPLICATION_SAFE_PHRASE}${suffix}$`).test(value)) {
+    return 'owned';
+  }
+  return new RegExp(`^${DEFINITE_APPLICATION_SUBMISSION_STEM} ${DEFINITE_APPLICATION_ANY_PHRASE}${suffix}$`).test(value)
+    ? 'unrelated'
+    : null;
+}
+
 function siblingTailSignalsQuestionOrInstruction(label: string, tail: string): boolean {
   return /\?\s*$/.test(label.trim())
     || /(?:^|\s)(?:please|explain|describe|provide|specify|identify|why|how|who|and)\b/i.test(tail.trim());
@@ -1945,8 +1963,7 @@ function parsePriorApplicationQuestion(
     const object = remainder
       .replace(/^(?:at|for|to|with)\s+/, '')
       .replace(/\s+(?:before|previously|already|yet|ever|in the past|within the last \d+(?: \d+)? months?)$/, '');
-    return /(?:^|\s)(?:source code|app stores?)$/.test(object)
-      || /(?:^|\s)(?:problems?|methods?|practices?|techniques?|algorithms?|frameworks?|projects?|tasks?|concepts?|technolog(?:y|ies)|codebases?|vulnerabilit(?:y|ies)|issues?|datasets?|data|models?|systems?|architectures?|research|schoolwork|coursework|knowledge|experience|science|learning)$/.test(object);
+    return /\b(?:source code|app stores?|problems?|methods?|practices?|techniques?|algorithms?|frameworks?|projects?|tasks?|concepts?|technolog(?:y|ies)|codebases?|vulnerabilit(?:y|ies)|issues?|datasets?|data|models?|systems?|architectures?|research|schoolwork|coursework|knowledge|experience|science|learning)\b/.test(object);
   };
   const previousApplicant = value.match(/^previous applicant\b(.*)$/i);
   if (previousApplicant) {
@@ -1958,13 +1975,9 @@ function parsePriorApplicationQuestion(
       ...(packetEmployer ? { target: canonicalSiblingEmployerIdentity(packetEmployer) } : {}),
     };
   }
-  const definiteApplicationPhrase = String.raw`(?:the|this|that|these|those|your|our|current) (?:[a-z0-9]+ )*applications?`;
-  const definiteApplicationTemporal = String.raw`(?: (?:before|previously|already|yet|in the past|ever))?`;
-  const definiteSubmission = value.match(new RegExp(
-    String.raw`^(?:(?:have|had) you (?:(?:ever|previously) )?submitted|did you (?:(?:ever|previously) )?submit|(?:(?:ever|previously) )?submitted) ${definiteApplicationPhrase}${definiteApplicationTemporal}$`,
-    'i',
-  ));
-  if (definiteSubmission) return { family: 'prior_application', valid: false };
+  const definiteSubmission = classifyDefiniteApplicationSubmission(normalizeIdentity(value));
+  if (definiteSubmission === 'owned') return { family: 'prior_application', valid: false };
+  if (definiteSubmission === 'unrelated') return null;
   const submissionStem = value.match(/^(?:(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?submitted|did\s+you\s+(?:(?:ever|previously)\s+)?submit|(?:(?:ever|previously)\s+)?submitted)\s+(?:(an?|any|the|this|that|your|current)\s+)?(applications?)\b(.*)$/i);
   if (submissionStem) {
     const determiner = submissionStem[1]?.toLowerCase();
@@ -1972,7 +1985,7 @@ function parsePriorApplicationQuestion(
     const tail = submissionStem[3]?.trim() ?? '';
     const tailIdentity = normalizeIdentity(tail);
     if (/^(?:the|this|that|your|current)$/.test(determiner ?? '')
-      && /^(?:before|previously|already|yet|in the past|ever)?$/.test(tailIdentity)) {
+      && /^(?:before|previously|already|yet|ever|earlier|so far|to date|in the past)?$/.test(tailIdentity)) {
       return { family: 'prior_application', valid: false };
     }
     if (/^(?:the|this|that|your|current)$/.test(determiner ?? '')) return null;
@@ -2010,11 +2023,15 @@ function parsePriorApplicationQuestion(
   const globalObject = String.raw`(?:(?:an?|any) )?(?:application|role|job|company|employer)`;
   const targetFreeRemainder = new RegExp(`^(?:before|previously|(?:here|with us|to us|for us)(?: before| previously)?|(?:at|for|to|with) ${packetObject}(?: before| previously)?)$`).test(remainder);
   const definiteApplicationObject = new RegExp(
-    String.raw`^(?:at|for|to|with) ${definiteApplicationPhrase}${definiteApplicationTemporal}$`,
+    String.raw`^(?:at|for|to|with) ${DEFINITE_APPLICATION_SAFE_PHRASE}(?: ${DEFINITE_APPLICATION_SUFFIX_TEMPORAL})?$`,
   ).test(remainder);
   if (definiteApplicationObject) return { family: 'prior_application', valid: false };
+  const unsafeDefiniteApplicationObject = new RegExp(
+    String.raw`^(?:at|for|to|with) ${DEFINITE_APPLICATION_ANY_PHRASE}(?: ${DEFINITE_APPLICATION_SUFFIX_TEMPORAL})?$`,
+  ).test(remainder);
+  if (unsafeDefiniteApplicationObject) return null;
   const definiteApplicationWithTail = new RegExp(
-    String.raw`^(?:at|for|to|with) ${definiteApplicationPhrase}\s+\S`,
+    String.raw`^(?:at|for|to|with) ${DEFINITE_APPLICATION_ANY_PHRASE}\s+\S`,
   ).test(remainder);
   if (definiteApplicationWithTail) return null;
   const globalRemainder = new RegExp(`^(?:at|for|to|with) ${globalObject}(?: before| previously)?$`).test(remainder);
@@ -2234,6 +2251,7 @@ function classifyUnrecognizedSiblingIntent(
   jdText?: string,
 ): ParsedSiblingQuestion | null {
   const value = normalizeIdentity(normalizedSiblingQuestionLabel(label));
+  if (classifyDefiniteApplicationSubmission(value) === 'unrelated') return null;
   const questionShaped = /\?\s*$/.test(label.trim())
     || /^(?:have|has|had|did|do|does|are|is|was|were|would|will|can|could|should|how|where|what|who|when|why)\b/.test(value)
     || /\b(?:please|explain|describe|provide|specify|identify|and who|and why|who referred)\b/.test(value);
