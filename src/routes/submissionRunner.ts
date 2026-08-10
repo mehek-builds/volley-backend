@@ -78,6 +78,7 @@ import {
   managedAnswerLossReasons,
   managedResultHasCoverLetterUpload,
   managedAttendedAccountHold,
+  managedAttendedAccountUrlIsSupported,
   navigateToApplicationForm,
   portalApplicationUrl,
   isAccountWalledFamily,
@@ -677,6 +678,70 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     postingCountryFromJobContext(row.job_context),
     postingCountryCodeFromJobContext(row.job_context),
   );
+  const snapshotExperience = (value: unknown): NonNullable<SubmissionPacket['applicantSnapshot']>['profile']['experience'] => {
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+      const entry = item as Record<string, unknown>;
+      const string = (...keys: string[]): string | undefined => {
+        for (const key of keys) {
+          const candidate = entry[key];
+          if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+        }
+        return undefined;
+      };
+      const company = string('company', 'org');
+      const title = string('title', 'role');
+      if (!company || !title) return [];
+      return [{
+        company,
+        title,
+        start: string('start', 'start_date', 'startDate', 'from') ?? '',
+        end: string('end', 'end_date', 'endDate', 'to') ?? '',
+        description: string('description', 'summary') ?? '',
+      }];
+    });
+  };
+  const stringList = (value: unknown): string[] => Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean)
+    : [];
+  const snapshotProjects = (value: unknown): Array<{ name: string; description: string }> | undefined => {
+    if (!Array.isArray(value)) return undefined;
+    const projects = value.flatMap((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return [];
+      const project = item as Record<string, unknown>;
+      const name = typeof project.name === 'string' ? project.name.trim() : '';
+      const description = typeof project.description === 'string' ? project.description.trim() : '';
+      return name ? [{ name, description }] : [];
+    });
+    return projects.length ? projects : undefined;
+  };
+  const applicantSnapshot: NonNullable<SubmissionPacket['applicantSnapshot']> = {
+    profile: {
+      full_name: fullName,
+      email,
+      experience: snapshotExperience(Array.isArray(parsed.experience) ? parsed.experience : base.experience),
+      skills: stringList(profileRow[0]?.skills ?? parsed.skills ?? base.skills),
+      ...(snapshotProjects(parsed.projects ?? base.projects) ? { projects: snapshotProjects(parsed.projects ?? base.projects) } : {}),
+      school: academicStr('school') ?? '',
+      ...(degree ? { degree } : {}),
+      ...(graduationDate ? { grad_date: graduationDate } : {}),
+      grad_year: graduationYear ?? (Number.parseInt(graduationParts.year ?? '', 10) || 0),
+      ...(academicBoolean('currently_enrolled') !== undefined
+        ? { currently_enrolled: academicBoolean('currently_enrolled') }
+        : {}),
+      ...(stringList(parsed.coursework ?? base.coursework).length
+        ? { coursework: stringList(parsed.coursework ?? base.coursework) }
+        : {}),
+      ...(stringList(parsed.target_roles ?? base.target_roles).length
+        ? { target_roles: stringList(parsed.target_roles ?? base.target_roles) }
+        : {}),
+      ...(typeof (parsed.voice_pref ?? base.voice_pref) === 'string'
+        ? { voice_pref: String(parsed.voice_pref ?? base.voice_pref).trim() }
+        : {}),
+    },
+    application_profile: applicationProfile,
+  };
   return {
     fullName,
     email,
@@ -701,6 +766,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     roleCountry: postingCountryFromJobContext(row.job_context),
     roleCountryCode: postingCountryCodeFromJobContext(row.job_context),
     applicationProfile,
+    applicantSnapshot,
     jdText: review.jd_text,
     resume,
     resumeName: resumeFileNameForRole(fullName, roleTitle),
@@ -2073,6 +2139,7 @@ async function prepareManaged(
     })),
     // Which address this form was filled with, and why. See ApplicationReviewState.applicant_email.
     ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
+    ...(packet.applicantSnapshot ? { applicant_snapshot: packet.applicantSnapshot } : {}),
     preview_screenshot_url: preview.url,
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
@@ -2116,7 +2183,7 @@ async function prepareManaged(
 }
 
 /**
- * Capture the exact attended gate for Jobvite or iCIMS without operating it. Unlike the generic
+ * Capture the exact attended gate for Jobvite, iCIMS, or the measured Oracle URL without operating it. Unlike the generic
  * managed preparation this sends no identity, file, answer, consent, CAPTCHA, or submit action.
  * Building the packet first is intentional: it validates the immutable generated PDF and the
  * packet-specific Litos email before Chrome is offered the handoff.
@@ -2150,6 +2217,7 @@ async function prepareManagedAttendedAccountGate(
     filled_fields: [],
     extension_handoff_url: hold ? canonicalSupportedPortalUrl(result.url, portal) : undefined,
     ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
+    ...(packet.applicantSnapshot ? { applicant_snapshot: packet.applicantSnapshot } : {}),
     verification: { status: hold?.kind === 'security_code' ? 'handoff' : 'not_needed' },
     attention_reason: attentionReason,
     attention_categories: attentionCategories,
@@ -2259,7 +2327,8 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     await prepareControlled(row, current, runId, authorization, fastify);
     return;
   }
-  if (isManagedStratusProvider() && isManagedAttendedAccountPortal(portal)) {
+  if (isManagedStratusProvider() && isManagedAttendedAccountPortal(portal)
+    && managedAttendedAccountUrlIsSupported(portal, current.portal_url!)) {
     await prepareManagedAttendedAccountGate(row, current, portal, runId, fastify);
     return;
   }

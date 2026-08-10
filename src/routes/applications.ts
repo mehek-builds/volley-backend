@@ -30,7 +30,7 @@ import {
   type ApplicationReviewQuestion,
 } from '../lib/applicationReview';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
-import { getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
+import { connectToSession, getBrowserSession, getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
 import { storedCoverLetter } from '../lib/coverLetterService';
@@ -47,6 +47,7 @@ import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffE
 import {
   detectPortal,
   isPortalSupported,
+  readReceipt,
 } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
 import {
@@ -444,6 +445,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'This saved application does not match the company form open in Chrome' });
       }
       if (!row.resume_object_key) return reply.status(409).send({ error: 'This application has no generated resume to attach' });
+      if ((review.ats_name === 'jobvite' || review.ats_name === 'icims' || review.ats_name === 'oraclecloud')
+        && !review.applicant_snapshot) {
+        return reply.status(409).send({ error: 'This application must be prepared again before Chrome can fill it' });
+      }
 
       const contact = (stored._contact ?? {}) as StoredContact;
       const job = (row.job_context ?? {}) as { role?: unknown };
@@ -481,6 +486,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         file_name: fileName,
         spec: editableResumeSpec(stored),
         application: { id: row.id, spec: stored },
+        applicant_snapshot: review.applicant_snapshot,
         quality: {
           ready_to_attach: issues.length === 0,
           issues,
@@ -1337,8 +1343,30 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         if (!current.browser_session_id) {
           return reply.status(409).send({ error: 'Open the company page first so we can attach this submission to a live handoff.' });
         }
-        const finalUrl = parsed.data.final_url ?? current.portal_url;
-        if (!finalUrl) return reply.status(409).send({ error: 'This application is missing the company page URL' });
+        let observedReceipt: Awaited<ReturnType<typeof readReceipt>>;
+        try {
+          const session = await getBrowserSession(current.browser_session_id);
+          const connected = await connectToSession(session);
+          try {
+            observedReceipt = await readReceipt(connected.page);
+          } finally {
+            await connected.browser.close().catch(() => undefined);
+          }
+        } catch {
+          return reply.status(409).send({
+            error: 'Litos could not verify an employer confirmation in the retained company session. Nothing was marked submitted.',
+          });
+        }
+        if (!extensionEmployerReceiptIsSufficient({
+          atsName: current.ats_name,
+          portalUrl: current.portal_url,
+          confirmationText: observedReceipt.confirmationText,
+          finalUrl: observedReceipt.finalUrl,
+        })) {
+          return reply.status(409).send({
+            error: 'The retained company session does not show a verified receipt for this exact application.',
+          });
+        }
         const next = {
           ...current,
           status: 'submitted' as const,
@@ -1347,9 +1375,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           submission_error: undefined,
           updated_at: now,
           receipt: {
-            confirmation_text: parsed.data.confirmation_text?.trim()
-              || 'Submitted by the applicant in the live company page',
-            final_url: finalUrl,
+            confirmation_text: observedReceipt.confirmationText,
+            final_url: observedReceipt.finalUrl,
+            ...(observedReceipt.referenceId ? { reference_id: observedReceipt.referenceId } : {}),
             captured_at: now,
             source: 'attended_handoff' as const,
           },

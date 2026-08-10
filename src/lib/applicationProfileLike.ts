@@ -174,6 +174,7 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     phone: str('phone'),
     address_city: str('address_city'),
     address_state: str('address_state'),
+    address_zip: str('address_zip'),
     address_country: str('address_country'),
     linkedin_url: str('linkedin_url'),
     github_url: str('github_url'),

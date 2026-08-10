@@ -88,7 +88,22 @@ test('iCIMS terminal receipts require employer confirmation bound to the exact t
   assert.equal(sufficient('Application received.', `${portalUrl}?success=true`), false);
 });
 
-test('receipt tightening is scoped to Jobvite and iCIMS', () => {
+test('Oracle remains unconfirmable until a measured terminal receipt contract exists', () => {
+  const portalUrl = 'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email';
+  for (const finalUrl of [
+    portalUrl,
+    `${portalUrl}?submitted=true`,
+    `${portalUrl}/confirmation`,
+    'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/thank-you',
+  ]) assert.equal(extensionEmployerReceiptIsSufficient({
+    atsName: 'oraclecloud',
+    portalUrl,
+    confirmationText: 'Your application has been submitted.',
+    finalUrl,
+  }), false);
+});
+
+test('receipt tightening is scoped to attended families', () => {
   assert.equal(extensionEmployerReceiptIsSufficient({
     atsName: 'lever',
     portalUrl: 'https://jobs.lever.co/acme/job-1',

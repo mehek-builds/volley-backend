@@ -40,6 +40,7 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   phone?: string;
   address_city?: string;
   address_state?: string;
+  address_zip?: string;
   address_country?: string;
   linkedin_url?: string;
   github_url?: string;

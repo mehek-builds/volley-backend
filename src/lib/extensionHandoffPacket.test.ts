@@ -10,6 +10,9 @@ import {
   ICIMS_ATTENDED_GATE_REASON,
   JOBVITE_ATTENDED_GATE_REASON,
   MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
+  ORACLE_ATTENDED_GATE_REASON,
+  SAP_SUCCESSFACTORS_CAPTURE_REQUIRED_REASON,
+  UKG_CAPTURE_REQUIRED_REASON,
 } from './portalSubmission';
 
 const SEEKA_POSTING = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648206-software-engineer-internship';
@@ -128,6 +131,55 @@ test('iCIMS attended recovery requires the exact measured login URL and typed ca
   assert.equal(extensionHandoffPacketMatches({
     ...input,
     currentUrl: 'https://jobs-express.icims.com/jobs/48174/sales-associate/login',
+  }), false);
+});
+
+test('Oracle attended recovery requires the exact measured email gate and typed cause', () => {
+  const gate = 'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email';
+  const input = {
+    frozenUrl: gate,
+    frozenHandoffUrl: gate,
+    currentUrl: gate,
+    frozenAtsName: 'oraclecloud',
+    status: 'needs_attention' as const,
+    attentionReason: ORACLE_ATTENDED_GATE_REASON,
+  };
+  assert.equal(extensionHandoffPacketMatches(input), true);
+  assert.equal(extensionHandoffPacketMatches({ ...input, frozenHandoffUrl: undefined }), false);
+  assert.equal(extensionHandoffPacketMatches({ ...input, attentionReason: 'An emailed code is required' }), false);
+  assert.equal(extensionHandoffPacketMatches({ ...input, currentUrl: gate.replace('/apply/email', '') }), false);
+  assert.equal(extensionHandoffPacketMatches({ ...input, currentUrl: `${gate}?source=tracker` }), false);
+  assert.equal(extensionHandoffPacketMatches({ ...input, currentUrl: `${gate}#authentication` }), false);
+  assert.equal(extensionHandoffPacketMatches({ ...input, currentUrl: gate.replace('/333913/', '/333914/') }), false);
+  assert.equal(extensionHandoffPacketMatches({
+    ...input,
+    currentUrl: gate.replace('eeho.fa.us2.oraclecloud.com', 'iawmqy.fa.ocs.oraclecloud.com'),
+  }), false);
+  assert.equal(extensionHandoffPacketMatches({ ...input, status: 'ready_for_final_approval' }), false);
+  assert.equal(extensionHandoffPacketMatches({
+    ...input,
+    submissionClaimedAt: '2026-08-10T00:00:00.000Z',
+  }), false);
+});
+
+test('UKG and SuccessFactors capture-needed states cannot disclose an attended packet', () => {
+  for (const input of [
+    {
+      frozenUrl: 'https://recruiting.ultipro.com/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9',
+      frozenHandoffUrl: 'https://recruiting.ultipro.com/WIN1014WINDQ/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9',
+      frozenAtsName: 'ultipro',
+      attentionReason: UKG_CAPTURE_REQUIRED_REASON,
+    },
+    {
+      frozenUrl: 'https://career2.successfactors.eu/portalcareer?company=southafr02&job_application=10516',
+      frozenHandoffUrl: 'https://career2.successfactors.eu/portalcareer?company=southafr02&job_application=10516',
+      frozenAtsName: 'sap_successfactors',
+      attentionReason: SAP_SUCCESSFACTORS_CAPTURE_REQUIRED_REASON,
+    },
+  ]) assert.equal(extensionHandoffPacketMatches({
+    ...input,
+    currentUrl: input.frozenHandoffUrl,
+    status: 'needs_attention',
   }), false);
 });
 

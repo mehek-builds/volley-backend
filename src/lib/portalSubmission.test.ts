@@ -9,6 +9,7 @@ import {
   AUTONOMOUS_PORTAL_FAMILIES,
   blockersRequireCoverLetter,
   buildManagedDiscoveryActions,
+  buildManagedAttendedAccountProbeActions,
   buildManagedPortalActions,
   canFillReviewedQuestions,
   canonicalSmartRecruitersOneClickUrl,
@@ -18,6 +19,7 @@ import {
   fillPortal,
   isAccountWalledFamily,
   isAutonomousPortalFamily,
+  isManagedAttendedAccountPortal,
   isChoiceQuestion,
   isPaylocityTerminalStep,
   managedResultFilledFields,
@@ -3318,6 +3320,14 @@ test('an account-walled handoff never claims Litos filled a form it never reache
   assert.match(portalHandoffReason('jobvite')!, /privacy notice/i);
   assert.match(portalHandoffReason('icims')!, /make an account/i);
   assert.match(portalHandoffReason('oraclecloud')!, /code/i);
+});
+
+test('UKG and SuccessFactors remain typed capture-required holds, never managed attended portals', () => {
+  for (const portal of ['ultipro', 'sap_successfactors'] as const) {
+    assert.equal(isManagedAttendedAccountPortal(portal), false);
+    assert.deepEqual(buildManagedAttendedAccountProbeActions(portal), []);
+    assert.match(portalHandoffReason(portal)!, /live capture/i);
+  }
 });
 
 test('BambooHR is CAPTCHA-gated, so it fills and stops however inviting its form looks', () => {
