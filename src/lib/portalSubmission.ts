@@ -6751,6 +6751,27 @@ export function managedCaptchaProvider(
 }
 
 /**
+ * EVERYTHING ON THIS PAGE THAT IS POSITIVE EVIDENCE A HUMAN IS BEING ASKED SOMETHING.
+ *
+ * Named once and shared, because "what counts as evidence" was previously spelled out inline in
+ * the corroboration check and therefore applied to some portals and not others. Each entry is a
+ * direct observation rather than an inference: an open bframe is the image grid a person is looking
+ * at, a rendered widget or anchor is a control that has not declared itself invisible, and an
+ * unexplained challenge sitekey is a widget nothing on the page accounted for.
+ *
+ * Empty means the page said nothing about a challenge. It does NOT mean there is no challenge - a
+ * page that returned no readable text at all produces an empty list too, and that is precisely the
+ * shape the caller has to be able to tell apart from a seen widget.
+ */
+export function managedCaptchaPageEvidence(evidence: ManagedCaptchaEvidence): string[] {
+  return [
+    ...(evidence.bframeSrc ? [evidence.bframeSrc] : []),
+    ...renderedCaptchaEvidence(evidence),
+    ...unexplainedChallengeSitekeys(evidence),
+  ];
+}
+
+/**
  * Does this repo's own read of the page back up the REMOTE RUNNER's claim that a human is needed?
  *
  * WHAT THIS IS, stated precisely, because it used to be described as something it is not. It is a
@@ -6767,25 +6788,38 @@ export function managedCaptchaProvider(
  * defence in depth, it is one check wearing two names, which is worse than one check because it
  * reads as two.
  *
- * Outside the autonomous families the provider's word stands unchallenged - JazzHR and BambooHR
- * really do gate every form, portalCanAutoSubmit already refuses to submit them, and there is
- * nothing to protect.
+ * THE EVIDENCE REQUIREMENT IS THE SAME FOR EVERY FAMILY, and it was not. This function used to
+ * return true for any portal outside AUTONOMOUS_PORTAL_FAMILIES before looking at a single extract,
+ * so the runner's word stood unexamined on smartrecruiters, workday, icims, jobvite and on every
+ * family added after that line was written - which is most of them, and all of the ones nobody has
+ * measured yet. Measured consequence: packet 1d1de862 (SEEKA, smartrecruiters) carries a CAPTCHA
+ * claim and an open human_verification stall on a page whose own preview recorded no readable text
+ * whatsoever. That is the signature of an interstitial, not of a widget, and a family carve-out is
+ * what let it through. A verdict backed by nothing is not more trustworthy on a portal we know less
+ * about; it is less.
+ *
+ * The families that genuinely gate every form lose nothing by this. JazzHR and BambooHR render a
+ * real widget, which this reads; portalCanAutoSubmit still refuses to submit them either way; and
+ * portalHandoffReason still says "this company's application page asks you to prove you are human"
+ * at the handoff, because that sentence comes from the family and not from this check.
  *
  * Uncorroborating is safe at the point it is used. It drops a blocker off a PREPARE result, which
  * fills a form and screenshots it; it never presses submit. The submit path runs its own probe
  * afterwards, and portalCanAutoSubmit still stands in front of that. The cost of a false negative
  * here is a preview the applicant reviews anyway. The cost of the false positive was the product.
+ *
+ * `portal` is still taken, and still ignored on purpose: the caller passes the portal it is judging
+ * and the answer is deliberately independent of it. Removing the parameter would only hide that
+ * this is a page question rather than a family question.
  */
 export function managedCaptchaVerdictIsCorroborated(
   portal: SupportedPortal,
   result: ManagedBrowserResult | null,
 ): boolean {
+  void portal;
   const evidence = readManagedCaptchaEvidence(result);
   if (isInvisibleRecaptchaEvidence(evidence)) return false;
-  if (!isAutonomousPortalFamily(portalFamily(portal))) return true;
-  return evidence.bframeSrc !== null
-    || renderedCaptchaEvidence(evidence).length > 0
-    || unexplainedChallengeSitekeys(evidence).length > 0;
+  return managedCaptchaPageEvidence(evidence).length > 0;
 }
 
 export function corroborateManagedCaptchaBlockers(

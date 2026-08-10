@@ -2092,7 +2092,21 @@ async function prepareManaged(
         submission_attempted_at: securityCode.requested_at,
       }
       : {}),
-    ...(captchaAttention
+    /* A SECURITY-CODE SCREEN OUTRANKS THE CAPTCHA STALL, and until now the two branches simply both
+     * applied to this same patch.
+     *
+     * A stall is the record of a HUMAN-VERIFICATION wait: it is what the "waiting on you" queue is
+     * ordered by and what the time-to-resolution measurement is computed from. A run that reached an
+     * emailed security-code screen is not waiting on a human verification, it is waiting on eight
+     * characters out of her mailbox, and it already carries that state in `security_code` plus its
+     * own attention category. Writing a human_verification stall beside it puts a row in the CAPTCHA
+     * queue that no CAPTCHA is holding, and counts it in the stall metrics as one, which is the
+     * metric confirming a challenge nobody saw.
+     *
+     * The captcha ATTENTION CATEGORY is untouched: the page really may have carried a widget, and
+     * the categories list is allowed to name more than one thing. It is the stall - the queue's
+     * entry and the clock - that must belong to exactly one wait. */
+    ...(captchaAttention && !securityCode
       ? beginStall(current, {
         surface: 'server_run',
         // Read off the page's own markup rather than hard-coded. `unknown` was written on every one

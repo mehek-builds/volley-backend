@@ -3,6 +3,7 @@ import test from 'node:test';
 import type { Page } from 'playwright-core';
 import { browserSessionBody, type ManagedBrowserResult } from './browserbase';
 import {
+  AUTONOMOUS_PORTAL_FAMILIES,
   buildManagedCaptchaProbeActions,
   buildManagedPortalActions,
   CAPTCHA_BLOCKER,
@@ -20,9 +21,11 @@ import {
   FormIncompleteError,
   READ_SUBMIT_READINESS_SCRIPT,
   hasUnresolvedCaptcha,
+  managedCaptchaPageEvidence,
   managedCaptchaProvider,
   managedCaptchaVerdictIsCorroborated,
   managedResultRequiresCaptchaAttention,
+  readManagedCaptchaEvidence,
   CaptchaUnresolvedError,
   SUBMIT_CANDIDATE_SELECTOR,
   NoSubmitControlError,
@@ -734,16 +737,86 @@ test('a corroborated CAPTCHA verdict still stops an autonomous family', () => {
   assert.equal(managedCaptchaVerdictIsCorroborated('greenhouse', corroborating), true);
 });
 
-// Outside the autonomous families the provider's word stands. JazzHR and BambooHR really do gate
-// every form, portalCanAutoSubmit already refuses to submit them, and there is nothing to protect.
-test('a CAPTCHA-gated family is believed without corroboration', () => {
-  assert.equal(managedCaptchaVerdictIsCorroborated('jazzhr', null), true);
-  assert.deepEqual(corroborateManagedCaptchaBlockers('jazzhr', [CAPTCHA_BLOCKER], null), [CAPTCHA_BLOCKER]);
+/* THE FAMILY CARVE-OUT IS GONE, and this test used to assert it.
+ *
+ * It read `managedCaptchaVerdictIsCorroborated('jazzhr', null) === true`: outside
+ * AUTONOMOUS_PORTAL_FAMILIES the runner's claim stood with zero page evidence. Written when the
+ * exception covered two well-understood families, it silently covered every family added
+ * afterwards - smartrecruiters, workday, icims, jobvite - and those are the ones nobody has
+ * measured. Packet 1d1de862 (SEEKA, smartrecruiters) is the measured cost: a CAPTCHA claim and an
+ * open human_verification stall on a page that returned no readable text at all.
+ *
+ * Nothing is lost on the families that really do gate every form. They render a widget, which is
+ * evidence; portalCanAutoSubmit still refuses to submit them; and portalHandoffReason still tells
+ * the applicant this page asks her to prove she is human, because that sentence comes from the
+ * family and never from this check. */
+test('a CAPTCHA claim backed by nothing is not believed on any family', () => {
+  for (const portal of ['jazzhr', 'bamboohr', 'smartrecruiters', 'oraclecloud', 'icims', 'jobvite'] as const) {
+    assert.equal(managedCaptchaVerdictIsCorroborated(portal, null), false, portal);
+    assert.deepEqual(corroborateManagedCaptchaBlockers(portal, [CAPTCHA_BLOCKER], null), [], portal);
+  }
+  // The SEEKA shape: a run that reached a page and read nothing off it. An empty extract list is not
+  // evidence of a challenge, and it is exactly what an interstitial produces.
+  assert.equal(managedCaptchaVerdictIsCorroborated('smartrecruiters', probeResult([])), false);
+  assert.equal(
+    managedCaptchaVerdictIsCorroborated(
+      'smartrecruiters',
+      probeResult([{ selector: CHALLENGE_SEL, label: 'captcha_challenge', value: null }]),
+    ),
+    false,
+  );
 });
 
-// ...but an invisible reCAPTCHA is never a human challenge, on ANY path or family.
+// The same portal, one bframe: the image grid is open and a person is being asked to solve it.
+test('a seen challenge is believed on a non-autonomous family too', () => {
+  const bframe = probeResult([
+    { selector: 'iframe', label: 'captcha_bframe', value: 'https://www.recaptcha.net/recaptcha/enterprise/bframe?k=x' },
+  ]);
+  assert.equal(managedCaptchaVerdictIsCorroborated('smartrecruiters', bframe), true);
+  assert.deepEqual(corroborateManagedCaptchaBlockers('smartrecruiters', [CAPTCHA_BLOCKER], bframe), [CAPTCHA_BLOCKER]);
+  // And the other two evidence channels, on the same non-autonomous family.
+  const widget = probeResult([{ selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6Lc-ExampleSiteKey' }]);
+  assert.equal(managedCaptchaVerdictIsCorroborated('smartrecruiters', widget), true);
+  const renderedAnchor = probeResult([
+    { selector: 'iframe', label: 'captcha_anchor', value: 'https://www.google.com/recaptcha/api2/anchor?ar=1&k=6Lc-Key&size=normal' },
+  ]);
+  assert.equal(managedCaptchaVerdictIsCorroborated('oraclecloud', renderedAnchor), true);
+});
+
+// The autonomous families keep exactly the behaviour they had.
+test('the autonomous families are unchanged by the shared evidence rule', () => {
+  const widget = probeResult([{ selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6Lc-ExampleSiteKey' }]);
+  for (const portal of AUTONOMOUS_PORTAL_FAMILIES) {
+    assert.equal(managedCaptchaVerdictIsCorroborated(portal, null), false, portal);
+    assert.equal(managedCaptchaVerdictIsCorroborated(portal, AKUNA_INVISIBLE_PROBE), false, portal);
+    assert.equal(managedCaptchaVerdictIsCorroborated(portal, widget), true, portal);
+  }
+});
+
+// ...and an invisible reCAPTCHA is never a human challenge, on ANY path or family.
 test('an invisible reCAPTCHA is not believed even on a CAPTCHA-gated family', () => {
   assert.equal(managedCaptchaVerdictIsCorroborated('jazzhr', AKUNA_INVISIBLE_PROBE), false);
+});
+
+/* The evidence list is the whole rule, so it is asserted directly rather than only through the
+ * predicate above it. An empty page and an invisible badge both produce nothing; each of the three
+ * channels produces something on its own. */
+test('the shared evidence list names every positive channel and nothing else', () => {
+  assert.deepEqual(managedCaptchaPageEvidence(readManagedCaptchaEvidence(null)), []);
+  assert.deepEqual(managedCaptchaPageEvidence(readManagedCaptchaEvidence(AKUNA_INVISIBLE_PROBE)), []);
+  assert.deepEqual(
+    managedCaptchaPageEvidence(readManagedCaptchaEvidence(probeResult([
+      { selector: CHALLENGE_SEL, label: 'captcha_challenge', value: '6Lc-ExampleSiteKey' },
+    ]))),
+    ['6Lc-ExampleSiteKey'],
+  );
+  const grid = 'https://www.recaptcha.net/recaptcha/enterprise/bframe?k=x';
+  assert.deepEqual(
+    managedCaptchaPageEvidence(readManagedCaptchaEvidence(probeResult([
+      { selector: 'iframe', label: 'captcha_bframe', value: grid },
+    ]))),
+    [grid],
+  );
 });
 
 test('nothing but a CAPTCHA blocker is ever removed', () => {
