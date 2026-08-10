@@ -9,6 +9,7 @@ import {
   isAccountWalledFamily,
   managedPortalReceiptCapability,
   managedAttendedAccountHold,
+  managedAttendedAccountUrlIsSupported,
   portalApplicationUrl,
   portalCanAutoSubmit,
   portalHandoffReason,
@@ -45,7 +46,7 @@ const smartRecruitersExactSelectors = {
   resume: 'spl-dropzone[data-test="resume-upload"] input[type="file"]',
 } as const;
 
-test('detects the exact live SmartRecruiters, iCIMS, and Jobvite job routes', () => {
+test('detects the exact live SmartRecruiters, iCIMS, Jobvite, and Oracle attended routes', () => {
   const fixtures = [
     ['https://jobs.smartrecruiters.com/Lumina1/744000001027275-software-engineer', 'smartrecruiters'],
     ['https://jobs.smartrecruiters.com/BoschGroup/744000142166560-junior-managers-program', 'smartrecruiters'],
@@ -54,6 +55,8 @@ test('detects the exact live SmartRecruiters, iCIMS, and Jobvite job routes', ()
     ['https://jobs-express.icims.com/jobs/48173/sales-associate/login', 'icims'],
     ['https://jobs.jobvite.com/worldfirst/job/oknrAfws/apply', 'jobvite'],
     ['https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr', 'jobvite'],
+    ['https://iawmqy.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/careers/job/295586', 'oraclecloud'],
+    ['https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email', 'oraclecloud'],
   ] as const;
   for (const [url, expected] of fixtures) assert.equal(detectPortal(url), expected, url);
 });
@@ -74,6 +77,10 @@ test('rejects vendor, listing, API, malformed, and over-broad routes', () => {
     'https://jobs.jobvite.com/careers/worldfirst/jobs',
     'https://www.jobvite.com/worldfirst/job/oknrAfws/apply',
     'https://jobs.jobvite.com/worldfirst/job/oknrAfws/apply/extra',
+    'https://iawmqy.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/careers/job/295587/apply/email',
+    'https://iawmqy.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/careers/job/295586/apply/email',
+    'https://iawmqy.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/careers/job/295586/apply/password',
+    'https://arbitrary.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/careers/job/295586/apply/email',
   ];
   for (const url of rejected) assert.throws(() => detectPortal(url));
 });
@@ -102,6 +109,18 @@ test('canonicalizes only stable application identity and strips tracking state',
   assert.equal(
     portalApplicationUrl('jobvite', 'https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr'),
     'https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr/apply',
+  );
+  assert.equal(
+    canonicalSupportedPortalUrl('https://iawmqy.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/careers/job/295586?source=board#apply'),
+    'https://iawmqy.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/careers/job/295586',
+  );
+  assert.equal(
+    canonicalSupportedPortalUrl('https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email'),
+    'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email',
+  );
+  assert.equal(
+    portalApplicationUrl('oraclecloud', 'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email'),
+    'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email',
   );
 });
 
@@ -152,21 +171,99 @@ test('managed actions fill SmartRecruiters step one but never advance or submit'
   }
 });
 
-test('account-walled iCIMS and Jobvite build no actions from benign, legal, or sensitive packet questions', () => {
-  for (const family of ['icims', 'jobvite'] as const) {
+test('account-walled iCIMS, Jobvite, and Oracle build no actions from packet questions', () => {
+  for (const family of ['icims', 'jobvite', 'oraclecloud'] as const) {
     const actions = buildManagedPortalActions(family, { ...packet, questions: adversarialQuestions }, true);
     assert.deepEqual(actions, [], family);
   }
 });
 
-test('Jobvite and iCIMS managed gate probes are extract-only and never operate a user gate', () => {
-  for (const family of ['jobvite', 'icims'] as const) {
+test('Jobvite, iCIMS, and Oracle managed gate probes are extract-only and never operate a user gate', () => {
+  for (const family of ['jobvite', 'icims', 'oraclecloud'] as const) {
     const actions = buildManagedAttendedAccountProbeActions(family);
     assert.ok(actions.length > 0, family);
     assert.ok(actions.every((action) => action.type === 'extract'), family);
     assert.equal(actions.some((action) => action.value || action.text || action.file), false, family);
   }
   assert.deepEqual(buildManagedAttendedAccountProbeActions('greenhouse'), []);
+});
+
+test('Oracle hold requires every exact captured authentication marker on the frozen job', () => {
+  const frozen = 'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email';
+  const handoff = frozen;
+  const extracted = [
+    { selector: 'input#primary-email-1[name="primary-email"]', label: 'oracle_primary_email_gate', value: 'primary-email' },
+    { selector: 'input#legal-disclaimer-checkbox', label: 'oracle_legal_disclaimer_gate', value: 'legal-disclaimer-checkbox' },
+    { selector: 'input#honey-pot-0[name="honey-pot"]', label: 'oracle_honeypot_marker', value: 'honey-pot' },
+  ];
+  assert.deepEqual(managedAttendedAccountHold('oraclecloud', frozen, {
+    title: 'Authentication screen',
+    url: handoff,
+    text: "You don't need to have an account. I agree with the terms and conditions",
+    extracted,
+  }), {
+    kind: 'account_login',
+    reason: portalHandoffReason('oraclecloud'),
+    categories: ['account_login', 'privacy_consent'],
+  });
+  assert.deepEqual(managedAttendedAccountHold('oraclecloud', frozen, {
+    title: 'Authentication screen',
+    url: handoff,
+    text: 'Protected by hCaptcha',
+    extracted: [...extracted, {
+      selector: 'textarea[name="h-captcha-response"]',
+      label: 'oracle_hcaptcha_gate',
+      value: 'h-captcha-response',
+    }],
+  }), {
+    kind: 'account_login',
+    reason: portalHandoffReason('oraclecloud'),
+    categories: ['account_login', 'privacy_consent', 'captcha'],
+    captchaProvider: 'hcaptcha',
+  });
+  for (let index = 0; index < extracted.length; index += 1) {
+    assert.equal(managedAttendedAccountHold('oraclecloud', frozen, {
+      title: 'Authentication screen',
+      url: handoff,
+      text: 'Authentication screen',
+      extracted: extracted.filter((_, itemIndex) => itemIndex !== index),
+    }), null);
+  }
+  for (const url of [
+    handoff.replace('/apply/email', ''),
+    `${handoff}?source=tracker`,
+    `${handoff}#authentication`,
+    handoff.replace('oraclecloud.com', 'oraclecloud.com:444'),
+  ]) assert.equal(managedAttendedAccountHold('oraclecloud', frozen, {
+    title: 'Authentication screen',
+    url,
+    text: 'Authentication screen',
+    extracted,
+  }), null);
+  assert.equal(managedAttendedAccountHold('oraclecloud', frozen, {
+    title: 'Authentication screen',
+    url: handoff.replace('333913', '333914'),
+    text: 'Authentication screen',
+    extracted,
+  }), null);
+  assert.equal(managedAttendedAccountHold('oraclecloud', frozen, {
+    title: 'Authentication screen',
+    url: handoff.replace('eeho.fa.us2.oraclecloud.com', 'arbitrary.fa.us2.oraclecloud.com'),
+    text: 'Authentication screen',
+    extracted,
+  }), null);
+});
+
+test('Oracle managed preparation is limited to the exact captured authentication URL', () => {
+  const gate = 'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email';
+  assert.equal(managedAttendedAccountUrlIsSupported('oraclecloud', gate), true);
+  for (const url of [
+    gate.replace('/apply/email', ''),
+    `${gate}?source=tracker`,
+    `${gate}#authentication`,
+    gate.replace('333913', '333914'),
+    'https://iawmqy.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/careers/job/295586',
+  ]) assert.equal(managedAttendedAccountUrlIsSupported('oraclecloud', url), false, url);
 });
 
 test('Jobvite hold requires the exact captured consent control on the same job', () => {

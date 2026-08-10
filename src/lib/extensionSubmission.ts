@@ -36,14 +36,18 @@ export function extensionEmployerReceiptIsSufficient(input: {
       frozenFamily = null;
     }
   }
-  const targetFamily = frozenFamily === 'jobvite' || frozenFamily === 'icims'
+  const targetFamily = frozenFamily === 'jobvite' || frozenFamily === 'icims' || frozenFamily === 'oraclecloud'
     ? frozenFamily
-    : declaredFamily === 'jobvite' || declaredFamily === 'icims'
+    : declaredFamily === 'jobvite' || declaredFamily === 'icims' || declaredFamily === 'oraclecloud'
       ? declaredFamily
       : null;
   if (!targetFamily) return true;
   if (!frozenFamily || (declaredFamily && declaredFamily !== frozenFamily)) return false;
   const family = targetFamily;
+  // No Oracle terminal receipt page has been captured yet. An extension may fill only after the
+  // attended account gate, but it cannot promote an Oracle outcome to submitted without that
+  // evidence contract.
+  if (family === 'oraclecloud') return false;
   const confirmation = input.confirmationText?.trim();
   const normalizedConfirmation = confirmation?.replace(/\s+/g, ' ').trim();
   if (!normalizedConfirmation || !EMPLOYER_RECEIPT_TEXT.test(normalizedConfirmation)) return false;

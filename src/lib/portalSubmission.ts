@@ -196,7 +196,17 @@ export function isAccountWalledFamily(portal: SupportedPortal): boolean {
 
 export function isManagedAttendedAccountPortal(portal: SupportedPortal): boolean {
   const family = portalFamily(portal);
-  return family === 'jobvite' || family === 'icims';
+  return family === 'jobvite' || family === 'icims' || family === 'oraclecloud';
+}
+
+export const ORACLE_CAPTURED_ATTENDED_GATE_URL =
+  'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email';
+
+/** Oracle attended preparation is limited to the one gate captured in a real browser. */
+export function managedAttendedAccountUrlIsSupported(portal: SupportedPortal, rawUrl: string): boolean {
+  const family = portalFamily(portal);
+  if (family === 'jobvite' || family === 'icims') return true;
+  return family === 'oraclecloud' && rawUrl === ORACLE_CAPTURED_ATTENDED_GATE_URL;
 }
 
 const JOBVITE_DATA_CONSENT_SELECTOR = 'select#jv-country-select';
@@ -204,9 +214,13 @@ const ICIMS_LOGIN_EMAIL_SELECTOR = 'input#email[name="css_loginName"]';
 const ICIMS_HCAPTCHA_SELECTOR = 'textarea[name="h-captcha-response"]';
 const ICIMS_SECURITY_CODE_SELECTOR =
   'input[autocomplete="one-time-code"], input[name*="verification" i], input[name*="securityCode" i]';
+const ORACLE_PRIMARY_EMAIL_SELECTOR = 'input#primary-email-1[name="primary-email"]';
+const ORACLE_LEGAL_DISCLAIMER_SELECTOR = 'input#legal-disclaimer-checkbox';
+const ORACLE_HONEYPOT_SELECTOR = 'input#honey-pot-0[name="honey-pot"]';
+const ORACLE_HCAPTCHA_SELECTOR = 'textarea[name="h-captcha-response"]';
 
 /**
- * Read only the exact controls captured on the two account-gated portals. These actions never
+ * Read only the exact controls captured on the three account-gated portals. These actions never
  * type identity, choose privacy terms, solve a CAPTCHA, request a code, or submit a form.
  */
 export function buildManagedAttendedAccountProbeActions(portal: SupportedPortal): ManagedBrowserAction[] {
@@ -249,6 +263,42 @@ export function buildManagedAttendedAccountProbeActions(portal: SupportedPortal)
       },
     ];
   }
+  if (family === 'oraclecloud') {
+    return [
+      {
+        type: 'extract',
+        selector: ORACLE_PRIMARY_EMAIL_SELECTOR,
+        attribute: 'name',
+        label: 'oracle_primary_email_gate',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      },
+      {
+        type: 'extract',
+        selector: ORACLE_LEGAL_DISCLAIMER_SELECTOR,
+        attribute: 'id',
+        label: 'oracle_legal_disclaimer_gate',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      },
+      {
+        type: 'extract',
+        selector: ORACLE_HONEYPOT_SELECTOR,
+        attribute: 'name',
+        label: 'oracle_honeypot_marker',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      },
+      {
+        type: 'extract',
+        selector: ORACLE_HCAPTCHA_SELECTOR,
+        attribute: 'name',
+        label: 'oracle_hcaptcha_gate',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      },
+    ];
+  }
   return [];
 }
 
@@ -273,7 +323,8 @@ export function managedAttendedAccountHold(
   frozenUrl: string,
   result: ManagedBrowserResult | null | undefined,
 ): ManagedAttendedAccountHold | null {
-  if (!result?.url || !isManagedAttendedAccountPortal(portal)) return null;
+  if (!result?.url || !isManagedAttendedAccountPortal(portal)
+    || !managedAttendedAccountUrlIsSupported(portal, frozenUrl)) return null;
   let observed: SupportedPortal;
   try {
     observed = detectPortal(result.url);
@@ -292,6 +343,21 @@ export function managedAttendedAccountHold(
       kind: 'privacy_consent',
       reason: ACCOUNT_WALLED_REASONS.jobvite,
       categories: ['privacy_consent'],
+    };
+  }
+
+  if (family === 'oraclecloud') {
+    if (result.url !== ORACLE_CAPTURED_ATTENDED_GATE_URL) return null;
+    const email = managedExtractMatches(result, 'oracle_primary_email_gate', 'primary-email');
+    const legal = managedExtractMatches(result, 'oracle_legal_disclaimer_gate', 'legal-disclaimer-checkbox');
+    const honeypot = managedExtractMatches(result, 'oracle_honeypot_marker', 'honey-pot');
+    if (!email || !legal || !honeypot) return null;
+    const hcaptcha = managedExtractMatches(result, 'oracle_hcaptcha_gate', 'h-captcha-response');
+    return {
+      kind: 'account_login',
+      reason: ORACLE_ATTENDED_GATE_REASON,
+      categories: ['account_login', 'privacy_consent', ...(hcaptcha ? ['captcha' as const] : [])],
+      ...(hcaptcha ? { captchaProvider: 'hcaptcha' as const } : {}),
     };
   }
 
@@ -402,16 +468,19 @@ export const ICIMS_ATTENDED_GATE_REASON =
   'This company asks you to make an account and prove you are human before the application form opens. Litos cannot do either of those for you, so this one needs your hands.';
 export const ICIMS_SECURITY_CODE_GATE_REASON =
   'This iCIMS account page is waiting for a security code sent to the stored Litos application email. Litos did not enter the code or submit the application. Open the page and finish the account check in Chrome.';
+export const ORACLE_ATTENDED_GATE_REASON =
+  'This Oracle application asks for an emailed code and a legal terms choice before the application form opens. Litos did not request the code, accept the terms, or submit anything. Open the exact saved page in Chrome and complete those steps yourself.';
+export const UKG_CAPTURE_REQUIRED_REASON =
+  'This UKG application did not expose a verified job or application form beyond its anonymous-session frame. Litos did not enter information or submit anything. A new live capture is required before this portal can be continued safely.';
+export const SAP_SUCCESSFACTORS_CAPTURE_REQUIRED_REASON =
+  'This SuccessFactors application stops at an account wall, and Litos has not captured a verified application form or receipt for this tenant. Litos did not sign in, create an account, accept anything, or submit. A new live capture is required before this portal can be continued safely.';
 
 const ACCOUNT_WALLED_REASONS: Record<AccountWalledFamily, string> = {
   jobvite: JOBVITE_ATTENDED_GATE_REASON,
   icims: ICIMS_ATTENDED_GATE_REASON,
-  oraclecloud:
-    'This company emails you a code and asks you to agree to their terms before the application form opens. Both of those need you, so Litos stops here.',
-  ultipro:
-    'This company requires an applicant account or asks you to make an AI-scoring consent choice before the application form opens. Litos leaves both to you.',
-  sap_successfactors:
-    'This company asks you to sign in or create a SuccessFactors account before the application form opens. Litos leaves that account and every later legal choice to you.',
+  oraclecloud: ORACLE_ATTENDED_GATE_REASON,
+  ultipro: UKG_CAPTURE_REQUIRED_REASON,
+  sap_successfactors: SAP_SUCCESSFACTORS_CAPTURE_REQUIRED_REASON,
   oracle_taleo:
     'This Taleo application asks you to accept the employer legal notice before any application fields open. Litos leaves that decision and the later account flow to you.',
   adp_recruiting:
@@ -488,6 +557,31 @@ export function unattendedHandoffReason(portal: SupportedPortal): string | null 
   return null;
 }
 
+export type AutofillApplicantSnapshot = {
+  profile: {
+    full_name?: string;
+    email?: string;
+    experience: Array<{
+      company: string;
+      title: string;
+      start: string;
+      end: string;
+      description: string;
+    }>;
+    skills: string[];
+    projects?: Array<{ name: string; description: string }>;
+    school: string;
+    degree?: string;
+    grad_date?: string;
+    grad_year: number;
+    currently_enrolled?: boolean;
+    coursework?: string[];
+    target_roles?: string[];
+    voice_pref?: string;
+  };
+  application_profile: ApplicationProfileLike;
+};
+
 export type SubmissionPacket = {
   fullName: string;
   email: string;
@@ -542,6 +636,8 @@ export type SubmissionPacket = {
     inputType?: string;
   }>;
   applicationProfile?: ApplicationProfileLike;
+  /** Exact applicant facts frozen with the prepared packet for attended clients. */
+  applicantSnapshot?: AutofillApplicantSnapshot;
   jdText?: string;
   resume: Buffer;
   resumeName: string;
@@ -5146,7 +5242,7 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   // The widest host space of any portal here BY FAR - oraclecloud.com hosts every Oracle Cloud
   // application there is, not just recruiting. The path check is doing the real work, and this entry
   // would be actively dangerous without it.
-  oraclecloud: /^(?:iawmqy\.fa\.ocs\.oraclecloud\.com|fa-etxx-saasfaprod1\.fa\.ocs\.oraclecloud\.com|enterpriseplatform\.dell\.com)$/i,
+  oraclecloud: /^(?:eeho\.fa\.us2\.oraclecloud\.com|iawmqy\.fa\.ocs\.oraclecloud\.com|fa-etxx-saasfaprod1\.fa\.ocs\.oraclecloud\.com|enterpriseplatform\.dell\.com)$/i,
   // Pinned exactly. The bare ultipro.com is the employee login for UKG's HR product.
   ultipro: /^recruiting\.ultipro\.com$/i,
   // One tenant label only. Excludes www.recruitee.com and the vendor's own non-careers services.
@@ -5207,7 +5303,7 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   icims: /^\/jobs\/\d+\/[a-z0-9%._~-]+\/(?:job|login)\/?$/i,
   // The one that matters most. Without it this family would claim every Oracle Cloud application
   // under the sun, including ones that are somebody's payroll or ERP login.
-  oraclecloud: /^\/hcmUI\/CandidateExperience\/(?:[a-z]{2}\/)?sites\/[a-z0-9_-]+\/(?:job|opportunity)\/\d+\/?$/i,
+  oraclecloud: /^\/hcmUI\/CandidateExperience\/(?:[a-z]{2}\/)?sites\/[a-z0-9_-]+\/(?:job|opportunity)\/\d+(?:\/apply\/email)?\/?$/i,
   ultipro: /^\/[a-z0-9._-]+\/JobBoard\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/OpportunityDetail\/?$/i,
   recruitee: /^\/o\/[^/]+(?:\/c\/new)?\/?$/i,
   teamtailor: /^\/jobs\/[^/]+(?:\/applications\/new)?\/?$/i,
@@ -5266,7 +5362,10 @@ function isExactResearchedBatchIdentity(portal: PortalFamily, url: URL): boolean
       || (host === 'prentkeromich.bamboohr.com' && /^\/careers\/480\/?$/.test(url.pathname));
   }
   if (portal === 'oraclecloud') {
-    return ((host === 'enterpriseplatform.dell.com' || host === 'iawmqy.fa.ocs.oraclecloud.com')
+    return (host === 'eeho.fa.us2.oraclecloud.com'
+        && url.pathname === '/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email'
+        && !url.search && !url.hash)
+      || ((host === 'enterpriseplatform.dell.com' || host === 'iawmqy.fa.ocs.oraclecloud.com')
         && /^\/hcmUI\/CandidateExperience\/en\/sites\/careers\/job\/295586\/?$/i.test(url.pathname))
       || (host === 'fa-etxx-saasfaprod1.fa.ocs.oraclecloud.com'
         && /^\/hcmUI\/CandidateExperience\/en\/sites\/CX_1\/job\/2850\/?$/i.test(url.pathname));

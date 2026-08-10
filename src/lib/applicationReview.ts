@@ -1,6 +1,6 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported } from './portalSubmission';
+import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported, type AutofillApplicantSnapshot } from './portalSubmission';
 
 export type ApplicationReviewQuestion = {
   id: string;
@@ -455,6 +455,8 @@ export type ApplicationReviewState = {
     tracked: boolean;
     decided_at: string;
   };
+  /** Immutable applicant facts captured by the same preparation that froze this handoff. */
+  applicant_snapshot?: AutofillApplicantSnapshot;
   filled_fields?: string[];
   preview_screenshot_url?: string;
   submission_authorization?: {

@@ -7,6 +7,7 @@ import {
   ICIMS_ATTENDED_GATE_REASON,
   ICIMS_SECURITY_CODE_GATE_REASON,
   JOBVITE_ATTENDED_GATE_REASON,
+  ORACLE_ATTENDED_GATE_REASON,
   MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
 } from './portalSubmission';
 
@@ -162,7 +163,8 @@ export function extensionHandoffPacketMatches(input: {
       || (frozenPortal === 'icims' && (
         reasons.includes(ICIMS_ATTENDED_GATE_REASON)
         || reasons.includes(ICIMS_SECURITY_CODE_GATE_REASON)
-      ));
+      ))
+      || (frozenPortal === 'oraclecloud' && reasons.includes(ORACLE_ATTENDED_GATE_REASON));
     if (input.status !== 'needs_attention' || !eligibleRecoveryCause) return false;
   }
 
@@ -182,7 +184,7 @@ export function extensionHandoffPacketMatches(input: {
     const handoffCanonical = canonicalSupportedPortalUrl(input.frozenHandoffUrl, handoffPortal);
     return Boolean(handoffCanonical && currentCanonical && handoffCanonical === currentCanonical);
   }
-  if (frozenPortal === 'jobvite' || frozenPortal === 'icims') {
+  if (frozenPortal === 'jobvite' || frozenPortal === 'icims' || frozenPortal === 'oraclecloud') {
     if (!input.frozenHandoffUrl) return false;
     let handoffPortal: string;
     try {
@@ -192,6 +194,8 @@ export function extensionHandoffPacketMatches(input: {
     }
     if (handoffPortal !== frozenPortal) return false;
     const handoffCanonical = canonicalSupportedPortalUrl(input.frozenHandoffUrl, handoffPortal);
+    if (frozenPortal === 'oraclecloud'
+      && (input.frozenHandoffUrl !== handoffCanonical || input.currentUrl !== currentCanonical)) return false;
     return Boolean(
       frozenCanonical
       && handoffCanonical

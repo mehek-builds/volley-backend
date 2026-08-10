@@ -259,6 +259,28 @@ test('submission packet only reaches for the alias through the deliverability pr
   assert.equal(runner.match(/applicant_email: packet\.applicantEmail/g)?.length, 3);
 });
 
+test('attended packets freeze one structured applicant snapshot with exact profile dates and application facts', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const buildPacketIndex = runner.indexOf('export async function buildPacket');
+  const managedGateIndex = runner.indexOf('async function prepareManagedAttendedAccountGate');
+  assert.ok(buildPacketIndex >= 0 && managedGateIndex > buildPacketIndex);
+  const packetBuilder = runner.slice(buildPacketIndex, managedGateIndex);
+  assert.match(packetBuilder, /applicantSnapshot:[\s\S]*?profile:[\s\S]*?application_profile: applicationProfile/);
+  assert.match(packetBuilder, /experience: snapshotExperience/);
+  assert.match(packetBuilder, /start: string\('start'/);
+  assert.match(packetBuilder, /end: string\('end'/);
+  const profileLoader = await readFile('src/lib/applicationProfileLike.ts', 'utf8');
+  assert.match(profileLoader, /address_zip: str\('address_zip'\)/);
+  const managedGate = runner.slice(managedGateIndex, runner.indexOf('\nasync function prepare(', managedGateIndex));
+  assert.match(managedGate, /applicant_snapshot: packet\.applicantSnapshot/);
+});
+
+test('Oracle managed preparation is gated by the exact measured URL before any browser run', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const prepare = runner.slice(runner.indexOf('async function prepare('), runner.indexOf('\nasync function submit(', runner.indexOf('async function prepare(')));
+  assert.match(prepare, /isManagedAttendedAccountPortal\(portal\)[\s\S]{0,100}managedAttendedAccountUrlIsSupported\(portal, current\.portal_url!\)/);
+});
+
 test('a retired packet email releases the final claim and requires regeneration before any employer request', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const failStart = runner.indexOf('async function fail(');

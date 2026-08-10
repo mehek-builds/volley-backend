@@ -31,6 +31,8 @@ test('attended extension refill returns the exact owned generated packet and a f
   assert.match(route, /handoff_version: handoffVersion/);
   assert.match(route, /extensionHandoffVersion\([\s\S]*?applicationId: row\.id[\s\S]*?resumeObjectKey: row\.resume_object_key[\s\S]*?spec: row\.spec[\s\S]*?jobContext: row\.job_context/);
   assert.match(route, /application: \{ id: row\.id, spec: stored \}/);
+  assert.match(route, /applicant_snapshot: review\.applicant_snapshot/);
+  assert.match(route, /review\.ats_name === 'jobvite'[\s\S]*?review\.ats_name === 'icims'[\s\S]*?review\.ats_name === 'oraclecloud'[\s\S]*?!review\.applicant_snapshot/);
   assert.doesNotMatch(route, /resume\/generate/);
   assert.ok(route.indexOf('ownedResume(request, reply)') < route.indexOf('extensionHandoffPacketMatches('));
   assert.ok(route.indexOf('extensionHandoffPacketMatches(') < route.indexOf('mintDownloadToken('));
@@ -72,14 +74,20 @@ test('extension outcomes only mark confirmed claims applied', () => {
   assert.match(source, /outcome === 'confirmed'/);
 });
 
-test('attended handoff can record a user-confirmed submission without an ATS key', () => {
+test('attended handoff submission trusts only the retained exact session receipt', () => {
   assert.match(source, /handoffCompleteBodySchema/);
   assert.match(source, /submission\/handoff-complete'[\s\S]*?preHandler: requireAuth/);
   assert.match(source, /parsed\.data\.outcome === 'submitted'/);
   assert.match(source, /!current\.browser_session_id/);
+  assert.match(source, /getBrowserSession\(current\.browser_session_id\)/);
+  assert.match(source, /connectToSession\(session\)/);
+  assert.match(source, /observedReceipt = await readReceipt\(connected\.page\)/);
+  assert.match(source, /extensionEmployerReceiptIsSufficient\([\s\S]*?confirmationText: observedReceipt\.confirmationText[\s\S]*?finalUrl: observedReceipt\.finalUrl/);
   assert.match(source, /source: 'attended_handoff'/);
   assert.match(source, /pipeline_stage: 'applied'/);
-  assert.match(source, /Submitted by the applicant in the live company page/);
+  assert.doesNotMatch(source, /Submitted by the applicant in the live company page/);
+  assert.doesNotMatch(source, /confirmation_text: parsed\.data\.confirmation_text/);
+  assert.doesNotMatch(source, /final_url: parsed\.data\.final_url/);
   const handler = source.slice(source.indexOf("'/applications/:id/submission/handoff-complete'"));
   /* The check moved into preparedRunHandoffExpired, so this used to look for a field name the
      handler no longer spells. indexOf then returned -1, which is less than everything, and the
