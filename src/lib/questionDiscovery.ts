@@ -1854,22 +1854,35 @@ type ParsedSiblingQuestion = {
   globalPriorApplicationHistory?: boolean;
 };
 
-const DEFINITE_APPLICATION_PREFIX_TEMPORAL = String.raw`(?:already|successfully|previously|ever)`;
-const DEFINITE_APPLICATION_SUFFIX_TEMPORAL = String.raw`(?:before|previously|already|yet|ever|earlier|so far|to date|in the past)`;
 const DEFINITE_APPLICATION_DETERMINER = String.raw`(?:the|this|that|these|those|your|our|current)`;
-const DEFINITE_APPLICATION_SAFE_MODIFIER = String.raw`(?:current|completed|fully|successfully|online|job|employment)`;
-const DEFINITE_APPLICATION_SAFE_PHRASE = String.raw`${DEFINITE_APPLICATION_DETERMINER} (?:${DEFINITE_APPLICATION_SAFE_MODIFIER} )*applications?`;
-const DEFINITE_APPLICATION_ANY_PHRASE = String.raw`${DEFINITE_APPLICATION_DETERMINER} (?:[a-z0-9]+ )*applications?`;
-const DEFINITE_APPLICATION_SUBMISSION_STEM = String.raw`(?:(?:have|had) you (?:${DEFINITE_APPLICATION_PREFIX_TEMPORAL} )*submitted|did you (?:${DEFINITE_APPLICATION_PREFIX_TEMPORAL} )*submit|(?:${DEFINITE_APPLICATION_PREFIX_TEMPORAL} )*submitted)`;
+const DEFINITE_APPLICATION_ANY_PHRASE = String.raw`${DEFINITE_APPLICATION_DETERMINER} (?:[a-z0-9]+ )*applications?(?: forms?)?`;
+const DEFINITE_APPLICATION_HISTORY_SUFFIX = String.raw`(?:before|previously|already|yet|ever|earlier|so far|to date|in the past)`;
+const SUBMISSION_DOMAIN_NOUN = /\b(?:visa|immigration|work authorization|permits?|mobile|software|web|app store|schools?|universit(?:y|ies)|colleges?|loans?|grants?|patents?|benefits?)\b/;
+const SUBMISSION_NEGATION = /\b(?:not|never|no|without|neither|nor|didn t|hasn t|haven t|hadn t)\b/;
+
+function isSingleSubmissionTemporal(value: string): boolean {
+  return /^(?:[a-z]+ly|already|just|recently|finally|successfully|ever)$/.test(value);
+}
+
+function isSubmissionSuffixTemporal(value: string): boolean {
+  return isSingleSubmissionTemporal(value)
+    || /^(?:before|yet|earlier|so far|to date|in (?:the )?past)$/.test(value);
+}
 
 function classifyDefiniteApplicationSubmission(value: string): 'owned' | 'unrelated' | null {
-  const suffix = String.raw`(?: ${DEFINITE_APPLICATION_SUFFIX_TEMPORAL})?`;
-  if (new RegExp(`^${DEFINITE_APPLICATION_SUBMISSION_STEM} ${DEFINITE_APPLICATION_SAFE_PHRASE}${suffix}$`).test(value)) {
-    return 'owned';
-  }
-  return new RegExp(`^${DEFINITE_APPLICATION_SUBMISSION_STEM} ${DEFINITE_APPLICATION_ANY_PHRASE}${suffix}$`).test(value)
-    ? 'unrelated'
-    : null;
+  const match = value.match(/^(?:(?:have|has|had) you(?: ([a-z]+))? (submitted)|did you(?: ([a-z]+))? (submit)|(?:([a-z]+) )?(submitted)) (.+)$/);
+  if (!match) return null;
+  const prefixTemporal = match[1] ?? match[3] ?? match[5] ?? '';
+  const rawObject = match[7] ?? '';
+  const suffixMatch = rawObject.match(/^(.*?)(?: ((?:[a-z]+ly|already|just|recently|finally|successfully|ever|before|yet|earlier|so far|to date|in (?:the )?past)))?$/);
+  const object = suffixMatch?.[1]?.trim() ?? rawObject;
+  const suffixTemporal = suffixMatch?.[2] ?? '';
+  const definiteObject = new RegExp(`^${DEFINITE_APPLICATION_ANY_PHRASE}$`).test(object);
+  if (!definiteObject) return null;
+  if (SUBMISSION_NEGATION.test(value) || SUBMISSION_DOMAIN_NOUN.test(object)) return 'unrelated';
+  if (prefixTemporal && !isSingleSubmissionTemporal(prefixTemporal)) return 'unrelated';
+  if (suffixTemporal && !isSubmissionSuffixTemporal(suffixTemporal)) return 'unrelated';
+  return 'owned';
 }
 
 function siblingTailSignalsQuestionOrInstruction(label: string, tail: string): boolean {
@@ -2023,13 +2036,9 @@ function parsePriorApplicationQuestion(
   const globalObject = String.raw`(?:(?:an?|any) )?(?:application|role|job|company|employer)`;
   const targetFreeRemainder = new RegExp(`^(?:before|previously|(?:here|with us|to us|for us)(?: before| previously)?|(?:at|for|to|with) ${packetObject}(?: before| previously)?)$`).test(remainder);
   const definiteApplicationObject = new RegExp(
-    String.raw`^(?:at|for|to|with) ${DEFINITE_APPLICATION_SAFE_PHRASE}(?: ${DEFINITE_APPLICATION_SUFFIX_TEMPORAL})?$`,
+    String.raw`^(?:at|for|to|with) ${DEFINITE_APPLICATION_ANY_PHRASE}(?: ${DEFINITE_APPLICATION_HISTORY_SUFFIX})?$`,
   ).test(remainder);
   if (definiteApplicationObject) return { family: 'prior_application', valid: false };
-  const unsafeDefiniteApplicationObject = new RegExp(
-    String.raw`^(?:at|for|to|with) ${DEFINITE_APPLICATION_ANY_PHRASE}(?: ${DEFINITE_APPLICATION_SUFFIX_TEMPORAL})?$`,
-  ).test(remainder);
-  if (unsafeDefiniteApplicationObject) return null;
   const definiteApplicationWithTail = new RegExp(
     String.raw`^(?:at|for|to|with) ${DEFINITE_APPLICATION_ANY_PHRASE}\s+\S`,
   ).test(remainder);
@@ -2079,14 +2088,14 @@ function parsePriorApplicationQuestion(
   if (boundedForObject && boundedForObject.split(/\s+/).length <= 6) {
     return { family: 'prior_application', valid: false };
   }
-  if (isSkillOrWorkApplicationObject(remainder)) return null;
   const toObject = remainder.match(/^to\s+(.+)$/);
   const boundedToObject = toObject?.[1]
-    .replace(/\s+(?:before|previously|already|yet|ever|in the past|within the last \d+(?: \d+)? months?)$/, '')
+    .replace(/\s+(?:before|previously|already|yet|ever|earlier|so far|to date|in the past|within the last \d+(?: \d+)? months?)$/, '')
     .trim();
-  if (boundedToObject && boundedToObject.split(/\s+/).length <= 6) {
-    return { family: 'prior_application', valid: false };
-  }
+  const organizationalUnitObject = boundedToObject
+    && /\b(?:teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|functions?|practices?|subsidiar(?:y|ies))$/.test(boundedToObject);
+  if (organizationalUnitObject) return { family: 'prior_application', valid: false };
+  if (isSkillOrWorkApplicationObject(remainder)) return null;
   const aliases = packetEmployer ? siblingEmployerAliases(packetEmployer) : [];
   const recognizedObjectPrefix = new RegExp(String.raw`^(?:before|previously|here|with us|to us|for us|to work (?:at|for)|(?:at|for|to|with) (?:${packetObject}|${globalObject}))\b`).test(remainder)
     || aliases.some((alias) => new RegExp(String.raw`^(?:at|for|to|with) ${regexpEscape(alias)}\b`).test(remainder))
