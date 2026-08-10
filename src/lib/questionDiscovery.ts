@@ -1976,11 +1976,9 @@ function parsePriorApplicationQuestion(
   if (/^any former applications$/i.test(value)) {
     return { family: 'prior_application', valid: false };
   }
+  const priorTime = String.raw`(?:before|previously|in the past|ever|(?:within|in) the last \d+ (?:days?|weeks?|months?|years?))`;
   const applicationObjectKind = (remainder: string): 'global' | 'packet' | 'typed' | null => {
-    const withoutTemporal = remainder.replace(
-      /\s+(?:before|previously|in the past|within the last \d+(?: \d+)? months?)$/,
-      '',
-    );
+    const withoutTemporal = remainder.replace(new RegExp(`\\s+${priorTime}$`), '');
     const objectMatch = withoutTemporal.match(/^(?:at|for|to|with)\s+(.+)$/);
     if (!objectMatch) return null;
     const object = objectMatch[1].trim();
@@ -2001,7 +1999,7 @@ function parsePriorApplicationQuestion(
   const isSkillOrWorkApplicationObject = (remainder: string): boolean => {
     const object = remainder
       .replace(/^(?:at|for|to|with)\s+/, '')
-      .replace(/\s+(?:before|previously|already|yet|ever|in the past|within the last \d+(?: \d+)? months?)$/, '');
+      .replace(new RegExp(`\\s+(?:${priorTime}|already|yet)$`), '');
     return /\b(?:source code|app stores?|problems?|methods?|practices?|techniques?|algorithms?|frameworks?|projects?|tasks?|concepts?|technolog(?:y|ies)|codebases?|vulnerabilit(?:y|ies)|issues?|datasets?|data|models?|systems?|architectures?|research|schoolwork|coursework|knowledge|experience|science|learning)\b/.test(object);
   };
   const previousApplicant = value.match(/^previous applicant\b(.*)$/i);
@@ -2028,9 +2026,9 @@ function parsePriorApplicationQuestion(
       return { family: 'prior_application', valid: false };
     }
     if (/^(?:the|this|that|your|current)$/.test(determiner ?? '')) return null;
-    const packetObject = String.raw`(?:(?:the|this|our) (?:application|role|position|job)|(?:the|this|our|current|the current) (?:company|employer|organization|firm))`;
+    const packetObject = String.raw`(?:(?:the|this|our) (?:application|role|position|job)|(?:the|our|this|current|the current) (?:company|employer|organization|firm)|(?:our|this|current) (?:organisation|business|institution|agency))`;
     const globalObject = String.raw`(?:(?:an?|any) )?(?:application|role|job|company|employer)`;
-    const completePacket = new RegExp(`^(?:(?:here|with us|to us|for us)(?: before| previously)?|(?:at|for|to|with) ${packetObject}(?: before| previously)?)$`).test(tailIdentity);
+    const completePacket = new RegExp(`^(?:(?:here|with us|to us|for us)(?: ${priorTime})?|(?:at|for|to|with) ${packetObject}(?: ${priorTime})?)$`).test(tailIdentity);
     const completeGlobal = new RegExp(`^(?:at|for|to|with) ${globalObject}(?: before| previously)?$`).test(tailIdentity);
     const aliases = packetEmployer ? siblingEmployerAliases(packetEmployer) : [];
     const exactPacketObject = aliases.some((alias) => new RegExp(`^(?:at|for|to|with) ${regexpEscape(alias)}(?: before| previously)?$`).test(tailIdentity));
@@ -2056,11 +2054,11 @@ function parsePriorApplicationQuestion(
     ?? value.match(/^(?:(?:ever|previously)\s+)?applied\b\s*(.*)$/i);
   if (!stem) return null;
   const remainder = normalizeIdentity(stem[1]?.trim() ?? '');
-  const temporal = String.raw`(?:before|previously|in the past|within the last \d+(?: \d+)? months?)`;
+  const temporal = priorTime;
   const targetFreeTemporal = /^(?:(?:have|had) you (?:ever|previously) applied|did you (?:ever|previously) apply|(?:ever|previously) applied)$/.test(normalizeIdentity(value));
-  const packetObject = String.raw`(?:(?:the|this|our) (?:application|role|position|job)|(?:the|this|our|current|the current) (?:company|employer|organization|firm))`;
+  const packetObject = String.raw`(?:(?:the|this|our) (?:application|role|position|job)|(?:the|our|this|current|the current) (?:company|employer|organization|firm)|(?:our|this|current) (?:organisation|business|institution|agency))`;
   const globalObject = String.raw`(?:(?:an?|any) )?(?:application|role|job|company|employer)`;
-  const targetFreeRemainder = new RegExp(`^(?:before|previously|(?:here|with us|to us|for us)(?: before| previously)?|(?:at|for|to|with) ${packetObject}(?: before| previously)?)$`).test(remainder);
+  const targetFreeRemainder = new RegExp(`^(?:${priorTime}|(?:here|with us|to us|for us)(?: ${priorTime})?|(?:at|for|to|with) ${packetObject}(?: ${priorTime})?)$`).test(remainder);
   const definiteApplicationObject = new RegExp(
     String.raw`^(?:at|for|to|with) ${DEFINITE_APPLICATION_ANY_PHRASE}(?: ${DEFINITE_APPLICATION_HISTORY_SUFFIX})?$`,
   ).test(remainder);
@@ -2103,7 +2101,7 @@ function parsePriorApplicationQuestion(
     return { family: 'prior_application', valid: true, globalPriorApplicationHistory: true };
   }
   const packetEmploymentReference = (scope: string): boolean => (
-    /^(?:here|with us|at us|for us|(?:at|with|for) (?:(?:our|this|current|the current) (?:company|employer|organization|firm)))$/.test(scope)
+    /^(?:here|with us|at us|for us|(?:at|with|for) (?:(?:(?:our|this|current|the current) (?:company|employer|organization|firm))|(?:(?:our|this|current) (?:organisation|business|institution|agency))))$/.test(scope)
     || (packetEmployer
       ? siblingEmployerAliases(packetEmployer).some((alias) => new RegExp(`^(?:at|with|for) ${regexpEscape(alias)}$`).test(scope))
       : false)
@@ -2162,8 +2160,12 @@ function parsePriorApplicationQuestion(
       if (!boundedModifier) return null;
       const technicalModifier = /\b(?:activation|loss|objective|mathematical|statistical|coding|secure coding|programming|api|database|algorithmic)\b/.test(unitPrefix);
       if (technicalModifier) return null;
-      const organizationalModifier = /\b(?:consulting|product|business development|corporate|organizational|client services|advisory)\b/.test(unitPrefix);
-      if (!organizationalModifier) return null;
+      const contextualOwner = /^(?:our|this|current)\b/.test(unitPrefix)
+        || Boolean(packetEmployer && siblingEmployerAliases(packetEmployer).some((alias) => (
+          unitPrefix === alias || unitPrefix.startsWith(`${alias} `)
+        )));
+      const organizationalModifier = /\b(?:consulting|product|business development|corporate|organizational|client services|advisory|finance|legal|tax|audit|strategy)\b/.test(unitPrefix);
+      if (!contextualOwner && !organizationalModifier) return null;
     }
     if (!preposition) return { family: 'prior_application', valid: false };
     const locationTargets = frozenJobRelocationLocationsFromContext(jdText).flatMap((location) => {
