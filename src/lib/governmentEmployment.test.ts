@@ -795,8 +795,18 @@ describe('prior government employment, answered from the experience bank', () =>
       ['Did you previously apply to NASA?', 'Yes'],
       ['Did you ever apply to NASA?', 'Yes'],
       ['Did you apply to NASA before?', 'Yes'],
+      ['Have you applied to NASA before?', 'Yes'],
+      ['Have you applied to NASA in the past?', 'Yes'],
+      ['Have you previously applied to NASA before?', 'Yes'],
+      ['Have you ever applied for a role at NASA?', 'Yes'],
+      ['Have you applied for an internship with NASA?', 'Yes'],
       ['Where did you hear about NASA?', 'LinkedIn'],
+      ['Where did you first hear about NASA?', 'LinkedIn'],
       ['How did you learn about NASA?', 'LinkedIn'],
+      ['What is your referral source for NASA?', 'LinkedIn'],
+      ['What was the referral source for NASA?', 'LinkedIn'],
+      ['Would you be willing to relocate for NASA?', 'Yes'],
+      ['Would you be open to relocating for NASA?', 'Yes'],
     ] as const;
     for (const [label, expected] of valid) {
       assert.deepEqual(resolveKnownAnswer(label, 'text', profile, undefined), { value: expected }, label);
@@ -810,10 +820,15 @@ describe('prior government employment, answered from the experience bank', () =>
       'How did you hear about NASA, and have you worked for NASA?',
       'How did you hear about NASA, and why do you want to work here?',
       'How did you hear about NASA, and who referred you?',
+      'Did you ever apply to NASA and interview there?',
+      'Where did you first hear about NASA and who referred you?',
+      'What is your referral source for NASA and why did you choose it?',
       'Are you willing to relocate for NASA, and can you work onsite three days per week?',
       'Are you willing to relocate for NASA and work onsite three days per week?',
       'Are you willing to relocate for NASA and travel 25 percent?',
       'Are you willing to relocate for NASA and work weekends?',
+      'Would you be willing to relocate for NASA and travel for work?',
+      'Would you be open to relocating for NASA and work weekends?',
     ];
     for (const label of compound) {
       const resolved = resolveKnownAnswer(label, 'text', profile, undefined);

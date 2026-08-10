@@ -1792,6 +1792,60 @@ function normalizedSiblingQuestionLabel(label: string): string {
   return normalizedGovernmentEmploymentLabel(label);
 }
 
+type SiblingQuestionFamily = 'prior_application' | 'referral' | 'relocation';
+type ParsedSiblingQuestion = { family: SiblingQuestionFamily; remainder: string; form: string };
+
+const SIBLING_QUESTION_STEMS: readonly {
+  family: SiblingQuestionFamily;
+  form: string;
+  pattern: RegExp;
+}[] = [
+  {
+    family: 'prior_application',
+    form: 'have_applied',
+    pattern: /^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\b\s*(.*)$/i,
+  },
+  {
+    family: 'prior_application',
+    form: 'did_apply',
+    pattern: /^did\s+you\s+(?:(?:ever|previously)\s+)?apply\b\s*(.*)$/i,
+  },
+  {
+    family: 'referral',
+    form: 'hear_about',
+    pattern: /^(?:how|where)\s+did\s+you\s+(?:first\s+)?hear\s+about\b\s*(.*)$/i,
+  },
+  {
+    family: 'referral',
+    form: 'learn_about',
+    pattern: /^(?:how\s+did|where\s+(?:did|have))\s+you\s+learn(?:ed)?\s+about\b\s*(.*)$/i,
+  },
+  {
+    family: 'referral',
+    form: 'referral_source',
+    pattern: /^what\s+(?:is|was)\s+(?:(?:your|the)\s+)?referral\s+source\b\s*(.*)$/i,
+  },
+  {
+    family: 'relocation',
+    form: 'relocate',
+    pattern: /^(?:are|would|will|can|could)\s+you\s+(?:be\s+)?(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*\b\s*(.*)$/i,
+  },
+  {
+    family: 'relocation',
+    form: 'plan_move',
+    pattern: /^do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move)\b\s*(.*)$/i,
+  },
+];
+
+function parseSiblingQuestionStart(label: string): ParsedSiblingQuestion | null {
+  const value = normalizedSiblingQuestionLabel(label);
+  for (const parser of SIBLING_QUESTION_STEMS) {
+    const match = value.match(parser.pattern);
+    if (match) return { family: parser.family, remainder: match[1]?.trim() ?? '', form: parser.form };
+  }
+  return null;
+}
+
 function isKnownGovernmentSiblingTarget(raw: string): boolean {
   const target = raw
     .trim()
@@ -1801,28 +1855,38 @@ function isKnownGovernmentSiblingTarget(raw: string): boolean {
   return targetFromBareGovernmentPhrase(target)?.kind === 'named';
 }
 
+function priorApplicationTarget(remainder: string): string | null {
+  const withoutTime = remainder
+    .replace(/\s+(?:before|previously|in\s+the\s+past|within\s+the\s+last(?:\s+\d+(?:\s*[-–]\s*\d+)?\s+months?)?)$/i, '')
+    .trim();
+  const workAt = withoutTime.match(/^to\s+work\s+(?:at|for)\s+(.+)$/i);
+  if (workAt) return workAt[1].trim();
+  const roleAt = withoutTime.match(/^(?:to|for)\s+(?:(?:a|an|the|this)\s+)?(?:full[\s-]?time\s+or\s+internship\s+)?(?:role|position|job|internship)\s+(?:at|with|for)\s+(.+)$/i);
+  if (roleAt) return roleAt[1].trim();
+  const direct = withoutTime.match(/^(?:to|with)\s+(.+)$/i);
+  return direct?.[1]?.trim() ?? null;
+}
+
 function isCompletePriorApplicationQuestion(label: string): boolean {
-  const value = normalizedSiblingQuestionLabel(label);
-  const direct = value.match(/^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\s+(?:to|for|with)\s+(.+)$/i)
-    ?? value.match(/^did\s+you\s+(?:(?:ever|previously)\s+)?apply\s+(?:to|for|with)\s+(.+)$/i);
-  if (direct && isKnownGovernmentSiblingTarget(direct[1])) return true;
-  const workAt = value.match(/^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\s+to\s+work\s+(?:at|for)\s+(.+)$/i);
-  if (workAt && isKnownGovernmentSiblingTarget(workAt[1])) return true;
-  const dated = value.match(/^did\s+you\s+apply\s+(?:to|for|with)\s+(.+)\s+(?:before|previously|in\s+the\s+past)$/i);
-  return Boolean(dated && isKnownGovernmentSiblingTarget(dated[1]));
+  const parsed = parseSiblingQuestionStart(label);
+  if (parsed?.family !== 'prior_application') return false;
+  const target = priorApplicationTarget(parsed.remainder);
+  return Boolean(target && isKnownGovernmentSiblingTarget(target));
 }
 
 function isCompleteReferralQuestion(label: string): boolean {
-  const value = normalizedSiblingQuestionLabel(label);
-  const match = value.match(/^(?:how\s+did\s+you\s+(?:first\s+)?hear\s+about|where\s+did\s+you\s+hear\s+about|how\s+did\s+you\s+learn\s+about|where\s+(?:did|have)\s+you\s+learn(?:ed)?\s+about)\s+(.+)$/i);
-  return Boolean(match && isKnownGovernmentSiblingTarget(match[1]));
+  const parsed = parseSiblingQuestionStart(label);
+  if (parsed?.family !== 'referral') return false;
+  const target = parsed.form === 'referral_source'
+    ? parsed.remainder.replace(/^(?:for|regarding)\s+/i, '')
+    : parsed.remainder;
+  return Boolean(target && isKnownGovernmentSiblingTarget(target));
 }
 
 function isCompleteRelocationQuestion(label: string): boolean {
-  const value = normalizedSiblingQuestionLabel(label);
-  const match = value.match(/^(?:(?:are|would|will|can|could)\s+you\s+(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*|do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move))(?:\s+(.*))?$/i);
-  if (!match) return false;
-  const detail = match[1]?.trim();
+  const parsed = parseSiblingQuestionStart(label);
+  if (parsed?.family !== 'relocation') return false;
+  const detail = parsed.remainder;
   if (!detail) return true;
   const employer = detail.match(/^(?:for|to\s+work\s+(?:at|for)|to\s+join)\s+(.+)$/i);
   if (employer && isKnownGovernmentSiblingTarget(employer[1])) return true;
@@ -1830,17 +1894,12 @@ function isCompleteRelocationQuestion(label: string): boolean {
   return Boolean(place && VETTED_WORKPLACE_LOCATIONS.has(normalizeIdentity(place[1])));
 }
 
-function startsLikeSiblingQuestion(label: string): boolean {
-  const value = normalizedSiblingQuestionLabel(label);
-  return /^(?:(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\b|did\s+you\s+(?:previously\s+apply|apply\b)|how\s+did\s+you\s+(?:(?:first\s+)?hear|learn)\s+about\b|where\s+(?:did\s+you\s+hear|(?:did|have)\s+you\s+learn(?:ed)?)\s+about\b|(?:are|would|will|can|could)\s+you\s+(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*\b|do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move)\b)/i.test(value);
-}
-
 function compoundSiblingQuestionAnswer(label: string): { skipReason: string } | null {
-  const value = normalizedSiblingQuestionLabel(label);
-  if (!startsLikeSiblingQuestion(value) || !labelNamesKnownGovernmentEmployer(label)) return null;
-  if (isCompletePriorApplicationQuestion(value)
-    || isCompleteReferralQuestion(value)
-    || isCompleteRelocationQuestion(value)) return null;
+  const parsed = parseSiblingQuestionStart(label);
+  if (!parsed || !labelNamesKnownGovernmentEmployer(label)) return null;
+  if (isCompletePriorApplicationQuestion(label)
+    || isCompleteReferralQuestion(label)
+    || isCompleteRelocationQuestion(label)) return null;
   return { skipReason: `compound application question left for you: "${label.slice(0, 60)}"` };
 }
 
