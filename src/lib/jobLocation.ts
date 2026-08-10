@@ -115,7 +115,7 @@ const STRUCTURED_CITY_COUNTRY_CODES = new Map<string, string>([
   ['COPENHAGEN', 'DK'], ['HELSINKI', 'FI'], ['WARSAW', 'PL'], ['PRAGUE', 'CZ'],
   ['BUCHAREST', 'RO'], ['BUDAPEST', 'HU'], ['ATHENS', 'GR'], ['ISTANBUL', 'TR'],
   ['TEL AVIV', 'IL'],
-  ['BENGALURU', 'IN'], ['BANGALORE', 'IN'], ['MUMBAI', 'IN'], ['DELHI', 'IN'],
+  ['BENGALURU', 'IN'], ['BANGALORE', 'IN'], ['MUMBAI', 'IN'], ['NEW DELHI', 'IN'], ['DELHI', 'IN'],
   ['GURGAON', 'IN'], ['GURUGRAM', 'IN'], ['HYDERABAD', 'IN'], ['CHENNAI', 'IN'],
   ['PUNE', 'IN'], ['NOIDA', 'IN'], ['GIFT CITY', 'IN'],
   ['TOKYO', 'JP'], ['OSAKA', 'JP'], ['SEOUL', 'KR'],
@@ -126,9 +126,65 @@ const STRUCTURED_CITY_COUNTRY_CODES = new Map<string, string>([
   ['DUBAI', 'AE'], ['ABU DHABI', 'AE'], ['RIYADH', 'SA'], ['KING ABDULLAH', 'SA'],
   ['CAIRO', 'EG'], ['LAGOS', 'NG'], ['NAIROBI', 'KE'], ['MANILA', 'PH'],
   ['JAKARTA', 'ID'], ['BANGKOK', 'TH'], ['KUALA LUMPUR', 'MY'],
-  ['HO CHI MINH', 'VN'], ['HANOI', 'VN'], ['BELGRADE', 'RS'], ['REYKJAVIK', 'IS'],
+  ['HO CHI MINH CITY', 'VN'], ['HO CHI MINH', 'VN'], ['HANOI', 'VN'], ['BELGRADE', 'RS'], ['REYKJAVIK', 'IS'],
   ['DOHA', 'QA'], ['MILAN', 'IT'], ['MILANO', 'IT'], ['LUXEMBOURG', 'LU'],
 ]);
+
+const CANADIAN_PROVINCE_CODES = new Set([
+  'AB', 'BC', 'MB', 'NB', 'NL', 'NS', 'NT', 'NU', 'ON', 'PE', 'QC', 'SK', 'YT',
+]);
+
+const CANADIAN_PROVINCE_NAMES = [
+  'ALBERTA', 'BRITISH COLUMBIA', 'MANITOBA', 'NEW BRUNSWICK', 'NEWFOUNDLAND AND LABRADOR',
+  'NOVA SCOTIA', 'NORTHWEST TERRITORIES', 'NUNAVUT', 'ONTARIO', 'PRINCE EDWARD ISLAND',
+  'QUEBEC', 'SASKATCHEWAN', 'YUKON',
+];
+
+/* A city alias is only authoritative when it owns the whole structured place value. These are the
+   jurisdiction suffixes a board may append to that city. State and province aliases are generated
+   from the same authoritative lists used by the location classifier; country aliases are closed
+   to the jurisdictions represented by the city registry. */
+const STRUCTURED_JURISDICTION_SUFFIX_CODES = new Map<string, string>([
+  ...[...US_STATE_CODES].map((code) => [code, 'US'] as const),
+  ...US_STATE_NAMES.map((name) => [name, 'US'] as const),
+  ['GEORGIA', 'US'],
+  ['US', 'US'], ['USA', 'US'], ['U S', 'US'], ['U S A', 'US'],
+  ['UNITED STATES', 'US'], ['UNITED STATES OF AMERICA', 'US'],
+  ...[...CANADIAN_PROVINCE_CODES].map((code) => [code, 'CA'] as const),
+  ...CANADIAN_PROVINCE_NAMES.map((name) => [name, 'CA'] as const),
+  ['CANADA', 'CA'],
+  ['UK', 'GB'], ['U K', 'GB'], ['UNITED KINGDOM', 'GB'], ['GREAT BRITAIN', 'GB'], ['BRITAIN', 'GB'],
+  ['ENGLAND', 'GB'], ['SCOTLAND', 'GB'], ['WALES', 'GB'],
+  ['IRELAND', 'IE'], ['GERMANY', 'DE'], ['FRANCE', 'FR'], ['SPAIN', 'ES'], ['PORTUGAL', 'PT'],
+  ['NETHERLANDS', 'NL'], ['BELGIUM', 'BE'], ['SWITZERLAND', 'CH'], ['AUSTRIA', 'AT'],
+  ['SWEDEN', 'SE'], ['NORWAY', 'NO'], ['DENMARK', 'DK'], ['FINLAND', 'FI'], ['POLAND', 'PL'],
+  ['CZECH REPUBLIC', 'CZ'], ['CZECHIA', 'CZ'], ['ROMANIA', 'RO'], ['HUNGARY', 'HU'],
+  ['GREECE', 'GR'], ['TURKEY', 'TR'], ['TURKIYE', 'TR'], ['ISRAEL', 'IL'],
+  ['INDIA', 'IN'], ['JAPAN', 'JP'], ['SOUTH KOREA', 'KR'], ['KOREA', 'KR'], ['CHINA', 'CN'],
+  ['AUSTRALIA', 'AU'], ['NEW ZEALAND', 'NZ'], ['MEXICO', 'MX'], ['BRAZIL', 'BR'],
+  ['ARGENTINA', 'AR'], ['COLOMBIA', 'CO'], ['UNITED ARAB EMIRATES', 'AE'], ['UAE', 'AE'],
+  ['SAUDI ARABIA', 'SA'], ['EGYPT', 'EG'], ['NIGERIA', 'NG'], ['KENYA', 'KE'],
+  ['PHILIPPINES', 'PH'], ['INDONESIA', 'ID'], ['THAILAND', 'TH'], ['MALAYSIA', 'MY'],
+  ['VIETNAM', 'VN'], ['VIET NAM', 'VN'], ['SERBIA', 'RS'], ['ICELAND', 'IS'], ['QATAR', 'QA'],
+  ['ITALY', 'IT'], ['LUXEMBOURG', 'LU'],
+]);
+
+const STRUCTURED_JURISDICTION_SUFFIXES_LONGEST_FIRST = [...STRUCTURED_JURISDICTION_SUFFIX_CODES.keys()]
+  .sort((left, right) => right.length - left.length);
+
+function structuredJurisdictionSuffixCodes(suffix: string): Set<string> | undefined {
+  const codes = new Set<string>();
+  let remaining = suffix;
+  while (remaining) {
+    const alias = STRUCTURED_JURISDICTION_SUFFIXES_LONGEST_FIRST.find(
+      (candidate) => remaining === candidate || remaining.startsWith(`${candidate} `),
+    );
+    if (!alias) return undefined;
+    codes.add(STRUCTURED_JURISDICTION_SUFFIX_CODES.get(alias)!);
+    remaining = remaining.slice(alias.length).trim();
+  }
+  return codes;
+}
 
 function normalise(location: string): string {
   /* Accents folded first, or "São Paulo" becomes "S O PAULO" and matches nothing, and "Reykjavík"
@@ -324,28 +380,86 @@ type StructuredCountryEvidence = {
   nonUs: boolean;
 };
 
+function explicitStructuredJurisdictionCodes(value: string, acceptsBareIsoCode: boolean): Set<string> {
+  const codes = new Set(namedCountryCodes(value));
+  const trimmed = value.trim();
+  const normalized = normalise(value).trim();
+  const upper = value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+
+  // A bare ISO code is authoritative only in a field the ATS declares as a country. In a location
+  // value, CA and IN are state abbreviations and require location syntax.
+  if (acceptsBareIsoCode && isIsoCountryCode(trimmed)) codes.add(trimmed.toUpperCase());
+  if (/\b(?:US|USA|U\.?S\.?A?)\b/i.test(value) || normalized.includes(' UNITED STATES ')) codes.add('US');
+  if (US_STATE_NAMES.some((name) => ` ${normalized} `.includes(` ${name} `))) codes.add('US');
+  if (CANADIAN_PROVINCE_NAMES.some((name) => ` ${normalized} `.includes(` ${name} `))) codes.add('CA');
+
+  // Codes are jurisdiction evidence only after a city delimiter or as the final jurisdiction
+  // token. This keeps IN-Bengaluru as India-shaped ambiguity while accepting Paris TX and London ON.
+  const locationCodes = upper.match(/(?:,\s*|[\s\-/])([A-Z]{2})(?=$|\s*,)/g) ?? [];
+  for (const match of locationCodes) {
+    const code = match.match(/([A-Z]{2})\s*$/)?.[1];
+    if (!code) continue;
+    if (US_STATE_CODES.has(code)) codes.add('US');
+    else if (CANADIAN_PROVINCE_CODES.has(code)) codes.add('CA');
+  }
+  return codes;
+}
+
+function structuredCityMatch(normalized: string): { city: string; code: string } | undefined {
+  const matches = [...STRUCTURED_CITY_COUNTRY_CODES]
+    .filter(([city]) => ` ${normalized} `.includes(` ${city} `))
+    .sort(([left], [right]) => right.length - left.length);
+  if (matches.length === 0) return undefined;
+  const [city, code] = matches[0];
+  return { city, code };
+}
+
 function structuredCountryEvidence(value: string, acceptsBareIsoCode: boolean): StructuredCountryEvidence {
   const trimmed = value.trim();
   if (!trimmed) return { codes: [], us: false, nonUs: false };
-  const codes = new Set<string>();
-  // A bare ISO code is authoritative only in a field the ATS declares as a country. In a location
-  // string CA and IN are US state abbreviations, not Canada and India.
-  if (acceptsBareIsoCode && isIsoCountryCode(trimmed)) codes.add(trimmed.toUpperCase());
-  for (const named of namedCountryCodes(trimmed)) codes.add(named);
+  const normalized = normalise(trimmed).trim();
+  const codes = explicitStructuredJurisdictionCodes(trimmed, acceptsBareIsoCode);
+  const city = structuredCityMatch(normalized);
 
-  const normalized = normalise(trimmed);
-  for (const [city, code] of STRUCTURED_CITY_COUNTRY_CODES) {
-    if (normalized.includes(` ${city} `)) codes.add(code);
+  if (city) {
+    /* A city alias supplies a country only as the whole place value. When a jurisdiction follows,
+       that explicit jurisdiction wins. Material prose around the city is not workplace evidence:
+       "London office supporting US customers" therefore stays unknown, not US or GB. */
+    if (normalized === city.city) {
+      if (codes.size === 0) codes.add(city.code);
+    } else if (normalized.startsWith(`${city.city} `)) {
+      const suffix = normalized.slice(city.city.length + 1);
+      const suffixCodes = structuredJurisdictionSuffixCodes(suffix);
+      if (!suffixCodes) return { codes: [], us: false, nonUs: false };
+      for (const suffixCode of suffixCodes) codes.add(suffixCode);
+    } else {
+      return { codes: [], us: false, nonUs: false };
+    }
+    return {
+      codes: [...codes],
+      us: codes.has('US'),
+      nonUs: [...codes].some((code) => code !== 'US'),
+    };
+  }
+
+  // Explicit jurisdiction also wins for ambiguous cities deliberately absent from the alias
+  // registry, such as Melbourne, FL. Conflicting explicit jurisdictions remain in the set so the
+  // caller fails closed instead of choosing either one.
+  if (codes.size > 0) {
+    return {
+      codes: [...codes],
+      us: codes.has('US'),
+      nonUs: [...codes].some((code) => code !== 'US'),
+    };
   }
 
   const signals = jobCountrySignalDetails(trimmed);
-  const explicitMelbourneFlorida = /\bMELBOURNE\s*,\s*FL\b/i.test(trimmed);
   const unambiguousWeakUs = trimmed.includes(',') && signals.weakUs && !signals.nonUs;
   if (signals.strongUs || unambiguousWeakUs) codes.add('US');
   return {
     codes: [...codes],
     us: signals.strongUs || unambiguousWeakUs || codes.has('US'),
-    nonUs: (signals.nonUs && !explicitMelbourneFlorida) || [...codes].some((code) => code !== 'US'),
+    nonUs: signals.nonUs || [...codes].some((code) => code !== 'US'),
   };
 }
 

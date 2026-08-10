@@ -181,6 +181,66 @@ describe('exact-country resolver', () => {
     }
   });
 
+  test('explicit jurisdictions override city aliases and contradictions fail closed', () => {
+    const scopedProfile: ApplicationProfileLike = {
+      work_eligibility_by_country: [
+        records[0],
+        records[2],
+        {
+          country_code: 'CA',
+          authorized_now: false,
+          needs_sponsorship_now: true,
+          needs_sponsorship_future: true,
+        },
+      ],
+    };
+    const cases: Array<[string, string, 'Yes' | 'No']> = [
+      ['Paris TX', 'US', 'Yes'],
+      ['Berlin, NJ', 'US', 'Yes'],
+      ['Athens GA', 'US', 'Yes'],
+      ['Dublin, CA', 'US', 'Yes'],
+      ['Vienna VA', 'US', 'Yes'],
+      ['Geneva, NY', 'US', 'Yes'],
+      ['London ON', 'CA', 'No'],
+      ['London, Ontario', 'CA', 'No'],
+      ['London, Canada', 'CA', 'No'],
+      ['London, ON, Canada', 'CA', 'No'],
+      ['Paris, TX, United States', 'US', 'Yes'],
+      ['London', 'GB', 'No'],
+      ['London, England', 'GB', 'No'],
+      ['Paris, France', 'FR', 'No'],
+    ];
+    for (const [location, code, answer] of cases) {
+      const context = { location };
+      assert.equal(postingCountryCodeFromJobContext(context), code, location);
+      assert.equal(postingCountryFromJobContext(context), code === 'US' ? 'us' : 'non_us', location);
+      if (['US', 'GB', 'CA'].includes(code)) {
+        assert.deepEqual(resolveKnownAnswer(
+          'Are you authorized to work in the country where this role is located?',
+          'select',
+          scopedProfile,
+          undefined,
+          postingCountryFromJobContext(context),
+          postingCountryCodeFromJobContext(context),
+        ), { value: answer }, location);
+      }
+    }
+
+    for (const context of [
+      { location: 'Paris, TX, France' },
+      { location: 'London ON, England' },
+      { location: 'London office supporting US customers' },
+      { location: 'Paris office supporting US customers' },
+      { portal_country: 'GB', location: 'Paris, TX' },
+      { portal_country: 'US', location: 'London, England' },
+    ]) {
+      assert.equal(postingCountryCodeFromJobContext(context), undefined, JSON.stringify(context));
+      assert.equal(postingCountryFromJobContext(context), 'unknown', JSON.stringify(context));
+    }
+    assert.equal(postingCountryCodeFromJobContext({ portal_country: 'US', location: 'Paris, TX' }), 'US');
+    assert.equal(postingCountryCodeFromJobContext({ portal_country: 'GB', location: 'London, England' }), 'GB');
+  });
+
   test('structured ATS country metadata reaches the exact country resolver', () => {
     const jobContext = { portal_country: 'GB', location: 'London' };
     assert.equal(postingCountryFromJobContext(jobContext), 'non_us');

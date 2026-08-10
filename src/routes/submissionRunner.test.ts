@@ -732,6 +732,7 @@ test('portal country metadata reaches managed send resolution without borrowing 
     work_eligibility_by_country: [
       { country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false },
       { country_code: 'GB', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
+      { country_code: 'CA', authorized_now: false, needs_sponsorship_now: true, needs_sponsorship_future: true },
     ],
   };
 
@@ -749,9 +750,29 @@ test('portal country metadata reaches managed send resolution without borrowing 
     answer: 'No',
   }]);
 
+  for (const [job_context, answer] of [
+    [{ location: 'Paris, TX' }, 'Yes'],
+    [{ location: 'London, ON' }, 'No'],
+    [{ portal_country: 'US', location: 'Paris, TX' }, 'Yes'],
+  ] as const) {
+    const resolved = await discoverAndResolveQuestions(
+      fields,
+      { user_id: 'user-1', job_context } as ResumeRow,
+      current,
+      applicationProfile,
+      true,
+      'greenhouse',
+    );
+    assert.deepEqual(resolved.attentionReasons, []);
+    assert.equal(resolved.questions[0]?.answer, answer);
+  }
+
   for (const job_context of [
     { locations: ['London', 'New York, NY'] },
     { location: 'London office supporting US customers' },
+    { portal_country: 'GB', location: 'Paris, TX' },
+    { portal_country: 'US', location: 'London, England' },
+    { location: 'Paris, TX, France' },
   ]) {
     const mixed = await discoverAndResolveQuestions(
       fields,
