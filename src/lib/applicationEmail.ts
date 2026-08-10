@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from 'crypto';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { application_email_aliases, application_email_messages, generated_resumes, users } from '../db/schema';
-import { readApplicationReview } from './applicationReview';
+import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
 import { isUndefinedColumnError } from './applicationFacts';
 import {
   type AliasDeliverability,
@@ -28,15 +28,33 @@ export type ApplicationEmailClassification =
   | 'submission_confirmation'
   | 'interview_request'
   | 'verification_code'
+  /* THE ACCOUNT WALL. An employer portal that will not show an application form until an account
+   * exists, and every step of building that account arrives by mail: confirm this address, verify
+   * this account, your account has been created, activate it, set a password, reset a password.
+   *
+   * One classification rather than six because they are one job with one destination. Every one of
+   * them is useless to a machine and only actionable by the person holding the mailbox, which is
+   * exactly why the previous whitelist made account-walled portals (jobvite, icims, oraclecloud,
+   * ultipro, sap_successfactors, oracle_taleo, adp_recruiting, avature) impossible to register on:
+   * the activation link was stored and never reached anyone. */
+  | 'account_registration'
   | 'recruiter_reply'
   // The applicant answering the employer through her own alias. Never produced by the text
   // classifier: it is decided by WHO SENT IT, not by what it says.
   | 'applicant_reply'
   | 'other';
 
+/* Why a message was kept from the applicant. There is exactly one reason, and it is narrow on
+ * purpose: see applicationEmailForwardingDecision. */
+export type ApplicationEmailWithholdReason =
+  /* A one-time code that a managed session is spending on this same application right now. */
+  | 'security_code_in_flight'
+  /* Her own message, travelling outward through the relay. Sending it back in would be an echo. */
+  | 'applicant_reply';
+
 export type ApplicationEmailForwardingDecision =
   | { forward: true }
-  | { forward: false; reason: 'internal_only' };
+  | { forward: false; reason: ApplicationEmailWithholdReason };
 
 export type InboundApplicationEmail = {
   provider?: string;
@@ -412,14 +430,44 @@ export async function resolveApplicantEmail(input: {
   };
 }
 
+/* THE NOUN AN ACCOUNT-WALL MESSAGE IS ABOUT, and the whole reason these patterns are anchored.
+ *
+ * "Activate your account" and "activate your career alerts" differ by one noun, and the second is a
+ * marketing blast every ATS sends. A loose alternation on the verbs alone would classify both, so
+ * the verb has to reach an object out of this list for the message to be about an account at all. */
+const ACCOUNT_NOUN = '(?:accounts?|profiles?|logins?|registrations?'
+  + '|candidate (?:account|profile|home|portal)'
+  + '|career(?:s)? (?:account|profile|portal|site|cent(?:er|re))'
+  + '|talent (?:profile|community|network)'
+  + '|applicant (?:account|profile))';
+
 export function classifyApplicationEmail(subject = '', text = ''): ApplicationEmailClassification {
   const haystack = `${subject}\n${text}`.toLowerCase();
-  if (/\b(verification code|security code|one[- ]?time|otp|passcode|confirm your email)\b/.test(haystack)) {
+  /* "confirm your email" USED TO LIVE HERE and does not any more. It is the opening line of an
+   * account-wall activation mail and it carries no code, so treating it as a security code both
+   * misnamed it and, under the old whitelist, buried it. A message is a verification_code when it
+   * hands over a credential, which is what every alternative below actually names. */
+  if (/\b(verification code|security code|one[- ]?time|otp|passcode)\b/.test(haystack)) {
     return 'verification_code';
   }
+  /* BEFORE the account-wall test, so a confirmation that opens "Welcome to Acme" and closes with a
+   * link to the candidate portal stays what it is: a receipt for an application that was filed. */
   if (/\b(thank you for applying|thanks for applying|application (?:has been )?received|we received your application|successfully submitted|application submitted)\b/.test(haystack)) {
     return 'submission_confirmation';
   }
+  const accountRegistration =
+    // "Please confirm your email address", "Verify your account", "Activate your candidate account".
+    new RegExp(`\\b(?:confirm|verify|validate|activate)\\b.{0,30}\\b(?:your|the)\\b.{0,25}\\b(?:e-?mail(?: address)?|${ACCOUNT_NOUN})\\b`).test(haystack)
+    // "Your account has been created", "A candidate profile was created for you".
+    || new RegExp(`\\b(?:your|a|an|the)\\s+(?:new\\s+)?${ACCOUNT_NOUN}\\s+(?:has been|have been|was|were|is|are)\\s+(?:created|registered|set up|activated)\\b`).test(haystack)
+    || new RegExp(`\\b${ACCOUNT_NOUN}\\s+(?:created|activated|registered)\\b`).test(haystack)
+    // "Thanks for registering", "Welcome to the Acme careers portal".
+    || /\b(?:thanks|thank you)\s+for\s+(?:registering|signing up|creating (?:an|your) account)\b/.test(haystack)
+    || new RegExp(`\\bwelcome\\b.{0,40}\\b${ACCOUNT_NOUN}\\b`).test(haystack)
+    // "Reset your password", "Set your password", "Password reset requested".
+    || /\b(?:reset|set|create|choose|change)\b.{0,20}\byour\b.{0,20}\bpassword\b/.test(haystack)
+    || /\bpassword\s+reset\b/.test(haystack);
+  if (accountRegistration) return 'account_registration';
   const interviewStage = '(?:interview|phone screen|technical screen|onsite interview)';
   const interviewRequestOrConfirmation =
     new RegExp(`\\b(?:schedule|reschedule|book|confirm)\\b.{0,40}\\b(?:${interviewStage}|call)\\b`).test(haystack)
@@ -436,17 +484,82 @@ export function classifyApplicationEmail(subject = '', text = ''): ApplicationEm
   return 'other';
 }
 
-/**
- * Employer mail is always stored, but only terminal submission receipts and interview logistics
- * leave Litos automatically. Verification codes remain available to the managed-session reader,
- * and recruiter or miscellaneous messages remain available in the application email ledger.
+/* THE WINDOW IN WHICH A RUN IS STILL SPENDING A CODE, mirroring MAX_CODE_AGE_MS and CLOCK_SKEW_MS
+ * in lib/emailVerification.ts, which is the window the code READER accepts. Deliberately not
+ * imported: emailVerification imports this module, and an import cycle between them would be a
+ * worse defect than a repeated number. If one moves, move both. */
+const SECURITY_CODE_CONSUMPTION_WINDOW_MS = 10 * 60_000;
+const SECURITY_CODE_CLOCK_SKEW_MS = 30_000;
+
+/* Is a managed session consuming a one-time code for this application AT THIS MOMENT.
+ *
+ * This is the entire justification for the one thing Litos withholds, so it answers narrowly and
+ * it answers no when it does not know. A packet that is not waiting on a code, or whose wait began
+ * more than the reader's own window ago, is not racing anybody: the run has already finished,
+ * failed, or timed out, and the code in that message is hers to use by hand.
+ */
+export function managedSessionIsConsumingSecurityCode(
+  review: Pick<ApplicationReviewState, 'status' | 'security_code' | 'verification'> | null | undefined,
+  now: Date,
+): boolean {
+  if (!review) return false;
+  const verificationStatus = review.verification?.status;
+  const requestedAt = review.status === 'awaiting_security_code'
+    ? review.security_code?.requested_at ?? review.verification?.requested_at
+    : (verificationStatus === 'searching' || verificationStatus === 'verification_pending')
+      ? review.verification?.requested_at
+      : undefined;
+  if (!requestedAt) return false;
+  const requested = new Date(requestedAt).getTime();
+  if (Number.isNaN(requested)) return false;
+  const age = now.getTime() - requested;
+  return age >= -SECURITY_CODE_CLOCK_SKEW_MS && age <= SECURITY_CODE_CONSUMPTION_WINDOW_MS;
+}
+
+/* WHAT LEAVES LITOS. This is a list of what to WITHHOLD, and it has one entry.
+ *
+ * It used to be the opposite: an allowlist of two classifications, submission_confirmation and
+ * interview_request, with everything else stored and dropped in silence. Measured against the
+ * shipped classifier on 2026-08-10, that meant an activation link, a password reset, an assessment
+ * invitation, a rejection and an OFFER LETTER all landed in the ledger and reached nobody, with
+ * direction still 'inbound', forwarded_at NULL and forward_error NULL, which is indistinguishable
+ * from a message nothing had looked at. It forwarded zero messages in the day it was live.
+ *
+ * The direction is inverted because the premise was wrong. The applicant's own address is the one
+ * the employer thinks it is writing to; the alias is a forwarding address, not an editor. So the
+ * question is no longer "is this important enough to send on", which is a judgement Litos is not
+ * entitled to make about someone else's mail, but "is there a concrete mechanical reason this
+ * exact message must not go out right now".
+ *
+ * There is exactly one such reason, and it is not importance:
+ *
+ *   verification_code, while a managed session is consuming it. A one-time code is spent by
+ *   whoever types it first. If the runner is mid-submit and she is also handed the code, the two
+ *   race, the code burns, and the application is filed by neither. Outside that window (see
+ *   managedSessionIsConsumingSecurityCode) nothing is racing her, so the code forwards like
+ *   everything else, which is what makes a stalled or failed run recoverable by hand.
+ *
+ *   applicant_reply is listed too, but it is not a policy: it is her own message on its way OUT
+ *   through relayApplicantReply, and mailing it back to her would be an echo between two mail
+ *   systems. The inbound path routes by sender before it classifies and can never reach this
+ *   branch; it is here so the function is total.
+ *
+ * Everything else forwards, including 'other'. That bucket does not mean unimportant, it means
+ * unrecognised, and it is where the offer letter and the rejection both land. A classifier's
+ * failure to name a message is not grounds for keeping it from the person it was addressed to.
+ *
+ * Every withhold is written to application_email_messages.forward_decision and counted in /health,
+ * so a drop can be seen. An invisible drop is the failure this function exists to end.
  */
 export function applicationEmailForwardingDecision(
   classification: ApplicationEmailClassification,
+  context: { securityCodeInFlight?: boolean } = {},
 ): ApplicationEmailForwardingDecision {
-  return classification === 'submission_confirmation' || classification === 'interview_request'
-    ? { forward: true }
-    : { forward: false, reason: 'internal_only' };
+  if (classification === 'applicant_reply') return { forward: false, reason: 'applicant_reply' };
+  if (classification === 'verification_code' && context.securityCodeInFlight === true) {
+    return { forward: false, reason: 'security_code_in_flight' };
+  }
+  return { forward: true };
 }
 
 function storedApplicationEmailClassification(value: string): ApplicationEmailClassification {
@@ -454,6 +567,7 @@ function storedApplicationEmailClassification(value: string): ApplicationEmailCl
     case 'submission_confirmation':
     case 'interview_request':
     case 'verification_code':
+    case 'account_registration':
     case 'recruiter_reply':
     case 'applicant_reply':
     case 'other':
@@ -810,6 +924,43 @@ async function relayApplicantReply(
   return { accepted: true, alias: aliasRow.alias, classification: 'applicant_reply', relayed: true };
 }
 
+/* Record what the router decided about one stored message.
+ *
+ * Tolerates the column not existing, because on Vercel a merge is a deploy and this can be live
+ * before `npm run db:application-email-forward-decision` has run. Losing the annotation for a few
+ * minutes is survivable; refusing to deliver the mail because we could not annotate it is not, so
+ * this never fails the delivery path on that one error. Any other database failure still throws:
+ * a webhook that cannot write is a real incident and the caller retries against a deduped row. */
+async function recordForwardDecision(messageId: string, decision: string): Promise<void> {
+  try {
+    await db.update(application_email_messages)
+      .set({ forward_decision: decision })
+      .where(eq(application_email_messages.id, messageId));
+  } catch (error) {
+    if (!isUndefinedColumnError(error)) throw error;
+  }
+}
+
+/* Whether a managed session is spending a one-time code on this application as the message lands.
+ *
+ * Answers false when there is no application, no packet, or no readable review. Not knowing is not
+ * evidence of a race, and the cost of the two errors is not symmetric: a needless forward is one
+ * extra email, while a needless withhold is a code she never sees and an application nobody can
+ * finish. */
+async function securityCodeConsumptionInFlight(applicationId: string | null, now: Date): Promise<boolean> {
+  if (!applicationId) return false;
+  try {
+    const rows = await db
+      .select({ spec: generated_resumes.spec })
+      .from(generated_resumes)
+      .where(eq(generated_resumes.id, applicationId))
+      .limit(1);
+    return managedSessionIsConsumingSecurityCode(readApplicationReview(rows[0]?.spec), now);
+  } catch {
+    return false;
+  }
+}
+
 export async function processInboundApplicationEmail(input: InboundApplicationEmail): Promise<{
   accepted: boolean;
   alias?: string;
@@ -890,8 +1041,13 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
   const storedClassification = message
     ? storedApplicationEmailClassification(message.classification)
     : classification;
-  const forwardingDecision = applicationEmailForwardingDecision(storedClassification);
+  // Only a code can be withheld, so only a code is worth a second read of the packet.
+  const securityCodeInFlight = storedClassification === 'verification_code'
+    ? await securityCodeConsumptionInFlight(aliasRow.generated_resume_id, receivedAt)
+    : false;
+  const forwardingDecision = applicationEmailForwardingDecision(storedClassification, { securityCodeInFlight });
   if (!forwardingDecision.forward) {
+    if (message) await recordForwardDecision(message.id, `withheld:${forwardingDecision.reason}`);
     return {
       accepted: true,
       alias: aliasRow.alias,
@@ -903,6 +1059,10 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
   if (!message || message.forwarded_at) {
     return { accepted: true, alias: aliasRow.alias, classification: storedClassification, forwarded: false };
   }
+  /* Written BEFORE the claim and the send, so the row states the decision even if the send then
+   * throws. A failed send leaves forward_decision 'forward' and the cause in forward_error, which
+   * are two different facts and are recorded as two. */
+  await recordForwardDecision(message.id, 'forward');
 
   const messageId = message.id;
   let forwarded = false;
@@ -973,6 +1133,19 @@ export type ApplicationEmailHealth = {
   inbound_route_configured: boolean;
   last_inbound_message_at: string | null;
   last_inbound_message_age_seconds: number | null;
+  /* HOW MUCH MAIL WAS STORED AND DELIBERATELY NOT SENT ON, in the window below.
+   *
+   * last_inbound_message_at was the only message fact here, and it cannot see this failure: during
+   * the whole of 2026-08-10 messages were arriving, that timestamp was fresh, and every one of
+   * them was being dropped. A probe that only asks "is mail landing" reports a healthy inbox for a
+   * service that is delivering nothing.
+   *
+   * NULL means the count could not be taken, including on a database that has not run the
+   * forward_decision migration. It is deliberately not 0: "nothing was withheld" and "we cannot
+   * see what was withheld" are different answers, and reporting the second as the first is the
+   * exact shape of the bug this field exists to expose. */
+  withheld_messages_recent: number | null;
+  withheld_messages_window_hours: number;
   enabled_aliases: number | null;
   // Config presence, kept under the old names so existing monitors keep parsing, but no longer
   // the answer to "is the inbox working".
@@ -999,10 +1172,13 @@ export type ApplicationEmailHealth = {
  *
  * It cannot take /health down. The deliverability probe never throws, and the two database reads
  * degrade to null rather than propagating. */
+export const WITHHELD_MESSAGE_WINDOW_HOURS = 24;
+
 export async function applicationEmailHealth(): Promise<ApplicationEmailHealth> {
   const check = await applicationAliasDeliverability();
   const route = applicationEmailRouteSelection();
-  const [aliasCount, lastInbound] = await Promise.all([
+  const withheldSince = new Date(Date.now() - WITHHELD_MESSAGE_WINDOW_HOURS * 60 * 60 * 1000);
+  const [aliasCount, lastInbound, withheldCount] = await Promise.all([
     db
       .select({ count: sql<number>`count(*)::int` })
       .from(application_email_aliases)
@@ -1014,6 +1190,17 @@ export async function applicationEmailHealth(): Promise<ApplicationEmailHealth> 
       .from(application_email_messages)
       .where(sql`${application_email_messages.direction} <> 'outbound'`)
       .then((rows) => rows[0]?.at ?? null)
+      .catch(() => null),
+    db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(application_email_messages)
+      .where(and(
+        sql`${application_email_messages.forward_decision} like 'withheld:%'`,
+        sql`coalesce(${application_email_messages.received_at}, ${application_email_messages.created_at}) >= ${withheldSince}`,
+      ))
+      .then((rows) => Number(rows[0]?.count ?? 0))
+      // Including the undefined_column error a database that has not run the migration raises. See
+      // the field comment: null here means unmeasurable, never "none".
       .catch(() => null),
   ]);
   const lastAt = lastInbound ? new Date(lastInbound) : null;
@@ -1045,6 +1232,8 @@ export async function applicationEmailHealth(): Promise<ApplicationEmailHealth> 
     last_inbound_message_age_seconds: lastIso
       ? Math.max(0, Math.round((Date.now() - new Date(lastIso).getTime()) / 1000))
       : null,
+    withheld_messages_recent: withheldCount,
+    withheld_messages_window_hours: WITHHELD_MESSAGE_WINDOW_HOURS,
     enabled_aliases: aliasCount,
     domain_configured: Boolean((configuredDomain() || configuredMailbox()) && applicationAliasSecret()),
     inbound_webhook_configured: Boolean(inboundWebhookSecret()),

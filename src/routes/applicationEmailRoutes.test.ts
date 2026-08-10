@@ -84,6 +84,11 @@ test('the health probe measures the world instead of reading environment variabl
   assert.match(service, /resend_domain_status: check\.resend_domain_status/);
   assert.match(service, /inbound_route_configured: check\.inbound_route_configured/);
   assert.match(service, /last_inbound_message_at/);
+  /* A FRESH last_inbound_message_at IS NOT A WORKING INBOX. On 2026-08-10 mail was landing, that
+   * timestamp was current, and every message was being dropped. The count of what was withheld is
+   * the field that can see that, and null rather than 0 when it cannot be taken. */
+  assert.match(service, /withheld_messages_recent: withheldCount/);
+  assert.match(service, /like 'withheld:%'/);
   // 'degraded' must be reachable and must not be the same answer as 'ok'.
   assert.match(service, /status: check\.deliverable\s*\n\s*\? 'ok'/);
   assert.match(service, /'degraded'/);
@@ -115,13 +120,13 @@ test('managed receiving rejects applicant replies before any relay ledger insert
   assert.match(service, /return \/\^\[a-z0-9\].*\\\.resend\\\.app\$\/i\.test\(domain\)/);
 });
 
-test('employer mail is stored before the strict forwarding whitelist is applied', () => {
+test('employer mail is stored before the forwarding decision, and every decision is recorded', () => {
   const processor = service.slice(
     service.indexOf('export async function processInboundApplicationEmail'),
     service.indexOf('export async function applicationEmailHealth'),
   );
   const ledgerInsert = processor.indexOf("direction: 'inbound'");
-  const decision = processor.indexOf('applicationEmailForwardingDecision(storedClassification)');
+  const decision = processor.indexOf('applicationEmailForwardingDecision(storedClassification, {');
   const claim = processor.indexOf('forwarding_claimed_at: new Date()');
   const send = processor.indexOf('sendEmail(forwardEmailPayload');
   assert.ok(ledgerInsert >= 0);
@@ -129,7 +134,19 @@ test('employer mail is stored before the strict forwarding whitelist is applied'
   assert.ok(claim > decision);
   assert.ok(send > claim);
   assert.match(processor, /reason: forwardingDecision\.reason/);
-  assert.match(service, /classification === 'submission_confirmation' \|\| classification === 'interview_request'/);
+  /* THE WHITELIST IS NOW A WITHHOLD LIST, and this is the assertion that says so.
+   *
+   * It used to pin the literal `classification === 'submission_confirmation' || classification ===
+   * 'interview_request'`, which is the two-outcome allowlist that forwarded nothing for a day and
+   * silently dropped an offer letter. What has to stay true is the shape: the default answer is to
+   * deliver, and a refusal has to name a reason from a closed set. */
+  assert.match(service, /if \(classification === 'applicant_reply'\) return \{ forward: false, reason: 'applicant_reply' \}/);
+  assert.match(service, /classification === 'verification_code' && context\.securityCodeInFlight === true/);
+  assert.match(service, /\n {2}return \{ forward: true \};\n\}/);
+  // A withheld message is annotated on its own row, so it can never look unprocessed again.
+  assert.match(processor, /await recordForwardDecision\(message\.id, `withheld:\$\{forwardingDecision\.reason\}`\)/);
+  assert.match(processor, /await recordForwardDecision\(message\.id, 'forward'\)/);
+  assert.match(service, /set\(\{ forward_decision: decision \}\)/);
   assert.match(processor, /onConflictDoNothing\(\{ target: application_email_messages\.dedupe_key \}\)/);
   assert.match(processor, /sql`\(\$\{application_email_messages\.forwarding_claimed_at\} is null or/);
   assert.match(processor, /storedApplicationEmailClassification\(message\.classification\)/);

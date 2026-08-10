@@ -44,7 +44,7 @@ import { sharedRankingConfigured } from './lib/rankingCache';
 import { resolveBuild, resolveRevision } from './lib/buildInfo';
 import { dashboardBootstrapRoutes } from './routes/dashboardBootstrap';
 import { configuredAtsSubmissionChannels } from './lib/atsSubmissionChannels';
-import { applicationEmailHealth } from './lib/applicationEmail';
+import { applicationEmailHealth, WITHHELD_MESSAGE_WINDOW_HOURS } from './lib/applicationEmail';
 import { applicationEmailRouteSelection } from './lib/applicationEmailRoute';
 import { warmApplicationAliasDeliverability } from './lib/applicationEmailDeliverability';
 import { aggregateServiceHealthStatus } from './lib/serviceHealth';
@@ -215,6 +215,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
         inbound_route_configured: false,
         last_inbound_message_at: null,
         last_inbound_message_age_seconds: null,
+        // Null, not 0: an unmeasurable probe must never report "nothing was withheld".
+        withheld_messages_recent: null,
+        withheld_messages_window_hours: WITHHELD_MESSAGE_WINDOW_HOURS,
         enabled_aliases: null,
         domain_configured: Boolean(route.route_label),
         inbound_webhook_configured: Boolean((process.env.RESEND_WEBHOOK_SECRET || process.env.LITOS_INBOUND_EMAIL_WEBHOOK_SECRET || process.env.LITOS_APPLICATION_EMAIL_WEBHOOK_SECRET)?.trim()),

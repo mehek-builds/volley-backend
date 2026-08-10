@@ -878,6 +878,17 @@ export const application_email_messages = pgTable('application_email_messages', 
   forwarding_claimed_at: timestamp('forwarding_claimed_at', { withTimezone: true }),
   forwarded_at: timestamp('forwarded_at', { withTimezone: true }),
   forward_error: text('forward_error'),
+  /* WHAT THE ROUTER DECIDED TO DO WITH THIS MESSAGE, as opposed to what then happened to it.
+   *
+   * 'forward' or 'withheld:<reason>'. NULL means no router has looked at this row yet.
+   *
+   * It exists because those three states were previously indistinguishable. A message the
+   * forwarding whitelist refused was stored with direction 'inbound', forwarded_at NULL and
+   * forward_error NULL, which is byte for byte what an unprocessed message looks like, so a
+   * deliberate drop could not be counted, queried or noticed. forward_error cannot carry this:
+   * it means "we tried to send it and the send failed", and overloading it would destroy the
+   * distinction between a bug and a policy. */
+  forward_decision: text('forward_decision'),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (t) => ({
   userCreatedIdx: index('application_email_messages_user_created_idx').on(t.user_id, t.created_at),

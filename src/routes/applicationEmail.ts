@@ -322,24 +322,40 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
     const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
     if (!params.success) return reply.status(400).send({ error: 'Invalid application id' });
     const userId = request.jwtPayload!.userId;
+    const ledgerColumns = {
+      id: application_email_messages.id,
+      alias: application_email_messages.alias,
+      direction: application_email_messages.direction,
+      from_email: application_email_messages.from_email,
+      to_email: application_email_messages.to_email,
+      subject: application_email_messages.subject,
+      text: application_email_messages.text,
+      classification: application_email_messages.classification,
+      received_at: application_email_messages.received_at,
+      forwarded_at: application_email_messages.forwarded_at,
+      created_at: application_email_messages.created_at,
+    } as const;
+    const ledgerWhere = eq(application_email_messages.generated_resume_id, params.data.id);
+    /* forward_decision is what separates "stored and deliberately withheld" from "nothing has
+     * looked at this row yet", so the ledger says it. Read through a fallback because a merge is a
+     * deploy on Vercel and this can be live before `npm run db:application-email-forward-decision`:
+     * an unmigrated database answers in the older shape rather than 500ing the whole inbox. */
     const messages = await db
-      .select({
-        id: application_email_messages.id,
-        alias: application_email_messages.alias,
-        direction: application_email_messages.direction,
-        from_email: application_email_messages.from_email,
-        to_email: application_email_messages.to_email,
-        subject: application_email_messages.subject,
-        text: application_email_messages.text,
-        classification: application_email_messages.classification,
-        received_at: application_email_messages.received_at,
-        forwarded_at: application_email_messages.forwarded_at,
-        created_at: application_email_messages.created_at,
-      })
+      .select({ ...ledgerColumns, forward_decision: application_email_messages.forward_decision })
       .from(application_email_messages)
-      .where(eq(application_email_messages.generated_resume_id, params.data.id))
+      .where(ledgerWhere)
       .orderBy(desc(application_email_messages.created_at))
-      .limit(50);
+      .limit(50)
+      .catch(async (error) => {
+        if (!isUndefinedColumnError(error)) throw error;
+        const legacy = await db
+          .select(ledgerColumns)
+          .from(application_email_messages)
+          .where(ledgerWhere)
+          .orderBy(desc(application_email_messages.created_at))
+          .limit(50);
+        return legacy.map((message) => ({ ...message, forward_decision: null as string | null }));
+      });
     const owned = messages.filter((message) => message.alias);
     const aliases = await db.select({ alias: application_email_aliases.alias })
       .from(application_email_aliases)

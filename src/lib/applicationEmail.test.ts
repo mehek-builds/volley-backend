@@ -6,6 +6,8 @@ import {
   applicationEmailRouteLabel,
   applicationEmailRouteGenerationFingerprint,
   classifyApplicationEmail,
+  managedSessionIsConsumingSecurityCode,
+  type ApplicationEmailClassification,
   forwardingAddressWouldLoop,
   forwardEmailPayload,
   ApplicantEmailRegenerationRequiredError,
@@ -220,16 +222,187 @@ test('application email classifier recognizes employer outcomes', () => {
   );
 });
 
-test('application email forwarding is a strict outcome whitelist', () => {
-  assert.deepEqual(applicationEmailForwardingDecision('submission_confirmation'), { forward: true });
-  assert.deepEqual(applicationEmailForwardingDecision('interview_request'), { forward: true });
-  for (const classification of ['verification_code', 'recruiter_reply', 'applicant_reply', 'other'] as const) {
+/* THE NINE SHAPES MEASURED AGAINST THE SHIPPED CLASSIFIER ON 2026-08-10, when the forwarding
+ * whitelist admitted two classifications and every one of these was stored and dropped in silence.
+ * Both facts are asserted for each: what it is called, and whether it reaches the applicant. */
+const MEASURED_SHAPES: Array<{ subject: string; text: string; classification: ApplicationEmailClassification }> = [
+  {
+    subject: 'Please confirm your email address',
+    text: 'Click https://careers.example.com/confirm?t=abc to continue your application.',
+    classification: 'account_registration',
+  },
+  {
+    subject: 'Verify your account',
+    text: 'Verify your account to finish creating your Workday candidate profile.',
+    classification: 'account_registration',
+  },
+  {
+    subject: 'Your account has been created',
+    text: 'Your account has been created for the Acme careers site.',
+    classification: 'account_registration',
+  },
+  {
+    subject: 'Activate your candidate account',
+    text: 'Activate your candidate account before applying to this role.',
+    classification: 'account_registration',
+  },
+  {
+    subject: 'Reset your password',
+    text: 'Reset your password using the link below.',
+    classification: 'account_registration',
+  },
+  {
+    subject: 'Complete your online assessment',
+    text: 'Please complete the online assessment within five days.',
+    classification: 'other',
+  },
+  {
+    subject: 'Your offer from Acme',
+    text: 'We are delighted to extend an offer for the Software Engineer role.',
+    classification: 'other',
+  },
+  {
+    subject: 'Update on your application',
+    text: 'We have decided to move forward with other candidates.',
+    classification: 'other',
+  },
+  {
+    subject: 'Quick note from our talent team',
+    text: 'Our talent team wanted to reach out about your background.',
+    classification: 'recruiter_reply',
+  },
+];
+
+test('every shape the old whitelist dropped is classified, and every one of them reaches her', () => {
+  for (const shape of MEASURED_SHAPES) {
+    const classification = classifyApplicationEmail(shape.subject, shape.text);
+    assert.equal(classification, shape.classification, shape.subject);
+    assert.deepEqual(applicationEmailForwardingDecision(classification), { forward: true }, shape.subject);
+  }
+});
+
+test('the account wall is one classification, because it is one job with one destination', () => {
+  // The employer's own words for "there is no application form until you have an account".
+  assert.equal(
+    classifyApplicationEmail('Welcome to the Acme careers portal', 'Thanks for registering. Your login is ready.'),
+    'account_registration',
+  );
+  assert.equal(
+    classifyApplicationEmail('Set your password', 'Set your password to finish setting up your profile.'),
+    'account_registration',
+  );
+  assert.equal(
+    classifyApplicationEmail('Action required', 'Please validate the email address on your candidate profile.'),
+    'account_registration',
+  );
+});
+
+test('the account-wall patterns capture accounts, not every message with a verb in it', () => {
+  /* A marketing blast is the exact false capture these patterns are anchored against: it uses the
+   * same verb, and its footer talks about an account. The noun after the verb is what decides. */
+  assert.equal(
+    classifyApplicationEmail(
+      'Activate your career alerts',
+      'New roles are posted every week. Activate your career alerts to be the first to know. '
+        + 'You can manage your account preferences at any time.',
+    ),
+    'other',
+  );
+  // A receipt for a filed application stays a receipt, however warmly it opens.
+  assert.equal(
+    classifyApplicationEmail(
+      'Welcome to Acme',
+      'Thank you for applying to the Software Engineer Intern role. Your candidate profile is now '
+        + 'available in our careers portal.',
+    ),
+    'submission_confirmation',
+  );
+  // Interview logistics are not an account wall just because the portal is mentioned.
+  assert.equal(
+    classifyApplicationEmail('Interview availability', 'Can you schedule a call with our recruiter this week?'),
+    'interview_request',
+  );
+});
+
+test('forwarding is a list of what to WITHHOLD, and everything not on it reaches her', () => {
+  for (const classification of [
+    'submission_confirmation',
+    'interview_request',
+    'account_registration',
+    'verification_code',
+    'recruiter_reply',
+    'other',
+  ] as const) {
+    assert.deepEqual(applicationEmailForwardingDecision(classification), { forward: true }, classification);
+  }
+  // Her own message travels outward through the relay. Sending it back in would be an echo.
+  assert.deepEqual(
+    applicationEmailForwardingDecision('applicant_reply'),
+    { forward: false, reason: 'applicant_reply' },
+  );
+  // The single withhold, and it is about a race, not about importance.
+  assert.deepEqual(
+    applicationEmailForwardingDecision('verification_code', { securityCodeInFlight: true }),
+    { forward: false, reason: 'security_code_in_flight' },
+  );
+  // Narrow: an active run does not license withholding anything else, least of all an offer.
+  for (const classification of ['account_registration', 'other', 'recruiter_reply'] as const) {
     assert.deepEqual(
-      applicationEmailForwardingDecision(classification),
-      { forward: false, reason: 'internal_only' },
+      applicationEmailForwardingDecision(classification, { securityCodeInFlight: true }),
+      { forward: true },
       classification,
     );
   }
+});
+
+test('every withhold reason is a machine token, not a sentence', () => {
+  const reasons = [
+    applicationEmailForwardingDecision('applicant_reply'),
+    applicationEmailForwardingDecision('verification_code', { securityCodeInFlight: true }),
+  ].map((decision) => (decision.forward ? '' : decision.reason));
+  for (const reason of reasons) {
+    assert.match(reason, /^[a-z][a-z0-9_]*$/, reason);
+  }
+});
+
+test('a one-time code is withheld only while a managed session is spending it', () => {
+  const now = new Date('2026-08-11T10:00:00.000Z');
+  const requestedAt = '2026-08-11T09:58:00.000Z';
+  assert.equal(
+    managedSessionIsConsumingSecurityCode(
+      { status: 'awaiting_security_code', security_code: { digits: 8, requested_at: requestedAt, submit_was_authorized: true } },
+      now,
+    ),
+    true,
+  );
+  assert.equal(
+    managedSessionIsConsumingSecurityCode(
+      { status: 'filling', verification: { status: 'verification_pending', requested_at: '2026-08-11T09:59:30.000Z' } },
+      now,
+    ),
+    true,
+  );
+  /* An hour later the run is over, whatever became of it. Nothing is racing her, and a code she
+   * cannot reach is a wall rather than a safeguard. */
+  assert.equal(
+    managedSessionIsConsumingSecurityCode(
+      { status: 'awaiting_security_code', security_code: { digits: 8, requested_at: '2026-08-11T08:30:00.000Z', submit_was_authorized: true } },
+      now,
+    ),
+    false,
+  );
+  // Not knowing is never a reason to withhold: no packet, no review, no recorded request.
+  assert.equal(managedSessionIsConsumingSecurityCode(null, now), false);
+  assert.equal(managedSessionIsConsumingSecurityCode(undefined, now), false);
+  assert.equal(managedSessionIsConsumingSecurityCode({ status: 'needs_attention' }, now), false);
+  assert.equal(managedSessionIsConsumingSecurityCode({ status: 'awaiting_security_code' }, now), false);
+  assert.equal(
+    managedSessionIsConsumingSecurityCode(
+      { status: 'awaiting_security_code', security_code: { digits: 8, requested_at: 'not a date', submit_was_authorized: true } },
+      now,
+    ),
+    false,
+  );
 });
 
 test('security codes and generic recruiter follow-ups are never promoted to interview mail', () => {
