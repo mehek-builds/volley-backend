@@ -1075,6 +1075,7 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you applied for work at Acme before?',
       'Did you apply for employment with Acme?',
       'Have you applied for work at this company?',
+      'Have you applied for employment at current company previously?',
       'Previous applicant',
     ];
     for (const label of priorLabels) {
@@ -1163,9 +1164,6 @@ describe('prior government employment, answered from the experience bank', () =>
         'Did you submit any applications for cooperative programs?',
         'Have you submitted an application for a permanent role?',
         'Have you applied for an internship with NASA?',
-        'Have you applied for summer employment?',
-        'Did you apply for contract work before?',
-        'Have you applied for remote work at Acme?',
         'Have you applied for senior analyst opportunities?',
         'Did you apply for an advanced fellowship?',
         'Have you applied for research school?',
@@ -1239,9 +1237,9 @@ describe('prior government employment, answered from the experience bank', () =>
         'Have you applied to the trading division?',
         'Did you apply to our research group?',
         'Have you applied to a regional office?',
-        'Have you applied to the product function?',
-        'Did you apply to another machine learning practice?',
-        'Have you applied to secure coding practices?',
+        'Have you applied to the corporate finance function?',
+        'Did you apply to the business secure coding practice?',
+        'Have you applied to the team activation functions?',
         'Have you applied to a subsidiary?',
         'Have you applied to an affiliate before?',
         'Did you apply to another regional location?',
@@ -1254,6 +1252,7 @@ describe('prior government employment, answered from the experience bank', () =>
         'Have you applied to the data science team in Boston?',
         'Did you apply to our research group at Acme?',
         'Have you applied to the engineering team based in Boston?',
+        'Have you applied to the engineering team located in Boston?',
         'Did you apply to the research division within Acme?',
         'Have you applied to the product office at Boston?',
       ]) {
@@ -1572,9 +1571,15 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you applied to a conference?',
       'Did you apply to the developer community?',
       'Did you apply to our local chapter?',
+      'Have you applied to the product function?',
+      'Did you apply to another machine learning practice?',
+      'Have you applied to secure coding practices?',
+      'Did you apply to activation functions?',
       'Have you applied to the data team in London?',
       'Did you apply to the research group at Other Corp?',
       'Have you applied to the engineering team based in London?',
+      'Have you applied to the engineering team located in London?',
+      'Have you applied to the sales group located in Acme?',
       'Did you apply to the research division within Other Corp?',
       'Have you applied for any machine learning methods before?',
       'Did you previously apply for data science?',
@@ -1584,6 +1589,11 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you applied for internship projects?',
       'Have you applied for a tax credit?',
       'Did you apply for the research grant?',
+      'Have you applied for summer employment?',
+      'Did you apply for contract work before?',
+      'Have you applied for employment insurance?',
+      'Did you apply for a work permit?',
+      'Did you apply for work-study assistance?',
       'Did you apply full time-series methods previously?',
       'Have you submitted applications for seasonal forecasting projects?',
       'Have you submitted any applications for summer forecasting projects?',
@@ -1617,6 +1627,23 @@ describe('prior government employment, answered from the experience bank', () =>
       ),
       [{ question: workAuthorizationApplication, answer: '' }],
     );
+    for (const downstreamApplicationLabel of [
+      'Have you applied for remote work at Acme?',
+      'Have you applied for work authorization?',
+    ]) {
+      assert.equal(isPriorApplicationQuestion(downstreamApplicationLabel), false, downstreamApplicationLabel);
+      const downstreamResolution = resolveKnownAnswer(downstreamApplicationLabel, 'text', profile, context);
+      assert.ok(downstreamResolution && 'skipReason' in downstreamResolution, downstreamApplicationLabel);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers(
+          [{ question: downstreamApplicationLabel, answer: 'stale' }],
+          profile,
+          context,
+        ),
+        [{ question: downstreamApplicationLabel, answer: '' }],
+        downstreamApplicationLabel,
+      );
+    }
   });
 
   test('unsupported named-employer history noun forms refuse and clear stale answers', () => {
