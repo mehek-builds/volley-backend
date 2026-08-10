@@ -2028,7 +2028,7 @@ function parsePriorApplicationQuestion(
       return { family: 'prior_application', valid: false };
     }
     if (/^(?:the|this|that|your|current)$/.test(determiner ?? '')) return null;
-    const packetObject = String.raw`(?:the|this|our) (?:application|role|position|job|company|employer)`;
+    const packetObject = String.raw`(?:(?:the|this|our) (?:application|role|position|job)|(?:the|this|our|current|the current) (?:company|employer|organization|firm))`;
     const globalObject = String.raw`(?:(?:an?|any) )?(?:application|role|job|company|employer)`;
     const completePacket = new RegExp(`^(?:(?:here|with us|to us|for us)(?: before| previously)?|(?:at|for|to|with) ${packetObject}(?: before| previously)?)$`).test(tailIdentity);
     const completeGlobal = new RegExp(`^(?:at|for|to|with) ${globalObject}(?: before| previously)?$`).test(tailIdentity);
@@ -2058,7 +2058,7 @@ function parsePriorApplicationQuestion(
   const remainder = normalizeIdentity(stem[1]?.trim() ?? '');
   const temporal = String.raw`(?:before|previously|in the past|within the last \d+(?: \d+)? months?)`;
   const targetFreeTemporal = /^(?:(?:have|had) you (?:ever|previously) applied|did you (?:ever|previously) apply|(?:ever|previously) applied)$/.test(normalizeIdentity(value));
-  const packetObject = String.raw`(?:the|this|our) (?:application|role|position|job|company|employer)`;
+  const packetObject = String.raw`(?:(?:the|this|our) (?:application|role|position|job)|(?:the|this|our|current|the current) (?:company|employer|organization|firm))`;
   const globalObject = String.raw`(?:(?:an?|any) )?(?:application|role|job|company|employer)`;
   const targetFreeRemainder = new RegExp(`^(?:before|previously|(?:here|with us|to us|for us)(?: before| previously)?|(?:at|for|to|with) ${packetObject}(?: before| previously)?)$`).test(remainder);
   const definiteApplicationObject = new RegExp(
@@ -2103,9 +2103,9 @@ function parsePriorApplicationQuestion(
     return { family: 'prior_application', valid: true, globalPriorApplicationHistory: true };
   }
   const packetEmploymentReference = (scope: string): boolean => (
-    /^(?:here|with us|at us|(?:at|with) (?:(?:our|this|current|the current) (?:company|employer|organization|firm)))$/.test(scope)
+    /^(?:here|with us|at us|for us|(?:at|with|for) (?:(?:our|this|current|the current) (?:company|employer|organization|firm)))$/.test(scope)
     || (packetEmployer
-      ? siblingEmployerAliases(packetEmployer).some((alias) => new RegExp(`^(?:at|with) ${regexpEscape(alias)}$`).test(scope))
+      ? siblingEmployerAliases(packetEmployer).some((alias) => new RegExp(`^(?:at|with|for) ${regexpEscape(alias)}$`).test(scope))
       : false)
   );
   const typedEmployment = employmentWithoutTemporal?.match(/^(.+)\s+(?:employment|work)(?:\s+(.+))?$/);
@@ -2127,7 +2127,7 @@ function parsePriorApplicationQuestion(
         ...(packetEmployer ? { target: canonicalSiblingEmployerIdentity(packetEmployer) } : {}),
       };
     }
-    if (/^(?:here|with us|at us|(?:at|with)\s+\S(?:.*\S)?)$/.test(employmentScope)) {
+    if (/^(?:here|with us|at us|for us|(?:at|with|for)\s+\S(?:.*\S)?)$/.test(employmentScope)) {
       return { family: 'prior_application', valid: false };
     }
     return null;
@@ -2156,13 +2156,15 @@ function parsePriorApplicationQuestion(
     const head = organizationalUnitObject[2];
     const preposition = organizationalUnitObject[3];
     const complement = organizationalUnitObject[4]?.trim();
-    const singularAmbiguousHead = /^(?:function|practice)$/.test(head);
-    const pluralAmbiguousHead = /^(?:functions|practices)$/.test(head);
     const unitPrefix = fullUnit.slice(0, -head.length).trim();
-    const boundedSingularModifier = unitPrefix && unitPrefix.split(/\s+/).length <= 6;
-    const explicitUnitContext = /\b(?:teams?|departments?|groups?|units?|divisions?|branch(?:es)?|affiliates?|entit(?:y|ies)|locations?|offices?|subsidiar(?:y|ies))\b/.test(unitPrefix);
-    if (singularAmbiguousHead && !boundedSingularModifier) return null;
-    if (pluralAmbiguousHead && !explicitUnitContext) return null;
+    if (/^(?:functions?|practices?)$/.test(head)) {
+      const boundedModifier = unitPrefix.split(/\s+/).length <= 6;
+      if (!boundedModifier) return null;
+      const technicalModifier = /\b(?:activation|loss|objective|mathematical|statistical|coding|secure coding|programming|api|database|algorithmic)\b/.test(unitPrefix);
+      if (technicalModifier) return null;
+      const organizationalModifier = /\b(?:consulting|product|business development|corporate|organizational|client services|advisory)\b/.test(unitPrefix);
+      if (!organizationalModifier) return null;
+    }
     if (!preposition) return { family: 'prior_application', valid: false };
     const locationTargets = frozenJobRelocationLocationsFromContext(jdText).flatMap((location) => {
       const city = location.split(',')[0]?.trim();
@@ -2174,8 +2176,10 @@ function parsePriorApplicationQuestion(
     );
     const validComplement = /^(?:located in|located at)$/.test(preposition)
       ? exactLocation
-      : /^(?:for|based at)$/.test(preposition)
+      : /^for$/.test(preposition)
         ? exactEmployer
+        : /^based at$/.test(preposition)
+          ? exactLocation || exactEmployer
         : exactLocation || exactEmployer;
     if (validComplement) return { family: 'prior_application', valid: false };
   }
