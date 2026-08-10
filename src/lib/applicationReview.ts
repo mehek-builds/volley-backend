@@ -308,6 +308,11 @@ export type ApplicationReviewState = {
   submission_run_id?: string;
   browser_context_id?: string;
   browser_session_id?: string;
+  /* The exact application-form URL observed by the managed runner when a network-reputation page
+   * stopped it. This is server evidence, not a URL supplied by the extension. SmartRecruiters uses
+   * an opaque publication UUID that cannot be derived from its public posting URL, so an attended
+   * refill may use this URL only when it exactly matches the form currently open in Chrome. */
+  extension_handoff_url?: string;
   attention_reason?: string;
   attention_categories?: ApplicationAttentionCategory[];
   /* The TYPED half of attention_reason, which is prose and always will be.
