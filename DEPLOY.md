@@ -55,6 +55,7 @@ Set these for Production (and Preview if you want):
 | Key | Value |
 |-----|-------|
 | `DATABASE_URL` | your Neon/Vercel Postgres **pooled** URL |
+| `POSTHOG_PROJECT_TOKEN` | public PostHog ingestion token (`phc_...`), the same one the website bundle ships. **Account-creation events are silently not sent without it**, by design, so the module is safe to deploy first and switch on after |
 | `DATABASE_DIRECT_URL` | optional direct, session-pinned Postgres URL; omit for Neon because it is derived from `DATABASE_URL` |
 | `JWT_SIGNING_SECRET` | any 32+ char random string |
 | `GOOGLE_CLIENT_ID` | Google OAuth web client ID, must match the website's `NEXT_PUBLIC_GOOGLE_CLIENT_ID` |

@@ -11,7 +11,7 @@ import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
 import { emailSender, sendEmail } from '../lib/email';
 import { requireAuth, type JWTPayload } from '../middleware/auth';
 import { withReadOnlyRetry } from '../db/readOnlyRetry';
-import { reportAccountCreated, reportSessionStarted } from '../lib/serverAnalytics';
+import { reportAccountCreated } from '../lib/serverAnalytics';
 import {
   hashPassword,
   normalizePassword,
@@ -347,8 +347,11 @@ export async function authRoutes(fastify: FastifyInstance) {
           authMethod: 'guest',
           sessionVersion: active.session_version,
         });
-        // An existing guest key returning: a session, not a new account.
-        reportSessionStarted(active.id, 'guest', fastify.log);
+        /* Deliberately NOT reported. This early return happens BEFORE the
+         * per-IP guard below, so anyone replaying one idempotency key could
+         * drive unlimited billable person-profile writes through an
+         * unauthenticated endpoint. Returning guests are countable from the
+         * database whenever they are actually wanted. */
         return reply.status(200).send({
           token,
           is_guest: true,
@@ -381,6 +384,13 @@ export async function authRoutes(fastify: FastifyInstance) {
         ?? (await db.select().from(users).where(eq(users.guest_key_hash, keyHash)).limit(1))[0];
       if (!guest) throw new Error('Guest creation did not return a user');
 
+      const token = await signSessionToken(guest.id, {
+        isGuest: true,
+        expiresAt: Math.floor((guest.guest_expires_at ?? guest_expires_at).getTime() / 1000),
+        authMethod: 'guest',
+        sessionVersion: guest.session_version,
+      });
+
       /* Report from the server, because the browser demonstrably does not.
        *
        * The site fires its own guest event and it has never arrived: eighteen
@@ -388,18 +398,24 @@ export async function authRoutes(fastify: FastifyInstance) {
        * of seven sampled creations had no PostHog traffic at all within three
        * minutes either side. See src/lib/serverAnalytics.ts.
        *
-       * `created[0]` is only populated on a real insert. onConflictDoNothing
-       * leaves it empty when the key already existed, in which case this is a
-       * returning guest and calling it a new account would inflate signups. */
-      if (created[0]) reportAccountCreated(guest.id, 'guest', fastify.log);
-      else reportSessionStarted(guest.id, 'guest', fastify.log);
+       * ORDER AND AWAIT ARE BOTH DELIBERATE.
+       *
+       * After signSessionToken, because that call can throw and land in the
+       * catch below as a 500. Reporting first would count accounts that the
+       * caller never received a session for, over-reporting on exactly the
+       * failures this number exists to expose.
+       *
+       * Awaited, because api/index.ts resolves the Vercel handler as soon as
+       * the response flushes and the platform may freeze the container at that
+       * point (see src/lib/serverlessRespond.ts, observed in production
+       * 2026-08-04). Work started here and not awaited is the work that gets
+       * frozen. The call cannot reject and is capped by its own timeout.
+       *
+       * `created[0]` is only populated on a real insert; onConflictDoNothing
+       * leaves it empty when the key already existed, and that is a returning
+       * guest, not a new account. */
+      if (created[0]) await reportAccountCreated(guest.id, 'guest', request.log);
 
-      const token = await signSessionToken(guest.id, {
-        isGuest: true,
-        expiresAt: Math.floor((guest.guest_expires_at ?? guest_expires_at).getTime() / 1000),
-        authMethod: 'guest',
-        sessionVersion: guest.session_version,
-      });
       return reply.status(201).send({
         token,
         is_guest: true,
