@@ -571,6 +571,14 @@ test('network reputation handoff is cross-ATS but never swallows real security g
     'Access is temporarily restricted. Sign-on verification is required.',
     'Access denied after unusual activity. Please verify you are human.',
     'Request blocked after unusual activity. Complete the human verification.',
+    'Access denied because automated traffic from this IP was flagged. Confirm you are a person to continue.',
+    'Request blocked because automated traffic from this IP was flagged. Complete the security check.',
+    'Access denied because automated traffic from this IP was flagged. Prove you are a real person.',
+    'Request blocked because automated traffic from this IP was flagged. Tick the checkbox to continue.',
+    'Access denied because automated traffic from this IP was flagged. Press and hold to continue.',
+    'Request blocked because automated traffic from this IP was flagged. Create an account to continue.',
+    'Access denied because automated traffic from this IP was flagged. Register to continue.',
+    'Request blocked because automated traffic from this IP was flagged. Continue with Google.',
   ]) {
     assert.deepEqual(attentionBlockersForManagedResult(
       'greenhouse',
@@ -578,6 +586,20 @@ test('network reputation handoff is cross-ATS but never swallows real security g
       { text: securityText },
       packet,
     ), ['CAPTCHA requires your attention'], securityText);
+  }
+
+  for (const networkOnlyText of [
+    'Access denied. Automated traffic from this IP address was flagged.',
+    'Request blocked because of automated traffic from this network.',
+  ]) {
+    const blockers = attentionBlockersForManagedResult(
+      'greenhouse',
+      ['CAPTCHA requires your attention'],
+      { text: networkOnlyText },
+      packet,
+    );
+    assert.equal(blockers.some((blocker) => /captcha requires/i.test(blocker)), false, networkOnlyText);
+    assert.match(blockers[0], /Open this application in Chrome/, networkOnlyText);
   }
 
   assert.deepEqual(attentionBlockersForManagedResult(
