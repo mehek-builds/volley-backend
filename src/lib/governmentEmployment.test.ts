@@ -1169,14 +1169,23 @@ describe('prior government employment, answered from the experience bank', () =>
       }
       for (const label of [
         'Submitted the application',
+        'Submitted this application',
+        'Submitted that application',
+        'Submitted your applications',
+        'Submitted current application',
         'Have you previously submitted the application?',
         'Did you submit the application before?',
+        'Have you applied for this application before?',
         'Have you applied for fellowships before?',
+        'Have you applied for a fellowship?',
         'Did you previously apply for apprenticeships?',
+        'Did you apply for an apprenticeship?',
         'Have you applied for graduate schemes in the past?',
+        'Have you applied for a graduate scheme?',
         'Have you ever applied for research residencies?',
+        'Have you applied for graduate school?',
+        'Have you applied for a co-op opportunity?',
         'Have you applied for a quantum fellowship previously?',
-        'Have you applied for any machine learning methods before?',
       ]) {
         const profile: ApplicationProfileLike = { prior_application_employers: [...declared] };
         const held = resolveKnownAnswer(label, 'text', profile, context);
@@ -1429,6 +1438,11 @@ describe('prior government employment, answered from the experience bank', () =>
       'Mobility details for relocating',
       'Have you previously applied machine learning methods?',
       'Did you apply ML practices before?',
+      'Have you applied for any machine learning methods before?',
+      'Did you previously apply for data science?',
+      'Have you applied for algorithms in the past?',
+      'Have you ever applied for research?',
+      'Have you applied for framework techniques before?',
       'Have you previously applied source code?',
       'Have you applied to the App Store?',
       'Have you previously submitted an application for machine learning methods?',
