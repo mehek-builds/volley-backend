@@ -1070,12 +1070,14 @@ export function profileBackedBlockerLabels(
   blockers: readonly string[],
   ap: ApplicationProfileLike,
   jdText?: string,
+  postingCountry?: JobCountry,
+  postingCountryCode?: string,
 ): string[] {
   const out: string[] = [];
   for (const blocker of blockers) {
     const label = blocker.match(REQUIRED_BLOCKER_RE)?.[1];
     if (!label) continue;
-    if (resolveProfileField({ label }, ap, jdText)) out.push(label);
+    if (resolveProfileField({ label }, ap, jdText, postingCountry, postingCountryCode)) out.push(label);
   }
   return [...new Set(out)];
 }

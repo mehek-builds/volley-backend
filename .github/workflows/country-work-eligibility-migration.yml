@@ -34,7 +34,7 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Apply country work eligibility schema
+      - name: Apply encrypted country work eligibility storage
         run: npm run db:country-work-eligibility
 
       - name: Prove schema and declarations agree

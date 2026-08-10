@@ -5,6 +5,7 @@ import {
   conservativeLegacyUsRecord,
   countryEligibilityForRead,
   countryWorkEligibilityListSchema,
+  normalizeCountryWorkEligibility,
   legacyUsProjection,
   namedCountryCode,
   type CountryWorkEligibility,
@@ -180,6 +181,23 @@ describe('exact-country resolver', () => {
       );
       assert.ok(held && 'skipReason' in held);
     }
+  });
+
+  test('one expired country is disabled while another valid country remains usable', () => {
+    const aged = [
+      { ...records[0], authorization_expiry: '2020-01-01' },
+      records[1],
+    ];
+    assert.deepEqual(normalizeCountryWorkEligibility(aged), [records[1]]);
+    const scopedProfile = { work_eligibility_by_country: aged } as ApplicationProfileLike;
+    assert.deepEqual(
+      resolveKnownAnswer('Are you authorized to work in the United Arab Emirates?', 'select', scopedProfile, undefined),
+      { value: 'Yes' },
+    );
+    const held = resolveKnownAnswer(
+      'Are you authorized to work in the United States?', 'select', scopedProfile, undefined,
+    );
+    assert.ok(held && 'skipReason' in held);
   });
 
   test('now is current-only while now or future uses both stored answers', () => {

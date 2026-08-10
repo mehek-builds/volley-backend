@@ -8,6 +8,7 @@ import {
   factString,
   factStringList,
   isUndefinedColumnError,
+  mayRetryWithoutFactColumns,
   withoutFactColumns,
 } from './applicationFacts';
 
@@ -336,6 +337,16 @@ describe('the reader survives the migration not having run', () => {
   test('a write can shed the fact columns without losing the established ones', () => {
     const values = { phone: '+971500000000', pronouns: 'she/her', accept_privacy_notices: true };
     assert.deepEqual(withoutFactColumns(values), { phone: '+971500000000' });
+  });
+
+  test('a required scoped column prevents any compatibility projection retry', () => {
+    const values = {
+      work_eligibility_by_country: 'encrypted',
+      work_authorized: true,
+      needs_sponsorship: false,
+    };
+    assert.equal(mayRetryWithoutFactColumns(values, ['work_eligibility_by_country']), false);
+    assert.equal(mayRetryWithoutFactColumns(values), true);
   });
 
   /* THE FALLBACK ONLY FIRES IF THE ERROR IS RECOGNISED, and for the whole life of this file it was

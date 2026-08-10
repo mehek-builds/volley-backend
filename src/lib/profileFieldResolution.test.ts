@@ -364,6 +364,21 @@ test('the guard stays honest: Class B fields the profile really does not hold ar
   assert.deepEqual(profileBackedBlockerLabels(classB.map((label) => describeRequiredBlocker(label)), STORED_PROFILE), []);
 });
 
+test('blocker diagnosis receives the exact posting country for scoped eligibility', () => {
+  const label = 'Will you require sponsorship?';
+  const blockers = [describeRequiredBlocker(label)];
+  const scoped = {
+    work_eligibility_by_country: [{
+      country_code: 'GB',
+      authorized_now: false,
+      needs_sponsorship_now: true,
+      needs_sponsorship_future: true,
+    }],
+  };
+  assert.deepEqual(profileBackedBlockerLabels(blockers, scoped, undefined, 'non_us', 'GB'), [label]);
+  assert.deepEqual(profileBackedBlockerLabels(blockers, scoped, undefined, 'non_us'), []);
+});
+
 test('an empty profile flags only what the resolver can answer without one', () => {
   const blockers = CLASS_A_LABELS.map((label) => describeRequiredBlocker(label));
   /* Every academic fact and the sponsorship boolean drop out, which proves the guard is reading the

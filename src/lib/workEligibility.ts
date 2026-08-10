@@ -32,7 +32,7 @@ export function authorizationExpiryIsCurrent(value: string, now: Date = new Date
  * worldwide answer. `authorization_type` and `authorization_expiry` are optional because many
  * applicants can truthfully answer the yes/no questions without either detail.
  */
-export const countryWorkEligibilitySchema = z.object({
+const storedCountryWorkEligibilitySchema = z.object({
   country_code: z.string().trim().toUpperCase().refine(isIsoCountryCode, 'Use an ISO 3166-1 alpha-2 country code'),
   authorized_now: z.boolean(),
   needs_sponsorship_now: z.boolean(),
@@ -47,18 +47,39 @@ export const countryWorkEligibilitySchema = z.object({
       message: 'Someone not authorized now must declare whether sponsorship is needed before starting',
     });
   }
-  if (row.authorization_expiry && !authorizationExpiryIsCurrent(row.authorization_expiry)) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ['authorization_expiry'],
-      message: 'Authorization expiry must be today or later',
-    });
-  }
   if (!row.authorized_now && row.authorization_expiry) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['authorization_expiry'],
       message: 'An inactive authorization cannot have a current expiry',
+    });
+  }
+});
+
+function uniqueCountryListSchema(recordSchema: typeof storedCountryWorkEligibilitySchema) {
+  return z.array(recordSchema).max(64).superRefine((rows, ctx) => {
+    const seen = new Set<string>();
+    rows.forEach((row, index) => {
+      if (seen.has(row.country_code)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index, 'country_code'],
+          message: 'Only one work eligibility record is allowed per country',
+        });
+      }
+      seen.add(row.country_code);
+    });
+  });
+}
+
+export const storedCountryWorkEligibilityListSchema = uniqueCountryListSchema(storedCountryWorkEligibilitySchema);
+
+export const countryWorkEligibilitySchema = storedCountryWorkEligibilitySchema.superRefine((row, ctx) => {
+  if (row.authorization_expiry && !authorizationExpiryIsCurrent(row.authorization_expiry)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['authorization_expiry'],
+      message: 'Authorization expiry must be today or later',
     });
   }
 });
@@ -80,9 +101,14 @@ export const countryWorkEligibilityListSchema = z.array(countryWorkEligibilitySc
 export type CountryWorkEligibility = z.infer<typeof countryWorkEligibilitySchema>;
 
 export function normalizeCountryWorkEligibility(value: unknown): CountryWorkEligibility[] | undefined {
-  const parsed = countryWorkEligibilityListSchema.safeParse(value);
+  // Stored declarations can age. One expired row becomes unavailable without invalidating another
+  // country's current declaration. Structural corruption and duplicate country keys still fail the
+  // entire encrypted payload because selecting either duplicate would be arbitrary.
+  const parsed = storedCountryWorkEligibilityListSchema.safeParse(value);
   if (!parsed.success) return undefined;
-  return parsed.data.map((row) => {
+  return parsed.data.filter((row) => (
+    !row.authorization_expiry || authorizationExpiryIsCurrent(row.authorization_expiry)
+  )).map((row) => {
     const normalized: CountryWorkEligibility = {
       country_code: row.country_code,
       authorized_now: row.authorized_now,
@@ -101,9 +127,7 @@ export function eligibilityForCountry(
 ): CountryWorkEligibility | undefined {
   const code = countryCode?.trim().toUpperCase();
   if (!isIsoCountryCode(code)) return undefined;
-  const parsed = countryWorkEligibilityListSchema.safeParse(rows);
-  if (!parsed.success) return undefined;
-  return parsed.data.find((row) => row.country_code === code);
+  return normalizeCountryWorkEligibility(rows)?.find((row) => row.country_code === code);
 }
 
 /** Existing scalar columns remain a US projection plus a temporary scalar-only client bridge. */

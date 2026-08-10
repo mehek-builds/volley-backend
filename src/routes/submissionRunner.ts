@@ -1809,6 +1809,8 @@ async function prepareManaged(
     blockers,
     applicationProfile,
     applicationContextForQuestionResolution(row, resolutionCurrent),
+    packet.roleCountry,
+    packet.roleCountryCode,
   );
   if (unattemptedProfileFields.length > 0) {
     fastify.log.error(

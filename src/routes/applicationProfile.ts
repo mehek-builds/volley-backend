@@ -3,12 +3,13 @@ import { z } from 'zod';
 import { application_profile } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { encryptField, decryptField, looksEncrypted, FieldDecryptError } from '../lib/fieldCrypto';
-import { selectApplicationProfileRow, upsertApplicationProfile, type ApplicationProfileRow } from '../lib/applicationFacts';
+import { isUndefinedColumnError, selectApplicationProfileRow, upsertApplicationProfile, type ApplicationProfileRow } from '../lib/applicationFacts';
 import {
-  countryEligibilityForRead,
   countryWorkEligibilityListSchema,
   legacyUsProjection,
+  normalizeCountryWorkEligibility,
 } from '../lib/workEligibility';
+import { persistProfileWithCountryEligibility } from '../lib/countryEligibilityPersistence';
 
 // Fields sensitive enough to encrypt at rest per PRD-v2 Section 4: phone/address/
 // work-authorization status. Links and referral_source are not identity-sensitive
@@ -144,7 +145,9 @@ export function applicationProfileWriteValues(body: z.infer<typeof bodySchema>) 
   const row: Record<string, unknown> = { ...body };
   if (Array.isArray(body.work_eligibility_by_country)) {
     const records = body.work_eligibility_by_country;
-    row.work_eligibility_by_country = records;
+    // The whole declaration is one authenticated envelope. Encrypting only type and expiry would
+    // still expose the same immigration claim through country and authorization booleans.
+    row.work_eligibility_by_country = encryptField(JSON.stringify(records));
     Object.assign(row, legacyUsProjection(records));
   } else {
     // Current extension builds round-trip the legacy scalar-only profile. Keep those writes until
@@ -192,12 +195,19 @@ export function decryptRow(row: ApplicationProfileRow) {
       out[field] = decryptField(value); // throws FieldDecryptError on a wrong or missing key
     }
   }
-  const eligibility = countryEligibilityForRead({
-    stored: out.work_eligibility_by_country,
-    work_authorized: typeof out.work_authorized === 'boolean' ? out.work_authorized : null,
-    needs_sponsorship: typeof out.needs_sponsorship === 'boolean' ? out.needs_sponsorship : null,
-  });
-  if (eligibility !== undefined) out.work_eligibility_by_country = eligibility;
+  const storedEligibility = out.work_eligibility_by_country;
+  if (typeof storedEligibility === 'string' && storedEligibility.length > 0) {
+    try {
+      const plaintext = looksEncrypted(storedEligibility) ? decryptField(storedEligibility) : storedEligibility;
+      out.work_eligibility_by_country = normalizeCountryWorkEligibility(JSON.parse(plaintext)) ?? [];
+    } catch (error) {
+      if (error instanceof FieldDecryptError) throw error;
+      // Corrupt or duplicate scoped data is authoritative but unusable. Never synthesize a hidden
+      // scoped key from the legacy scalars in this path: scalar-only extension GET-edit-PUT must
+      // round-trip exactly the contract it understands.
+      out.work_eligibility_by_country = [];
+    }
+  }
   return out;
 }
 
@@ -252,7 +262,10 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
     const encrypted = { ...applicationProfileWriteValues(body), ...attestationConsentStamp(body) };
 
     try {
-      const { droppedFactColumns } = await upsertApplicationProfile(userId, encrypted);
+      const scopedRecords = body.work_eligibility_by_country;
+      const { droppedFactColumns } = Array.isArray(scopedRecords)
+        ? (await persistProfileWithCountryEligibility(userId, encrypted, scopedRecords), { droppedFactColumns: false })
+        : await upsertApplicationProfile(userId, encrypted);
       if (droppedFactColumns) {
         fastify.log.warn(
           { userId },
@@ -263,6 +276,9 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
         }
       }
     } catch (err) {
+      if (Array.isArray(body.work_eligibility_by_country) && isUndefinedColumnError(err)) {
+        return reply.status(503).send({ error: 'Country work eligibility is being enabled. Try again shortly.' });
+      }
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to save application profile' });
     }

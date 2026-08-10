@@ -10,13 +10,11 @@ import {
   type SponsorshipAnswer,
 } from '../lib/sponsorship';
 import { H1B_EMPLOYERS, H1B_FISCAL_YEARS, H1B_SOURCE, LCA_QUARTERS, LCA_SOURCE } from '../lib/sponsorEmployers';
-import { upsertApplicationProfile } from '../lib/applicationFacts';
 import {
   countryWorkEligibilityListSchema,
-  eligibilityForCountry,
-  legacyUsProjection,
-  type CountryWorkEligibility,
 } from '../lib/workEligibility';
+import { persistProfileWithCountryEligibility } from '../lib/countryEligibilityPersistence';
+import { isUndefinedColumnError } from '../lib/applicationFacts';
 
 /**
  * THE VISA-SPONSORSHIP DECLARATION AND THE FILTER IT TURNS ON.
@@ -45,13 +43,6 @@ const scopedEligibilitySchema = z.object({
     message: 'Add at least one country',
   }),
 });
-
-function legacyAnswerForUs(record: CountryWorkEligibility): SponsorshipAnswer {
-  if (record.needs_sponsorship_now) return 'needs_now';
-  if (record.needs_sponsorship_future) return 'needs_future';
-  if (!record.authorized_now) return 'not_authorized';
-  return 'no';
-}
 
 type AccountRow = {
   declared: boolean | null;
@@ -104,24 +95,12 @@ export async function sponsorshipRoutes(fastify: FastifyInstance) {
     if (!account) return reply.status(404).send({ error: 'No such user' });
     const records = parsed.data.records;
     try {
-      const saved = await upsertApplicationProfile(userId, {
-        work_eligibility_by_country: records,
-        ...legacyUsProjection(records),
-      });
-      if (saved.droppedFactColumns) {
-        return reply.status(503).send({ error: 'Country work eligibility is being enabled. Try again shortly.' });
-      }
-      const us = eligibilityForCountry(records, 'US');
-      if (us && account.declared_at === null) {
-        const answer = legacyAnswerForUs(us);
-        await db.update(users).set({
-          sponsorship_required_at_onboarding: answerRequiresSponsorship(answer),
-          sponsorship_declared_at: new Date(),
-          sponsorship_answer: answer,
-        }).where(and(eq(users.id, userId), isNull(users.sponsorship_declared_at)));
-      }
+      await persistProfileWithCountryEligibility(userId, {}, records);
       return reply.send({ records });
     } catch (error) {
+      if (isUndefinedColumnError(error)) {
+        return reply.status(503).send({ error: 'Country work eligibility is being enabled. Try again shortly.' });
+      }
       fastify.log.error(error);
       return reply.status(500).send({ error: 'Failed to save work eligibility' });
     }

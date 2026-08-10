@@ -49,8 +49,8 @@ export const APPLICATION_FACT_COLUMNS = [
   'availability_window_end',
   'availability_cycle',
   'availability_valid_through',
-  // Added by scripts/apply-country-work-eligibility-schema.mjs. Until that migration lands, a
-  // read falls back to the old US columns and every non-US country remains unknown.
+  // Schema-only prerequisite for the encrypted country declaration. Feature readers and writers
+  // land separately after this column is migrated, so old deploys must tolerate it being absent.
   'work_eligibility_by_country',
 ] as const;
 
@@ -133,6 +133,13 @@ export function withoutFactColumns<T extends Record<string, unknown>>(values: T)
   return out as Partial<T>;
 }
 
+export function mayRetryWithoutFactColumns(
+  values: Record<string, unknown>,
+  required: readonly ApplicationFactColumn[] = [],
+): boolean {
+  return !required.some((column) => Object.prototype.hasOwnProperty.call(values, column));
+}
+
 /**
  * Upsert an application_profile row, retrying without the fact columns if they do not exist yet.
  *
@@ -144,6 +151,7 @@ export function withoutFactColumns<T extends Record<string, unknown>>(values: T)
 export async function upsertApplicationProfile(
   userId: string,
   values: Record<string, unknown>,
+  options: { requireFactColumns?: readonly ApplicationFactColumn[] } = {},
 ): Promise<{ droppedFactColumns: boolean }> {
   const write = async (payload: Record<string, unknown>) => {
     await db
@@ -159,6 +167,11 @@ export async function upsertApplicationProfile(
     return { droppedFactColumns: false };
   } catch (error) {
     if (!isUndefinedColumnError(error)) throw error;
+    if (!mayRetryWithoutFactColumns(values, options.requireFactColumns)) {
+      // A required new column and its compatibility projections are one logical write. Retrying
+      // without the new column would commit only the legacy booleans and then report failure.
+      throw error;
+    }
     const stripped = withoutFactColumns(values);
     // Nothing left to write means the request was ONLY new answers, so there is no partial save to
     // salvage; let the caller's 500 stand rather than report a success that wrote nothing.

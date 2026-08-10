@@ -12,7 +12,7 @@ import {
 } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { decryptField } from '../lib/fieldCrypto';
-import { ENCRYPTED_FIELDS } from './applicationProfile';
+import { decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
 import { AUTOMATIC_CAPTCHA_CONSENT_VERSION, AUTOMATIC_SUBMISSION_CONSENT_VERSION, automationConsentValues, captchaResumeGranted } from '../lib/automationConsent';
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
 import { generated_resumes } from '../db/schema';
@@ -119,13 +119,11 @@ export function hasFiveTargetRoles(parsed: { target_roles?: unknown } | null | u
 }
 
 export function hasWorkEligibilityDeclaration(input: {
-  sponsorship_declared_at?: Date | string | null;
   sponsorship_answer?: unknown;
   work_eligibility_by_country?: unknown;
   work_authorized?: boolean | null;
   needs_sponsorship?: boolean | null;
 }): boolean {
-  if (input.sponsorship_declared_at != null) return true;
   return (countryEligibilityForRead({
     stored: input.work_eligibility_by_country,
     work_authorized: input.work_authorized,
@@ -325,10 +323,10 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
        postings they cannot take and then quietly removing them.
        Derived from the timestamp, not from the boolean: "no, I do not need sponsorship" is a real
        answer that stores `false`, and gating on the boolean would ask that person again forever. */
+    const readableEligibilityProfile = appProfile ? decryptRow(appProfile) : undefined;
     const has_sponsorship_answer = hasWorkEligibilityDeclaration({
-      sponsorship_declared_at: user.sponsorship_declared_at,
       sponsorship_answer: user.sponsorship_answer,
-      work_eligibility_by_country: appProfile?.work_eligibility_by_country,
+      work_eligibility_by_country: readableEligibilityProfile?.work_eligibility_by_country,
       work_authorized: appProfile?.work_authorized,
       needs_sponsorship: appProfile?.needs_sponsorship,
     });
@@ -415,6 +413,20 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     if (!gate.ok) return reply.status(gate.status).send(gate.body);
     const verificationProblem = await verificationConnectionProblem(userId, parsed.data);
     if (verificationProblem) return reply.status(verificationProblem.status).send({ error: verificationProblem.error });
+
+    const [[eligibilityUser], eligibilityRow] = await Promise.all([
+      db.select({ sponsorship_answer: users.sponsorship_answer }).from(users).where(eq(users.id, userId)).limit(1),
+      selectApplicationProfileRow(userId),
+    ]);
+    const readableEligibility = eligibilityRow ? decryptRow(eligibilityRow) : undefined;
+    if (!hasWorkEligibilityDeclaration({
+      sponsorship_answer: eligibilityUser?.sponsorship_answer,
+      work_eligibility_by_country: readableEligibility?.work_eligibility_by_country,
+      work_authorized: eligibilityRow?.work_authorized,
+      needs_sponsorship: eligibilityRow?.needs_sponsorship,
+    })) {
+      return reply.status(409).send({ error: 'Complete work eligibility before finishing setup.' });
+    }
 
     try {
       const now = new Date();

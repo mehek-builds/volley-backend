@@ -158,8 +158,8 @@ describe('country-scoped work eligibility onboarding', () => {
     }), true);
   });
 
-  test('a legacy declaration timestamp remains compatible', () => {
-    assert.equal(hasWorkEligibilityDeclaration({ sponsorship_declared_at: '2026-08-10T00:00:00Z' }), true);
+  test('a declaration timestamp without a safe answer does not complete onboarding', () => {
+    assert.equal(hasWorkEligibilityDeclaration({}), false);
   });
 });
 
