@@ -1061,6 +1061,25 @@ describe('prior government employment, answered from the experience bank', () =>
       'Did you apply here?',
       'Ever applied',
       'Applied here',
+      'Have you applied here previously?',
+      'Did you apply here before?',
+      'Did you apply here previously?',
+      'Have you applied to us previously?',
+      'Did you apply to us before?',
+      'Did you apply to us previously?',
+      'Have you applied with us previously?',
+      'Did you apply with us before?',
+      'Did you apply with us previously?',
+      'Have you applied for us before?',
+      'Did you apply for us previously?',
+      'Have you submitted an application?',
+      'Have you ever submitted an application?',
+      'Have you previously submitted an application?',
+      'Did you submit an application?',
+      'Did you ever submit an application?',
+      'Submitted an application',
+      'Submitted an application before',
+      'Previous applicant',
     ];
     for (const label of priorLabels) {
       assert.equal(isPriorApplicationQuestion(label), true, label);
@@ -1102,10 +1121,12 @@ describe('prior government employment, answered from the experience bank', () =>
       'Source',
       'Application referral',
       'How did you find us?',
+      'How did you find out about us?',
+      'How did you discover us?',
     ];
     for (const label of referralLabels) {
       const profile: ApplicationProfileLike = { referral_source_default: 'LinkedIn' };
-      const packetBound = /^(?:Referral|Source|Application referral|How did you find us\?)$/i.test(label)
+      const packetBound = /^(?:Referral|Source|Application referral|How did you (?:find(?: out about)?|discover) us\?)$/i.test(label)
         || /this employer/i.test(label);
       assert.equal(classifyField(label), packetBound ? null : 'referral_source_default', label);
       assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: 'LinkedIn' }, label);
@@ -1158,6 +1179,8 @@ describe('prior government employment, answered from the experience bank', () =>
       'Would you be open to move to Boston?',
       'Open to move to Boston',
       'Able to move to Boston',
+      'Will you move to Boston?',
+      'Relocation',
     ];
     for (const label of relocationLabels) {
       const profile: ApplicationProfileLike = { relocation_willingness: 'yes' };
@@ -1174,6 +1197,15 @@ describe('prior government employment, answered from the experience bank', () =>
         assert.ok(held && 'skipReason' in held, label);
         assert.deepEqual(
           refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], profile, wrongContext),
+          [{ question: label, answer: '' }],
+          label,
+        );
+      }
+      if (label === 'Relocation') {
+        const unbound = resolveKnownAnswer(label, 'text', profile, undefined);
+        assert.ok(unbound && 'skipReason' in unbound, label);
+        assert.deepEqual(
+          refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], profile, undefined),
           [{ question: label, answer: '' }],
           label,
         );
@@ -1208,6 +1240,12 @@ describe('prior government employment, answered from the experience bank', () =>
       'Are you open to moving to Boston work weekends',
       'Would you be able to move to Boston start immediately',
       'Could you relocate to Boston travel 50 percent',
+      'Submitted an application please explain the outcome',
+      'Previous applicant describe your prior application',
+      'How did you find out about us and who referred you',
+      'How did you discover us please explain',
+      'Will you move to Boston and work weekends',
+      'Relocation explain your answer',
     ];
     const profile: ApplicationProfileLike = {
       prior_application_employers: ['Acme'],
@@ -1222,6 +1260,31 @@ describe('prior government employment, answered from the experience bank', () =>
         [{ question: label, answer: '' }],
         label,
       );
+    }
+
+    const unrecognizedSiblingIntent = [
+      'Prior application details',
+      'How were you referred to us?',
+      'Who referred you and in what capacity?',
+      'Would moving to Boston affect your availability?',
+      'Relocation preference details',
+    ];
+    for (const label of unrecognizedSiblingIntent) {
+      const held = resolveKnownAnswer(label, 'text', profile, context);
+      assert.ok(held && 'skipReason' in held, label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
+        [{ question: label, answer: '' }],
+        label,
+      );
+    }
+    for (const unrelated of [
+      'Source code experience',
+      'Relocation assistance benefit',
+      'Application support systems experience',
+    ]) {
+      const resolved = resolveKnownAnswer(unrelated, 'text', profile, context);
+      assert.equal(resolved, null, unrelated);
     }
   });
 

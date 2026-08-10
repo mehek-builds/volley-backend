@@ -1877,18 +1877,35 @@ function parsePriorApplicationQuestion(
   jdText?: string,
 ): ParsedSiblingQuestion | null {
   const value = normalizedSiblingQuestionLabel(label);
+  const packetEmployer = frozenJobEmployerFromContext(jdText);
+  const previousApplicant = value.match(/^previous applicant\b(.*)$/i);
+  if (previousApplicant) {
+    return {
+      family: 'prior_application',
+      valid: !previousApplicant[1]?.trim() && Boolean(packetEmployer),
+      ...(packetEmployer ? { target: canonicalSiblingEmployerIdentity(packetEmployer) } : {}),
+    };
+  }
+  const submissionStem = value.match(/^(?:(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?submitted|did\s+you\s+(?:(?:ever|previously)\s+)?submit|(?:(?:ever|previously)\s+)?submitted)\s+an\s+application\b(.*)$/i);
+  if (submissionStem) {
+    const complete = /^(?:before|previously)?$/i.test(submissionStem[1]?.trim() ?? '');
+    return {
+      family: 'prior_application',
+      valid: complete && Boolean(packetEmployer),
+      ...(packetEmployer ? { target: canonicalSiblingEmployerIdentity(packetEmployer) } : {}),
+    };
+  }
   const stem = value.match(/^(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?applied\b\s*(.*)$/i)
     ?? value.match(/^did\s+you\s+(?:(?:ever|previously)\s+)?apply\b\s*(.*)$/i)
     ?? value.match(/^(?:(?:ever|previously)\s+)?applied\b\s*(.*)$/i);
   if (!stem) return null;
   const remainder = normalizeIdentity(stem[1]?.trim() ?? '');
   const temporal = String.raw`(?:before|previously|in the past|within the last \d+(?: \d+)? months?)`;
-  const packetEmployer = frozenJobEmployerFromContext(jdText);
   const targetFreeTemporal = /^(?:(?:have|had) you (?:ever|previously) applied|did you (?:ever|previously) apply|(?:ever|previously) applied)$/.test(normalizeIdentity(value));
   if (
     packetEmployer
     && (
-      /^(?:before|previously|here(?: before)?|with us before|for this company|to this role before|to (?:this company|us|this employer)(?: before)?)$/.test(remainder)
+      /^(?:before|previously|(?:here|with us|to us|for us)(?: before| previously)?|for this company|to this role before|to (?:this company|this employer)(?: before| previously)?)$/.test(remainder)
       || targetFreeTemporal
     )
   ) {
@@ -1915,7 +1932,7 @@ function parsePriorApplicationQuestion(
 
 function parseReferralQuestion(label: string, jdText?: string): ParsedSiblingQuestion | null {
   const value = normalizedSiblingQuestionLabel(label);
-  const find = value.match(/^how\s+did\s+you\s+find\b\s*(.*)$/i);
+  const find = value.match(/^how\s+did\s+you\s+(?:find(?:\s+out\s+about)?|discover)\b\s*(.*)$/i);
   if (find) {
     return {
       family: 'referral',
@@ -1927,7 +1944,10 @@ function parseReferralQuestion(label: string, jdText?: string): ParsedSiblingQue
     const complete = /^(?:(?:your|the) )?(?:referral|application) source$|^source of (?:(?:your|the) )?application$/i.test(value);
     return { family: 'referral', valid: complete };
   }
-  const packetBoundBare = value.match(/^(source|application referral)\b(.*)$/i);
+  if (/^source$/i.test(value)) {
+    return { family: 'referral', valid: Boolean(frozenJobEmployerFromContext(jdText)) };
+  }
+  const packetBoundBare = value.match(/^(application referral)\b(.*)$/i);
   if (packetBoundBare) {
     return {
       family: 'referral',
@@ -1962,7 +1982,13 @@ function parseReferralQuestion(label: string, jdText?: string): ParsedSiblingQue
 
 function parseRelocationQuestion(label: string, jdText?: string): ParsedSiblingQuestion | null {
   const value = normalizedSiblingQuestionLabel(label);
-  const regular = value.match(/^(?:(?:are|would|will|can|could)\s+you\s+(?:be\s+)?(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*|(?:are|would|could)\s+you\s+(?:be\s+)?(?:willing|able|prepared|open)\s+to\s+mov(?:e|ing)|(?:can|could)\s+you\s+move|(?:open|able|willing|prepared)\s+to\s+mov(?:e|ing)|(?:would|could)\s+you\s+consider\s+relocat\w*|are\s+you\s+comfortable\s+(?:with\s+)?relocat\w*|do\s+you\s+agree\s+to\s+relocate|do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move)|open\s+to\s+relocation|willingness\s+to\s+relocate|willing\s+to\s+relocate|able\s+to\s+relocate|relocation\s+willingness)\b\s*(.*)$/i);
+  if (/^relocation$/i.test(value)) {
+    return { family: 'relocation', valid: Boolean(frozenJobEmployerFromContext(jdText)) };
+  }
+  if (/^relocation\s+(?:please|explain|describe|why|how|and)\b/i.test(value)) {
+    return { family: 'relocation', valid: false };
+  }
+  const regular = value.match(/^(?:(?:are|would|will|can|could)\s+you\s+(?:be\s+)?(?:(?:willing|able|prepared|open)\s+to\s+)?relocat\w*|(?:are|would|could)\s+you\s+(?:be\s+)?(?:willing|able|prepared|open)\s+to\s+mov(?:e|ing)|(?:will|can|could)\s+you\s+move|(?:open|able|willing|prepared)\s+to\s+mov(?:e|ing)|(?:would|could)\s+you\s+consider\s+relocat\w*|are\s+you\s+comfortable\s+(?:with\s+)?relocat\w*|do\s+you\s+agree\s+to\s+relocate|do\s+you\s+(?:plan|intend|expect)\s+to\s+(?:relocate|move)|open\s+to\s+relocation|willingness\s+to\s+relocate|willing\s+to\s+relocate|able\s+to\s+relocate|relocation\s+willingness)\b\s*(.*)$/i);
   const gerund = value.match(/^would\s+relocating\b\s*(.*)$/i);
   if (!regular && !gerund) return null;
   let detail = (regular?.[1] ?? gerund?.[1] ?? '').trim();
@@ -1993,7 +2019,32 @@ function parseSiblingQuestion(
 ): ParsedSiblingQuestion | null {
   return parsePriorApplicationQuestion(label, jdText)
     ?? parseReferralQuestion(label, jdText)
-    ?? parseRelocationQuestion(label, jdText);
+    ?? parseRelocationQuestion(label, jdText)
+    ?? classifyUnrecognizedSiblingIntent(label);
+}
+
+/** Fail closed only for labels whose complete leading grammar establishes a sibling intent.
+ * Incidental words inside employment subjects, source-code fields, or relocation benefits remain
+ * outside these families, while a newly worded application-history question cannot retain stale
+ * data merely because its exact safe grammar has not been added yet. */
+function classifyUnrecognizedSiblingIntent(label: string): ParsedSiblingQuestion | null {
+  const value = normalizeIdentity(normalizedSiblingQuestionLabel(label));
+  if (
+    /^(?:(?:have|had|did) you\b.{0,80}\b(?:apply|applied)\b|(?:have|had|did) you\b.{0,80}\b(?:submit|submitted) an application\b|(?:ever|previously) (?:applied|submitted an application)\b|previous applicant\b|prior application (?:details|history|status|information|notes)\b)/.test(value)
+  ) {
+    return { family: 'prior_application', valid: false };
+  }
+  if (
+    /^(?:referral\b|application referral\b|(?:how|where) (?:did|were|was|have) you\b.{0,80}\b(?:hear|learn|find|discover|refer\w*)\b|who referred you\b|what (?:is|was)\b.{0,40}\breferral source\b|source (?:please|explain|describe|why|how|who|and)\b)/.test(value)
+  ) {
+    return { family: 'referral', valid: false };
+  }
+  if (
+    /^(?:(?:are|would|will|can|could|do) you\b.{0,80}\b(?:relocat\w*|move|moving)\b|would (?:moving|relocating)\b|(?:open|able|willing|prepared) to (?:relocat\w*|move|moving)\b|willingness to relocate\b|relocation willingness\b|relocation (?:preference|details|instructions|comments|notes)\b)/.test(value)
+  ) {
+    return { family: 'relocation', valid: false };
+  }
+  return null;
 }
 
 export function isPriorApplicationQuestion(label: string): boolean {
