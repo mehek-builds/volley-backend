@@ -11,6 +11,7 @@ import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
 import { emailSender, sendEmail } from '../lib/email';
 import { requireAuth, type JWTPayload } from '../middleware/auth';
 import { withReadOnlyRetry } from '../db/readOnlyRetry';
+import { reportAccountCreated } from '../lib/serverAnalytics';
 import {
   hashPassword,
   normalizePassword,
@@ -346,6 +347,11 @@ export async function authRoutes(fastify: FastifyInstance) {
           authMethod: 'guest',
           sessionVersion: active.session_version,
         });
+        /* Deliberately NOT reported. This early return happens BEFORE the
+         * per-IP guard below, so anyone replaying one idempotency key could
+         * drive unlimited billable person-profile writes through an
+         * unauthenticated endpoint. Returning guests are countable from the
+         * database whenever they are actually wanted. */
         return reply.status(200).send({
           token,
           is_guest: true,
@@ -384,6 +390,32 @@ export async function authRoutes(fastify: FastifyInstance) {
         authMethod: 'guest',
         sessionVersion: guest.session_version,
       });
+
+      /* Report from the server, because the browser demonstrably does not.
+       *
+       * The site fires its own guest event and it has never arrived: eighteen
+       * guest accounts since 31 July, zero guest sign-ins in PostHog, and five
+       * of seven sampled creations had no PostHog traffic at all within three
+       * minutes either side. See src/lib/serverAnalytics.ts.
+       *
+       * ORDER AND AWAIT ARE BOTH DELIBERATE.
+       *
+       * After signSessionToken, because that call can throw and land in the
+       * catch below as a 500. Reporting first would count accounts that the
+       * caller never received a session for, over-reporting on exactly the
+       * failures this number exists to expose.
+       *
+       * Awaited, because api/index.ts resolves the Vercel handler as soon as
+       * the response flushes and the platform may freeze the container at that
+       * point (see src/lib/serverlessRespond.ts, observed in production
+       * 2026-08-04). Work started here and not awaited is the work that gets
+       * frozen. The call cannot reject and is capped by its own timeout.
+       *
+       * `created[0]` is only populated on a real insert; onConflictDoNothing
+       * leaves it empty when the key already existed, and that is a returning
+       * guest, not a new account. */
+      if (created[0]) await reportAccountCreated(guest.id, 'guest', request.log);
+
       return reply.status(201).send({
         token,
         is_guest: true,
