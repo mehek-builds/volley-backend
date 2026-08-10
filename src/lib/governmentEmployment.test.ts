@@ -1167,6 +1167,26 @@ describe('prior government employment, answered from the experience bank', () =>
           label,
         );
       }
+      for (const label of [
+        'Submitted the application',
+        'Have you previously submitted the application?',
+        'Did you submit the application before?',
+        'Have you applied for fellowships before?',
+        'Did you previously apply for apprenticeships?',
+        'Have you applied for graduate schemes in the past?',
+        'Have you ever applied for research residencies?',
+        'Have you applied for a quantum fellowship previously?',
+        'Have you applied for any machine learning methods before?',
+      ]) {
+        const profile: ApplicationProfileLike = { prior_application_employers: [...declared] };
+        const held = resolveKnownAnswer(label, 'text', profile, context);
+        assert.ok(held && 'skipReason' in held, label);
+        assert.deepEqual(
+          refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], profile, context),
+          [{ question: label, answer: '' }],
+          label,
+        );
+      }
     }
 
     const referralLabels = [
@@ -1190,6 +1210,8 @@ describe('prior government employment, answered from the experience bank', () =>
       'Where did you discover this job?',
       'Where did you first find this job?',
       'How did you first discover this job?',
+      'How did you first become aware of this job?',
+      'Where did you first come across this opportunity?',
       'How did you become aware of this vacancy?',
       'Where did you come across this opening?',
       'How were you made aware of this job?',
@@ -1410,7 +1432,6 @@ describe('prior government employment, answered from the experience bank', () =>
       'Have you previously applied source code?',
       'Have you applied to the App Store?',
       'Have you previously submitted an application for machine learning methods?',
-      'Have you applied for any machine learning methods before?',
       'Have you previously submitted an application for any project?',
       'Have you applied for internship projects?',
       'Did you apply full time-series methods previously?',

@@ -1951,10 +1951,15 @@ function parsePriorApplicationQuestion(
       ...(packetEmployer ? { target: canonicalSiblingEmployerIdentity(packetEmployer) } : {}),
     };
   }
-  const submissionStem = value.match(/^(?:(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?submitted|did\s+you\s+(?:(?:ever|previously)\s+)?submit|(?:(?:ever|previously)\s+)?submitted)\s+(?:(?:an?|any|the)\s+)?applications?\b(.*)$/i);
+  const submissionStem = value.match(/^(?:(?:have|had)\s+you\s+(?:(?:ever|previously)\s+)?submitted|did\s+you\s+(?:(?:ever|previously)\s+)?submit|(?:(?:ever|previously)\s+)?submitted)\s+(?:(an?|any|the)\s+)?(applications?)\b(.*)$/i);
   if (submissionStem) {
-    const tail = submissionStem[1]?.trim() ?? '';
+    const determiner = submissionStem[1]?.toLowerCase();
+    const noun = submissionStem[2]?.toLowerCase();
+    const tail = submissionStem[3]?.trim() ?? '';
     const tailIdentity = normalizeIdentity(tail);
+    if (determiner === 'the' && noun === 'application') {
+      return { family: 'prior_application', valid: false };
+    }
     const packetObject = String.raw`(?:the|this|our) (?:application|role|position|job|company|employer)`;
     const globalObject = String.raw`(?:an?|any) (?:role|position|job|company|employer)`;
     const completePacket = new RegExp(`^(?:(?:here|with us|to us|for us)(?: before| previously)?|(?:at|for|to|with) ${packetObject}(?: before| previously)?)$`).test(tailIdentity);
@@ -2025,6 +2030,12 @@ function parsePriorApplicationQuestion(
       target: canonicalSiblingEmployerIdentity(packetEmployer),
     };
   }
+  const priorObject = /^(?:at|for|to|with)\s+\S/.test(remainder);
+  const temporalObject = /\s+(?:before|previously|in the past|within the last \d+(?: \d+)? months?)$/.test(remainder)
+    || /^(?:(?:have|had) you (?:ever|previously) applied|did you (?:ever|previously) apply|(?:ever|previously) applied)\b/.test(normalizeIdentity(value));
+  if (priorObject && temporalObject) {
+    return { family: 'prior_application', valid: false };
+  }
   const aliases = packetEmployer ? siblingEmployerAliases(packetEmployer) : [];
   const recognizedObjectPrefix = new RegExp(String.raw`^(?:before|previously|here|with us|to us|for us|to work (?:at|for)|(?:at|for|to|with) (?:${packetObject}|${globalObject}))\b`).test(remainder)
     || aliases.some((alias) => new RegExp(String.raw`^(?:at|for|to|with) ${regexpEscape(alias)}\b`).test(remainder))
@@ -2041,7 +2052,7 @@ function parseReferralQuestion(label: string, jdText?: string): ParsedSiblingQue
       && /\b(?:experience|skills?|expertise|knowledge|analytics|program|systems?|software|code)\b/i.test(value))) {
     return null;
   }
-  const discovery = value.match(/^(?:how|where)\s+did\s+you\s+(?:become\s+aware\s+of|come\s+across)\b\s*(.*)$/i)
+  const discovery = value.match(/^(?:how|where)\s+did\s+you\s+(?:first\s+)?(?:become\s+aware\s+of|come\s+across)\b\s*(.*)$/i)
     ?? value.match(/^how\s+were\s+you\s+made\s+aware\s+of\b\s*(.*)$/i);
   if (discovery) {
     const target = discovery[1]?.trim() ?? '';
