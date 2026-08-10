@@ -43,6 +43,7 @@ import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } fro
 import { sharedRankingConfigured } from './lib/rankingCache';
 import { resolveBuild, resolveRevision } from './lib/buildInfo';
 import { dashboardBootstrapRoutes } from './routes/dashboardBootstrap';
+import { portalCredentialRoutes } from './routes/portalCredentials';
 import { configuredAtsSubmissionChannels } from './lib/atsSubmissionChannels';
 import { applicationEmailHealth } from './lib/applicationEmail';
 import { applicationEmailRouteSelection } from './lib/applicationEmailRoute';
@@ -331,6 +332,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(resumeRetentionRoutes);
   await fastify.register(adapterHealthRoutes);
   await fastify.register(dashboardBootstrapRoutes);
+  await fastify.register(portalCredentialRoutes);
 
   // Global error handler
   fastify.setErrorHandler((error, _request, reply) => {

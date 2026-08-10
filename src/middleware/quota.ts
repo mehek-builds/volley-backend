@@ -44,6 +44,11 @@ export const LIMITS = {
        student reading a day's packets opens many and the cache makes most of them free; this is
        here to stop a loop, not to ration ordinary use. */
     jdRequirements: parseInt(process.env.RATE_JD_REQUIREMENTS_PER_HOUR || '60', 10),
+    /* Reading back a stored employer-portal password. Sized to be generous for the real use (open
+       the portal, copy the password, occasionally re-copy it) and mean to anything that wants to
+       walk a session's credentials in bulk. Every reveal is also counted on the row itself, so the
+       owner can see how often it happened. */
+    portalCredentialReveal: parseInt(process.env.RATE_PORTAL_CREDENTIAL_REVEAL_PER_HOUR || '20', 10),
     requestCode: parseInt(process.env.RATE_CODE_PER_HOUR || '5', 10),
     session: parseInt(process.env.RATE_SESSION_PER_HOUR || '10', 10),
     requestCodePerIp: parseInt(process.env.RATE_CODE_IP_PER_HOUR || '50', 10),

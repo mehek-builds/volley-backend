@@ -905,6 +905,38 @@ export const application_email_receiving_proofs = pgTable('application_email_rec
   verifiedAtIdx: index('application_email_receiving_proofs_verified_at_idx').on(t.verified_at),
 }));
 
+// ---- portal_credentials ----
+// The account Litos holds on an employer's ATS tenant so an account-walled portal can be opened at
+// all. One row per (user, portal family, tenant): a tenant is one employer's whole portal, so the
+// same account serves every job that employer posts there, and a second account on the same tenant
+// is how a portal locks you out rather than how it helps.
+//
+// `username` is the Litos application alias, so employer mail from the account (verification,
+// confirmation, interview invitations) lands where every other employer message already lands.
+//
+// `password_encrypted` is AES-256-GCM ciphertext from src/lib/fieldCrypto.ts, the same envelope the
+// encrypted country work-eligibility declaration uses. It is NEVER selected by the list route, never
+// logged, and never written into a submission spec or a review record: the only path that decrypts
+// it is the owner's own deliberate reveal. `reveal_count` and `last_revealed_at` exist so a reveal
+// leaves a trace the owner can read, which is the whole reason a password is worth storing at all.
+export const portal_credentials = pgTable('portal_credentials', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  portal_family: text('portal_family').notNull(),
+  tenant: text('tenant').notNull(),
+  username: text('username').notNull(),
+  password_encrypted: text('password_encrypted').notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  last_used_at: timestamp('last_used_at', { withTimezone: true }),
+  last_revealed_at: timestamp('last_revealed_at', { withTimezone: true }),
+  reveal_count: integer('reveal_count').default(0).notNull(),
+}, (t) => ({
+  ownerTenantUnique: uniqueIndex('portal_credentials_user_family_tenant_unique')
+    .on(t.user_id, t.portal_family, t.tenant),
+  userIdx: index('portal_credentials_user_id_idx').on(t.user_id),
+}));
+
 // ---- career_page_sources ----
 // Operator-managed company career boards. The polling worker reads the public ATS APIs rather
 // than scraping job aggregators, so Litos can show first-party postings with a stable apply URL.

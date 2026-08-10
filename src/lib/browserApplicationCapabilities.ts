@@ -4,7 +4,8 @@ export type BrowserApplicationFamily =
   | 'sap_successfactors'
   | 'oracle_taleo'
   | 'adp_recruiting'
-  | 'jazzhr';
+  | 'jazzhr'
+  | 'icims';
 
 export type BrowserApplicationCapability = {
   family: BrowserApplicationFamily;
@@ -63,6 +64,25 @@ const CAPABILITIES: Readonly<Record<BrowserApplicationFamily, BrowserApplication
     uploadResume: true,
     reason: 'Both researched JazzHR forms include reCAPTCHA and tenant-specific questions that require applicant review.',
   },
+  /* The one family where creating an account is allowed, and the only capability that changed.
+   *
+   * iCIMS shows no application form at all until an account exists on the employer's tenant, so
+   * "Litos leaves the account to you" meant Litos could do nothing here. It can now register the
+   * account: the Litos application alias becomes the account address, so verification, confirmation
+   * and interview mail arrive where every other employer message already arrives, and the password
+   * is generated per tenant and stored encrypted for the applicant to read whenever she wants.
+   *
+   * Everything else stays denied, and deliberately so. `fill` is false because there is still no
+   * captured application form behind the wall. `programmaticSubmit` is false because registering an
+   * account is not pressing submit: the submit boundary is exactly where it was. The registration
+   * plan itself is behind a flag that is off by default and stops on the hCaptcha that the captured
+   * login page carries. */
+  icims: {
+    ...DENIED,
+    family: 'icims',
+    createAccount: true,
+    reason: 'Litos creates the applicant account this portal requires, registered to the Litos application alias with a per-tenant password stored encrypted. The application form, its legal choices, and the send button remain the applicant\'s.',
+  },
 };
 
 /** Unknown families and unknown tenants are denied. Nothing becomes submit-capable by omission. */
@@ -81,6 +101,11 @@ export const RESEARCHED_BROWSER_TENANTS = {
   oracle_taleo: ['fa007.taleo.net', 'aa270.taleo.net'],
   adp_recruiting: ['myjobs.adp.com'],
   jazzhr: ['utilidata.applytojob.com', 'foundationai.applytojob.com'],
+  // Empty on purpose. The account wall and its hCaptcha were captured on 2026-07-29, but no iCIMS
+  // tenant has been carried through a real registration, and listing a host here would claim
+  // otherwise. Tenant identity for iCIMS is read from the URL by icimsTenantFromUrl, which needs no
+  // allowlist; this stays empty until a live capture earns an entry.
+  icims: [],
 } as const satisfies Readonly<Record<BrowserApplicationFamily, readonly string[]>>;
 
 export function isResearchedBrowserTenant(family: BrowserApplicationFamily, hostname: string): boolean {
