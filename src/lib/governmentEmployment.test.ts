@@ -1154,33 +1154,20 @@ describe('prior government employment, answered from the experience bank', () =>
       'Open to relocation',
       'Willingness to relocate',
       'Willing to move',
-      'Able to relocate',
-      'Can you move to Boston?',
       'Open to moving to Boston',
       'Are you open to relocation?',
       'Would you be open to relocation?',
-      'Are you able to relocate?',
-      'Would you be able to relocate?',
-      'Could you relocate?',
       'Are you open to relocating to Boston?',
       'Would you be open to relocating to Boston?',
-      'Are you able to relocate to Boston?',
-      'Would you be able to relocate to Boston?',
-      'Could you relocate to Boston?',
       'Are you open to moving to Boston?',
       'Would you be open to moving to Boston?',
-      'Are you able to move to Boston?',
-      'Would you be able to move to Boston?',
-      'Could you move to Boston?',
       'Could you be open to moving to Boston?',
-      'Could you be able to move to Boston?',
       'Could you be open to relocating to Boston?',
-      'Could you be able to relocate to Boston?',
+      'Can you be willing to move to Boston?',
+      'Will you be open to moving to Boston?',
       'Would you be open to move to Boston?',
       'Open to move to Boston',
-      'Able to move to Boston',
       'Will you move to Boston?',
-      'Relocation',
     ];
     for (const label of relocationLabels) {
       const profile: ApplicationProfileLike = { relocation_willingness: 'yes' };
@@ -1201,15 +1188,35 @@ describe('prior government employment, answered from the experience bank', () =>
           label,
         );
       }
-      if (label === 'Relocation') {
-        const unbound = resolveKnownAnswer(label, 'text', profile, undefined);
-        assert.ok(unbound && 'skipReason' in unbound, label);
-        assert.deepEqual(
-          refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], profile, undefined),
-          [{ question: label, answer: '' }],
-          label,
-        );
-      }
+    }
+
+    const ambiguousRelocation = [
+      'Relocation',
+      'Able to relocate',
+      'Can you move to Boston?',
+      'Are you able to relocate?',
+      'Would you be able to relocate?',
+      'Could you relocate?',
+      'Are you able to relocate to Boston?',
+      'Would you be able to relocate to Boston?',
+      'Could you relocate to Boston?',
+      'Are you able to move to Boston?',
+      'Would you be able to move to Boston?',
+      'Could you move to Boston?',
+      'Could you be able to move to Boston?',
+      'Could you be able to relocate to Boston?',
+      'Able to move to Boston',
+    ];
+    for (const label of ambiguousRelocation) {
+      const profile: ApplicationProfileLike = { relocation_willingness: 'yes' };
+      assert.equal(isRelocationQuestion(label), true, label);
+      const held = resolveKnownAnswer(label, 'text', profile, context);
+      assert.ok(held && 'skipReason' in held, label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], profile, context),
+        [{ question: label, answer: '' }],
+        label,
+      );
     }
 
     const compounds = [
@@ -1268,6 +1275,13 @@ describe('prior government employment, answered from the experience bank', () =>
       'Who referred you and in what capacity?',
       'Would moving to Boston affect your availability?',
       'Relocation preference details',
+      'Applicant from a previous application',
+      'Please provide prior applicant information',
+      'How did the recruiter refer you?',
+      'Please provide your recruiting source',
+      'Please specify the source of application',
+      'Mobility details for relocating',
+      'Please confirm your ability to move to Boston',
     ];
     for (const label of unrecognizedSiblingIntent) {
       const held = resolveKnownAnswer(label, 'text', profile, context);
@@ -1282,6 +1296,10 @@ describe('prior government employment, answered from the experience bank', () =>
       'Source code experience',
       'Relocation assistance benefit',
       'Application support systems experience',
+      'Prior application support systems experience',
+      'Experience building referral program systems',
+      'Candidate source code experience',
+      'Employee relocation assistance benefit',
     ]) {
       const resolved = resolveKnownAnswer(unrelated, 'text', profile, context);
       assert.equal(resolved, null, unrelated);
