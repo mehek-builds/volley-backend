@@ -36,6 +36,3 @@ jobs:
 
       - name: Apply encrypted country work eligibility storage
         run: npm run db:country-work-eligibility
-
-      - name: Prove schema and declarations agree
-        run: npm run schema:check

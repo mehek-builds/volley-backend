@@ -49,9 +49,6 @@ export const APPLICATION_FACT_COLUMNS = [
   'availability_window_end',
   'availability_cycle',
   'availability_valid_through',
-  // Schema-only prerequisite for the encrypted country declaration. Feature readers and writers
-  // land separately after this column is migrated, so old deploys must tolerate it being absent.
-  'work_eligibility_by_country',
 ] as const;
 
 export type ApplicationFactColumn = (typeof APPLICATION_FACT_COLUMNS)[number];

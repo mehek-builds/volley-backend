@@ -25,7 +25,6 @@ function row(over: Partial<ApplicationProfile> = {}): ApplicationProfile {
     citizenship: null,
     work_authorized: null,
     needs_sponsorship: null,
-    work_eligibility_by_country: null,
     availability_date: null,
     availability_term: null,
     desired_salary: null,
