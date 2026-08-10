@@ -1607,15 +1607,42 @@ function governmentTargetsAreCompatible(
   return Boolean(primaryEmployer && exampleEmployer && primaryEmployer.canonical === exampleEmployer.canonical);
 }
 
+function regexpEscape(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function maskedGovernmentEmployerExamples(illustration: string): {
+  value: string;
+  targets: Map<string, GovernmentEmploymentTarget>;
+} {
+  let value = illustration;
+  const targets = new Map<string, GovernmentEmploymentTarget>();
+  const aliases = [...VETTED_GOVERNMENT_EMPLOYERS.entries()]
+    .sort(([left], [right]) => right.length - left.length);
+  for (const [alias] of aliases) {
+    const tokens = alias.split(' ').map(regexpEscape);
+    const aliasPattern = new RegExp(`\\b${tokens.join('[\\s.\\-/]+')}\\b`, 'gi');
+    if (!aliasPattern.test(value)) continue;
+    aliasPattern.lastIndex = 0;
+    const placeholder = `GOVERNMENTEMPLOYERALIAS${targets.size}`;
+    value = value.replace(aliasPattern, placeholder);
+    targets.set(placeholder.toLowerCase(), { kind: 'named', identity: alias });
+  }
+  return { value, targets };
+}
+
 function parseGovernmentExampleTargets(illustration: string): GovernmentEmploymentTarget[] | null {
   const wholeTarget = targetFromBareGovernmentPhrase(illustration);
   if (wholeTarget) return [wholeTarget];
-  const pieces = illustration.split(/\s*(?:,|;|\/|\band\b|\bor\b)\s*/i).filter(Boolean);
+  const masked = maskedGovernmentEmployerExamples(illustration);
+  const pieces = masked.value.split(/\s*(?:,|;|\/|\band\b|\bor\b)\s*/i).filter(Boolean);
   if (!pieces.length) return null;
   const targets: GovernmentEmploymentTarget[] = [];
   for (const piece of pieces) {
     const shorthand = normalizeIdentity(piece.replace(/^(?:a|an|any|the)\s+/i, ''));
-    if (/^federal$/.test(shorthand)) targets.push({ kind: 'level', level: 'federal' });
+    const maskedTarget = masked.targets.get(shorthand);
+    if (maskedTarget) targets.push(maskedTarget);
+    else if (/^federal$/.test(shorthand)) targets.push({ kind: 'level', level: 'federal' });
     else if (/^state$/.test(shorthand)) targets.push({ kind: 'level', level: 'state' });
     else if (/^(?:local|municipal|city|county)$/.test(shorthand)) targets.push({ kind: 'level', level: 'local' });
     else {
@@ -1737,26 +1764,13 @@ function normalizedGovernmentEmploymentLabel(label: string): string {
   return label.trim().replace(/\s+/g, ' ').replace(/[?.!]+$/g, '').trim();
 }
 
-function formerGovernmentEmploymentTarget(label: string): GovernmentEmploymentTarget | null {
-  const value = normalizedGovernmentEmploymentLabel(label);
-  const patterns: readonly { pattern: RegExp; scopeGroup: number }[] = [
-    { pattern: /^are\s+you\s+(?:an?\s+)?former\s+(.+?)\s+employee$/i, scopeGroup: 1 },
-    {
-      pattern: /^are\s+you\s+(?:an?\s+)?former\s+employee\s+(?:of|for|with)\s+(?:the\s+)?(.+)$/i,
-      scopeGroup: 1,
-    },
-    { pattern: /^former\s+(.+?)\s+employee$/i, scopeGroup: 1 },
-    {
-      pattern: /^former\s+employee\s+(?:of|for|with)\s+(?:the\s+)?(.+)$/i,
-      scopeGroup: 1,
-    },
-    { pattern: /^former\s+(.+?)\s+employment$/i, scopeGroup: 1 },
-  ];
-  for (const parser of patterns) {
-    const match = value.match(parser.pattern);
-    if (match) return targetFromGovernmentPhrase(match[parser.scopeGroup]);
+function labelHasFormerKnownGovernmentEmployer(label: string): boolean {
+  if (!/\bformer(?:ly)?\b/i.test(label)) return false;
+  const identity = ` ${normalizeIdentity(label)} `;
+  for (const alias of [...VETTED_GOVERNMENT_EMPLOYERS.keys()].sort((left, right) => right.length - left.length)) {
+    if (identity.includes(` ${alias} `)) return true;
   }
-  return null;
+  return false;
 }
 
 function currentGovernmentEmploymentTarget(label: string): GovernmentEmploymentTarget | null {
@@ -1829,7 +1843,7 @@ function governmentEmploymentAnswer(
   if (!isGovernmentEmploymentQuestion(label)) {
     if ((GOVERNMENT_EMPLOYER_SCOPE.test(label)
       || governmentLabelNamesKnownEmployer(label)
-      || formerGovernmentEmploymentTarget(label))
+      || labelHasFormerKnownGovernmentEmployer(label))
       && !NOT_HER_GOVERNMENT_EMPLOYMENT.test(label)) {
       return {
         skipReason: governmentEmploymentSkipReason(

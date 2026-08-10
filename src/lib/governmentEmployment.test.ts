@@ -399,6 +399,39 @@ describe('prior government employment, answered from the experience bank', () =>
     }
   });
 
+  test('longest registry aliases stay atomic inside multi-example parentheticals', () => {
+    const federal: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'NASA', title: 'Research Intern' }],
+    };
+    const local: ApplicationProfileLike = {
+      experience_bank: [{ type: 'job', org: 'City of Los Angeles', title: 'Analyst' }],
+    };
+    const fullFederalList = 'National Aeronautics and Space Administration, Federal Aviation Administration, and Department of Energy';
+    const safe = [
+      `Have you worked for government (e.g., ${fullFederalList})?`,
+      `Have you worked for federal government (including: ${fullFederalList})?`,
+      'Have you worked for NASA (for example: National Aeronautics and Space Administration and NASA)?',
+    ];
+    for (const label of safe) {
+      assert.equal(answer(label, federal), 'VALUE Yes', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: '' }], federal, undefined),
+        [{ question: label, answer: 'Yes' }],
+      );
+    }
+    const contradictions = [
+      `Have you worked for federal government (e.g., ${fullFederalList}, and City of Los Angeles)?`,
+      'Have you worked for local government (e.g., City of Los Angeles and National Aeronautics and Space Administration)?',
+    ];
+    for (const label of contradictions) {
+      assert.equal(answer(label, local), 'SKIP', label);
+      assert.deepEqual(
+        refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], local, undefined),
+        [{ question: label, answer: '' }],
+      );
+    }
+  });
+
   test('canonical federal aliases resolve directly and at send-time', () => {
     const cases = [
       ['Have you worked for US DOE?', 'U.S. Department of Energy'],
@@ -608,6 +641,12 @@ describe('prior government employment, answered from the experience bank', () =>
       'Former NASA employee?',
       'Former employee of FAA?',
       'Former DOE employment?',
+      'Did you formerly work for NASA?',
+      'Were you formerly employed by FAA?',
+      'Have you formerly been employed by DOE?',
+      'Was NASA your former employer?',
+      'Is FAA a former employer?',
+      'Former employer: DOE?',
     ];
     for (const label of labels) {
       assert.equal(answer(label, currentFederal), 'SKIP', label);
