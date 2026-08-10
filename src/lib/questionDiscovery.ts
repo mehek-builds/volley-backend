@@ -2171,7 +2171,7 @@ function parsePriorApplicationQuestion(
           ? semanticModifier.slice(alias.length).trim()
           : semanticModifier;
       }
-      const organizationalModifier = /^(?:consulting|product|business development|corporate(?: finance)?|organizational|client services|advisory|finance|legal|tax|audit|strategy)$/.test(semanticModifier);
+      const organizationalModifier = /^(?:consulting|products?|business development|corporate(?: finance)?|organizational|client services?|advisory|finance|legal|tax|audit|strateg(?:y|ies)|risks?|compliance|operations?|human resources?|hr|people|talent|recruiting|sales|marketing|customer (?:success|support)|supply chains?|procurement|accounting|treasur(?:y|ies)|investor relations?|communications?|public relations?|security governance|quality assurance|program management|project management)$/.test(semanticModifier);
       if (!organizationalModifier) return null;
     }
     if (!preposition) return { family: 'prior_application', valid: false };
