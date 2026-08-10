@@ -408,6 +408,57 @@ async function refuseDuplicateApplication(
 }
 
 export async function applicationRoutes(fastify: FastifyInstance) {
+  fastify.get(
+    '/applications/:id/submission/extension-packet',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const stored = row.spec as StoredSpec;
+      const review = readApplicationReview(stored);
+      if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      if (!row.resume_object_key) return reply.status(409).send({ error: 'This application has no generated resume to attach' });
+
+      const contact = (stored._contact ?? {}) as StoredContact;
+      const job = (row.job_context ?? {}) as { role?: unknown };
+      const quality = (stored._quality ?? {}) as Record<string, unknown>;
+      const issueKeys = ['specIssues', 'contactIssues', 'leadAlignmentIssues', 'layoutIssues'] as const;
+      const issues = issueKeys.flatMap((key) => Array.isArray(quality[key])
+        ? (quality[key] as unknown[]).filter((value): value is string => typeof value === 'string')
+        : []);
+      const warnings = Array.isArray(quality.visualWarnings) ? quality.visualWarnings : [];
+      const omissions = Array.isArray(quality.layoutOmissions)
+        ? quality.layoutOmissions.filter((value): value is string => typeof value === 'string')
+        : [];
+      const groundingRemoved = Array.isArray(quality.groundingRemoved)
+        ? quality.groundingRemoved.filter((value): value is string => typeof value === 'string')
+        : [];
+      const fileName = resumeFileNameForRole(contact.full_name, job.role);
+
+      return reply.send({
+        resume_id: row.id,
+        resume_url: `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(
+          request.jwtPayload!.userId,
+          row.resume_object_key,
+          { fileName },
+        )}`,
+        file_name: fileName,
+        spec: editableResumeSpec(stored),
+        application: { id: row.id, spec: stored },
+        quality: {
+          ready_to_attach: issues.length === 0,
+          issues,
+          warnings,
+          ats_keyword_coverage_pct: typeof quality.atsCoverage === 'number' ? quality.atsCoverage : 0,
+          trimmed_for_one_page_fit: quality.trimmedForFit === true,
+          sparse_add_more_experience: quality.sparse === true,
+          grounding_removed: groundingRemoved,
+          omissions,
+        },
+      });
+    },
+  );
+
   fastify.post(
     '/applications/:id/submission/extension-start',
     { preHandler: requireAuth },

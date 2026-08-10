@@ -14,6 +14,20 @@ test('extension submission routes keep auth, ownership, quota, and claims server
   assert.match(source, /submission_claim_id'->|submission_claim_id/);
 });
 
+test('attended extension refill returns the exact owned generated packet and a fresh resume capability', () => {
+  const route = source.slice(
+    source.indexOf("'/applications/:id/submission/extension-packet'"),
+    source.indexOf("'/applications/:id/submission/extension-start'"),
+  );
+  assert.match(route, /preHandler: requireAuth/);
+  assert.match(route, /const row = await ownedResume\(request, reply\)/);
+  assert.match(route, /row\.resume_object_key/);
+  assert.match(route, /mintDownloadToken\([\s\S]*?row\.resume_object_key/);
+  assert.match(route, /resume_id: row\.id/);
+  assert.match(route, /application: \{ id: row\.id, spec: stored \}/);
+  assert.doesNotMatch(route, /resume\/generate/);
+});
+
 test('extension outcomes only mark confirmed claims applied', () => {
   assert.match(source, /parsed\.data\.outcome === 'confirmed'[\s\S]*?pipeline_stage: 'applied'/);
   assert.match(source, /current\.submission_claim_id !== parsed\.data\.claim_id/);

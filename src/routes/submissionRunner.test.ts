@@ -506,6 +506,61 @@ test('non-CAPTCHA managed blocker reconciliation waits for normal evidence handl
   assert.deepEqual(blockers, ['The filled form did not record an email field.']);
 });
 
+test('SmartRecruiters network restriction becomes an attended Chrome handoff, not CAPTCHA', () => {
+  const blockers = attentionBlockersForManagedResult(
+    'smartrecruiters',
+    ['CAPTCHA requires your attention'],
+    {
+      title: 'Access is temporarily restricted',
+      text: '',
+      filledFields: [],
+    },
+    {
+      fullName: 'Mehek Mandal',
+      email: 'mehek@example.com',
+      resume: Buffer.from('exact generated pdf'),
+      resumeName: 'Mehek_Mandal_Resume.pdf',
+      questions: [],
+    },
+  );
+
+  assert.equal(blockers.includes('CAPTCHA requires your attention'), false);
+  assert.deepEqual(blockers, [
+    'The application site temporarily blocked Litos\'s secure browser because of its network activity. This is not a CAPTCHA, and nothing was sent. Open this application in Chrome and Litos will refill the exact saved packet there.',
+  ]);
+});
+
+test('network reputation handoff is cross-ATS but never swallows real security gates', () => {
+  const packet = {
+    fullName: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    resume: Buffer.from('exact generated pdf'),
+    resumeName: 'Mehek_Mandal_Resume.pdf',
+    questions: [],
+  };
+  const reputationBlock = attentionBlockersForManagedResult(
+    'greenhouse',
+    ['CAPTCHA requires your attention'],
+    { text: 'Access denied. Your request was blocked because automated traffic from this IP address was flagged.' },
+    packet,
+  );
+  assert.equal(reputationBlock.some((blocker) => /captcha requires/i.test(blocker)), false);
+  assert.match(reputationBlock[0], /Open this application in Chrome/);
+
+  assert.deepEqual(attentionBlockersForManagedResult(
+    'greenhouse',
+    ['CAPTCHA requires your attention'],
+    { text: 'Access denied. Prove you are human by completing the security check.' },
+    packet,
+  ), ['CAPTCHA requires your attention']);
+  assert.deepEqual(attentionBlockersForManagedResult(
+    'greenhouse',
+    ['CAPTCHA requires your attention'],
+    { text: 'Sign in. Access denied until your account login is complete.' },
+    packet,
+  ), ['CAPTCHA requires your attention']);
+});
+
 test('future sponsorship onboarding answer supplies work eligibility for US applications', () => {
   assert.deepEqual(workEligibilityFromSponsorshipAnswer('needs_future'), {
     workAuthorized: true,

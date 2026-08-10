@@ -45,9 +45,11 @@ import {
 } from '../lib/browserbase';
 import {
   blockersIncludeCaptcha,
+  CAPTCHA_BLOCKER,
   buildManagedCaptchaProbeActions,
   buildManagedDiscoveryActions,
   corroborateManagedCaptchaBlockers,
+  managedNetworkAccessRestrictionReason,
   managedCaptchaProvider,
   detectCaptchaProvider,
   captchaProviderForFamily,
@@ -976,9 +978,20 @@ export { attentionCategoriesForReasons };
 export function attentionBlockersForManagedResult(
   portal: SupportedPortal,
   blockers: readonly string[],
-  result: { text?: string; filledFields?: string[] },
+  result: {
+    title?: string;
+    text?: string;
+    filledFields?: string[];
+  },
   packet: SubmissionPacket,
 ): string[] {
+  const accessRestriction = managedNetworkAccessRestrictionReason(portal, result.text, result.title);
+  if (accessRestriction) {
+    return [
+      ...blockers.filter((blocker) => blocker !== CAPTCHA_BLOCKER),
+      accessRestriction,
+    ];
+  }
   if (!blockersIncludeCaptcha(blockers)) return [...blockers];
   return reconcileManagedProviderBlockers(portal, blockers, result, packet);
 }

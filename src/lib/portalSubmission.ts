@@ -6617,6 +6617,33 @@ export async function detectCaptchaProvider(page: Page): Promise<CaptchaProvider
 // that contract silently breaks.
 export const CAPTCHA_BLOCKER = 'CAPTCHA requires your attention';
 
+export const MANAGED_NETWORK_ACCESS_RESTRICTION_REASON =
+  'The application site temporarily blocked Litos\'s secure browser because of its network activity. This is not a CAPTCHA, and nothing was sent. Open this application in Chrome and Litos will refill the exact saved packet there.';
+
+/**
+ * SmartRecruiters sometimes rejects a datacenter IP before it renders an application form. Its
+ * page mentions bots and unusual activity, which made the managed provider report CAPTCHA even
+ * though there is no challenge a person can solve. Treat only the complete restriction page as
+ * this condition. A normal form mentioning access or activity in an employer question must not be
+ * intercepted.
+ */
+export function managedNetworkAccessRestrictionReason(
+  portal: SupportedPortal,
+  pageText: string | undefined,
+  pageTitle: string | undefined,
+): string | null {
+  const normalized = `${pageText ?? ''} ${pageTitle ?? ''}`.toLowerCase().replace(/\s+/g, ' ').trim();
+  const exactSmartRecruitersHeading = portalFamily(portal) === 'smartrecruiters'
+    && normalized.includes('access is temporarily restricted');
+  const blocked = exactSmartRecruitersHeading
+    || /\baccess denied\b|\brequest (?:has been )?blocked\b|\btemporarily blocked\b/.test(normalized);
+  const reputationEvidence = exactSmartRecruitersHeading
+    || /unusual activity|bot activity|automated traffic|traffic from (?:this|your) ip|ip address.{0,80}(?:blocked|flagged)|network reputation/.test(normalized);
+  if (!blocked || !reputationEvidence) return null;
+  if (/prove you are human|verification code|security code|\bsign in\b|\blog in\b|\blogin required\b/.test(normalized)) return null;
+  return MANAGED_NETWORK_ACCESS_RESTRICTION_REASON;
+}
+
 export function blockersIncludeCaptcha(blockers: readonly string[]): boolean {
   return blockers.includes(CAPTCHA_BLOCKER);
 }
