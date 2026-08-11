@@ -14,8 +14,13 @@
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { bodySchema } from '../routes/applicationProfile';
-import { resolveKnownAnswer, type ApplicationProfileLike } from './questionDiscovery';
+import { bodySchema, mergedTestScoreState, testScoreConflict } from '../routes/applicationProfile';
+import {
+  EEO_QUESTION,
+  STANDARDIZED_TEST_TYPE_QUESTION,
+  resolveKnownAnswer,
+  type ApplicationProfileLike,
+} from './questionDiscovery';
 import { APPLICATION_FACT_COLUMNS } from './applicationFacts';
 
 process.env.ENCRYPTION_KEY ??= 'test-encryption-key-at-least-32-chars-long';
@@ -93,6 +98,80 @@ const CORPUS_LABELS = {
   act: 'provide your best result on act',
   type: 'select your standardized test score type',
 } as const;
+
+/* THE CONTRADICTION THE API MUST REFUSE TO STORE.
+ *
+ * The onboarding step never removed a value: the patch iterated everything typed, and both setState
+ * calls were additive spreads. Choosing "Both", filling both scores, then answering "None" posted
+ * all three, and this route stored it because the fields were independent optionals. The resolver
+ * then told one employer, on one form, that she took no standardized test and that her SAT was 1520.
+ *
+ * The step now clears the scores, which is the experience. This is the guarantee: the step is one
+ * component and the API has other callers. */
+describe('standardized test scores: the API refuses a self-contradicting state', () => {
+  const merged = (stored: Record<string, unknown> | undefined, body: Record<string, unknown>) =>
+    testScoreConflict(mergedTestScoreState(stored, body));
+
+  test('the exact body the old step produced is refused', () => {
+    const conflict = merged(undefined, {
+      standardized_test_type: 'None',
+      sat_score: '1520',
+      act_score: '34',
+    });
+    assert.ok(conflict, 'None alongside two scores must not be storable');
+    assert.match(conflict!, /took no standardized test/);
+  });
+
+  test('a score with no test named is refused', () => {
+    assert.ok(merged(undefined, { sat_score: '1520' }));
+  });
+
+  test('a test that excludes the score given is refused', () => {
+    assert.ok(merged(undefined, { standardized_test_type: 'SAT', act_score: '34' }));
+    assert.ok(merged(undefined, { standardized_test_type: 'ACT', sat_score: '1520' }));
+  });
+
+  test('coherent states are stored', () => {
+    assert.equal(merged(undefined, { standardized_test_type: 'None' }), null);
+    assert.equal(merged(undefined, { standardized_test_type: 'SAT', sat_score: '1520' }), null);
+    assert.equal(merged(undefined, { standardized_test_type: 'ACT', act_score: '34' }), null);
+    assert.equal(
+      merged(undefined, { standardized_test_type: 'Both', sat_score: '1520', act_score: '34' }),
+      null,
+    );
+    // Never answered at all is coherent, and is the state every account starts in.
+    assert.equal(merged(undefined, {}), null);
+  });
+
+  /* THE MERGED-STATE HALF. A request carrying only a score cannot be judged alone: whether it
+   * contradicts anything depends on what is already stored. A body-only check would let a client
+   * build the contradiction across two requests. */
+  test('a score alone is refused against a stored None', () => {
+    assert.ok(merged({ standardized_test_type: 'None' }, { sat_score: '1520' }));
+  });
+
+  test('changing the stored type to None while scores are stored is refused', () => {
+    assert.ok(merged({ sat_score: '1520', standardized_test_type: 'SAT' }, { standardized_test_type: 'None' }));
+  });
+
+  test('clearing the score in the same request makes the change storable', () => {
+    assert.equal(
+      merged(
+        { sat_score: '1520', act_score: '34', standardized_test_type: 'Both' },
+        { standardized_test_type: 'None', sat_score: null, act_score: null },
+      ),
+      null,
+    );
+  });
+
+  /* An ABSENT key means "leave it alone" and an explicit null means "clear it". Conflating them
+   * would make every partial save look like a clear, so this pins the difference. */
+  test('an absent key keeps the stored value rather than clearing it', () => {
+    assert.ok(merged({ standardized_test_type: 'None' }, { gpa: '3.9', sat_score: '1520' }));
+    assert.equal(mergedTestScoreState({ sat_score: '1520' }, {}).sat_score, '1520');
+    assert.equal(mergedTestScoreState({ sat_score: '1520' }, { sat_score: null }).sat_score, null);
+  });
+});
 
 describe('standardized test scores: the measured labels are answered', () => {
   test('the SAT question the employer actually asks', () => {
@@ -249,14 +328,40 @@ describe('standardized test scores: a self-identification question is never a te
     });
   }
 
-  test('the EEO refusal is the first act of the matcher, not a side effect of a word list', () => {
+  /* THE ASSERTION THAT COULD NOT FAIL, replaced by one that can.
+   *
+   * This test used to compare source positions: `body.indexOf('EEO_QUESTION.test(label)') <
+   * body.indexOf('isSatScoreQuestion')`. Delete the guard entirely and the left side is -1, which is
+   * less than everything, so the assertion passed on a file that no longer had the guard in it.
+   * Confirmed by mutation: removing the EEO half of the refusal left the whole file at 54 of 54
+   * passing, while `Disability: which standardized test did you take with extended time?` began
+   * resolving to "Both".
+   *
+   * The behaviour is what matters, so the behaviour is what is asserted. This label matches
+   * EEO_QUESTION and a test matcher at once, which is the only configuration where the ordering can
+   * be observed at all: if the refusal is removed, the test matcher wins and this fails. */
+  test('a label matching both an EEO question and a test matcher returns the EEO answer', () => {
+    const label = 'Disability: which standardized test did you take with extended time?';
+    assert.ok(EEO_QUESTION.test(label), 'the label must match EEO_QUESTION for this to prove anything');
+    assert.ok(
+      STANDARDIZED_TEST_TYPE_QUESTION.test(label),
+      'the label must also match a test matcher, or the ordering is never exercised',
+    );
+    assert.equal(typedValue(label, answered), 'Decline to self-identify');
+  });
+
+  /* The source-order check is kept as a second signal, but it now asserts both positions are REAL
+   * first. Without that, "the thing I am looking for is absent" satisfies it, which is exactly how
+   * the previous version passed. */
+  test('the EEO refusal is present and precedes every score matcher in the source', () => {
     const source = readFileSync('src/lib/questionDiscovery.ts', 'utf8');
     const fn = source.slice(source.indexOf('function standardizedTestAnswer'));
     const body = fn.slice(0, fn.indexOf('\n}'));
-    assert.ok(
-      body.indexOf('EEO_QUESTION.test(label)') < body.indexOf('isSatScoreQuestion'),
-      'the EEO refusal must run before any score matcher',
-    );
+    const guard = body.indexOf('EEO_QUESTION.test(label)');
+    const matcher = body.indexOf('isSatScoreQuestion');
+    assert.ok(guard >= 0, 'the EEO refusal must exist');
+    assert.ok(matcher >= 0, 'the score matcher must exist, or this comparison means nothing');
+    assert.ok(guard < matcher, 'the EEO refusal must run before any score matcher');
   });
 });
 
@@ -354,7 +459,11 @@ describe('standardized test scores: schema and migration agree', () => {
    * removed key can never satisfy a check that the key is absent. */
   test('no workflow in the repo runs this migration automatically', () => {
     const dir = '.github/workflows';
-    for (const file of readdirSync(dir)) {
+    const files = readdirSync(dir);
+    // Without this the test passes when the directory is empty or has been moved, which is the same
+    // "absent satisfies the check" failure the two assertions above were rewritten for.
+    assert.ok(files.length > 0, 'the workflows directory must have files, or this proves nothing');
+    for (const file of files) {
       const source = readFileSync(`${dir}/${file}`, 'utf8');
       const code = source.replace(/#.*$/gm, '');
       if (!/db:standardized-test-scores/.test(code)) continue;

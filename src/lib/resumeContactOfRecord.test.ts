@@ -97,6 +97,11 @@ describe('the location reaches the rendered resume', () => {
     assert.match(line, /Los Angeles, CA/);
   });
 
+  /* BOTH POSITIONS ARE ASSERTED REAL BEFORE THEY ARE COMPARED. Written as a bare
+   * `indexOf(a) < indexOf(b)` this could not fail for the reason it was written: a missing location
+   * gives -1, which is less than everything, so deleting the location from the header would have
+   * left this test green. The same shape made the EEO ordering assertion in
+   * standardizedTestScores.test.ts vacuous, and it is worth refusing everywhere. */
   test('the location leads the contact line, ahead of the email', () => {
     const line = contactLine({
       full_name: 'Test Applicant',
@@ -104,10 +109,11 @@ describe('the location reaches the rendered resume', () => {
       phone: '+971 567417451',
       location: 'Los Angeles, CA',
     });
-    assert.ok(
-      line.indexOf('Los Angeles, CA') < line.indexOf('test@example.com'),
-      `location must come first in the contact line, got: ${line}`,
-    );
+    const location = line.indexOf('Los Angeles, CA');
+    const email = line.indexOf('test@example.com');
+    assert.ok(location >= 0, `the location must be printed at all, got: ${line}`);
+    assert.ok(email >= 0, `the email must be printed, or the comparison means nothing: ${line}`);
+    assert.ok(location < email, `location must come first in the contact line, got: ${line}`);
   });
 
   test('the whole header assembles from a stored profile with nothing requested', () => {

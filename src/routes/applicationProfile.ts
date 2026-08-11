@@ -150,6 +150,72 @@ export const bodySchema = z.object({
   act_score: z.string().trim().min(1).nullable().optional(),
 });
 
+/* ---- the three test fields are ONE fact, and the API may not store a self-contradicting version ----
+ *
+ * THE DEFECT THIS CLOSES, replayed from the real onboarding step. Nothing on that screen ever
+ * REMOVED a value: the patch was built by iterating everything the student had typed, and the two
+ * setState calls were additive spreads. So choosing "Both", filling 1520 and 34, then changing the
+ * answer to "None" sent all three:
+ *
+ *   {"standardized_test_type":"None","sat_score":"1520","act_score":"34"}
+ *
+ * and this route stored it, because the three were independent optional fields with no cross-field
+ * check. The resolver then did exactly what it is supposed to do with what it was given, and told
+ * one employer, on one form, that she had taken no standardized test and that her SAT was 1520.
+ * A contradiction Litos generated itself, from a student changing her mind mid-step.
+ *
+ * THE CLIENT-SIDE CLEAR IS THE EXPERIENCE; THIS IS THE GUARANTEE. The step now clears the scores
+ * when the type moves to None or to the decline option, which is the right behaviour. It is not a
+ * safeguard: it lives in one component, and the extension, a replayed request and any future caller
+ * reach this route without passing through it.
+ *
+ * VALIDATED AGAINST THE MERGED STATE, not the body. A request carrying only `{sat_score}` cannot be
+ * judged on its own; the contradiction it creates depends on the type already stored. So the stored
+ * row is overlaid with the fields the body actually sends, and the result is what must be coherent.
+ * An ABSENT key means "leave it alone" and takes the stored value; an explicit null means "clear it".
+ */
+export type TestScoreState = {
+  standardized_test_type?: string | null;
+  sat_score?: string | null;
+  act_score?: string | null;
+};
+
+const TEST_FIELDS = ['standardized_test_type', 'sat_score', 'act_score'] as const;
+
+export function mergedTestScoreState(
+  stored: Record<string, unknown> | undefined,
+  body: Record<string, unknown>,
+): TestScoreState {
+  const out: Record<string, string | null> = {};
+  for (const field of TEST_FIELDS) {
+    const value = Object.prototype.hasOwnProperty.call(body, field) ? body[field] : stored?.[field];
+    out[field] = typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+  }
+  return out as TestScoreState;
+}
+
+/**
+ * The reason this state may not be stored, or null when it is coherent.
+ *
+ * Null type with a score is included: a bare 1520 with nothing saying which test it belongs to
+ * cannot tell an ACT field to stay empty, which is the same pairing the GPA and salary fields
+ * already enforce. Every message names the fix rather than only the fault, because this is shown to
+ * a student who has just changed one answer.
+ */
+export function testScoreConflict(state: TestScoreState): string | null {
+  const type = state.standardized_test_type ?? null;
+  const sat = state.sat_score ?? null;
+  const act = state.act_score ?? null;
+  if (!sat && !act) return null;
+  if (!type) return 'Choose which standardized test you took, or clear the score.';
+  if (type === 'None') {
+    return 'You answered that you took no standardized test. Clear the score, or change the test you took.';
+  }
+  if (type === 'SAT' && act) return 'You answered SAT. Clear the ACT score, or change the test to Both.';
+  if (type === 'ACT' && sat) return 'You answered ACT. Clear the SAT score, or change the test to Both.';
+  return null;
+}
+
 /* The consent timestamp is SERVER-SET, never taken from the body, which is why it has no line
  * above. It is the evidence that the two attestation booleans were granted, and evidence a client
  * can post is not evidence. Same rule automationConsentValues follows for the users.* permissions. */
@@ -277,6 +343,21 @@ export async function applicationProfileRoutes(fastify: FastifyInstance) {
     }
 
     const encrypted = { ...applicationProfileWriteValues(body), ...attestationConsentStamp(body) };
+
+    /* The three test fields are one fact, checked against the MERGED state. See testScoreConflict:
+       a request carrying only a score cannot be judged alone, because whether it contradicts
+       anything depends on the type already stored. Read tolerantly, so a database that has not run
+       the migration behaves as "nothing stored" rather than 500ing here. */
+    if (TEST_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(body, field))) {
+      let storedRow: Record<string, unknown> | undefined;
+      try {
+        storedRow = await selectApplicationProfileRow(userId);
+      } catch (err) {
+        if (!isUndefinedColumnError(err)) throw err;
+      }
+      const conflict = testScoreConflict(mergedTestScoreState(storedRow, body as Record<string, unknown>));
+      if (conflict) return reply.status(400).send({ error: conflict });
+    }
 
     try {
       const scopedRecords = body.work_eligibility_by_country;
