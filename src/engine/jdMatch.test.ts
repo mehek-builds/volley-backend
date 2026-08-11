@@ -2338,6 +2338,30 @@ StockX employs 1,000 people across offices and verification centers around the w
 `;
 
 describe('"About you" is the candidate, not the company', () => {
+  test('a bare You heading closes responsibilities and opens candidate requirements', () => {
+    const sections = segmentJd([
+      "What you'll do:",
+      'Build and ship a bounded project with the founding team.',
+      'You',
+      "Current CS or ML undergrad or Master's student with a hands-on project track record",
+      'Fluent in one of Python, TypeScript, or Go.',
+    ].join('\n'));
+    assert.deepEqual(sections.map((section) => section.kind), ['responsibilities', 'required']);
+    assert.match(sections[1].text, /Fluent in one of Python/);
+  });
+
+  test('flattened recovery requires the exact measured candidate and footer boundaries', () => {
+    const proseYou = segmentJd(
+      "What you'll do: Build tools that help you Current customers solve hard problems Comp and Benefits Salary",
+    );
+    assert.equal(proseYou.some((section) => section.kind === 'required'), false);
+
+    const missingFooter = segmentJd(
+      "What you'll do: Build tools You Current CS undergrad with a project track record Fluent in Python",
+    );
+    assert.equal(missingFooter.some((section) => section.kind === 'required'), false);
+  });
+
   test('the second-person forms open a REQUIRED section', () => {
     for (const heading of [
       'About You',

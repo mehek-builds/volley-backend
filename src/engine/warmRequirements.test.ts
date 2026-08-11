@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { warmRequirementCache, warmQuestions, WARM_TIMEOUT_MS } from './warmRequirements';
-import { matchClause } from './clauseMatch';
+import { matchClause, scorePosting } from './clauseMatch';
 import { cacheKey } from '../llm/competencyCache';
 import type { CandidateFacts } from './clauseMatch';
 
@@ -313,6 +313,204 @@ describe('an eligibility answer is cached under everything it depends on', () =>
     // Whether a bullet shows Python does not depend on the date, and rekeying those would throw
     // away every warm answer in the table for nothing.
     assert.equal(cacheKey('shows python', ['b']), cacheKey('shows python', ['b']));
+  });
+});
+
+describe('term alternatives apply only to their exact list span', () => {
+  const facts = (resumeText: string, monthsOfExperience = 0): CandidateFacts => ({
+    resumeText,
+    bullets: [],
+    monthsOfExperience,
+    monthsOfProfessionalExperience: monthsOfExperience,
+  });
+
+  test('a simple two-term alternative is satisfied by either exact term', () => {
+    assert.equal(matchClause('Experience with SQL or Python', 1, facts('Python')).verdict, 'met');
+    assert.equal(matchClause('Experience with SQL and/or Python', 1, facts('Python')).verdict, 'met');
+  });
+
+  test('Mercari API experience does not satisfy its separate language alternatives', () => {
+    const clause = 'Backend: API development experience using languages such as Go, PHP, or Java.';
+    const apiOnly = matchClause(clause, 1, facts('Built and documented an API'));
+    assert.equal(apiOnly.basis, 'terms');
+    assert.equal(apiOnly.verdict, 'unmet');
+    assert.deepEqual(new Set(apiOnly.missingTerms), new Set(['Backend', 'Go', 'Java', 'PHP']));
+    assert.equal(matchClause(clause, 1, facts('Built a Backend API in Java')).verdict, 'met');
+    assert.equal(matchClause(clause, 1, facts('Built a Backend API in Go')).verdict, 'met');
+    assert.equal(matchClause(clause, 1, facts('Built an API in Go')).verdict, 'unmet');
+    assert.equal(matchClause(clause, 1, facts('Built a Backend service in Go')).verdict, 'unmet');
+  });
+
+  test('ordinary lowercase go remains a movement verb, never a language signal', () => {
+    const clause = matchClause('Ability to go ship customer code quickly', 1, facts('Go'));
+    assert.notEqual(clause.basis, 'terms');
+  });
+
+  test('duration and named-term floors retain a scoped language alternative', () => {
+    const met = matchClause('5+ years with Java or Kotlin', 1, facts('Java', 72));
+    assert.equal(met.verdict, 'met');
+    const short = matchClause('5+ years with Java or Kotlin', 1, facts('Java', 48));
+    assert.equal(short.verdict, 'unmet');
+  });
+
+  test('an unrelated prose or does not relax earlier named requirements', () => {
+    const clause = 'Experience with API and SQL; work independently or ask for help.';
+    assert.equal(matchClause(clause, 1, facts('API')).verdict, 'unmet');
+    assert.equal(matchClause(clause, 1, facts('API SQL')).verdict, 'met');
+  });
+
+  test('multiple overlapping alternative connectors remain unscoreable', () => {
+    assert.equal(matchClause('Experience with Python or Java or Kotlin', 1, facts('Python')).verdict, 'unscoreable');
+  });
+
+  test('terms after an alternative remain mandatory', () => {
+    const clause = 'Experience with Java or Kotlin and SQL';
+    assert.equal(matchClause(clause, 1, facts('Java')).verdict, 'unmet');
+    assert.equal(matchClause(clause, 1, facts('Java SQL')).verdict, 'met');
+    assert.equal(matchClause(clause, 1, facts('Kotlin SQL')).verdict, 'met');
+  });
+
+  test('a framework alternative does not swallow a later data-tooling requirement', () => {
+    const clause = 'Exposure to at least one AI/ML framework such as PyTorch or JAX and basic data tooling including Pandas and SQL.';
+    assert.equal(matchClause(clause, 1, facts('AI ML Pandas SQL')).verdict, 'unmet');
+    assert.equal(matchClause(clause, 1, facts('AI ML PyTorch Pandas SQL')).verdict, 'met');
+  });
+
+  test('ordinary colon headings never become invented required terms', () => {
+    for (const clause of [
+      'Requirements: Experience with Python',
+      'Preferred: Experience with Python',
+      'Technical skills: Experience with Python',
+    ]) {
+      assert.equal(matchClause(clause, 1, facts('Python')).verdict, 'met', clause);
+    }
+  });
+
+  test('one-of groups are bounded, preserve neighbors, and do not merge a second group', async () => {
+    const jd = [
+      'Experience with Python is required.',
+      'Experience in at least one of the following:',
+      'Backend: Development experience using Java.',
+      'Frontend: Development experience using React.',
+      'Experience with SQL databases is required.',
+      'Experience in at least one of the following:',
+      'Backend: Development experience using Python.',
+      'Frontend: Development experience using React.',
+      'Experience with Docker containers is required.',
+    ].join('\n');
+    const scored = await scorePosting(
+      jd,
+      facts('Backend Java Frontend React'),
+      undefined,
+      () => [{ kind: 'required', weight: 1, text: jd }],
+      async () => ({ verdicts: [], rejected: [] }),
+    );
+    assert.equal(scored.clauses.some((clause) => clause.text === 'Experience with Python is required.'), true);
+    assert.equal(scored.clauses.some((clause) => clause.text.startsWith('Backend:') && clause.verdict === 'met'), true);
+    assert.equal(scored.clauses.some((clause) => clause.text === 'Experience with SQL databases is required.' && clause.verdict === 'unmet'), true);
+    assert.equal(scored.clauses.some((clause) => clause.text.startsWith('Frontend:') && clause.verdict === 'met'), true);
+    assert.equal(scored.clauses.some((clause) => clause.text === 'Experience with Docker containers is required.' && clause.verdict === 'unmet'), true);
+  });
+
+  test('current CS undergrad requires frozen enrollment and project evidence', () => {
+    const clause = 'Current CS undergrad with a hands-on project track record';
+    const base = {
+      ...facts('CS project'),
+      degree: 'Bachelor of Science in Computer Science',
+      school: 'USC',
+      projectOrInternshipEvidence: 'Built a production project',
+    };
+    assert.equal(matchClause(clause, 1, { ...base, currentlyEnrolled: true }).verdict, 'met');
+    assert.equal(matchClause(clause, 1, { ...base, currentlyEnrolled: false }).verdict, 'unmet');
+    assert.equal(matchClause(clause, 1, { ...base, currentlyEnrolled: null }).verdict, 'unscoreable');
+    assert.equal(matchClause(clause, 1, { ...base, currentlyEnrolled: true, projectOrInternshipEvidence: null }).verdict, 'unmet');
+  });
+
+  test('machine learning is an academic field only in the measured enrollment alternative', () => {
+    const ordinary = "Bachelor's in computer science with machine learning experience";
+    const csDegree = {
+      ...facts('Bachelor of Science in Computer Science'),
+      degree: 'Bachelor of Science in Computer Science',
+      school: 'USC',
+    };
+    assert.equal(matchClause(ordinary, 1, csDegree).verdict, 'unmet');
+    assert.equal(matchClause(ordinary, 1, { ...csDegree, resumeText: `${csDegree.resumeText} Machine Learning` }).verdict, 'met');
+
+    const enrollment = "Current CS or ML undergrad or Master's student with a hands-on project track record";
+    const base = {
+      ...facts('Built a production project'),
+      school: 'USC',
+      currentlyEnrolled: true,
+      projectOrInternshipEvidence: 'Built a production project',
+    };
+    assert.equal(matchClause(enrollment, 1, { ...base, degree: 'Bachelor of Science in Computer Science' }).verdict, 'met');
+    assert.equal(matchClause(enrollment, 1, { ...base, degree: 'Master of Science in Machine Learning' }).verdict, 'met');
+    assert.equal(matchClause(enrollment, 1, {
+      ...base,
+      degree: 'Bachelor of Arts in Economics',
+      school: 'Machine Learning University',
+    }).verdict, 'unmet');
+    assert.equal(matchClause(enrollment, 1, {
+      ...base,
+      degree: 'Bachelor of Arts in Economics',
+      school: 'CS Institute',
+    }).verdict, 'unmet');
+  });
+
+  test('a school name never proves the degree field cited by packet evidence', () => {
+    for (const [clause, misleadingSchool, matchingDegree] of [
+      ["Bachelor's degree in computer science", 'Computer Science University', 'Bachelor of Science in Computer Science'],
+      ["Bachelor's degree in engineering", 'Engineering University', 'Bachelor of Science in Mechanical Engineering'],
+      ["Bachelor's degree in data science", 'Data Science Institute', 'Bachelor of Science in Data Science'],
+    ] as const) {
+      const wrong = {
+        ...facts(''),
+        degree: 'Bachelor of Arts in Economics',
+        school: misleadingSchool,
+      };
+      const exact = { ...wrong, degree: matchingDegree };
+      assert.equal(matchClause(clause, 1, wrong).verdict, 'unmet', clause);
+      assert.equal(matchClause(clause, 1, exact).verdict, 'met', clause);
+    }
+  });
+
+  test('kos onsite commitment ignores resume location text and uses frozen applicant facts', () => {
+    const clause = "You're comfortable working in-person at our SF office for the whole internship";
+    assert.equal(matchClause(clause, 1, { ...facts('SF San Francisco'), onsiteCommitment: null }).verdict, 'unscoreable');
+    assert.equal(matchClause(clause, 1, { ...facts(''), onsiteCommitment: 'anywhere' }).verdict, 'met');
+    assert.equal(matchClause(clause, 1, {
+      ...facts(''), onsiteCommitment: 'listed_locations', onsiteLocations: ['San Francisco'],
+    }).verdict, 'met');
+    assert.equal(matchClause(clause, 1, {
+      ...facts('SF'), onsiteCommitment: 'listed_locations', onsiteLocations: ['Los Angeles'],
+    }).verdict, 'unmet');
+    assert.equal(matchClause(clause, 1, { ...facts('SF'), onsiteCommitment: 'no' }).verdict, 'unmet');
+  });
+
+  test('CTGT internship duration remains a blocking availability fact', () => {
+    const clause = '10 to 12 weeks between May/June and August/September 2027';
+    assert.deepEqual(matchClause(clause, 1, {
+      ...facts('Summer 2027 San Francisco'),
+      gradDate: 'May 2028',
+      onsiteCommitment: 'anywhere',
+    }), {
+      text: clause,
+      weight: 1,
+      verdict: 'unscoreable',
+      basis: 'availability',
+    });
+
+    const onsite = 'Full-time, in person in San Francisco';
+    assert.deepEqual(matchClause(onsite, 1, {
+      ...facts('Full-time work in San Francisco'),
+      onsiteCommitment: 'anywhere',
+      onsiteLocations: ['San Francisco'],
+    }), {
+      text: onsite,
+      weight: 1,
+      verdict: 'unscoreable',
+      basis: 'onsite-commitment',
+    });
   });
 });
 
