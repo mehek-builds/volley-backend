@@ -577,7 +577,7 @@ test('kos.ai Ashby bare You section emits exact auditable requirements with froz
   assert.notEqual(skillOnly.clauses.find((clause) => clause.text.startsWith("You've played with LLMs"))?.verdict, 'covered');
 });
 
-test('a met clause without one exact frozen evidence pointer remains degraded and unscoreable', async () => {
+test('a met clause without one exact frozen evidence pointer is unscoreable but does not degrade packet integrity', async () => {
   const jdText = 'Requirements\nExperience with Machine Learning.';
   const spec = {
     target_role: '', school: '', degree: '', grad_date: '', gpa: '', school_location: '', coursework: '',
@@ -589,7 +589,80 @@ test('a met clause without one exact frozen evidence pointer remains degraded an
   );
   assert.equal(scored.clauses[0]?.verdict, 'unscoreable');
   assert.equal(scored.clauses[0]?.evidence, undefined);
-  assert.equal(scored.degraded, true);
+  assert.equal(scored.degraded, false);
+  assert.doesNotThrow(() => createPacketAudit({
+    ownerId: 'owner-ungrounded-fit',
+    applicationId: 'application-ungrounded-fit',
+    jdText,
+    spec,
+    jobContext: { company: 'Example', role: 'Engineer' },
+    questions: [],
+    applicantSnapshot: null,
+    resumeEmail: 'student@example.edu',
+    applicantEmail: 'app-ungrounded@apply.trylitos.com',
+    pdfObjectKey: 'users/owner-ungrounded-fit/resumes/application.pdf',
+    pdfBytes: Buffer.from('%PDF-1.7\nungrounded fit packet'),
+    editedTerms: scored.editedTerms,
+    clauses: scored.clauses,
+    rejected: scored.rejected,
+    degraded: scored.degraded,
+    terms: scored.terms,
+  }));
+});
+
+test('Remote Recruitment negated degree and AI term gaps stay visible without blocking exact packet audit', async () => {
+  const noDegree = 'You do not need a perfect CV or a university degree. Attitude, work ethic, commercial awareness, coachability, and resilience are more important than traditional qualifications.';
+  const aiFeedback = 'The successful candidate will receive regular performance feedback and coaching, with AI technology used to analyse calls and support ongoing development.';
+  const jdText = ['Requirements', noDegree, aiFeedback].join('\n');
+  const spec = {
+    target_role: 'Sales Setter / Executive',
+    school: 'University of Southern California, Viterbi School of Engineering',
+    degree: 'Bachelor of Science in Computer Science',
+    grad_date: 'May 2028',
+    gpa: '3.89/4.0',
+    school_location: 'Los Angeles, CA',
+    coursework: 'Data Structures & Algorithms',
+    skills: [],
+    experience: [{
+      type: 'job' as const,
+      org: 'Tonee - AI Texting Tone Detector',
+      title: 'Founder',
+      location: 'Remote',
+      date_range: 'September 2025 - Present',
+      bullets: ['Shipped a consumer mobile app and improved product performance from user feedback.'],
+    }],
+    _review: {},
+  };
+  const scored = await scoreAuditEvidence(
+    { spec, job_context: { company: 'Remote Recruitment', role: 'Sales Setter / Executive' } } as never,
+    { jd_text: jdText, questions: [], edited_terms: [], status: 'ready_to_submit' } as never,
+  );
+
+  assert.deepEqual(scored.clauses.map((clause) => ({ text: clause.text, verdict: clause.verdict })), [
+    { text: noDegree, verdict: 'unscoreable' },
+    { text: aiFeedback, verdict: 'unscoreable' },
+  ]);
+  assert.equal(scored.clauses.every((clause) => clause.evidence === undefined), true);
+  assert.equal(scored.degraded, false);
+  assert.deepEqual(scored.judgementWarnings, []);
+  assert.doesNotThrow(() => createPacketAudit({
+    ownerId: 'owner-remote-recruitment',
+    applicationId: 'application-remote-recruitment',
+    jdText,
+    spec,
+    jobContext: { company: 'Remote Recruitment', role: 'Sales Setter / Executive' },
+    questions: [],
+    applicantSnapshot: null,
+    resumeEmail: 'student@example.edu',
+    applicantEmail: 'app-remote-recruitment@apply.trylitos.com',
+    pdfObjectKey: 'users/owner-remote-recruitment/resumes/application.pdf',
+    pdfBytes: Buffer.from('%PDF-1.7\nRemote Recruitment packet'),
+    editedTerms: scored.editedTerms,
+    clauses: scored.clauses,
+    rejected: scored.rejected,
+    degraded: scored.degraded,
+    terms: scored.terms,
+  }));
 });
 
 test('CTGT Summer 2027 duration remains exact and unscoreable without scoped availability facts', async () => {
