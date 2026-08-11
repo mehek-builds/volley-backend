@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { submissionFailureOutcome } from './submissionRunner';
+import {
+  delayedSecurityCodeHandoffReview,
+  preClickNoSubmitReview,
+  preClickSecurityRecipientMismatchReview,
+  preClickVerificationContinuationBlockedReview,
+  submissionFailureOutcome,
+} from './submissionRunner';
+import { submitRequestDisposition } from '../lib/submissionSafety';
 
 const base = {
   captchaStop: null as 'before_fill' | 'at_submit' | null,
@@ -21,6 +28,191 @@ test('a run that found no submit control says nothing was sent', () => {
   assert.match(out.attentionReason!, /nothing has been sent/);
   assert.doesNotMatch(out.attentionReason!, /check the portal or your email/i,
     'the one sentence this branch exists to avoid');
+});
+
+test('the pre-click route transition is retryable and stores no attempted or submitted residue', () => {
+  const current = {
+    status: 'submission_claimed',
+    submission_claimed_at: '2026-08-11T12:00:00.000Z',
+    submission_claim_id: 'claim-id',
+    submission_authorization: { source: 'standing_consent' },
+    submission_attempted_at: '2026-08-11T12:00:01.000Z',
+    unverified_submission: {
+      attempted_at: '2026-08-11T12:00:01.000Z',
+      cause: 'no_confirmation_state',
+      portal_url: 'https://jobs.ashbyhq.com/kos/job/application',
+    },
+    submitted_at: '2026-08-11T12:00:02.000Z',
+    receipt: {
+      confirmation_text: 'stale confirmation',
+      final_url: 'https://jobs.ashbyhq.com/kos/job/application',
+      captured_at: '2026-08-11T12:00:02.000Z',
+    },
+    attention_reason: 'stale reason',
+    updated_at: '2026-08-11T12:00:00.000Z',
+  } as unknown as Parameters<typeof preClickNoSubmitReview>[0];
+  const persisted = preClickNoSubmitReview(current, 'Atomic submit control was missing or ambiguous');
+  assert.equal(persisted.status, 'needs_attention');
+  assert.equal(persisted.submission_claimed_at, undefined);
+  assert.equal(persisted.submission_claim_id, undefined);
+  assert.equal(persisted.submission_authorization, undefined);
+  assert.equal(persisted.submission_attempted_at, undefined);
+  assert.equal(persisted.unverified_submission, undefined);
+  assert.equal(persisted.submitted_at, undefined);
+  assert.equal(persisted.receipt, undefined);
+  assert.match(persisted.attention_reason!, /could not find the button that sends this application/);
+  assert.match(persisted.attention_reason!, /nothing has been sent/);
+  assert.doesNotMatch(persisted.attention_reason!, /could not verify the employer confirmation/);
+});
+
+test('a standing code wall for another alias stays non-restartable and preserves the challenge', () => {
+  const current = {
+    status: 'submission_claimed',
+    submission_claimed_at: '2026-08-11T12:00:00.000Z',
+    submission_claim_id: 'claim-id',
+    submission_authorization: { source: 'standing_consent' },
+    submission_attempted_at: '2026-08-11T12:00:01.000Z',
+    unverified_submission: {
+      attempted_at: '2026-08-11T12:00:01.000Z',
+      cause: 'no_confirmation_state',
+      portal_url: 'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
+    },
+    submitted_at: '2026-08-11T12:00:02.000Z',
+    receipt: { confirmation_text: 'stale', final_url: 'stale', captured_at: 'stale' },
+    security_code: { digits: 8, sent_to: 'packet@example.com', requested_at: 'stale', submit_was_authorized: true },
+    verification: { status: 'searching' },
+    updated_at: '2026-08-11T12:00:00.000Z',
+  } as unknown as Parameters<typeof preClickSecurityRecipientMismatchReview>[0];
+  const persisted = preClickSecurityRecipientMismatchReview(current, {
+    digits: 8,
+    sentTo: 'other@example.com',
+  }, '2026-08-11T12:00:03.000Z');
+  assert.equal(persisted.status, 'awaiting_security_code');
+  assert.equal(persisted.submission_claimed_at, undefined);
+  assert.equal(persisted.submission_claim_id, undefined);
+  assert.equal(persisted.submission_authorization, undefined);
+  assert.equal(persisted.submission_attempted_at, '2026-08-11T12:00:01.000Z',
+    'the standing wall must not invent a current-run attempt or erase known prior evidence');
+  assert.equal(persisted.security_code?.sent_to, 'other@example.com');
+  assert.equal(persisted.security_code?.submit_was_authorized, false,
+    'a wall for another recipient cannot inherit authorization from the packet recipient');
+  assert.equal(persisted.security_code?.attempts, undefined);
+  assert.equal(persisted.unverified_submission, undefined);
+  assert.equal(persisted.submitted_at, undefined);
+  assert.equal(persisted.receipt, undefined);
+  assert.equal(persisted.verification?.status, 'verification_pending');
+  assert.match(persisted.attention_reason!, /different application email/i);
+  assert.match(persisted.attention_reason!, /already waiting/i);
+  assert.equal(submitRequestDisposition(persisted.status), 'reject');
+});
+
+test('a delayed post-click code wall preserves the unresolved external-side-effect lock', () => {
+  const current = {
+    status: 'submitting',
+    submission_claimed_at: '2026-08-11T12:00:00.000Z',
+    submission_claim_id: 'claim-id',
+    submission_authorization: {
+      source: 'standing_consent',
+      authorized_at: '2026-08-11T11:59:59.000Z',
+    },
+    unverified_submission: {
+      at: '2026-08-11T12:00:01.000Z',
+      cause: 'no_confirmation_state',
+    },
+    updated_at: '2026-08-11T12:00:00.000Z',
+  } as unknown as Parameters<typeof delayedSecurityCodeHandoffReview>[0];
+  const persisted = delayedSecurityCodeHandoffReview(current, {
+    securityCode: {
+      digits: 8,
+      sent_to: 'app-exact@apply.trylitos.com',
+      requested_at: '2026-08-11T12:00:03.000Z',
+      submit_was_authorized: true,
+    },
+    verification: {
+      status: 'verification_pending',
+      requested_at: '2026-08-11T12:00:03.000Z',
+      retry_count: 0,
+    },
+    attemptedAt: '2026-08-11T12:00:03.000Z',
+    screenshotUrl: 'https://proof.example/receipt.png',
+  });
+  assert.equal(persisted.status, 'needs_attention');
+  assert.equal(persisted.submission_claimed_at, '2026-08-11T12:00:00.000Z');
+  assert.equal(persisted.submission_claim_id, 'claim-id');
+  assert.deepEqual(persisted.submission_authorization, current.submission_authorization);
+  assert.equal(persisted.submission_attempted_at, '2026-08-11T12:00:03.000Z');
+  assert.equal(persisted.preview_screenshot_url, 'https://proof.example/receipt.png');
+  assert.equal(persisted.security_code?.sent_to, 'app-exact@apply.trylitos.com');
+  assert.equal(persisted.verification?.status, 'verification_pending');
+  assert.equal(persisted.unverified_submission, undefined);
+  assert.equal(persisted.submission_error, undefined);
+  assert.deepEqual(persisted.attention_categories, ['security_code', 'evidence_gap']);
+  assert.match(persisted.attention_reason!, /will not open a fresh form or send this application again automatically/);
+  assert.equal(submitRequestDisposition('needs_attention', false), 'start', 'the cleared-claim regression would restart');
+  assert.equal(
+    submitRequestDisposition(
+      persisted.status,
+      Boolean(persisted.submission_claimed_at),
+    ),
+    'reject',
+  );
+});
+
+for (const cause of ['authorization_revoked', 'email_route_changed', 'email_permission_revoked'] as const) {
+  for (const pressed of [true, false]) {
+    test(`a ${cause} race after pressed=${pressed} preserves the challenge and cannot restart`, () => {
+      const knownAttempt = undefined;
+      const currentAttempt = pressed ? '2026-08-11T12:00:02.000Z' : undefined;
+      const current = {
+        status: 'submission_claimed',
+        submission_claimed_at: '2026-08-11T12:00:00.000Z',
+        submission_claim_id: 'claim-id',
+        submission_authorization: { source: 'standing_consent' },
+        submission_attempted_at: knownAttempt,
+        unverified_submission: { attempted_at: 'stale', cause: 'no_confirmation_state', portal_url: 'stale' },
+        submitted_at: 'stale',
+        receipt: { confirmation_text: 'stale', final_url: 'stale', captured_at: 'stale' },
+        updated_at: '2026-08-11T12:00:00.000Z',
+      } as unknown as Parameters<typeof preClickVerificationContinuationBlockedReview>[0];
+      const challenge = {
+        digits: 8,
+        sent_to: 'app-exact@apply.trylitos.com',
+        requested_at: '2026-08-11T11:59:00.000Z',
+        submit_was_authorized: true,
+        attempts: undefined,
+      };
+      const persisted = preClickVerificationContinuationBlockedReview(current, challenge, cause, currentAttempt);
+      assert.equal(persisted.status, 'awaiting_security_code');
+      assert.equal(persisted.security_code, challenge);
+      assert.equal(persisted.security_code?.attempts, undefined, 'the matched code is not fingerprinted before authorization');
+      assert.equal(persisted.submission_claimed_at, undefined);
+      assert.equal(persisted.submission_claim_id, undefined);
+      assert.equal(persisted.submission_authorization, undefined);
+      assert.equal(persisted.submission_attempted_at, currentAttempt,
+        'pressed=false must not invent a current-run attempt marker');
+      assert.equal(persisted.unverified_submission, undefined);
+      assert.equal(persisted.submitted_at, undefined);
+      assert.equal(persisted.receipt, undefined);
+      assert.match(persisted.attention_reason!, /already waiting/i);
+      assert.match(persisted.attention_reason!, /without clicking the verification button/i);
+      assert.equal(submitRequestDisposition(persisted.status), 'reject');
+    });
+  }
+}
+
+test('action-time blocking preserves a genuine prior attempted marker on a retained wall', () => {
+  const current = {
+    status: 'submission_claimed',
+    submission_attempted_at: '2026-08-11T11:58:00.000Z',
+    updated_at: '2026-08-11T12:00:00.000Z',
+  } as unknown as Parameters<typeof preClickVerificationContinuationBlockedReview>[0];
+  const challenge = {
+    digits: 8,
+    requested_at: '2026-08-11T11:59:00.000Z',
+    submit_was_authorized: true,
+  };
+  const persisted = preClickVerificationContinuationBlockedReview(current, challenge, 'authorization_revoked');
+  assert.equal(persisted.submission_attempted_at, '2026-08-11T11:58:00.000Z');
 });
 
 test('no-submit-control outranks uncertainty, and captcha outranks both', () => {

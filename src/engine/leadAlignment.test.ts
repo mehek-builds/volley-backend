@@ -22,6 +22,29 @@ Requirements:
 - Experience shipping a consumer product end to end
 - Strong written communication`;
 
+const WORKABLE_FORM_ONLY_JD = `Sales Setter / Executive
+Remote Recruitment
+Personal details
+First name
+Last name
+Email
+Phone
+Photo
+Education
+School
+Field of study
+Degree
+Start date
+End date
+Experience
+Title
+Company
+Industry
+Summary
+Resume
+Do you live in South Africa?
+Submit application`;
+
 const TONEE = {
   type: 'job' as const,
   org: 'Tonee - AI Texting Tone Detector',
@@ -81,6 +104,37 @@ test('a missing justification is reported so the retry loop can ask for one', ()
 
 test('a single-entry resume still needs evidence for why it leads this job', () => {
   assert.match(leadAlignmentIssues(spec({ experience: [TONEE] }), JD)[0], /lead_alignment is missing/);
+});
+
+test('a rendered Workable form with no role description keeps lead fit explicitly unscoreable', () => {
+  const context = { company: 'Remote Recruitment', role: 'Sales Setter / Executive' };
+  assert.deepEqual(leadRequirementCandidates(WORKABLE_FORM_ONLY_JD, context), []);
+
+  const selected = selectJdAlignedLead(
+    spec({ experience: [TRAECO, TONEE] }, WORKABLE_FORM_ONLY_JD),
+    WORKABLE_FORM_ONLY_JD,
+    context,
+  );
+  assert.deepEqual(selected.issues, []);
+  assert.deepEqual(selected.supported_terms, []);
+  assert.equal(selected.spec.lead_alignment, null);
+  assert.deepEqual(selected.spec.experience.map((entry) => entry.org), [TRAECO.org, TONEE.org]);
+  assert.deepEqual(leadAlignmentIssues(selected.spec, WORKABLE_FORM_ONLY_JD, { context }), []);
+});
+
+test('a form-only posting cannot carry a fabricated lead citation', () => {
+  const context = { company: 'Remote Recruitment', role: 'Sales Setter / Executive' };
+  const cited = spec({
+    lead_alignment: {
+      entry_org: TONEE.org,
+      requirement: 'Experience',
+      evidence: TONEE.bullets[0],
+    },
+  }, WORKABLE_FORM_ONLY_JD);
+  assert.match(
+    leadAlignmentIssues(cited, WORKABLE_FORM_ONLY_JD, { context })[0],
+    /cannot cite a lead requirement when the frozen job description contains no supported primary ask/,
+  );
 });
 
 test('deterministic selection leads a frontend role with frontend work instead of LLM infrastructure', () => {
@@ -249,10 +303,9 @@ test('the asks lead with what the job does, then what it screens for', () => {
   ]);
 });
 
-/* A posting with no readable asks must relax to the weaker bar rather than fail every packet
- * against an empty list, which would withhold resumes over an unparseable job board rather than
- * over anything the resume says. */
-test('a posting that yields no asks falls back to quoting the job description', () => {
+/* A posting with no readable asks cannot support a lead citation, even when the quoted text occurs
+ * somewhere in the posting. Null records the honest absence of an evidence-bearing decision. */
+test('a posting that yields no asks rejects a citation quoted from its text', () => {
   const thin = 'Engineer wanted. Apply within.';
   assert.deepEqual(leadRequirementCandidates(thin), []);
   const s = spec({
@@ -262,8 +315,7 @@ test('a posting that yields no asks falls back to quoting the job description', 
       evidence: TONEE.bullets[0],
     },
   }, thin);
-  assert.match(leadAlignmentIssues(s, thin)[0], /does not address/);
-  assert.ok(!leadAlignmentIssues(s, thin).some((i) => /not in the job description/.test(i)));
+  assert.match(leadAlignmentIssues(s, thin)[0], /cannot cite a lead requirement/);
 });
 
 test('evidence the lead entry does not hold is rejected, even when it is a real bullet elsewhere', () => {

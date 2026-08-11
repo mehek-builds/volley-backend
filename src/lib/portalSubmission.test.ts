@@ -50,6 +50,7 @@ import {
   MANAGED_OPTION_EXTRACT_PREFIX,
   managedResultHasCoverLetterUpload,
   portalApplicationUrl,
+  navigateToApplicationForm,
   portalCanAutoSubmit,
   portalHandoffReason,
   readManagedReceipt,
@@ -2998,6 +2999,54 @@ test('Workable uploads the resume by data-ui, never by id or a bare file selecto
   assert.match(upload!.selector!, /data-ui="resume"/);
   assert.doesNotMatch(upload!.selector!, /input_files_input/, 'must not match the per-render random id');
   assert.notEqual(upload!.selector, 'input[type="file"]');
+});
+
+test('Workable opens the exact application route and clears optional-cookie overlays before filling', () => {
+  const posting = 'https://apply.workable.com/mercari/j/EC5A1078C4/';
+  const application = 'https://apply.workable.com/mercari/j/EC5A1078C4/apply';
+  assert.equal(portalApplicationUrl('workable', posting), application);
+  assert.equal(portalApplicationUrl('workable', application), application);
+
+  const actions = buildManagedPortalActions('workable', capturePacket, true);
+  const declineIndex = actions.findIndex((action) => action.label === 'workable_cookie_preflight');
+  const readyIndex = actions.findIndex((action) => action.label === 'workable_application_form_ready');
+  const firstNameIndex = actions.findIndex((action) => action.label === 'first_name');
+  assert.ok(declineIndex >= 0, 'Workable must dismiss the cookie overlay without accepting optional cookies');
+  assert.equal(actions[declineIndex]?.selector, 'button:has-text("Decline all")');
+  assert.ok(readyIndex > declineIndex, 'Workable must wait for the candidate form after cookie preflight');
+  assert.ok(firstNameIndex > readyIndex, 'Workable form readiness must precede fixed-field filling');
+});
+
+test('direct Workable preparation reaches the same form and declines optional cookies', async () => {
+  let currentUrl = 'https://apply.workable.com/mercari/j/EC5A1078C4/';
+  const events: string[] = [];
+  const fakePage = {
+    url: () => currentUrl,
+    goto: async (destination: string) => {
+      currentUrl = destination;
+      events.push(`goto:${destination}`);
+    },
+    locator: (selector: string) => ({
+      first: () => selector === 'button:has-text("Decline all")'
+        ? {
+          count: async () => 1,
+          isVisible: async () => true,
+          click: async () => { events.push('decline'); },
+        }
+        : {
+          waitFor: async () => { events.push('ready'); },
+        },
+    }),
+  } as unknown as Page;
+
+  await navigateToApplicationForm(fakePage, 'workable');
+
+  assert.equal(currentUrl, 'https://apply.workable.com/mercari/j/EC5A1078C4/apply');
+  assert.deepEqual(events, [
+    'goto:https://apply.workable.com/mercari/j/EC5A1078C4/apply',
+    'decline',
+    'ready',
+  ]);
 });
 
 test('Workable never ticks the GDPR consent checkbox', () => {

@@ -118,7 +118,7 @@ export type ManagedBrowserResult = {
   submitOutcome?: {
     pressed?: boolean;
     state?: 'confirmed' | 'rejected' | 'unknown' | 'not_attempted';
-    source?: 'ats_state' | 'live_region' | 'page_text' | null;
+    source?: 'ats_state' | 'ats_route' | 'ats_state_unconfirmed' | 'live_region' | 'page_text' | null;
     evidence?: string | null;
     message?: string | null;
     formStillPresent?: boolean | null;

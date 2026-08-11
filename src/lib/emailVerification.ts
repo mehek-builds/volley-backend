@@ -42,6 +42,7 @@ const CONTEXTUAL_ALPHA_CODE_PATTERNS = [
 ];
 const MAX_CODE_AGE_MS = 10 * 60_000;
 const CLOCK_SKEW_MS = 30_000;
+const STANDING_GREENHOUSE_CODE_LOOKBACK_MS = 24 * 60 * 60_000;
 
 const PORTAL_SENDER_DOMAINS: Array<{ portal: RegExp; senders: string[] }> = [
   { portal: /(?:^|\.)greenhouse\.io$/i, senders: ['greenhouse.io', 'grnh.se', 'us.greenhouse-mail.io'] },
@@ -243,6 +244,24 @@ function isGreenhouseVerificationPortal(portalUrl: string): boolean {
     && parsed.searchParams.get('board')?.toLowerCase() === 'greenhouse';
 }
 
+/** The 24-hour exception is narrower than ordinary Greenhouse sender recognition. */
+function isManagedGreenhouseStandingPortal(portalUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(portalUrl);
+  } catch {
+    return false;
+  }
+  if (isControlledTestPortalUrl(portalUrl)) {
+    return parsed.searchParams.get('board')?.toLowerCase() === 'greenhouse';
+  }
+  return parsed.protocol === 'https:'
+    && !parsed.username
+    && !parsed.password
+    && (!parsed.port || parsed.port === '443')
+    && /^(?:job-boards|boards)(?:\.eu)?\.greenhouse\.io$/.test(parsed.hostname.toLowerCase());
+}
+
 function allowedSender(actual: string, allowed: string[]): boolean {
   return allowed.some((domain) => actual === domain || actual.endsWith(`.${domain}`));
 }
@@ -288,11 +307,16 @@ export function extractVerificationCode(
   requestedAt: Date,
   expectedRecipient?: string,
   applicationId?: string,
+  preferNewest = false,
+  window: { beforeMs: number; afterMs: number } = {
+    beforeMs: CLOCK_SKEW_MS,
+    afterMs: MAX_CODE_AGE_MS,
+  },
 ): VerificationCodeMatch | null {
   const allowedDomains = expectedSenderDomains(portalUrl);
   if (allowedDomains.length === 0 || Number.isNaN(requestedAt.getTime())) return null;
-  const earliest = requestedAt.getTime() - CLOCK_SKEW_MS;
-  const latest = requestedAt.getTime() + MAX_CODE_AGE_MS;
+  const earliest = requestedAt.getTime() - window.beforeMs;
+  const latest = requestedAt.getTime() + window.afterMs;
   const recipient = expectedRecipient?.trim().toLowerCase() ?? '';
   if (expectedRecipient && !recipient) return null;
   if (recipient && applicationId && /(?:^app-|\+app-)/i.test(recipient)) {
@@ -318,7 +342,14 @@ export function extractVerificationCode(
     })
     .sort((left, right) => right.message.receivedAt!.getTime() - left.message.receivedAt!.getTime());
 
-  if (new Set(matches.map((match) => match.code)).size > 1) return null;
+  if (!preferNewest && new Set(matches.map((match) => match.code)).size > 1) return null;
+  if (preferNewest && matches.length > 1) {
+    const newestReceivedAt = matches[0].message.receivedAt!.getTime();
+    const newestCodes = new Set(matches
+      .filter((match) => match.message.receivedAt!.getTime() === newestReceivedAt)
+      .map((match) => match.code));
+    if (newestCodes.size > 1) return null;
+  }
   const best = matches[0];
   if (!best) return null;
   return {
@@ -404,7 +435,10 @@ export function extractLitosVerificationCode(
   portalUrl: string,
   requestedAt: Date,
   expectedRecipient: string,
+  standingGreenhouse = false,
 ): VerificationCodeMatch | null {
+  const useStandingGreenhouseWindow = standingGreenhouse
+    && isManagedGreenhouseStandingPortal(portalUrl);
   const payload = rows.map((row) => {
     const raw = asRecord(row.raw_json);
     const authentication = asRecord(raw?.authentication);
@@ -425,6 +459,11 @@ export function extractLitosVerificationCode(
     portalUrl,
     requestedAt,
     expectedRecipient,
+    undefined,
+    useStandingGreenhouseWindow,
+    useStandingGreenhouseWindow
+      ? { beforeMs: STANDING_GREENHOUSE_CODE_LOOKBACK_MS, afterMs: CLOCK_SKEW_MS }
+      : undefined,
   );
 }
 
@@ -434,6 +473,7 @@ async function findLitosVerificationCode(options: {
   requestedAt: Date;
   expectedRecipient: string;
   applicationId?: string;
+  standingChallenge?: boolean;
 }): Promise<VerificationCodeMatch | null> {
   const recipient = options.expectedRecipient.trim().toLowerCase();
   if (!recipient) return null;
@@ -441,8 +481,15 @@ async function findLitosVerificationCode(options: {
     const packetPrefix = options.applicationId.replace(/-/g, '').slice(0, 10).toLowerCase();
     if (!recipient.includes(packetPrefix)) return null;
   }
-  const earliest = new Date(options.requestedAt.getTime() - CLOCK_SKEW_MS);
-  const latest = new Date(options.requestedAt.getTime() + MAX_CODE_AGE_MS);
+  const standingGreenhouse = options.standingChallenge === true
+    && isManagedGreenhouseStandingPortal(options.portalUrl)
+    && Boolean(options.applicationId);
+  const earliest = new Date(options.requestedAt.getTime() - (
+    standingGreenhouse ? STANDING_GREENHOUSE_CODE_LOOKBACK_MS : CLOCK_SKEW_MS
+  ));
+  const latest = new Date(options.requestedAt.getTime() + (
+    standingGreenhouse ? CLOCK_SKEW_MS : MAX_CODE_AGE_MS
+  ));
   const rows = await db.select({
     from_email: application_email_messages.from_email,
     to_email: application_email_messages.to_email,
@@ -458,7 +505,13 @@ async function findLitosVerificationCode(options: {
     gte(application_email_messages.received_at, earliest),
     lte(application_email_messages.received_at, latest),
   )).orderBy(desc(application_email_messages.received_at)).limit(10);
-  return extractLitosVerificationCode(rows, options.portalUrl, options.requestedAt, recipient);
+  return extractLitosVerificationCode(
+    rows,
+    options.portalUrl,
+    options.requestedAt,
+    recipient,
+    standingGreenhouse,
+  );
 }
 
 function defaultExecutor(): EmailToolExecutor {
@@ -480,6 +533,7 @@ export async function findComposioVerificationCode(options: {
   requestedAt: Date;
   expectedRecipient?: string;
   applicationId?: string;
+  standingChallenge?: boolean;
   executor?: EmailToolExecutor;
   resolveRoute?: typeof resolveVerificationEmailRoute;
   findAliasCode?: typeof findLitosVerificationCode;
@@ -491,12 +545,21 @@ export async function findComposioVerificationCode(options: {
     expectedRecipient: options.expectedRecipient,
   }).catch(() => 'invalid_alias' as const);
   if (route === 'application_alias') {
+    // A retained Greenhouse wall can predate this run. Search backward only after the route has
+    // proved the exact active alias belongs to this user and application, and only for Greenhouse.
+    // Personal inboxes and other ATS families never get this exception. The held verification page
+    // gets only the newest authenticated message from this exact application alias, and the caller
+    // can spend that code in one verification continuation without resending the application.
+    const standingGreenhouse = options.standingChallenge === true
+      && isManagedGreenhouseStandingPortal(options.portalUrl)
+      && Boolean(options.applicationId);
     return (options.findAliasCode ?? findLitosVerificationCode)({
       userId: options.userId,
       portalUrl: options.portalUrl,
       requestedAt: options.requestedAt,
       expectedRecipient: options.expectedRecipient,
       applicationId: options.applicationId,
+      standingChallenge: standingGreenhouse,
     }).catch(() => null);
   }
   if (route !== 'personal_address') return null;
