@@ -7,6 +7,7 @@ import {
   managedContinuationFingerprint,
   runManagedBrowser,
 } from './browserbase';
+import { observeManagedReceiptOnce } from './managedSubmitOutcome';
 import { buildManagedDiscoveryActions, buildManagedPortalActions } from './portalSubmission';
 
 function assertStratusSafeActions(actions: Array<Record<string, unknown>>) {
@@ -203,6 +204,94 @@ test('managed Stratus continuation sends an opaque token and actions without reo
   else process.env.STRATUS_API_KEY = previousKey;
   if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
   else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('an ordinary unknown receipt checkpoint reaches its one read-only observer', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  const applicationUrl = 'https://jobs.ashbyhq.com/kos/software-engineer-intern/application';
+  const token = 'receipt_checkpoint_token_abcdefghijklmnopqrstuvwxyz';
+  const expiresAt = '2026-08-11T12:00:15.000Z';
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+  try {
+    globalThis.fetch = (async (input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push({ url: String(input), body });
+      if (!('continuationToken' in body)) {
+        const checkpointOffered = body.requestContinuation === true && body.continuationCheckpoint === true;
+        return new Response(JSON.stringify({
+          run: {
+            title: 'Application',
+            url: applicationUrl,
+            text: 'Submit Application',
+            screenshot: 'initial-image',
+            continuationOffered: checkpointOffered,
+            ...(checkpointOffered ? { continuationToken: token, continuationExpiresAt: expiresAt } : {}),
+            humanVerification: null,
+            submitOutcome: {
+              pressed: true,
+              state: 'unknown',
+              source: null,
+              evidence: null,
+              message: null,
+              formStillPresent: true,
+            },
+          },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        run: {
+          title: 'Application submitted',
+          url: applicationUrl,
+          text: 'Thank you for submitting your application.',
+          screenshot: 'observed-image',
+          humanVerification: null,
+          submitOutcome: {
+            pressed: true,
+            state: 'confirmed',
+            source: 'ats_state',
+            evidence: '.ashby-application-form-success-container',
+            message: 'Thank you for submitting your application.',
+            formStillPresent: false,
+          },
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    const initial = await runManagedBrowser(applicationUrl, [], {
+      allowSubmit: true,
+      requestContinuation: true,
+      continuationCheckpoint: true,
+      continuationTtlSeconds: 120,
+    });
+    assert.equal(initial.humanVerification, null);
+    assert.equal(initial.continuationOffered, true);
+    const observation = await observeManagedReceiptOnce({
+      initial,
+      expectedApplicationUrl: applicationUrl,
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: (continuationToken) => continueManagedBrowser(continuationToken, [], { screenshot: true }),
+    });
+
+    assert.equal(observation.attempted, true);
+    assert.equal(observation.receiptResult.submitOutcome?.state, 'confirmed');
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].body.requestContinuation, true);
+    assert.equal(requests[0].body.continuationCheckpoint, true);
+    assert.equal(requests[1].body.continuationToken, token);
+    assert.deepEqual(requests[1].body.actions, []);
+    assert.equal('url' in requests[1].body, false);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
 });
 
 test('managed Stratus converts label fills into selector-backed fill actions', async () => {
