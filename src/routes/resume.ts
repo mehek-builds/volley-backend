@@ -56,6 +56,7 @@ import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPor
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
 import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
+import { specWithoutDocumentPointers } from '../lib/documentStore';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
 import { resumeEmailOfRecord } from '../lib/resumeEmail';
@@ -1195,7 +1196,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       application: persisted ? {
         id: resumeId,
         job_context: jobContext,
-        spec: storedSpec,
+        /* Through the stripper even though this particular spec cannot hold a pointer: it was built
+         * a few lines above for an application id that has existed for milliseconds, so no document
+         * has ever been attached to it and the call returns its argument by identity.
+         *
+         * It is here so that "a stored spec on the wire goes through specWithoutDocumentPointers"
+         * is a rule with no exceptions to remember. The two leaks this replaced were both routes
+         * where the pointer was not visible in the line that shipped it - a whole-row spread, and a
+         * spec handed over under a key that says nothing about documents - and an exception list is
+         * the mechanism by which the third one gets written. */
+        spec: specWithoutDocumentPointers(storedSpec),
         download_url: resumeUrl,
         created_at: now,
       } : undefined,
@@ -1294,6 +1304,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
   // key, so nothing could actually retrieve a past resume; the token makes the list usable and
   // is minted per-request so the links expire with the response rather than being stored.
   // Files older than the retention window are gone, and their link 404s by design.
+  //
+  // THE SPEC GOES OUT WHOLE, WHICH IS WHY IT GOES OUT THROUGH specWithoutDocumentPointers. This
+  // route answers with fifty complete specs, so it began serving _documents.transcript.object_key
+  // the day attachments were added, without a line of this file ever mentioning documents and
+  // without the contract test that fences routes/documents.ts being able to see it. A Blob object
+  // is written `access: 'public'` because that is the only mode the SDK has, so that key plus the
+  // store's stable base URL is permanent unauthenticated access to a student's transcript. It is
+  // also fifty rows of bytes nobody reads: db/schema.ts:1122 records a board list query exhausting
+  // Neon's monthly transfer ceiling, and this is the payload the plan named next to it.
   fastify.get('/resume/history', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
     const rows = await db
@@ -1342,7 +1361,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const resumeFileName = resumeFileNameForRole(contact.full_name, job.role);
       return {
         ...row,
-        spec: refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context),
+        spec: specWithoutDocumentPointers(
+          refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context),
+        ),
         download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, { fileName: resumeFileName })}`,
         cover_letter_download_url: typeof coverLetter.object_key === 'string'
           ? `${base}/resume/download?t=${mintDownloadToken(userId, coverLetter.object_key)}`

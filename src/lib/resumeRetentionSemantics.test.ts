@@ -137,6 +137,10 @@ test('every blob this codebase writes has a retention decision recorded', async 
     'lib/coverLetterService.ts',
     'routes/applications.ts',
     'routes/resume.ts',
+    // The fifth writer, and the census is why it is listed. It shipped on a branch that never
+    // touched this file, so the count stayed at four and passed: a write that is not in `roots` is
+    // invisible to the guard that exists to make a new write force a retention decision.
+    'lib/documentStore.ts',
   ];
   let writes = 0;
   for (const file of roots) {
@@ -145,7 +149,7 @@ test('every blob this codebase writes has a retention decision recorded', async 
   }
   assert.equal(
     writes,
-    4,
+    5,
     'A blob write was added or removed. Classify its key in classifyUserBlob and give it a window '
     + 'in retentionDaysForCategory, then update this count. Unclassified keys are kept forever.',
   );
@@ -181,10 +185,55 @@ test('every category a write can produce classifies, and every classification ha
     ['users/u/submission-runs/r/receipt-abc.png', 'submission-receipt'],
     // Legacy originals, no longer written but swept on sight if one reappears.
     ['users/u/resume.pdf', 'legacy-original'],
+    // documentStore.ts, via putUserDocument
+    ['users/u/documents/5d3f0b6a-9a71-4f3a-9c2f-2b6a1d8e7c40.pdf', 'user-document'],
   ];
   for (const [pathname, expected] of written) {
     assert.equal(classifyUserBlob(pathname), expected, pathname);
     assert.notEqual(classifyUserBlob(pathname), 'unclassified', pathname);
+  }
+});
+
+/* THE PUBLISHED SENTENCE, AND THE DIFFERENCE BETWEEN SURVIVING AND BEING EXEMPT.
+ *
+ * trylitos.com/privacy says of a file the student attaches herself: "We encrypt it and keep it until
+ * you remove it or delete your account." That was verified once against a classifier that no longer
+ * exists - main replaced resumeBlobsDueForDeletion's two-arm filter with classifyUserBlob plus
+ * retentionDaysForCategory while the branch was out - and under the replacement the key survived
+ * only by reaching the catch-all.
+ *
+ * The catch-all is an ALARM, not a policy. Its own comment says an unrecognised shape is kept and
+ * logged so a new category "announces itself on the first run after it ships", which is an
+ * invitation for the next person to give that arm a window. A window on 'unclassified' would delete
+ * every stored transcript and make the sentence on the page false, with nothing failing anywhere.
+ * So the first assertion here is the load-bearing one: the exemption has a NAME.
+ */
+test('a file the student attached herself is exempt by name, not by falling through', () => {
+  const key = 'users/user-1/documents/5d3f0b6a-9a71-4f3a-9c2f-2b6a1d8e7c40.pdf';
+  assert.equal(
+    classifyUserBlob(key),
+    'user-document',
+    'The privacy page promises this file is kept until she removes it. Reclassifying it, or letting '
+    + 'it fall to the catch-all, makes a published sentence false the first time that arm gets a '
+    + 'window. Change the page before changing this.',
+  );
+  assert.notEqual(classifyUserBlob(key), 'unclassified', key);
+  assert.equal(retentionDaysForCategory('user-document'), null);
+  // Four years old and not due, so the exemption is asserted through the filter and not only
+  // through the two functions it is built from.
+  assert.deepEqual(resumeBlobsDueForDeletion([blob(key, 1460)], now), []);
+  // The other half of the same sentence: "or delete your account" is true only while the key sits
+  // inside the prefix deleteBlobsForUser lists.
+  assert.ok(key.startsWith(userBlobPrefix('user-1')));
+
+  /* Anchored like the generated-resume rule, and for the same reason: one segment under documents/
+     is every key putUserDocument can build, so anything deeper is a shape nobody has decided about
+     and belongs in the alarm rather than under this exemption. */
+  for (const nested of [
+    'users/user-1/documents/nested/deeper.pdf',
+    'users/user-1/audit/documents/evidence.pdf',
+  ]) {
+    assert.equal(classifyUserBlob(nested), 'unclassified', nested);
   }
 });
 

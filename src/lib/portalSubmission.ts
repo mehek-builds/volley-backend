@@ -671,6 +671,26 @@ export type SubmissionPacket = {
   resumeName: string;
   coverLetter?: Buffer;
   coverLetterName?: string;
+  /* A file the student attached to this application herself, decrypted for the fill. One carrier
+   * for all three delivery paths - Playwright setInputFiles, the managed sandbox's base64 upload,
+   * and the ATS API multipart - so a document added here reaches every one of them at once rather
+   * than the one the author happened to be looking at.
+   *
+   * Both fields or neither. uploadFirst and managedUpload each return early unless the file AND the
+   * name are truthy, which is what makes an application with no transcript a no-op instead of a
+   * half-populated packet that spends an action on an empty upload. */
+  transcript?: Buffer;
+  transcriptName?: string;
+  /* Why the attached transcript is not on this packet, when the application says one is attached.
+   *
+   * Metadata, not a fill field, the same way applicantEmail above is. Removing a document deletes
+   * its blob and tombstones the row, and it deliberately does NOT rewrite the spec of every
+   * application that already carried it, so a student who tidies her library leaves live pointers at
+   * a file that is gone. buildPacket records that here instead of throwing, because it is called
+   * bare at nine sites and only two of them catch anything: a dead pointer must not be able to abort
+   * a fully filled application. The run turns this into one fixed sentence for her and logs the
+   * detail. */
+  transcriptUnavailableReason?: string;
   eeoPrefs?: Record<string, string> | null;
   // The single most recent role from the parsed resume, for portals that ask for work history as
   // structured fields rather than accepting the resume file alone (Paylocity's step one). Only one
@@ -2145,7 +2165,7 @@ function managedSelect(
 function managedUpload(
   actions: ManagedBrowserAction[],
   selector: string,
-  label: 'resume' | 'cover_letter',
+  label: 'resume' | 'cover_letter' | 'transcript',
   file: Buffer | undefined,
   fileName: string | undefined,
 ) {
@@ -3793,7 +3813,17 @@ function isProtectedManagedAction(
   const base = managedActionLabelBase(action);
   if (base && protectedActionBases.has(base)) return true;
   if (GREENHOUSE_FIXED_EDUCATION_ACTION_RE.test(label)) return true;
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_preflight$|workable_application_form_ready$)/
+  // transcript_capability joins cover_letter_capability here because it is the same kind of thing:
+  // a READ whose absence is indistinguishable from a no. If the trim takes it, transcript_supported
+  // is written false on a form that has the control, the submit run re-derives its attach decision
+  // from that flag, and a document she attached is silently left off. The `upload` action it decides
+  // about is deliberately NOT protected - a fill is what the budget is for giving up.
+  //
+  // The two workable_ entries arrived on main in PR #487 while this branch was open. Both sides of
+  // that merge were adding to this one list rather than disagreeing about it, so the resolution is
+  // the union: a Workable form that cannot report itself ready and a transcript control that cannot
+  // report itself present are two separate reads, and dropping either one loses a different fact.
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_preflight$|workable_application_form_ready$)/
     .test(label);
 }
 
@@ -4379,6 +4409,135 @@ export async function hasCoverLetterUpload(page: Page, portal: SupportedPortal):
   return false;
 }
 
+/* THE TRANSCRIPT CONTROL, and the two facts that are true about it before any of this runs.
+ *
+ * FIRST: no portal in the corpus has ever been captured exposing one. Every other selector in this
+ * file was read off a live form; these were not, and pretending otherwise would be the worse
+ * mistake. A transcript field is never a platform control - it is an employer-configured extra
+ * question, present on some postings of a family and absent on the next tenant - so no capture of
+ * one form could answer for the family anyway. What IS knowable without a capture is the word the
+ * employer will have used, which is why every arm below is anchored on "transcript" and none of them
+ * is a positional or shape guess.
+ *
+ * SECOND, and this is the part that has to be right: a transcript selector must never reach the
+ * resume or the cover-letter control. uploadFirst takes the first selector that matches and accepts,
+ * setInputFiles REPLACES whatever the control was holding, and the resume upload runs first in every
+ * family - so a transcript selector broad enough to match the resume input does not merely miss, it
+ * overwrites her resume with her transcript on a form that is then submitted. GREENHOUSE_RESUME_
+ * SELECTOR and ASHBY_RESUME_SELECTOR both carry input[type="file"][name*="resume" i], so the two
+ * live one attribute apart. Requiring the literal token is most of the answer; the :not() arms cover
+ * the label-scoped case, where a "Transcript" heading can sit above a block that also holds the
+ * resume input and the label scope alone would not tell them apart.
+ */
+const NOT_RESUME_OR_COVER_FILE =
+  ':not([name*="resume" i]):not([id*="resume" i]):not([name*="cover" i]):not([id*="cover" i])';
+const TRANSCRIPT_UPLOAD_SELECTOR = [
+  `input[type="file"][name*="transcript" i]${NOT_RESUME_OR_COVER_FILE}`,
+  `input[type="file"][id*="transcript" i]${NOT_RESUME_OR_COVER_FILE}`,
+  `input[type="file"][aria-label*="transcript" i]${NOT_RESUME_OR_COVER_FILE}`,
+  `label:has-text("Transcript") input[type="file"]${NOT_RESUME_OR_COVER_FILE}`,
+].join(', ');
+
+/* The honest answer for a family where a transcript could not be attached even if the employer did
+ * ask for one, and the rule that decides which families those are: a family gets a real selector
+ * exactly when its fill path already pushes a document upload that is not the resume.
+ *
+ * That is a mechanical test rather than a judgement, and it lands where it should. The
+ * account-walled families reach no form at all. SmartRecruiters and JazzHR stop after the exact
+ * captured first-page controls and return. Breezy, BambooHR, Zoho Recruit and Bullhorn each had
+ * exactly one file input on every form captured, and their adapters are deliberately locked to the
+ * controls that were captured - Breezy's form also ships a honeypot that defeats a visibility check,
+ * which is reason enough not to widen it on a guess. A never-matching selector keeps that answer in
+ * one place instead of making every caller special-case the list. */
+const NO_TRANSCRIPT_UPLOAD_SELECTOR = 'input[type="file"][name="noTranscriptControlCapturedOnThisPortal"]';
+
+const TRANSCRIPT_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
+  greenhouse: TRANSCRIPT_UPLOAD_SELECTOR,
+  lever: TRANSCRIPT_UPLOAD_SELECTOR,
+  ashby: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_test: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_lever: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_ashby: TRANSCRIPT_UPLOAD_SELECTOR,
+  workable: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_workable: TRANSCRIPT_UPLOAD_SELECTOR,
+  paylocity: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_paylocity: TRANSCRIPT_UPLOAD_SELECTOR,
+  rippling: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_rippling: TRANSCRIPT_UPLOAD_SELECTOR,
+  recruitee: TRANSCRIPT_UPLOAD_SELECTOR,
+  manual_recruitee: TRANSCRIPT_UPLOAD_SELECTOR,
+  teamtailor: TRANSCRIPT_UPLOAD_SELECTOR,
+  personio: TRANSCRIPT_UPLOAD_SELECTOR,
+  pinpoint: TRANSCRIPT_UPLOAD_SELECTOR,
+  comeet: TRANSCRIPT_UPLOAD_SELECTOR,
+  // SmartRecruiters' capability ends at the captured first page, before any employer question can
+  // render, so there is nothing here to attach to even when the posting asks for a transcript later
+  // in its wizard.
+  smartrecruiters: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_smartrecruiters: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  jazzhr: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_jazzhr: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  breezy: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_breezy: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  bamboohr: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_bamboohr: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  zoho_recruit: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  bullhorn: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  sap_successfactors: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  oracle_taleo: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  adp_recruiting: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  avature: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  jobvite: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  icims: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  oraclecloud: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  ultipro: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+};
+
+export function transcriptUploadSelector(portal: SupportedPortal): string {
+  return TRANSCRIPT_UPLOAD_SELECTORS[portal];
+}
+
+/**
+ * Whether this portal carries a real transcript selector rather than the never-match sentinel.
+ *
+ * Every caller that would spend an action, or claim a capability, asks this first. Spending one is
+ * the smaller cost and it still matters - Greenhouse already measures at exactly MANAGED_ACTION_
+ * LIMIT with a cover letter - but claiming one is the failure that has teeth: transcript_supported
+ * is what the submit run re-derives its attach decision from, so a portal that says yes and cannot
+ * attach produces an application recorded as carrying a document it never sent.
+ */
+export function portalMayAttachTranscript(portal: SupportedPortal): boolean {
+  return TRANSCRIPT_UPLOAD_SELECTORS[portal] !== NO_TRANSCRIPT_UPLOAD_SELECTOR;
+}
+
+export function managedResultHasTranscriptUpload(result: ManagedBrowserResult | null, portal: SupportedPortal): boolean {
+  if (!portalMayAttachTranscript(portal)) return false;
+  const selector = transcriptUploadSelector(portal);
+  return result?.extracted?.some((item) => (
+    (item.label === 'transcript_capability' || item.selector === selector)
+    && item.value?.trim().toLowerCase() === 'file'
+  )) === true;
+}
+
+/**
+ * Does this form have somewhere Litos can put a transcript?
+ *
+ * The sentinel check leads, and it is the one departure from hasCoverLetterUpload's shape. The
+ * label fallback below would happily find a file input labelled "Transcript" on a family whose fill
+ * path pushes no transcript upload at all, and the answer would then be recorded as
+ * transcript_supported: true on a run that can never attach one. "The page has such a control" and
+ * "this run can use it" are two different questions, and only the second one is worth writing down.
+ */
+export async function hasTranscriptUpload(page: Page, portal: SupportedPortal): Promise<boolean> {
+  if (!portalMayAttachTranscript(portal)) return false;
+  if ((await page.locator(transcriptUploadSelector(portal)).count()) > 0) return true;
+  const labelled = page.getByLabel(/transcript/i);
+  for (let index = 0; index < await labelled.count(); index += 1) {
+    if ((await labelled.nth(index).getAttribute('type'))?.toLowerCase() === 'file') return true;
+  }
+  return false;
+}
+
 function managedLabelInputSelector(text: string): string {
   const quoted = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   return [
@@ -4926,6 +5085,26 @@ function pushFixedFieldActions(
     managedUpload(actions, ASHBY_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, ASHBY_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
   }
+  /* THE TRANSCRIPT GOES LAST, AND IT IS OUTSIDE THE FAMILY CHAIN FOR THAT REASON.
+   *
+   * Written once here rather than repeated in eleven branches, because "after the resume and the
+   * cover letter, in every family" is the whole property and a per-branch copy is one branch away
+   * from losing it. The resume selectors are the broad ones (GREENHOUSE_RESUME_SELECTOR and
+   * ASHBY_RESUME_SELECTOR both carry name*="resume"), the runner takes the first selector that
+   * matches, and setInputFiles replaces rather than adds - so an upload ordered before the resume
+   * can end up holding the resume's slot.
+   *
+   * It is also after the account-walled return at the top of this function, deliberately. Those
+   * families reach no form, and an upload placed before that return would be an action fired at a
+   * login or consent gate. They get no transcript, and that is the correct answer rather than a gap.
+   *
+   * Zero cost when there is nothing to attach: managedUpload returns before pushing unless both the
+   * file and the name are set, and portalMayAttachTranscript keeps the action off the families whose
+   * selector cannot match anything. Greenhouse measures at exactly MANAGED_ACTION_LIMIT with a cover
+   * letter, so an action spent on a control that provably does not exist is not free there. */
+  if (portalMayAttachTranscript(portal)) {
+    managedUpload(actions, transcriptUploadSelector(portal), 'transcript', packet.transcript, packet.transcriptName);
+  }
 }
 
 // A cheap first pass: fill the fixed fields (idempotent - the real run below fills them again,
@@ -4956,6 +5135,22 @@ export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: Su
     optional: true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
   });
+  /* The same read for the transcript, and it is pushed ONLY where the answer can be anything other
+   * than no. On the sentinel families the selector cannot match, so the extract would spend one of
+   * the runner's 120 actions to learn a fact this repo already knows - and this is the builder that
+   * went from 120 to 145 once and had every managed Greenhouse discovery call answered with HTTP 400
+   * TOO_MANY_ACTIONS before a browser opened. managedResultHasTranscriptUpload returns false for
+   * those families without needing the read. */
+  if (portalMayAttachTranscript(portal)) {
+    actions.push({
+      type: 'extract',
+      selector: transcriptUploadSelector(portal),
+      attribute: 'type',
+      label: 'transcript_capability',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
   /* THE BUDGET, and its absence here is what made R-096 invisible on every real run.
    *
    * buildManagedPortalActions has trimmed itself to MANAGED_ACTION_LIMIT since Greenhouse first
@@ -6029,7 +6224,7 @@ async function uploadFirst(
   selectors: string[],
   file: Buffer | undefined,
   fileName: string | undefined,
-  label: 'resume' | 'cover_letter',
+  label: 'resume' | 'cover_letter' | 'transcript',
   out: string[],
 ) {
   if (!file || !fileName) return;
@@ -6378,6 +6573,23 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ASHBY_PORTFOLIO_SELECTOR.split(', '), packet.portfolioUrl, 'portfolio', filledFields);
     await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+  }
+  /* The direct-Playwright twin of the transcript upload in pushFixedFieldActions, and it sits here
+   * for the same two reasons: after every family's own uploads, because uploadFirst is
+   * first-match-wins and the resume selectors are the broad ones; and after the account-walled
+   * return at the top of this function, because those families reach no form to upload to.
+   *
+   * The families that return early inside the chain above - SmartRecruiters and JazzHR - never reach
+   * this line, and both carry the never-match sentinel anyway, so the two answers agree. */
+  if (portalMayAttachTranscript(portal)) {
+    await uploadFirst(
+      page,
+      transcriptUploadSelector(portal).split(', '),
+      packet.transcript,
+      packet.transcriptName,
+      'transcript',
+      filledFields,
+    );
   }
   if (family !== 'zoho_recruit' && family !== 'bullhorn' && family !== 'bamboohr') {
     await fillReviewedQuestions(page, portal, packet, filledFields);

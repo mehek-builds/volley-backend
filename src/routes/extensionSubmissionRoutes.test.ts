@@ -30,7 +30,16 @@ test('attended extension refill returns the exact owned generated packet and a f
   assert.match(route, /resume_id: row\.id/);
   assert.match(route, /handoff_version: handoffVersion/);
   assert.match(route, /extensionHandoffVersion\([\s\S]*?applicationId: row\.id[\s\S]*?resumeObjectKey: row\.resume_object_key[\s\S]*?spec: row\.spec[\s\S]*?jobContext: row\.job_context/);
-  assert.match(route, /application: \{ id: row\.id, spec: stored \}/);
+  /* The whole stored packet still goes to the extension, minus the Blob pointers on any document
+   * she attached. This pin used to read `spec: stored`, which is how that payload came to be
+   * handing a content script running in the employer's page origin a key that is permanent
+   * unauthenticated access to a student's transcript. The extension has no file channel for a
+   * document anyway: its only one is the resume capability token minted a few lines above. */
+  assert.match(route, /application: \{ id: row\.id, spec: specWithoutDocumentPointers\(stored\) \}/);
+  /* And the RAW spec is still what the handoff version hashes, deliberately. That value binds the
+   * packet the extension is about to fill; stripping a field out of its input would change every
+   * version string on an application that has an attachment. */
+  assert.match(route, /extensionHandoffVersion\(\{[\s\S]*?spec: row\.spec,/);
   assert.match(route, /applicant_snapshot: review\.applicant_snapshot/);
   assert.match(route, /review\.ats_name === 'jobvite'[\s\S]*?review\.ats_name === 'icims'[\s\S]*?review\.ats_name === 'oraclecloud'[\s\S]*?!review\.applicant_snapshot/);
   assert.doesNotMatch(route, /resume\/generate/);
