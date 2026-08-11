@@ -182,7 +182,7 @@ test('saved experience dates compute exact month floors and fail closed when unp
   assert.equal(monthsOfExperienceFromSpec({ ...base, experience: [entry('Summer 2024 - Present')] }, now), null);
 });
 
-test('packet scoring keeps met, unmet, and unparseable experience-year requirements fail closed', async () => {
+test('packet scoring keeps met, unmet, and unparseable experience-year requirements explicit without blocking the packet', async () => {
   const score = async (
     date_range: string,
     requirement = '5+ years of experience building software systems',
@@ -203,7 +203,8 @@ test('packet scoring keeps met, unmet, and unparseable experience-year requireme
   assert.equal(unmet.degraded, false);
   assert.equal(unmet.clauses[0]?.verdict, 'missing');
   const unknown = await score('Summer 2024 - Present');
-  assert.equal(unknown.degraded, true);
+  assert.equal(unknown.clauses[0]?.verdict, 'unscoreable');
+  assert.equal(unknown.degraded, false);
   const projectOnly = await score('Jun 2018 - Jun 2024', '5+ years of professional experience building software', 'project');
   assert.equal(projectOnly.degraded, false);
   assert.equal(projectOnly.clauses[0]?.verdict, 'missing');
@@ -241,7 +242,9 @@ test('packet scoring requires frozen enrollment truth and an exact requested deg
   assert.equal((await score('Associate of Arts', true, "Bachelor's degree in any field is required")).clauses[0]?.verdict, 'missing');
   assert.equal((await score('Master of Science', true, "Bachelor's degree in any field is required")).clauses[0]?.verdict, 'covered');
   assert.equal((await score('Doctorate in Engineering', true, "Bachelor's degree in any field is required")).clauses[0]?.verdict, 'covered');
-  assert.equal((await score('Bachelor of Science', undefined, "Currently enrolled in a bachelor's degree program")).degraded, true);
+  const unknownEnrollment = await score('Bachelor of Science', undefined, "Currently enrolled in a bachelor's degree program");
+  assert.equal(unknownEnrollment.clauses[0]?.verdict, 'unscoreable');
+  assert.equal(unknownEnrollment.degraded, false);
 });
 
 test('covered duration clauses retain every contributing saved date range', async () => {
@@ -382,7 +385,25 @@ test('Mercari multilingual clause keeps generic API evidence separate from langu
     verdict: 'unscoreable',
   });
   assert.equal(clause?.evidence, undefined);
-  assert.equal(scored.degraded, true);
+  assert.equal(scored.degraded, false);
+  assert.doesNotThrow(() => createPacketAudit({
+    ownerId: 'owner-mercari',
+    applicationId: 'application-mercari',
+    jdText,
+    spec,
+    jobContext: { company: 'Mercari', role: 'Class of 2028 Software Engineer Internship' },
+    questions: [],
+    applicantSnapshot: null,
+    resumeEmail: 'student@example.edu',
+    applicantEmail: 'app-mercari@apply.trylitos.com',
+    pdfObjectKey: 'users/owner-mercari/resumes/application-mercari.pdf',
+    pdfBytes: Buffer.from('%PDF-1.7\nMercari packet'),
+    editedTerms: scored.editedTerms,
+    clauses: scored.clauses,
+    rejected: scored.rejected,
+    degraded: scored.degraded,
+    terms: scored.terms,
+  }));
   assert.equal(scored.clauses.some((candidate) => candidate.text.startsWith('Backend:')), false);
   assert.equal(scored.clauses.some((candidate) => candidate.text.startsWith('Security Engineer:')), false);
 
@@ -509,7 +530,7 @@ test('kos.ai Ashby bare You section emits exact auditable requirements with froz
     { ...review, applicant_snapshot: { profile: {}, application_profile: {} } } as never,
   );
   assert.equal(unknownEnrollment.clauses.find((clause) => clause.text.startsWith('Current CS or ML'))?.verdict, 'unscoreable');
-  assert.equal(unknownEnrollment.degraded, true);
+  assert.equal(unknownEnrollment.degraded, false);
 
   const resumeLocationCannotAuthorizeOnsite = await scoreAuditEvidence(
     {
@@ -532,7 +553,7 @@ test('kos.ai Ashby bare You section emits exact auditable requirements with froz
     resumeLocationCannotAuthorizeOnsite.clauses.find((clause) => clause.text.startsWith("You're comfortable working in-person"))?.verdict,
     'unscoreable',
   );
-  assert.equal(resumeLocationCannotAuthorizeOnsite.degraded, true);
+  assert.equal(resumeLocationCannotAuthorizeOnsite.degraded, false);
 
   const wrongOnsiteCity = await scoreAuditEvidence(
     { spec, job_context: { company: 'kos.ai', role: 'Software Engineer Intern', location: 'San Francisco' } } as never,
@@ -571,7 +592,7 @@ test('a met clause without one exact frozen evidence pointer remains degraded an
   assert.equal(scored.degraded, true);
 });
 
-test('CTGT Summer 2027 duration remains exact and blocks without scoped availability facts', async () => {
+test('CTGT Summer 2027 duration remains exact and unscoreable without scoped availability facts', async () => {
   const jdText = [
     'Requirements',
     'Full-time, in person in San Francisco',
@@ -605,7 +626,7 @@ test('CTGT Summer 2027 duration remains exact and blocks without scoped availabi
   assert.equal(onsite?.text, jdText.slice(onsite.start, onsite.end));
   assert.equal(availability?.verdict, 'unscoreable');
   assert.equal(availability?.text, jdText.slice(availability.start, availability.end));
-  assert.equal(scored.degraded, true);
+  assert.equal(scored.degraded, false);
 });
 
 test('current packet identities require the explicit profile resume email and active exact alias', async () => {
