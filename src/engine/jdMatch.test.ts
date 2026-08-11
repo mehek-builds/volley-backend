@@ -21,6 +21,18 @@ import {
  */
 const MIN_SEPARATION = 30;
 
+/**
+ * Every requirement the posting asks for, a stated choice counted by its branches.
+ *
+ * An inline "A or B" is ONE requirement carrying both branches, so the branch that is not the
+ * group's key stopped being a key of its own. The assertions that reach for this were always asking
+ * whether the requirement SURVIVED extraction, never whether it held a denominator slot to itself,
+ * and this is that question spelled so both shapes answer it. Negative assertions get STRICTER
+ * rather than weaker: a word that must not be a requirement must not be hiding inside a choice.
+ */
+const requirementKeys = (terms: ReadonlyArray<{ term: string; alternatives?: string[] }>): string[] =>
+  terms.flatMap((t) => t.alternatives ?? [t.term]);
+
 /** Mirrors the primary fit-section hierarchy in jdMatch.ts. */
 const STATED_KINDS_FOR_TEST = new Set(['required', 'preferred']);
 
@@ -259,7 +271,8 @@ You have some first hand experience with SQL and/or Python
     // outweigh the stated requirement. That is the part that makes the number wrong, not their
     // presence: `sql` and `python` must carry more than `genie` does.
     const terms = extractJdTerms(jd);
-    const weightOf = (term: string) => terms.find((t) => t.term === term)?.weight;
+    const weightOf = (term: string) =>
+      terms.find((t) => t.term === term || (t.alternatives ?? []).includes(term))?.weight;
     assert.equal(weightOf('sql'), 1, 'SQL is stated under "What we look for"');
     assert.equal(weightOf('python'), 1, 'Python is stated under "What we look for"');
     // No `if (w !== undefined)` guard here, deliberately: as a guard this whole loop degraded to a
@@ -566,18 +579,23 @@ describe('scoreJdMatch', () => {
     assert.equal(r.scorable, true);
     assert.ok(r.score !== null && r.score >= 55, `expected a strong PM/SWE score, got ${r.score}`);
     for (const covered of ['product management', 'product strategy', 'user research', 'roadmap', 'dashboards']) {
+      /* BOTH HALVES, ASSERTED SEPARATELY. "on both documents and must be counted" is two claims,
+         and folding them into one membership test let a stated choice satisfy it from the OTHER
+         branch: the requirement was counted, but not because of this string. The resume side is
+         pinned by resumeCovers and the posting side by the requirement carrying it. */
+      assert.ok(resumeCovers(MEHEK_PM_SWE_RESUME, covered), `${covered} is on the resume`);
       assert.ok(
-        r.matched.some((t) => t.term === covered),
+        r.matched.some((t) => t.term === covered || (t.alternatives ?? []).includes(covered)),
         `${covered} is on both documents and must be counted`,
       );
     }
   });
 
   test('a required product-management phrase is not deleted by the posting title', () => {
-    const terms = extractJdTerms(
+    const terms = requirementKeys(extractJdTerms(
       'Qualifications\n- Experience with product management or product strategy.\n- Python.\n- SQL.\n- Git.\n',
       { role: 'Product Management Intern' },
-    ).map((t) => t.term);
+    ));
     assert.ok(terms.includes('product management'), 'the requirement survives despite the role title');
     assert.ok(terms.includes('product strategy'), 'the alternate PM requirement survives too');
   });
@@ -832,7 +850,12 @@ Requirements
 - Comfortable with Git
 `;
     const terms = extractJdTerms(jd);
-    assert.equal(terms.length, 4, 'four stated requirements');
+    /* FOUR NAMED THINGS ACROSS THREE REQUIREMENTS, which is the number this floor is about.
+       "SQL and/or Python" is one stated choice and spends one denominator slot, and the posting
+       still names four concrete technologies, so it is still enough to be honest about. Counting
+       the choice as one thing here would make this posting refuse to score. */
+    assert.equal(requirementKeys(terms).length, 4, 'four stated requirements');
+    assert.equal(terms.length, 3, 'stated as three requirements, one of them a choice');
     const scored = scoreJdMatch('Python and Docker and Git and SQL.', jd);
     assert.equal(scored.scorable, true, 'four terms is enough to be honest about');
     assert.notEqual(scored.score, null);
@@ -1584,7 +1607,7 @@ describe('a posting does not ask for its own address', () => {
       'Our Values',
       'We value transparency and honest communication.',
     ].join('\n');
-    const keys = extractJdTerms(jd, { company: 'Postman', role: 'AI Engineer, Intern' }).map((t) => t.term);
+    const keys = requirementKeys(extractJdTerms(jd, { company: 'Postman', role: 'AI Engineer, Intern' }));
     for (const place of ['san francisco', 'tokyo', 'london', 'bangalore']) {
       assert.ok(!keys.includes(place), `"${place}" is office policy prose, not a resume requirement`);
     }
@@ -1729,9 +1752,9 @@ describe('the requirement denominator excludes prose and branding, not requireme
   test('an example marker is not a requirement', () => {
     // "(e.g. AWS)" tokenizes to "e.g", normalizes to "eg", and the dot is what admitted it:
     // TECH_MARKER reads '.' as the punctuation of a technical name. Nearly every JD names examples.
-    const keys = extractJdTerms(
+    const keys = requirementKeys(extractJdTerms(
       'Requirements\n- Experience with cloud platforms (e.g. AWS) and CI/CD\n- Scripting, i.e. Python or Bash\n',
-    ).map((t) => t.term);
+    ));
 
     assert.ok(!keys.includes('eg'), '"e.g." is prose punctuation, not a requirement');
     assert.ok(!keys.includes('ie'), '"i.e." is prose punctuation, not a requirement');
@@ -3374,8 +3397,8 @@ describe('a colour on the review screen is supported by something the posting as
       'certain legal rights at https://drw.com/california-privacy-notice.\n';
 
     test('a privacy notice contributes nothing, including its state', () => {
-      const keys = extractJdTerms(NOTICE, { company: 'DRW', role: 'Software Developer Intern' }).map(
-        (t) => t.term,
+      const keys = requirementKeys(
+        extractJdTerms(NOTICE, { company: 'DRW', role: 'Software Developer Intern' }),
       );
       assert.ok(!keys.includes('california'), 'the state in a privacy notice is not a requirement');
       assert.ok(!keys.includes('legal'), 'nor is "certain legal rights"');
@@ -3526,11 +3549,11 @@ describe('a colour on the review screen is supported by something the posting as
     test('"the rails for viable solution space" is not Ruby on Rails', () => {
       // Databricks, packets cd4d316d / 7030b54f / a82d860a. `rails` was the ONLY amber on the whole
       // packet: the single gap Litos reported was a framework the posting never mentions.
-      const keys = extractJdTerms(
+      const keys = requirementKeys(extractJdTerms(
         'What we look for:\nDeeply understand the customer problem space and establish the rails ' +
           'for viable solution space\nFirst hand experience with SQL and/or Python\n',
         { company: 'Databricks', role: 'Product Management Intern' },
-      ).map((t) => t.term);
+      ));
       assert.ok(!keys.includes('rails'), 'the English idiom is not a web framework');
       assert.ok(keys.includes('sql') && keys.includes('python'), 'the real asks survive');
     });
@@ -3553,10 +3576,10 @@ describe('a colour on the review screen is supported by something the posting as
     // the decoration class, so the first word of every bullet read as a mid-sentence capital.
     // `Comfortable` and `Currently` are both already in POSITIONAL_OPENERS precisely so they cannot
     // become requirements; the glyph is what stopped that list from ever being consulted.
-    const keys = extractJdTerms(
+    const keys = requirementKeys(extractJdTerms(
       '→ Comfortable with Python and/or JavaScript\n→ Currently enrolled in an undergraduate program\n',
       { company: 'Scale AI', role: 'AI Builder Intern' },
-    ).map((t) => t.term);
+    ));
     assert.ok(!keys.includes('comfortable') && !keys.includes('currently'), 'a bullet opener is grammar');
     assert.ok(keys.includes('python') && keys.includes('javascript'), 'the requirements survive');
   });
@@ -3571,5 +3594,493 @@ describe('a colour on the review screen is supported by something the posting as
     ).map((t) => t.term);
     assert.ok(!keys.includes('however'), 'a conjunctive adverb is grammar in any position');
     assert.ok(keys.includes('python') && keys.includes('ai'), 'the real terms survive');
+  });
+});
+
+/**
+ * kos.ai, Ashby, "Software Engineer Intern", measured live on 2026-08-11.
+ *
+ * The posting's candidate block is flattened into one paragraph and its only heading is the bare
+ * word `You`; segmentJd already restores that. Kept verbatim, punctuation and all, because every
+ * defect below is a defect about THIS sentence structure and paraphrasing it would test a different
+ * posting.
+ */
+const KOS_JD = "What you'll do: Build and ship a bounded project in one of: eval infrastructure, ERP integration stubs, internal ops dashboards, or the agent training pipeline Partner with the founding team. They're your reviewer and your mentor. Learn how an AI-native product works under the hood. The agent loop, the eval harness, the production plumbing. Not the marketing version. Contribute to code reviews, design discussions, and the culture of the team You Current CS or ML undergrad or Master's student with a hands-on project or internship track record Fluent in one of Python, TypeScript, or Go. You pick up whatever else the project needs. You've played with LLMs, agents, or computer-use workflows. You've built something, not just read about it. You're hungry to ship code into production, not complete a rotational checklist You'd rather ship one thing a customer touches than polish ten projects that live on a demo-day slide You're comfortable working in-person at our SF office for the whole internship Comp and Benefits Relocation benefits Visa sponsorship for eligible candidates";
+
+const KOS_CONTEXT = { company: 'kos.ai', role: 'Software Engineer Intern', location: null };
+
+/* The same shape resumeSpecText builds: school, degree, graduation date, then experience. The
+   education block is the applicant's own, verbatim from the packet that produced the defect. */
+const KOS_RESUME = [
+  'University of Southern California, Viterbi School of Engineering',
+  'Bachelor of Science in Computer Science',
+  'May 2028',
+  'Litos', 'Founding Engineer', 'Jan 2025 - Present',
+  'Built LLMs agent workflows in Python and TypeScript and shipped them to real users',
+].join(' ');
+
+/* Pinned, because "is this degree still in progress" is a comparison against today and a test that
+   let the wall clock decide would be asserting the calendar. This is the day the defect was
+   measured on the live account. */
+const MEASURED_TODAY = new Date('2026-08-11T09:00:00Z');
+
+describe('a stated choice is one requirement, and the branch the resume answers is not a gap', () => {
+  test('kos.ai: "Current CS or ML" is one requirement, met by an in-progress CS degree', () => {
+    const terms = extractJdTerms(KOS_JD, KOS_CONTEXT);
+    const choice = terms.filter((t) => (t.alternatives ?? []).includes('current cs'));
+    assert.equal(choice.length, 1, 'the alternation is ONE requirement, not one per branch');
+    assert.deepEqual(choice[0].alternatives, ['current cs', 'ml']);
+    assert.equal(choice[0].display, 'Current CS or ML', 'displayed as the employer wrote the choice');
+    assert.equal(
+      terms.filter((t) => t.term === 'ml').length,
+      0,
+      'the branch she does not hold is not also standing on its own',
+    );
+
+    const match = scoreJdMatch(KOS_RESUME, KOS_JD, KOS_CONTEXT, { now: MEASURED_TODAY });
+    assert.equal(
+      match.matched.some((t) => (t.alternatives ?? []).includes('current cs')),
+      true,
+      'a current CS undergraduate satisfies the CS branch',
+    );
+    for (const missing of match.missing) {
+      assert.doesNotMatch(missing.term, /\bcs\b|\bml\b/i);
+      assert.doesNotMatch(missing.display, /\bCS\b|\bML\b/i);
+    }
+  });
+
+  test('kos.ai: an office commitment is not a term the resume is scored against', () => {
+    const keys = requirementKeys(extractJdTerms(KOS_JD, KOS_CONTEXT));
+    assert.equal(keys.includes('sf'), false, 'SF is where the job is, not something a resume carries');
+    const match = scoreJdMatch(KOS_RESUME, KOS_JD, KOS_CONTEXT, { now: MEASURED_TODAY });
+    assert.equal(match.missing.some((t) => /^(?:sf|san francisco)$/i.test(t.display)), false);
+    assert.ok(keys.includes('python') && keys.includes('typescript'), 'the real requirements survive');
+  });
+
+  test('kos.ai: "Fluent in one of Python, TypeScript, or Go" is one requirement too', () => {
+    /* The posting says "one of" in its own words, which is the same declaration the bulleted form
+       reads, so the comma list folds whole. `go` is never extracted (see the lowercase-go rule), so
+       the group is the two branches the extractor can actually see, and it spans exactly the words
+       between them. */
+    const choice = extractJdTerms(KOS_JD, KOS_CONTEXT).find((t) => t.term === 'python');
+    assert.deepEqual(choice?.alternatives, ['python', 'typescript']);
+    assert.equal(choice?.display, 'Python, TypeScript');
+  });
+
+  test('kos.ai: the packet scores 3 of 3 with nothing on the gap list', () => {
+    // BEFORE this fix, measured on the same pair: score 50, "3 of 6", and a gap list reading
+    // `Current CS`, `ML`, `SF` - two halves of one choice she meets, and a city. The posting states
+    // three requirements to a resume-matching model: a degree choice, a language choice, and LLMs.
+    const match = scoreJdMatch(KOS_RESUME, KOS_JD, KOS_CONTEXT, { now: MEASURED_TODAY });
+    assert.equal(match.scorable, true);
+    assert.equal(match.term_count, 3);
+    assert.equal(match.matched.length, 3);
+    assert.equal(match.missing.length, 0);
+    assert.equal(match.score, 100);
+    assert.equal(match.required_coverage, 1);
+    assert.deepEqual(
+      match.matched.map((t) => t.display).sort(),
+      ['Current CS or ML', 'LLMs', 'Python, TypeScript'],
+    );
+    // Four things named across three requirements, so the floor still sees what the employer wrote.
+    assert.equal(requirementKeys(extractJdTerms(KOS_JD, KOS_CONTEXT)).length, 5);
+  });
+
+  test('a school named after a field did not confer a degree in it', () => {
+    // The exact over-reach the prior round warned about: reading the field off the page rather than
+    // off the degree lets any string containing "Computer Science" answer an enrollment requirement.
+    const resume = [
+      'University of Computer Science',
+      'Bachelor of Arts in History',
+      'May 2099',
+      'Museum', 'Archivist', 'Jan 2025 - Present',
+      'Catalogued Python and TypeScript oral histories with LLMs',
+    ].join(' ');
+    const match = scoreJdMatch(resume, KOS_JD, KOS_CONTEXT, { now: MEASURED_TODAY });
+    assert.equal(
+      match.matched.some((t) => (t.alternatives ?? []).includes('current cs')),
+      false,
+      'the school name is not the degree field',
+    );
+    assert.equal(match.missing.some((t) => t.display === 'Current CS or ML'), true);
+  });
+
+  test('a finished degree does not answer a current-enrollment requirement', () => {
+    const resume = [
+      'University of Southern California, Viterbi School of Engineering',
+      'Bachelor of Science in Computer Science',
+      'May 2019',
+      'Litos', 'Founding Engineer', 'Jan 2025 - Present',
+      'Built LLMs agent workflows in Python and TypeScript and shipped them to real users',
+    ].join(' ');
+    const match = scoreJdMatch(resume, KOS_JD, KOS_CONTEXT, { now: MEASURED_TODAY });
+    assert.equal(match.matched.some((t) => (t.alternatives ?? []).includes('current cs')), false);
+    assert.equal(match.missing.some((t) => t.display === 'Current CS or ML'), true);
+  });
+
+  test('a degree with no readable date stays a gap rather than becoming a mark', () => {
+    // Ambiguity fails closed. The right field is on the page and the resume never says when, so the
+    // one thing "current" turns on was never stated and nothing here may colour green.
+    const resume = [
+      'University of Southern California',
+      'Bachelor of Science in Computer Science',
+      'graduation date to be confirmed',
+      'Litos', 'Founding Engineer',
+      'Built LLMs agent workflows in Python and TypeScript and shipped them to real users',
+    ].join(' ');
+    const match = scoreJdMatch(resume, KOS_JD, KOS_CONTEXT, { now: MEASURED_TODAY });
+    assert.equal(match.matched.some((t) => (t.alternatives ?? []).includes('current cs')), false);
+    assert.equal(match.missing.some((t) => t.display === 'Current CS or ML'), true);
+  });
+
+  test('an unanswered choice is one gap, and it is still a gap', () => {
+    const resume = 'Bachelor of Arts in History May 2099 Museum Archivist Wrote Python and TypeScript catalogues about LLMs';
+    const match = scoreJdMatch(resume, KOS_JD, KOS_CONTEXT, { now: MEASURED_TODAY });
+    assert.deepEqual(match.missing.map((t) => t.display), ['Current CS or ML']);
+    assert.equal(match.score, 67, 'one unmet requirement of three, not two of six');
+  });
+
+  test('a choice stops where the choice stops, and mandatory requirements after it survive', () => {
+    // The boundary defect the bulleted one-of form was fixed for, in its inline form: a group that
+    // ran to the end of the line would have swallowed SQL and Docker and credited a Python resume
+    // for both.
+    const jd = [
+      'Requirements',
+      '- Strong experience with at least one of Python, Ruby, or PHP and production SQL and Docker every day',
+      '- Comfortable owning services end to end',
+    ].join('\n');
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const terms = extractJdTerms(jd, context);
+    const choice = terms.find((t) => t.alternatives);
+    assert.deepEqual(choice?.alternatives, ['python', 'ruby', 'php']);
+    assert.deepEqual(choice?.display, 'Python, Ruby, or PHP');
+    // " and production " is not a connector, so the group stops at PHP and both later terms stand.
+    assert.deepEqual(terms.map((t) => t.term).sort(), ['docker', 'python', 'sql']);
+
+    const match = scoreJdMatch('Built services in Python for five years', jd, context);
+    assert.equal(match.matched.length, 1);
+    assert.deepEqual(match.missing.map((t) => t.display).sort(), ['Docker', 'SQL']);
+  });
+
+  test('"and" asks for both, so it is never folded into a choice', () => {
+    const jd = [
+      'Requirements',
+      '- Strong experience with SQL and Docker in production systems',
+      '- Working knowledge of Python and Git',
+    ].join('\n');
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const terms = extractJdTerms(jd, context);
+    assert.equal(terms.some((t) => t.alternatives), false, 'nothing here is a choice');
+    assert.deepEqual(terms.map((t) => t.term).sort(), ['docker', 'git', 'python', 'sql']);
+    // Both halves of an "and" are charged, which is the whole difference from a choice.
+    const match = scoreJdMatch('Ran SQL reports nightly with Python and Git', jd, context);
+    assert.deepEqual(match.missing.map((t) => t.display), ['Docker']);
+  });
+
+  test('a comma list without "or" is a list of requirements, not a choice', () => {
+    const jd = 'Requirements\n- Strong experience with React, PostgreSQL, Docker in production\n- Ship features weekly\n';
+    const context = { company: 'Northwind', role: 'Frontend Engineer', location: null };
+    const terms = extractJdTerms(jd, context);
+    assert.equal(terms.some((t) => t.alternatives), false);
+    assert.deepEqual(terms.map((t) => t.term).sort(), ['docker', 'postgresql', 'react']);
+  });
+
+  test('"either A or B" is the same one requirement', () => {
+    const jd = 'Requirements\n- Fluent in either Python or Kotlin for backend services\n- Working knowledge of Docker and SQL\n';
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const choice = extractJdTerms(jd, context).find((t) => t.alternatives);
+    assert.deepEqual(choice?.alternatives, ['python', 'kotlin']);
+    assert.equal(choice?.display, 'Python or Kotlin');
+    // Kotlin alone answers it, and the requirement is not also charged for Python.
+    const match = scoreJdMatch('Shipped Kotlin backend services with Docker and SQL', jd, context);
+    assert.deepEqual(match.missing.map((t) => t.display), []);
+  });
+
+  test('a relocation or onsite commitment leaves the resume score alone', () => {
+    const jd = [
+      'Requirements',
+      '- Strong Python and SQL',
+      '- You are comfortable working in-person at our SF office five days a week',
+      '- Willing to relocate to Austin for the role',
+    ].join('\n');
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const terms = extractJdTerms(jd, context).map((t) => t.display);
+    assert.deepEqual(terms.sort(), ['Python', 'SQL']);
+  });
+
+  test('a culture blurb cannot fold two requirement bullets into one', () => {
+    /* THE DEFECT THE ANCHOR RULE EXISTS FOR. The group used to be built by rescanning every scored
+       line for any two extracted spellings, so a sentence the terms were never extracted from could
+       create one. Here that sentence is the culture blurb, and folding `python` into `git` moved the
+       score from 75 to 100 and left the bullet "- Strong Python" with no colour and no gap entry. */
+    const bullets = [
+      'Requirements',
+      '- Strong Python',
+      '- Strong SQL',
+      '- Strong Docker',
+      '- Strong Git',
+    ].join('\n');
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const resume = 'Shipped Git workflows and Docker images and SQL reports';
+    const baseline = scoreJdMatch(resume, bullets, context);
+    assert.equal(baseline.score, 75);
+    assert.deepEqual(baseline.missing.map((t) => t.display), ['Python']);
+
+    for (const blurb of [
+      'We use Python or Git day to day.',
+      'Whether you reach for Python or Docker first, we want to hear from you.',
+    ]) {
+      // After the bullets, and before them: the anchor rule catches one order, "named twice" the other.
+      for (const jd of [`${bullets}\n${blurb}`, `Requirements\n${blurb}\n${bullets.split('\n').slice(1).join('\n')}`]) {
+        const match = scoreJdMatch(resume, jd, context);
+        assert.equal(match.score, 75, `a culture sentence must not move the score: ${blurb}`);
+        assert.equal(match.term_count, 4);
+        assert.deepEqual(match.missing.map((t) => t.display), ['Python']);
+        assert.equal(extractJdTerms(jd, context).some((t) => t.alternatives), false, 'nothing here is a choice');
+      }
+    }
+  });
+
+  test('an unmarked comma list does not fold whole, and one word does not swing the score', () => {
+    /* "Experience with Python, SQL, Docker or Kubernetes" is ambiguous between "all of these" and
+       "any of these". Reading it as one choice folded four requirements into one and reported 100
+       for a resume carrying only Kubernetes. Unmarked, only the pair the employer actually joined
+       with `or` folds, so the line reads Python AND SQL AND (Docker OR Kubernetes). */
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const resume = 'Ran Kubernetes clusters in production for three years and used Git';
+    const choice = 'Requirements\n- Experience with Python, SQL, Docker or Kubernetes in production\n- Ship weekly with Git\n';
+    const both = 'Requirements\n- Experience with Python, SQL, Docker and Kubernetes in production\n- Ship weekly with Git\n';
+
+    const withOr = scoreJdMatch(resume, choice, context);
+    assert.equal(withOr.term_count, 4, 'four requirements, one of them a two-way choice');
+    assert.equal(withOr.score, 50);
+    assert.deepEqual(withOr.missing.map((t) => t.display).sort(), ['Python', 'SQL']);
+    assert.deepEqual(
+      extractJdTerms(choice, context).find((t) => t.alternatives)?.alternatives,
+      ['docker', 'kubernetes'],
+    );
+
+    const withAnd = scoreJdMatch(resume, both, context);
+    assert.equal(withAnd.term_count, 5);
+    assert.equal(withAnd.score, 40);
+    // One word apart, and the two numbers stay within one requirement of each other.
+    assert.ok(withOr.score !== null && withAnd.score !== null && withOr.score - withAnd.score <= 15);
+  });
+
+  test('a five-way comma list is not one requirement either', () => {
+    const context = { company: 'Northwind', role: 'Data Engineer', location: null };
+    const jd = 'Requirements\n- Experience with React, PostgreSQL, Redis, Kafka or Airflow\n- Ship weekly with Git\n';
+    const match = scoreJdMatch('Built Airflow DAGs and used Git', jd, context);
+    assert.equal(match.term_count, 5);
+    assert.equal(match.score, 40);
+    assert.deepEqual(match.missing.map((t) => t.display).sort(), ['PostgreSQL', 'React', 'Redis']);
+  });
+
+  test('the employer saying "one of" is what folds a comma list whole', () => {
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const marked = [
+      '- Experience with one or more of: Python, Rust, Kotlin',
+      '- Comfortable with any of Python, Rust, Kotlin',
+      '- Experience with at least one of Python, Rust, Kotlin',
+    ];
+    for (const line of marked) {
+      const jd = `Requirements\n${line}\n- Ship weekly with Git and SQL\n`;
+      const choice = extractJdTerms(jd, context).find((t) => t.alternatives);
+      assert.deepEqual(choice?.alternatives, ['python', 'rust', 'kotlin'], line);
+      assert.equal(scoreJdMatch('Built Rust services with Git and SQL', jd, context).missing.length, 0, line);
+    }
+    // The same list with no marker stays three requirements.
+    const unmarked = 'Requirements\n- Experience with Python, Rust, Kotlin\n- Ship weekly with Git and SQL\n';
+    assert.equal(extractJdTerms(unmarked, context).some((t) => t.alternatives), false);
+    // And a marker governing something else, too far from the list to be about it, does not reach.
+    const distant = 'Requirements\n- We ship one of the best platforms around and we need Python, Rust, Kotlin depth\n- Git and SQL\n';
+    assert.equal(extractJdTerms(distant, context).some((t) => t.alternatives), false);
+  });
+
+  test('a marker governs ONE list, not the whole line it sits on', () => {
+    /* THE DIMENSION THE MARKER RULE IS MOST FRAGILE IN, and a flattened one-line posting is the
+       common shape for it: kos.ai's own posting is one. Asking whether the line carries a marker
+       once, then reusing that answer for every run on it, let "one of" turn commas into connectors
+       for a list the employer had introduced with the words "Also required". A resume carrying only
+       Kubernetes was told it met that sentence, with SQL and Docker absent from the gap list
+       entirely. */
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const resume = 'Ran Kubernetes clusters daily';
+    const marked = scoreJdMatch(
+      resume,
+      'Requirements\n- Fluent in one of Python, TypeScript, Go. Also required: SQL, Docker, Kubernetes.',
+      context,
+    );
+    // The marked list folds. The one after it does not, and both of its unmet members are named.
+    assert.equal(marked.term_count, 4);
+    assert.equal(marked.score, 25);
+    assert.deepEqual(marked.missing.map((t) => t.display).sort(), ['Docker', 'Python, TypeScript', 'SQL']);
+
+    // The same line without the marker folds nothing, which is what makes the fold above the
+    // marker's doing rather than the comma's.
+    const control = scoreJdMatch(
+      resume,
+      'Requirements\n- Fluent in Python, TypeScript, Go. Also required: SQL, Docker, Kubernetes.',
+      context,
+    );
+    assert.equal(control.term_count, 5);
+    assert.equal(control.score, 20);
+    assert.deepEqual(control.missing.map((t) => t.display).sort(), ['Docker', 'Python', 'SQL', 'TypeScript']);
+
+    // A second list on the same line, introduced by a duty rather than a heading, behaves the same.
+    const twoLists = scoreJdMatch(
+      resume,
+      'Requirements\n- We support any of Slack, Teams for comms. You must have production SQL, Docker, Kubernetes and Terraform experience daily.',
+      context,
+    );
+    assert.equal(twoLists.term_count, 5);
+    assert.deepEqual(twoLists.missing.map((t) => t.display).sort(), ['Docker', 'SQL', 'Slack', 'Terraform']);
+  });
+
+  test('a marker that governs a noun phrase marks nothing', () => {
+    /* THE MARKER IS READ AS GRAMMAR, NOT AS DISTANCE. A character budget cannot tell "one of
+       Python, SQL, Docker" from "one of our teams on Python, SQL, Docker": the second governs a
+       noun phrase and has nothing to do with the list, but it sits close enough to be admitted.
+       Each row below is asserted against its own minimal pair, because the only thing that matters
+       is that swapping the marker in changes NOTHING. */
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const filler = [
+      '- Ship features weekly with Git',
+      '- Comfortable owning services end to end',
+      '- Partner with design on discovery',
+    ];
+    const scored = (bullet: string, resume: string) =>
+      scoreJdMatch(resume, ['Requirements', bullet, ...filler].join('\n'), context);
+    const pairs: Array<[string, string, string]> = [
+      [
+        "- You'll work with one of our teams on Python, SQL, Docker every day",
+        "- You'll work with our platform team on Python, SQL, Docker every day",
+        'Built Docker images',
+      ],
+      [
+        '- We work in one of two ways. SQL, Docker, Kubernetes are required.',
+        '- We work in two ways. SQL, Docker, Kubernetes are required.',
+        'Ran Kubernetes clusters',
+      ],
+      [
+        '- Deep experience (any of our teams) with SQL, Docker, Kubernetes required',
+        '- Deep experience (with our teams) with SQL, Docker, Kubernetes required',
+        'Ran Kubernetes clusters',
+      ],
+    ];
+    for (const [marked, control, resume] of pairs) {
+      const withMarker = scored(marked, resume);
+      const without = scored(control, resume);
+      assert.equal(withMarker.term_count, without.term_count, marked);
+      assert.equal(withMarker.score, without.score, marked);
+      assert.deepEqual(
+        withMarker.missing.map((t) => t.display).sort(),
+        without.missing.map((t) => t.display).sort(),
+        marked,
+      );
+      assert.ok((withMarker.missing.length) > 0, 'the gap list is not emptied by a noun phrase');
+    }
+  });
+
+  test('a second list starting right after a short marked one is not swept in', () => {
+    /* The residual of the per-run fix. When the marked list is short the marker is only a few
+       characters from the NEXT list, so any distance rule admits it there too. Only the list the
+       marker runs straight into folds. */
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const match = scoreJdMatch(
+      'Ran Kubernetes clusters',
+      [
+        'Requirements',
+        '- Fluent in one of Python, TypeScript, Go. SQL, Docker, Kubernetes also needed.',
+        '- Ship features weekly with Git',
+        '- Comfortable owning services end to end',
+        '- Partner with design on discovery',
+      ].join('\n'),
+      context,
+    );
+    assert.equal(match.term_count, 5);
+    assert.equal(match.score, 20);
+    assert.deepEqual(
+      match.missing.map((t) => t.display).sort(),
+      ['Docker', 'Git', 'Python, TypeScript', 'SQL'],
+    );
+  });
+
+  test('a marker still folds the list it runs straight into', () => {
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const folds: Array<[string, string[]]> = [
+      ['- Fluent in one of Python, TypeScript, Go', ['python', 'typescript']],
+      ['- Experience with one or more of: Python, Rust, Kotlin', ['python', 'rust', 'kotlin']],
+      ['- Experience with at least one of Python, Ruby, PHP', ['python', 'ruby', 'php']],
+      ['- Comfortable with any of Python, Rust, Kotlin', ['python', 'rust', 'kotlin']],
+      ['- Experience with one of the following: Python, Rust, Kotlin', ['python', 'rust', 'kotlin']],
+    ];
+    for (const [bullet, branches] of folds) {
+      const choice = extractJdTerms(`Requirements\n${bullet}\n- Ship weekly with Git and SQL\n`, context)
+        .find((t) => t.alternatives);
+      assert.deepEqual(choice?.alternatives, branches, bullet);
+    }
+  });
+
+  test('"Either way" is prose, and prose does not declare a choice', () => {
+    /* `either` was in the marker list and never needed to be: "Fluent in either Python or Kotlin"
+       folds on the `or` the employer wrote between the branches, with no marker involved. What
+       listing the word cost was this sentence, where it turned three requirements into one. */
+    const context = { company: 'Northwind', role: 'Backend Engineer', location: null };
+    const match = scoreJdMatch(
+      'Wrote SQL reports nightly',
+      'Requirements\n- Either way, Python, SQL and Docker and Git matter to us',
+      context,
+    );
+    assert.equal(match.term_count, 4);
+    assert.equal(match.score, 25);
+    assert.deepEqual(match.missing.map((t) => t.display).sort(), ['Docker', 'Git', 'Python']);
+
+    // And the case `either` was listed for still folds, on the connector rather than the word.
+    const choice = extractJdTerms(
+      'Requirements\n- Fluent in either Python or Kotlin\n- Working knowledge of Docker and SQL\n',
+      context,
+    ).find((t) => t.alternatives);
+    assert.deepEqual(choice?.alternatives, ['python', 'kotlin']);
+
+    /* THE TRADE, PINNED SO IT IS NOT DISCOVERED LATER. Dropping `either` does cost one shape:
+       "either A, B, or C" has no `or` between its first two branches and no marker left to make
+       the comma a connector, so it now reads as separate requirements. That is an over-count, the
+       safe direction, and a rarer spelling than "either A or B". */
+    const commaForm = extractJdTerms(
+      'Requirements\n- Fluent in either Python, TypeScript, or Go\n- Ship weekly with Git and SQL\n',
+      context,
+    );
+    assert.equal(commaForm.some((t) => t.alternatives), false, 'over-counted rather than over-credited');
+  });
+
+  test('a duty-phrased line that happens to say onsite keeps its technologies', () => {
+    /* The commitment rule fires on a sentence whose SUBJECT is the commitment, never on any line
+       containing the word. Both of these name real technical requirements and lost every one of
+       them: the first to a bare "working onsite", the second because "the front office" is an
+       office. */
+    const context = { company: 'Northwind', role: 'Platform Engineer', location: null };
+    const duty = extractJdTerms(
+      'Requirements\n- Deploy and maintain Kubernetes clusters while working onsite with the hardware team\n- Strong Python\n',
+      context,
+    ).map((t) => t.term);
+    assert.ok(duty.includes('kubernetes') && duty.includes('python'), 'a duty is not a commitment');
+
+    const frontOffice = extractJdTerms(
+      'Requirements\n- Able to work directly with the front office on low latency Python and Kafka systems\n- Strong SQL\n',
+      context,
+    ).map((t) => t.term);
+    assert.ok(
+      frontOffice.includes('python') && frontOffice.includes('kafka'),
+      'the front office is a desk, not a workplace commitment',
+    );
+  });
+
+  test('a background that happens to be onsite is still a requirement', () => {
+    // The experience guard runs first, so this rule cannot reach a sentence naming a background.
+    const jd = 'Requirements\n- Experience working onsite with Kubernetes clusters\n- Strong Python\n';
+    const context = { company: 'Northwind', role: 'Platform Engineer', location: null };
+    const terms = extractJdTerms(jd, context).map((t) => t.term);
+    assert.ok(terms.includes('kubernetes'), 'a stated background survives whatever else the line says');
   });
 });

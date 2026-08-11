@@ -698,14 +698,22 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     // it merged two meaningful sets when `matched` is structurally always empty against an empty
     // resume, and it dragged the scorer's user-facing copy along with it into a panel that is not
     // about scoring.
+    /* UNGROUPED, so this pane and the score pane cannot disagree. Interview prep asks a question
+       per named technology; handed a folded choice it asked one question about the whole group and
+       reported it unanswered, on a posting where scoreJdMatch had already counted that requirement
+       met from the branch the resume carries. Two panes of one product, two answers. */
     const prep = buildInterviewPrep(
-      extractJdTerms(parsed.data.jd_text, {
-        ...parsed.data.job_context,
-        location:
-          parsed.data.job_context?.location ??
-          (await postingRow(parsed.data.job_context?.job_id))?.location ??
-          null,
-      }),
+      extractJdTerms(
+        parsed.data.jd_text,
+        {
+          ...parsed.data.job_context,
+          location:
+            parsed.data.job_context?.location ??
+            (await postingRow(parsed.data.job_context?.job_id))?.location ??
+            null,
+        },
+        { groupChoices: false },
+      ),
       spec,
     );
     if (prep.items.length === 0) {

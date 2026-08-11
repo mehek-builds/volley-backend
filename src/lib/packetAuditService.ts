@@ -171,9 +171,16 @@ function evidenceForTerm(
   jdText: string,
   context: JdContext,
 ): EvidencePointer | undefined {
+  /* THE POINTER MUST NAME THE BRANCH THAT ACTUALLY COVERED IT, not merely the requirement.
+     A stated choice is one term carrying several branches, so matching on `term` alone returned the
+     first resume field that satisfied ANY branch. On "Fluent in Python, Ruby, or PHP" against a
+     resume carrying PHP, the frozen evidence for a requirement met by PHP could be pinned to the
+     line that mentions Python. `satisfied_by` is written by scoreJdMatch and is the covering string
+     itself, so comparing it holds the pointer to the same words the match was made on. */
+  const covering = term.satisfied_by ?? term.term;
   for (const value of specStrings(spec)) {
     const fieldMatch = scoreJdMatch(value.quote, jdText, context).matched
-      .some((candidate) => candidate.term === term.term);
+      .some((candidate) => candidate.term === term.term && (candidate.satisfied_by ?? candidate.term) === covering);
     if (fieldMatch) return value;
   }
   return undefined;
@@ -393,10 +400,17 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
   } = { covered: [], missing: [], edited: [] };
   const clauseFor = (occurrence: { start: number; end: number }, verdict: 'covered' | 'missing') => clauses
     .find((clause) => occurrence.start >= clause.start && occurrence.end <= clause.end && clause.verdict === verdict);
+  /* A COVERED MARK GOES ON THE BRANCH THAT COVERED IT, not on the whole choice.
+     `display` for a stated choice is the employer's whole span, "Python, TypeScript", and painting
+     that from evidence quoting only "Python" claims more than the evidence supports: the highlight
+     validator rejected it and the mark was dropped entirely. A MISSING choice keeps the whole span,
+     because the requirement that is unmet is the choice itself. */
+  const highlightSpelling = (term: JdTerm, verdict: 'covered' | 'missing') =>
+    (verdict === 'covered' && term.alternatives ? (term.satisfied_by ?? term.term) : term.display);
   const occurrenceInsideClause = (term: JdTerm, verdict: 'covered' | 'missing') => {
     for (const clause of clauses) {
       if (clause.verdict !== verdict || clause.start < 0) continue;
-      const local = exactOccurrence(review.jd_text.slice(clause.start, clause.end), term.display);
+      const local = exactOccurrence(review.jd_text.slice(clause.start, clause.end), highlightSpelling(term, verdict));
       if (local) return { start: clause.start + local.start, end: clause.start + local.end };
     }
     return null;
