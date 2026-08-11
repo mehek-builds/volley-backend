@@ -164,10 +164,15 @@ describe('every path that can produce or send one of these packets is closed', (
       resumeRoute.indexOf('if (resumeContactIssues(contactOfRecord).length > 0)') < resumeRoute.indexOf('generateResumeSpec('),
       'the contact refusal must precede the model call',
     );
-    // The alias decision reads the RESOLVED email. Keyed off the raw request, a caller with an
-    // empty body.contact.email skipped the alias and shipped a packet with no address of any kind.
-    assert.match(resumeRoute, /body\.application && contactOfRecord\.email/);
+    /* The alias decision reads the RESOLVED email. Keyed off the raw request, a caller with an
+     * empty body.contact.email skipped the alias and shipped a packet with no address of any kind.
+     *
+     * It is no longer gated on body.application as well: that gate is what put the applicant's
+     * personal address on a Greenhouse form on 2026-08-11. body.contact.email survives here for one
+     * thing only, naming the fallback source, which is what it always meant. */
+    assert.match(resumeRoute, /planPacketApplicantEmail\(\{[\s\S]*contactEmail: contactOfRecord\.email/);
     assert.doesNotMatch(resumeRoute, /body\.application && body\.contact\.email/);
+    assert.doesNotMatch(resumeRoute, /body\.application && contactOfRecord\.email/);
     // The stored block is the resolved one, not the request's.
     assert.match(resumeRoute, /applicationContact = applicationEmail[\s\S]*: contactOfRecord;/);
   });
