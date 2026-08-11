@@ -76,6 +76,54 @@ test('an unrecognised key shape is kept and reported rather than silently retain
   assert.equal(retentionDaysForCategory('unclassified'), null);
 });
 
+// Review finding: the rule was `pathname.includes('/resumes/')`, so a nested path that merely
+// CONTAINED the segment aged out at 30 days, which quietly contradicted the guarantee that an
+// unrecognised shape is kept. Anchoring keeps every real key deletable and sends the rest to
+// 'unclassified'. Both directions are asserted so a future loosening fails here.
+test('only a real generated-resume key ages out, not any path containing /resumes/', () => {
+  for (const real of [
+    'users/user-1/resumes/42-cover-letter-1754900000000-abc.pdf',
+    'users/user-1/resumes/42-edited-uuid-abc.pdf',
+    'users/user-1/resumes/jdhash-1754900000000-abc.pdf',
+  ]) {
+    assert.equal(classifyUserBlob(real), 'generated-resume', real);
+    assert.deepEqual(resumeBlobsDueForDeletion([blob(real, 31)], now), [blob(real, 31)], real);
+  }
+  for (const nested of [
+    'users/user-1/audit/resumes/evidence.png',
+    'users/user-1/submission-runs/run-1/resumes/receipt.png',
+    'users/user-1/resumes/nested/deeper.pdf',
+  ]) {
+    assert.equal(classifyUserBlob(nested), 'unclassified', nested);
+    assert.deepEqual(resumeBlobsDueForDeletion([blob(nested, 400)], now), [], nested);
+  }
+});
+
+// Review finding: the sweep chunked its del() but account deletion did not, and account deletion
+// is the ONLY thing that reaches an exempt receipt. An oversized call there throws, leaves the
+// user's PII in the store, and breaks the promise the receipt exemption rests on. Every delete
+// path must go through the batching helper, so no bare del() may survive in this module.
+test('every blob delete path chunks, so account deletion cannot exceed the batch limit', async () => {
+  const source = await readFile(path.join(__dirname, 'resumeAccess.ts'), 'utf8');
+  // Everything except the helper's own call, which is the one place del() is allowed to appear.
+  const helperStart = source.indexOf('async function delInBatches');
+  assert.ok(helperStart > 0, 'delInBatches is missing');
+  const helperEnd = source.indexOf('\n}', helperStart);
+  const outsideHelper = source.slice(0, helperStart) + source.slice(helperEnd);
+  const bare = outsideHelper.match(/await del\(/g)?.length ?? 0;
+  assert.equal(
+    bare,
+    0,
+    'A delete path calls del() directly. Route it through delInBatches so a user with more than '
+    + 'DELETE_BATCH_SIZE blobs is still fully deleted.',
+  );
+  assert.match(source, /async function delInBatches/);
+  for (const caller of ['deleteBlobsForUser', 'deleteUploadedResumeBlobsForUser', 'sweepExpiredResumeBlobs']) {
+    const body = source.slice(source.indexOf(`function ${caller}`));
+    assert.match(body.slice(0, body.indexOf('\n}')), /delInBatches\(/, caller);
+  }
+});
+
 // The count is the point, not the names: adding a fifth blob write fails this until whoever added
 // it decides what retention the new key gets. That decision never being forced is the actual root
 // cause here, and it is not specific to screenshots.

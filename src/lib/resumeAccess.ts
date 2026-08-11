@@ -73,6 +73,7 @@ export type UserBlobCategory =
   | 'unclassified';
 
 const SUBMISSION_RUN_FILE_RE = /^users\/[^/]+\/submission-runs\/[^/]+\/([^/]+)$/;
+const GENERATED_RESUME_RE = /^users\/[^/]+\/resumes\/[^/]+$/;
 
 export function classifyUserBlob(pathname: string): UserBlobCategory {
   if (isUploadedResumeBlob(pathname)) return 'legacy-original';
@@ -86,7 +87,14 @@ export function classifyUserBlob(pathname: string): UserBlobCategory {
     if (/^receipt(?:-[^/]*)?\.png$/i.test(runFile)) return 'submission-receipt';
     return 'unclassified';
   }
-  if (pathname.includes('/resumes/')) return 'generated-resume';
+  // Anchored, where the old rule was a bare `pathname.includes('/resumes/')` substring test. That
+  // test would classify `users/<id>/anything/resumes/x.png` as a generated resume and delete it at
+  // 30 days, which would make the "an unrecognised shape is kept" guarantee above false for any
+  // nested path that happens to contain the segment. Every real generated key is exactly one
+  // segment under resumes/ (resume.ts, applications.ts and coverLetterService.ts all build
+  // `users/<id>/resumes/<name>.pdf`, plus put()'s random suffix), so anchoring loses nothing and
+  // sends anything else to 'unclassified', which is kept and logged rather than deleted.
+  if (GENERATED_RESUME_RE.test(pathname)) return 'generated-resume';
   return 'unclassified';
 }
 
@@ -261,6 +269,23 @@ export async function resolveBlobUrl(objectKey: string): Promise<string | null> 
   return blobs.find((b) => b.pathname === objectKey)?.url ?? null;
 }
 
+// @vercel/blob's del() rejects a batch above this size outright, so an oversized call deletes
+// nothing and throws. It matters most on the run that carries a backlog, which is precisely the
+// run that follows an outage like the one that stopped this sweep between 3 and 11 August.
+const DELETE_BATCH_SIZE = 1000;
+
+// del() takes at most DELETE_BATCH_SIZE URLs per call and rejects the whole batch
+// above that, so EVERY caller has to chunk, not just the sweep. Account deletion is the one that
+// matters most: it is the only thing that reaches an exempt receipt, so a single oversized call
+// there would throw, leave the user's PII in the store, and break the promise the exemption rests
+// on. Deleting per user is unbounded by age, so a long-lived heavy account is exactly where the
+// limit gets hit first.
+async function delInBatches(urls: string[]): Promise<void> {
+  for (let i = 0; i < urls.length; i += DELETE_BATCH_SIZE) {
+    await del(urls.slice(i, i + DELETE_BATCH_SIZE));
+  }
+}
+
 async function listAll(prefix: string): Promise<StoredResumeBlob[]> {
   const out: StoredResumeBlob[] = [];
   let cursor: string | undefined;
@@ -283,7 +308,7 @@ async function listAll(prefix: string): Promise<StoredResumeBlob[]> {
 export async function deleteBlobsForUser(userId: string): Promise<number> {
   const blobs = await listAll(userBlobPrefix(userId));
   if (blobs.length === 0) return 0;
-  await del(blobs.map((b) => b.url));
+  await delInBatches(blobs.map((b) => b.url));
   return blobs.length;
 }
 
@@ -293,7 +318,7 @@ export async function deleteUploadedResumeBlobsForUser(userId: string): Promise<
     isUploadedResumeBlob(blob.pathname),
   );
   if (blobs.length === 0) return 0;
-  await del(blobs.map((blob) => blob.url));
+  await delInBatches(blobs.map((blob) => blob.url));
   return blobs.length;
 }
 
@@ -308,13 +333,6 @@ export async function deleteUploadedResumeThenClear(
   await deleteUploadedResume();
   await clearLegacyPointers();
 }
-
-// @vercel/blob's del() takes at most 1000 URLs per call and rejects the whole batch above that.
-// A single over-large call would abort the sweep mid-run and leave the backlog in place, which is
-// the failure this sweep exists to prevent. It matters precisely because the sweep has already
-// been proven able to stop for days at a time (PR #480): the run that resumes after an outage is
-// the one carrying a backlog, so it is exactly the run that would trip the limit.
-const DELETE_BATCH_SIZE = 1000;
 
 export interface BlobSweepResult {
   scanned: number;
@@ -336,9 +354,7 @@ export async function sweepExpiredResumeBlobs(
 ): Promise<BlobSweepResult> {
   const blobs = await listAll('users/');
   const due = resumeBlobsDueForDeletion(blobs, now, retentionDays, previewRetentionDays);
-  for (let i = 0; i < due.length; i += DELETE_BATCH_SIZE) {
-    await del(due.slice(i, i + DELETE_BATCH_SIZE).map((blob) => blob.url));
-  }
+  await delInBatches(due.map((blob) => blob.url));
   const deletedByCategory: Record<UserBlobCategory, number> = {
     'legacy-original': 0,
     'generated-resume': 0,
