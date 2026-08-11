@@ -233,22 +233,25 @@ describe('the restore is wired at the packet-audit gate, not at buildPacket', ()
     assert.match(runner, /packetAudit\.code === 'PACKET_RESUME_EXPIRED'/);
   });
 
-  test('the restore persists and re-issues all three records bound to the bytes', () => {
-    /* Generation binding, packet audit, acknowledgement. Re-issuing two of three leaves the packet
-       in a half-state whose file is new and whose audit still describes the deleted one. */
-    assert.match(restore, /put\(objectKey, bytes/);
+  test('the restore persists the file and re-issues the records bound to those bytes', () => {
+    /* Generation binding and packet audit. Re-issuing one of the two leaves the packet in a
+       half-state whose file is new and whose audit still describes the deleted one.
+       THE ACKNOWLEDGEMENT IS NOT ON THIS LIST ANY MORE, and the omission is the fix: a restore may
+       carry one the applicant already gave, and may never write one she did not. That is a
+       behaviour, not a line of source, and packetResumeRestoreAcknowledgement.test.ts drives the
+       real function to prove it - including against a real database. */
+    assert.match(restore, /await write\(objectKey, bytes\)/);
+    // The default writer is the blob store, so the seam a test injects changes nothing in prod.
+    assert.match(restore, /put\(key, payload, \{ access: 'public', contentType: 'application\/pdf' \}\)/);
     assert.match(restore, /pdfGenerationBinding: createPdfGenerationBinding\(/);
     assert.match(restore, /dependencies\.persistAudit\(refreshed\)/);
-    assert.match(restore, /packet_audit_acknowledgement: \{/);
-    assert.match(restore, /source: 'auto_restored'/);
   });
 
 
   test('rebuilding is opt-in, and the read routes do not opt in', () => {
-    /* Restoring WRITES: a new blob, and a re-issued acknowledgement, which is the record that
-       authorizes a send. Doing that on a GET would let a packet the applicant merely looked at
-       become sendable by the unattended runner under standing consent, and would resurrect a
-       deleted file for browsing. Both GET audit call sites must stay on the default. */
+    /* Restoring WRITES: a new blob, a re-issued generation binding and a re-issued audit. Doing
+       that on a GET would resurrect a deleted file for browsing, which the retention promise says
+       does not happen. Both GET audit call sites must stay on the default. */
     const applications = readFileSync('src/routes/applications.ts', 'utf8');
     const getRoutes = [
       "'/applications/:id/submission/extension-packet'",
@@ -262,12 +265,13 @@ describe('the restore is wired at the packet-audit gate, not at buildPacket', ()
       assert.ok(audit > 0, `${route} should still audit`);
       const call = body.slice(audit, audit + 200);
       assert.doesNotMatch(call, /restoreExpiredResume/,
-        `${route} is a read and must not rebuild or re-acknowledge a packet`);
+        `${route} is a read and must not rebuild a packet`);
     }
-    // And the send paths must opt in, or the expired packet is never fixed at all.
+    // And the send paths must opt in, or the expired packet is never fixed at all. They opt in by
+    // naming their authority, which is what decides whether an approval may travel to the new file.
     const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-    assert.match(runner, /currentPacketAudit\(row, \{ restoreExpiredResume: true \}\)/);
-    assert.match(runner, /currentAcknowledgedPacketAudit\(row, \{ restoreExpiredResume: true \}\)/);
+    assert.match(runner, /currentPacketAudit\(row, \{ restoreExpiredResume: 'authorizing_send' \}\)/);
+    assert.match(runner, /currentAcknowledgedPacketAudit\(row, \{ restoreExpiredResume: 'authorizing_send' \}\)/);
   });
 
   test('the write is guarded on the old key, so two runners cannot both restore', () => {

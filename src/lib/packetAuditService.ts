@@ -13,6 +13,7 @@ import {
   type ApplicationReviewState,
 } from './applicationReview';
 import {
+  acknowledgementBindsAudit,
   canonicalizePacketAuditTerms,
   createPacketAudit,
   createApplicantSnapshotEvidencePointer,
@@ -25,7 +26,11 @@ import {
 } from './packetAudit';
 import { resolveBlobUrl } from './resumeAccess';
 import { pdfGenerationBindingIsCurrent } from './pdfGenerationBinding';
-import { PACKET_EXPIRED_REASON, restoreExpiredPacketResume } from './packetResumeRestore';
+import {
+  PACKET_EXPIRED_REASON,
+  restoreExpiredPacketResume,
+  type PacketRestoreAuthority,
+} from './packetResumeRestore';
 import { resolveFrozenApplicantEmail } from './applicationEmail';
 import { resumeEmailOfRecord } from './resumeEmail';
 
@@ -520,20 +525,20 @@ export async function currentPacketAudit(
     loadPdf?: PdfLoader;
     validateApplicantEmail?: (row: ResumeRow) => Promise<void>;
     /**
-     * Whether this call may REBUILD a packet whose file aged out of the 30-day window.
+     * Whether this call may REBUILD a packet whose file aged out of the 30-day window, and on whose
+     * authority.
      *
-     * Defaults to false, and the default is the safety property. Restoring writes: it puts a new
-     * blob and re-issues the generation binding, the audit, and the acknowledgement. The
-     * acknowledgement is what authorizes a send, so writing one on a read would let a packet the
-     * applicant merely LOOKED at become sendable by the unattended runner under standing consent,
-     * and would resurrect a deleted file for browsing, which the retention promise says does not
-     * happen. Only callers that are actually authorizing a send pass true.
+     * Absent means no rebuild, and that default is the safety property: restoring writes a new blob
+     * and re-issues the generation binding and the audit, and a caller that forgets to opt in keeps
+     * the pre-existing expired-packet refusal, which is a visible stop.
      *
-     * Off-by-default is also the safe direction to be wrong in. A send path that forgets to opt in
-     * keeps the pre-existing expired-packet refusal, which is a visible stop; a read path that
-     * forgot to opt out would silently write.
+     * The VALUE is the second half of the rule, and it is a named authority rather than `true`
+     * because the first version of this was really keyed on the HTTP verb and got the packet-audit
+     * route wrong: that route is a POST that renders a packet for the applicant to look at. Only
+     * 'authorizing_send' may carry an acknowledgement she already gave onto the rebuilt file, and
+     * nothing may create one. See PacketRestoreAuthority and restoredPacketAcknowledgement.
      */
-    restoreExpiredResume?: boolean;
+    restoreExpiredResume?: PacketRestoreAuthority;
   } = {},
 ): Promise<PacketAuditVerdict> {
   /* FIRST, BEFORE ANY OTHER CHECK, because every check below reads either the stored PDF or a
@@ -544,6 +549,7 @@ export async function currentPacketAudit(
      returns immediately, which is every call but the rare one. */
   const restore = options.restoreExpiredResume
     ? await restoreExpiredPacketResume(row, {
+    authority: options.restoreExpiredResume,
     persistAudit: createAndPersistPacketAudit,
     /* THE RESTORE MUST AGREE WITH THIS CALL'S OWN LOADER about whether the file exists. A caller
        that injects loadPdf (every test here, and any path that already holds the bytes) would
@@ -612,25 +618,22 @@ export async function currentAcknowledgedPacketAudit(
     questions?: readonly ApplicationReviewQuestion[];
     loadPdf?: PdfLoader;
     validateApplicantEmail?: (row: ResumeRow) => Promise<void>;
-    /** Forwarded verbatim. See currentPacketAudit for why this is off by default. */
-    restoreExpiredResume?: boolean;
+    /** Forwarded verbatim. See currentPacketAudit for why this is off by default, and why the
+        value names the caller's authority rather than saying `true`. */
+    restoreExpiredResume?: PacketRestoreAuthority;
   } = {},
 ): Promise<PacketAuditVerdict> {
   const verdict = await currentPacketAudit(row, options);
   if (!verdict.valid) return verdict;
-  /* verdict.row, NOT the row passed in. A restored packet had its acknowledgement re-issued against
-     the rebuilt file inside that call, and reading the caller's stale copy would compare the new
-     audit against the acknowledgement of a file that no longer exists, failing every restored
-     packet with ACK_REQUIRED. */
+  /* verdict.row, NOT the row passed in. A restored packet may have had an acknowledgement she
+     already gave carried onto the rebuilt file inside that call, and reading the caller's stale
+     copy would compare the new audit against the acknowledgement of a file that no longer exists,
+     failing that packet with ACK_REQUIRED. A packet that had no acknowledgement to carry has none
+     here either, and fails exactly as it should. */
   const acknowledgement = readApplicationReview(verdict.row.spec)?.packet_audit_acknowledgement;
   const audit = verdict.audit;
-  if (!acknowledgement
-    || acknowledgement.ownerSha256 !== audit.bindings.ownerSha256
-    || acknowledgement.applicationId !== audit.bindings.applicationId
-    || acknowledgement.audit_digest !== audit.audit_digest
-    || acknowledgement.packet_version !== audit.packet_version
-    || acknowledgement.pdfSha256 !== audit.bindings.pdf.sha256
-    || acknowledgement.pdfSizeBytes !== audit.bindings.pdf.sizeBytes) {
+  // The same comparison the restore makes before it carries one forward, so the two cannot drift.
+  if (!acknowledgementBindsAudit(acknowledgement, audit)) {
     return {
       valid: false,
       code: 'PACKET_AUDIT_ACK_REQUIRED',

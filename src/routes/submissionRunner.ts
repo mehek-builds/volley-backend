@@ -2889,7 +2889,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   /* The audit is also where a packet past its retention window gets its file rebuilt, so the row it
      returns can carry a NEW resume_object_key. Everything below reads from that row, never from
      inputRow, or the run assembles a packet from the key the sweep deleted. */
-  const packetAudit = await currentPacketAudit(row, { restoreExpiredResume: true });
+  const packetAudit = await currentPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
   if (!packetAudit.valid) {
     fastify.log.warn(
       { applicationId: row.id, code: packetAudit.code },
@@ -3477,7 +3477,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
 } = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
-  const packetAudit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: true });
+  const packetAudit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
   if (!packetAudit.valid) {
     const finishingSecurityCode = Boolean(options.securityCode) && Boolean(current.security_code);
     fastify.log.error(
