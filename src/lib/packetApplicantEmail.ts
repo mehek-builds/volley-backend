@@ -28,11 +28,10 @@ import {
  * later, so it is conditioned on the only thing that is knowable now: whether Litos can actually
  * receive mail for this account.
  *
- * WHAT STAYS THE SAME. The fallback to the real address is still allowed, because a deployment
- * with no inbound route and a guest with no verified mailbox both have to keep working. What is no
- * longer allowed is a SILENT fallback: every fallback carries the measured reason and a sentence
- * the caller can show, and a fallback caused by a failed write on a route that IS configured is an
- * error the generation refuses to hide (see routes/resume.ts). */
+ * The planner still reports why an alias is unavailable so non-application consumers can explain
+ * the configuration problem. Application packet generation treats every fallback as a hold. It
+ * never puts the personal resume address into an employer form and never prints the routing alias
+ * in the PDF. See routes/resume.ts for that strict boundary. */
 
 export type PacketApplicantEmailDeps = {
   deliverability?: () => Promise<AliasDeliverability>;
@@ -122,12 +121,10 @@ export async function planPacketApplicantEmail(input: {
     return { identity: null, choice, notice: applicantEmailNotice(choice) };
   };
 
-  /* THE ALIAS IS PRINTED ON THE PDF, which is why the deliverability check has to run here and not
-   * only at submission time. The PDF is frozen the moment it is generated, so an alias on a domain
-   * that cannot receive mail is not merely a bad form field, it is a bad address baked into the
-   * document the employer keeps. The check is cached per domain with a TTL, so this costs one
-   * lookup an hour across the whole deployment rather than one per generation, and it turns itself
-   * back on without a deploy once the MX record exists. */
+  /* The alias is frozen into the portal packet, so deliverability must be known before generation
+   * completes. The personal resume address remains in the PDF. The check is cached per domain with
+   * a TTL, so this costs one lookup an hour across the deployment rather than one per generation,
+   * and it turns itself back on without a deploy once the MX record exists. */
   const deliverability = await (deps.deliverability ?? applicationAliasDeliverability)()
     .catch(() => unavailableDeliverability(decidedAt));
   if (!deliverability.deliverable) return fallback(deliverability.reason);

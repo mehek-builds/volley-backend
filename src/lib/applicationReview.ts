@@ -1,5 +1,6 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
+import type { PacketAudit } from './packetAudit';
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported, type AutofillApplicantSnapshot } from './portalSubmission';
 
 export type ApplicationReviewQuestion = {
@@ -320,6 +321,11 @@ export type ApplicationReviewState = {
    * an opaque publication UUID that cannot be derived from its public posting URL, so an attended
    * refill may use this URL only when it exactly matches the form currently open in Chrome. */
   extension_handoff_url?: string;
+  /** Server-owned digest of the exact attended URL and typed cause observed for this application. */
+  extension_handoff_binding?: {
+    version: 'dashboard_handoff_v1';
+    sha256: string;
+  };
   attention_reason?: string;
   attention_categories?: ApplicationAttentionCategory[];
   /* The TYPED half of attention_reason, which is prose and always will be.
@@ -434,6 +440,8 @@ export type ApplicationReviewState = {
   portal_supported?: boolean;
   submission_claimed_at?: string;
   submission_claim_id?: string;
+  /** Exact server-audited packet reserved by an extension submission claim. */
+  submission_packet_version?: string;
   /* WHICH ADDRESS THE EMPLOYER WAS GIVEN, and why that one.
    *
    * Litos prefers a per-application alias so replies come back through the product and can be
@@ -457,6 +465,18 @@ export type ApplicationReviewState = {
   };
   /** Immutable applicant facts captured by the same preparation that froze this handoff. */
   applicant_snapshot?: AutofillApplicantSnapshot;
+  /** Server-owned proof that the exact JD, saved resume, answers, and stored PDF were audited. */
+  packet_audit?: PacketAudit;
+  /** Applicant acknowledgement of the exact rendered packet audit and PDF bytes. */
+  packet_audit_acknowledgement?: {
+    ownerSha256: string;
+    applicationId: string;
+    audit_digest: string;
+    packet_version: string;
+    pdfSha256: string;
+    pdfSizeBytes: number;
+    acknowledged_at: string;
+  };
   filled_fields?: string[];
   preview_screenshot_url?: string;
   submission_authorization?: {

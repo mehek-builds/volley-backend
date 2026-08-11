@@ -654,8 +654,9 @@ test('managed SmartRecruiters attended handoff persists only an exact form URL o
   );
   assert.match(
     prepareManagedSource,
-    /extension_handoff_url: managedExtensionHandoffUrl\([\s\S]*?portal,[\s\S]*?result\.url,[\s\S]*?networkAccessRestriction,[\s\S]*?captchaAttention,[\s\S]*?\)/,
+    /const extensionHandoffUrl = managedExtensionHandoffUrl\([\s\S]*?portal,[\s\S]*?result\.url,[\s\S]*?networkAccessRestriction,[\s\S]*?captchaAttention,[\s\S]*?\)/,
   );
+  assert.match(prepareManagedSource, /extension_handoff_binding: extensionHandoffBinding/);
   assert.doesNotMatch(
     prepareManagedSource,
     /extension_handoff_url:[^\n]*current\.portal_url/,

@@ -267,12 +267,11 @@ async function activeAliasForApplication(input: { userId: string; applicationId:
 }
 
 /**
- * Resolves the form email without ever changing the address printed in the frozen PDF.
+ * Resolves the tracked form email while keeping it separate from the address printed in the PDF.
  *
- * New packets carry `_applicant_email`. Legacy packets are recovered from `_contact.email`,
- * which was the exact value rendered into their PDF. A pinned alias that is no longer receivable
- * is a regeneration hold. Falling back to a personal address at submit time would make the PDF
- * and employer form disagree, and would also hide that employer replies cannot arrive.
+ * New packets carry a tracked `_applicant_email` alias and a personal `_contact.email`. Legacy,
+ * nonalias, equal-address, inactive, or stale-route packets are regeneration holds. There is no
+ * personal-email fallback at submit time.
  */
 export async function resolveFrozenApplicantEmail(input: {
   userId: string;
@@ -283,28 +282,18 @@ export async function resolveFrozenApplicantEmail(input: {
   const stored = input.spec && typeof input.spec === 'object' && !Array.isArray(input.spec)
     ? input.spec as StoredApplicantEmailSpec
     : {};
-  let pinned = readPinnedApplicantEmail(stored);
-
-  if (!pinned) {
-    const contact = stored._contact && typeof stored._contact === 'object' && !Array.isArray(stored._contact)
-      ? normalizedAddress((stored._contact as Record<string, unknown>).email)
-      : null;
-    const legacyIdentity = stored._application_email && typeof stored._application_email === 'object' && !Array.isArray(stored._application_email)
-      ? normalizedAddress((stored._application_email as Record<string, unknown>).alias)
-      : null;
-    const address = contact ?? legacyIdentity ?? normalizedAddress(input.accountEmail);
-    if (!address) throw new ApplicantEmailRegenerationRequiredError('no applicant email is stored');
-    const alias = isAliasAddress(address);
-    pinned = {
-      address,
-      source: alias ? 'litos_alias' : contact ? 'contact_email' : 'account_email',
-      reason: alias ? 'deliverable' : 'alias_unavailable',
-      tracked: alias,
-      decided_at: new Date(0).toISOString(),
-    };
+  const pinned = readPinnedApplicantEmail(stored);
+  if (!pinned) throw new ApplicantEmailRegenerationRequiredError('no tracked Litos applicant email is stored');
+  if (pinned.source !== 'litos_alias' || pinned.tracked !== true || !isAliasAddress(pinned.address)) {
+    throw new ApplicantEmailRegenerationRequiredError('the stored applicant email is not a tracked Litos alias');
   }
-
-  if (pinned.source !== 'litos_alias' && !isAliasAddress(pinned.address)) return pinned;
+  const contact = stored._contact && typeof stored._contact === 'object' && !Array.isArray(stored._contact)
+    ? normalizedAddress((stored._contact as Record<string, unknown>).email)
+    : null;
+  if (!contact) throw new ApplicantEmailRegenerationRequiredError('no personal resume email is stored');
+  if (contact === pinned.address) {
+    throw new ApplicantEmailRegenerationRequiredError('the resume email and tracked applicant email are not separate');
+  }
 
   const deliverability = await (deps.deliverability ?? applicationAliasDeliverability)().catch(() => null);
   if (!deliverability?.deliverable) {

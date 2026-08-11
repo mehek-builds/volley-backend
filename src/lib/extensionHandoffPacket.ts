@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ApplicationReviewState } from './applicationReview';
 import {
+  BAMBOOHR_ATTENDED_GATE_REASON,
   canonicalSupportedPortalUrl,
   CAPTCHA_BLOCKER,
   detectPortal,
@@ -208,4 +209,139 @@ export function extensionHandoffPacketMatches(input: {
   if (frozenCanonical && currentCanonical
     && applicationIdentityKey(frozenCanonical, frozenPortal) === applicationIdentityKey(currentCanonical, currentPortal)) return true;
   return false;
+}
+
+const DASHBOARD_ATTENDED_PORTALS = new Set([
+  'smartrecruiters',
+  'jobvite',
+  'icims',
+  'bamboohr',
+]);
+
+export function createDashboardHandoffBinding(input: {
+  applicationId: string;
+  userId: string;
+  frozenUrl: string | undefined;
+  frozenHandoffUrl: string;
+  frozenAtsName: string | undefined;
+  attentionReason?: string;
+  attentionCategories?: ApplicationReviewState['attention_categories'];
+}): NonNullable<ApplicationReviewState['extension_handoff_binding']> {
+  return {
+    version: 'dashboard_handoff_v1',
+    sha256: createHash('sha256').update(JSON.stringify({
+      applicationId: input.applicationId,
+      userId: input.userId,
+      frozenUrl: input.frozenUrl,
+      frozenHandoffUrl: input.frozenHandoffUrl,
+      frozenAtsName: input.frozenAtsName,
+      attentionReason: input.attentionReason,
+      attentionCategories: [...(input.attentionCategories ?? [])],
+    })).digest('hex'),
+  };
+}
+
+/**
+ * Return the exact server-observed company URL that the dashboard may open at action time.
+ *
+ * This is deliberately narrower than extensionHandoffPacketMatches. The dashboard is not allowed
+ * to reuse a URL from React state, derive a form URL from a posting, or advertise a future portal.
+ * Oracle remains unavailable until a measured post-gate form and receipt exist.
+ */
+export function verifiedDashboardHandoffUrl(input: {
+  applicationId: string;
+  userId: string;
+  frozenUrl: string | undefined;
+  frozenHandoffUrl?: string;
+  frozenHandoffBinding?: ApplicationReviewState['extension_handoff_binding'];
+  frozenAtsName?: string;
+  status: ApplicationReviewState['status'];
+  attentionReason?: string;
+  attentionCategories?: ApplicationReviewState['attention_categories'];
+  submissionClaimedAt?: string;
+  submissionClaimId?: string;
+  submissionPacketVersion?: string;
+  submissionAttemptedAt?: string;
+  submittedAt?: string;
+  receipt?: ApplicationReviewState['receipt'];
+  unverifiedSubmission?: ApplicationReviewState['unverified_submission'];
+}): string | null {
+  if (input.status !== 'needs_attention'
+    || input.submissionClaimedAt
+    || input.submissionClaimId
+    || input.submissionPacketVersion
+    || input.submissionAttemptedAt
+    || input.submittedAt
+    || input.receipt
+    || (input.unverifiedSubmission && input.unverifiedSubmission.resolution !== 'not_sent')
+    || !input.frozenHandoffUrl) return null;
+
+  const expectedBinding = createDashboardHandoffBinding({
+    applicationId: input.applicationId,
+    userId: input.userId,
+    frozenUrl: input.frozenUrl,
+    frozenHandoffUrl: input.frozenHandoffUrl,
+    frozenAtsName: input.frozenAtsName,
+    attentionReason: input.attentionReason,
+    attentionCategories: input.attentionCategories,
+  });
+  if (input.frozenHandoffBinding?.version !== expectedBinding.version
+    || input.frozenHandoffBinding.sha256 !== expectedBinding.sha256) return null;
+
+  let portal: string;
+  try {
+    portal = detectPortal(input.frozenHandoffUrl);
+  } catch {
+    return null;
+  }
+  if (!DASHBOARD_ATTENDED_PORTALS.has(portal) || input.frozenAtsName !== portal) return null;
+
+  const categories = new Set(input.attentionCategories ?? []);
+  const reasons = new Set(input.attentionReason?.split('\n') ?? []);
+  const typedCause = portal === 'jobvite'
+    ? reasons.has(JOBVITE_ATTENDED_GATE_REASON) && categories.has('privacy_consent')
+    : portal === 'icims'
+      ? ((reasons.has(ICIMS_ATTENDED_GATE_REASON) && categories.has('account_login'))
+        || (reasons.has(ICIMS_SECURITY_CODE_GATE_REASON) && categories.has('security_code')))
+      : portal === 'bamboohr'
+        ? reasons.has(BAMBOOHR_ATTENDED_GATE_REASON) && categories.has('captcha')
+        : (reasons.has(MANAGED_NETWORK_ACCESS_RESTRICTION_REASON)
+          || (reasons.has(CAPTCHA_BLOCKER) && categories.has('captcha')));
+  if (!typedCause) return null;
+
+  const exactCanonical = canonicalSupportedPortalUrl(input.frozenHandoffUrl, portal);
+  if (!exactCanonical || exactCanonical !== input.frozenHandoffUrl) return null;
+
+  if (portal === 'smartrecruiters') {
+    try {
+      const url = new URL(input.frozenHandoffUrl);
+      if (url.protocol !== 'https:'
+        || url.hostname !== 'jobs.smartrecruiters.com'
+        || url.username
+        || url.password
+        || url.port
+        || url.search
+        || url.hash
+        || !/^\/oneclick-ui\/company\/[a-z0-9._-]+\/publication\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/?$/i.test(url.pathname)) return null;
+    } catch {
+      return null;
+    }
+  }
+
+  if (portal === 'bamboohr') {
+    const frozenCanonical = input.frozenUrl
+      ? canonicalSupportedPortalUrl(input.frozenUrl, input.frozenAtsName)
+      : undefined;
+    return frozenCanonical === exactCanonical ? input.frozenHandoffUrl : null;
+  }
+
+  return extensionHandoffPacketMatches({
+    frozenUrl: input.frozenUrl,
+    frozenHandoffUrl: input.frozenHandoffUrl,
+    currentUrl: input.frozenHandoffUrl,
+    frozenAtsName: input.frozenAtsName,
+    status: input.status,
+    attentionReason: input.attentionReason,
+    submissionClaimedAt: input.submissionClaimedAt,
+  }) ? input.frozenHandoffUrl : null;
 }

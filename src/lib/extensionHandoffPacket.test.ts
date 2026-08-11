@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import type { ApplicationReviewState } from './applicationReview';
 import {
+  createDashboardHandoffBinding,
   extensionHandoffPacketMatches,
   extensionHandoffVersion,
   extensionStartHandoffBinding,
+  verifiedDashboardHandoffUrl,
 } from './extensionHandoffPacket';
 import {
+  BAMBOOHR_ATTENDED_GATE_REASON,
   CAPTCHA_BLOCKER,
   ICIMS_ATTENDED_GATE_REASON,
   JOBVITE_ATTENDED_GATE_REASON,
@@ -18,13 +22,30 @@ import {
 const SEEKA_POSTING = 'https://jobs.smartrecruiters.com/SeekaTechnology/744000063648206-software-engineer-internship';
 const SEEKA_FORM = 'https://jobs.smartrecruiters.com/oneclick-ui/company/SeekaTechnology/publication/123e4567-e89b-12d3-a456-426614174000';
 
+function dashboardInput<T extends {
+  frozenUrl: string;
+  frozenHandoffUrl: string;
+  frozenAtsName: string;
+  attentionReason?: string;
+  attentionCategories?: ApplicationReviewState['attention_categories'];
+}>(input: T) {
+  const applicationId = '11111111-1111-4111-8111-111111111111';
+  const userId = '22222222-2222-4222-8222-222222222222';
+  return {
+    ...input,
+    applicationId,
+    userId,
+    frozenHandoffBinding: createDashboardHandoffBinding({ applicationId, userId, ...input }),
+  };
+}
+
 test('the exact SEEKA posting may continue to its same-employer SmartRecruiters form', () => {
   assert.equal(extensionHandoffPacketMatches({
     frozenUrl: SEEKA_POSTING,
     frozenHandoffUrl: SEEKA_FORM,
     currentUrl: SEEKA_FORM,
     frozenAtsName: 'smartrecruiters',
-    status: 'needs_attention',
+    status: 'needs_attention' as const,
     attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
   }), true);
 });
@@ -117,14 +138,14 @@ test('Jobvite attended recovery requires the exact measured gate URL and typed c
 
 test('iCIMS attended recovery requires the exact measured login URL and typed cause', () => {
   const login = 'https://jobs-express.icims.com/jobs/48173/sales-associate/login';
-  const input = {
+  const input = dashboardInput({
     frozenUrl: 'https://jobs-express.icims.com/jobs/48173/sales-associate/job',
     frozenHandoffUrl: login,
     currentUrl: login,
     frozenAtsName: 'icims',
     status: 'needs_attention' as const,
     attentionReason: ICIMS_ATTENDED_GATE_REASON,
-  };
+  });
   assert.equal(extensionHandoffPacketMatches(input), true);
   assert.equal(extensionHandoffPacketMatches({ ...input, frozenHandoffUrl: undefined }), false);
   assert.equal(extensionHandoffPacketMatches({ ...input, attentionReason: 'Litos could not verify the exact account gate' }), false);
@@ -181,6 +202,183 @@ test('UKG and SuccessFactors capture-needed states cannot disclose an attended p
     currentUrl: input.frozenHandoffUrl,
     status: 'needs_attention',
   }), false);
+});
+
+test('dashboard handoff returns only an exact server-observed Jobvite gate with its typed cause', () => {
+  const url = 'https://jobs.jobvite.com/worldfirst/job/oknrAfws/apply';
+  const base = {
+    frozenUrl: url,
+    frozenHandoffUrl: url,
+    frozenAtsName: 'jobvite',
+    status: 'needs_attention' as const,
+    attentionReason: JOBVITE_ATTENDED_GATE_REASON,
+    attentionCategories: ['privacy_consent' as const],
+  };
+  const input = dashboardInput(base);
+  assert.equal(verifiedDashboardHandoffUrl(input), url);
+  assert.equal(verifiedDashboardHandoffUrl({ ...input, status: 'ready_to_submit' }), null);
+  assert.equal(verifiedDashboardHandoffUrl({ ...input, submissionClaimedAt: '2026-08-11T00:00:00.000Z' }), null);
+  assert.equal(verifiedDashboardHandoffUrl({ ...input, submissionClaimId: 'claim-1' }), null);
+  assert.equal(verifiedDashboardHandoffUrl({ ...input, submissionPacketVersion: 'packet-1' }), null);
+  assert.equal(verifiedDashboardHandoffUrl({ ...input, submissionAttemptedAt: '2026-08-11T00:00:00.000Z' }), null);
+  assert.equal(verifiedDashboardHandoffUrl({ ...input, submittedAt: '2026-08-11T00:00:00.000Z' }), null);
+  assert.equal(verifiedDashboardHandoffUrl({
+    ...input,
+    receipt: {
+      confirmation_text: 'Application received',
+      final_url: url,
+      captured_at: '2026-08-11T00:00:00.000Z',
+    },
+  }), null);
+  assert.equal(verifiedDashboardHandoffUrl({
+    ...input,
+    unverifiedSubmission: { at: '2026-08-11T00:00:00.000Z', cause: 'no_confirmation_state' },
+  }), null);
+  assert.equal(verifiedDashboardHandoffUrl({
+    ...input,
+    unverifiedSubmission: {
+      at: '2026-08-11T00:00:00.000Z',
+      cause: 'no_confirmation_state',
+      resolution: 'sent',
+      resolved_at: '2026-08-11T00:05:00.000Z',
+    },
+  }), null);
+  assert.equal(verifiedDashboardHandoffUrl({
+    ...input,
+    unverifiedSubmission: {
+      at: '2026-08-11T00:00:00.000Z',
+      cause: 'no_confirmation_state',
+      resolution: 'not_sent',
+      resolved_at: '2026-08-11T00:05:00.000Z',
+    },
+  }), url);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({ ...base, attentionCategories: ['account_login'] })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...base,
+    attentionReason: `Prefix: ${JOBVITE_ATTENDED_GATE_REASON}`,
+  })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...base,
+    frozenHandoffUrl: 'https://jobs.jobvite.com/worldfirst/job/DIFFERENT/apply',
+  })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...base,
+    frozenHandoffUrl: 'https://jobs.jobvite.com/WorldFirst/job/oknrAfws/apply',
+  })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({ ...base, frozenHandoffUrl: `${url}?source=tracker` })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({ ...base, frozenHandoffUrl: `${url}#application` })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...base,
+    frozenHandoffUrl: url.replace('jobs.jobvite.com', 'jobs.jobvite.com:444'),
+  })), null);
+});
+
+test('dashboard SmartRecruiters handoff returns only the exact frozen publication for an exact cause', () => {
+  const reputation = dashboardInput({
+    frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
+    frozenAtsName: 'smartrecruiters',
+    status: 'needs_attention' as const,
+    attentionReason: MANAGED_NETWORK_ACCESS_RESTRICTION_REASON,
+    attentionCategories: ['evidence_gap' as const],
+  });
+  assert.equal(verifiedDashboardHandoffUrl(reputation), SEEKA_FORM);
+  const captcha = dashboardInput({
+    frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
+    frozenAtsName: 'smartrecruiters',
+    status: 'needs_attention' as const,
+    attentionReason: CAPTCHA_BLOCKER,
+    attentionCategories: ['captcha'],
+  });
+  assert.equal(verifiedDashboardHandoffUrl(captcha), SEEKA_FORM);
+  assert.equal(verifiedDashboardHandoffUrl({ ...reputation, frozenHandoffUrl: SEEKA_POSTING }), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    frozenUrl: SEEKA_POSTING,
+    frozenHandoffUrl: SEEKA_FORM,
+    frozenAtsName: 'smartrecruiters',
+    status: 'needs_attention' as const,
+    attentionReason: CAPTCHA_BLOCKER,
+    attentionCategories: ['evidence_gap'],
+  })), null);
+  assert.equal(verifiedDashboardHandoffUrl({
+    ...reputation,
+    frozenHandoffUrl: SEEKA_FORM.replace(
+      '123e4567-e89b-12d3-a456-426614174000',
+      'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    ),
+  }), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...reputation,
+    frozenHandoffUrl: `${SEEKA_FORM}?source=tracker`,
+  })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...reputation,
+    frozenHandoffUrl: `${SEEKA_FORM}#application`,
+  })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...reputation,
+    frozenHandoffUrl: SEEKA_FORM.replace('jobs.smartrecruiters.com', 'jobs.smartrecruiters.com:444'),
+  })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({ ...reputation, frozenAtsName: 'jobvite' })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...reputation,
+    attentionReason: `Temporary: ${MANAGED_NETWORK_ACCESS_RESTRICTION_REASON}`,
+  })), null);
+});
+
+test('dashboard handoff binds iCIMS host and numeric job and denies Oracle', () => {
+  const posting = 'https://jobs-express.icims.com/jobs/48173/sales-associate/job';
+  const login = 'https://jobs-express.icims.com/jobs/48173/sales-associate/login';
+  const input = dashboardInput({
+    frozenUrl: posting,
+    frozenHandoffUrl: login,
+    frozenAtsName: 'icims',
+    status: 'needs_attention' as const,
+    attentionReason: ICIMS_ATTENDED_GATE_REASON,
+    attentionCategories: ['account_login' as const, 'captcha' as const],
+  });
+  assert.equal(verifiedDashboardHandoffUrl(input), login);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...input,
+    frozenHandoffUrl: 'https://jobs-express.icims.com/jobs/48174/sales-associate/login',
+  })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...input,
+    frozenHandoffUrl: 'https://other-valid.icims.com/jobs/48173/sales-associate/login',
+  })), null);
+  const oracleGate = 'https://eeho.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/jobsearch/job/333913/apply/email';
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    frozenUrl: oracleGate,
+    frozenHandoffUrl: oracleGate,
+    frozenAtsName: 'oraclecloud',
+    status: 'needs_attention' as const,
+    attentionReason: ORACLE_ATTENDED_GATE_REASON,
+    attentionCategories: ['account_login'],
+  })), null);
+});
+
+test('dashboard handoff permits only the exact captured BambooHR CAPTCHA page', () => {
+  const url = 'https://prentkeromich.bamboohr.com/careers/480';
+  const input = dashboardInput({
+    frozenUrl: url,
+    frozenHandoffUrl: url,
+    frozenAtsName: 'bamboohr',
+    status: 'needs_attention' as const,
+    attentionReason: BAMBOOHR_ATTENDED_GATE_REASON,
+    attentionCategories: ['captcha' as const],
+  });
+  assert.equal(verifiedDashboardHandoffUrl(input), url);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...input,
+    frozenHandoffUrl: 'https://prentkeromich.bamboohr.com/careers/481',
+  })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({
+    ...input,
+    frozenHandoffUrl: 'https://mpathic2.bamboohr.com/careers/99',
+  })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({ ...input, attentionReason: CAPTCHA_BLOCKER })), null);
+  assert.equal(verifiedDashboardHandoffUrl(dashboardInput({ ...input, attentionReason: 'CAPTCHA may require attention' })), null);
 });
 
 test('a SmartRecruiters packet cannot be loaded into another employer form', () => {

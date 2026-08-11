@@ -63,6 +63,10 @@ export interface CandidateFacts {
   bullets?: string[];
   /** Total months across dated experience entries, when they can be parsed. */
   monthsOfExperience?: number | null;
+  /** Total months across entries explicitly typed as jobs. */
+  monthsOfProfessionalExperience?: number | null;
+  /** Frozen structured enrollment fact. Undefined means it was not captured. */
+  currentlyEnrolled?: boolean | null;
 }
 
 export type ClauseVerdict = 'met' | 'unmet' | 'unscoreable' | 'pending';
@@ -313,6 +317,33 @@ export function matchClause(
   const terms = DEGREE_CLAUSE.test(text)
     ? signalTerms.filter((t) => !DEGREE_FIELDS.has(t.term))
     : signalTerms;
+
+  // A named technology must never hide a structured duration floor. For a clause such as
+  // "5+ years with Python", both the dated experience and Python evidence are mandatory.
+  const years = YEARS_CLAUSE.exec(text);
+  const asksProfessionalExperience = /\b(professional|work|industry|full[- ]time)\s+experience\b/i.test(text);
+  const experienceMonths = asksProfessionalExperience
+    ? facts.monthsOfProfessionalExperience
+    : facts.monthsOfExperience;
+  if (years) {
+    if (experienceMonths == null) {
+      return { ...base, verdict: 'unscoreable', basis: 'experience-years' };
+    }
+    const wanted = Number(years[1]) * 12;
+    const covered = terms.filter((t) => resumeCovers(facts.resumeText, t.term));
+    const anySuffices = /\b(and\/or|or)\b/i.test(text);
+    const termsMet = terms.length === 0
+      || (anySuffices ? covered.length > 0 : covered.length === terms.length);
+    const durationMet = experienceMonths >= wanted;
+    return {
+      ...base,
+      verdict: durationMet && termsMet ? 'met' : 'unmet',
+      basis: 'experience-years',
+      evidence: `${Math.round(experienceMonths / 12 * 10) / 10} years on the resume vs ${years[1]} asked`,
+      missingTerms: terms.filter((t) => !covered.includes(t)).map((t) => t.display),
+    };
+  }
+
   if (terms.length > 0) {
     const covered = terms.filter((t) => resumeCovers(facts.resumeText, t.term));
     // "SQL and/or Python" and "Java or Kotlin" are satisfied by one. An unqualified list is not.
@@ -324,19 +355,6 @@ export function matchClause(
       basis: 'terms',
       evidence: covered.length ? `resume has ${covered.map((t) => t.display).join(', ')}` : undefined,
       missingTerms: terms.filter((t) => !covered.includes(t)).map((t) => t.display),
-    };
-  }
-
-  // 2a. Years of experience, against dated entries rather than against prose.
-  const years = YEARS_CLAUSE.exec(text);
-  if (years && facts.monthsOfExperience != null) {
-    const wanted = Number(years[1]) * 12;
-    const met = facts.monthsOfExperience >= wanted;
-    return {
-      ...base,
-      verdict: met ? 'met' : 'unmet',
-      basis: 'experience-years',
-      evidence: `${Math.round(facts.monthsOfExperience / 12 * 10) / 10} years on the resume vs ${years[1]} asked`,
     };
   }
 
@@ -359,6 +377,24 @@ export function matchClause(
       return { ...base, verdict: 'pending', basis: 'graduation' };
     }
 
+    const enrollmentAsked = /\b(currently\s+enrolled|enrolled|pursuing|currently\s+studying)\b/i.test(text);
+    if (enrollmentAsked && facts.currentlyEnrolled == null) {
+      return { ...base, verdict: 'unscoreable', basis: 'degree' };
+    }
+    if (enrollmentAsked && facts.currentlyEnrolled === false) {
+      return { ...base, verdict: 'unmet', basis: 'degree', evidence: 'candidate is not currently enrolled' };
+    }
+
+    const degreeLevels = [
+      { rank: 1, pattern: /\b(bachelor|bachelors|bachelor's|undergraduate|b\.?s\.?|b\.?a\.?)\b/i },
+      { rank: 2, pattern: /\b(master|masters|master's|m\.?s\.?|m\.?a\.?|mba)\b/i },
+      { rank: 3, pattern: /\b(ph\.?d\.?|doctorate|doctoral)\b/i },
+    ];
+    const levelAsked = degreeLevels.find((level) => level.pattern.test(text));
+    const levelHeld = [...degreeLevels].reverse().find((level) => level.pattern.test(degree));
+    const levelMet = !levelAsked || (levelHeld != null && (enrollmentAsked
+      ? levelHeld.rank === levelAsked.rank
+      : levelHeld.rank >= levelAsked.rank));
     const fieldsAsked = Object.entries(FIELD_SYNONYMS).filter(([, re]) => re.test(text));
     const fieldMet =
       fieldsAsked.length === 0 || fieldsAsked.some(([, re]) => re.test(degree) || re.test(school));
@@ -367,7 +403,13 @@ export function matchClause(
         ? `field matches (${degree})`
         : `field asked: ${fieldsAsked.map(([n]) => n).join('/')}`
       : '';
-    return { ...base, verdict: fieldMet ? 'met' : 'unmet', basis: 'degree', evidence: why || undefined };
+    const met = fieldMet && levelMet;
+    const evidence = [
+      enrollmentAsked ? 'candidate is currently enrolled' : '',
+      levelAsked ? (levelMet ? `degree level matches (${degree})` : `degree level does not match (${degree})`) : '',
+      why,
+    ].filter(Boolean).join('; ');
+    return { ...base, verdict: met ? 'met' : 'unmet', basis: 'degree', evidence: evidence || undefined };
   }
 
   // 3. Competencies, evidenced by what the resume shows the student DOING, in their own bullets.

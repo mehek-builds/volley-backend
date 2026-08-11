@@ -494,6 +494,8 @@ export const ICIMS_ATTENDED_GATE_REASON =
   'This company asks you to make an account and prove you are human before the application form opens. Litos cannot do either of those for you, so this one needs your hands.';
 export const ICIMS_SECURITY_CODE_GATE_REASON =
   'This iCIMS account page is waiting for a security code sent to the stored Litos application email. Litos did not enter the code or submit the application. Open the page and finish the account check in Chrome.';
+export const BAMBOOHR_ATTENDED_GATE_REASON =
+  'This company’s application page asks you to prove you are human. Litos filled everything in, so all that is left is that check and the send button.';
 export const ORACLE_ATTENDED_GATE_REASON =
   'This Oracle application asks for an emailed code and a legal terms choice before the application form opens. Litos did not request the code, accept the terms, or submit anything. Open the exact saved page in Chrome and complete those steps yourself.';
 export const UKG_CAPTURE_REQUIRED_REASON =

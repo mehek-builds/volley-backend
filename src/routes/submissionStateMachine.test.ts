@@ -324,6 +324,7 @@ test('a run stopped on an emailed security code does not also open a CAPTCHA sta
   assert.match(patch, /\.\.\.\(securityCode\s*\n\s*\? \{/);
   assert.match(patch, /\.\.\.\(captchaAttention && !securityCode\s*\n\s*\? beginStall\(current, \{/);
   // The evidence is not lost with the stall: the categories still name both.
-  assert.match(patch, /attention_categories: securityCode\s*\n\s*\? \['security_code' as const, \.\.\.attentionCategories/);
+  assert.match(runner, /const preparedAttentionCategories = securityCode\s*\n\s*\? \['security_code' as const, \.\.\.attentionCategories/);
+  assert.match(patch, /attention_categories: preparedAttentionCategories/);
   assert.match(runner, /const attentionCategories = attentionCategoriesForReasons\(attentionReasons\);/);
 });

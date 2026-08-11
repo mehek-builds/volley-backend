@@ -401,9 +401,12 @@ test('a cover letter failure degrades the run instead of aborting it', () => {
     runner,
     /try \{\s*await generateStoredCoverLetter\(row, false, true\);\s*\} catch \(error\) \{[\s\S]{0,400}coverLetterIssue:/,
   );
-  // And the reason reaches the applicant on both provider paths rather than being swallowed.
-  const attentionLines = runner.match(/attention_reason:[\s\S]{0,220}?(?:coverLetterAttention|attentionReasons)/g) ?? [];
-  assert.equal(attentionLines.length, 2, 'both the managed and direct paths must surface the reason');
+  // And the reason reaches the applicant on both provider paths rather than being swallowed. The
+  // managed path names its final reason before it signs the attended URL binding, while the direct
+  // path still writes the array inline.
+  assert.match(runner, /const attentionReasons = \[[\s\S]{0,300}\.\.\.coverLetterAttention/);
+  assert.match(runner, /const preparedAttentionReason = \[[\s\S]{0,220}\.\.\.attentionReasons/);
+  assert.match(runner, /attention_reason:[\s\S]{0,220}\.\.\.coverLetterAttention/);
 });
 
 test('preview evidence blocks broken pages and incomplete form fills before final approval', () => {

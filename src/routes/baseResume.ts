@@ -37,6 +37,7 @@ import {
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
+import { resumeEmailOfRecord } from '../lib/resumeEmail';
 
 /* GET /resume/base        - the stored base resume, or 404 if never built.
  * POST /resume/base/stream - build it, streaming each piece as it is decided (SSE).
@@ -173,7 +174,7 @@ export function contactHeaderFrom(
   const str = (v: unknown) => (typeof v === 'string' && v.trim().length > 0 ? v.trim() : undefined);
   return {
     full_name: str(p.full_name) ?? 'Applicant',
-    email: email ?? str(p.email),
+    email,
     phone: str(appProfile?.phone),
     linkedin_url: str(appProfile?.linkedin_url),
     github_url: str(appProfile?.github_url),
@@ -481,7 +482,12 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        * it passed is exactly R-017's failure mode, and a spec saved behind a check that silently
        * threw is the same lie in a different place. */
       send({ event: 'stage', stage: 'checking' });
-      const contact = contactHeaderFrom(profile.parsed_json, applicationRecord, email);
+      const resumeEmail = resumeEmailOfRecord(profile.parsed_json);
+      const contact = contactHeaderFrom(
+        profile.parsed_json,
+        applicationRecord,
+        resumeEmail,
+      );
       let ats: AtsVerdict;
       /* What the renderer actually PRINTED, which is not always what it was handed: planResumeLayout
        * trims to make one page (a third bullet, then whole entries, then coursework, then skills).
@@ -509,6 +515,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
           },
         );
         const issues = [
+          ...(!resumeEmail ? ['Add a personal resume email to your profile before generating this resume.'] : []),
           ...finalValidation.issues,
           ...baseResumeSelectionIssues(printed, priorityEntries),
           ...layout.issues,

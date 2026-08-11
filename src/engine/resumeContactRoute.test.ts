@@ -155,8 +155,10 @@ describe('every path that can produce or send one of these packets is closed', (
   const applicationsRoute = readFileSync('src/routes/applications.ts', 'utf8');
   const baseResumeRoute = readFileSync('src/routes/baseResume.ts', 'utf8');
 
-  test('generation resolves the contact against the account and refuses before the model call', () => {
-    assert.match(resumeRoute, /resumeContactOfRecord\(\{[\s\S]*accountEmail: request\.jwtPayload!\.email/);
+  test('generation requires the explicit personal resume email and refuses before the model call', () => {
+    assert.match(resumeRoute, /const resumeEmail = resumeEmailOfRecord\(profileRows\[0\]\?\.parsed_json\)/);
+    assert.match(resumeRoute, /if \(!resumeEmail\)[\s\S]*code: 'resume_email_required'/);
+    assert.match(resumeRoute, /resumeContactOfRecord\(\{[\s\S]*accountEmail: resumeEmail/);
     assert.match(resumeRoute, /if \(resumeContactIssues\(contactOfRecord\)\.length > 0\)/);
     assert.match(resumeRoute, /code: 'resume_quality_hold'/);
     // Refused BEFORE the spec is generated, or the refusal costs a Claude call and a render.
@@ -164,17 +166,21 @@ describe('every path that can produce or send one of these packets is closed', (
       resumeRoute.indexOf('if (resumeContactIssues(contactOfRecord).length > 0)') < resumeRoute.indexOf('generateResumeSpec('),
       'the contact refusal must precede the model call',
     );
-    /* The alias decision reads the RESOLVED email. Keyed off the raw request, a caller with an
-     * empty body.contact.email skipped the alias and shipped a packet with no address of any kind.
+    /* The alias decision reads the RESOLVED personal email. Keyed off the raw request, a caller
+     * with an empty body.contact.email skipped the alias and shipped a packet with no address.
      *
      * It is no longer gated on body.application as well: that gate is what put the applicant's
-     * personal address on a Greenhouse form on 2026-08-11. body.contact.email survives here for one
-     * thing only, naming the fallback source, which is what it always meant. */
+     * personal address on a Greenhouse form on 2026-08-11. The route now refuses any fallback and
+     * keeps the personal address exclusively in the resume contact block. */
     assert.match(resumeRoute, /planPacketApplicantEmail\(\{[\s\S]*contactEmail: contactOfRecord\.email/);
     assert.doesNotMatch(resumeRoute, /body\.application && body\.contact\.email/);
     assert.doesNotMatch(resumeRoute, /body\.application && contactOfRecord\.email/);
-    // The stored block is the resolved one, not the request's.
-    assert.match(resumeRoute, /applicationContact = applicationEmail[\s\S]*: contactOfRecord;/);
+    assert.match(resumeRoute, /pinnedApplicantEmail\.source !== 'litos_alias'/);
+    assert.match(resumeRoute, /pinnedApplicantEmail\.tracked !== true/);
+    assert.match(resumeRoute, /pinnedApplicantEmail\.address\.toLowerCase\(\) === resumeEmail\.toLowerCase\(\)/);
+    // The stored PDF block remains personal, while the portal snapshot receives the alias.
+    assert.match(resumeRoute, /const applicationContact = contactOfRecord;/);
+    assert.match(resumeRoute, /email: pinnedApplicantEmail\.address/);
   });
 
   test('the packet records the contact verdict instead of leaving an empty array to be misread', () => {
@@ -206,7 +212,8 @@ describe('every path that can produce or send one of these packets is closed', (
   test('the main resume prints the stored phone and reports the guard as its own cause', () => {
     assert.match(baseResumeRoute, /phone: str\(appProfile\?\.phone\)/);
     // The decrypted row, not the raw one: phone is in ENCRYPTED_FIELDS and the raw column is base64.
-    assert.match(baseResumeRoute, /contactHeaderFrom\(profile\.parsed_json, applicationRecord, email\)/);
+    assert.match(baseResumeRoute, /const resumeEmail = resumeEmailOfRecord\(profile\.parsed_json\)/);
+    assert.match(baseResumeRoute, /contactHeaderFrom\([\s\S]*profile\.parsed_json,[\s\S]*applicationRecord,[\s\S]*resumeEmail/);
     assert.match(baseResumeRoute, /err instanceof ResumeContactError/);
   });
 });

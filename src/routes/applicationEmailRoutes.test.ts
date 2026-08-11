@@ -14,12 +14,17 @@ const packetEmail = readFileSync('src/lib/packetApplicantEmail.ts', 'utf8');
 test('application packet generation uses the Litos alias as the employer-facing email', () => {
   assert.match(resumeRoute, /planPacketApplicantEmail\(\{/);
   assert.match(resumeRoute, /applicationId: resumeId/);
-  assert.match(resumeRoute, /applicationContact = applicationEmail[\s\S]*email: applicationEmail\.alias/);
+  assert.match(resumeRoute, /const applicationContact = contactOfRecord/);
+  assert.match(resumeRoute, /pinnedApplicantEmail\.source !== 'litos_alias'/);
+  assert.match(resumeRoute, /pinnedApplicantEmail\.tracked !== true/);
+  assert.match(resumeRoute, /pinnedApplicantEmail\.address\.toLowerCase\(\) !== applicationEmail\.alias\.toLowerCase\(\)/);
+  assert.match(resumeRoute, /pinnedApplicantEmail\.address\.toLowerCase\(\) === resumeEmail\.toLowerCase\(\)/);
   assert.match(resumeRoute, /_contact: applicationContact/);
   assert.match(resumeRoute, /_applicant_email: pinnedApplicantEmail/);
   assert.match(resumeRoute, /_application_email: applicationEmail/);
   assert.match(resumeRoute, /ensureApplicationEmailAlias/);
   assert.match(resumeRoute, /applicant_email: pinnedApplicantEmail/);
+  assert.match(resumeRoute, /email: pinnedApplicantEmail\.address/);
   assert.match(packetEmail, /address: alias,\n\s+source: 'litos_alias'/);
 });
 
@@ -35,7 +40,7 @@ test('application packet generation uses the Litos alias as the employer-facing 
 test('the applicant email decision is not conditioned on a portal link being known yet', () => {
   const decision = resumeRoute.slice(
     resumeRoute.indexOf('const applicantEmailPlan = await planPacketApplicantEmail'),
-    resumeRoute.indexOf('const applicationContact = applicationEmail'),
+    resumeRoute.indexOf('const applicationContact = contactOfRecord'),
   );
   assert.ok(decision.length > 0);
   assert.doesNotMatch(decision, /body\.application/);
@@ -54,6 +59,7 @@ test('only a configured route turns a missing alias into a refusal', () => {
   assert.match(packetEmail, /'no_forwarding_address'/);
   assert.match(packetEmail, /export function applicantEmailNotice/);
   assert.match(resumeRoute, /notice: applicantEmailPlan\.notice/);
+  assert.match(resumeRoute, /code: 'applicant_email_regeneration_required'/);
 });
 
 test('dashboard resume edits preserve both immutable application email keys', () => {

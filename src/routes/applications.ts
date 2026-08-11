@@ -67,6 +67,7 @@ import {
   extensionHandoffPacketMatches,
   extensionHandoffVersion,
   extensionStartHandoffBinding,
+  verifiedDashboardHandoffUrl,
 } from '../lib/extensionHandoffPacket';
 import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import {
@@ -77,9 +78,19 @@ import {
 import { resolveFrozenApplicantEmail } from '../lib/applicationEmail';
 import { findComposioVerificationCode } from '../lib/emailVerification';
 import { registerWorkdayVerificationRoute } from './workdayVerification';
+import { createAndPersistPacketAudit, currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
+import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
+import { resumeEmailOfRecord, resumePacketEmailIsCurrent } from '../lib/resumeEmail';
+import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(4000) });
+const packetAuditAcknowledgementSchema = z.object({
+  audit_digest: z.string().regex(/^[a-f0-9]{64}$/),
+  packet_version: z.string().regex(/^[a-f0-9]{64}$/),
+  pdf_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  size_bytes: z.number().int().positive(),
+});
 const questionSchema = z.object({
   id: z.string().min(1).max(200),
   question: z.string().min(1).max(4000),
@@ -422,6 +433,183 @@ async function refuseDuplicateApplication(
 }
 
 export async function applicationRoutes(fastify: FastifyInstance) {
+  fastify.post(
+    '/applications/:id/packet-audit',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const review = readApplicationReview(row.spec);
+      if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      if (review.submission_claimed_at || review.status === 'submitting' || review.status === 'submission_claimed'
+        || review.status === 'submitted' || review.status === 'awaiting_security_code') {
+        return reply.status(409).send({ error: 'This application can no longer be audited before submission' });
+      }
+      try {
+        const cached = await currentPacketAudit(row);
+        if (!cached.valid) {
+          const allowed = await allowHourly(request.jwtPayload!.userId, 'packet-audit', LIMITS.perHour.packetAudit);
+          if (!allowed) return rateLimitedReply(reply);
+        }
+        const result = cached.valid
+          ? { audit: cached.audit, persisted: true, pdfBytes: cached.pdfBytes }
+          : await createAndPersistPacketAudit(row);
+        if (!result.persisted) {
+          return reply.status(409).send({
+            error: 'The saved application changed while it was being audited. Reload it and audit again.',
+            code: 'PACKET_AUDIT_STALE',
+          });
+        }
+        const fileName = resumeFileNameForRole(
+          ((row.spec as StoredSpec)._contact as StoredContact | undefined)?.full_name,
+          (row.job_context as { role?: unknown } | null)?.role,
+        );
+        const downloadUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(
+          request.jwtPayload!.userId,
+          row.resume_object_key,
+          { fileName },
+        )}`;
+        const response = {
+          packet_audit: result.audit,
+          pdf: {
+            object_key: row.resume_object_key,
+            sha256: result.audit.bindings.pdf.sha256,
+            size_bytes: result.audit.bindings.pdf.sizeBytes,
+            download_url: downloadUrl,
+          },
+        };
+        return reply.status(200).send(response);
+      } catch (error) {
+        request.log.warn({ error, applicationId: row.id }, 'Packet audit could not verify the saved application');
+        return reply.status(422).send({
+          error: error instanceof Error ? error.message : 'The saved application could not be audited',
+          code: 'PACKET_AUDIT_FAILED',
+        });
+      }
+    },
+  );
+
+  fastify.post(
+    '/applications/:id/packet-audit/acknowledge',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const parsed = packetAuditAcknowledgementSchema.safeParse(request.body);
+      if (!parsed.success) return reply.status(400).send({ error: 'Invalid packet audit acknowledgement' });
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const review = readApplicationReview(row.spec);
+      if (!review || review.submission_claimed_at || review.status === 'submitted') {
+        return reply.status(409).send({ error: 'This application cannot be acknowledged in its current state' });
+      }
+      const verdict = await currentPacketAudit(row);
+      if (!verdict.valid) return reply.status(409).send({ error: verdict.reason, code: verdict.code });
+      const audit = verdict.audit;
+      if (parsed.data.audit_digest !== audit.audit_digest
+        || parsed.data.packet_version !== audit.packet_version
+        || parsed.data.pdf_sha256 !== audit.bindings.pdf.sha256
+        || parsed.data.size_bytes !== audit.bindings.pdf.sizeBytes) {
+        return reply.status(409).send({
+          error: 'The rendered packet no longer matches the saved application. Reload it before continuing.',
+          code: 'PACKET_AUDIT_STALE',
+        });
+      }
+      const acknowledgement = {
+        ownerSha256: audit.bindings.ownerSha256,
+        applicationId: audit.bindings.applicationId,
+        audit_digest: audit.audit_digest,
+        packet_version: audit.packet_version,
+        pdfSha256: audit.bindings.pdf.sha256,
+        pdfSizeBytes: audit.bindings.pdf.sizeBytes,
+        acknowledged_at: new Date().toISOString(),
+      };
+      const next: ApplicationReviewState = { ...review, packet_audit_acknowledgement: acknowledgement };
+      const updated = await db.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
+        eq(generated_resumes.id, row.id),
+        eq(generated_resumes.user_id, request.jwtPayload!.userId),
+        sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+        sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
+      )).returning({ id: generated_resumes.id });
+      if (!updated.length) {
+        return reply.status(409).send({
+          error: 'The saved application changed before the acknowledgement was recorded.',
+          code: 'PACKET_AUDIT_STALE',
+        });
+      }
+      return reply.send({ acknowledged: true });
+    },
+  );
+
+  fastify.post(
+    '/applications/:id/submission/manual-handoff',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const review = readApplicationReview(row.spec);
+      if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+
+      // This action-time read is the dashboard's sole authority to navigate. It deliberately
+      // repeats every live packet check instead of trusting the audit object or URL held in React:
+      // currentAcknowledgedPacketAudit revalidates the exact PDF/spec/JD/answers, current personal
+      // resume email, and active owner/application Litos alias before any company URL is disclosed.
+      const audit = await currentAcknowledgedPacketAudit(row);
+      if (!audit.valid) return reply.status(409).send({ error: audit.reason, code: audit.code });
+
+      // PDF and alias verification perform external reads. Re-read the owner-scoped row after
+      // those awaits and reject unless the complete saved packet is still byte-for-byte the one
+      // that was audited. The URL below is derived only from this refreshed row, never the earlier
+      // snapshot, so a concurrent portal/job/status/claim mutation cannot release a stale URL.
+      const refreshed = await ownedResume(request, reply);
+      if (!refreshed) return;
+      if (refreshed.resume_object_key !== row.resume_object_key
+        || !isDeepStrictEqual(refreshed.spec, row.spec)) {
+        return reply.status(409).send({
+          error: 'This application changed while its company handoff was being verified. Reload it before continuing.',
+          code: 'MANUAL_HANDOFF_STALE',
+        });
+      }
+      const refreshedReview = readApplicationReview(refreshed.spec);
+      if (!refreshedReview) {
+        return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      }
+
+      const url = verifiedDashboardHandoffUrl({
+        applicationId: refreshed.id,
+        userId: refreshed.user_id,
+        frozenUrl: refreshedReview.portal_url,
+        frozenHandoffUrl: refreshedReview.extension_handoff_url,
+        frozenHandoffBinding: refreshedReview.extension_handoff_binding,
+        frozenAtsName: refreshedReview.ats_name,
+        status: refreshedReview.status,
+        attentionReason: refreshedReview.attention_reason,
+        attentionCategories: refreshedReview.attention_categories,
+        submissionClaimedAt: refreshedReview.submission_claimed_at,
+        submissionClaimId: refreshedReview.submission_claim_id,
+        submissionPacketVersion: refreshedReview.submission_packet_version,
+        submissionAttemptedAt: refreshedReview.submission_attempted_at,
+        submittedAt: refreshedReview.submitted_at,
+        receipt: refreshedReview.receipt,
+        unverifiedSubmission: refreshedReview.unverified_submission,
+      });
+      if (!url) {
+        return reply.status(409).send({
+          error: 'This application no longer has a verified company handoff. Reload it before continuing.',
+          code: 'MANUAL_HANDOFF_STALE',
+        });
+      }
+
+      return reply.send({
+        manual_handoff: {
+          url,
+          audit_digest: audit.audit.audit_digest,
+          packet_version: audit.audit.packet_version,
+          pdf_sha256: audit.audit.bindings.pdf.sha256,
+          size_bytes: audit.audit.bindings.pdf.sizeBytes,
+        },
+      });
+    },
+  );
+
   fastify.get(
     '/applications/:id/submission/extension-packet',
     { preHandler: requireAuth },
@@ -448,6 +636,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if ((review.ats_name === 'jobvite' || review.ats_name === 'icims' || review.ats_name === 'oraclecloud')
         && !review.applicant_snapshot) {
         return reply.status(409).send({ error: 'This application must be prepared again before Chrome can fill it' });
+      }
+      const auditVerdict = await currentAcknowledgedPacketAudit(row);
+      if (!auditVerdict.valid) {
+        return reply.status(409).send({ error: auditVerdict.reason, code: auditVerdict.code });
       }
 
       const contact = (stored._contact ?? {}) as StoredContact;
@@ -487,6 +679,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         spec: editableResumeSpec(stored),
         application: { id: row.id, spec: stored },
         applicant_snapshot: review.applicant_snapshot,
+        packet_audit: auditVerdict.audit,
         quality: {
           ready_to_attach: issues.length === 0,
           issues,
@@ -524,6 +717,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         eq(generated_resumes.user_id, userId),
       )).limit(1);
       const precheckReview = precheckRow ? readApplicationReview(precheckRow.spec) : null;
+      let precheckPacketVersion: string | null = null;
       if (precheckRow && precheckReview) {
         const binding = extensionStartHandoffBinding({
           handoffVersion: parsed.data.handoff_version,
@@ -546,6 +740,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         }
       }
       if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
+        const auditVerdict = await currentAcknowledgedPacketAudit(precheckRow);
+        if (!auditVerdict.valid) {
+          return reply.status(409).send({ error: auditVerdict.reason, code: auditVerdict.code });
+        }
+        precheckPacketVersion = auditVerdict.audit.packet_version;
         const verdict = await refuseDuplicateApplication(precheckRow, precheckReview, userId, fastify.log);
         if (verdict.kind === 'duplicate') return reply.status(409).send(duplicateApplicationResponse(verdict));
         const resumeIssues = await preSendResumeVerificationIssues(
@@ -640,6 +839,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           status: 'submitting' as const,
           submission_claimed_at: now,
           submission_claim_id: claimId,
+          submission_packet_version: precheckPacketVersion!,
           submission_authorization: {
             source: parsed.data.authorization === 'standing_consent' ? 'standing_consent' as const : 'user_initiated_extension' as const,
             authorized_at: now,
@@ -699,6 +899,15 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.submission_claim_id !== parsed.data.claim_id || current.status !== 'submitting') {
         return reply.status(409).send({ error: 'This extension submission is no longer active' });
       }
+      const outcomeAudit = await currentAcknowledgedPacketAudit(row);
+      if (!outcomeAudit.valid || current.submission_packet_version !== outcomeAudit.audit.packet_version) {
+        return reply.status(409).send({
+          error: outcomeAudit.valid
+            ? 'The audited packet no longer matches the extension submission claim.'
+            : outcomeAudit.reason,
+          code: outcomeAudit.valid ? 'PACKET_AUDIT_STALE' : outcomeAudit.code,
+        });
+      }
       const now = new Date().toISOString();
       const outcome = parsed.data.outcome === 'confirmed' && !extensionEmployerReceiptIsSufficient({
         portalUrl: current.portal_url,
@@ -721,6 +930,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }).where(and(
         eq(generated_resumes.id, row.id),
         eq(generated_resumes.user_id, request.jwtPayload!.userId),
+        sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+        sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
         sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${parsed.data.claim_id}`,
         sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
       )).returning({ id: generated_resumes.id });
@@ -773,6 +984,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const userId = request.jwtPayload!.userId;
       const bank = await readExperienceBankOrSeedFromBaseResume(userId);
       const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
+      const currentResumeEmail = resumeEmailOfRecord(profileRows[0]?.parsed_json);
+      if (!resumePacketEmailIsCurrent(contact.email, currentResumeEmail)) {
+        return reply.status(409).send({
+          error: 'Your personal resume email changed or is missing. Regenerate this application before editing it.',
+          code: 'resume_email_regeneration_required',
+        });
+      }
       const parsed = profileRows[0]?.parsed_json as {
         school?: string;
         degree?: string;
@@ -824,6 +1042,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const rendered = await renderResumePdf(edited, { ...contact, full_name: contact.full_name }, review.jd_text);
       const visual = validateResumeVisualLayout(rendered.layout);
       const parsedPdf = await extractPdfText(rendered.buffer);
+      const applicantIdentity = stored._applicant_email && typeof stored._applicant_email === 'object'
+        ? stored._applicant_email as { address?: unknown; source?: unknown }
+        : null;
       const pdfIssues = [
         ...leadAlignmentIssues(rendered.spec, review.jd_text, {
           context: { company: applicationCompany(row), role: review.role },
@@ -832,6 +1053,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues,
         ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
         ...findPdfTextFidelityIssues(parsedPdf.text, rendered.spec, { ...contact, full_name: contact.full_name }),
+        ...(applicantIdentity?.source === 'litos_alias'
+          && typeof applicantIdentity.address === 'string'
+          && parsedPdf.text.toLowerCase().includes(applicantIdentity.address.toLowerCase())
+          ? ['the tracked application routing email must not appear on the resume PDF']
+          : []),
       ];
       if (pdfIssues.length > 0) {
         return reply.status(422).send({ error: 'The edited resume does not fit the one-page layout.', issues: pdfIssues });
@@ -857,6 +1083,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...(stored._cover_letter ? { _cover_letter: stored._cover_letter } : {}),
         _quality: {
           ...(stored._quality as Record<string, unknown> | undefined),
+          pdfGenerationBinding: createPdfGenerationBinding(rendered.spec, blob.pathname, rendered.buffer, contact.email ?? ''),
           atsCoverage: validation.ats_keyword_coverage_pct,
           visualWarnings: visual.warnings,
           groundingRemoved: grounded.removed,
@@ -869,6 +1096,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         .where(and(
           eq(generated_resumes.id, row.id),
           eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
           sql`${generated_resumes.spec}->'_review'->>'status' = ${review.status}`,
         ))
         .returning({ id: generated_resumes.id });
@@ -1099,6 +1328,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.portal_url && !isPortalSupported(current.portal_url) && sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
+      const submitAudit = await currentAcknowledgedPacketAudit(row, { questions: normalizedSubmittedQuestions });
+      if (!submitAudit.valid) {
+        return reply.status(409).send({ error: submitAudit.reason, code: submitAudit.code });
+      }
       /* REMEMBER THE ANSWERS THAT TRAVEL, so she is asked for each of them exactly once.
        *
        * Here rather than on the Apply screen, deliberately: this is the moment her answers are
@@ -1300,11 +1533,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ),
       };
       let handoff_url: string | undefined;
+      let handoff_packet_valid = true;
       if (review.status === 'needs_attention' && review.browser_session_id) {
-        try {
-          handoff_url = await getLiveViewUrl(review.browser_session_id);
-        } catch {
-          handoff_url = undefined;
+        const audit = await currentAcknowledgedPacketAudit(row);
+        handoff_packet_valid = audit.valid;
+        if (audit.valid) {
+          try {
+            handoff_url = await getLiveViewUrl(review.browser_session_id);
+          } catch {
+            handoff_url = undefined;
+          }
         }
       }
       return reply.send({
@@ -1312,6 +1550,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         review,
         cover_letter: storedCoverLetter(row),
         handoff_url,
+        handoff_packet_valid,
         configured: isBrowserbaseConfigured(),
       });
     },
@@ -1329,6 +1568,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const current = readApplicationReview(stored);
       if (!current || current.status !== 'needs_attention') {
         return reply.status(409).send({ error: 'This application is not waiting on you' });
+      }
+      const handoffAudit = await currentAcknowledgedPacketAudit(row);
+      if (!handoffAudit.valid) {
+        return reply.status(409).send({
+          error: handoffAudit.reason,
+          code: handoffAudit.code,
+        });
       }
       const now = new Date().toISOString();
       /* Unchanged in meaning, narrowed to the case it was always describing. This route's
@@ -1391,6 +1637,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .where(and(
             eq(generated_resumes.id, row.id),
             eq(generated_resumes.user_id, request.jwtPayload!.userId),
+            sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+            sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
             sql`${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'`,
           ))
           .returning({ id: generated_resumes.id });
@@ -1407,6 +1655,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         .set({ spec: reviewSpec(next) })
         .where(and(
           eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
           sql`${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'`,
         ))
         .returning({ id: generated_resumes.id });
@@ -1508,6 +1759,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         stored,
         applicationCompany(row),
       ));
+      const approvalAudit = await currentAcknowledgedPacketAudit(row, { questions: approvalReview.questions });
+      if (!approvalAudit.valid) approvalIssues.push(approvalAudit.reason);
       if (approvalIssues.length > 0) {
         return reply.status(422).send({
           error: 'Verify the complete application before sending. The current packet is not ready for final approval.',
@@ -1532,6 +1785,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         .set({ spec: approvedReviewSpec(next, now) })
         .where(and(
           eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
           sql`${generated_resumes.spec}->'_review'->>'status' = 'ready_for_final_approval'`,
         ))
         .returning({ id: generated_resumes.id });
@@ -1582,6 +1838,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     async (request: FastifyRequest, reply: FastifyReply) => {
       const row = await ownedResume(request, reply);
       if (!row) return;
+      const securityCodeAudit = await currentAcknowledgedPacketAudit(row);
+      if (!securityCodeAudit.valid) {
+        return reply.status(409).send({
+          error: securityCodeAudit.reason,
+          code: securityCodeAudit.code,
+        });
+      }
       const body = request.body as { code?: unknown } | undefined;
       const outcome = await finishSecurityCodeSubmission(row.id, body?.code, fastify);
       if (outcome.kind === 'not_found') {

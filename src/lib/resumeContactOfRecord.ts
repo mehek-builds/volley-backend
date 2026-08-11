@@ -17,11 +17,9 @@ import type { ContactHeader } from '../engine/resumeRender';
  * phone, while the same account's users.email and application_profile.phone were populated and
  * sitting on this very request. The server had the answer and printed the client's blank.
  *
- * So the request is now a PREFERENCE, not the record. Anything the caller sends wins (it may be a
- * deliberate per-application choice), and every field it leaves empty is filled from the account.
- * Nothing is invented: `accountEmail` is the verified login off the JWT and `profile` is the
- * decrypted application_profile row. When both sources are empty the field stays empty and the
- * caller refuses, which is the whole point of returning a plain object rather than a rendered PDF.
+ * Phone and links still use the caller as a preference and fill holes from the decrypted profile.
+ * Application resume routes pass the separately stored explicit resume_email as both requested and
+ * account email, so neither login identity nor a portal alias can become the PDF email.
  */
 export interface ResumeContactSources {
   /** What the caller asked for. Every field optional; blanks are holes to fill, not instructions. */
