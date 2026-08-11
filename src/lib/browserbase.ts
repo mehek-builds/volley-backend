@@ -348,6 +348,26 @@ export function managedContinuationFingerprint(token: string): string {
   return createHash('sha256').update(`stratus-managed-continuation-v1:${token}`).digest('hex').slice(0, 24);
 }
 
+/* THE OPTIONS FOR A MANAGED APPLICATION SUBMIT, IN ONE PLACE THAT CAN BE ARGUED WITH.
+ *
+ * They used to be an object literal buried in the runner, and one field of it was wrong on a false
+ * premise for a whole deploy: continuationCheckpoint was set because "an ordinary unknown receipt
+ * does not offer a continuation", which merged Stratus contradicts - its own pressedUnknown term
+ * offers one already. Setting it anyway suppressed the 15 second receipt-observation cap AND made
+ * continuationOffered true on confirmed, rejected and not_attempted outcomes, so keepAlive held a
+ * sandbox open after every successful submission.
+ *
+ * Named and exported so the shape a real submit sends is a thing a test can hold, rather than a
+ * literal that can only be grepped for.
+ */
+export function managedApplicationSubmitOptions(continuationTtlSeconds: number): {
+  allowSubmit: true;
+  requestContinuation: true;
+  continuationTtlSeconds: number;
+} {
+  return { allowSubmit: true, requestContinuation: true, continuationTtlSeconds };
+}
+
 // `screenshot` defaults to true because every existing caller wants the receipt image. The CAPTCHA
 // probe does not: it reads one attribute and throws the result away, so a full-page PNG would be
 // rendered, transferred and retained by the third-party runner for nothing.

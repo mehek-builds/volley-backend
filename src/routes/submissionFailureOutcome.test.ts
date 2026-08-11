@@ -7,7 +7,7 @@ import {
   preClickVerificationContinuationBlockedReview,
   submissionFailureOutcome,
 } from './submissionRunner';
-import { submitRequestDisposition } from '../lib/submissionSafety';
+import { resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 
 const base = {
   captchaStop: null as 'before_fill' | 'at_submit' | null,
@@ -106,7 +106,19 @@ test('a standing code wall for another alias stays non-restartable and preserves
   assert.equal(submitRequestDisposition(persisted.status), 'reject');
 });
 
-test('a delayed post-click code wall preserves the unresolved external-side-effect lock', () => {
+/* THE LOCK HAS TO HAVE A KEY, AND THIS TEST USED TO ASSERT THE TRAP INTO PLACE.
+ *
+ * It checked that the claim was retained and that submitRequestDisposition said 'reject', and never
+ * asked the next question: what, then, can ever move this packet? The answer was nothing. Three
+ * exits exist in this system and the shape it wrote closed all three at once - the ordinary submit
+ * and resume-edit routes both go through submitRequestDisposition, the security-code endpoint needs
+ * status 'awaiting_security_code' AND a null claim, and the unverified-resolution endpoint needs an
+ * unverified_submission record that this branch deliberately clears.
+ *
+ * So the assertions below are the pair, not the half: still non-restartable through the ordinary
+ * path, and provably finishable through the one route that is safe from a standing code wall.
+ */
+test('a delayed post-click code wall stays non-restartable and keeps the code route open', () => {
   const current = {
     status: 'submitting',
     submission_claimed_at: '2026-08-11T12:00:00.000Z',
@@ -136,10 +148,6 @@ test('a delayed post-click code wall preserves the unresolved external-side-effe
     attemptedAt: '2026-08-11T12:00:03.000Z',
     screenshotUrl: 'https://proof.example/receipt.png',
   });
-  assert.equal(persisted.status, 'needs_attention');
-  assert.equal(persisted.submission_claimed_at, '2026-08-11T12:00:00.000Z');
-  assert.equal(persisted.submission_claim_id, 'claim-id');
-  assert.deepEqual(persisted.submission_authorization, current.submission_authorization);
   assert.equal(persisted.submission_attempted_at, '2026-08-11T12:00:03.000Z');
   assert.equal(persisted.preview_screenshot_url, 'https://proof.example/receipt.png');
   assert.equal(persisted.security_code?.sent_to, 'app-exact@apply.trylitos.com');
@@ -147,15 +155,28 @@ test('a delayed post-click code wall preserves the unresolved external-side-effe
   assert.equal(persisted.unverified_submission, undefined);
   assert.equal(persisted.submission_error, undefined);
   assert.deepEqual(persisted.attention_categories, ['security_code', 'evidence_gap']);
-  assert.match(persisted.attention_reason!, /will not open a fresh form or send this application again automatically/);
-  assert.equal(submitRequestDisposition('needs_attention', false), 'start', 'the cleared-claim regression would restart');
-  assert.equal(
-    submitRequestDisposition(
-      persisted.status,
-      Boolean(persisted.submission_claimed_at),
-    ),
-    'reject',
-  );
+  assert.match(persisted.attention_reason!, /will not open a fresh form or send this application again on its own/);
+
+  // THE LOCK. Neither another submit run nor a resume edit can move this packet, and the reason is
+  // the status itself rather than the claim, so releasing the claim below does not weaken it.
+  assert.equal(submitRequestDisposition(persisted.status, Boolean(persisted.submission_claimed_at)), 'reject');
+  assert.equal(submitRequestDisposition(persisted.status, false), 'reject',
+    'the status alone must refuse a re-run, with or without a claim on the row');
+  assert.equal(resumeEditDisposition(persisted.status, Boolean(persisted.submission_claimed_at)), 'reject');
+
+  /* THE KEY. POST /applications/:id/security-code is the one route that is safe from a standing
+   * code wall, and it has two preconditions, both of which this state has to satisfy:
+   * finishSecurityCodeSubmission requires status 'awaiting_security_code' with a security_code on
+   * the row, and claimSecurityCodeSubmission then updates only WHERE submission_claimed_at is null.
+   * Assert both, because satisfying either one alone still leaves the packet with no way out. */
+  assert.equal(persisted.status, 'awaiting_security_code',
+    'finishSecurityCodeSubmission answers not_awaiting on any other status');
+  assert.ok(persisted.security_code, 'finishSecurityCodeSubmission needs the challenge it is finishing');
+  assert.equal(persisted.submission_claimed_at, undefined,
+    'claimSecurityCodeSubmission only claims a row whose submission_claimed_at is null');
+  assert.equal(persisted.submission_claim_id, undefined);
+  assert.equal(persisted.submission_authorization, undefined,
+    'the code the applicant supplies is its own per-application approval, taken at claim time');
 });
 
 for (const cause of ['authorization_revoked', 'email_route_changed', 'email_permission_revoked'] as const) {
