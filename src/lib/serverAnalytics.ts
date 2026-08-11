@@ -174,9 +174,10 @@ export async function captureServerEvent(
  * aspirational.
  *
  * It needs a PERSONAL api key (phx_), not the public ingestion token: deletion
- * is a management operation and the ingestion token cannot perform it. Without
- * POSTHOG_PERSONAL_API_KEY and POSTHOG_PROJECT_ID this returns false and logs,
- * which is the honest signal that the promise is not currently being kept.
+ * is a management operation and the ingestion token cannot perform it. The key
+ * also needs person:write. Without POSTHOG_PERSONAL_API_KEY and
+ * POSTHOG_PROJECT_ID this returns false and logs, which is the honest signal
+ * that the promise is not currently being kept.
  *
  * Returns true only if PostHog confirmed the deletion.
  */
@@ -198,19 +199,54 @@ export async function deleteAnalyticsProfile(
 
   // PostHog's management API lives on the app host, not the ingestion host.
   const apiHost = (process.env.POSTHOG_API_HOST ?? 'https://us.posthog.com').replace(/\/$/, '');
+  const auth = { Authorization: `Bearer ${personalKey}` };
+
   try {
-    // delete_events=true removes the events as well as the person row; without
-    // it the profile disappears but its history stays queryable.
-    const url =
+    /* TWO STEPS, and the first version got this wrong.
+     *
+     * Deleting by `?distinct_id=` is refused outright for personal API keys.
+     * Probed against production on 2026-08-11:
+     *
+     *   DELETE /api/projects/480194/persons/?distinct_id=<uuid>&delete_events=true
+     *   -> 403 {"code":"permission_denied",
+     *           "detail":"This action does not support personal API key access"}
+     *
+     * That is NOT a missing scope, so adding person:write to the key does not
+     * help; PostHog simply does not expose that variant to personal keys. The
+     * per-person endpoint, addressed by PostHog's own internal person id, does
+     * work: same key, same project, HTTP 202, and the person was confirmed gone
+     * on the next read.
+     *
+     * So: look the person up by distinct_id, which reads fine, then delete by
+     * the id that lookup returns. */
+    const lookup = await fetch(
       `${apiHost}/api/projects/${encodeURIComponent(projectId)}/persons/` +
-      `?distinct_id=${encodeURIComponent(userId)}&delete_events=true`;
-    const res = await fetch(url, {
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${personalKey}` },
-      signal: AbortSignal.timeout(DELETE_TIMEOUT_MS),
-    });
-    // 404 means there was no profile to delete, which satisfies the promise.
-    if (res.ok || res.status === 404) return true;
+        `?distinct_id=${encodeURIComponent(userId)}`,
+      { headers: auth, signal: AbortSignal.timeout(DELETE_TIMEOUT_MS) },
+    );
+    if (!lookup.ok) {
+      safeWarn(log, `serverAnalytics: person lookup rejected with ${lookup.status}`);
+      return false;
+    }
+
+    const payload = (await lookup.json()) as { results?: Array<{ id?: unknown }> };
+    const person = payload?.results?.[0];
+    // No profile is the expected case for anyone who only ever used the
+    // extension, or who never signed in on the website. Nothing to delete means
+    // the promise is already kept.
+    if (!person?.id) return true;
+
+    // delete_events=true removes the event history as well as the person row;
+    // without it the profile disappears but its events stay queryable, which
+    // would not be the deletion the privacy policy describes.
+    const res = await fetch(
+      `${apiHost}/api/projects/${encodeURIComponent(projectId)}/persons/` +
+        `${encodeURIComponent(String(person.id))}/?delete_events=true`,
+      { method: 'DELETE', headers: auth, signal: AbortSignal.timeout(DELETE_TIMEOUT_MS) },
+    );
+    // 202 is the success here: deletion is queued, not synchronous. 404 means it
+    // went between the lookup and the delete, which is also fine.
+    if (res.ok || res.status === 202 || res.status === 404) return true;
     safeWarn(log, `serverAnalytics: profile deletion rejected with ${res.status}`);
     return false;
   } catch (error) {
