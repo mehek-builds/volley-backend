@@ -2731,6 +2731,7 @@ function greenhouseComboboxValuesForQuestion(
   answer: string,
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
+  answerIsResolved = false,
 ): string[] {
   const normalizedQuestion = question.toLowerCase();
   const normalizedAnswer = answer.trim().toLowerCase();
@@ -2754,22 +2755,51 @@ function greenhouseComboboxValuesForQuestion(
   // wins the head of the list; these exist so the SECOND and THIRD attempts are useful instead of
   // absent. uniqueDefined at the end of this function dedupes against whatever they add.
   if (!referralQuestion) values.push(...profileAnswerAliases(question, answer));
+  /* WHERE A COMPUTED BUCKET GOES, and it is not unconditionally the head.
+   *
+   * greenhouseGpaBucket and greenhouseGraduationBucket map a profile fact onto ONE employer's
+   * vocabulary: "3.89" becomes "3.6 or above (out of 4.0)", "May 2028" becomes "Spring 2028". That
+   * is a guess, and it is the right guess to lead with when the value in hand is a profile fact,
+   * because a profile fact is rarely spelled the way a closed list spells it.
+   *
+   * It is the wrong guess to lead with when the value in hand was READ OFF THIS CONTROL. Measured on
+   * the live IMC application 2026-08-11: the resolved answer was "January 2028 - July 2028", one of
+   * the three options that control offers, and this unshift put "Spring 2028" in front of it.
+   * comboboxValueLimit is 1, so the bucket was the ONLY value the form ever saw, the resolved answer
+   * was never attempted, and the field came back required-and-empty. The same run turned a resolved
+   * "3.81 - 3.9" into "3.6 or above (out of 4.0)".
+   *
+   * So the bucket ranks BEHIND such an answer and AHEAD of everything else. Behind, not gone: a
+   * profile fact, a stale record and a term form the resolver wrote without seeing a list all still
+   * put the bucket first, which is the case it was written for and the case Cloudflare, Databricks
+   * and the Akuna fixed-question list all take. answerIsResolved is what draws that line, and it is
+   * narrow on purpose: see greenhouseOptionBandAnswer.
+   *
+   * Only the buckets move. Every other rule below keeps the head of the list, because each of those
+   * was measured to BEAT the stored answer on its own control - the self-identify wordings
+   * especially, see selfIdentificationDeclineWording. */
+  const pushComputedBucket = (...buckets: Array<string | undefined>) => {
+    const behindAnswer = answerIsResolved
+      ? values.findIndex((value) => value.trim().toLowerCase() === normalizedAnswer) + 1
+      : 0;
+    values.splice(Math.max(behindAnswer, 0), 0, ...buckets.map((bucket) => bucket ?? ''));
+  };
   const isGraduationPartQuestion = /\bgraduat(?:ion|e)\s+(?:month|year)\b|\bwhat\s+is\s+your\s+graduation\s+(?:month|year)\b/.test(normalizedQuestion);
   if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b|academic\s+performance|grade\s+average|grade\s+point/.test(normalizedQuestion)) {
-    values.unshift(greenhouseGpaBucket(answer) ?? '');
-    if (isAkunaContext) values.unshift(greenhouseExactGpaOption(answer) ?? '');
+    pushComputedBucket(greenhouseGpaBucket(answer));
+    if (isAkunaContext) pushComputedBucket(greenhouseExactGpaOption(answer));
   }
   if (/\bclosest\s+date\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
-    values.unshift(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? '');
+    pushComputedBucket(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer));
   }
   if (!isGraduationPartQuestion && /\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bwhat\s+is\s+your\s+graduation\s+(?:date|month|year)\b|\bexpected\s+graduat(?:ion|e)|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
     const closestDateQuestion = /\bclosest\s+date\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion);
     if (closestDateQuestion) {
-      values.unshift(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? '');
+      pushComputedBucket(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer));
     } else {
-      values.unshift(greenhouseGraduationBucket(answer) ?? '', greenhouseClosestGraduationOption(answer) ?? '');
+      pushComputedBucket(greenhouseGraduationBucket(answer), greenhouseClosestGraduationOption(answer));
     }
-    if (/\bexpecting\s+to\s+graduat(?:e|ion)\b/.test(normalizedQuestion)) values.unshift(answer.match(/\b20\d{2}\b/)?.[0] ?? '');
+    if (/\bexpecting\s+to\s+graduat(?:e|ion)\b/.test(normalizedQuestion)) pushComputedBucket(answer.match(/\b20\d{2}\b/)?.[0]);
   }
   if (/\bdegree\b/.test(normalizedQuestion) && /\bbachelor/i.test(answer)) {
     const wantsCompactBachelor = /\b(?:currently\s+pursuing|pursuing|enrolled\s+in\s+university)\b/.test(normalizedQuestion)
@@ -3010,6 +3040,7 @@ function pushGreenhouseQuestionComboboxActions(
   labelPrefix: string,
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
+  answerIsResolved = false,
 ) {
   if (!questionMayBeClosedList(questionText)) return;
   const selectors = [selector];
@@ -3030,6 +3061,7 @@ function pushGreenhouseQuestionComboboxActions(
     contextText,
     valueLimit,
     referralEvidence,
+    answerIsResolved,
   );
   for (const [index, value] of candidates.entries()) {
     for (const [selectorIndex, inputSelector] of selectors.entries()) {
@@ -3052,6 +3084,26 @@ function pushGreenhouseQuestionComboboxActions(
  * trimming pass; widening this across the board pushed real fills out of the run. The ladder in
  * profileFieldResolution.ts is therefore spent where it is free: on the direct-Playwright path,
  * which reads the control's real options and snaps, and on any question this already widened.
+ *
+ * AND A SECOND REASON, WHICH IS THE STRONGER ONE. Raising this was considered while fixing the
+ * resolved-answer ordering above, so a bucket could be tried after the resolved answer rather than
+ * instead of it, and it was rejected on inspection of what a second attempt actually does.
+ *
+ * managedGreenhouseScopedReactSelectFill emits an unconditional five-action sequence per candidate:
+ * click the input open, fill the value, click the option whose text matches, click
+ * GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR, press Enter. Every one is `optional: true`, and
+ * the action list is a flat script the remote runner executes start to finish - there is no
+ * verification helper anywhere that gates a later candidate on an earlier one having failed, and no
+ * way to express "stop here" in a ManagedBrowserAction.
+ *
+ * So a SECOND candidate after a successful first one reopens a control that is already correctly
+ * committed and clicks `[id^="react-select-"][id$="-option-0"]:visible` - option ZERO of whatever
+ * menu is now open, which is not the value being attempted and need not be related to it at all.
+ * That is exactly the "a failed attempt leaves a wrong selection behind" hazard, and it is not
+ * hypothetical: option-0 is a positional selector with no text match in it.
+ *
+ * Ordering the resolved answer first, with the limit left at 1, fixes the measured IMC symptom on
+ * its own. Widening this is a separate change that needs the runner to learn a conditional first.
  */
 function comboboxValueLimit(questionText: string, contextText: string): number {
   return /\bdatabricks\b/i.test(`${questionText}\n${contextText}`)
@@ -3068,12 +3120,14 @@ function pushGreenhouseQuestionSelectActions(
   labelPrefix: string,
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
+  answerIsResolved = false,
 ) {
   const values = greenhouseComboboxValuesForQuestion(
     questionText,
     answer,
     contextText,
     referralEvidence,
+    answerIsResolved,
   ).slice(0, 3);
   for (const [index, value] of values.entries()) {
     managedSelect(actions, selector, value, `${labelPrefix}_select_live:${index}:${questionText.slice(0, 80)}`);
@@ -3131,8 +3185,9 @@ function greenhouseComboboxCandidateValues(
   contextText: string,
   valueLimit: number,
   referralEvidence?: ReferralSourceEvidence,
+  answerIsResolved = false,
 ): string[] {
-  const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText, referralEvidence);
+  const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText, referralEvidence, answerIsResolved);
   const sliced = values.slice(0, valueLimit);
   const escapeHatch = escapeHatchOptionFor(questionText);
   if (!escapeHatch || sliced.some((value) => value.trim().toLowerCase() === escapeHatch.toLowerCase())) return sliced;
@@ -3146,6 +3201,7 @@ function pushGreenhouseQuestionComboboxLabelActions(
   labelPrefix: string,
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
+  answerIsResolved = false,
 ) {
   if (!questionMayBeClosedList(questionText)) return;
   let index = 0;
@@ -3159,6 +3215,7 @@ function pushGreenhouseQuestionComboboxLabelActions(
     contextText,
     valueLimit,
     referralEvidence,
+    answerIsResolved,
   );
   for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
     for (const value of values) {
@@ -3647,10 +3704,80 @@ function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][nu
   if (/\bgraduat(?:ion|e)\s+year\b|\bwhat\s+is\s+your\s+graduation\s+year\b|\byear\s+of\s+graduation\b/i.test(questionText)) {
     return graduationYearAnswerForControl(item, packet);
   }
+  /* THE DATE BRANCH STILL OUTRANKS A STALE ANSWER, AND NO LONGER OUTRANKS A SNAPPED ONE.
+   *
+   * The packet value has to keep winning in the ordinary case, and the reason is the STALE answer: a
+   * question record written on an earlier run says "May 2027" long after the profile says "May 2028",
+   * and replaying the record would submit a graduation date the applicant has since corrected. That
+   * is what this branch was built for and it is still right.
+   *
+   * What it could not tell apart is an answer that is not the applicant's phrasing at all. Measured
+   * on the live IMC application (generated_resumes fc6eade3-90e5-4d17-af94-009f9a22beaa,
+   * 2026-08-11): that control's real options read "July 2027 - December 2027", "January 2028 - July
+   * 2028", "August 2028 - December 2028". Discovery read the list, resolveProfileField snapped onto
+   * "January 2028 - July 2028", and this line threw it away for "May 2028", which is not on that
+   * list and never could be. The field came back required-and-still-empty.
+   *
+   * greenhouseOptionBandAnswer is the whole discriminator, and it is a shape test rather than a
+   * provenance flag because there is no provenance to read: packet.fieldOptions is not persisted, so
+   * at action-build time it is absent on every real run and any rule keyed on it is inert. A BAND is
+   * something no profile holds and no function in this file computes - not "May 2027", not
+   * "Spring 2027", not "3.89" - so the only thing that can have produced one is a real option list. */
   if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)\b/i.test(questionText)) {
-    return packet.graduationDate?.trim() || item.answer;
+    return greenhouseOptionBandAnswer(item.answer) ?? (packet.graduationDate?.trim() || item.answer);
   }
   return item.answer;
+}
+
+/**
+ * An answer that can only have come from the CONTROL'S OWN OPTION LIST, recognised by its shape.
+ *
+ * "January 2028 - July 2028". "3.81 - 3.9". "2027-2028". A band spans two endpoints, and nothing on
+ * the applicant's profile and nothing this file computes is ever written that way: a profile holds
+ * "May 2028" and "3.89", greenhouseGraduationBucket emits "Spring 2028", greenhouseGpaBucket emits
+ * "3.6 or above (out of 4.0)". So a stored answer in band form is evidence that discovery read this
+ * control's options and resolveProfileField snapped onto one of them, which is exactly the evidence
+ * a locally computed bucket does not have.
+ *
+ * IT IS A SHAPE TEST BECAUSE THERE IS NOTHING BETTER TO ASK. packet.fieldOptions would settle it
+ * outright and is not persisted with the packet, so it is absent at action-build time on every real
+ * run. ResolvedProfileField.matchedOption says it too and does not survive into the question record.
+ * The shape is what is left, and it is deliberately narrow: anything it does not recognise keeps the
+ * behaviour that shipped, so the cost of a miss is the status quo rather than a new wrong answer.
+ *
+ * Returns the trimmed answer so callers can use it directly, and undefined when there is no band.
+ */
+function greenhouseOptionBandAnswer(answer: string | undefined): string | undefined {
+  const value = answer?.trim();
+  if (!value) return undefined;
+  // "January 2028 - July 2028", "2027-2028", "July 2027 to December 2027".
+  const dateBand = /\b(?:[A-Za-z]{3,9}\s+)?(?:19|20)\d{2}\s*(?:[-\u2010-\u2015]|\bto\b|\bthrough\b)\s*(?:[A-Za-z]{3,9}\s+)?(?:19|20)\d{2}\b/;
+  // "3.81 - 3.9", "3.5-3.9".
+  const numberBand = /\b\d(?:\.\d+)?\s*(?:[-\u2010-\u2015]|\bto\b)\s*\d(?:\.\d+)?\b/;
+  return dateBand.test(value) || numberBand.test(value) ? value : undefined;
+}
+
+/**
+ * Whether the value this control is about to be filled with carries evidence from the CONTROL,
+ * rather than being a profile fact that has never been near it.
+ *
+ * It decides where a locally computed bucket ranks against that value. See
+ * greenhouseComboboxValuesForQuestion: a bucket maps a profile fact onto one employer's vocabulary,
+ * which is the right thing to lead with when the value in hand IS a profile fact and the wrong thing
+ * to lead with when the value was read off this control's own list.
+ *
+ * TWO TESTS. The first is that greenhouseReviewedQuestionAnswer chose the question record over a
+ * profile substitution, so this describes the value that will really be sent rather than one that
+ * was overruled a few lines up. The second is greenhouseOptionBandAnswer, which is where the actual
+ * evidence lives.
+ */
+function greenhouseReviewedAnswerIsResolved(
+  item: SubmissionPacket['questions'][number],
+  packet: SubmissionPacket,
+): boolean {
+  const stored = greenhouseOptionBandAnswer(item.answer);
+  if (!stored) return false;
+  return greenhouseReviewedQuestionAnswer(item, packet).trim() === stored;
 }
 
 function pushGreenhouseKnownQuestionAliases(
@@ -5343,6 +5470,9 @@ export function buildManagedPortalActions(
     if (packetQuestionFailed(packet, item)) continue;
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
     if (!answer.trim()) continue;
+    // Whether that answer is the resolver's own, and therefore already snapped against this
+    // control's real option texts. It decides whether a computed bucket leads or follows it.
+    const answerIsResolved = greenhouseReviewedAnswerIsResolved(item, packet);
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
@@ -5364,6 +5494,7 @@ export function buildManagedPortalActions(
         'question',
         packet.jdText,
         packet.referralSourceEvidence,
+        answerIsResolved,
       );
       pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
     }
@@ -5377,6 +5508,7 @@ export function buildManagedPortalActions(
           'question',
           packet.jdText,
           packet.referralSourceEvidence,
+          answerIsResolved,
         );
         pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
         continue;
@@ -5425,6 +5557,7 @@ export function buildManagedPortalActions(
           'question',
           packet.jdText,
           packet.referralSourceEvidence,
+          answerIsResolved,
         );
         pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
       }
@@ -5441,6 +5574,7 @@ export function buildManagedPortalActions(
             'question',
             packet.jdText,
             packet.referralSourceEvidence,
+            answerIsResolved,
           );
         }
         continue;
@@ -5453,6 +5587,7 @@ export function buildManagedPortalActions(
           'question',
           packet.jdText,
           packet.referralSourceEvidence,
+          answerIsResolved,
         );
         continue;
       }
@@ -5467,6 +5602,7 @@ export function buildManagedPortalActions(
         'question',
         packet.jdText,
         packet.referralSourceEvidence,
+        answerIsResolved,
       );
       pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
     } else {

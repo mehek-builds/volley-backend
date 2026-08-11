@@ -2202,31 +2202,135 @@ test('one control that could not be read does not silence the questions that rea
   } as Parameters<typeof buildManagedPortalActions>[1]);
   assert.equal(actions.some((action) => action.selector?.includes(IMC_UNREADABLE_ID)), false);
 
-  /* THE VALUE, NOT JUST THE SELECTOR, AND IT IS STILL WRONG. THIS PIN RECORDS AN OPEN DEFECT.
+  /* THE VALUE, NOT JUST THE SELECTOR. THIS PIN USED TO RECORD AN OPEN DEFECT, AND NOW RECORDS ITS FIX.
    *
    * An earlier version of this test asserted only that SOME action reached this selector, which is
-   * true and useless: it passes while the fill carries anything at all. The one fill that reaches
-   * the control carries "Spring 2028". The resolved answer, "January 2028 - July 2028", is on the
-   * employer's list and is not what gets sent.
+   * true and useless: it passes while the fill carries anything at all. It was then pinned to the
+   * value that really landed, "Spring 2028", with a note that the pin SHOULD fail once the ordering
+   * defect was fixed. It did, and this is the flip.
    *
-   * Neither of this PR's two fixes causes or repairs that, and the value is byte-identical at
-   * unmodified main. Two things upstream produce it, both out of scope here and both needing their
-   * own measurement:
+   * Two things produced the old value, both now repaired in portalSubmission.ts:
    *
-   *   greenhouseReviewedQuestionAnswer   replaces a graduation-date question's resolved answer with
-   *                                      the raw profile value, "May 2028", unconditionally.
-   *   greenhouseComboboxValuesForQuestion unshifts greenhouseGraduationBucket ahead of everything,
-   *                                      and comboboxValueLimit returns 1, so the bucket is the only
-   *                                      value attempted and "Spring 2028" is what lands.
+   *   greenhouseReviewedQuestionAnswer   replaced a graduation-date question's resolved answer with
+   *                                      the raw profile value, "May 2028", unconditionally. It now
+   *                                      keeps an answer that came off the control's own option
+   *                                      list, and still overrides a stale record with the profile.
+   *   greenhouseComboboxValuesForQuestion unshifted greenhouseGraduationBucket ahead of everything.
+   *                                      A computed bucket now ranks BEHIND such an answer and still
+   *                                      ahead of everything else, so with comboboxValueLimit at 1
+   *                                      the one attempt is the option the resolver read off this
+   *                                      control.
    *
-   * Pinned rather than left unasserted so the next reader cannot mistake this fixture for proof that
-   * IMC is fixed. It is not. When the ordering defect is fixed, this assertion SHOULD fail, and the
-   * right change is to flip it to the resolved answer. */
+   * ONE fill, and it carries the resolved answer. The count matters as much as the value: the limit
+   * is still 1 on purpose (see comboboxValueLimit), because a second candidate would reopen a
+   * correctly committed react-select and click option-0 of whatever menu it found. */
   const graduationFills = actions.filter((action) => action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill');
-  assert.deepEqual(graduationFills.map((action) => action.value), ['Spring 2028'],
-    'open defect: the control is attempted with a bucket, not with its resolved answer');
-  assert.equal(graduationFills.some((action) => action.value === graduation?.answer), false,
-    'open defect: the resolved answer is not the value that reaches the form');
+  assert.deepEqual(graduationFills.map((action) => action.value), ['January 2028 - July 2028'],
+    'the control is attempted with its resolved answer');
+  assert.equal(graduationFills.every((action) => action.value === graduation?.answer), true,
+    'the resolved answer is the value that reaches the form');
+  assert.equal(graduationFills.some((action) => action.value === 'Spring 2028'), false,
+    'the computed bucket does not reach the form when a resolved answer exists');
+});
+
+/* THE FALLBACK IS INTACT, which is the half of this that is easy to break while fixing the other.
+ *
+ * The bucket is not wrong, it is second. It maps a profile fact onto one employer's vocabulary, and
+ * that is still the best available guess when nothing has been read off the control to prefer over
+ * it. Three cases produce that, and all three must still send a bucket: the R-096 placeholder, where
+ * a required control the applicant has not answered carries a BLANK stored answer; the unprobed
+ * control, where the stored answer is the profile date itself; and the STALE record, where an
+ * earlier run stored a date the profile has since corrected and the profile has to win.
+ *
+ * Same control, same profile, four stored answers. Nothing else varies. */
+const GRADUATION_PROFILE = {
+  fullName: 'Mehek Mandal',
+  email: 'mehekmandal05@gmail.com',
+  school: 'University of Southern California',
+  degree: 'Bachelor of Science in Computer Science',
+  graduationDate: 'May 2028',
+  graduationMonth: 'May',
+  graduationYear: '2028',
+  resume: Buffer.from('pdf'),
+  resumeName: 'resume.pdf',
+};
+
+function graduationFillValues(answer: string): Array<string | undefined> {
+  const actions = buildManagedPortalActions('greenhouse', {
+    ...GRADUATION_PROFILE,
+    questions: [{
+      question: 'Expected graduation date',
+      answer,
+      portalSelector: `#${IMC_GRADUATION_ID}`,
+      portalInputType: 'combobox',
+    }],
+  } as Parameters<typeof buildManagedPortalActions>[1]);
+  return actions
+    .filter((action) => action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill')
+    .map((action) => action.value);
+}
+
+test('a graduation combobox with no resolved answer still leads with the computed bucket', () => {
+  // Nothing stored at all: the profile date is substituted in and bucketed, exactly as before.
+  assert.deepEqual(graduationFillValues(''), ['Spring 2028'],
+    'the R-096 placeholder still reaches the form as a bucket');
+
+  // Stored, but only the profile fact itself, which is what an unprobed control leaves behind. No
+  // option list was ever consulted, so the bucket is still the better guess and still leads.
+  assert.deepEqual(graduationFillValues('May 2028'), ['Spring 2028'],
+    'a stored answer identical to the profile date is not evidence of snapping');
+
+  // A stale record from an earlier run, naming a year the profile has since corrected. The profile
+  // still overrides it, so what reaches the form is the bucket of "May 2028" and not of "May 2027".
+  assert.deepEqual(graduationFillValues('May 2027'), ['Spring 2028'],
+    'a stale stored date is still overridden by the profile');
+
+  // And the resolved case, read against the three above rather than on its own. This value is an
+  // option text off the live control that no bucket function could ever produce.
+  assert.deepEqual(graduationFillValues('January 2028 - July 2028'), ['January 2028 - July 2028'],
+    'a resolved answer is the one value attempted');
+});
+
+/* THE SAME PAIR FOR GPA, because it is the same defect on a different control.
+ *
+ * The IMC run of 2026-08-11 carried a resolved "3.81 - 3.9" and sent "3.6 or above (out of 4.0)".
+ * greenhouseGpaBucket is a different function from greenhouseGraduationBucket and is unshifted by a
+ * different branch, so fixing one says nothing about the other. */
+const GPA_ID = 'question_9176667102';
+
+function gpaFillValues(answer: string): Array<string | undefined> {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    school: 'University of Southern California',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: 'What is your GPA?',
+      answer,
+      portalSelector: `#${GPA_ID}`,
+      portalInputType: 'combobox',
+    }],
+  } as Parameters<typeof buildManagedPortalActions>[1]);
+  return actions
+    .filter((action) => action.selector === `#${GPA_ID}` && action.type === 'fill')
+    .map((action) => action.value);
+}
+
+test('a GPA combobox prefers its resolved answer and keeps the bucket as the fallback', () => {
+  // The unprobed control: the stored answer is a bare GPA, which is what the profile holds and what
+  // the resolver stores when it has no option list to snap onto.
+  assert.deepEqual(gpaFillValues('3.89'), ['3.6 or above (out of 4.0)'],
+    'a bare stored GPA is still bucketed');
+
+  // The probed control: "3.81 - 3.9" is one of the employer's own option texts, and it is what the
+  // live IMC application resolved to while "3.6 or above (out of 4.0)" is what actually went out.
+  const resolved = gpaFillValues('3.81 - 3.9');
+  assert.deepEqual(resolved, ['3.81 - 3.9'],
+    'the bucket the employer really offers, not the one this codebase computes');
+  assert.equal(resolved.includes('3.6 or above (out of 4.0)'), false,
+    'the computed GPA bucket does not reach the form when a resolved answer exists');
 });
 
 /* THE HONESTY THE OLD CODE WAS PROTECTING, kept at the scope it belongs to.
