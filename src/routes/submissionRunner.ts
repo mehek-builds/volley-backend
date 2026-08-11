@@ -2457,7 +2457,9 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       submission_error: undefined,
     }));
     await page.goto(portalUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    await navigateToApplicationForm(page, portal); // no-op except SmartRecruiters's JD-page/form-page split
+    // SmartRecruiters follows its captured link. Workable canonicalizes to /apply and clears its
+    // optional-cookie overlay. Every other portal is a no-op here.
+    await navigateToApplicationForm(page, portal);
     const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
       .from(users).where(eq(users.id, row.user_id)).limit(1);
     const verificationRoute = await resolveVerificationEmailRoute({
