@@ -598,6 +598,12 @@ function highSchoolGraduationAnswer(
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
   if (!HIGH_SCHOOL_GRADUATION_QUESTION.test(label)) return null;
+  /* One control asking for the school's NAME as well as the year cannot be satisfied by the year.
+   * Palantir's card is "High School Name & Graduation Year", and typing "May 2023" into it answers
+   * half the question while reading as an answer to all of it. Same rule as educationStartAnswer's
+   * "a single control asking for the whole range needs both ends": fall through to the refusal
+   * below rather than send a partial answer. */
+  if (/\bname\b/i.test(label)) return null;
   const stored = ap.high_school_grad_date;
   if (!stored) {
     return { skipReason: `high school graduation question left for you: "${label.slice(0, 60)}"` };
@@ -606,6 +612,23 @@ function highSchoolGraduationAnswer(
   // the evidence for. Without a date on file neither is answerable, which is the branch above.
   const asksWhen = /\bmonth\b|\byear\b|\bwhen\b|\bdate\b/i.test(label);
   return { value: asksWhen ? stored : 'Yes' };
+}
+
+/**
+ * Everything a form asks about high school that is not the graduation date.
+ *
+ * Checked immediately after highSchoolGraduationAnswer, so the one stored high-school fact still
+ * answers its own questions and this catches the rest. It never returns a value because there is
+ * nothing to return: the profile carries `high_school_grad_date` and no other high-school column -
+ * no name, no city, no GPA, no diploma title. See questionIsScopedToHighSchool for the four values
+ * the university profile was handing these labels instead.
+ *
+ * A skipReason rather than null on purpose. Null falls through to the essay drafter, and a drafted
+ * high school name is the same wrong answer arriving by a different route.
+ */
+function highSchoolRecordRefusal(label: string): { skipReason: string } | null {
+  if (!questionIsScopedToHighSchool(label)) return null;
+  return { skipReason: `high school question left for you: "${label.slice(0, 60)}"` };
 }
 
 /**
@@ -2650,6 +2673,48 @@ const PREFERRED_NAME_QUESTION =
 export const HIGH_SCHOOL_GRADUATION_QUESTION =
   /\bhigh\s+school\b[\s\S]{0,200}\b(?:graduat\w*|diploma|ged|month\s+and\s+year|when)\b|\b(?:graduat\w*|when|month|year)\b[\s\S]{0,120}\bhigh\s+school\b/i;
 
+/* A HIGH SCHOOL IS NOT THE SCHOOL THE PROFILE HOLDS.
+ *
+ * FUTURE_OR_OTHER_PROGRAMME_QUESTION already states the rule pointing forward in time: school,
+ * degree, major, gpa and every graduation key describe the programme the applicant is in NOW, so a
+ * question scoped to a different one is not answered by them. High school is that same defect
+ * pointing backward, and it was reachable on four separate paths. Measured against the owner's real
+ * stored profile on 2026-08-11:
+ *
+ *   "High School Name"              -> "University of Southern California, Viterbi School of
+ *                                       Engineering"   (the `school name` arm of classifyField)
+ *   "High School GPA"               -> "3.89"          (the university GPA)
+ *   "High School Degree"            -> "Bachelor of Science in Computer Science"
+ *   "High School Graduation Year"   -> resolveKnownAnswer said "May 2023", correctly, and then
+ *                                      profileFieldCandidates rebuilt the ladder from grad_year and
+ *                                      chooseClosestOption picked "2028" off the option list - the
+ *                                      UNIVERSITY year, selected as an exact match, on a
+ *                                      high-school control.
+ *
+ * That last one is why this is a rule in classifyField and not only in resolveKnownAnswer: the
+ * resolver was already right about it, and the wrong value came from the classifier's key being
+ * handed to the alias ladder in profileFieldResolution. The same key also drives
+ * portalSubmission's combobox chain. One label, three callers, one classification to fix.
+ *
+ * The one high-school fact on file is application_profile.high_school_grad_date, and
+ * highSchoolGraduationAnswer answers from it at the top of resolveKnownAnswer, before this
+ * function is ever consulted. Nothing on the profile holds a high school's NAME, city, GPA or
+ * degree - there is no column for any of them - so those are refused rather than answered from the
+ * university's.
+ */
+const HIGH_SCHOOL_NOUN = /\bhigh[\s-]school\b|\bsecondary[\s-]school\b/i;
+/* The one place "high school" appears WITHOUT being the subject: an education-LEVEL list
+ * enumerates it beside bachelor's and master's ("Highest level of education completed (e.g. High
+ * School, Bachelor's)"), and the answer there is the current degree. Excluding this family is what
+ * keeps the rule above from costing the six level-of-education labels in the corpus. */
+const EDUCATION_LEVEL_QUESTION =
+  /\beducation\s+level\b|\blevel\s+of\s+education\b|\bhighest\s+(?:level|degree|qualification|education)\b/i;
+
+/** Whether the label's subject is the applicant's HIGH SCHOOL rather than her current programme. */
+export function questionIsScopedToHighSchool(label: string): boolean {
+  return HIGH_SCHOOL_NOUN.test(label) && !EDUCATION_LEVEL_QUESTION.test(label);
+}
+
 // Further education AFTER the current degree. Checked before every graduation-date rule so that
 // "when is your potential master's graduation date?" cannot be handed the undergraduate date -
 // which is exactly what a live Akuna packet carried, answered "May 2028".
@@ -2831,6 +2896,14 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (STORED_ONSITE_COMMITMENT_QUESTION.test(l) && (ONSITE_DAY_COUNT_QUESTION.test(l) || !/relocat/i.test(l))) {
     return 'onsite_commitment';
   }
+  /* EVERY EDUCATION ARM BELOW THIS LINE READS THE CURRENT UNIVERSITY PROGRAMME, so a label whose
+   * subject is the applicant's HIGH SCHOOL stops here. See questionIsScopedToHighSchool for the
+   * four measured wrong answers this refuses and for why the refusal has to live in the classifier
+   * rather than only in resolveKnownAnswer. Placed here, after residence, referral, employer and
+   * contact-detail routing, so it narrows nothing except the education block and the bare-keyword
+   * fallbacks underneath it - which is the whole of what could reach a university fact.
+   * The one high-school fact on file is answered before this function runs. */
+  if (questionIsScopedToHighSchool(l)) return null;
   if (/\bcurrent\s+year\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b/i.test(l)) return 'study_year';
   if (GRADUATION_MONTH_QUESTION.test(l)) return 'graduation_month';
   if (GRADUATION_YEAR_QUESTION.test(l)) return 'graduation_year';
@@ -2855,6 +2928,9 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
 
   if (/\bgpa\b|grade average|grade point|academic performance/i.test(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
+  // Subsumed by the questionIsScopedToHighSchool guard above for every label that reaches it; kept
+  // as the narrower statement of the same refusal, and still the live one for the education-LEVEL
+  // phrasings that guard deliberately lets through.
   if (/\bhigh school\b/i.test(l) && /graduat|when|date|year/i.test(l)) return null;
   if (LANGUAGE_QUESTION.test(l)) return 'languages';
   if (/\bdegree\b(?!\s+(?:program|subject))|education level|level of education/i.test(l)) return 'degree';
@@ -4289,6 +4365,13 @@ export function resolveKnownAnswer(
 
   const highSchool = highSchoolGraduationAnswer(label, ap);
   if (highSchool) return highSchool;
+
+  /* Directly after it, so the graduation date answers its own questions and nothing else about
+   * high school is answered from the university programme. Up here with the self-declarations for
+   * the reason the block header gives: this is a label a broad rule has already answered wrongly on
+   * a live form, and being up here is what stops any later rule reaching it. */
+  const highSchoolRecord = highSchoolRecordRefusal(label);
+  if (highSchoolRecord) return highSchoolRecord;
 
   const previouslyApplied = previouslyAppliedAnswer(label, ap, jdText);
   if (previouslyApplied) return previouslyApplied;

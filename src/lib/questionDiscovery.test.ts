@@ -28,6 +28,9 @@ import {
   WORK_ELIGIBILITY_QUESTION,
   type ApplicationProfileLike,
 } from './questionDiscovery';
+// The high-school test below asserts on the alias ladder as well as on the resolver: the wrong
+// graduation year came from the ladder, not from resolveKnownAnswer, and only this call sees it.
+import { resolveProfileField } from './profileFieldResolution';
 
 // R-004 originally refused every work-eligibility question after one false legal declaration
 // shipped. These are now answerable only from explicit stored booleans, never by inference.
@@ -2267,6 +2270,79 @@ test('a high school diploma question that asks for a month and year is not answe
     ),
     { value: 'June 2024' },
   );
+});
+
+test('a question about HIGH SCHOOL is never answered from the university profile (Palantir)', () => {
+  /* Measured against the owner's real stored profile on 2026-08-11, reading only the plaintext
+     profiles.parsed_json / base_resume_json. The label is Palantir's, from the live Lever posting's
+     "High School Name & Graduation Year" card:
+
+       resolveKnownAnswer('high school name', 'textarea', ap) -> { value:
+         'University of Southern California, Viterbi School of Engineering' }
+
+     A blank field stalls a run; this is a wrong answer typed onto an employer's form. It reached
+     the university profile through the `school name` arm of classifyField, and three of its
+     neighbours reached the same profile the same way. Each assertion below is one of them. */
+  const HS = { ...PROD_OWNER_PROFILE, high_school_grad_date: 'May 2023' };
+  for (const label of [
+    'high school name',
+    'high school name & graduation year',   // Palantir's card, were it ever one control
+    'name of high school',
+    'high school',
+    'high school attended',
+    'which high school did you attend?',
+    'what high school did you go to?',
+    'secondary school name',
+    'high school city',
+    'high school gpa',                      // was "3.89", the UNIVERSITY GPA
+    'high school degree',                   // was "Bachelor of Science in Computer Science"
+  ]) {
+    refuses(label, 'textarea', HS);
+    refuses(label, 'textarea');             // and with no high-school fact stored at all
+    assert.equal(classifyField(label), null, label);
+    assert.match(
+      skipReasonOf(resolveKnownAnswer(label, 'textarea', HS, undefined)) ?? '',
+      /high school question left for you/,
+      label,
+    );
+  }
+
+  /* The classifier is where this has to be fixed, not only the resolver. resolveKnownAnswer was
+     ALREADY right about the graduation year - it said "May 2023" - and the wrong value came from
+     classifyField handing `graduation_year` to profileFieldCandidates, which rebuilt the ladder
+     from grad_year and let chooseClosestOption match "2028" exactly off the option list. That is
+     the university year, selected on a high-school control, with no widened label walk needed. */
+  const years = ['2021', '2022', '2023', '2024', '2025', '2026', '2027', '2028'];
+  const picked = resolveProfileField(
+    { label: 'High School Graduation Year', inputType: 'text', options: years }, HS,
+  );
+  assert.equal(picked?.value, '2023');
+  assert.equal(picked?.candidates.includes('2028'), false);
+  assert.equal(resolveProfileField({ label: 'High School Name', inputType: 'text' }, HS), null);
+
+  // The one high-school fact on file still answers its own questions, and still refuses without it.
+  for (const label of [
+    'year of high school graduation',
+    'when did you graduate from high school?',
+    'high school graduation year',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: 'May 2023' }, label);
+    refuses(label);
+  }
+  assert.deepEqual(
+    resolveKnownAnswer('do you have a high school diploma or equivalent?', 'select', HS, undefined),
+    { value: 'Yes' },
+  );
+
+  /* And the one family that names a high school WITHOUT being about one: an education-LEVEL list
+     enumerates it beside bachelor's and master's, and the answer there is the current degree. */
+  for (const label of [
+    'highest level of education completed (e.g. high school, bachelor’s, master’s)',
+    'what is your highest level of education? high school, associate, bachelor',
+  ]) {
+    assert.equal(classifyField(label), 'degree', label);
+    assert.deepEqual(resolveKnownAnswer(label, 'select', HS, undefined), { value: "Bachelor's Degree" }, label);
+  }
 });
 
 test('politically-exposed-person declarations are left for the applicant (Tower)', () => {
