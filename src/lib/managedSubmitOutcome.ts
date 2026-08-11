@@ -32,8 +32,8 @@ export type ManagedSubmitOutcome = {
   /** Whether a final submit action was actually pressed. Recorded before the post-click wait. */
   pressed: boolean;
   state: 'confirmed' | 'rejected' | 'unknown' | 'not_attempted';
-  /** 'ats_state' is the published container, 'live_region' the page's own status role, 'page_text' the fallback. */
-  source: 'ats_state' | 'live_region' | 'page_text' | null;
+  /** ATS state is strong evidence. The other sources remain useful context, but cannot promote a receipt-only continuation. */
+  source: 'ats_state' | 'ats_route' | 'ats_state_unconfirmed' | 'live_region' | 'page_text' | null;
   /** The selector or role that proved it, so a verdict can be argued with. */
   evidence: string | null;
   /** The sentence the employer showed. Evidence for a person, never the thing the verdict rests on. */
@@ -44,7 +44,7 @@ export type ManagedSubmitOutcome = {
 type MaybeOutcome = { submitOutcome?: unknown };
 
 const STATES = new Set(['confirmed', 'rejected', 'unknown', 'not_attempted']);
-const SOURCES = new Set(['ats_state', 'live_region', 'page_text']);
+const SOURCES = new Set(['ats_state', 'ats_route', 'ats_state_unconfirmed', 'live_region', 'page_text']);
 
 /**
  * Normalise what came back over the wire. Returns null when the runner said nothing at all, which
@@ -118,9 +118,203 @@ export function managedSubmitVerdict(result: MaybeOutcome | null | undefined): M
   return { kind: 'unverified', cause: 'no_confirmation_state' };
 }
 
+type ManagedReceiptResult = MaybeOutcome & {
+  url?: unknown;
+  screenshot?: string | null;
+  continuationOffered?: unknown;
+  continuationToken?: unknown;
+  continuationExpiresAt?: unknown;
+  humanVerification?: unknown;
+};
+
+type ManagedAtsFamily = 'ashby' | 'greenhouse';
+
+type ManagedAtsBinding = {
+  family: ManagedAtsFamily;
+  origin: string;
+  tenant: string;
+  jobToken: string;
+  shape: 'ashby_path' | 'greenhouse_jobs_path' | 'greenhouse_embed_query';
+};
+
+function exactQueryIdentity(url: URL): { tenant: string; jobToken: string } | null {
+  const tenants = url.searchParams.getAll('for');
+  const tokens = url.searchParams.getAll('token');
+  return tenants.length === 1
+    && tokens.length === 1
+    && /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(tenants[0])
+    && /^\d{5,20}$/.test(tokens[0])
+    ? { tenant: tenants[0], jobToken: tokens[0] }
+    : null;
+}
+
+function validGreenhouseIdentity(tenant: string, jobToken: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$/.test(tenant) && /^\d{5,20}$/.test(jobToken);
+}
+
+function managedAtsBinding(result: ManagedReceiptResult): ManagedAtsBinding | null {
+  if (typeof result.url !== 'string') return null;
+  let url: URL;
+  try {
+    url = new URL(result.url);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')) return null;
+  const host = url.hostname.toLowerCase();
+  if (host === 'jobs.ashbyhq.com') {
+    const match = url.pathname.match(/^\/([^/]+)\/([^/]+)\/application\/?$/);
+    return match ? { family: 'ashby', origin: url.origin, tenant: match[1], jobToken: match[2], shape: 'ashby_path' } : null;
+  }
+  if (/^(?:job-boards|boards)(?:\.eu)?\.greenhouse\.io$/.test(host)) {
+    const match = url.pathname.match(/^\/([^/]+)\/jobs\/([^/]+)\/?$/);
+    if (match && validGreenhouseIdentity(match[1], match[2])) {
+      return { family: 'greenhouse', origin: url.origin, tenant: match[1], jobToken: match[2], shape: 'greenhouse_jobs_path' };
+    }
+    if (/^\/embed\/job_app\/?$/.test(url.pathname)) {
+      const identity = exactQueryIdentity(url);
+      return identity ? { family: 'greenhouse', origin: url.origin, ...identity, shape: 'greenhouse_embed_query' } : null;
+    }
+  }
+  return null;
+}
+
+function observedAtsIdentity(result: ManagedReceiptResult, family: ManagedAtsFamily): ManagedAtsBinding | null {
+  if (typeof result.url !== 'string') return null;
+  let url: URL;
+  try {
+    url = new URL(result.url);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== 'https:' || url.username || url.password || (url.port && url.port !== '443')) return null;
+  const host = url.hostname.toLowerCase();
+  if (family === 'ashby' && host === 'jobs.ashbyhq.com') {
+    const match = url.pathname.match(/^\/([^/]+)\/([^/]+)\/application\/?$/);
+    return match ? { family, origin: url.origin, tenant: match[1], jobToken: match[2], shape: 'ashby_path' } : null;
+  }
+  if (family === 'greenhouse' && /^(?:job-boards|boards)(?:\.eu)?\.greenhouse\.io$/.test(host)) {
+    const match = url.pathname.match(/^\/([^/]+)\/jobs\/([^/]+)\/(?:application_)?confirmation\/?$/);
+    if (match && validGreenhouseIdentity(match[1], match[2])) {
+      return { family, origin: url.origin, tenant: match[1], jobToken: match[2], shape: 'greenhouse_jobs_path' };
+    }
+    if (/^\/embed\/job_app\/confirmation\/?$/.test(url.pathname)) {
+      const identity = exactQueryIdentity(url);
+      return identity ? { family, origin: url.origin, ...identity, shape: 'greenhouse_embed_query' } : null;
+    }
+  }
+  return null;
+}
+
+function sameAtsBinding(left: ManagedAtsBinding | null, right: ManagedAtsBinding | null): boolean {
+  return !!left && !!right
+    && left.family === right.family
+    && left.origin === right.origin
+    && left.tenant === right.tenant
+    && left.jobToken === right.jobToken
+    && left.shape === right.shape;
+}
+
+function exactAtsReceipt(
+  result: ManagedReceiptResult,
+  outcome: ManagedSubmitOutcome,
+  expected: ManagedAtsBinding,
+): boolean {
+  const observed = observedAtsIdentity(result, expected.family);
+  if (!observed
+      || observed.origin !== expected.origin
+      || observed.tenant !== expected.tenant
+      || observed.jobToken !== expected.jobToken
+      || observed.shape !== expected.shape
+      || typeof result.url !== 'string') return false;
+  const url = new URL(result.url);
+  if (expected.family === 'ashby' && outcome.source === 'ats_state') {
+    if (outcome.state === 'confirmed') return outcome.evidence === '.ashby-application-form-success-container';
+    if (outcome.state === 'rejected') return outcome.evidence === '.ashby-application-form-failure-container';
+    return false;
+  }
+  const greenhousePath = /\/(?:application_)?confirmation\/?$/.test(url.pathname);
+  return expected.family === 'greenhouse'
+    && greenhousePath
+    && outcome.state === 'confirmed'
+    && outcome.source === 'ats_route'
+    && outcome.evidence === `greenhouse:${url.pathname}`;
+}
+
+export type ManagedReceiptObservation<T extends ManagedReceiptResult> = {
+  /** The only result the caller may use to decide submitted/refused/unverified. */
+  receiptResult: T;
+  /** The latest trustworthy post-click picture, even when its verdict remains unknown. */
+  evidenceResult: T;
+  /** The one result returned by the consumed continuation, for a newly rendered typed challenge. */
+  observedResult?: T;
+  attempted: boolean;
+  error?: unknown;
+};
+
+/**
+ * Re-read an exact held Stratus page once when its first post-click verdict is still unknown.
+ *
+ * This helper owns the fail-closed boundary. It accepts only the ATS hooks the runner already
+ * publishes for Ashby's success/failure containers and Greenhouse's confirmation route. A live
+ * region, body text, another unknown result, or a continuation failure can improve the screenshot
+ * shown to the applicant, but none of them can turn the row into submitted or refused.
+ *
+ * The observer receives only the capability copied from this exact result. It receives no URL and
+ * no action list, so it cannot reopen the employer page or press Send a second time. Stratus binds
+ * the capability to its held sandbox and consumes it atomically on the first claim.
+ */
+export async function observeManagedReceiptOnce<T extends ManagedReceiptResult>(input: {
+  initial: T;
+  observe: (continuationToken: string) => Promise<T>;
+  nowMs?: number;
+}): Promise<ManagedReceiptObservation<T>> {
+  const unchanged = (over: Partial<ManagedReceiptObservation<T>> = {}): ManagedReceiptObservation<T> => ({
+    receiptResult: input.initial,
+    evidenceResult: input.initial,
+    attempted: false,
+    ...over,
+  });
+  const initialOutcome = readManagedSubmitOutcome(input.initial);
+  if (initialOutcome?.pressed !== true || initialOutcome.state !== 'unknown') return unchanged();
+  const initialBinding = managedAtsBinding(input.initial);
+  if (!initialBinding) return unchanged();
+  if (input.initial.humanVerification != null || input.initial.continuationOffered !== true) return unchanged();
+  const token = input.initial.continuationToken;
+  const expiresAt = input.initial.continuationExpiresAt;
+  if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{32,200}$/.test(token)) return unchanged();
+  if (typeof expiresAt !== 'string') return unchanged();
+  const expiresAtMs = Date.parse(expiresAt);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= (input.nowMs ?? Date.now())) return unchanged();
+
+  let observed: T;
+  try {
+    observed = await input.observe(token);
+  } catch (error) {
+    return unchanged({ attempted: true, error });
+  }
+  const observedOutcome = readManagedSubmitOutcome(observed);
+  const atsTerminal = observedOutcome?.pressed === true
+    && (observedOutcome.state === 'confirmed' || observedOutcome.state === 'rejected')
+    && exactAtsReceipt(observed, observedOutcome, initialBinding);
+  const heldPageMatches = sameAtsBinding(managedAtsBinding(observed), initialBinding);
+  const evidenceResult = observed.screenshot && (atsTerminal || heldPageMatches) ? observed : input.initial;
+  return {
+    receiptResult: atsTerminal ? observed : input.initial,
+    evidenceResult,
+    ...(heldPageMatches ? { observedResult: observed } : {}),
+    attempted: true,
+  };
+}
+
 /** The stratus error codes that mean the run stopped without ever reporting what it did. */
 export function isManagedRunTimeout(message: string): boolean {
   return /run timed out before it produced a result|continuation timed out|did not produce a (?:continuation )?result/i.test(message);
+}
+
+/** The current Stratus atomic chooser throws this exact error before submitHandle.click executes. */
+export function isManagedNoSubmitControl(message: string): boolean {
+  return message.trim() === 'Atomic submit control was missing or ambiguous';
 }
 
 /* WHAT A SENT APPLICATION LOOKS LIKE ONCE SHE GETS THERE, per board.

@@ -189,7 +189,7 @@ test('employer mail is stored before the strict forwarding whitelist is applied'
   assert.doesNotMatch(handler, /inbound: input/);
   const verificationReader = readFileSync('src/lib/emailVerification.ts', 'utf8');
   assert.match(verificationReader, /from\(application_email_messages\)/);
-  assert.match(verificationReader, /extractLitosVerificationCode\(rows/);
+  assert.match(verificationReader, /extractLitosVerificationCode\(\s*rows/);
 });
 
 test('the forwarding destination is a stored preference, not the login address', () => {

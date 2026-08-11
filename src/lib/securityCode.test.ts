@@ -16,6 +16,7 @@ import {
   findSecurityCodeAttempt,
   normalizeSecurityCode,
   readManagedSecurityCodeChallenge,
+  securityCodeChallengeMatchesRecipient,
   securityCodeAttentionReason,
   securityCodeContinuationActions,
   securityCodeFingerprint,
@@ -74,6 +75,14 @@ test('a control that did not say how long the code is reports zero, not a guesse
   // Greenhouse's own sentence says "8-character". Reading the number out of that sentence is exactly
   // the prose-matching this design refuses, so an unstated length stays unstated.
   assert.deepEqual(challenge, { digits: 0 });
+});
+
+test('a challenge is bound to the frozen packet recipient after narrow email normalization', () => {
+  const challenge = readManagedSecurityCodeChallenge(CHALLENGE);
+  assert.equal(securityCodeChallengeMatchesRecipient(challenge, ' MehekMandal05@GMAIL.com '), true);
+  assert.equal(securityCodeChallengeMatchesRecipient(challenge, 'other@example.com'), false);
+  assert.equal(securityCodeChallengeMatchesRecipient({ digits: 8 }, 'mehekmandal05@gmail.com'), false);
+  assert.equal(securityCodeChallengeMatchesRecipient(null, 'mehekmandal05@gmail.com'), false);
 });
 
 // ---- the sentence and its category ----
@@ -248,6 +257,16 @@ test('attempts survive a re-issued challenge, so a replay is still recognised', 
   assert.equal(findSecurityCodeAttempt(reissued, first)?.outcome, 'rejected');
 });
 
+test('a spent code fingerprint is durable before continuation and its measured outcome replaces the provisional one', () => {
+  const fingerprint = securityCodeFingerprint('app-1', 'TPHJrFMJ');
+  const state = beginSecurityCodeState({ challenge: { digits: 8 }, attemptedAt: 'x', authorized: true });
+  const spent = withSecurityCodeAttempt(state, { at: 'y', fingerprint, outcome: 'error' });
+  assert.equal(findSecurityCodeAttempt(spent, fingerprint)?.outcome, 'error');
+  const measured = withSecurityCodeAttempt(spent, { at: 'z', fingerprint, outcome: 'rejected' });
+  assert.equal(measured.attempts?.length, 1);
+  assert.equal(findSecurityCodeAttempt(measured, fingerprint)?.outcome, 'rejected');
+});
+
 test('an unauthorized submit is recorded as one', () => {
   // A fill run that reaches this screen has submitted an application with nobody's authorization,
   // which is a Litos defect and not a fact about the employer. It has to be countable.
@@ -354,7 +373,7 @@ test('the first managed run of a code finish is an application submit with no co
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const start = source.indexOf('const initialActions = buildManagedPortalActions(portal, packet, true);');
   assert.ok(start > 0, 'the first run must build the ordinary packet actions');
-  const firstRun = source.slice(start, source.indexOf('const initialChallenge = readManagedSecurityCodeChallenge(result);', start));
+  const firstRun = source.slice(start, source.indexOf('const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);', start));
   // THE REGRESSION GUARD. The code must not be attached to a list that begins with a page load.
   assert.doesNotMatch(firstRun, /withSecurityCode\(/);
   assert.doesNotMatch(firstRun, /options\.securityCode/);
@@ -377,8 +396,8 @@ test('the first managed run of a code finish is an application submit with no co
  */
 test('a code supplied out of band is never typed, only fingerprinted as superseded', async () => {
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const start = source.indexOf('const initialChallenge = readManagedSecurityCodeChallenge(result);');
-  const end = source.indexOf('if (!receiptResult.screenshot)', start);
+  const start = source.indexOf('const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);');
+  const end = source.indexOf('if (!receiptEvidenceResult.screenshot)', start);
   assert.ok(start > 0 && end > start);
   const half = source.slice(start, end);
   // The only thing done with the supplied code in the whole second half.
@@ -407,7 +426,7 @@ test('a code finish is only recorded as submitted when the code was accepted AND
   // The attempt records what the runner actually said. 'accepted' used to be written here as a
   // literal, on every code run that got this far, whatever the runner reported.
   assert.match(body, /receiptResult\.securityCodeAttempt\?\.outcome/);
-  assert.match(body, /outcome: codeOutcome === 'rejected' \? 'rejected'/);
+  assert.match(body, /recordEnteredCodeOutcome\(\s*codeOutcome === 'rejected' \? 'rejected'/);
 });
 
 test('a list with no submit click is left alone rather than given one', () => {
@@ -481,7 +500,7 @@ test('nothing but the code endpoint can move a packet out of the waiting state',
 
 test('a security-code challenge is persisted before any receipt is parsed', async () => {
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const managedStart = source.indexOf('const challenge = readManagedSecurityCodeChallenge(receiptResult);');
+  const managedStart = source.indexOf('const challengeCandidate = readManagedSecurityCodeChallenge(receiptResult);');
   assert.ok(managedStart > 0, 'the managed result must inspect the challenge');
   const challengeBranch = source.indexOf('if (challenge)', managedStart);
   const awaitingWrite = source.indexOf("status: 'awaiting_security_code'", challengeBranch);
@@ -497,7 +516,7 @@ test('a security-code challenge is persisted before any receipt is parsed', asyn
 test('automatic verification records one remote managed continuation without exposing its token', async () => {
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const start = source.indexOf('const continuationEvidence = continuationIsLive');
-  const end = source.indexOf('if (!receiptResult.screenshot)', start);
+  const end = source.indexOf('if (!receiptEvidenceResult.screenshot)', start);
   assert.ok(start > 0 && end > start);
   const continuation = source.slice(start, end);
   assert.match(continuation, /runner: 'stratus-managed'/);
