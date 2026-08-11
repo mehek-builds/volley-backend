@@ -12,6 +12,7 @@ import {
   normalizeWorkableJobs,
   sourceEndpoint,
 } from './jobMonitor';
+import { jobDescriptionSourceUrl } from '../routes/jobExtract';
 
 test('normalizes Greenhouse postings and strips HTML from descriptions', () => {
   const jobs = normalizeGreenhouseJobs({ jobs: [{
@@ -219,6 +220,10 @@ test('normalizes Workable postings from the public account feed', () => {
   assert.equal(jobs[0].external_id, '57B10F8875');
   assert.equal(jobs[0].posting_url, 'https://apply.workable.com/j/57B10F8875');
   assert.equal(jobs[0].apply_url, 'https://apply.workable.com/j/57B10F8875/apply');
+  assert.equal(
+    jobDescriptionSourceUrl(jobs[0].apply_url),
+    'https://apply.workable.com/j/57B10F8875/',
+  );
   assert.equal(jobs[0].location, 'London, England, United Kingdom');
   assert.equal(jobs[0].portal_country, 'United Kingdom');
   assert.equal(jobs[0].portal_company_name, 'Suade');

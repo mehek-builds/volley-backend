@@ -79,10 +79,26 @@ describe('jobDescriptionSourceUrl', () => {
     );
   });
 
+  test('reads an exact bare Workable account-feed application URL from its job overview', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://apply.workable.com/j/57B10F8875/apply'),
+      'https://apply.workable.com/j/57B10F8875/',
+    );
+  });
+
+  test('drops query and fragment state from an exact bare Workable application URL', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://apply.workable.com/j/57B10F8875/apply/?source=feed#application'),
+      'https://apply.workable.com/j/57B10F8875/',
+    );
+  });
+
   test('does not rewrite non-form Workable paths or other origins', () => {
     for (const url of [
       'https://apply.workable.com/remote-recruitment/j/D4CA268A39/',
       'https://apply.workable.com/remote-recruitment/j/D4CA268A39/apply/extra',
+      'https://apply.workable.com/j/57B10F8875/?source=feed#overview',
+      'https://apply.workable.com/j/57B10F8875/apply/extra?source=feed#application',
       'https://apply.workable.com/remote-recruitment/jobs/view/D4CA268A39',
       'https://apply.workable.com:444/remote-recruitment/j/D4CA268A39/apply',
       'https://www.workable.com/remote-recruitment/j/D4CA268A39/apply',

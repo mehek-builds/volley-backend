@@ -17,7 +17,7 @@ export function clipJdText(rawText: string | undefined | null): string {
   return (rawText ?? '').trim().slice(0, MAX_JD_TEXT_CHARS);
 }
 
-const WORKABLE_APPLICATION_PATH = /^\/([a-z0-9][a-z0-9._-]*)\/j\/([a-z0-9]+)\/apply\/?$/i;
+const WORKABLE_APPLICATION_PATH = /^\/((?:[a-z0-9][a-z0-9._-]*\/)?j\/[a-z0-9]+)\/apply\/?$/i;
 
 /**
  * Workable's application route contains form labels, not the job description. Read the exact job
@@ -30,8 +30,8 @@ export function jobDescriptionSourceUrl(rawUrl: string): string {
   const workableApplication = url.pathname.match(WORKABLE_APPLICATION_PATH);
   if (!workableApplication) return rawUrl;
 
-  const [, tenant, jobToken] = workableApplication;
-  url.pathname = `/${tenant}/j/${jobToken}/`;
+  const [, overviewPath] = workableApplication;
+  url.pathname = `/${overviewPath}/`;
   // These values belong to the application form and are not needed to identify its job overview.
   url.search = '';
   url.hash = '';
