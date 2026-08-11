@@ -140,6 +140,56 @@ async function messageByProviderId(providerMessageId: string) {
   return rows[0];
 }
 
+/* THE ORDINARY ATS LAYOUT, driven through the live path with a code window open.
+ *
+ * This is how the classifier and the reader were caught disagreeing: the code sits on its own line,
+ * which the reader flattens away and the classifier could not cross, so the message classified
+ * account_registration, a class with no in-flight gate, and forwarded while the runner could still
+ * read the very same code out of the very same row. Measured before the fix at forwarded=true,
+ * sends=1 for all three shapes. */
+test('a code on its own line is withheld, because that is the layout employers actually use', async () => {
+  const layouts = [
+    ['race-security', 'Your security code', 'Hi Mehek,\n\nplease enter the code below to continue:\n\n483920\n\nThanks'],
+    ['race-verification', 'Confirm your email address', 'To confirm your email address, use this verification code:\n\n739104'],
+    ['race-confirmation', 'Complete your sign in', 'Your confirmation is required.\n\n204815\n\nEnter it on the page you left open.'],
+  ] as const;
+  for (const [id, subject, text] of layouts) {
+    captureSends();
+    const result = await service.processInboundApplicationEmail({
+      provider: 'resend',
+      providerMessageId: id,
+      from: 'no-reply@us.greenhouse-mail.io',
+      to: [ALIAS],
+      subject,
+      text,
+      receivedAt: new Date(),
+    });
+    assert.equal(result.classification, 'verification_code', id);
+    assert.equal(result.forwarded, false, id);
+    assert.equal(result.reason, 'security_code_in_flight', id);
+    assert.equal(sends.length, 0, `${id} must not race the runner for the code it carries`);
+    assert.equal((await messageByProviderId(id))?.forward_decision, 'withheld:security_code_in_flight', id);
+  }
+});
+
+/* And the mail that finishes a registration still goes out during that same window, because a
+ * one-time LINK is a door rather than a credential. */
+test('a one-time activation link is forwarded even while a code is in flight', async () => {
+  captureSends();
+  const result = await service.processInboundApplicationEmail({
+    provider: 'resend',
+    providerMessageId: 'link-activate',
+    from: 'no-reply@myworkday.com',
+    to: [ALIAS],
+    subject: 'Activate your candidate account',
+    text: 'Use your one-time activation link to finish setting up your account:\nhttps://acme.example.com/activate?t=abc',
+    receivedAt: new Date(),
+  });
+  assert.equal(result.classification, 'account_registration');
+  assert.equal(result.forwarded, true, 'withholding this is refusing the one message that passes the wall');
+  assert.equal(sends.length, 1);
+});
+
 test('a code withheld from a live run records a machine-readable reason on its own row', async () => {
   captureSends();
   const result = await service.processInboundApplicationEmail({
@@ -298,8 +348,8 @@ test('a redelivery with no authentication header cannot un-refuse a message', as
 
 test('the health probe can see the withheld messages, which last_inbound_message_at cannot', async () => {
   const health = await service.applicationEmailHealth();
-  // One code withheld mid-run, one spoofed offer, one replay of that spoof that stayed refused.
-  assert.equal(health.withheld_messages_recent, 3);
+  // Three codes on their own line, one code named outright, one spoofed offer, one replay of it.
+  assert.equal(health.withheld_messages_recent, 6);
   assert.equal(health.withheld_messages_window_hours, 24);
   // The field that used to be the only message fact here is fresh at the same moment, which is why
   // it could not report the outage.

@@ -464,14 +464,55 @@ const ACCOUNT_NOUN = '(?:accounts?|profiles?|logins?|registrations?'
   + '|applicant (?:account|profile))';
 
 /* A TOKEN SHAPED LIKE A ONE-TIME CODE: 4 to 8 digits, or 8 alphanumerics carrying at least one
- * letter and one digit. The narrow twin of CODE_PATTERN in lib/emailVerification.ts, which is the
- * reader the managed session uses. Deliberately not imported, for the same reason as the window
- * constants: emailVerification imports this module and the cycle would be worse than the echo. This
- * one only has to answer "could this message be handing over a code", never "which code". */
+ * letter and one digit. The twin of CODE_PATTERN in lib/emailVerification.ts, which is the reader
+ * the managed session uses. Deliberately not imported, for the same reason as the window constants:
+ * emailVerification imports this module and the cycle would be worse than the echo. This one only
+ * has to answer "could the reader get a code out of this", never "which code". */
 const CODE_SHAPED_TOKEN = '(?<![a-z0-9])(?:\\d{4,8}|(?=[a-z0-9]{8}(?![a-z0-9]))(?=[a-z0-9]{0,7}[a-z])(?=[a-z0-9]{0,7}\\d)[a-z0-9]{8})(?![a-z0-9])';
+const CODE_SHAPED_TOKEN_GLOBAL = new RegExp(CODE_SHAPED_TOKEN, 'g');
+
+/* The twin of CODE_CONTEXT in lib/emailVerification.ts. BARE WORDS, not glued to "code", which is
+ * exactly where the two used to disagree. */
+const READER_CODE_CONTEXT = /\b(?:verification|security|authentication|confirmation|one[ -]?time|passcode|otp)\b/;
+const READER_CONTEXT_WINDOW = 100;
+
+/* COULD THE READER PULL A CODE OUT OF THIS MESSAGE. A faithful mirror of
+ * extractCodeFromVerificationText: same token shape, same context words, same 100 character window
+ * either side of the token, and the same flattened whitespace.
+ *
+ * THE FLATTENING IS THE POINT. The reader calls stripMarkup first, which collapses every run of
+ * whitespace to one space, so for the reader a code on its own line sits right next to the sentence
+ * introducing it. The classifier used `.` with no `s` flag, so its gaps could not cross a newline,
+ * and a code on its own line was invisible to it. That is the ordinary ATS layout. Driven end to
+ * end with a live code window open, three real shapes all classified account_registration, which
+ * has no in-flight gate by design, and all three forwarded while the runner could still read the
+ * code out of the very same row:
+ *
+ *   "...please enter the code below to continue:\n\n483920"  -> forwarded, runner read 483920
+ *
+ * Two components each correct on their own, disagreeing about what a newline means.
+ *
+ * The invariant this restores, and the one the parity test asserts directly: ANYTHING THE READER
+ * CAN EXTRACT A CODE FROM CLASSIFIES AS verification_code. The classifier may be broader; it may
+ * never be narrower. */
+function readerCouldExtractACode(flattened: string): boolean {
+  for (const match of flattened.matchAll(CODE_SHAPED_TOKEN_GLOBAL)) {
+    const at = match.index ?? 0;
+    const window = flattened.slice(
+      Math.max(0, at - READER_CONTEXT_WINDOW),
+      Math.min(flattened.length, at + match[0].length + READER_CONTEXT_WINDOW),
+    );
+    if (READER_CODE_CONTEXT.test(window)) return true;
+  }
+  return false;
+}
 
 export function classifyApplicationEmail(subject = '', text = ''): ApplicationEmailClassification {
   const haystack = `${subject}\n${text}`.toLowerCase();
+  /* Whitespace flattened exactly as stripMarkup does, for the code tests only. The account,
+   * interview and confirmation patterns below keep the newline-bounded haystack they were measured
+   * against: widening those is a separate change with its own false captures to check. */
+  const flattened = haystack.replace(/\s+/g, ' ').trim();
   /* "confirm your email" USED TO LIVE HERE and does not any more. It is the opening line of an
    * account-wall activation mail, and when it carries no code that is all it is: treating it as a
    * security code both misnamed it and, under the old whitelist, buried it.
@@ -485,15 +526,24 @@ export function classifyApplicationEmail(subject = '', text = ''): ApplicationEm
    *
    * So the rule is the one the comment always claimed: a message is a verification_code when it
    * HANDS OVER A CREDENTIAL. Either it names the credential ("verification code", "passcode"), or
-   * it puts a code-shaped token next to a handover ("enter the code below: 483920"). An activation
-   * mail carrying only a LINK still classifies as account_registration and still forwards, which is
-   * what keeps the account wall passable. */
-  const namesACredential = /\b(verification code|security code|confirmation code|authentication code|access code|login code|one[- ]?time|otp|passcode)\b/.test(haystack);
+   * it carries a token the reader could spend. An activation mail carrying only a LINK still
+   * classifies as account_registration and still forwards, which is what keeps the account wall
+   * passable.
+   *
+   * `one-time` ALONE IS NOT A CREDENTIAL, and treating it as one broke that guarantee in the other
+   * direction. A bare match on it made "your one-time activation link" and "one-time password reset
+   * link" into verification_code, so both were withheld during a code window while carrying no code
+   * at all. Those are the two messages that finish a registration, so the class designed to keep
+   * the account wall passable was refusing exactly the mail that passes it. It has to reach a
+   * credential noun now: a one-time CODE is a credential, a one-time LINK is a door. */
+  const namesACredential =
+    /\b(?:verification|security|confirmation|authentication|access|login|one[- ]?time)\s+(?:code|passcode|password|pin)\b/.test(haystack)
+    || /\b(?:passcode|otp)\b/.test(haystack);
   const handsOverACode =
-    new RegExp(`\\bcode\\b\\s*(?:is|:|=|-)\\s*${CODE_SHAPED_TOKEN}`).test(haystack)
-    || new RegExp(`\\b(?:enter|use|type|paste|copy|provide|submit|input)\\b.{0,60}\\bcode\\b.{0,80}${CODE_SHAPED_TOKEN}`).test(haystack)
-    || new RegExp(`${CODE_SHAPED_TOKEN}\\s+is\\s+your\\b.{0,30}\\bcode\\b`).test(haystack);
-  if (namesACredential || handsOverACode) {
+    new RegExp(`\\bcode\\b\\s*(?:is|:|=|-)\\s*${CODE_SHAPED_TOKEN}`).test(flattened)
+    || new RegExp(`\\b(?:enter|use|type|paste|copy|provide|submit|input)\\b.{0,60}\\bcode\\b.{0,80}${CODE_SHAPED_TOKEN}`).test(flattened)
+    || new RegExp(`${CODE_SHAPED_TOKEN}\\s+is\\s+your\\b.{0,30}\\bcode\\b`).test(flattened);
+  if (namesACredential || handsOverACode || readerCouldExtractACode(flattened)) {
     return 'verification_code';
   }
   /* BEFORE the account-wall test, so a confirmation that opens "Welcome to Acme" and closes with a
@@ -851,6 +901,24 @@ export function routeInboundApplicationEmail(input: {
  * withholding on the absence of a positive signal, which withholds every employer whose provider
  * does not stamp the header. Fail-open on a non-assertion, fail-closed on an assertion, and the
  * gap written down instead of explained away.
+ *
+ * TWO MORE RESIDUALS, both filed rather than fixed, both real:
+ *
+ * 1. `p=none` IS NOT READ. authenticationFromHeaders takes only the verdict token, so
+ *    `dmarc=fail (p=NONE)` refuses even though the domain has explicitly asked receivers to take no
+ *    action on its behalf, and the stickiness in forwardDecisionRefusedSender makes that refusal
+ *    permanent for the message. That is stricter than the domain asked for, and it is a change in
+ *    the safe direction from a baseline where employer mail was never authentication-checked at
+ *    all, but it will withhold real mail from monitoring-only domains. Reading the policy needs the
+ *    parser to keep the parenthetical, which is its own change.
+ *
+ * 2. THE `dmarc === 'pass'` SHORT CIRCUIT IS A WIDENING, not a neutral improvement. The old rule
+ *    refused if ANY mechanism failed, so an attacker had to suppress every failure; this one
+ *    accepts on a single token, so a forged Authentication-Results carrying only `dmarc=pass`,
+ *    prepended ahead of the genuine receiver header, flips a refusal into a delivery. It is narrow
+ *    and it is conditional on the authserv-id gap recorded at authenticationFromHeaders, but it is
+ *    the same gap made slightly more valuable to exploit. Both close together: check the
+ *    authserv-id, and neither residual survives.
  */
 export function senderAuthenticationFailed(
   authentication: InboundApplicationEmail['authentication'],
@@ -1364,6 +1432,18 @@ export async function handleStoredEmployerMessage(input: {
     securityCodeInFlight,
     senderAuthenticationFailed: senderRefused,
   });
+  /* A MESSAGE THAT HAS ALREADY LEFT CANNOT BE WITHHELD, and this check has to come first for the
+   * row to be able to say so. It used to sit below the withhold branch, which produced the mirror
+   * image of the bug the branch exists to fix:
+   *
+   *   delivery 1, authentication passes -> forwarded, forwarded_at set, decision 'forward'
+   *   delivery 2, authentication FAILS  -> decision overwritten to withheld:sender_authentication_failed
+   *
+   * The ledger then claimed Litos had withheld a message it demonstrably sent, and /health counted
+   * it among the drops. The copy is already in her mailbox; the honest record of that is
+   * forwarded_at, and no later verdict can make it untrue. The verdict is not discarded either: a
+   * refusal on any delivery still sticks for any message that has NOT gone out. */
+  if (message?.forwarded_at) return done({ ...base, forwarded: false, reason: 'already_forwarded' });
   if (!forwardingDecision.forward) {
     /* THE DROP IS WRITTEN DOWN. Without this the row is direction 'inbound', forwarded_at NULL and
      * forward_error NULL, which is byte for byte an unprocessed message, and a policy that stops
@@ -1373,7 +1453,6 @@ export async function handleStoredEmployerMessage(input: {
     return done({ ...base, forwarded: false, reason: forwardingDecision.reason });
   }
   if (!message) return done({ ...base, forwarded: false, reason: 'message_not_stored' });
-  if (message.forwarded_at) return done({ ...base, forwarded: false, reason: 'already_forwarded' });
   /* Written BEFORE the claim and the send, so the row states the decision even when the claim is
    * lost or the send then throws. A failed send leaves forward_decision 'forward' and the cause in
    * forward_error: two different facts, recorded as two. */

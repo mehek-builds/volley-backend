@@ -1,6 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
+import { join } from 'path';
+
+/** Every TypeScript source file under a directory, tests excluded, in a stable order. */
+function sourceFilesUnder(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .flatMap((entry) => {
+      const path = join(root, entry.name);
+      if (entry.isDirectory()) return sourceFilesUnder(path);
+      return entry.isFile() && path.endsWith('.ts') && !path.endsWith('.test.ts') ? [path] : [];
+    });
+}
 
 const resumeRoute = readFileSync('src/routes/resume.ts', 'utf8');
 const indexRoute = readFileSync('src/index.ts', 'utf8');
@@ -231,8 +243,15 @@ test('forward_decision is written by code that works before its migration', () =
   assert.match(service, /return insertLedgerRowWithoutForwardDecision\(ledgerValues\)/);
   assert.match(service, /return insertLedgerRowWithoutForwardDecision\(relayValues\)/);
   assert.doesNotMatch(service, /insert into application_email_messages[\s\S]{0,700}forward_decision/);
-  // Nothing may insert into this table without going through one of those two guarded call sites.
-  assert.equal(service.match(/db\.insert\(application_email_messages\)/g)?.length, 2);
+  /* Nothing anywhere in src may insert into this table without going through one of those two
+   * guarded call sites. Scanned across the whole tree rather than this one file: the first version
+   * of this guard counted inserts in applicationEmail.ts alone, so a third insert added HERE failed
+   * the suite as intended while an identical one added to routes/applicationEmail.ts passed
+   * uncaught. A guard that only looks where the bug already happened is not a guard. */
+  const insertSites = sourceFilesUnder('src')
+    .map((file) => ({ file, hits: (readFileSync(file, 'utf8').match(/db\.insert\(application_email_messages\)/g) ?? []).length }))
+    .filter(({ hits }) => hits > 0);
+  assert.deepEqual(insertSites, [{ file: 'src/lib/applicationEmail.ts', hits: 2 }]);
   // The re-read after a conflict is the redelivery path, so it needs the same fallback.
   assert.match(service, /\.select\(LEDGER_ROW_SELECTION_BEFORE_FORWARD_DECISION\)/);
   /* The account export: a BARE select is the form that breaks, because Drizzle names every declared

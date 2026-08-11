@@ -444,6 +444,39 @@ test('a message once refused for authentication stays refused on every later del
   assert.deepEqual(second.calls.decisions, ['withheld:sender_authentication_failed']);
 });
 
+/* THE DELIVERY ORDER THE FIRST VERSION DID NOT TEST, and the mirror image of the bug above.
+ *
+ * The withhold was recorded before the forwarded_at check, so:
+ *   delivery 1, authentication passes -> forwarded, forwarded_at set, decision 'forward'
+ *   delivery 2, authentication FAILS  -> decision overwritten to withheld:sender_authentication_failed
+ * The ledger then claimed Litos had withheld a message it demonstrably sent, and /health counted it
+ * among the drops. A copy already in her mailbox cannot be un-sent by a later verdict, and the row
+ * has to say what happened rather than what we now wish had. */
+test('a message that has already gone out is never recorded as withheld', async () => {
+  const { deps, calls } = handlerDeps();
+  const result = await handle(
+    'other',
+    storedMessage({ forwarded_at: new Date('2026-08-10T17:36:10.000Z'), forward_decision: 'forward' }),
+    deps,
+    ALIAS_ROW,
+    true,
+  );
+  assert.equal(result.forwarded, false);
+  assert.equal(result.reason, 'already_forwarded', 'the honest record of a sent message is forwarded_at');
+  assert.deepEqual(calls.decisions, [], 'and nothing rewrites the decision on it');
+  assert.equal(calls.forwarded, 0, 'nor does it go out a second time');
+});
+
+/* The same verdict on a message that has NOT gone out still sticks, so the fix above narrows
+ * nothing: it separates "already sent" from "not sent yet". */
+test('a failing verdict still withholds a message that has not been forwarded', async () => {
+  const { deps, calls } = handlerDeps();
+  const result = await handle('other', storedMessage({ forwarded_at: null }), deps, ALIAS_ROW, true);
+  assert.equal(result.forwarded, false);
+  assert.equal(result.reason, 'sender_authentication_failed');
+  assert.deepEqual(calls.decisions, ['withheld:sender_authentication_failed']);
+});
+
 /* The stickiness is deliberately narrow. A code withheld because a run was spending it must forward
  * once the run is over, or a one-off race would bury the message permanently. */
 test('the security-code withhold is not sticky, because that window closes', async () => {

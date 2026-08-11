@@ -21,6 +21,10 @@ import {
   senderAuthenticationFailed,
 } from './applicationEmail';
 import type { AliasDeliverability } from './applicationEmailDeliverability';
+/* The REAL reader the managed session uses. Imported here and nowhere in the source, because
+ * emailVerification imports applicationEmail and the cycle is what keeps the two apart in the
+ * first place. A test is a leaf, so it can hold both and assert they agree. */
+import { extractCodeFromVerificationText } from './emailVerification';
 
 test('application aliases are deterministic and live on the configured domain', () => {
   const previousMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
@@ -352,6 +356,81 @@ test('forwarding is a list of what to WITHHOLD, and everything not on it reaches
       applicationEmailForwardingDecision(classification, { securityCodeInFlight: true }),
       { forward: true },
       classification,
+    );
+  }
+});
+
+/* THE INVARIANT BETWEEN THE CLASSIFIER AND THE READER, asserted by running BOTH.
+ *
+ * The gate only works if the classifier's verification_code set contains everything the managed
+ * session's reader can pull a code out of. It did not. The reader calls stripMarkup, which
+ * collapses whitespace, so a code on its own line sits beside the sentence introducing it; the
+ * classifier used `.` with no `s` flag and could not cross the newline. Two components, each
+ * correct read alone, disagreeing about what a newline means. Driven end to end with a live code
+ * window, three ordinary ATS layouts classified account_registration, which has no in-flight gate,
+ * and forwarded while the runner could still read the code out of the same row.
+ *
+ * This asserts the implication directly rather than through examples of it: for every body, if the
+ * reader gets a code, the classifier says verification_code. Nothing about newlines is assumed. */
+const CODE_CORPUS: Array<{ subject: string; text: string; readerFinds: string | null }> = [
+  {
+    subject: 'Your security code',
+    text: 'Hi Mehek,\n\nplease enter the code below to continue:\n\n483920\n\nThanks',
+    readerFinds: '483920',
+  },
+  {
+    subject: 'Confirm your email address',
+    text: 'To confirm your email address, use this verification code:\n\n739104',
+    readerFinds: '739104',
+  },
+  {
+    subject: 'Complete your sign in',
+    text: 'Your confirmation is required.\n\n204815\n\nEnter it on the page you left open.',
+    readerFinds: '204815',
+  },
+  // No token anywhere: a door, not a credential. The reader has nothing to spend.
+  {
+    subject: 'Activate your candidate account',
+    text: 'Use your one-time activation link to finish setting up your account:\nhttps://acme.example.com/activate?t=abc',
+    readerFinds: null,
+  },
+  {
+    subject: 'Reset your password',
+    text: 'We received a request to reset your password. Use the one-time link below.\nhttps://acme.example.com/reset?t=xyz',
+    readerFinds: null,
+  },
+];
+
+test('anything the managed reader can extract a code from is classified as a code', () => {
+  for (const { subject, text, readerFinds } of CODE_CORPUS) {
+    // The real reader, not a restatement of it.
+    assert.equal(extractCodeFromVerificationText(`${subject}\n${text}`), readerFinds, subject);
+    if (readerFinds === null) continue;
+    assert.equal(classifyApplicationEmail(subject, text), 'verification_code', subject);
+    // And therefore it is withheld while the runner is spending it, which is the whole point.
+    assert.deepEqual(
+      applicationEmailForwardingDecision(classifyApplicationEmail(subject, text), { securityCodeInFlight: true }),
+      { forward: false, reason: 'security_code_in_flight' },
+      subject,
+    );
+  }
+});
+
+/* THE OTHER DIRECTION, which is the guarantee the account-wall class exists to give.
+ *
+ * `namesACredential` matched a bare `one[- ]?time`, so a one-time activation LINK and a one-time
+ * password-reset LINK, neither carrying any code, both classified verification_code and were
+ * withheld during a code window. Those are the two messages that finish a registration, so the
+ * class written to keep the account wall passable was refusing exactly the mail that passes it.
+ * A one-time code is a credential. A one-time link is a door. */
+test('a one-time link carries no credential, so it stays account mail and still goes out', () => {
+  for (const { subject, text, readerFinds } of CODE_CORPUS.filter((entry) => entry.readerFinds === null)) {
+    assert.equal(readerFinds, null);
+    assert.equal(classifyApplicationEmail(subject, text), 'account_registration', subject);
+    assert.deepEqual(
+      applicationEmailForwardingDecision(classifyApplicationEmail(subject, text), { securityCodeInFlight: true }),
+      { forward: true },
+      subject,
     );
   }
 });
