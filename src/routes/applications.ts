@@ -987,7 +987,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const currentResumeEmail = resumeEmailOfRecord(profileRows[0]?.parsed_json);
       if (!resumePacketEmailIsCurrent(contact.email, currentResumeEmail)) {
         return reply.status(409).send({
-          error: 'Your personal resume email changed or is missing. Regenerate this application packet before editing it.',
+          error: 'Your personal resume email changed or is missing. Regenerate this application before editing it.',
           code: 'resume_email_regeneration_required',
         });
       }
