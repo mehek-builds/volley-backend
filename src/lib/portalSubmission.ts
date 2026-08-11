@@ -6,6 +6,7 @@ import {
   type ManagedBrowserResult,
 } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
+import { optionBandAnswer, storedOptionAnswerIsCurrent } from './optionBand';
 import {
   classifyField,
   discoveredFieldIsRequired,
@@ -712,6 +713,15 @@ export type SubmissionPacket = {
     portal_selector?: string;
     portal_input_type?: string;
     atsApiField?: string;
+    /**
+     * The profile value `answer` was snapped from, when discovery read this control's options and
+     * resolveProfileField picked one. Copied from the question record's answer_option_source.
+     *
+     * Absent means "cannot prove this answer is current", which is the reading a hand-built packet,
+     * a record written before the field existed, and a free-text answer all get. Every consumer
+     * treats absence as a reason to recompute rather than to trust.
+     */
+    answerOptionSource?: string;
   }>;
 };
 
@@ -3718,43 +3728,47 @@ function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][nu
    * "January 2028 - July 2028", and this line threw it away for "May 2028", which is not on that
    * list and never could be. The field came back required-and-still-empty.
    *
-   * greenhouseOptionBandAnswer is the whole discriminator, and it is a shape test rather than a
-   * provenance flag because there is no provenance to read: packet.fieldOptions is not persisted, so
-   * at action-build time it is absent on every real run and any rule keyed on it is inert. A BAND is
-   * something no profile holds and no function in this file computes - not "May 2027", not
-   * "Spring 2027", not "3.89" - so the only thing that can have produced one is a real option list. */
+   * greenhouseCurrentOptionAnswer is the discriminator, and it takes TWO facts because one is not
+   * enough. Band shape says the answer could not have been computed from the profile, so it must
+   * have come off a list. answer_option_source says the profile still says what it said when that
+   * choice was made. A band alone would let a record written when she said "May 2027" send
+   * "January 2027 - July 2027" long after she corrected her graduation to May 2028, which is a
+   * window a year early on a real application. */
   if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)\b/i.test(questionText)) {
-    return greenhouseOptionBandAnswer(item.answer) ?? (packet.graduationDate?.trim() || item.answer);
+    return greenhouseCurrentOptionAnswer(item, packet) ?? (packet.graduationDate?.trim() || item.answer);
   }
   return item.answer;
 }
 
 /**
- * An answer that can only have come from the CONTROL'S OWN OPTION LIST, recognised by its shape.
+ * The stored answer, when it was read off this control's own option list AND is still current.
  *
- * "January 2028 - July 2028". "3.81 - 3.9". "2027-2028". A band spans two endpoints, and nothing on
- * the applicant's profile and nothing this file computes is ever written that way: a profile holds
- * "May 2028" and "3.89", greenhouseGraduationBucket emits "Spring 2028", greenhouseGpaBucket emits
- * "3.6 or above (out of 4.0)". So a stored answer in band form is evidence that discovery read this
- * control's options and resolveProfileField snapped onto one of them, which is exactly the evidence
- * a locally computed bucket does not have.
+ * optionBandAnswer supplies the first half: a band is a string no profile holds and no bucket in
+ * this file computes, so the only thing that produces one is a real option list. The packet's own
+ * profile facts supply the second: answerOptionSource records the profile value the option was
+ * chosen for, and if the packet still carries that value, the applicant has not moved underneath it.
  *
- * IT IS A SHAPE TEST BECAUSE THERE IS NOTHING BETTER TO ASK. packet.fieldOptions would settle it
- * outright and is not persisted with the packet, so it is absent at action-build time on every real
- * run. ResolvedProfileField.matchedOption says it too and does not survive into the question record.
- * The shape is what is left, and it is deliberately narrow: anything it does not recognise keeps the
- * behaviour that shipped, so the cost of a miss is the status quo rather than a new wrong answer.
+ * WHY THE SOURCE IS CHECKED AGAINST A SET rather than the one fact for this question's family. The
+ * bucket ladders in this file are computed from exactly four profile values, and a graduation or GPA
+ * question can only have been snapped from one of them. Testing the set keeps this function from
+ * having to classify the question a second time, in a second place, with a second set of regexes
+ * that could disagree with greenhouseComboboxValuesForQuestion's. A source matching some other one
+ * of the four is not a false positive worth engineering against: it still proves the profile has not
+ * changed since the snap, which is the only thing this is asked.
  *
- * Returns the trimmed answer so callers can use it directly, and undefined when there is no band.
+ * Absent answerOptionSource returns undefined, and that is the safe direction: the caller recomputes
+ * from the profile, which is what shipped.
  */
-function greenhouseOptionBandAnswer(answer: string | undefined): string | undefined {
-  const value = answer?.trim();
-  if (!value) return undefined;
-  // "January 2028 - July 2028", "2027-2028", "July 2027 to December 2027".
-  const dateBand = /\b(?:[A-Za-z]{3,9}\s+)?(?:19|20)\d{2}\s*(?:[-\u2010-\u2015]|\bto\b|\bthrough\b)\s*(?:[A-Za-z]{3,9}\s+)?(?:19|20)\d{2}\b/;
-  // "3.81 - 3.9", "3.5-3.9".
-  const numberBand = /\b\d(?:\.\d+)?\s*(?:[-\u2010-\u2015]|\bto\b)\s*\d(?:\.\d+)?\b/;
-  return dateBand.test(value) || numberBand.test(value) ? value : undefined;
+function greenhouseCurrentOptionAnswer(
+  item: SubmissionPacket['questions'][number],
+  packet: SubmissionPacket,
+): string | undefined {
+  const band = optionBandAnswer(item.answer);
+  if (!band) return undefined;
+  const bucketInputs = [packet.gpa, packet.graduationDate, packet.graduationMonth, packet.graduationYear];
+  return bucketInputs.some((fact) => storedOptionAnswerIsCurrent(band, item.answerOptionSource, fact))
+    ? band
+    : undefined;
 }
 
 /**
@@ -3764,18 +3778,17 @@ function greenhouseOptionBandAnswer(answer: string | undefined): string | undefi
  * It decides where a locally computed bucket ranks against that value. See
  * greenhouseComboboxValuesForQuestion: a bucket maps a profile fact onto one employer's vocabulary,
  * which is the right thing to lead with when the value in hand IS a profile fact and the wrong thing
- * to lead with when the value was read off this control's own list.
+ * to lead with when the value was read off this control's own list and is still current.
  *
- * TWO TESTS. The first is that greenhouseReviewedQuestionAnswer chose the question record over a
- * profile substitution, so this describes the value that will really be sent rather than one that
- * was overruled a few lines up. The second is greenhouseOptionBandAnswer, which is where the actual
- * evidence lives.
+ * TWO TESTS. The first is greenhouseCurrentOptionAnswer, which is where the evidence lives. The
+ * second is that greenhouseReviewedQuestionAnswer actually chose it, so this describes the value
+ * that will really be sent rather than one that was overruled a few lines up.
  */
 function greenhouseReviewedAnswerIsResolved(
   item: SubmissionPacket['questions'][number],
   packet: SubmissionPacket,
 ): boolean {
-  const stored = greenhouseOptionBandAnswer(item.answer);
+  const stored = greenhouseCurrentOptionAnswer(item, packet);
   if (!stored) return false;
   return greenhouseReviewedQuestionAnswer(item, packet).trim() === stored;
 }

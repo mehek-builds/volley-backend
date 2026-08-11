@@ -2177,8 +2177,16 @@ test('one control that could not be read does not silence the questions that rea
   const graduation = merged.find((question) => question.portal_selector === `#${IMC_GRADUATION_ID}`);
   // Same again: true on both branches. The resolved answer is the employer's own wording.
   assert.equal(graduation?.answer, 'January 2028 - July 2028');
+  /* And the record says WHAT IT WAS SNAPPED FROM, which is the fact that makes it usable later.
+   *
+   * Without this the answer above is a string with no provenance, and the submit run's refresh has
+   * no way to tell it from a record written a year ago. See refreshKnownQuestionAnswers. */
+  assert.equal(graduation?.answer_option_source, 'May 2028',
+    'the profile value the option was chosen for is recorded beside it');
 
-  // And it reaches the action list, while the unreadable control reaches nothing.
+  // And it reaches the action list, while the unreadable control reaches nothing. The mapping below
+  // is buildPacket's, field for field, because a packet built any other way is not the packet the
+  // run fills from.
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
@@ -2198,6 +2206,7 @@ test('one control that could not be read does not silence the questions that rea
       answer: question.answer,
       portalSelector: question.portal_selector,
       portalInputType: 'combobox',
+      answerOptionSource: question.answer_option_source,
     })),
   } as Parameters<typeof buildManagedPortalActions>[1]);
   assert.equal(actions.some((action) => action.selector?.includes(IMC_UNREADABLE_ID)), false);
@@ -2233,104 +2242,254 @@ test('one control that could not be read does not silence the questions that rea
     'the computed bucket does not reach the form when a resolved answer exists');
 });
 
-/* THE FALLBACK IS INTACT, which is the half of this that is easy to break while fixing the other.
+/* WHAT THE EMPLOYER ACTUALLY RECEIVES, WHICH IS NOT WHAT THE PREVIEW WAS BUILT FROM.
  *
- * The bucket is not wrong, it is second. It maps a profile fact onto one employer's vocabulary, and
- * that is still the best available guess when nothing has been read off the control to prefer over
- * it. Three cases produce that, and all three must still send a bucket: the R-096 placeholder, where
- * a required control the applicant has not answered carries a BLANK stored answer; the unprobed
- * control, where the stored answer is the profile date itself; and the STALE record, where an
- * earlier run stored a date the profile has since corrected and the profile has to win.
+ * Every test above this point builds the packet the PREPARE run builds, straight off the merged
+ * questions. That is not the packet that fills the employer's form. The managed runner is stateless
+ * and one-shot: prepare produces the preview screenshot, and the SUBMIT run calls buildPacket again,
+ * which passes review.questions through refreshKnownQuestionAnswers before mapping them onto the
+ * packet. A fix that only survives the prepare path reaches nobody.
  *
- * Same control, same profile, four stored answers. Nothing else varies. */
-const GRADUATION_PROFILE = {
+ * It is worse than that. Before answer_option_source existed, refresh recomputed the answer from the
+ * profile and destroyed the band, so prepare showed "January 2028 - July 2028" and submit sent
+ * "Spring 2028". A preview that does not match what is sent is the one outcome this product cannot
+ * ship, and a prepare-only test is exactly what would let it through.
+ *
+ * submitRunFills therefore runs buildPacket's chain, refresh then map then build, and the mapping is
+ * buildPacket's own field for field. buildPacket itself reads the database and object storage and
+ * cannot be executed here; the source-level pin below holds this composition to it. */
+const GPA_ID = 'question_9176667102';
+
+const SUBMIT_RUN_PROFILE = {
   fullName: 'Mehek Mandal',
   email: 'mehekmandal05@gmail.com',
   school: 'University of Southern California',
   degree: 'Bachelor of Science in Computer Science',
-  graduationDate: 'May 2028',
   graduationMonth: 'May',
   graduationYear: '2028',
   resume: Buffer.from('pdf'),
   resumeName: 'resume.pdf',
 };
 
-function graduationFillValues(answer: string): Array<string | undefined> {
+function submitRunFills(input: {
+  label: string;
+  selector: string;
+  storedAnswer: string;
+  /** The question record's answer_option_source: the profile value the option was chosen for. */
+  derivedFrom?: string;
+  /** What the profile says NOW. Differs from derivedFrom exactly when the record is stale. */
+  graduationDate?: string;
+  gpa?: string;
+}): Array<string | undefined> {
+  const refreshed = refreshKnownQuestionAnswers(
+    [{
+      question: input.label,
+      answer: input.storedAnswer,
+      answer_option_source: input.derivedFrom,
+    } as Parameters<typeof refreshKnownQuestionAnswers>[0][number]],
+    { grad_date: input.graduationDate, grad_year: 2028, gpa: input.gpa } as ApplicationProfileLike,
+    undefined,
+  );
   const actions = buildManagedPortalActions('greenhouse', {
-    ...GRADUATION_PROFILE,
-    questions: [{
-      question: 'Expected graduation date',
-      answer,
-      portalSelector: `#${IMC_GRADUATION_ID}`,
+    ...SUBMIT_RUN_PROFILE,
+    graduationDate: input.graduationDate,
+    gpa: input.gpa,
+    questions: refreshed.map((question) => ({
+      question: question.question,
+      answer: question.answer,
+      portalSelector: input.selector,
       portalInputType: 'combobox',
-    }],
+      answerOptionSource: (question as { answer_option_source?: string }).answer_option_source,
+    })),
   } as Parameters<typeof buildManagedPortalActions>[1]);
   return actions
-    .filter((action) => action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill')
+    .filter((action) => action.selector === input.selector && action.type === 'fill')
     .map((action) => action.value);
 }
 
+function graduationSubmitFills(storedAnswer: string, derivedFrom?: string): Array<string | undefined> {
+  return submitRunFills({
+    label: 'Expected graduation date',
+    selector: `#${IMC_GRADUATION_ID}`,
+    storedAnswer,
+    derivedFrom,
+    graduationDate: 'May 2028',
+  });
+}
+
+test('the resolved option survives the submit run\'s refresh and reaches the employer', () => {
+  // The IMC case, through the chain that actually fills the form.
+  assert.deepEqual(graduationSubmitFills('January 2028 - July 2028', 'May 2028'),
+    ['January 2028 - July 2028'],
+    'the option the resolver read off this control is what the submit run sends');
+
+  // The same for GPA, whose bucket is a different function reached by a different branch.
+  assert.deepEqual(submitRunFills({
+    label: 'What is your GPA?',
+    selector: `#${GPA_ID}`,
+    storedAnswer: '3.81 - 3.9',
+    derivedFrom: '3.89',
+    gpa: '3.89',
+  }), ['3.81 - 3.9'], 'the employer\'s own GPA band survives the refresh');
+});
+
+/* A STALE BAND IS STILL STALE, and shape alone cannot tell you that.
+ *
+ * "January 2027 - July 2027" is as well-formed an option text as "January 2028 - July 2028". It is
+ * also a graduation window a year early, and once the applicant corrects her graduation to May 2028
+ * nothing about the string itself says so. The profile has to win, and the only fact that makes that
+ * decidable is the derivation recorded when the option was chosen.
+ *
+ * This is the case that a band-shape test on its own gets wrong, and it is the reason
+ * answer_option_source exists rather than the shape being trusted by itself. */
+test('a band-shaped stale record loses to a profile that has moved', () => {
+  /* THE FILL LAYER FIRST, ON ITS OWN, because that is where this can actually be observed.
+   *
+   * Through the submit chain the refresh gets there first and overwrites a stale band before any
+   * fill is built, so a submit-only test cannot tell a fill layer that refuses stale bands from one
+   * that would happily send them. The PREPARE path takes no refresh at all: it builds actions
+   * straight off the merged questions, and it is what renders the preview the applicant approves.
+   * So the refusal has to hold here too, and be tested here. */
+  const prepareFills = (storedAnswer: string, answerOptionSource?: string) => buildManagedPortalActions(
+    'greenhouse',
+    {
+      ...SUBMIT_RUN_PROFILE,
+      graduationDate: 'May 2028',
+      questions: [{
+        question: 'Expected graduation date',
+        answer: storedAnswer,
+        portalSelector: `#${IMC_GRADUATION_ID}`,
+        portalInputType: 'combobox',
+        answerOptionSource,
+      }],
+    } as Parameters<typeof buildManagedPortalActions>[1],
+  )
+    .filter((action) => action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill')
+    .map((action) => action.value);
+
+  assert.deepEqual(prepareFills('January 2027 - July 2027', 'May 2027'), ['Spring 2028'],
+    'the preview must not show a graduation window a year early either');
+  assert.deepEqual(prepareFills('January 2027 - July 2027'), ['Spring 2028'],
+    'a stale band with no derivation is refused at the fill layer');
+  assert.deepEqual(prepareFills('January 2028 - July 2028', 'May 2028'), ['January 2028 - July 2028'],
+    'and a current one is still preferred, so this is a staleness test and not a blanket refusal');
+
+  // Recorded against "May 2027"; the profile now says "May 2028". The record is stale.
+  assert.deepEqual(graduationSubmitFills('January 2027 - July 2027', 'May 2027'), ['Spring 2028'],
+    'a window a year early must not reach the employer');
+
+  // No derivation recorded at all, which is every record written before this field existed, and
+  // every free-text answer that merely happens to be band-shaped. Unprovable means recompute.
+  assert.deepEqual(graduationSubmitFills('January 2027 - July 2027'), ['Spring 2028'],
+    'a band with no recorded derivation cannot prove it is current');
+  assert.deepEqual(graduationSubmitFills('Sept 2024 to May 2028'), ['Spring 2028'],
+    'free text that reads as a band is not an option the resolver chose');
+
+  // And the derivation is not a rubber stamp: it has to match the profile, not merely exist.
+  assert.deepEqual(graduationSubmitFills('January 2028 - July 2028', 'December 2029'), ['Spring 2028'],
+    'a derivation the profile no longer agrees with is stale too');
+});
+
+/* THE FALLBACK IS INTACT, which is the half of this that is easy to break while fixing the other.
+ *
+ * The bucket is not wrong, it is second. It maps a profile fact onto one employer's vocabulary, and
+ * that is still the best available guess when nothing has been read off the control to prefer over
+ * it. All of these must still send a bucket: the R-096 placeholder, where a required control the
+ * applicant has not answered carries a BLANK stored answer; the unprobed control, where the stored
+ * answer is the profile date itself; and the ordinary stale record.
+ *
+ * Same control, same profile, four stored answers. Nothing else varies. */
 test('a graduation combobox with no resolved answer still leads with the computed bucket', () => {
   // Nothing stored at all: the profile date is substituted in and bucketed, exactly as before.
-  assert.deepEqual(graduationFillValues(''), ['Spring 2028'],
+  assert.deepEqual(graduationSubmitFills(''), ['Spring 2028'],
     'the R-096 placeholder still reaches the form as a bucket');
 
   // Stored, but only the profile fact itself, which is what an unprobed control leaves behind. No
   // option list was ever consulted, so the bucket is still the better guess and still leads.
-  assert.deepEqual(graduationFillValues('May 2028'), ['Spring 2028'],
+  assert.deepEqual(graduationSubmitFills('May 2028'), ['Spring 2028'],
     'a stored answer identical to the profile date is not evidence of snapping');
 
-  // A stale record from an earlier run, naming a year the profile has since corrected. The profile
-  // still overrides it, so what reaches the form is the bucket of "May 2028" and not of "May 2027".
-  assert.deepEqual(graduationFillValues('May 2027'), ['Spring 2028'],
+  // A stale record from an earlier run, naming a year the profile has since corrected.
+  assert.deepEqual(graduationSubmitFills('May 2027'), ['Spring 2028'],
     'a stale stored date is still overridden by the profile');
 
-  // And the resolved case, read against the three above rather than on its own. This value is an
-  // option text off the live control that no bucket function could ever produce.
-  assert.deepEqual(graduationFillValues('January 2028 - July 2028'), ['January 2028 - July 2028'],
-    'a resolved answer is the one value attempted');
+  // And the resolved case, read against the three above rather than on its own.
+  assert.deepEqual(graduationSubmitFills('January 2028 - July 2028', 'May 2028'),
+    ['January 2028 - July 2028'], 'a current resolved option is the one value attempted');
 });
 
-/* THE SAME PAIR FOR GPA, because it is the same defect on a different control.
+/* THE SAME SET FOR GPA, because it is the same defect on a different control.
  *
  * The IMC run of 2026-08-11 carried a resolved "3.81 - 3.9" and sent "3.6 or above (out of 4.0)".
  * greenhouseGpaBucket is a different function from greenhouseGraduationBucket and is unshifted by a
  * different branch, so fixing one says nothing about the other. */
-const GPA_ID = 'question_9176667102';
-
-function gpaFillValues(answer: string): Array<string | undefined> {
-  const actions = buildManagedPortalActions('greenhouse', {
-    fullName: 'Mehek Mandal',
-    email: 'mehekmandal05@gmail.com',
-    school: 'University of Southern California',
-    gpa: '3.89',
-    resume: Buffer.from('pdf'),
-    resumeName: 'resume.pdf',
-    questions: [{
-      question: 'What is your GPA?',
-      answer,
-      portalSelector: `#${GPA_ID}`,
-      portalInputType: 'combobox',
-    }],
-  } as Parameters<typeof buildManagedPortalActions>[1]);
-  return actions
-    .filter((action) => action.selector === `#${GPA_ID}` && action.type === 'fill')
-    .map((action) => action.value);
-}
-
 test('a GPA combobox prefers its resolved answer and keeps the bucket as the fallback', () => {
+  const gpaFills = (storedAnswer: string, derivedFrom?: string) => submitRunFills({
+    label: 'What is your GPA?', selector: `#${GPA_ID}`, storedAnswer, derivedFrom, gpa: '3.89',
+  });
+
   // The unprobed control: the stored answer is a bare GPA, which is what the profile holds and what
   // the resolver stores when it has no option list to snap onto.
-  assert.deepEqual(gpaFillValues('3.89'), ['3.6 or above (out of 4.0)'],
-    'a bare stored GPA is still bucketed');
+  assert.deepEqual(gpaFills('3.89'), ['3.6 or above (out of 4.0)'], 'a bare stored GPA is still bucketed');
 
-  // The probed control: "3.81 - 3.9" is one of the employer's own option texts, and it is what the
-  // live IMC application resolved to while "3.6 or above (out of 4.0)" is what actually went out.
-  const resolved = gpaFillValues('3.81 - 3.9');
+  // A band recorded against a GPA she has since raised. The profile wins.
+  assert.deepEqual(gpaFills('3.4 - 3.5', '3.45'), ['3.6 or above (out of 4.0)'],
+    'a GPA band derived from a superseded GPA is stale');
+
+  // The probed and current control: "3.81 - 3.9" is one of the employer's own option texts, and it
+  // is what the live IMC application resolved to while "3.6 or above (out of 4.0)" went out.
+  const resolved = gpaFills('3.81 - 3.9', '3.89');
   assert.deepEqual(resolved, ['3.81 - 3.9'],
     'the bucket the employer really offers, not the one this codebase computes');
   assert.equal(resolved.includes('3.6 or above (out of 4.0)'), false,
-    'the computed GPA bucket does not reach the form when a resolved answer exists');
+    'the computed GPA bucket does not reach the form when a current resolved answer exists');
+});
+
+/* A DERIVATION NEVER OUTLIVES THE ANSWER IT DESCRIBES.
+ *
+ * The refresh has two outcomes, and only one of them keeps the stored answer. When it recomputes,
+ * the recorded derivation described a value that is no longer there, and leaving it attached would
+ * claim a snap that never happened for the value now in the record. The next reader has no way to
+ * detect that from the record alone, which is precisely the failure mode this field was added to
+ * remove, so it is dropped with the answer it belonged to. */
+test('the recorded option derivation is dropped whenever the answer is recomputed', () => {
+  const refresh = (answer: string, source: string) => refreshKnownQuestionAnswers(
+    [{ question: 'Expected graduation date', answer, answer_option_source: source } as
+      Parameters<typeof refreshKnownQuestionAnswers>[0][number]],
+    { grad_date: 'May 2028', grad_year: 2028 } as ApplicationProfileLike,
+    undefined,
+  )[0] as { answer: string; answer_option_source?: string };
+
+  const recomputed = refresh('January 2027 - July 2027', 'May 2027');
+  assert.equal(recomputed.answer, 'May 2028', 'the stale band is recomputed from the profile');
+  assert.equal(recomputed.answer_option_source, undefined,
+    'and its derivation does not survive to describe a value it never described');
+
+  const kept = refresh('January 2028 - July 2028', 'May 2028');
+  assert.equal(kept.answer, 'January 2028 - July 2028');
+  assert.equal(kept.answer_option_source, 'May 2028',
+    'the branch that keeps the answer keeps the derivation, or the next refresh cannot check it');
+});
+
+/* THE COMPOSITION ABOVE IS buildPacket'S, and this is what holds it there.
+ *
+ * submitRunFills cannot call buildPacket: it reads users, the application profile, the parsed resume
+ * and the resume object. So the test asserts the shape of the chain instead, against the real source.
+ * If buildPacket ever stops refreshing, or stops carrying the derivation onto the packet, the tests
+ * above would keep passing against a composition production no longer performs. */
+test('buildPacket refreshes stored answers and carries the option derivation onto the packet', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const buildStart = source.indexOf('export async function buildPacket(');
+  const buildEnd = source.indexOf('\nexport function readMostRecentRole', buildStart);
+  assert.ok(buildStart > 0 && buildEnd > buildStart);
+  const buildBody = source.slice(buildStart, buildEnd);
+  assert.match(buildBody, /const refreshedQuestions = refreshKnownQuestionAnswers\(/,
+    'the submit run resolves stored answers again before filling');
+  assert.match(
+    buildBody,
+    /questions: refreshedQuestions\.map\(\(item\) => \(\{[\s\S]{0,600}?answerOptionSource: item\.answer_option_source,/,
+    'the derivation has to reach the packet, or the fill cannot tell a read option from a profile value',
+  );
 });
 
 /* THE HONESTY THE OLD CODE WAS PROTECTING, kept at the scope it belongs to.
