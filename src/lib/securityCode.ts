@@ -56,6 +56,17 @@ export function readManagedSecurityCodeChallenge(
   return { digits, ...(verification.sentTo ? { sentTo: verification.sentTo } : {}) };
 }
 
+/** A typed code wall belongs to this packet only when it names the packet's frozen portal email. */
+export function securityCodeChallengeMatchesRecipient(
+  challenge: SecurityCodeChallenge | null,
+  expectedRecipient: string,
+): challenge is SecurityCodeChallenge & { sentTo: string } {
+  if (!challenge?.sentTo) return false;
+  const observed = challenge.sentTo.trim().toLowerCase();
+  const expected = expectedRecipient.trim().toLowerCase();
+  return observed.length > 0 && expected.length > 0 && observed === expected;
+}
+
 /**
  * The sentence the applicant reads.
  *
@@ -256,7 +267,15 @@ export function withSecurityCodeAttempts(
   attempts: readonly SecurityCodeAttempt[],
 ): SecurityCodeState {
   if (attempts.length === 0) return state;
-  return { ...state, attempts: [...(state.attempts ?? []), ...attempts].slice(-10) };
+  let merged = [...(state.attempts ?? [])];
+  for (const attempt of attempts) {
+    // A code is spent before the remote continuation so a process crash cannot replay it. When the
+    // continuation returns, replace that provisional error with the measured terminal outcome.
+    // Keeping two rows for one fingerprint would make findSecurityCodeAttempt return the stale one.
+    merged = merged.filter((existing) => existing.fingerprint !== attempt.fingerprint);
+    merged.push(attempt);
+  }
+  return { ...state, attempts: merged.slice(-10) };
 }
 
 /**

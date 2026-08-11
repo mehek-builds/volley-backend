@@ -3818,7 +3818,12 @@ function isProtectedManagedAction(
   // is written false on a form that has the control, the submit run re-derives its attach decision
   // from that flag, and a document she attached is silently left off. The `upload` action it decides
   // about is deliberately NOT protected - a fill is what the budget is for giving up.
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
+  //
+  // The two workable_ entries arrived on main in PR #487 while this branch was open. Both sides of
+  // that merge were adding to this one list rather than disagreeing about it, so the resolution is
+  // the union: a Workable form that cannot report itself ready and a transcript control that cannot
+  // report itself present are two separate reads, and dropping either one loses a different fact.
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_preflight$|workable_application_form_ready$)/
     .test(label);
 }
 
@@ -4116,6 +4121,26 @@ export function budgetDroppedReviewedQuestions(
 const WORKABLE_RESUME_SELECTOR = 'input[type="file"][data-ui="resume"]';
 const WORKABLE_COVER_LETTER_SELECTOR =
   'input[type="file"][data-ui="cover_letter"], input[type="file"][data-ui*="cover" i]';
+const WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR = 'button:has-text("Decline all")';
+const WORKABLE_APPLICATION_FORM_READY_SELECTOR =
+  `input[name="firstname"], input[name="email"], ${WORKABLE_RESUME_SELECTOR}`;
+
+function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
+  actions.push({
+    type: 'click',
+    selector: WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR,
+    label: 'workable_cookie_preflight',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  actions.push({
+    type: 'waitForSelector',
+    selector: WORKABLE_APPLICATION_FORM_READY_SELECTOR,
+    label: 'workable_application_form_ready',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+}
 
 // ─── JazzHR (*.applytojob.com) ────────────────────────────────────────────────
 // Read off a live TicketManager posting, 2026-07-28. The cleanest naming of any ATS Litos supports:
@@ -4865,6 +4890,7 @@ function pushFixedFieldActions(
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
     managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
   } else if (family === 'workable') {
+    pushWorkableManagedPreflightActions(actions);
     const parts = packet.fullName.trim().split(/\s+/);
     managedFill(actions, 'input[name="firstname"]', parts[0], 'first_name');
     managedFill(actions, 'input[name="lastname"]', parts.slice(1).join(' '), 'last_name');
@@ -6052,6 +6078,9 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   if (family === 'recruitee' && !url.pathname.endsWith('/c/new')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/c/new`;
   }
+  if (family === 'workable' && /^\/(?:[^/]+\/)?j\/[^/]+\/?$/i.test(url.pathname)) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
+  }
   if (family === 'personio' && url.hostname.toLowerCase() !== 'arteus-energy.jobs.personio.de'
     && !url.pathname.endsWith('/apply')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
@@ -6079,6 +6108,22 @@ const SMARTRECRUITERS_APPLY_LINK_SELECTOR =
   'a[href^="/oneclick-ui/company/"][href*="/publication/"], a[href^="https://jobs.smartrecruiters.com/oneclick-ui/company/"][href*="/publication/"]';
 
 export async function navigateToApplicationForm(page: Page, portal: SupportedPortal): Promise<void> {
+  if (portalFamily(portal) === 'workable') {
+    const currentUrl = page.url();
+    const destination = portalApplicationUrl(portal, currentUrl);
+    if (destination !== currentUrl && detectPortal(destination) === 'workable') {
+      await page.goto(destination, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    }
+    const declineOptionalCookies = page.locator(WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR).first();
+    if ((await declineOptionalCookies.count()) > 0
+      && (await declineOptionalCookies.isVisible().catch(() => false))) {
+      await declineOptionalCookies.click().catch(() => undefined);
+    }
+    await page.locator(WORKABLE_APPLICATION_FORM_READY_SELECTOR).first()
+      .waitFor({ state: 'attached', timeout: MANAGED_FILL_TIMEOUT_MS })
+      .catch(() => undefined);
+    return;
+  }
   if (portal !== 'smartrecruiters') return;
   const link = page.locator(SMARTRECRUITERS_APPLY_LINK_SELECTOR).first();
   if ((await link.count()) === 0) return; // already on the form, or the link isn't there this time

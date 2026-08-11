@@ -341,7 +341,7 @@ export function selectJdAlignedLead(
   if (asks.length === 0) {
     return {
       spec: { ...spec, lead_alignment: null },
-      issues: ['lead experience cannot be chosen: the frozen job description contains no supported primary ask'],
+      issues: [],
       supported_terms: [],
     };
   }
@@ -647,7 +647,16 @@ export function leadAlignmentIssues(
   // experience to put at the top for this job.
   if (!first) return [];
 
+  const asks = leadRequirementCandidates(jdText, options.context);
   const alignment = spec.lead_alignment;
+  /* No supported ask means the posting cannot justify any ordering. Keep that lack of evidence
+     explicit as null instead of fabricating a citation from form labels or boilerplate. This is
+     unscoreable job fit, not a defect in the grounded resume content. */
+  if (asks.length === 0) {
+    return alignment
+      ? ['lead_alignment cannot cite a lead requirement when the frozen job description contains no supported primary ask']
+      : [];
+  }
   if (!alignment) {
     return ['lead_alignment is missing: name the posting requirement the first experience entry proves'];
   }
@@ -667,23 +676,13 @@ export function leadAlignmentIssues(
     // the one defect that matters under noise the model then tries to fix separately.
     return issues;
   }
-  const asks = leadRequirementCandidates(jdText, options.context);
   const requirement = foldForCitation(alignment.requirement);
-  /* A posting this pipeline could not read into asks at all - a two-line listing, a page that is
-     all boilerplate - cannot support the check, and refusing to justify an ordering against a
-     posting that states no asks would be a defect report about the posting, not the resume. Fall
-     back to the weaker "quoted from somewhere in the job description" bar rather than to nothing:
-     it still cannot be satisfied by invention. */
-  const matchesAsk = asks.length > 0
-    ? asks.some((ask) => foldForCitation(ask) === requirement)
-    : foldForCitation(jdText).includes(requirement);
+  const matchesAsk = asks.some((ask) => foldForCitation(ask) === requirement);
   if (!requirement) {
     issues.push('lead_alignment.requirement is empty: quote one of the posting requirements listed in the prompt');
   } else if (!matchesAsk) {
     issues.push(
-      asks.length > 0
-        ? `lead_alignment.requirement is not one of this posting's listed requirements: copy one of them exactly, and if the first entry proves none of them, lead with the entry that does (got "${alignment.requirement.slice(0, 90)}")`
-        : `lead_alignment.requirement is not in the job description: quote it word for word, do not paraphrase ("${alignment.requirement.slice(0, 90)}")`,
+      `lead_alignment.requirement is not one of this posting's listed requirements: copy one of them exactly, and if the first entry proves none of them, lead with the entry that does (got "${alignment.requirement.slice(0, 90)}")`,
     );
   }
 
