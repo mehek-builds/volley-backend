@@ -990,6 +990,11 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
       portalSelector: item.portal_selector,
       portalInputType: item.portal_input_type,
       atsApiField: item.ats_api_field,
+      // Carried through so the fill can tell an option the resolver read off this control from a
+      // profile value that merely survived the refresh. Dropping it here would leave the fill
+      // unable to distinguish them and it would fall back to the computed bucket, which is exactly
+      // the state this packet was in before. See greenhouseReviewedAnswerIsResolved.
+      answerOptionSource: item.answer_option_source,
     })),
   };
 }
@@ -1685,6 +1690,23 @@ export async function discoverAndResolveQuestions(
       )
       : null;
     const knownValue = resolvedField?.value ?? (known && 'value' in known ? known.value : '');
+    /* WHAT THAT SNAPPED VALUE WAS SNAPPED FROM, recorded so a later pass can tell current from stale.
+     *
+     * Only when resolveProfileField really picked off the control's list. matchedOption is false for
+     * every free-text field and for a stored answer that matched nothing, and in both of those the
+     * stored answer IS the profile value, so there is nothing to preserve and nothing to record.
+     *
+     * The value recorded is profileKnown.value, the profile's own answer for this label, because
+     * that is precisely what refreshKnownQuestionAnswers recomputes later. Equal means the profile
+     * has not moved and the snapped answer may stand; different means she has corrected something
+     * and the record is stale. It is the only fact that makes that decidable: the answer alone
+     * cannot say, and field options do not survive into the packet. */
+    const answerOptionSource = resolvedField?.matchedOption
+      && profileKnown && 'value' in profileKnown
+      && profileKnown.value.trim()
+      && resolvedField.value.trim().toLowerCase() !== profileKnown.value.trim().toLowerCase()
+      ? profileKnown.value
+      : undefined;
     // "I had an answer and deliberately did not pick anything off this list."
     //
     // resolveProfileField reports that as matchedOption: false, and this loop used to throw the
@@ -1763,6 +1785,7 @@ export async function discoverAndResolveQuestions(
           required: fieldIsRequired,
           portal_selector: portalSelectorForField(field),
           portal_input_type: field.inputType,
+          answer_option_source: answerOptionSource,
         });
       } else if (staleDraftedAnswer) {
         invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
@@ -1790,6 +1813,7 @@ export async function discoverAndResolveQuestions(
         required: fieldIsRequired,
         portal_selector: portalSelectorForField(field),
         portal_input_type: field.inputType,
+        answer_option_source: answerOptionSource,
       });
       continue;
     }

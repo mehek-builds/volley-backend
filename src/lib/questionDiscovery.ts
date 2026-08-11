@@ -2,6 +2,7 @@ import type { Page } from 'playwright-core';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
 import { officeMetrosNamed } from './officeMetros';
+import { storedOptionAnswerIsCurrent } from './optionBand';
 import type { SupportedPortal } from './portalSubmission';
 import {
   resolveSalary,
@@ -1346,6 +1347,7 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
     const withProvenance = question as T & {
       answer_source?: unknown;
       answer_reviewed_at?: unknown;
+      answer_option_source?: unknown;
     };
     const applicantReviewedCurrentAnswer = Boolean(
       question.answer.trim()
@@ -1353,15 +1355,52 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       && typeof withProvenance.answer_reviewed_at === 'string'
       && withProvenance.answer_reviewed_at === questionsReviewedAt,
     );
+    /* answer_option_source goes with the answer it describes, and only ever with that answer.
+     *
+     * Every branch below that CHANGES the answer drops it, because a derivation left beside a value
+     * it was not derived from is a lie the next reader has no way to detect: a record reading
+     * answer "May 2028" with answer_option_source "May 2027" claims a snap that never happened. The
+     * one branch that keeps the answer keeps it, which is the whole point of recording it. */
     const withoutProvenance = (): T => {
       const {
         answer_source: _answerSource,
         answer_reviewed_at: _answerReviewedAt,
+        answer_option_source: _answerOptionSource,
         ...rest
       } = withProvenance;
       return rest as T;
     };
-    if (known && 'value' in known) return { ...withoutProvenance(), answer: known.value };
+    /* AN ANSWER THIS FUNCTION CANNOT RECOMPUTE, AND CAN STILL PROVE IS CURRENT.
+     *
+     * The line below is right about almost everything and was silently wrong about one class of
+     * answer, in the one place it costs the most. It is what makes the profile the source of truth:
+     * a question record written on an earlier run must not replay a graduation date the applicant
+     * has since corrected, so a freshly resolved value overwrites the stored one.
+     *
+     * But the value it computes comes only from the profile. It cannot produce
+     * "January 2028 - July 2028", because that string does not exist anywhere except the option list
+     * of one employer's control, which this function has never seen and cannot see: field options
+     * are not persisted. So when discovery HAD read that list and resolveProfileField had snapped
+     * onto it, this line overwrote the employer's own wording with "May 2028" and the evidence was
+     * gone by the time the fill ran.
+     *
+     * Measured end to end on 2026-08-11, before this branch existed: the prepare run's packet
+     * carried "January 2028 - July 2028" and "3.81 - 3.9", and the SUBMIT run's packet, which is the
+     * one that actually fills and sends, carried "May 2028" and "3.89" for all nine graduation and
+     * GPA label shapes. That divergence is worse than no fix at all: the preview the applicant
+     * approves would show the resolved option while the employer receives the bucket.
+     *
+     * BOTH HALVES ARE REQUIRED. Band shape says the stored answer could not have been computed here.
+     * answer_option_source says the profile has not moved underneath it since it was chosen. A band
+     * whose derivation no longer matches the profile is exactly the stale record this function
+     * exists to overwrite, and it is overwritten. See storedOptionAnswerIsCurrent. */
+    if (known && 'value' in known) {
+      const derivedFrom = typeof withProvenance.answer_option_source === 'string'
+        ? withProvenance.answer_option_source
+        : undefined;
+      if (storedOptionAnswerIsCurrent(question.answer, derivedFrom, known.value)) return question;
+      return { ...withoutProvenance(), answer: known.value };
+    }
     const currentResolverRefuses = Boolean(known && 'skipReason' in known)
       || Boolean(label && isRefusedQuestion(label));
     if (currentResolverRefuses && !applicantReviewedCurrentAnswer) {

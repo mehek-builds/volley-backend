@@ -15,6 +15,21 @@ export type ApplicationReviewQuestion = {
   ats_api_field?: string;
   answer_source?: 'applicant_review';
   answer_reviewed_at?: string;
+  /**
+   * The PROFILE VALUE this answer was snapped from, when discovery could read the control's options
+   * and resolveProfileField picked one of them. "May 2028" beside an answer of
+   * "January 2028 - July 2028"; "3.89" beside "3.81 - 3.9".
+   *
+   * It exists to make staleness DECIDABLE rather than guessed. The answer itself cannot say whether
+   * it is current: "January 2027 - July 2027" is a perfectly well-formed option text long after the
+   * applicant corrects her graduation to May 2028. Recording what it was derived from lets every
+   * later pass ask the only question that settles it, "does the profile still say what it said when
+   * this was chosen", and recompute when it does not. See refreshKnownQuestionAnswers.
+   *
+   * Optional forever. Every record written before this field existed lacks it, and absence is read
+   * as "cannot prove current", which recomputes. jsonb, so no migration.
+   */
+  answer_option_source?: string;
 };
 
 export type ApplicationAttentionCategory =
@@ -160,9 +175,18 @@ export function mergeSubmittedApplicationReviewQuestions(
       && submittedQuestion.question === question.question
       && questionKey(submittedQuestion.question) === questionKey(question.question)
       && submittedQuestion.answer === question.answer;
+    /* answer_option_source goes with the answer it describes, and `answer` is replaced below.
+     *
+     * The kept branch is safe to leave alone: exactReviewedIdentityUnchanged requires
+     * submittedQuestion.answer === question.answer, so the value the derivation describes is still
+     * the value in the record. Every other path through here substitutes a different answer, and a
+     * derivation that outlives its value claims a snap that never happened for what the record now
+     * holds. Nothing downstream can detect that from the record alone, and storedOptionAnswerIsCurrent
+     * would read the inherited derivation as proof the answer is current. */
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
+      answer_option_source: _answerOptionSource,
       ...questionWithoutProvenance
     } = question;
     return {
