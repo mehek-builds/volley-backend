@@ -87,6 +87,7 @@
     "db:employment-type-index": "node scripts/apply-employment-type-index.mjs",
     "db:description-digest": "node scripts/apply-description-digest.mjs",
     "db:posting-questions": "node scripts/apply-posting-questions-schema.mjs",
+    "db:user-documents": "node scripts/apply-user-documents-schema.mjs",
     "setup:application-email-resend": "node scripts/setup-resend-application-email.mjs",
     "setup:application-email-receiving-canary": "node scripts/configure-resend-receiving-canary.mjs",
     "verify:classification": "tsx scripts/verify-classification.mts",

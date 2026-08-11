@@ -452,6 +452,44 @@ function questionFieldBlockers(packet: SubmissionPacket): string[] {
     .map((item) => item.question.slice(0, 120));
 }
 
+/* THE PART NAME IS A MAPPING, NOT A WORD.
+ *
+ * Greenhouse and Lever appended the transcript under the hardcoded literal `'transcript'`, chosen
+ * because that is what the document is called. A multipart part name an API does not recognise is
+ * accepted at the HTTP level and dropped: the POST returns 200, the application is filed, the
+ * employer never receives the file, and nothing errors, logs, or shows on the dashboard, which goes
+ * on saying sent. That is the worst failure shape available, and it is exactly the one
+ * appendGreenhouseQuestionFields (:516) already refuses to produce for a text answer - it posts
+ * nothing it cannot name and hands the whole channel back as `not_applicable` with the field named.
+ * The document resolves its name the same way and refuses on the same terms.
+ *
+ * field_paths IS THE ONLY SOURCE WITH ANY AUTHORITY over what an employer's own form calls this
+ * document. It is employer-authorized configuration and it travels with the API credentials; Ashby
+ * has addressed every one of its fields that way since it was written.
+ *
+ * REFUSING COSTS THE APPLICATION NOTHING. `not_applicable` is not a dead end:
+ * submitViaAtsSubmissionChannel (routes/submissionRunner.ts) logs the reason and returns false, and
+ * the browser submit runs instead. The browser path is the one that measured a transcript control on
+ * this employer's form in the first place - that measurement is why the packet carries the file at
+ * all - so refusing here sends the application through the door that can actually attach it.
+ *
+ * THE HONEST LIMIT, stated because it is what this decision does NOT settle. Whether `transcript` is
+ * a real part name on the Greenhouse Job Board API or the Lever Postings API is UNPROVEN. Neither
+ * documents one, no Litos submission has ever gone out through a configured board token carrying a
+ * transcript, and no response has ever been read on the question. It can only be settled by a real
+ * API submission to a real posting that asks for one. Until it is, this file posts a document under
+ * a configured name or under none, and that holds for the obvious name as much as any other.
+ */
+function transcriptMissingFields(channel: ConfiguredChannel, packet: SubmissionPacket): string[] {
+  if (!packet.transcript || !packet.transcriptName) return [];
+  return trimmed(channel.fieldPaths?.transcript) ? [] : ['transcript'];
+}
+
+/** The configured name for the transcript part, or undefined when nothing has named it. */
+function transcriptFieldName(channel: ConfiguredChannel): string | undefined {
+  return trimmed(channel.fieldPaths?.transcript);
+}
+
 function appendMappedQuestionFields(form: FormData, packet: SubmissionPacket) {
   for (const item of packet.questions) {
     if (!item.atsApiField?.trim() || !item.answer.trim()) continue;
@@ -567,14 +605,32 @@ async function submitGreenhouse(
   if (packet.coverLetter && packet.coverLetterName) {
     form.append('cover_letter', pdfBlob(packet.coverLetter), packet.coverLetterName);
   }
-  const missingFields = await appendGreenhouseQuestionFields(form, posting, packet, fetchImpl);
+  /* The API channel carries every document the browser paths carry, or the same application is sent
+   * two different ways depending on whether a board token happens to be configured. A packet only
+   * reaches this line holding a transcript when a browser prepare measured a transcript control on
+   * this employer's own form, so the part is appended for a posting that asked for one and for no
+   * other. Guarded on both fields for the same reason every other upload here is: a name without
+   * bytes, or bytes without a name, is a half-populated part rather than an attachment. The third
+   * term is the employer's own name for the part - see transcriptMissingFields for why an unnamed
+   * document refuses the channel instead of going out under a guess. */
+  const transcriptField = transcriptFieldName(channel);
+  if (packet.transcript && packet.transcriptName && transcriptField) {
+    form.append(transcriptField, pdfBlob(packet.transcript), packet.transcriptName);
+  }
+  /* One refusal names everything this channel cannot map, rather than one per resolver: fixing the
+   * transcript mapping only to redeploy into the same refusal over a question is a round trip the
+   * list can spare whoever is configuring the channel. */
+  const missingFields = [
+    ...await appendGreenhouseQuestionFields(form, posting, packet, fetchImpl),
+    ...transcriptMissingFields(channel, packet),
+  ];
   if (missingFields.length > 0) {
     return {
       kind: 'not_applicable',
       assessment: {
         provider: 'greenhouse',
         status: 'unavailable',
-        reason: 'Required reviewed questions are missing Greenhouse API field mappings.',
+        reason: 'Required reviewed questions or attached documents are missing Greenhouse API field mappings.',
         board_token: posting.boardToken,
         job_id: posting.jobId,
         missing_fields: missingFields,
@@ -623,14 +679,14 @@ async function submitAshby(
       },
     };
   }
-  const missingFields = questionFieldBlockers(packet);
+  const missingFields = [...questionFieldBlockers(packet), ...transcriptMissingFields(channel, packet)];
   if (missingFields.length > 0) {
     return {
       kind: 'not_applicable',
       assessment: {
         provider: 'ashby',
         status: 'unavailable',
-        reason: 'Required reviewed questions are missing Ashby application form path mappings.',
+        reason: 'Required reviewed questions or attached documents are missing Ashby application form path mappings.',
         board_token: posting.organization,
         job_id: posting.jobPostingId,
         missing_fields: missingFields,
@@ -646,6 +702,16 @@ async function submitAshby(
   if (packet.coverLetter && packet.coverLetterName) {
     const coverLetterPath = channel.fieldPaths?.cover_letter ?? channel.fieldPaths?.coverLetter;
     if (coverLetterPath) form.append(`applicationForm[${coverLetterPath}]`, pdfBlob(packet.coverLetter), packet.coverLetterName);
+  }
+  /* Ashby addresses every field by a configured path, so there is no default path to fall back to:
+   * a transcript is an employer-configured question, and its path is tenant data. This used to SKIP
+   * the file when nothing had named it, which reads as the careful choice and is the same outcome as
+   * Greenhouse's wrong part name - an application filed without the document the form asked for, and
+   * no error anywhere. The refusal above is what makes not-naming-it mean not-sending-it-here rather
+   * than sending-it-nowhere; the cover letter beside it is a separate decision and keeps its skip. */
+  const transcriptPath = transcriptFieldName(channel);
+  if (packet.transcript && packet.transcriptName && transcriptPath) {
+    form.append(`applicationForm[${transcriptPath}]`, pdfBlob(packet.transcript), packet.transcriptName);
   }
   for (const item of packet.questions) {
     if (!item.atsApiField?.trim() || !item.answer.trim()) continue;
@@ -675,14 +741,14 @@ async function submitLever(
 ): Promise<AtsSubmissionResult> {
   const posting = leverPostingFromUrl(rawUrl);
   if (!posting) throw new Error('Lever posting URL could not be parsed');
-  const missingFields = questionFieldBlockers(packet);
+  const missingFields = [...questionFieldBlockers(packet), ...transcriptMissingFields(channel, packet)];
   if (missingFields.length > 0) {
     return {
       kind: 'not_applicable',
       assessment: {
         provider: 'lever',
         status: 'unavailable',
-        reason: 'Required reviewed questions are missing Lever API field mappings.',
+        reason: 'Required reviewed questions or attached documents are missing Lever API field mappings.',
         board_token: posting.site,
         job_id: posting.postingId,
         missing_fields: missingFields,
@@ -697,6 +763,13 @@ async function submitLever(
   if (packet.githubUrl) form.append('urls[GitHub]', packet.githubUrl);
   if (packet.portfolioUrl) form.append('urls[Portfolio]', packet.portfolioUrl);
   form.append('resume', pdfBlob(packet.resume), packet.resumeName);
+  // Lever carries no cover letter through this channel, and that is a gap rather than a decision, so
+  // it is not a precedent for leaving the transcript out too. Same guard as the other two builders,
+  // and the same third term: the part is named by field_paths or the channel has already refused.
+  const transcriptField = transcriptFieldName(channel);
+  if (packet.transcript && packet.transcriptName && transcriptField) {
+    form.append(transcriptField, pdfBlob(packet.transcript), packet.transcriptName);
+  }
   appendMappedQuestionFields(form, packet);
   const response = await fetchImpl(
     `https://api.lever.co/v0/postings/${encodeURIComponent(posting.site)}/${encodeURIComponent(posting.postingId)}?key=${encodeURIComponent(channel.apiKey!)}`,

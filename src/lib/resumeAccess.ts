@@ -70,10 +70,15 @@ export type UserBlobCategory =
   | 'generated-resume'
   | 'submission-preview'
   | 'submission-receipt'
+  | 'user-document'
   | 'unclassified';
 
 const SUBMISSION_RUN_FILE_RE = /^users\/[^/]+\/submission-runs\/[^/]+\/([^/]+)$/;
 const GENERATED_RESUME_RE = /^users\/[^/]+\/resumes\/[^/]+$/;
+// Anchored for the same reason GENERATED_RESUME_RE is: putUserDocument builds exactly
+// `users/<id>/documents/<uuid>.pdf` (lib/documentStore.ts, plus put()'s random suffix), so one
+// segment is every real key and anything deeper is a shape nobody here has decided about.
+const USER_DOCUMENT_RE = /^users\/[^/]+\/documents\/[^/]+$/;
 
 export function classifyUserBlob(pathname: string): UserBlobCategory {
   if (isUploadedResumeBlob(pathname)) return 'legacy-original';
@@ -95,6 +100,22 @@ export function classifyUserBlob(pathname: string): UserBlobCategory {
   // `users/<id>/resumes/<name>.pdf`, plus put()'s random suffix), so anchoring loses nothing and
   // sends anything else to 'unclassified', which is kept and logged rather than deleted.
   if (GENERATED_RESUME_RE.test(pathname)) return 'generated-resume';
+  /* A FILE THE STUDENT ATTACHED HERSELF, and it is a named category rather than a fall-through.
+   *
+   * It already survived as 'unclassified', which returns null and keeps it, so this line changes no
+   * file's fate today. It changes what the survival RESTS ON. 'unclassified' is an alarm, not a
+   * policy: its own comment above says an unrecognised shape is kept and logged so that a new
+   * category "announces itself on the first run after it ships", which means the next person to
+   * decide what to do about unrecognised artifacts is expected to give that arm a window. Doing that
+   * would delete every stored transcript, and the thing it would break is a published sentence -
+   * trylitos.com/privacy: an attached file is encrypted and kept "until you remove it or delete your
+   * account". A promise that holds only while nobody touches the default is not a promise.
+   *
+   * It also un-breaks the alarm. Every transcript in the store counted as unclassified, so the
+   * sweep's "non-zero means a new key shape needs a decision" signal was permanently non-zero and
+   * therefore permanently unreadable, and unclassifiedSample put user-id-bearing object keys into a
+   * log line on every run. */
+  if (USER_DOCUMENT_RE.test(pathname)) return 'user-document';
   return 'unclassified';
 }
 
@@ -121,6 +142,18 @@ export function retentionDaysForCategory(
     // for as long as the account is open, which is what the privacy page already promises for
     // account-linked product data, and deleteBlobsForUser removes it on account deletion.
     case 'submission-receipt': return null;
+    /* EXEMPT, AND A PUBLISHED SENTENCE DEPENDS ON THIS LINE. trylitos.com/privacy says of a file the
+     * student attaches to an application herself: "We encrypt it and keep it until you remove it or
+     * delete your account." A number here makes that false for every file older than it, silently,
+     * with the student's own copy of the promise still on the page. The two ways out it names are
+     * both built and both reach the file: DELETE /documents/:id (routes/documents.ts) removes one,
+     * and deleteBlobsForUser takes the whole `users/<id>/` prefix on account deletion.
+     *
+     * This is NOT the receipt's argument reused. A receipt is exempt because Litos wants to keep
+     * showing it; this one is exempt because Litos said it would. The difference matters if the
+     * storage bill ever argues for a window: the receipt's exemption is a product call that could be
+     * revisited, and this one cannot be revisited without changing the privacy page first. */
+    case 'user-document': return null;
     case 'unclassified': return null;
   }
 }
@@ -438,7 +471,8 @@ export interface BlobSweepResult {
 }
 
 // Deletes legacy original uploads on sight, generated files after RESUME_RETENTION_DAYS, and
-// filled-form previews after SUBMISSION_PREVIEW_RETENTION_DAYS. Receipts are exempt by decision.
+// filled-form previews after SUBMISSION_PREVIEW_RETENTION_DAYS. Receipts are exempt by decision, and
+// files the student attached herself are exempt by published promise.
 //
 // blobStore exists because this is the only function in this file that permanently destroys user
 // files, and it was the only one with no test: every retention test stubbed it out at the route
@@ -465,6 +499,7 @@ export async function sweepExpiredResumeBlobs(
     'generated-resume': 0,
     'submission-preview': 0,
     'submission-receipt': 0,
+    'user-document': 0,
     unclassified: 0,
   };
   for (const blob of due) deletedByCategory[classifyUserBlob(blob.pathname)] += 1;

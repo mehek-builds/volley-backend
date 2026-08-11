@@ -509,3 +509,127 @@ test('configured ATS channel surfaces API submission failures', async () => {
     /Greenhouse API submission failed with 422: invalid field/,
   );
 });
+
+/* THE GUESSED PART NAME, AND WHY IT IS TESTED AS A REFUSAL RATHER THAN AS A SPELLING.
+ *
+ * Greenhouse and Lever appended the transcript under the literal `'transcript'`. A multipart part an
+ * API does not recognise is accepted at the HTTP level and dropped, so that submission returns 200,
+ * files the application, and delivers no document - success everywhere a human or a log would look.
+ * There is no assertion available that proves a part name is right; the only thing that can be
+ * asserted is that this file never posts one nobody configured. Each pair below is the same channel
+ * twice: once with no mapping, which must not reach the API at all, and once with one, which must
+ * post under exactly that name and under no other.
+ */
+const transcriptPacket = (): SubmissionPacket => ({
+  ...basePacket(),
+  transcript: Buffer.from('%PDF-1.4\ntranscript\n%%EOF\n'),
+  transcriptName: 'Mehek_Mandal_Software_Engineer_Transcript.pdf',
+});
+
+const GREENHOUSE_CHANNEL = { ats: 'greenhouse', board_token: 'reddit', api_key_env: 'GH_REDDIT_KEY' };
+const ASHBY_PATHS = { name: 'person.name', email: 'person.email', resume: 'files.resume' };
+const ASHBY_CHANNEL = { ats: 'ashby', organization: 'fluency', api_key_env: 'ASHBY_FLUENCY_KEY', field_paths: ASHBY_PATHS };
+const LEVER_CHANNEL = { ats: 'lever', site: 'acme', api_key_env: 'LEVER_ACME_KEY' };
+const CHANNEL_SECRETS = { GH_REDDIT_KEY: 'reddit-secret', ASHBY_FLUENCY_KEY: 'fluency-secret', LEVER_ACME_KEY: 'lever-secret' };
+
+const GREENHOUSE_URL = 'https://boards.greenhouse.io/reddit/jobs/8070669';
+const ASHBY_URL = 'https://jobs.ashbyhq.com/fluency/f4436720-0c9a-44b1-b175-787bc0f8fa39';
+const LEVER_URL = 'https://jobs.lever.co/acme/abc-123';
+
+const channelEnv = (channels: unknown[]) => ({
+  LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON: JSON.stringify(channels),
+  ...CHANNEL_SECRETS,
+});
+
+test('an attached document nothing has named refuses the channel instead of guessing a part name', async () => {
+  const unmapped = [
+    { provider: 'greenhouse', url: GREENHOUSE_URL, channels: [GREENHOUSE_CHANNEL] },
+    { provider: 'ashby', url: ASHBY_URL, channels: [ASHBY_CHANNEL] },
+    { provider: 'lever', url: LEVER_URL, channels: [LEVER_CHANNEL] },
+  ] as const;
+  for (const channel of unmapped) {
+    let requests = 0;
+    const fetchImpl: typeof fetch = async () => {
+      requests += 1;
+      return new Response('accepted', { status: 200 });
+    };
+    const result = await tryAtsSubmissionChannel(channel.url, transcriptPacket(), {
+      env: channelEnv([...channel.channels]),
+      fetchImpl,
+    });
+    assert.equal(result.kind, 'not_applicable', `${channel.provider} must not post an unnamed document`);
+    if (result.kind !== 'not_applicable') return;
+    assert.equal(result.assessment.provider, channel.provider);
+    assert.equal(result.assessment.status, 'unavailable');
+    assert.deepEqual(result.assessment.missing_fields, ['transcript'],
+      `${channel.provider} must name what it could not map`);
+    // Nothing at all is sent. A refusal that had already POSTed would have filed the application
+    // without the document, which is the outcome the refusal exists to prevent.
+    assert.equal(requests, 0, `${channel.provider} must refuse before it reaches the API`);
+  }
+});
+
+test('a named document is posted under the name it was given and under no other', async () => {
+  const mapped = [
+    {
+      provider: 'greenhouse',
+      url: GREENHOUSE_URL,
+      channels: [{ ...GREENHOUSE_CHANNEL, field_paths: { transcript: 'question_31415926' } }],
+      field: 'question_31415926',
+    },
+    {
+      provider: 'ashby',
+      url: ASHBY_URL,
+      channels: [{ ...ASHBY_CHANNEL, field_paths: { ...ASHBY_PATHS, transcript: 'files.transcript' } }],
+      field: 'applicationForm[files.transcript]',
+    },
+    {
+      provider: 'lever',
+      url: LEVER_URL,
+      channels: [{ ...LEVER_CHANNEL, field_paths: { transcript: 'cards[transcript]' } }],
+      field: 'cards[transcript]',
+    },
+  ] as const;
+  for (const channel of mapped) {
+    let body: FormData | undefined;
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      body = init?.body as FormData;
+      return new Response('accepted', { status: 200 });
+    };
+    const packet = transcriptPacket();
+    const result = await tryAtsSubmissionChannel(channel.url, packet, {
+      env: channelEnv([...channel.channels]),
+      fetchImpl,
+    });
+    assert.equal(result.kind, 'submitted', channel.provider);
+    const part = body?.get(channel.field);
+    assert.ok(part instanceof File, `${channel.provider} must post the document under its configured name`);
+    assert.equal((part as File).name, packet.transcriptName);
+    assert.equal(await (part as File).text(), packet.transcript!.toString('utf8'));
+    // The literal is what was there before. It is asserted absent by name, because a builder that
+    // appends under both names posts a part no employer asked for and still passes the check above.
+    assert.equal(body?.get('transcript'), null, `${channel.provider} must not also post the guess`);
+    assert.equal(body?.getAll(channel.field).length, 1, `${channel.provider} must post the document once`);
+  }
+});
+
+test('an application carrying no document is unaffected by the mapping it does not need', async () => {
+  const unmapped = [
+    { provider: 'greenhouse', url: GREENHOUSE_URL, channels: [GREENHOUSE_CHANNEL] },
+    { provider: 'ashby', url: ASHBY_URL, channels: [ASHBY_CHANNEL] },
+    { provider: 'lever', url: LEVER_URL, channels: [LEVER_CHANNEL] },
+  ] as const;
+  for (const channel of unmapped) {
+    let body: FormData | undefined;
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      body = init?.body as FormData;
+      return new Response('accepted', { status: 200 });
+    };
+    const result = await tryAtsSubmissionChannel(channel.url, basePacket(), {
+      env: channelEnv([...channel.channels]),
+      fetchImpl,
+    });
+    assert.equal(result.kind, 'submitted', `${channel.provider} must still send an application with no document`);
+    assert.equal(body?.get('transcript'), null, channel.provider);
+  }
+});

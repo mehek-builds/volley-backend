@@ -1,6 +1,7 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import type { PacketAudit } from './packetAudit';
+import type { RequiredDocumentAsk } from './requiredDocuments';
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported, type AutofillApplicantSnapshot } from './portalSubmission';
 
 export type ApplicationReviewQuestion = {
@@ -494,6 +495,32 @@ export type ApplicationReviewState = {
     source?: 'applicant' | 'auto_restored';
   };
   filled_fields?: string[];
+  /* THE DOCUMENTS THIS FORM DEMANDS AND THIS RUN LEFT HER NO WAY TO GIVE IT.
+   *
+   * Beside filled_fields on purpose: that field is what the run DID leave on the form, and this is
+   * the matching account of what it could not. Derived by requiredDocumentAsks off the employer's
+   * own labels, from two sources merged at the prepare sites - the portal's "is required and is
+   * still empty" blockers that no question record answers, and required file questions the
+   * discovery pass saw.
+   *
+   * A STRUCTURED FIELD RATHER THAN attention_categories, and that choice is the feature. Reading
+   * `attention_categories.includes('required_document')` is the obvious trigger and it is wrong
+   * twice over: the classifier matched `file` inside `profile` until this shipped, and
+   * withholdInvalidLeadAlignment writes that category for a resume alignment failure that involves
+   * no document at all. See lib/requiredDocuments.ts for both, measured.
+   *
+   * Tri-state, following cover_letter_required directly above. `undefined` means no prepare on this
+   * build has measured it, which is every packet older than this field, and it must never be read
+   * as "nothing is owed". An empty array is the measured answer.
+   */
+  required_documents?: RequiredDocumentAsk[];
+  /* Whether the live form has a control a transcript could be attached to, measured mid-run.
+   *
+   * The same distinction cover_letter_supported and cover_letter_required draw, and for the same
+   * reason: "this form has a slot" and "this form will not be accepted without one" are different
+   * facts, and a gate built on the first refuses sends the employer would have taken. `undefined`
+   * means unmeasured, never false. */
+  transcript_supported?: boolean;
   preview_screenshot_url?: string;
   submission_authorization?: {
     source: 'standing_consent' | 'per_application_approval' | 'user_initiated_extension';

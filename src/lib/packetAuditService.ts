@@ -357,7 +357,6 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
     const evidence = evidenceForTerm(term, spec, review.jd_text, context);
     if (evidence) termEvidence.set(term.term, evidence);
   }
-  let hasUngroundedCoveredClause = false;
   const clauses = auditableClauses.map((clause, index) => {
     const offset = offsets[index]!;
     let rawEvidence = clause.verdict === 'met' && clause.evidence
@@ -374,7 +373,6 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
       rawEvidence = fallbackEvidence ? [fallbackEvidence] : undefined;
     }
     const groundedCovered = clause.verdict === 'met' && Boolean(rawEvidence?.length);
-    if (clause.verdict === 'met' && !groundedCovered) hasUngroundedCoveredClause = true;
     return {
       text: clause.text,
       start: offset.start,
@@ -420,14 +418,13 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
     const occurrence = occurrenceInsideClause(term, 'missing');
     if (occurrence && clauseFor(occurrence, 'missing')) terms.missing.push(occurrence);
   }
-  /* Requirement fit is evidence, not packet integrity. An unscoreable requirement says only that
-     the frozen packet cannot prove or disprove it. The audit already records that exact clause as
-     `unscoreable`, so blocking the whole packet here turns an honest unknown into a submission
-     outage. Keep failing closed on internal pending state and on any claimed coverage without one
-     exact frozen evidence pointer. Missing and unscoreable job requirements remain visible but do
-     not invalidate an otherwise exact resume, PDF, identity, answer set, or employer form. */
-  const degraded = scored.clauses.some((clause) => clause.verdict === 'pending')
-    || hasUngroundedCoveredClause;
+  /* Requirement fit is evidence, not packet integrity. A raw met verdict without one exact frozen
+     pointer has already been downgraded to `unscoreable` above, so the audit makes no unsupported
+     coverage claim. Remembering the discarded verdict here would turn that honest downgrade into
+     a submission outage. Keep failing closed on internal pending state. Missing and unscoreable job
+     requirements remain visible but do not invalidate an otherwise exact resume, PDF, identity,
+     answer set, or employer form. Judgement warnings remain available to diagnostics below. */
+  const degraded = scored.clauses.some((clause) => clause.verdict === 'pending');
   const canonicalTerms = canonicalizePacketAuditTerms(terms, review.jd_text.length);
   return {
     spec,

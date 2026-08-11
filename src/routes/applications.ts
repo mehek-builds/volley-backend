@@ -34,6 +34,8 @@ import { connectToSession, getBrowserSession, getLiveViewUrl, isBrowserbaseConfi
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
 import { storedCoverLetter } from '../lib/coverLetterService';
+import { specWithoutDocumentPointers, storedDocuments } from '../lib/documentStore';
+import { documentAsksLitosCannotResolve } from '../lib/requiredDocuments';
 import { mintDownloadToken } from '../lib/resumeAccess';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
@@ -272,6 +274,57 @@ function editableResumeSpec(value: unknown): ResumeSpec {
     throw new Error('Resume content is empty');
   }
   return spec;
+}
+
+/* Everything a resume edit must carry over from the packet it is editing.
+ *
+ * WHAT IS ABSENT FROM THIS LIST IS DELETED BY SAVING AN EDIT, silently. PATCH
+ * /applications/:id/resume rebuilds the whole packet out of `rendered.spec`, and rendered.spec is a
+ * ResumeSpec: normalizeSpec (llm/resumeSpec.ts:194) reconstructs it field by field from a fixed
+ * allowlist, so every underscore-prefixed key the stored packet carried is gone by the time it comes
+ * back. The rebuild is not adding to the spec; it is replacing it.
+ *
+ * _documents is on this list because it was left off the inline version of it. A student who
+ * attached a transcript and then fixed one bullet on the review screen lost the attachment: the
+ * PATCH answered 200, the spec came back without _documents, and the send gate then asked her for
+ * the same file again with nothing on screen to say why. Every other underscore key present in the
+ * codebase was carried; the one the newest feature added was not, because the allowlist lives at a
+ * call site nobody edits when they add a key.
+ *
+ * WHAT IS DELIBERATELY NOT HERE: _contact, _review and _quality. All three are recomputed by the
+ * edit, so carrying them forward would write the pre-edit values back over the new ones.
+ */
+const PRESERVED_APPLICATION_SPEC_KEYS = [
+  '_applicant_email',
+  '_application_email',
+  '_cover_letter',
+  '_documents',
+] as const;
+
+/**
+ * The keys above, as they stand on the stored packet, ready to spread into a rebuilt spec.
+ *
+ * A function rather than three conditional spreads inline, because the inline form cannot be
+ * tested: reaching the rebuild needs a database, a renderer and a PDF text extractor, so the one
+ * key it dropped was invisible to every test in the suite. This is callable, and
+ * resumeEditPacketCarryover.test.ts calls it with a transcript attached, with an acknowledgement
+ * that has no file, and with the whole stored packet to prove that what is missing from the list is
+ * missing on purpose. documentPacketScope.test.ts, which this comment used to name, is about a
+ * different thing entirely: whose object key a packet is allowed to spend.
+ *
+ * A key present but null is skipped rather than copied. All four are written as objects or not at
+ * all - resume.ts:1052 and :1053 spread their two in only when truthy, and the cover letter and the
+ * documents map are both written by jsonb_set with an object - so this matches the behaviour of the
+ * truthiness checks it replaces on every packet that exists, and refuses to introduce a null-valued
+ * key on any that does not.
+ */
+export function preservedApplicationSpecKeys(stored: StoredSpec): StoredSpec {
+  const preserved: StoredSpec = {};
+  for (const key of PRESERVED_APPLICATION_SPEC_KEYS) {
+    const value = stored[key];
+    if (value !== undefined && value !== null) preserved[key] = value;
+  }
+  return preserved;
 }
 
 export function applicationLeadAlignmentIssues(stored: StoredSpec, company?: string): string[] {
@@ -677,7 +730,24 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         )}`,
         file_name: fileName,
         spec: editableResumeSpec(stored),
-        application: { id: row.id, spec: stored },
+        /* THE WHOLE STORED SPEC, WHICH IS WHY IT LEAVES THROUGH THE STRIPPER.
+         *
+         * This is a second route that answers with a spec without a line of it mentioning
+         * documents, so it started serving _documents.transcript.object_key the day the first
+         * transcript was attached, exactly as GET /resume/history did. A Blob object is written
+         * `access: 'public'` because that is the only mode the SDK has, so that key plus the
+         * store's stable base URL is permanent unauthenticated access to a student's transcript -
+         * and this particular copy goes to a content script running in the employer's page origin.
+         *
+         * The extension has no use for the key either way: its only file channel is the resume
+         * capability token minted above, there is no cover-letter equivalent and there is no
+         * transcript one, so a document attached in the dashboard is not attached by the extension
+         * at all. Nothing downstream of here can spend the pointer; it could only escape.
+         *
+         * Note the RAW spec is still what extensionHandoffVersion hashes above, and has to be. That
+         * value binds the packet the extension is about to fill, and stripping a field out of the
+         * hash input would change every version string on an application that has an attachment. */
+        application: { id: row.id, spec: specWithoutDocumentPointers(stored) },
         applicant_snapshot: review.applicant_snapshot,
         packet_audit: auditVerdict.audit,
         quality: {
@@ -1074,13 +1144,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const updatedSpec = {
         ...rendered.spec,
         _contact: contact,
-        ...('_applicant_email' in stored ? { _applicant_email: stored._applicant_email } : {}),
-        ...('_application_email' in stored ? { _application_email: stored._application_email } : {}),
+        // Every stored key the edit does not recompute, from the one list that names them. Spread
+        // before _review and _quality because those two ARE recomputed and have to win.
+        ...preservedApplicationSpecKeys(stored),
         // Through settleStall like every other writer: this route can run on an application that is
       // waiting on a challenge, and abandoning that wait has to close it rather than carry an open
       // stall into a status the queue no longer looks at.
       _review: settleStall(updatedReview as ApplicationReviewState),
-        ...(stored._cover_letter ? { _cover_letter: stored._cover_letter } : {}),
         _quality: {
           ...(stored._quality as Record<string, unknown> | undefined),
           pdfGenerationBinding: createPdfGenerationBinding(rendered.spec, blob.pathname, rendered.buffer, contact.email ?? ''),
@@ -1107,7 +1177,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
 
       return reply.send({
         id: row.id,
-        spec: updatedSpec,
+        /* The rebuilt spec is now carrying _documents, so it is now a Blob pointer on the wire and
+         * has to leave through the stripper like every other spec-serializing route. The fix that
+         * kept the attachment through an edit is what put the key in this payload: before it, the
+         * rebuild dropped _documents entirely and this response was accidentally safe. */
+        spec: specWithoutDocumentPointers(updatedSpec),
         download_url: `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, blob.pathname, {
           blobUrl: blob.url,
           fileName: resumeFileNameForRole(contact.full_name, ((row.job_context ?? {}) as { role?: unknown }).role),
@@ -1549,6 +1623,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         application_id: row.id,
         review,
         cover_letter: storedCoverLetter(row),
+        // Keyed by kind, and built by the one reader that strips object_key. The spec holds the
+        // Blob pointer because the packet builder needs it; this envelope must never carry it,
+        // since a Blob object is public-read forever to anyone holding its URL.
+        documents: storedDocuments(row),
         handoff_url,
         handoff_packet_valid,
         configured: isBrowserbaseConfigured(),
@@ -1668,6 +1746,100 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(202).send({ application_id: row.id, review: review ?? current });
       }
       return reply.send({ application_id: row.id, review: next, cover_letter: storedCoverLetter(row) });
+    },
+  );
+
+  /* THE WAY OUT OF AN APPLICATION LITOS CANNOT FINISH AND CANNOT ABANDON.
+   *
+   * The stranding, exactly. A form asks for an official transcript, she presses "I've ordered it",
+   * and POST /applications/:id/documents/ordered writes `ordered_at` and nothing else - correctly,
+   * because Litos cannot make a registrar mail a sealed copy. The dashboard's send gate reads
+   * `attached_at`, so it stays closed; "Send it" is grey for the rest of that packet's life; and the
+   * modal that put her there says "This application then finishes with you rather than with Litos"
+   * while the screen it returns to has no control that finishes anything. The same dead end reaches
+   * ready_for_final_approval from the other direction when `transcript_supported` is false: the
+   * employer's form has no upload control Litos can fill, so no file she adds here changes the state.
+   *
+   * NO NEW STATE IS INVENTED. This lands on 'submitted' with a receipt whose source is
+   * 'attended_handoff' and whose text names HER as the witness, which is exactly what
+   * handoff-complete's 'submitted' arm and the unverified-submission route already write for the two
+   * other cases where a person, not Litos, saw the application land. Litos does not manufacture a
+   * confirmation it never saw, and the receipt says so in its own words.
+   *
+   * IT IS NOT A GENERAL "MARK ANYTHING SUBMITTED" DOOR, and the gate is what keeps it from becoming
+   * one. It answers only for a packet parked at ready_for_final_approval that is held on a measured
+   * document ask no upload can clear. An application she could still finish inside Litos has a
+   * working control already and gets a 409 here, so this cannot become the quiet way past a send
+   * gate that is doing its job.
+   */
+  fastify.post(
+    '/applications/:id/submission/self-submitted',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const current = readApplicationReview(row.spec);
+      if (!current || current.status !== 'ready_for_final_approval') {
+        return reply.status(409).send({ error: 'This application is not waiting for you to send it' });
+      }
+      const unresolvable = documentAsksLitosCannotResolve(current, storedDocuments(row));
+      if (unresolvable.length === 0) {
+        return reply.status(409).send({
+          error: 'Litos can still finish this one. Review the filled form and send it from here.',
+        });
+      }
+      const now = new Date().toISOString();
+      /* applyReviewPatch, not a spread, for the reason every other terminal write in this file gives:
+         the shared merge is where withTerminalCause enforces that a terminal state carries a cause,
+         and three production rows reached 'failed' with no stated reason when a route built its own
+         review object. */
+      const next = applyReviewPatch(current, {
+        status: 'submitted',
+        submitted_at: now,
+        attention_reason: undefined,
+        attention_categories: undefined,
+        submission_error: undefined,
+        receipt: {
+          /* Named for what it is. The document the employer required is one Litos had no way to put
+             on their form, so the application was completed by her; the receipt must not read as if
+             Litos watched it land. */
+          confirmation_text: 'Confirmed by you: this employer asked for a document Litos could not '
+            + 'attach, so you sent this application yourself.',
+          final_url: current.portal_url ?? '',
+          captured_at: now,
+          source: 'attended_handoff',
+        },
+      }, () => now);
+      const submitted = await db.update(generated_resumes)
+        .set({
+          spec: reviewSpec(next),
+          pipeline_stage: 'applied',
+          pipeline_stage_at: new Date(now),
+        })
+        .where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          // Conditional on the status this answered for, so a send that started somewhere else in
+          // the meantime is not overwritten by an answer about the screen before it.
+          sql`${generated_resumes.spec}->'_review'->>'status' = 'ready_for_final_approval'`,
+        ))
+        .returning({ id: generated_resumes.id });
+      if (submitted.length === 0) {
+        const refreshed = await ownedResume(request, reply);
+        if (!refreshed) return;
+        return reply.status(202).send({
+          application_id: row.id,
+          review: readApplicationReview(refreshed.spec) ?? current,
+        });
+      }
+      return reply.send({
+        application_id: row.id,
+        review: next,
+        cover_letter: storedCoverLetter(row),
+        // Carried so the screen this answers keeps the marks it was drawing. Built by the reader that
+        // strips object_key, like every other envelope in this file.
+        documents: storedDocuments(row),
+      });
     },
   );
 

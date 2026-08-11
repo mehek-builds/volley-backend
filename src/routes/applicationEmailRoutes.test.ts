@@ -63,8 +63,19 @@ test('only a configured route turns a missing alias into a refusal', () => {
 });
 
 test('dashboard resume edits preserve both immutable application email keys', () => {
-  assert.match(applicationsRoute, /'_applicant_email' in stored \? \{ _applicant_email: stored\._applicant_email \} : \{\}/);
-  assert.match(applicationsRoute, /'_application_email' in stored \? \{ _application_email: stored\._application_email \} : \{\}/);
+  /* This used to pin the two conditional spreads that carried these keys through the rebuild, one
+   * regex each. They are now two entries in PRESERVED_APPLICATION_SPEC_KEYS, which is the same
+   * guarantee reached from the other end: the rebuild names one list instead of a spread per key.
+   *
+   * The list, not the spreads, because the inline form had already lost a key. `_documents` was
+   * added by the transcript work and the rebuild's allowlist was not touched, so saving an edit
+   * silently detached an attached transcript - the same failure this test exists to prevent for
+   * these two, arriving at the one key nobody had written a pin for. There is a behavioural test
+   * of the carry-over in resumeEditPacketCarryover.test.ts, and it measures the list against every
+   * underscore key any module reads off a spec, so the next one cannot be forgotten either. */
+  assert.match(applicationsRoute, /const PRESERVED_APPLICATION_SPEC_KEYS = \[[\s\S]*?'_applicant_email',[\s\S]*?\] as const;/);
+  assert.match(applicationsRoute, /const PRESERVED_APPLICATION_SPEC_KEYS = \[[\s\S]*?'_application_email',[\s\S]*?\] as const;/);
+  assert.match(applicationsRoute, /\.\.\.preservedApplicationSpecKeys\(stored\),/);
 });
 
 test('application inbox schema and webhook route are registered', () => {
@@ -189,7 +200,7 @@ test('employer mail is stored before the strict forwarding whitelist is applied'
   assert.doesNotMatch(handler, /inbound: input/);
   const verificationReader = readFileSync('src/lib/emailVerification.ts', 'utf8');
   assert.match(verificationReader, /from\(application_email_messages\)/);
-  assert.match(verificationReader, /extractLitosVerificationCode\(rows/);
+  assert.match(verificationReader, /extractLitosVerificationCode\(\s*rows/);
 });
 
 test('the forwarding destination is a stored preference, not the login address', () => {

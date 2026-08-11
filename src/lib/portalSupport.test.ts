@@ -343,7 +343,14 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(resumeRoute, /monitored_jobs\.apply_url/);
   assert.match(resumeRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
   assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
-  assert.match(resumeRoute, /spec: refreshedHistorySpec\(repairedHistorySpec\(row, monitoredJobs\), profile, row\.job_context\)/);
+  // The composition is now wrapped by specWithoutDocumentPointers, which strips the Blob pointers a
+  // fifty-row spec payload was carrying (routes/documentResponseContract.test.ts owns that half).
+  // The pin here is unchanged in what it proves: the REPAIRED spec, and not row.spec, is what the
+  // response is built from, because a repair nothing serializes is a repair that did not happen.
+  assert.match(
+    resumeRoute,
+    /spec: specWithoutDocumentPointers\(\s*refreshedHistorySpec\(repairedHistorySpec\(row, monitoredJobs\), profile, row\.job_context\),\s*\)/,
+  );
   const applicationsRoute = routeSource('applications.ts');
   const repairSource = libSource('applicationPortalRepair.ts');
   // Packets created from monitored jobs can outlive a bad or stale review URL. Before declaring the

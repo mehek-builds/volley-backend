@@ -1,6 +1,11 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { jobExtractBodySchema, clipJdText, MAX_JD_TEXT_CHARS } from './jobExtract';
+import {
+  jobExtractBodySchema,
+  clipJdText,
+  jobDescriptionSourceUrl,
+  MAX_JD_TEXT_CHARS,
+} from './jobExtract';
 
 // POST /jobs/extract lets "New application" go from a pasted URL to a reviewable JD without a
 // side-channel copy-paste step (2026-07-24 product decision). No live network/DB in the test env
@@ -54,5 +59,52 @@ describe('clipJdText', () => {
     assert.equal(clipJdText(undefined), '');
     assert.equal(clipJdText(null), '');
     assert.equal(clipJdText(''), '');
+  });
+});
+
+describe('jobDescriptionSourceUrl', () => {
+  test('reads an exact Workable application URL from its job overview instead of the candidate form', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://apply.workable.com/remote-recruitment/j/D4CA268A39/apply/'),
+      'https://apply.workable.com/remote-recruitment/j/D4CA268A39/',
+    );
+  });
+
+  test('drops application-form tracking state when moving to the Workable overview', () => {
+    assert.equal(
+      jobDescriptionSourceUrl(
+        'https://apply.workable.com/remote-recruitment/j/D4CA268A39/apply?utm_source=board#application',
+      ),
+      'https://apply.workable.com/remote-recruitment/j/D4CA268A39/',
+    );
+  });
+
+  test('reads an exact bare Workable account-feed application URL from its job overview', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://apply.workable.com/j/57B10F8875/apply'),
+      'https://apply.workable.com/j/57B10F8875/',
+    );
+  });
+
+  test('drops query and fragment state from an exact bare Workable application URL', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://apply.workable.com/j/57B10F8875/apply/?source=feed#application'),
+      'https://apply.workable.com/j/57B10F8875/',
+    );
+  });
+
+  test('does not rewrite non-form Workable paths or other origins', () => {
+    for (const url of [
+      'https://apply.workable.com/remote-recruitment/j/D4CA268A39/',
+      'https://apply.workable.com/remote-recruitment/j/D4CA268A39/apply/extra',
+      'https://apply.workable.com/j/57B10F8875/?source=feed#overview',
+      'https://apply.workable.com/j/57B10F8875/apply/extra?source=feed#application',
+      'https://apply.workable.com/remote-recruitment/jobs/view/D4CA268A39',
+      'https://apply.workable.com:444/remote-recruitment/j/D4CA268A39/apply',
+      'https://www.workable.com/remote-recruitment/j/D4CA268A39/apply',
+      'https://example.com/remote-recruitment/j/D4CA268A39/apply',
+    ]) {
+      assert.equal(jobDescriptionSourceUrl(url), url);
+    }
   });
 });

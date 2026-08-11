@@ -540,8 +540,10 @@ test('submission runner requires confirmation proof before any receipt can be re
  */
 test('no continuation may carry a code that came from outside the run', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  assert.equal((source.match(/continueManagedBrowser\(/g) ?? []).length, 1,
-    'one held session, one answer: a second call site would mean a second submit');
+  assert.equal((source.match(/continueManagedBrowser\(continuationToken, codeActions\)/g) ?? []).length, 1,
+    'one held verification session, one code answer: a second code call site would mean a second submit');
+  assert.equal((source.match(/continueManagedBrowser\(continuationToken, \[\], \{ screenshot: true \}\)/g) ?? []).length, 1,
+    'the only other continuation is a read-only receipt observation with no actions');
   // The supplied code survives in exactly one place, and it is not an action list.
   const branch = source.indexOf('if (options.securityCode && initialChallenge) {');
   assert.ok(branch > 0, 'the supplied code is still fingerprinted, so the same dead code cannot resend');
