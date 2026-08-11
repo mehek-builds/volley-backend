@@ -22,8 +22,14 @@ type ResumeRow = typeof generated_resumes.$inferSelect;
  * the population applications.ts already describes as curable only by regenerating. A rebuildable
  * packet never reaches this sentence; it is rebuilt and sent.
  */
+/* THE CAUSE IS DESCRIBED AS USUAL, NOT AS CERTAIN. Three conditions reach this sentence: no reply
+   route frozen on the resume, no content left in the spec, and a render whose page would not be
+   sound. All 78 refusals measured across the whole corpus on 2026-08-11 were the first, so naming
+   it helps, but stating it flatly would make the sentence a lie on the day one of the other two
+   fires. Same discipline as the cause-neutral noSubmitControl wording in submissionRunner. The
+   recovery is the same either way, so nothing is lost by not claiming more than is known. */
 export const PACKET_EXPIRED_REASON =
-  'The resume file for this application is no longer stored and Litos could not rebuild it, so nothing was sent to the employer. Litos deletes the resumes it generates after 30 days, and this one cannot be remade because the saved application has no email address or phone number on it. Regenerate this application and send it again.';
+  'The resume file for this application is no longer stored and Litos could not rebuild it from what is saved, so nothing was sent to the employer. Litos deletes the resumes it generates after 30 days, and a saved application with no email address or phone number on it cannot be remade, which is normally what has happened here. Regenerate this application and send it again.';
 
 /**
  * Restoring the file a 30-day-old packet no longer has, so it can still be sent.

@@ -508,6 +508,21 @@ export async function currentPacketAudit(
     questions?: readonly ApplicationReviewQuestion[];
     loadPdf?: PdfLoader;
     validateApplicantEmail?: (row: ResumeRow) => Promise<void>;
+    /**
+     * Whether this call may REBUILD a packet whose file aged out of the 30-day window.
+     *
+     * Defaults to false, and the default is the safety property. Restoring writes: it puts a new
+     * blob and re-issues the generation binding, the audit, and the acknowledgement. The
+     * acknowledgement is what authorizes a send, so writing one on a read would let a packet the
+     * applicant merely LOOKED at become sendable by the unattended runner under standing consent,
+     * and would resurrect a deleted file for browsing, which the retention promise says does not
+     * happen. Only callers that are actually authorizing a send pass true.
+     *
+     * Off-by-default is also the safe direction to be wrong in. A send path that forgets to opt in
+     * keeps the pre-existing expired-packet refusal, which is a visible stop; a read path that
+     * forgot to opt out would silently write.
+     */
+    restoreExpiredResume?: boolean;
   } = {},
 ): Promise<PacketAuditVerdict> {
   /* FIRST, BEFORE ANY OTHER CHECK, because every check below reads either the stored PDF or a
@@ -516,7 +531,19 @@ export async function currentPacketAudit(
      call sites in routes/applications.ts funnel through here, which is why the restore lives at
      this line instead of at each of them. Idempotent: when the file is present it resolves and
      returns immediately, which is every call but the rare one. */
-  const restore = await restoreExpiredPacketResume(row, { persistAudit: createAndPersistPacketAudit });
+  const restore = options.restoreExpiredResume
+    ? await restoreExpiredPacketResume(row, {
+    persistAudit: createAndPersistPacketAudit,
+    /* THE RESTORE MUST AGREE WITH THIS CALL'S OWN LOADER about whether the file exists. A caller
+       that injects loadPdf (every test here, and any path that already holds the bytes) would
+       otherwise have the presence check fall through to resolveBlobUrl and hit the network, decide
+       the file was missing, and rebuild a packet the injected loader can serve perfectly well.
+       Derived from loadPdf rather than given its own option so the two can never disagree. */
+    resolveObjectUrl: options.loadPdf
+      ? async (key) => (await options.loadPdf!(key).then(() => 'present').catch(() => null))
+      : undefined,
+    })
+    : { restored: false as const, row };
   if ('unrecoverable' in restore) {
     return { valid: false, code: 'PACKET_RESUME_EXPIRED', reason: PACKET_EXPIRED_REASON };
   }
@@ -574,6 +601,8 @@ export async function currentAcknowledgedPacketAudit(
     questions?: readonly ApplicationReviewQuestion[];
     loadPdf?: PdfLoader;
     validateApplicantEmail?: (row: ResumeRow) => Promise<void>;
+    /** Forwarded verbatim. See currentPacketAudit for why this is off by default. */
+    restoreExpiredResume?: boolean;
   } = {},
 ): Promise<PacketAuditVerdict> {
   const verdict = await currentPacketAudit(row, options);

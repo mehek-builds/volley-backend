@@ -184,44 +184,99 @@ describe('rebuilding an expired packet resume from the row', () => {
   });
 });
 
-describe('the recovery is wired at the producer, not at one call site', () => {
-  /* buildPacket has a dozen callers (prepare, submit, the security-code finish, controlled tests,
-     the API channel, the extension handoff). renderResumePdf's own contact guard states the rule
-     this follows: a check written on one path leaves the next to be discovered from an employer.
-     These are source assertions because buildPacket needs a database to run, and the property being
-     pinned is structural rather than behavioural. */
-  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+describe('the restore is wired at the packet-audit gate, not at buildPacket', () => {
+  /* THIS BLOCK REPLACES ONE THAT ASSERTED THE OPPOSITE, and the reason is the whole point of the
+     design. The recovery was first written into buildPacket, at the producer, on the rule that a
+     check on one path leaves the next to be found from an employer. That rule is right and the
+     placement was still wrong: currentPacketAudit and currentAcknowledgedPacketAudit both load
+     resume_object_key and refuse before ANY buildPacket call site runs, so the producer is
+     downstream of the refusal and a recovery there can never execute. The audit is the real choke
+     point: prepare(), submit(), and all thirteen audit call sites in routes/applications.ts pass
+     through it. Source assertions, because these functions need a database to run. */
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const auditService = readFileSync('src/lib/packetAuditService.ts', 'utf8');
+  const restore = readFileSync('src/lib/packetResumeRestore.ts', 'utf8');
 
-  test('buildPacket recovers the resume instead of letting the expired error out', () => {
-    assert.match(source, /resumeBytesForPacket\(row\.resume_object_key, controlledTest\)\s*\n\s*\.catch\(/);
-    assert.match(source, /return rerenderFrozenResume\(\{ spec: stored, jdText: review\.jd_text \?\? '', role: review\.role \}\)/);
+  test('the restore runs inside the audit, ahead of every check that reads the stored PDF', () => {
+    /* Sliced to the function body, not searched across the file: PACKET_AUDIT_REQUIRED also appears
+       in the PacketAuditFailure type union hundreds of lines above, and comparing against that
+       occurrence passed the ordering check while proving nothing. */
+    const body = auditService.slice(
+      auditService.indexOf('export async function currentPacketAudit('),
+      auditService.indexOf('export async function currentAcknowledgedPacketAudit('),
+    );
+    const call = body.indexOf('restoreExpiredPacketResume(row');
+    const auditRequired = body.indexOf("code: 'PACKET_AUDIT_REQUIRED'");
+    const load = body.indexOf('options.loadPdf ?? defaultPdfLoader');
+    assert.ok(call > 0, 'the audit must attempt the retention restore');
+    assert.ok(auditRequired > 0 && load > 0, 'the slice must actually contain the checks being ordered');
+    assert.ok(call < auditRequired && call < load,
+      'a packet past its window has no PDF and no valid records until it is rebuilt, so the restore leads');
+  });
+
+  test('buildPacket no longer rebuilds, because bytes it invented would not be the audited bytes', () => {
+    /* renderResumePdf is not byte-deterministic, and three records bind the exact bytes. A rebuild
+       here would have the audit verifying one document and the employer receiving another. */
+    assert.doesNotMatch(runner, /resumeBytesForPacket\([^)]*\)\s*\n\s*\.catch\(/);
+    assert.doesNotMatch(runner, /rerenderFrozenResume\(/);
+  });
+
+  test('callers use the row the audit returns, never the one they passed in', () => {
+    /* A restored packet has a NEW resume_object_key. A caller that keeps its own copy assembles the
+       packet from the key the sweep deleted, which is the failure this whole change exists to end. */
+    assert.match(runner, /row = packetAudit\.row;/);
+    assert.match(auditService, /pdfBytes: loaded\.bytes, row \}/);
+    assert.match(auditService, /readApplicationReview\(verdict\.row\.spec\)\?\.packet_audit_acknowledgement/);
+  });
+
+  test('an expired packet is filed as packet_expired, not as an evidence gap', () => {
+    assert.match(runner, /packetAudit\.code === 'PACKET_RESUME_EXPIRED'/);
+  });
+
+  test('the restore persists and re-issues all three records bound to the bytes', () => {
+    /* Generation binding, packet audit, acknowledgement. Re-issuing two of three leaves the packet
+       in a half-state whose file is new and whose audit still describes the deleted one. */
+    assert.match(restore, /put\(objectKey, bytes/);
+    assert.match(restore, /pdfGenerationBinding: createPdfGenerationBinding\(/);
+    assert.match(restore, /dependencies\.persistAudit\(refreshed\)/);
+    assert.match(restore, /packet_audit_acknowledgement: \{/);
+    assert.match(restore, /source: 'auto_restored'/);
+  });
+
+
+  test('rebuilding is opt-in, and the read routes do not opt in', () => {
+    /* Restoring WRITES: a new blob, and a re-issued acknowledgement, which is the record that
+       authorizes a send. Doing that on a GET would let a packet the applicant merely looked at
+       become sendable by the unattended runner under standing consent, and would resurrect a
+       deleted file for browsing. Both GET audit call sites must stay on the default. */
+    const applications = readFileSync('src/routes/applications.ts', 'utf8');
+    const getRoutes = [
+      "'/applications/:id/submission/extension-packet'",
+      "'/applications/:id/submission'",
+    ];
+    for (const route of getRoutes) {
+      const start = applications.indexOf(route);
+      assert.ok(start > 0, `${route} should still exist`);
+      const body = applications.slice(start, start + 4000);
+      const audit = body.indexOf('currentAcknowledgedPacketAudit(');
+      assert.ok(audit > 0, `${route} should still audit`);
+      const call = body.slice(audit, audit + 200);
+      assert.doesNotMatch(call, /restoreExpiredResume/,
+        `${route} is a read and must not rebuild or re-acknowledge a packet`);
+    }
+    // And the send paths must opt in, or the expired packet is never fixed at all.
+    const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+    assert.match(runner, /currentPacketAudit\(row, \{ restoreExpiredResume: true \}\)/);
+    assert.match(runner, /currentAcknowledgedPacketAudit\(row, \{ restoreExpiredResume: true \}\)/);
+  });
+
+  test('the write is guarded on the old key, so two runners cannot both restore', () => {
+    assert.match(restore, /eq\(generated_resumes\.resume_object_key, row\.resume_object_key\)/);
   });
 
   test('the rebuild is handed the frozen row, never the live profile', () => {
-    /* `stored` is row.spec. If this ever becomes `parsed` or a profile read, an employer starts
-       receiving a document the applicant never approved, and the education guard starts comparing
-       the packet against itself. */
-    assert.doesNotMatch(source, /rerenderFrozenResume\(\{ spec: parsed/);
-    assert.doesNotMatch(source, /rerenderFrozenResume\(\{ spec: profileRow/);
-  });
-
-  test('only the resume expiry is recovered here, and other failures still propagate', () => {
-    assert.match(
-      source,
-      /if \(!\(error instanceof PacketDocumentExpiredError\) \|\| error\.document !== 'resume'\) throw error;\s*\n\s*return rerenderFrozenResume/,
-    );
-  });
-
-  test('nothing is written back to storage on the recovery path', () => {
-    /* The promise stays literally true only while the rebuilt bytes are never persisted: the file
-       stays deleted and old links stay dead. A put() reachable from here would restart a retention
-       clock as a side effect of sending, and resurrect a document for browsing. */
-    const start = source.indexOf('const resume = await resumeBytesForPacket');
-    const end = source.indexOf('const fullName =', start);
-    assert.ok(start > 0 && end > start);
-    const recoveryRegion = source.slice(start, end);
-    assert.doesNotMatch(recoveryRegion, /\bput\(/);
-    assert.doesNotMatch(recoveryRegion, /db\.update\(/);
+    assert.match(restore, /spec: row\.spec/);
+    assert.doesNotMatch(restore, /rerenderFrozenResume\(\{\s*spec: parsed/);
   });
 });
 

@@ -446,7 +446,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'This application can no longer be audited before submission' });
       }
       try {
-        const cached = await currentPacketAudit(row);
+        const cached = await currentPacketAudit(row, { restoreExpiredResume: true });
         if (!cached.valid) {
           const allowed = await allowHourly(request.jwtPayload!.userId, 'packet-audit', LIMITS.perHour.packetAudit);
           if (!allowed) return rateLimitedReply(reply);
@@ -501,7 +501,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!review || review.submission_claimed_at || review.status === 'submitted') {
         return reply.status(409).send({ error: 'This application cannot be acknowledged in its current state' });
       }
-      const verdict = await currentPacketAudit(row);
+      const verdict = await currentPacketAudit(row, { restoreExpiredResume: true });
       if (!verdict.valid) return reply.status(409).send({ error: verdict.reason, code: verdict.code });
       const audit = verdict.audit;
       if (parsed.data.audit_digest !== audit.audit_digest
@@ -552,7 +552,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // repeats every live packet check instead of trusting the audit object or URL held in React:
       // currentAcknowledgedPacketAudit revalidates the exact PDF/spec/JD/answers, current personal
       // resume email, and active owner/application Litos alias before any company URL is disclosed.
-      const audit = await currentAcknowledgedPacketAudit(row);
+      const audit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: true });
       if (!audit.valid) return reply.status(409).send({ error: audit.reason, code: audit.code });
 
       // PDF and alias verification perform external reads. Re-read the owner-scoped row after
@@ -740,7 +740,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         }
       }
       if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
-        const auditVerdict = await currentAcknowledgedPacketAudit(precheckRow);
+        const auditVerdict = await currentAcknowledgedPacketAudit(precheckRow, { restoreExpiredResume: true });
         if (!auditVerdict.valid) {
           return reply.status(409).send({ error: auditVerdict.reason, code: auditVerdict.code });
         }
@@ -1328,7 +1328,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.portal_url && !isPortalSupported(current.portal_url) && sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
-      const submitAudit = await currentAcknowledgedPacketAudit(row, { questions: normalizedSubmittedQuestions });
+      const submitAudit = await currentAcknowledgedPacketAudit(row, { questions: normalizedSubmittedQuestions, restoreExpiredResume: true });
       if (!submitAudit.valid) {
         return reply.status(409).send({ error: submitAudit.reason, code: submitAudit.code });
       }
@@ -1759,7 +1759,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         stored,
         applicationCompany(row),
       ));
-      const approvalAudit = await currentAcknowledgedPacketAudit(row, { questions: approvalReview.questions });
+      const approvalAudit = await currentAcknowledgedPacketAudit(row, { questions: approvalReview.questions, restoreExpiredResume: true });
       if (!approvalAudit.valid) approvalIssues.push(approvalAudit.reason);
       if (approvalIssues.length > 0) {
         return reply.status(422).send({
@@ -1838,7 +1838,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     async (request: FastifyRequest, reply: FastifyReply) => {
       const row = await ownedResume(request, reply);
       if (!row) return;
-      const securityCodeAudit = await currentAcknowledgedPacketAudit(row);
+      const securityCodeAudit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: true });
       if (!securityCodeAudit.valid) {
         return reply.status(409).send({
           error: securityCodeAudit.reason,

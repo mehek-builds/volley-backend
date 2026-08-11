@@ -2350,20 +2350,20 @@ async function prepareManagedAttendedAccountGate(
   }, 'Application held at an attended account gate without operating it');
 }
 
-async function prepare(inputRow: ResumeRow, fastify: FastifyInstance, unattended = false) {
-  let current = readApplicationReview(inputRow.spec);
+async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
+  let current = readApplicationReview(row.spec);
   if (!current) throw new Error('We do not have a link to the company application page');
-  current = await repairReviewPortalFromMonitoredJob(inputRow, current);
+  current = await repairReviewPortalFromMonitoredJob(row, current);
   /* The audit is also where a packet past its retention window gets its file rebuilt, so the row it
      returns can carry a NEW resume_object_key. Everything below reads from that row, never from
      inputRow, or the run assembles a packet from the key the sweep deleted. */
-  const packetAudit = await currentPacketAudit(inputRow);
+  const packetAudit = await currentPacketAudit(row, { restoreExpiredResume: true });
   if (!packetAudit.valid) {
     fastify.log.warn(
-      { applicationId: inputRow.id, code: packetAudit.code },
+      { applicationId: row.id, code: packetAudit.code },
       'Application preparation withheld because the exact packet audit is missing or stale',
     );
-    await writeReview(inputRow, nextReview(current, {
+    await writeReview(row, nextReview(current, {
       status: 'needs_attention',
       attention_reason: packetAudit.reason,
       /* An expired packet is not an evidence gap. It gets the category whose next step is the one
@@ -2375,7 +2375,7 @@ async function prepare(inputRow: ResumeRow, fastify: FastifyInstance, unattended
     }));
     return;
   }
-  const row = packetAudit.row;
+  row = packetAudit.row;
   const stored = row.spec as StoredSpec;
   const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
   // Re-read: a retention restore rewrote _review with a fresh audit and acknowledgement.
@@ -2874,14 +2874,13 @@ const SECURITY_CODE_MAILBOX_DELAY_MS = 3_000;
 // Threaded through submit() rather than given its own run, so the finishing path inherits every
 // guard this one already has: the authorization check, the claim, the daily cap, the portal gates,
 // the ATS channel and the CAPTCHA probe. A parallel path would inherit none of them.
-async function submit(inputRow: ResumeRow, fastify: FastifyInstance, options: {
+async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
   securityCode?: string;
   claimAlreadyHeld?: boolean;
 } = {}) {
-  let row = inputRow;
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
-  const packetAudit = await currentAcknowledgedPacketAudit(row);
+  const packetAudit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: true });
   if (!packetAudit.valid) {
     const finishingSecurityCode = Boolean(options.securityCode) && Boolean(current.security_code);
     fastify.log.error(
