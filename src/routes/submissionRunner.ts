@@ -1639,6 +1639,42 @@ export function describeDiscoveryFailure(error: unknown): string {
 }
 
 /**
+ * ONE CONTROL LITOS COULD NOT READ, NAMED ON ITS OWN.
+ *
+ * This used to be a run-level admission. A single control whose option list came back unreadable was
+ * pushed into `discoveryFailures`, which is the whole-form honesty gate, so the packet said "we could
+ * not read the questions this form asks" and every OTHER custom question on the same form was
+ * treated as unread too.
+ *
+ * Measured on IMC packet 920a6751, 2026-08-11: `question_9177934101` legitimately failed its option
+ * read (its list was windowed at the render cap). The graduation control beside it,
+ * `question_9176667101`, read fine and its answer snapped correctly to "January 2028 - July 2028".
+ * The run then declared the form unread, the snapped answer was thrown away for a blind alias ladder
+ * that fired "May 2028" and "Spring 2028", and the field came back required and still empty. One bad
+ * control cost the applicant every good one.
+ *
+ * The honesty the old code was protecting is kept, at the scope it actually belongs to: the failed
+ * control is still removed from `discoveredFields` before any alias resolution, still carried in
+ * `packet.failedFields` so no action can target it, and still named here so she can see it. What it
+ * no longer does is speak for controls it knows nothing about.
+ *
+ * The label is preferred over the durable id because it is the only half of the pair she can find on
+ * the page; the id is the fallback for a control discovery reported without one.
+ */
+export function optionProbeAttentionReasons(
+  failures: readonly { controlId: string; reason: string }[],
+  failedFields: readonly { controlId: string; label?: string }[],
+): string[] {
+  const labelById = new Map(failedFields.map((field) => [field.controlId, field.label?.trim()]));
+  return failures.map(({ controlId, reason }) => {
+    const label = labelById.get(controlId);
+    const named = label ? `"${label.slice(0, 80)}"` : `the control ${controlId.slice(0, 80)}`;
+    return `Litos could not read the choices ${named} offers, so it was left for you rather than `
+      + `answered with a guess (${reason.slice(0, 160)}). The other questions on this form are unaffected.`;
+  });
+}
+
+/**
  * What the run owes the applicant about its own blind spots, in her words.
  *
  * Two separate admissions, and they are not the same failure. The first is "the scan did not run";
@@ -1781,9 +1817,15 @@ async function prepareManaged(
     optionProbeBatchFailures,
     discoveryRoleCapability,
   );
+  /* NOT pushed into discoveryFailures. See optionProbeAttentionReasons for the measurement: that
+   * array is the WHOLE-FORM honesty gate, and a per-control read failure promoted into it made Litos
+   * say it could not read any of this form's questions, which sent every correctly read control on
+   * the same page back to a blind alias ladder. The failure is real and stays visible; its scope is
+   * the one control it happened to. */
   if (optionProbe.failures.length > 0) {
-    discoveryFailures.push(
-      `closed-control option discovery failed: ${optionProbe.failures.map(({ controlId, reason }) => `${controlId}: ${reason}`).join('; ').slice(0, 800)}`,
+    fastify.log.error(
+      { applicationId: row.id, portal, controls: optionProbe.failures },
+      'Closed controls whose option list could not be read, so each one alone is left for the applicant',
     );
   }
   const fieldOptions = optionProbe.options;
@@ -1792,6 +1834,7 @@ async function prepareManaged(
     if (!controlId || !optionProbe.failedIds.has(controlId)) return [];
     return [{ controlId, label: field.label, selector: field.selector, inputType: field.inputType }];
   });
+  const optionProbeAttention = optionProbeAttentionReasons(optionProbe.failures, failedFields);
   const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
     .filter((field) => {
       const controlId = managedOptionProbeControlId(field);
@@ -2032,6 +2075,7 @@ async function prepareManaged(
     ...answerLossReasons,
     ...unexplainedAnswerReasons,
     ...budgetShortfallReasons,
+    ...optionProbeAttention,
     ...honestyReasons,
   ];
   const attentionCategories = attentionCategoriesForReasons(attentionReasons);
@@ -2048,11 +2092,18 @@ async function prepareManaged(
   // call, so this is the only thing between an unanswered required question and a click on this
   // path. Not safe means ready_for_final_approval, where she is shown the blank question and can
   // answer it - which is exactly the loop the run gate had no exit from.
+  //
+  // The optionProbe term holds the send for exactly as long as it did while a per-control read
+  // failure was promoted to the run level. Narrowing the blast radius of the MESSAGE is not
+  // permission to send a form carrying a question Litos knowingly left blank. It reads the failure
+  // ARRAY rather than the rendered prose, for the reason the direct path's comment below gives: a
+  // sentence that renders to nothing must never be able to restore `safe`.
   const unansweredRequiredQuestions = blankRequiredQuestionLabels(mergedQuestions);
   const safe = blockers.length === 0
     && discoveryAttention.length === 0
     && evidenceBlockers.length === 0
     && discoveryFailures.length === 0
+    && optionProbe.failures.length === 0
     && coverLetterAttention.length === 0
     // A question the run never attempted is an answer she gave Litos and Litos did not use. The
     // submit path refuses outright rather than trade one away; this is the same refusal on the path

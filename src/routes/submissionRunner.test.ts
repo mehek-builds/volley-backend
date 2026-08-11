@@ -12,6 +12,7 @@ import {
   isProviderSessionFailureMessage,
   mergeDiscoveredPortalQuestions,
   managedExtensionHandoffUrl,
+  optionProbeAttentionReasons,
   packetUsesControlledResumeFixture,
   preparationEvidenceBlockers,
   reconcileManagedProviderBlockers,
@@ -33,7 +34,13 @@ import {
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { describeRequiredBlocker } from '../lib/fieldLabel';
-import { detectPortal } from '../lib/portalSubmission';
+import {
+  attachManagedFieldOptions,
+  buildManagedPortalActions,
+  detectPortal,
+  managedOptionProbeAnalysis,
+  reactSelectListboxSelector,
+} from '../lib/portalSubmission';
 import {
   CONTROLLED_PORTAL_BINDING_PARAM,
   controlledPortalBinding,
@@ -1861,7 +1868,13 @@ test('neither prepare path can call a form safe on the strength of a scan that f
    * same reason the other two do. Unlike the old fallback, a missing option list is not permission
    * to send a guessed alias into a closed employer control. */
   assert.equal(runner.match(/describeDiscoveryFailure\(error\)/g)?.length, 3);
-  assert.match(runner, /closed-control option discovery failed:/);
+  /* AND IT IS NOT A WHOLE-FORM FAILURE. A per-control option read that failed used to be pushed into
+   * discoveryFailures, which is this run-level array, so one unreadable control made the packet say
+   * Litos could not read ANY of the form's questions and sent every correctly read control on the
+   * same page back to a blind alias ladder. Measured on IMC packet 920a6751. The failure still holds
+   * the send and still reaches her; it now names only the control it happened to. */
+  assert.doesNotMatch(runner, /discoveryFailures\.push\(\s*\n?\s*`closed-control option discovery failed/);
+  assert.doesNotMatch(runner, /closed-control option discovery failed:/);
   assert.match(runner, /const discoveryRoleCapability = managedResultSupportsDiscoveryRole\(discoveryResult\)/);
   assert.match(runner, /buildManagedDiscoveredOptionProbeBatches\([\s\S]{0,300}discoveryRoleCapability/);
   assert.match(runner, /managedOptionProbeAnalysis\([\s\S]{0,500}discoveryRoleCapability/);
@@ -1885,6 +1898,187 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   // arithmetic around it.
   assert.match(runner, /&& discoveryFailures\.length === 0/);
   assert.match(runner, /attentionCount:[^\n]*\+ discoveryFailures\.length/);
+  // The per-control failure keeps both halves of that same contract at its own scope: it reaches her
+  // attention list, and it holds the send off the failure ARRAY rather than off the rendered prose.
+  assert.match(runner, /\.\.\.optionProbeAttention,/);
+  assert.match(runner, /&& optionProbe\.failures\.length === 0/);
+});
+
+/* THE IMC FIXTURE. Packet 920a6751, read off the live form on 2026-08-11.
+ *
+ * Two closed controls on one Greenhouse page. `question_9177934101` renders more choices than the
+ * option probe's window, so its list genuinely cannot be read. `question_9176667101` beside it reads
+ * perfectly, and its answer snaps to the employer's own wording, "January 2028 - July 2028".
+ *
+ * The failed one used to be promoted into `discoveryFailures`, which is the run-level honesty gate,
+ * so the packet declared that Litos could not read the questions this form asks AT ALL. The snapped
+ * graduation answer was thrown away, a blind alias ladder fired in its place, and the field came back
+ * to her as required and still empty. One control the employer chose to render long cost her every
+ * control on the page that had been read correctly.
+ *
+ * This walks the real chain prepareManaged walks, minus the browser: probe analysis, option
+ * attachment, the failed-control filter, resolution, the question merge, and the action list. */
+const IMC_UNREADABLE_ID = 'question_9177934101';
+const IMC_GRADUATION_ID = 'question_9176667101';
+const IMC_GRADUATION_OPTIONS = [
+  'July 2027 - December 2027',
+  'January 2028 - July 2028',
+  'August 2028 - December 2028',
+];
+
+function imcOptionProbe() {
+  const discovered = [
+    {
+      label: 'Which of the following best describes you?*',
+      selector: `#${IMC_UNREADABLE_ID}`,
+      inputType: 'text',
+      role: 'combobox',
+      required: true,
+    },
+    {
+      label: 'Expected graduation date*',
+      selector: `#${IMC_GRADUATION_ID}`,
+      inputType: 'text',
+      role: 'combobox',
+      required: true,
+    },
+  ];
+  // 100 rows is the render cap the live control was windowed at. Both reads agree, so this is not a
+  // conflicting-list failure: the list is simply longer than the probe can prove it saw the end of.
+  const windowed = Array.from({ length: 100 }, (_, index) => `Choice ${index}`).join('\n');
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: `[id="${IMC_UNREADABLE_ID}"]:is([role="combobox"],[aria-haspopup="listbox"])`, value: IMC_UNREADABLE_ID },
+      { selector: reactSelectListboxSelector(IMC_UNREADABLE_ID), value: windowed },
+      { selector: reactSelectListboxSelector(IMC_UNREADABLE_ID), value: windowed },
+      { selector: `[id="${IMC_GRADUATION_ID}"]:is([role="combobox"],[aria-haspopup="listbox"])`, value: IMC_GRADUATION_ID },
+      { selector: reactSelectListboxSelector(IMC_GRADUATION_ID), value: IMC_GRADUATION_OPTIONS.join('\n') },
+      { selector: reactSelectListboxSelector(IMC_GRADUATION_ID), value: IMC_GRADUATION_OPTIONS.join('\n') },
+    ],
+  }], [], true);
+  const failedFields = discovered.flatMap((field) => {
+    const controlId = field.selector.slice(1);
+    if (!analysis.failedIds.has(controlId)) return [];
+    return [{ controlId, label: field.label, selector: field.selector, inputType: field.inputType }];
+  });
+  const kept = attachManagedFieldOptions(discovered, analysis.options)
+    .filter((field) => !analysis.failedIds.has((field.selector ?? '').slice(1)));
+  return { discovered, analysis, failedFields, kept };
+}
+
+test('one control that could not be read does not silence the questions that read fine', async () => {
+  const { analysis, failedFields, kept } = imcOptionProbe();
+
+  // The read failure is real and belongs to exactly one control.
+  assert.deepEqual(analysis.failures.map((failure) => failure.controlId), [IMC_UNREADABLE_ID]);
+  assert.match(analysis.failures[0]!.reason, /windowed at the render cap/);
+  assert.deepEqual(analysis.options[IMC_GRADUATION_ID], IMC_GRADUATION_OPTIONS);
+
+  // It is NOT a whole-form discovery failure. The sentence that says the form could not be read at
+  // all is discoveryHonestyReasons' first reason, and nothing here may produce it.
+  const reasons = optionProbeAttentionReasons(analysis.failures, failedFields);
+  assert.equal(reasons.length, 1);
+  assert.doesNotMatch(reasons[0]!, /could not read the questions this form asks/);
+  assert.deepEqual(discoveryHonestyReasons(undefined, []), []);
+
+  // ...and it names the control it happened to, and only that one.
+  assert.match(reasons[0]!, /Which of the following best describes you\?\*/);
+  assert.doesNotMatch(reasons[0]!, /Expected graduation date/);
+  assert.match(reasons[0]!, /windowed at the render cap/);
+
+  // The control that read fine keeps its options, resolves against them, and snaps to the
+  // employer's own wording rather than the profile's "May 2028".
+  assert.deepEqual(kept.map((field) => field.selector), [`#${IMC_GRADUATION_ID}`]);
+  const resolved = await discoverAndResolveQuestions(
+    kept.map((field) => ({ ...field, maxLength: null })),
+    { user_id: 'user-1' } as ResumeRow,
+    {
+      jd_text: 'IMC Trading quantitative trader internship.',
+      role: 'Quantitative Trader Intern',
+      portal_url: 'https://job-boards.greenhouse.io/imc/jobs/1',
+      ats_name: 'greenhouse',
+      status: 'ready_to_submit',
+      edited_terms: [],
+      questions: [],
+      skipped_reasons: [],
+      updated_at: new Date().toISOString(),
+    },
+    { grad_date: 'May 2028', grad_year: 2028 },
+    true,
+    'greenhouse',
+  );
+  const merged = mergeDiscoveredPortalQuestions(resolved.questions, [], [], analysis.failedIds);
+  const graduation = merged.find((question) => question.portal_selector === `#${IMC_GRADUATION_ID}`);
+  assert.equal(graduation?.answer, 'January 2028 - July 2028',
+    'the snapped answer must survive a sibling control failing its option read');
+
+  // And it reaches the action list, while the unreadable control reaches nothing.
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    fieldOptions: analysis.options,
+    failedFields,
+    questions: merged.map((question) => ({
+      question: question.question,
+      answer: question.answer,
+      portalSelector: question.portal_selector,
+      portalInputType: 'combobox',
+    })),
+  } as Parameters<typeof buildManagedPortalActions>[1]);
+  assert.ok(actions.some((action) => action.selector === `#${IMC_GRADUATION_ID}`),
+    'the control that read fine must still be attempted');
+  assert.equal(actions.some((action) => action.selector?.includes(IMC_UNREADABLE_ID)), false);
+});
+
+/* THE HONESTY THE OLD CODE WAS PROTECTING, kept at the scope it belongs to.
+ *
+ * Narrowing a run-level admission to a per-control one is only safe while the per-control refusal is
+ * absolute: a control whose choices Litos could not read must be left alone, not filled with the
+ * closest-looking guess, and she must be told. Without this the change would trade a lie about
+ * twelve controls for a silent wrong answer on one, which is the worse of the two. */
+test('a control whose options could not be read is never silently given an answer', () => {
+  const { analysis, failedFields } = imcOptionProbe();
+  assert.equal(analysis.options[IMC_UNREADABLE_ID], undefined, 'a windowed read is not an option list');
+
+  // A stale stored answer for the same control cannot resurrect a fill for it either.
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    failedFields,
+    questions: [{
+      question: 'Which of the following best describes you?',
+      answer: 'Undergraduate student',
+      portalSelector: `#${IMC_UNREADABLE_ID}`,
+      portalInputType: 'combobox',
+    }],
+  } as Parameters<typeof buildManagedPortalActions>[1]);
+  assert.equal(actions.some((action) => action.selector?.includes(IMC_UNREADABLE_ID)), false);
+  assert.equal(actions.some((action) => action.value === 'Undergraduate student'), false);
+
+  // Silence is not permitted either: the run owes her a sentence naming the control.
+  assert.equal(optionProbeAttentionReasons(analysis.failures, failedFields).length, 1);
+  // A control discovery reported without a usable label is still named, by its durable id, rather
+  // than producing a sentence about nothing.
+  const unlabelled = optionProbeAttentionReasons(analysis.failures, []);
+  assert.equal(unlabelled.length, 1);
+  assert.match(unlabelled[0]!, new RegExp(IMC_UNREADABLE_ID));
 });
 
 test('a radio option is not recorded as a question the applicant has to answer', async () => {
