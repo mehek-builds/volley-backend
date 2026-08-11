@@ -102,9 +102,14 @@ export function findGapEvidence(
       const variants = Array.isArray(entry.bullet_variants) ? (entry.bullet_variants as string[]) : [];
       for (const variant of variants) {
         if (typeof variant !== 'string' || !variant.trim()) continue;
-        // The SAME matcher the score uses. If this drifted, we would offer the student a bullet
-        // that does not move the number, or fail to offer one that would.
-        if (!resumeCovers(variant, term.term)) continue;
+        /* The SAME matcher the score uses. If this drifted, we would offer the student a bullet
+           that does not move the number, or fail to offer one that would.
+           EVERY BRANCH, because a stated choice is one requirement the score will close from ANY of
+           its branches. Reading `term` alone tested the head branch only, so a bank bullet
+           evidencing TypeScript was never offered against a "Python, TypeScript" gap that it would
+           in fact have closed. A false negative rather than a false mark, but it is exactly the
+           drift the sentence above forbids. */
+        if (!(term.alternatives ?? [term.term]).some((branch) => resumeCovers(variant, branch))) continue;
         evidence.push({
           term: term.term,
           entry_id: entry.id,

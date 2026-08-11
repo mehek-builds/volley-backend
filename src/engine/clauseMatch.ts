@@ -481,7 +481,12 @@ export function matchClause(
   // ONLY WHEN NOTHING ELSE IS NAMED, so the exclusion cannot swallow a real tool: "Bachelor's in
   // computer science with strong Python" keeps `python`, stays here, and is answered literally.
   const termText = text.replace(/^(?:Requirements?|Preferred|Technical skills):\s*/iu, '');
-  const signalTerms = extractJdTerms(termText, context).filter((t) => t.signal);
+  /* UNGROUPED, DELIBERATELY. This module reads a choice itself, in termCoverageDecision, and reads
+     it more strictly than the extractor does: more than one connector in a clause leaves it
+     UNSCOREABLE rather than decided. Taking the extractor's folded view would answer the same
+     question twice and let the looser answer win, which turned a clause this file had refused to
+     decide into a met one. The extractor is used here only to ask which technologies are named. */
+  const signalTerms = extractJdTerms(termText, context, { groupChoices: false }).filter((t) => t.signal);
   addValidatedAlternativeLanguageTerms(termText, signalTerms, weight);
   if (requiredCategory) {
     const display = requiredCategory.trim();
