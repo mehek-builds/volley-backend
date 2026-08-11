@@ -156,14 +156,72 @@ test('the normal daily path remains unclaimed and performs the same sweep', asyn
   }
 });
 
-test('only the retention cron entry is temporarily activated', () => {
-  const config = require('../../vercel.json') as {
-    crons: Array<{ path: string; schedule: string }>;
-  };
-  assert.deepEqual(config.crons, [
-    { path: '/internal/adapter-health-check', schedule: '0 13 * * *' },
-    { path: operationUrl, schedule: '15 12 3 8 *' },
-    { path: '/internal/job-monitor', schedule: '0 6 * * *' },
-    { path: '/internal/application-submission-runner', schedule: '15 4 * * *' },
-  ]);
+// The privacy page states the 30-day window as fact, and vercel.json is the only place that
+// decides whether the sweep ever runs. Between 2026-08-03 and 2026-08-11 it did not: the daily
+// entry was narrowed to `?run=<one-shot>` on `15 12 3 8 *` to perform the approved legacy-original
+// cleanup, and the revert never came. Both halves were independently fatal - the schedule fired
+// once a year, and the one-shot slot was spent on the first run, so every later call short-circuits
+// to `{ already_processed: true }` at 200 without sweeping. Measured on 2026-08-11: 11 generated
+// files past the promised window, the oldest 7.9 days overdue.
+//
+// The previous version of this test asserted that broken state via deepEqual, so it locked the bug
+// in rather than catching it. These assertions are written against the PROPERTY the promise needs -
+// runs every day, sweeps unconditionally - so a future temporary narrowing has to delete a test
+// that says why, instead of quietly updating a snapshot.
+function scheduledCrons(): Array<{ path: string; schedule: string }> {
+  return (require('../../vercel.json') as { crons: Array<{ path: string; schedule: string }> }).crons;
+}
+
+// minute hour day-of-month month day-of-week. Pinning day-of-month or month (as `15 12 3 8 *` did)
+// turns a daily promise into an annual one. Vercel Hobby also rejects sub-daily schedules at DEPLOY
+// time, and that failure blocks every production deploy of this repo, not just the offending entry,
+// so minute and hour must stay literal rather than `*` or a `*/n` step.
+function assertRunsEveryDay(entry: { path: string; schedule: string }) {
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = entry.schedule.split(' ');
+  assert.deepEqual(
+    [dayOfMonth, month, dayOfWeek],
+    ['*', '*', '*'],
+    `${entry.path} schedule '${entry.schedule}' does not run every day`,
+  );
+  assert.match(minute, /^\d+$/, `${entry.path} minute must be a fixed value, not a wildcard or step`);
+  assert.match(hour, /^\d+$/, `${entry.path} hour must be fixed: Hobby rejects sub-daily crons at deploy time`);
+}
+
+test('the retention sweep is scheduled daily and unconditional', () => {
+  const retention = scheduledCrons().filter((cron) =>
+    cron.path.startsWith('/internal/resume-retention-sweep'));
+  assert.equal(retention.length, 1, 'exactly one retention cron entry must exist');
+
+  const [entry] = retention;
+  // `?run=<the approved operation id>` claims a usage_counters slot that is already spent, so a
+  // scheduled path carrying it returns 200 `{ already_processed: true }` forever without sweeping.
+  // Any other nonempty value is a 400 and never sweeps either. Both are reasons the scheduled path
+  // must carry no query string at all.
+  assert.equal(
+    entry.path,
+    '/internal/resume-retention-sweep',
+    'the scheduled path must carry no ?run= operation, or the sweep no-ops once its slot is claimed',
+  );
+  assertRunsEveryDay(entry);
+});
+
+// The Hobby daily-only constraint binds every entry, and a single sub-daily schedule anywhere in
+// this list blocks production deploys for the whole repo. Asserted as a property over all crons
+// rather than as a snapshot, so adding a legitimate new one (captchaStalls.ts notes an unscheduled
+// /internal/captcha-stall-nudge) fails on a named rule if it is wrong, and passes silently if right.
+test('every scheduled cron runs daily, as Hobby requires at deploy time', () => {
+  const crons = scheduledCrons();
+  assert.ok(crons.length > 0, 'vercel.json must schedule at least the retention sweep');
+  for (const entry of crons) assertRunsEveryDay(entry);
+});
+
+test('the other scheduled jobs are still scheduled', () => {
+  const paths = new Set(scheduledCrons().map((cron) => cron.path));
+  for (const path of [
+    '/internal/adapter-health-check',
+    '/internal/job-monitor',
+    '/internal/application-submission-runner',
+  ]) {
+    assert.ok(paths.has(path), `${path} is no longer scheduled`);
+  }
 });
