@@ -176,47 +176,60 @@ test('the normal daily path remains unclaimed and performs the same sweep', asyn
 // in rather than catching it. These assertions are written against the PROPERTY the promise needs -
 // runs every day, sweeps unconditionally - so a future temporary narrowing has to delete a test
 // that says why, instead of quietly updating a snapshot.
+function scheduledCrons(): Array<{ path: string; schedule: string }> {
+  return (require('../../vercel.json') as { crons: Array<{ path: string; schedule: string }> }).crons;
+}
+
+// minute hour day-of-month month day-of-week. Pinning day-of-month or month (as `15 12 3 8 *` did)
+// turns a daily promise into an annual one. Vercel Hobby also rejects sub-daily schedules at DEPLOY
+// time, and that failure blocks every production deploy of this repo, not just the offending entry,
+// so minute and hour must stay literal rather than `*` or a `*/n` step.
+function assertRunsEveryDay(entry: { path: string; schedule: string }) {
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = entry.schedule.split(' ');
+  assert.deepEqual(
+    [dayOfMonth, month, dayOfWeek],
+    ['*', '*', '*'],
+    `${entry.path} schedule '${entry.schedule}' does not run every day`,
+  );
+  assert.match(minute, /^\d+$/, `${entry.path} minute must be a fixed value, not a wildcard or step`);
+  assert.match(hour, /^\d+$/, `${entry.path} hour must be fixed: Hobby rejects sub-daily crons at deploy time`);
+}
+
 test('the retention sweep is scheduled daily and unconditional', () => {
-  const config = require('../../vercel.json') as {
-    crons: Array<{ path: string; schedule: string }>;
-  };
-  const retention = config.crons.filter((cron) =>
+  const retention = scheduledCrons().filter((cron) =>
     cron.path.startsWith('/internal/resume-retention-sweep'));
   assert.equal(retention.length, 1, 'exactly one retention cron entry must exist');
 
   const [entry] = retention;
-  // A query string here means a one-shot operation id, which claims a usage_counters slot that is
-  // spent after the first run. Anything parameterised stops sweeping forever and reports success.
+  // `?run=<the approved operation id>` claims a usage_counters slot that is already spent, so a
+  // scheduled path carrying it returns 200 `{ already_processed: true }` forever without sweeping.
+  // Any other nonempty value is a 400 and never sweeps either. Both are reasons the scheduled path
+  // must carry no query string at all.
   assert.equal(
     entry.path,
     '/internal/resume-retention-sweep',
     'the scheduled path must carry no ?run= operation, or the sweep no-ops once its slot is claimed',
   );
-
-  // minute hour day-of-month month day-of-week. Pinning day-of-month or month (as `15 12 3 8 *`
-  // did) turns the daily promise into an annual one. Vercel Hobby rejects sub-daily schedules at
-  // DEPLOY time and that failure blocks every production deploy of this repo, so the minute and
-  // hour fields must stay literal rather than `*` or a `*/n` step.
-  const [minute, hour, dayOfMonth, month, dayOfWeek] = entry.schedule.split(' ');
-  assert.deepEqual(
-    [dayOfMonth, month, dayOfWeek],
-    ['*', '*', '*'],
-    `schedule '${entry.schedule}' does not run every day`,
-  );
-  assert.match(minute, /^\d+$/, 'minute must be a fixed value, not a wildcard or step');
-  assert.match(hour, /^\d+$/, 'hour must be a fixed value: Hobby rejects sub-daily crons at deploy time');
+  assertRunsEveryDay(entry);
 });
 
-test('the other cron entries are unchanged', () => {
-  const config = require('../../vercel.json') as {
-    crons: Array<{ path: string; schedule: string }>;
-  };
-  assert.deepEqual(
-    config.crons.filter((cron) => !cron.path.startsWith('/internal/resume-retention-sweep')),
-    [
-      { path: '/internal/adapter-health-check', schedule: '0 13 * * *' },
-      { path: '/internal/job-monitor', schedule: '0 6 * * *' },
-      { path: '/internal/application-submission-runner', schedule: '15 4 * * *' },
-    ],
-  );
+// The Hobby daily-only constraint binds every entry, and a single sub-daily schedule anywhere in
+// this list blocks production deploys for the whole repo. Asserted as a property over all crons
+// rather than as a snapshot, so adding a legitimate new one (captchaStalls.ts notes an unscheduled
+// /internal/captcha-stall-nudge) fails on a named rule if it is wrong, and passes silently if right.
+test('every scheduled cron runs daily, as Hobby requires at deploy time', () => {
+  const crons = scheduledCrons();
+  assert.ok(crons.length > 0, 'vercel.json must schedule at least the retention sweep');
+  for (const entry of crons) assertRunsEveryDay(entry);
+});
+
+test('the other scheduled jobs are still scheduled', () => {
+  const paths = new Set(scheduledCrons().map((cron) => cron.path));
+  for (const path of [
+    '/internal/adapter-health-check',
+    '/internal/job-monitor',
+    '/internal/application-submission-runner',
+  ]) {
+    assert.ok(paths.has(path), `${path} is no longer scheduled`);
+  }
 });
