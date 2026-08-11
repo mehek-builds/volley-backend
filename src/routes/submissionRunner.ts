@@ -109,6 +109,7 @@ import {
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess';
+import { rerenderFrozenCoverLetter, rerenderFrozenResume } from '../lib/packetDocumentRecovery';
 import { currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
 import { createDashboardHandoffBinding } from '../lib/extensionHandoffPacket';
 import { decryptRow } from './applicationProfile';
@@ -578,6 +579,35 @@ export async function resumeBytesForPacket(
   return Buffer.from(await response.arrayBuffer());
 }
 
+async function fetchStoredCoverLetter(url: string): Promise<Buffer> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error('Generated cover letter file could not be downloaded');
+  return Buffer.from(await response.arrayBuffer());
+}
+
+/**
+ * The letter rebuilt from the row, for a packet whose letter file has been swept.
+ *
+ * Reads through storedCoverLetter rather than the raw `_cover_letter` object so that a half-written
+ * artifact is treated as no letter at all, exactly as every other reader of it does. A letter that
+ * cannot be rebuilt raises the typed error, which packetForCoverLetterCapability degrades into
+ * "written but not attached" - the same outcome an unreachable file already produced, so nothing
+ * gets worse than it was when the rebuild is impossible.
+ */
+async function rerenderStoredCoverLetter(row: ResumeRow, stored: StoredSpec): Promise<Buffer> {
+  const artifact = storedCoverLetter(row);
+  const job = (row.job_context ?? {}) as { company?: unknown };
+  const contact = (stored._contact ?? {}) as Record<string, unknown>;
+  if (!artifact || typeof job.company !== 'string') throw new PacketDocumentExpiredError('cover_letter');
+  return rerenderFrozenCoverLetter({
+    fullName: String(contact.full_name ?? '').trim(),
+    email: typeof contact.email === 'string' ? contact.email : undefined,
+    company: job.company,
+    body: artifact.body,
+    generatedAt: artifact.generated_at,
+  });
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
@@ -592,15 +622,32 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const parsed = (profileRow[0]?.parsed_json ?? {}) as Record<string, unknown>;
   const review = readApplicationReview(stored);
   if (!review) throw new Error('We could not find this application');
-  const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest);
+  /* THE RECOVERY SITS AT THE PRODUCER, not at the call sites, for the reason renderResumePdf states
+     over its own contact guard: there are several paths that assemble a packet, and a check written
+     on one of them leaves the next to be discovered from an employer. buildPacket is the single
+     function that turns a row into documents, so a packet past its retention window is rebuildable
+     everywhere or nowhere.
+
+     No write happens here, deliberately. The rebuilt bytes live for the length of this run and are
+     never put() back into storage, which is what keeps the published promise literally true: the
+     file stays deleted, old links stay dead, and nothing is resurrected for browsing. It also keeps
+     buildPacket read-only, which matters because it runs on preview and controlled-test paths that
+     have no business restarting a retention clock. */
+  const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest)
+    .catch(async (error: unknown) => {
+      if (!(error instanceof PacketDocumentExpiredError) || error.document !== 'resume') throw error;
+      return rerenderFrozenResume({ spec: stored, jdText: review.jd_text ?? '', role: review.role });
+    });
   let coverLetter: Buffer | undefined;
   const coverLetterKey = coverLetterObjectKeyToAttach(stored);
   if (coverLetterKey) {
     const coverLetterUrl = await resolveBlobUrl(coverLetterKey);
-    if (!coverLetterUrl) throw new PacketDocumentExpiredError('cover_letter');
-    const coverLetterResponse = await fetch(coverLetterUrl);
-    if (!coverLetterResponse.ok) throw new Error('Generated cover letter file could not be downloaded');
-    coverLetter = Buffer.from(await coverLetterResponse.arrayBuffer());
+    coverLetter = coverLetterUrl
+      ? await fetchStoredCoverLetter(coverLetterUrl)
+      /* Same recovery, same frozen inputs, and it matters more here than it looks: the letter's own
+         degrade path sends the application WITHOUT the attachment, so before this an expired letter
+         quietly cost the applicant the one document she wrote by hand. */
+      : await rerenderStoredCoverLetter(row, stored);
   }
   const fullName = String(contact.full_name ?? parsed.full_name ?? '').trim();
   const accountEmail = String(userRow[0]?.email ?? '').trim();
