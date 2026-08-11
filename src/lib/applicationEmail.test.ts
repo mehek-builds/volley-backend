@@ -402,11 +402,17 @@ test('a message whose sender authentication explicitly failed is never forwarded
 
 /* PASS, SOFTFAIL AND ABSENT ARE THREE DIFFERENT THINGS, and only one of them is a failure.
  *
- * softfail is SPF's `~all`: the sending domain saying "probably not us, but do not reject on my
- * account". It fires on ordinary relayed and forwarded mail, which is the shape of mail an alias
- * receives, so treating it as a failure would withhold real employer mail on a verdict whose own
- * definition asks receivers not to act on it. Absent is a fail-open on purpose: silence from the
- * provider is not a statement that the sender is forged. */
+ * THE RESIDUAL IS RECORDED HERE RATHER THAN DEFENDED. An earlier version of this comment argued
+ * softfail must be ignored because SPF breaks under forwarding. That is true of SPF and irrelevant
+ * to the softfail line: forwarded mail from a `-all` domain scores spf=fail, so the distinction was
+ * never about relaying. The actual reason is narrower and weaker. `~all` is the sending domain
+ * asking receivers not to reject on its behalf, and with no DMARC record there is nothing to align
+ * against, so a domain in that posture has given us no assertion to act on.
+ *
+ * The cost is real and is not hidden: an attacker who knows an alias, spoofing a domain that
+ * publishes `~all` and no DMARC, reaches her inbox from Litos's verified sending identity. Closing
+ * it means withholding on the ABSENCE of a positive signal, which withholds every employer whose
+ * provider does not stamp the header. Fail-open on a non-assertion, fail-closed on an assertion. */
 test('only an explicit failure withholds: pass, softfail and silence all deliver', () => {
   for (const authentication of [
     { spf: 'pass', dkim: 'pass', dmarc: 'pass' },
@@ -426,6 +432,80 @@ test('only an explicit failure withholds: pass, softfail and silence all deliver
       JSON.stringify(authentication ?? null),
     );
   }
+});
+
+/* THE RACE GUARD A RENAME REMOVED.
+ *
+ * Moving "confirm your email" out of verification_code and into account_registration put the two
+ * commonest code-carrying subject lines into a class with no in-flight gate. Measured with a run
+ * mid-submit, before this was fixed:
+ *
+ *   "Confirm your email address" -> account_registration -> {"forward":true}
+ *   "Verify your account"        -> account_registration -> {"forward":true}
+ *
+ * Both forwarded while the runner was spending the code they carried, so both raced, the code
+ * burned, and the application was filed by neither. The subject line does not decide this. */
+test('a message that hands over a code is a verification_code, whatever its subject says', () => {
+  const carriers = [
+    ['Confirm your email address', 'Enter the code below to confirm your email address: 483920'],
+    ['Verify your account', 'Your confirmation code is 771204.'],
+    ['Verify your account', 'Use code: TPHJrFM9 to finish signing in.'],
+    ['Action required', '483920 is your security code.'],
+  ] as const;
+  for (const [subject, text] of carriers) {
+    assert.equal(classifyApplicationEmail(subject, text), 'verification_code', subject);
+    assert.deepEqual(
+      applicationEmailForwardingDecision(classifyApplicationEmail(subject, text), { securityCodeInFlight: true }),
+      { forward: false, reason: 'security_code_in_flight' },
+      subject,
+    );
+  }
+});
+
+/* And the other half, which is what keeps the account wall passable: an activation mail carrying a
+ * LINK and no code is not a credential handover, so it stays account_registration and still goes
+ * out during a run. Withholding it would deny her the only thing that can finish a registration. */
+test('an activation mail carrying only a link is still forwarded during a run', () => {
+  const linkOnly = [
+    ['Confirm your email address', 'Click https://careers.example.com/confirm?t=a1b2c3 to continue.'],
+    ['Activate your candidate account', 'Activate your candidate account: https://acme.wd1.myworkdayjobs.com/activate'],
+    ['Reset your password', 'Follow the link below to choose a new password.'],
+  ] as const;
+  for (const [subject, text] of linkOnly) {
+    assert.equal(classifyApplicationEmail(subject, text), 'account_registration', subject);
+    assert.deepEqual(
+      applicationEmailForwardingDecision(classifyApplicationEmail(subject, text), { securityCodeInFlight: true }),
+      { forward: true },
+      subject,
+    );
+  }
+  // A bare number that is not handed over as a code does not make a message a credential either.
+  assert.equal(
+    classifyApplicationEmail('Update on your application', 'Requisition 4820 has been closed.'),
+    'other',
+  );
+});
+
+/* DMARC IS THE VERDICT THAT SURVIVES FORWARDING, and the reason the previous rule was wrong.
+ *
+ * The old defence of ignoring softfail was that SPF breaks under forwarding. It does, but that is
+ * independent of the domain's policy: a forwarded message from a `-all` domain scores spf=fail, so
+ * the fail/softfail line never tracked "was this relayed". DMARC does, through DKIM alignment. */
+test('DMARC decides when it has spoken, and rescues ordinary forwarded mail', () => {
+  // The case the raw rule got wrong: a relay broke the SPF path and the signature carried through.
+  assert.equal(senderAuthenticationFailed({ spf: 'fail', dkim: 'pass', dmarc: 'pass' }), false);
+  assert.deepEqual(
+    applicationEmailForwardingDecision('other', {
+      senderAuthenticationFailed: senderAuthenticationFailed({ spf: 'fail', dkim: 'pass', dmarc: 'pass' }),
+    }),
+    { forward: true },
+  );
+  // A DMARC failure is authoritative even beside a passing SPF, because alignment is what failed.
+  assert.equal(senderAuthenticationFailed({ spf: 'pass', dkim: 'pass', dmarc: 'fail' }), true);
+  // With no DMARC verdict there is no alignment statement, so a bare dkim=pass rescues nothing.
+  assert.equal(senderAuthenticationFailed({ spf: 'fail', dkim: 'pass' }), true);
+  assert.equal(senderAuthenticationFailed({ spf: 'fail' }), true);
+  assert.equal(senderAuthenticationFailed({ dkim: 'fail' }), true);
 });
 
 test('every withhold reason is a machine token, not a sentence', () => {

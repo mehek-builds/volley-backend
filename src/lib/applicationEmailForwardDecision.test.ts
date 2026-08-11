@@ -258,9 +258,48 @@ test('the identical message with passing authentication is forwarded', async () 
   assert.equal(row?.forward_decision, 'forward');
 });
 
+/* THE REPLAY, END TO END. The same provider message delivered twice: refused on the first, and on
+ * the second arriving with no Authentication-Results at all. The dedupe key makes it one row, so
+ * the second delivery re-reads what the first decided.
+ *
+ * Measured before the stored decision was read back: delivery two forwarded the message AND
+ * overwrote the annotation to 'forward', so the ledger afterwards said Litos had chosen to send a
+ * message it had already judged forged. */
+test('a redelivery with no authentication header cannot un-refuse a message', async () => {
+  const message = {
+    provider: 'resend' as const,
+    providerMessageId: 'replay-1',
+    from: 'people@acme.com',
+    to: [ALIAS],
+    subject: 'Your offer from Acme',
+    text: 'Congratulations. Confirm your bank details to accept.',
+    receivedAt: new Date(),
+  };
+  captureSends();
+  const first = await service.processInboundApplicationEmail({
+    ...message,
+    authentication: { spf: 'pass', dkim: 'fail', dmarc: 'fail' },
+  });
+  assert.equal(first.forwarded, false);
+  assert.equal(first.reason, 'sender_authentication_failed');
+  assert.equal((await messageByProviderId('replay-1'))?.forward_decision, 'withheld:sender_authentication_failed');
+
+  // Same message, redelivered, this time with the header absent entirely.
+  const second = await service.processInboundApplicationEmail(message);
+  assert.equal(second.forwarded, false, 'silence on a redelivery is not a new verdict');
+  assert.equal(second.reason, 'sender_authentication_failed');
+  assert.equal(sends.length, 0, 'nothing was mailed on either delivery');
+  assert.equal(
+    (await messageByProviderId('replay-1'))?.forward_decision,
+    'withheld:sender_authentication_failed',
+    'and the record of the refusal survives, rather than being overwritten with forward',
+  );
+});
+
 test('the health probe can see the withheld messages, which last_inbound_message_at cannot', async () => {
   const health = await service.applicationEmailHealth();
-  assert.equal(health.withheld_messages_recent, 2);
+  // One code withheld mid-run, one spoofed offer, one replay of that spoof that stayed refused.
+  assert.equal(health.withheld_messages_recent, 3);
   assert.equal(health.withheld_messages_window_hours, 24);
   // The field that used to be the only message fact here is fresh at the same moment, which is why
   // it could not report the outage.
@@ -313,6 +352,25 @@ test('mail is still delivered, and the export still answers, on an unmigrated da
     unmigrated.every((row) => row.forward_decision === undefined),
     'the annotation is what is dropped, never the messages',
   );
+
+  /* THE RETURN LEG, which the first sweep missed because it looked for bare SELECTs. relayApplicantReply
+   * INSERTs, and an insert is the statement Drizzle fills out with every declared column, so on an
+   * unmigrated database this threw, the webhook 500d, Resend retried and gave up, and the
+   * applicant's answer never reached the employer. */
+  captureSends();
+  const relayed = await service.processInboundApplicationEmail({
+    provider: 'resend',
+    providerMessageId: 'pre-migration-reply-1',
+    from: FORWARD_TO,
+    to: [ALIAS],
+    subject: 'Re: Activate your candidate account',
+    text: 'Thanks, I have activated the account.',
+    receivedAt: new Date(),
+  });
+  assert.equal(relayed.accepted, true);
+  assert.equal(relayed.relayed, true, 'her reply must leave even when the deploy leads its migration');
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].body.from, ALIAS, 'and it leaves as the alias, not from her own mailbox');
 
   // And the health reader reports "unmeasurable", never "none": those are different answers.
   const health = await service.applicationEmailHealth();

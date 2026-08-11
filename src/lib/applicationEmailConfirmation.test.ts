@@ -409,9 +409,64 @@ function handle(
   message: StoredInboundMessage | null,
   deps: StoredEmployerMessageDeps,
   aliasRow = ALIAS_ROW,
+  senderAuthenticationFailed = false,
 ) {
-  return handleStoredEmployerMessage({ aliasRow, message, classification, receivedAt: RECEIVED_AT }, deps);
+  return handleStoredEmployerMessage(
+    { aliasRow, message, classification, receivedAt: RECEIVED_AT, senderAuthenticationFailed },
+    deps,
+  );
 }
+
+/* THE REPLAY. Two deliveries of one stored message, the second reporting no authentication at all.
+ *
+ * Before the stored decision was read back this measured:
+ *   delivery 1 (auth FAIL)   -> withheld, row = withheld:sender_authentication_failed
+ *   delivery 2 (auth ABSENT) -> FORWARDED, row overwritten to 'forward'
+ * A message already judged forged was mailed to the applicant from Litos's verified sending
+ * identity, and the record that anything had been refused was destroyed on the way out. */
+test('a message once refused for authentication stays refused on every later delivery', async () => {
+  const first = handlerDeps();
+  const beforeAnyDecision = storedMessage({ forward_decision: null });
+  const firstResult = await handle('other', beforeAnyDecision, first.deps, ALIAS_ROW, true);
+  assert.equal(firstResult.forwarded, false);
+  assert.equal(firstResult.reason, 'sender_authentication_failed');
+  assert.deepEqual(first.calls.decisions, ['withheld:sender_authentication_failed']);
+
+  // The same row, redelivered, with the header missing this time.
+  const second = handlerDeps();
+  const asStored = storedMessage({ forward_decision: 'withheld:sender_authentication_failed' });
+  const secondResult = await handle('other', asStored, second.deps, ALIAS_ROW, false);
+  assert.equal(secondResult.forwarded, false, 'a silent redelivery must not launder a forgery through');
+  assert.equal(secondResult.reason, 'sender_authentication_failed');
+  assert.equal(second.calls.forwarded, 0);
+  assert.equal(second.calls.claimed, 0);
+  // And the annotation is rewritten to the same value, never downgraded to 'forward'.
+  assert.deepEqual(second.calls.decisions, ['withheld:sender_authentication_failed']);
+});
+
+/* The stickiness is deliberately narrow. A code withheld because a run was spending it must forward
+ * once the run is over, or a one-off race would bury the message permanently. */
+test('the security-code withhold is not sticky, because that window closes', async () => {
+  const { deps, calls } = handlerDeps({ securityCodeInFlight: false });
+  const result = await handle(
+    'verification_code',
+    storedMessage({ forward_decision: 'withheld:security_code_in_flight' }),
+    deps,
+  );
+  assert.equal(result.forwarded, true, 'the run is over, so the code is hers');
+  assert.deepEqual(calls.decisions, ['forward']);
+});
+
+/* A row that has never been decided, and a database too old to answer, are different states, and
+ * neither is a refusal. */
+test('an unannotated row and an unmigrated database both leave the decision to this delivery', async () => {
+  for (const forward_decision of [null, undefined]) {
+    const { deps, calls } = handlerDeps();
+    const result = await handle('other', storedMessage({ forward_decision }), deps);
+    assert.equal(result.forwarded, true, String(forward_decision));
+    assert.deepEqual(calls.decisions, ['forward'], String(forward_decision));
+  }
+});
 
 /* The gate that made every row written before the resolution existed unresolvable forever: the call
  * used to sit BELOW `if (!message || message.forwarded_at) return`. */

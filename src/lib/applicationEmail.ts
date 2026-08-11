@@ -87,6 +87,24 @@ type ResendReceivedEmail = {
   headers?: Record<string, string>;
 };
 
+/* WHERE THE AUTHENTICATION VERDICTS COME FROM, AND THE ASSUMPTION UNDERNEATH THEM.
+ *
+ * KNOWN GAP, FILED RATHER THAN FIXED. This reads whatever single Authentication-Results value the
+ * provider puts in the headers map and takes the FIRST verdict it finds for each mechanism. It does
+ * not check the authserv-id, which is the field that says WHICH receiver wrote the header, and the
+ * headers map cannot represent more than one A-R header per message, so a chain of them is already
+ * collapsed by the time we see it. Authentication-Results is a trace header: anybody can put one on
+ * a message, and it is only trustworthy after the receiving boundary has stripped foreign copies
+ * and added its own.
+ *
+ * If a sender-supplied A-R can win that map, then `spf=pass; dkim=pass; dmarc=pass` is forgeable
+ * and the gate in applicationEmailForwardingDecision is fully bypassable by the attacker it exists
+ * to stop. Whether Resend strips foreign A-R headers before exposing them is UNVERIFIED, and there
+ * is no code-side defence either way: the authserv-id check needs a configured expected value we do
+ * not have, and the duplicate-header check needs a payload shape the provider does not give us.
+ *
+ * Recorded here rather than papered over. Closing it means either configuring the expected
+ * authserv-id or getting the raw header list from the provider, and both are their own change. */
 function authenticationFromHeaders(headers: Record<string, string> | undefined): InboundApplicationEmail['authentication'] {
   const value = Object.entries(headers ?? {}).find(([name]) => name.toLowerCase() === 'authentication-results')?.[1] ?? '';
   const verdict = (mechanism: 'spf' | 'dkim' | 'dmarc') => value.match(new RegExp(`\\b${mechanism}=([a-z]+)`, 'i'))?.[1]?.toLowerCase();
@@ -445,13 +463,37 @@ const ACCOUNT_NOUN = '(?:accounts?|profiles?|logins?|registrations?'
   + '|talent (?:profile|community|network)'
   + '|applicant (?:account|profile))';
 
+/* A TOKEN SHAPED LIKE A ONE-TIME CODE: 4 to 8 digits, or 8 alphanumerics carrying at least one
+ * letter and one digit. The narrow twin of CODE_PATTERN in lib/emailVerification.ts, which is the
+ * reader the managed session uses. Deliberately not imported, for the same reason as the window
+ * constants: emailVerification imports this module and the cycle would be worse than the echo. This
+ * one only has to answer "could this message be handing over a code", never "which code". */
+const CODE_SHAPED_TOKEN = '(?<![a-z0-9])(?:\\d{4,8}|(?=[a-z0-9]{8}(?![a-z0-9]))(?=[a-z0-9]{0,7}[a-z])(?=[a-z0-9]{0,7}\\d)[a-z0-9]{8})(?![a-z0-9])';
+
 export function classifyApplicationEmail(subject = '', text = ''): ApplicationEmailClassification {
   const haystack = `${subject}\n${text}`.toLowerCase();
   /* "confirm your email" USED TO LIVE HERE and does not any more. It is the opening line of an
-   * account-wall activation mail and it carries no code, so treating it as a security code both
-   * misnamed it and, under the old whitelist, buried it. A message is a verification_code when it
-   * hands over a credential, which is what every alternative below actually names. */
-  if (/\b(verification code|security code|one[- ]?time|otp|passcode)\b/.test(haystack)) {
+   * account-wall activation mail, and when it carries no code that is all it is: treating it as a
+   * security code both misnamed it and, under the old whitelist, buried it.
+   *
+   * BUT THE SUBJECT LINE DOES NOT DECIDE THIS. Moving that phrase out put every ATS mail titled
+   * "Confirm your email address" into a class with no in-flight gate, and those mails routinely
+   * carry a bare code in the body. Measured with a run mid-submit: "Confirm your email address"
+   * and "Verify your account" both forwarded while the runner was spending the very code they
+   * carried, so both raced, the code burned, and the application was filed by neither. That is the
+   * exact harm managedSessionIsConsumingSecurityCode exists to prevent, removed by a rename.
+   *
+   * So the rule is the one the comment always claimed: a message is a verification_code when it
+   * HANDS OVER A CREDENTIAL. Either it names the credential ("verification code", "passcode"), or
+   * it puts a code-shaped token next to a handover ("enter the code below: 483920"). An activation
+   * mail carrying only a LINK still classifies as account_registration and still forwards, which is
+   * what keeps the account wall passable. */
+  const namesACredential = /\b(verification code|security code|confirmation code|authentication code|access code|login code|one[- ]?time|otp|passcode)\b/.test(haystack);
+  const handsOverACode =
+    new RegExp(`\\bcode\\b\\s*(?:is|:|=|-)\\s*${CODE_SHAPED_TOKEN}`).test(haystack)
+    || new RegExp(`\\b(?:enter|use|type|paste|copy|provide|submit|input)\\b.{0,60}\\bcode\\b.{0,80}${CODE_SHAPED_TOKEN}`).test(haystack)
+    || new RegExp(`${CODE_SHAPED_TOKEN}\\s+is\\s+your\\b.{0,30}\\bcode\\b`).test(haystack);
+  if (namesACredential || handsOverACode) {
     return 'verification_code';
   }
   /* BEFORE the account-wall test, so a confirmation that opens "Welcome to Acme" and closes with a
@@ -523,11 +565,18 @@ export function managedSessionIsConsumingSecurityCode(
 /* WHAT LEAVES LITOS. This is a list of what to WITHHOLD, and it has two entries.
  *
  * It used to be the opposite: an allowlist of two classifications, submission_confirmation and
- * interview_request, with everything else stored and dropped in silence. Measured against the
- * shipped classifier on 2026-08-10, that meant an activation link, a password reset, an assessment
- * invitation, a rejection and an OFFER LETTER all landed in the ledger and reached nobody, with
- * direction still 'inbound', forwarded_at NULL and forward_error NULL, which is indistinguishable
- * from a message nothing had looked at. It forwarded zero messages in the day it was live.
+ * interview_request, with everything else stored and dropped in silence.
+ *
+ * WHAT THAT WOULD DO, not what it was seen doing. The distinction matters and an earlier draft of
+ * this comment lost it, asserting as history that an activation link, a password reset, an
+ * assessment invitation, a rejection and an offer letter had all landed in the ledger and reached
+ * nobody. They had not: the table held three rows, every one of them direction 'forwarded' with
+ * forwarded_at set, and no inbound row at all. The real finding is a prediction with a measurement
+ * under it: those five shapes were run through the SHIPPED classifier on 2026-08-10 and every one
+ * of them classified outside the two-entry allowlist, so the whitelist would have stored each of
+ * them with direction 'inbound', forwarded_at NULL and forward_error NULL, which is
+ * indistinguishable from a message nothing had looked at. That is a defect in the rule, and it does
+ * not need to have hurt anybody yet to be worth removing.
  *
  * The direction is inverted because the premise was wrong. The applicant's own address is the one
  * the employer thinks it is writing to; the alias is a forwarding address, not an editor. So the
@@ -582,6 +631,34 @@ export function applicationEmailForwardingDecision(
     return { forward: false, reason: 'security_code_in_flight' };
   }
   return { forward: true };
+}
+
+/** The value written to forward_decision for a withhold. One spelling, one place. */
+export function withheldForwardDecision(reason: ApplicationEmailWithholdReason): string {
+  return `withheld:${reason}`;
+}
+
+/* A JUDGEMENT THAT A MESSAGE IS FORGED IS FINAL FOR THAT MESSAGE, and this is the memory that
+ * makes it so.
+ *
+ * Every other input to the forwarding decision is recomputed per delivery, which is right: the
+ * security-code window opens and closes, and a code withheld during a run should forward once the
+ * run is over. Authentication is not like that. It is a verdict on a message that has already
+ * arrived, and the message does not become trustworthy because a second delivery report omitted
+ * the header. Measured on the real handler before this existed: delivery one failed authentication
+ * and was withheld, delivery two arrived with no authentication object at all, and the message was
+ * forwarded to the applicant AND its annotation overwritten to 'forward', erasing the record that
+ * anything had ever been refused.
+ *
+ * So the rule is one-way. An explicit failure on ANY delivery withholds the message forever; no
+ * later delivery can un-fail it. The reverse is already handled by forwarded_at, which stops a
+ * second copy of an already-sent message going out.
+ *
+ * Reachability of a differing-verdict redelivery has not been observed in production, and this does
+ * not depend on it being reachable: a control with no memory is a control that can be replayed
+ * around, and that is enough reason for it to have one. */
+export function forwardDecisionRefusedSender(storedForwardDecision: string | null | undefined): boolean {
+  return storedForwardDecision === withheldForwardDecision('sender_authentication_failed');
 }
 
 function storedApplicationEmailClassification(value: string): ApplicationEmailClassification {
@@ -745,29 +822,45 @@ export function routeInboundApplicationEmail(input: {
   return { kind: 'applicant_reply' };
 }
 
-/* ONLY AN EXPLICIT `fail` COUNTS, and the two verdicts that are not it are the interesting ones.
+/* DMARC DECIDES WHEN IT HAS SPOKEN. Otherwise an explicit SPF or DKIM failure decides.
  *
- * `softfail` does NOT count. It is SPF's `~all`, which is the sending domain saying "this is
- * probably not us, but do not reject on my account", and it fires routinely on ordinary relayed
- * and forwarded mail, which is the exact shape of mail that reaches an alias. Withholding on a
- * verdict whose own definition asks receivers not to act on it would keep real employer mail from
- * her in the name of a risk the sender did not assert. `fail` is the opposite statement: `-all`,
- * the domain owner saying this sender is not authorized. DMARC has no softfail; it passes or fails.
- * `neutral`, `none`, `permerror` and `temperror` are all likewise non-assertions and pass through.
+ * THE REASONING THIS REPLACES WAS WRONG, and it is worth saying so plainly because it was the
+ * stated justification for the whole rule. It claimed softfail must be ignored because SPF breaks
+ * under forwarding. SPF does break under forwarding, but that has nothing to do with the domain's
+ * policy: a forwarded message from a `-all` domain scores `spf=fail`, not `spf=softfail`, so the
+ * fail/softfail line does not track "was this relayed" at all and never did. The rule was defended
+ * with an argument that did not support it.
  *
- * ABSENT does NOT count either, and this is a deliberate fail-open. A missing Authentication-Results
- * header means the provider did not tell us, which is not the same as telling us the sender is
- * forged, and treating silence as failure would withhold every message from any route that does not
- * stamp the header. It is the weaker choice and it is the honest one: fail-open on absent is
- * defensible, fail-open on an explicit failure is not, and only the second was actually happening
- * before this gate existed.
+ * DMARC is the mechanism that does track it, through DKIM alignment, which survives forwarding
+ * where SPF does not. It is already in the header we parse, so it is used:
+ *
+ *   dmarc=fail       refuse. The domain's own policy evaluation says this is not them, and an
+ *                    aligned DKIM signature would have rescued it if one existed.
+ *   dmarc=pass       deliver, even beside `spf=fail`. That combination IS ordinary forwarded mail:
+ *                    the relay broke the SPF path and the signature carried the identity through.
+ *                    The old rule withheld exactly this, which is real employer mail.
+ *   no dmarc verdict fall back to SPF and DKIM: refuse on an explicit `fail` from either. Without
+ *                    DMARC there is no alignment statement, so a bare `dkim=pass` is not evidence
+ *                    the signing domain is the FROM domain, and it may not rescue an SPF failure.
+ *
+ * WHAT STILL GETS THROUGH, stated rather than argued away: `spf=softfail` with no DKIM and no DMARC
+ * delivers, and so does a message with no verdicts at all. A domain publishing `~all` and no DMARC
+ * record has told the world not to reject on its behalf and has given us nothing to align against,
+ * so an attacker who knows an alias can reach her inbox in its name. That is a real residual and it
+ * is the sending domain's posture rather than our judgement of the message. Closing it would mean
+ * withholding on the absence of a positive signal, which withholds every employer whose provider
+ * does not stamp the header. Fail-open on a non-assertion, fail-closed on an assertion, and the
+ * gap written down instead of explained away.
  */
 export function senderAuthenticationFailed(
   authentication: InboundApplicationEmail['authentication'],
 ): boolean {
   if (!authentication) return false;
-  return [authentication.spf, authentication.dkim, authentication.dmarc]
-    .some((verdict) => verdict?.trim().toLowerCase() === 'fail');
+  const verdict = (value: string | undefined) => value?.trim().toLowerCase() || undefined;
+  const dmarc = verdict(authentication.dmarc);
+  if (dmarc === 'fail') return true;
+  if (dmarc === 'pass') return false;
+  return [verdict(authentication.spf), verdict(authentication.dkim)].some((value) => value === 'fail');
 }
 
 /* Which employer this reply belongs to, taken from the thread Litos already recorded rather than
@@ -1049,7 +1142,7 @@ async function relayApplicantReply(
     .limit(50);
   const recipient = relayRecipientFor(thread, { alias: aliasRow.alias, forwardTo: aliasRow.forward_to });
   const dedupeKey = `relay:${dedupeKeyFor(input)}`;
-  const inserted = await db.insert(application_email_messages).values({
+  const relayValues = {
     alias: aliasRow.alias,
     user_id: aliasRow.user_id,
     generated_resume_id: aliasRow.generated_resume_id,
@@ -1066,10 +1159,22 @@ async function relayApplicantReply(
     raw_json: { relay: { origin: aliasRow.forward_to, provider: input.provider ?? null } },
     received_at: receivedAt,
     forward_error: recipient ? null : 'No employer correspondent on this alias yet, so there was nothing to reply to.',
-  }).onConflictDoNothing({ target: application_email_messages.dedupe_key }).returning({
-    id: application_email_messages.id,
-    forwarded_at: application_email_messages.forwarded_at,
-  });
+  };
+  /* THE RETURN LEG GOES THROUGH THE SAME SHIM AS THE INBOUND ONE, and it was missed the first time
+   * because the sweep that found the other unmigrated-column hazards looked for bare SELECTs. This
+   * is an INSERT, and an insert is the statement Drizzle fills out with every declared column. On a
+   * database without forward_decision this threw, so the webhook 500d, Resend retried and gave up,
+   * and the applicant's reply never reached the employer. */
+  const inserted = await db.insert(application_email_messages).values(relayValues)
+    .onConflictDoNothing({ target: application_email_messages.dedupe_key })
+    .returning({
+      id: application_email_messages.id,
+      forwarded_at: application_email_messages.forwarded_at,
+    })
+    .catch((error) => {
+      if (!isUndefinedColumnError(error)) throw error;
+      return insertLedgerRowWithoutForwardDecision(relayValues);
+    });
   const row = inserted[0] ?? (await db
     .select({ id: application_email_messages.id, forwarded_at: application_email_messages.forwarded_at })
     .from(application_email_messages)
@@ -1127,6 +1232,10 @@ export type InboundApplicationEmailResult = {
 export type StoredInboundMessage = {
   id: string;
   forwarded_at: Date | null;
+  /* What the LAST router decided about this row, and the reason the decision can be remembered
+   * rather than recomputed from whatever the current delivery happens to say. Optional because a
+   * database that has not run the migration cannot answer, which is not the same as "no decision". */
+  forward_decision?: string | null;
   from_email: string | null;
   subject: string | null;
   text: string | null;
@@ -1238,8 +1347,12 @@ export async function handleStoredEmployerMessage(input: {
    * packet, and an unauthenticated message is not worth one at all: it is refused either way.
    * Asked AFTER resolution deliberately: resolution is a fact about the application and must not
    * queue behind a question that exists only to decide whether to send a courtesy copy. */
+  /* THIS DELIVERY'S VERDICT, OR ANY EARLIER ONE. See forwardDecisionRefusedSender: a message
+   * already judged forged stays judged, whatever the current delivery report says or omits. */
+  const senderRefused = input.senderAuthenticationFailed === true
+    || forwardDecisionRefusedSender(message?.forward_decision);
   const securityCodeInFlight = classification === 'verification_code'
-    && !input.senderAuthenticationFailed
+    && !senderRefused
     && aliasRow.generated_resume_id
     ? await deps.securityCodeInFlight({
       applicationId: aliasRow.generated_resume_id,
@@ -1249,14 +1362,14 @@ export async function handleStoredEmployerMessage(input: {
     : false;
   const forwardingDecision = applicationEmailForwardingDecision(classification, {
     securityCodeInFlight,
-    senderAuthenticationFailed: input.senderAuthenticationFailed === true,
+    senderAuthenticationFailed: senderRefused,
   });
   if (!forwardingDecision.forward) {
     /* THE DROP IS WRITTEN DOWN. Without this the row is direction 'inbound', forwarded_at NULL and
      * forward_error NULL, which is byte for byte an unprocessed message, and a policy that stops
      * delivering mail cannot be counted or noticed. A message that was never stored has no row to
      * annotate, which is a different and already visible state. */
-    if (message) await deps.recordDecision({ messageId: message.id, decision: `withheld:${forwardingDecision.reason}` });
+    if (message) await deps.recordDecision({ messageId: message.id, decision: withheldForwardDecision(forwardingDecision.reason) });
     return done({ ...base, forwarded: false, reason: forwardingDecision.reason });
   }
   if (!message) return done({ ...base, forwarded: false, reason: 'message_not_stored' });
@@ -1366,10 +1479,13 @@ type LedgerRow = {
   html: string | null;
   classification: string;
   received_at: Date | null;
+  /* Absent, not null, on a database that has not run the migration. The difference matters: null is
+   * "no router has looked at this row", undefined is "this deployment cannot see the answer". */
+  forward_decision?: string | null;
 };
 
-/** The columns the forward is built from. One list, used by the insert, the re-read and the shim. */
-const LEDGER_ROW_SELECTION = {
+/** The columns as they existed before forward_decision, which is what the shim can return. */
+const LEDGER_ROW_SELECTION_BEFORE_FORWARD_DECISION = {
   id: application_email_messages.id,
   forwarded_at: application_email_messages.forwarded_at,
   from_email: application_email_messages.from_email,
@@ -1378,6 +1494,24 @@ const LEDGER_ROW_SELECTION = {
   html: application_email_messages.html,
   classification: application_email_messages.classification,
   received_at: application_email_messages.received_at,
+} as const;
+
+/* THE STORED DECISION IS READ BACK, and this is the line that makes the withhold stick.
+ *
+ * It used to stop one column short. The row carried what the last router decided and nothing ever
+ * selected it, so every delivery re-derived the answer from scratch and the last one won. Driving
+ * the handler twice on one stored row measured what that costs:
+ *
+ *   delivery 1, authentication FAIL   -> withheld, row reads withheld:sender_authentication_failed
+ *   delivery 2, authentication ABSENT -> FORWARDED, row now reads 'forward'
+ *
+ * A message already judged forged was mailed to the applicant from Litos's verified sending
+ * identity, and the annotation was overwritten on the way, so the ledger afterwards said Litos had
+ * chosen to forward it. That is the invisible drop inverted into an invisible un-drop, and it
+ * destroys the evidence as it goes. See handleStoredEmployerMessage for what is done with it. */
+const LEDGER_ROW_SELECTION = {
+  ...LEDGER_ROW_SELECTION_BEFORE_FORWARD_DECISION,
+  forward_decision: application_email_messages.forward_decision,
 } as const;
 
 /* THE LEDGER INSERT AS IT LOOKED BEFORE forward_decision EXISTED, and why this shim is here.
@@ -1389,30 +1523,31 @@ const LEDGER_ROW_SELECTION = {
  * run `npm run db:application-email-forward-decision`, and on Vercel a merge is a deploy, so that
  * window is real and lasts however long it takes somebody to remember.
  *
- * The statement it breaks is the one that STORES EMPLOYER MAIL. Losing every inbound message for
- * the length of that window would be a strictly worse bug than the silent drop this change exists
- * to end, and it would arrive wearing a 500 rather than a silence, so Resend would retry and then
- * give up. This is not a theoretical hazard: it was measured by dropping the column and driving
- * this path through it, and the first version of this change failed that test.
+ * BOTH inserts into this table go through it. The inbound one stores employer mail; the outbound
+ * one in relayApplicantReply carries the applicant's answer back to the employer, and it was missed
+ * the first time this shim was written because the sweep that found it looked for bare SELECTs. On
+ * an unmigrated database the return leg threw, the webhook 500d, Resend retried and gave up, and
+ * her reply never left. A sweep for one dangerous statement class is not a sweep.
  *
- * The tolerance elsewhere in this file (recordDecision, the health count, the ledger route) could
- * afford to degrade because losing an annotation costs nothing. This one cannot degrade, so it is
- * repeated rather than skipped.
+ * The tolerance elsewhere in this file (recordDecision, the health count, the ledger route, the
+ * account export) can afford to degrade, because losing an annotation costs nothing. These two
+ * cannot degrade, so they are repeated rather than skipped.
  *
- * TEMPORARY. Once the migration has run everywhere, delete this function and the catch that calls
- * it; the test named for the unmigrated database is what will fail if it is deleted too early. */
-async function insertLedgerRowBeforeForwardDecision(
+ * TEMPORARY. Once the migration has run everywhere, delete this function and the two catches that
+ * call it; the test named for the unmigrated database is what fails if it goes too early. */
+async function insertLedgerRowWithoutForwardDecision(
   values: typeof application_email_messages.$inferInsert,
 ): Promise<LedgerRow[]> {
   const result = await db.execute(sql`
     insert into application_email_messages
       (alias, user_id, generated_resume_id, direction, provider, provider_message_id, dedupe_key,
-       from_email, to_email, subject, text, html, classification, raw_json, received_at)
+       from_email, to_email, subject, text, html, classification, raw_json, received_at, forward_error)
     values (${values.alias}, ${values.user_id}, ${values.generated_resume_id ?? null}, ${values.direction},
             ${values.provider ?? null}, ${values.provider_message_id ?? null}, ${values.dedupe_key},
             ${values.from_email ?? null}, ${values.to_email ?? null}, ${values.subject ?? null},
             ${values.text ?? null}, ${values.html ?? null}, ${values.classification ?? 'other'},
-            ${JSON.stringify(values.raw_json ?? null)}::jsonb, ${values.received_at ?? null})
+            ${JSON.stringify(values.raw_json ?? null)}::jsonb, ${values.received_at ?? null},
+            ${values.forward_error ?? null})
     on conflict (dedupe_key) do nothing
     returning id, forwarded_at, from_email, subject, text, html, classification, received_at`);
   return (result.rows ?? []) as LedgerRow[];
@@ -1472,14 +1607,24 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
       // The one error that means the deploy is ahead of its migration. Storing the message is not
       // allowed to depend on the column that only annotates it: see the shim's own comment.
       if (!isUndefinedColumnError(error)) throw error;
-      return insertLedgerRowBeforeForwardDecision(ledgerValues);
+      return insertLedgerRowWithoutForwardDecision(ledgerValues);
     });
-  // The re-read after a conflict names its columns, so it needs no shim of its own.
+  /* THE RE-READ AFTER A CONFLICT is the path a redelivery takes, and it is the one that has to
+   * carry the stored decision: the insert did nothing, so this row is the only record of what was
+   * decided the first time. It names forward_decision, so it needs the same fallback as the insert. */
   const message = inserted[0] ?? (await db
     .select(LEDGER_ROW_SELECTION)
     .from(application_email_messages)
     .where(eq(application_email_messages.dedupe_key, dedupeKey))
-    .limit(1))[0];
+    .limit(1)
+    .catch(async (error): Promise<LedgerRow[]> => {
+      if (!isUndefinedColumnError(error)) throw error;
+      return db
+        .select(LEDGER_ROW_SELECTION_BEFORE_FORWARD_DECISION)
+        .from(application_email_messages)
+        .where(eq(application_email_messages.dedupe_key, dedupeKey))
+        .limit(1);
+    }))[0];
   // The STORED classification is the authority from here on, including on the redelivery of a
   // message this deployment classified differently: the ledger row is what the applicant and the
   // packet were told, and two answers for one message is worse than either answer.
@@ -1491,10 +1636,14 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     message: message ?? null,
     classification: storedClassification,
     receivedAt,
-    /* Taken from the delivery rather than from the stored row, unlike the classification above.
-     * The verdict is a property of the SMTP transaction that just happened, and a redelivery of
-     * the same provider message is the same transaction re-reported: the dedupe key is what makes
-     * them one message. There is nothing older to prefer. */
+    /* THIS delivery's verdict. It is not the only one that counts.
+     *
+     * This comment used to claim there was "nothing older to prefer", on the reasoning that a
+     * redelivery of the same provider message is the same transaction re-reported. That was wrong,
+     * and measurably so: the row carries what the last router decided, a second delivery with the
+     * header absent scored no failure, and the message was forwarded and its annotation
+     * overwritten. handleStoredEmployerMessage now ORs this with the stored decision, so an earlier
+     * refusal survives a later delivery that says nothing. */
     senderAuthenticationFailed: senderAuthenticationFailed(input.authentication),
   }, storedEmployerMessageDeps());
 }
