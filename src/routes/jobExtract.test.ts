@@ -107,4 +107,61 @@ describe('jobDescriptionSourceUrl', () => {
       assert.equal(jobDescriptionSourceUrl(url), url);
     }
   });
+
+  test('reads exact numeric and slugged Celerant Paylocity Apply URLs from Details', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914'),
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914',
+    );
+    assert.equal(
+      jobDescriptionSourceUrl(
+        'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software-Developer-Intern',
+      ),
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software-Developer-Intern',
+    );
+  });
+
+  test('Paylocity extraction refuses query and fragment state and leaves the stored Apply URL unchanged', () => {
+    for (const storedPortalUrl of [
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914?source=celerant',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914#description',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914?source=celerant#description',
+    ]) {
+      assert.equal(jobDescriptionSourceUrl(storedPortalUrl), storedPortalUrl);
+    }
+  });
+
+  test('Paylocity extraction refuses wrong origins and non-exact Apply paths', () => {
+    for (const url of [
+      'http://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914',
+      'https://recruiting.paylocity.com:444/Recruiting/Jobs/Apply/4084914',
+      'https://access.paylocity.com/Recruiting/Jobs/Apply/4084914',
+      'https://www.paylocity.com/Recruiting/Jobs/Apply/4084914',
+      'https://recruiting.paylocity.example/Recruiting/Jobs/Apply/4084914',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/not-numeric',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software-Developer-Intern/extra',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/..',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/%2e',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/%2E',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/%2e%2e',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/%2E%2e',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/%2e%2E',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/.%2e',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/%2e.',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software%2FDeveloper',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software%5CDeveloper',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software\\Developer',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software Developer',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software\tDeveloper',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software\nDeveloper',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software\rDeveloper',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Développeur',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software\u0000Developer',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software\u007fDeveloper',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/View/4084914',
+    ]) {
+      assert.equal(jobDescriptionSourceUrl(url), url);
+    }
+  });
 });

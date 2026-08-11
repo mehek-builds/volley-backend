@@ -40,6 +40,7 @@ import {
   postingCountryFromJobContext,
   type JobCountry,
 } from './jobLocation';
+import { paylocityApplicationUrl } from './paylocityUrl';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
 // dots and colons), so they are matched with the [id="..."] attribute form rather than #id. Inside
@@ -6189,6 +6190,9 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   }
   if (family === 'workable' && /^\/(?:[^/]+\/)?j\/[^/]+\/?$/i.test(url.pathname)) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
+  }
+  if (family === 'paylocity') {
+    return paylocityApplicationUrl(rawUrl) ?? rawUrl;
   }
   if (family === 'personio' && url.hostname.toLowerCase() !== 'arteus-energy.jobs.personio.de'
     && !url.pathname.endsWith('/apply')) {

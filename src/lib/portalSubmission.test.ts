@@ -3017,6 +3017,66 @@ test('Workable opens the exact application route and clears optional-cookie over
   assert.ok(firstNameIndex > readyIndex, 'Workable form readiness must precede fixed-field filling');
 });
 
+test('Paylocity opens the exact Celerant application route from numeric and slugged details URLs', () => {
+  assert.equal(
+    portalApplicationUrl('paylocity', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914'),
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914',
+  );
+  assert.equal(
+    portalApplicationUrl(
+      'paylocity',
+      'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software-Developer-Intern',
+    ),
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software-Developer-Intern',
+  );
+});
+
+test('Paylocity submission never rewrites an existing Apply URL or a Details URL with query state', () => {
+  const apply = 'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software-Developer-Intern';
+  assert.equal(portalApplicationUrl('paylocity', apply), apply);
+  for (const details of [
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914?source=celerant',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914#apply',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914?source=celerant#apply',
+  ]) {
+    assert.equal(portalApplicationUrl('paylocity', details), details);
+  }
+});
+
+test('Paylocity submission refuses wrong origins and non-exact Details paths', () => {
+  for (const url of [
+    'http://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914',
+    'https://recruiting.paylocity.com:444/Recruiting/Jobs/Details/4084914',
+    'https://access.paylocity.com/Recruiting/Jobs/Details/4084914',
+    'https://www.paylocity.com/Recruiting/Jobs/Details/4084914',
+    'https://recruiting.paylocity.example/Recruiting/Jobs/Details/4084914',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/not-numeric',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software-Developer-Intern/extra',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/..',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/%2e',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/%2E',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/%2e%2e',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/%2E%2e',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/%2e%2E',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/.%2e',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/%2e.',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software%2FDeveloper',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software%5CDeveloper',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software\\Developer',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software Developer',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software\tDeveloper',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software\nDeveloper',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software\rDeveloper',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Développeur',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software\u0000Developer',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software\u007fDeveloper',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/View/4084914',
+  ]) {
+    assert.equal(portalApplicationUrl('paylocity', url), url);
+  }
+});
+
 test('direct Workable preparation reaches the same form and declines optional cookies', async () => {
   let currentUrl = 'https://apply.workable.com/mercari/j/EC5A1078C4/';
   const events: string[] = [];

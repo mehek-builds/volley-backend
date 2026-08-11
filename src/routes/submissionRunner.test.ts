@@ -13,6 +13,7 @@ import {
   mergeDiscoveredPortalQuestions,
   managedExtensionHandoffUrl,
   measuredRequiredDocuments,
+  nonManagedPreparationApplicationUrl,
   optionProbeAttentionReasons,
   packetUsesControlledResumeFixture,
   preparationEvidenceBlockers,
@@ -26,6 +27,7 @@ import {
   unansweredRequiredBlockerLabels,
   type ResumeRow,
 } from './submissionRunner';
+import { isManagedStratusProvider } from '../lib/browserbase';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
 import { savedAnswerKey } from '../lib/answerReuse';
 import {
@@ -905,6 +907,49 @@ test('managed prepare and final or security-code submit rebuild controlled packe
   const coverLetterBlock = buildBody.slice(buildBody.indexOf('let coverLetter:'));
   assert.doesNotMatch(coverLetterBlock, /controlledTest|packetUsesControlledResumeFixture/,
     'controlled resume bytes must not bypass or suppress normal cover-letter resolution');
+});
+
+test('managed prepare derives the browser destination through portalApplicationUrl before its first run', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const prepareStart = source.indexOf('async function prepareManaged(');
+  const prepareEnd = source.indexOf('\nasync function ', prepareStart + 10);
+  assert.ok(prepareStart > 0 && prepareEnd > prepareStart);
+  const prepareBody = source.slice(prepareStart, prepareEnd);
+  const deriveIndex = prepareBody.indexOf(
+    'const applicationUrl = portalApplicationUrl(portal, current.portal_url!);',
+  );
+  const runIndex = prepareBody.indexOf('runManagedBrowser(applicationUrl, buildManagedDiscoveryActions');
+  assert.ok(deriveIndex >= 0, 'managed prepare must derive its destination from the frozen portal URL');
+  assert.ok(runIndex > deriveIndex, 'the first managed preparation run must receive the derived Apply URL');
+});
+
+test('Browserbase and legacy Stratus prepare Paylocity at the exact derived Apply URL', () => {
+  const previousProvider = process.env.BROWSER_PROVIDER;
+  const details = 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/4084914/Software-Developer-Intern';
+  const apply = 'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/4084914/Software-Developer-Intern';
+  try {
+    for (const provider of ['browserbase', 'stratus']) {
+      process.env.BROWSER_PROVIDER = provider;
+      assert.equal(isManagedStratusProvider(), false, `${provider} must use the non-managed preparation branch`);
+      assert.equal(nonManagedPreparationApplicationUrl('paylocity', details), apply);
+    }
+  } finally {
+    if (previousProvider === undefined) delete process.env.BROWSER_PROVIDER;
+    else process.env.BROWSER_PROVIDER = previousProvider;
+  }
+
+  const greenhouse = 'https://boards.greenhouse.io/acme/jobs/123';
+  assert.equal(nonManagedPreparationApplicationUrl('greenhouse', greenhouse), greenhouse);
+
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const deriveIndex = source.indexOf(
+    'const applicationUrl = nonManagedPreparationApplicationUrl(portal, portalUrl);',
+  );
+  const sessionIndex = source.indexOf('createBrowserSession(contextId, applicationUrl)', deriveIndex);
+  const navigationIndex = source.indexOf('page.goto(applicationUrl,', sessionIndex);
+  assert.ok(deriveIndex >= 0, 'the non-managed branch must derive its Paylocity destination');
+  assert.ok(sessionIndex > deriveIndex, 'provider session creation must receive the derived Apply URL');
+  assert.ok(navigationIndex > sessionIndex, 'direct navigation must receive the same derived Apply URL');
 });
 
 test('discovered US work authorization and sponsorship become reviewed Yes answers', async () => {

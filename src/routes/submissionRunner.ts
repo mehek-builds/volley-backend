@@ -3019,8 +3019,9 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     await prepareManaged(row, current, portal, runId, fastify, authorization);
     return;
   }
+  const applicationUrl = nonManagedPreparationApplicationUrl(portal, portalUrl);
   const contextId = current.browser_context_id ?? (await createBrowserContext());
-  const session = await createBrowserSession(contextId, portalUrl);
+  const session = await createBrowserSession(contextId, applicationUrl);
   {
     const verificationRequestedAt = new Date();
     const connected = await connectToSession(session);
@@ -3032,7 +3033,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       browser_session_id: session.id,
       submission_error: undefined,
     }));
-    await page.goto(portalUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.goto(applicationUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     // SmartRecruiters follows its captured link. Workable canonicalizes to /apply and clears its
     // optional-cookie overlay. Every other portal is a no-op here.
     await navigateToApplicationForm(page, portal);
@@ -3285,6 +3286,13 @@ function controlledChromeExecutable(): string {
 
 export function shouldUseLocalControlledBrowser(portal: SupportedPortal): boolean {
   return portal === 'controlled_test' && !isManagedStratusProvider();
+}
+
+export function nonManagedPreparationApplicationUrl(
+  portal: SupportedPortal,
+  portalUrl: string,
+): string {
+  return portal === 'paylocity' ? portalApplicationUrl(portal, portalUrl) : portalUrl;
 }
 
 function assertControlledPortalEnabled(portal: SupportedPortal): void {

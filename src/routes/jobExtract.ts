@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { requireAuth } from '../middleware/auth';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { isBrowserbaseConfigured, isManagedStratusProvider, runManagedBrowser } from '../lib/browserbase';
+import { paylocityDetailsUrl } from '../lib/paylocityUrl';
 
 // Bounded so a page with an unusually large DOM (or a hostile one padding its text node) cannot
 // blow past resumeGenerateBodySchema's jd_text cap (100_000) once the frontend forwards this
@@ -20,10 +21,14 @@ export function clipJdText(rawText: string | undefined | null): string {
 const WORKABLE_APPLICATION_PATH = /^\/((?:[a-z0-9][a-z0-9._-]*\/)?j\/[a-z0-9]+)\/apply\/?$/i;
 
 /**
- * Workable's application route contains form labels, not the job description. Read the exact job
- * overview for extraction while leaving the caller's application URL untouched for submission.
+ * Workable and Paylocity application routes contain form labels, not the job description. Read the
+ * exact job overview for extraction while leaving the caller's application URL untouched for
+ * submission.
  */
 export function jobDescriptionSourceUrl(rawUrl: string): string {
+  const paylocityDetails = paylocityDetailsUrl(rawUrl);
+  if (paylocityDetails) return paylocityDetails;
+
   const url = new URL(rawUrl);
   if (url.origin !== 'https://apply.workable.com') return rawUrl;
 
