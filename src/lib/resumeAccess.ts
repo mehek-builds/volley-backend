@@ -269,6 +269,26 @@ export async function resolveBlobUrl(objectKey: string): Promise<string | null> 
   return blobs.find((b) => b.pathname === objectKey)?.url ?? null;
 }
 
+// The two Blob calls this module makes, as an injectable seam. Narrowed to the surface actually
+// consumed rather than restating @vercel/blob's types: `list` is generic over folded/expanded mode
+// and its blobs carry size, etag and downloadUrl that nothing here reads, so a fake would have to
+// fabricate fields only to satisfy the compiler.
+export type BlobListPage = {
+  blobs: Array<{ url: string; pathname: string; uploadedAt: Date }>;
+  cursor?: string;
+  hasMore: boolean;
+};
+
+export type ResumeBlobStore = {
+  list: (options: { prefix: string; cursor?: string; limit: number }) => Promise<BlobListPage>;
+  del: (urls: string[]) => Promise<void>;
+};
+
+const productionBlobStore: ResumeBlobStore = {
+  list: (options) => list(options),
+  del: (urls) => del(urls),
+};
+
 // @vercel/blob's del() rejects a batch above this size outright, so an oversized call deletes
 // nothing and throws. It matters most on the run that carries a backlog, which is precisely the
 // run that follows an outage like the one that stopped this sweep between 3 and 11 August.
@@ -280,17 +300,26 @@ const DELETE_BATCH_SIZE = 1000;
 // there would throw, leave the user's PII in the store, and break the promise the exemption rests
 // on. Deleting per user is unbounded by age, so a long-lived heavy account is exactly where the
 // limit gets hit first.
-async function delInBatches(urls: string[]): Promise<void> {
+//
+// The store is threaded through rather than closed over so that a test exercising the batching can
+// count the calls: chunking is the kind of arithmetic that is only ever wrong at a boundary.
+async function delInBatches(
+  urls: string[],
+  store: ResumeBlobStore = productionBlobStore,
+): Promise<void> {
   for (let i = 0; i < urls.length; i += DELETE_BATCH_SIZE) {
-    await del(urls.slice(i, i + DELETE_BATCH_SIZE));
+    await store.del(urls.slice(i, i + DELETE_BATCH_SIZE));
   }
 }
 
-async function listAll(prefix: string): Promise<StoredResumeBlob[]> {
+async function listAll(
+  prefix: string,
+  store: ResumeBlobStore = productionBlobStore,
+): Promise<StoredResumeBlob[]> {
   const out: StoredResumeBlob[] = [];
   let cursor: string | undefined;
   do {
-    const res = await list({ prefix, cursor, limit: 1000 });
+    const res = await store.list({ prefix, cursor, limit: 1000 });
     out.push(...res.blobs.map((b) => ({ url: b.url, pathname: b.pathname, uploadedAt: b.uploadedAt })));
     cursor = res.hasMore ? res.cursor : undefined;
   } while (cursor);
@@ -334,6 +363,24 @@ export async function deleteUploadedResumeThenClear(
   await clearLegacyPointers();
 }
 
+/**
+ * Owner ids for the legacy originals among a set of deleted pathnames, deduplicated.
+ *
+ * Only legacy originals matter here. profiles.resume_object_key / resume_url point at the raw
+ * upload under the user root; generated files under resumes/ are tracked in generated_resumes and
+ * clearing a profile pointer for one of those would be scoping by coincidence.
+ */
+export function legacyOriginalOwnerIds(pathnames: string[]): string[] {
+  const ids = new Set<string>();
+  for (const pathname of pathnames) {
+    if (!isUploadedResumeBlob(pathname)) continue;
+    // isUploadedResumeBlob has already pinned the shape to users/<id>/resume*.pdf|docx.
+    const userId = pathname.split('/')[1];
+    if (userId) ids.add(userId);
+  }
+  return [...ids];
+}
+
 export interface BlobSweepResult {
   scanned: number;
   deleted: number;
@@ -343,18 +390,36 @@ export interface BlobSweepResult {
   unclassified: number;
   /** A few offending paths, enough to identify the writer without dumping the store into a log. */
   unclassifiedSample: string[];
+  /**
+   * Pathnames actually handed to del(), so a caller can scope follow-up work to the owners whose
+   * files really went. Deliberately not surfaced in the HTTP response: these keys embed user ids.
+   */
+  deletedPathnames: string[];
 }
 
 // Deletes legacy original uploads on sight, generated files after RESUME_RETENTION_DAYS, and
 // filled-form previews after SUBMISSION_PREVIEW_RETENTION_DAYS. Receipts are exempt by decision.
+//
+// blobStore exists because this is the only function in this file that permanently destroys user
+// files, and it was the only one with no test: every retention test stubbed it out at the route
+// boundary, so the cursor loop in listAll and the batching in delInBatches ran unexercised in CI
+// and were first exercised in production. Overriding is partial, so a test can replace del alone
+// and still page through a real listing fake.
 export async function sweepExpiredResumeBlobs(
-  now = Date.now(),
-  retentionDays = RESUME_RETENTION_DAYS,
-  previewRetentionDays = SUBMISSION_PREVIEW_RETENTION_DAYS,
+  opts: {
+    now?: number;
+    retentionDays?: number;
+    previewRetentionDays?: number;
+    blobStore?: Partial<ResumeBlobStore>;
+  } = {},
 ): Promise<BlobSweepResult> {
-  const blobs = await listAll('users/');
+  const now = opts.now ?? Date.now();
+  const retentionDays = opts.retentionDays ?? RESUME_RETENTION_DAYS;
+  const previewRetentionDays = opts.previewRetentionDays ?? SUBMISSION_PREVIEW_RETENTION_DAYS;
+  const store: ResumeBlobStore = { ...productionBlobStore, ...opts.blobStore };
+  const blobs = await listAll('users/', store);
   const due = resumeBlobsDueForDeletion(blobs, now, retentionDays, previewRetentionDays);
-  await delInBatches(due.map((blob) => blob.url));
+  await delInBatches(due.map((blob) => blob.url), store);
   const deletedByCategory: Record<UserBlobCategory, number> = {
     'legacy-original': 0,
     'generated-resume': 0,
@@ -370,5 +435,6 @@ export async function sweepExpiredResumeBlobs(
     deletedByCategory,
     unclassified: unclassified.length,
     unclassifiedSample: unclassified.slice(0, 5).map((blob) => blob.pathname),
+    deletedPathnames: due.map((blob) => blob.pathname),
   };
 }

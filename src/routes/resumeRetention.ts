@@ -1,40 +1,35 @@
 import { FastifyInstance, FastifyRequest, FastifyReply, FastifyPluginOptions } from 'fastify';
+import { inArray } from 'drizzle-orm';
 import { db } from '../db/index';
 import { profiles } from '../db/schema';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import {
+  legacyOriginalOwnerIds,
   sweepExpiredResumeBlobs,
   RESUME_RETENTION_DAYS,
   SUBMISSION_PREVIEW_RETENTION_DAYS,
   type UserBlobCategory,
 } from '../lib/resumeAccess';
-import { claimCounterSlot } from '../middleware/quota';
-
-export const LEGACY_ORIGINAL_CLEANUP_OPERATION_ID =
-  'issue-007-approved-legacy-original-cleanup-2026-08-03';
-export const RETENTION_OPERATION_COUNTER_KEY = 'system:resume-retention-operation';
-export const RETENTION_OPERATION_COUNTER_KIND = 'one-shot';
 
 // The breakdown fields are optional because they describe a sweep's own bookkeeping, not the
 // contract a caller depends on: the production implementation always fills them, and a test
 // double that only cares about ordering can still return the two counts and nothing else.
+//
+// deletedPathnames is NOT optional, because it is the only one that decides a write. The pointer
+// clear below is scoped from it, so a double that omitted it would silently scope to nobody and
+// the test asserting the scoping would pass without ever exercising it.
 type SweepResult = {
   scanned: number;
   deleted: number;
+  deletedPathnames: string[];
   deletedByCategory?: Partial<Record<UserBlobCategory, number>>;
   unclassified?: number;
   unclassifiedSample?: string[];
 };
 
 export type ResumeRetentionDependencies = {
-  claimCounterSlot: (
-    key: string,
-    period: string,
-    kind: string,
-    limit: number,
-  ) => Promise<number | null>;
   sweepExpiredResumeBlobs: () => Promise<SweepResult>;
-  clearLegacyPointers: () => Promise<void>;
+  clearLegacyPointers: (userIds: string[]) => Promise<void>;
 };
 
 type ResumeRetentionRouteOptions = FastifyPluginOptions & {
@@ -42,10 +37,21 @@ type ResumeRetentionRouteOptions = FastifyPluginOptions & {
 };
 
 const productionDependencies: ResumeRetentionDependencies = {
-  claimCounterSlot,
   sweepExpiredResumeBlobs,
-  clearLegacyPointers: async () => {
-    await db.update(profiles).set({ resume_object_key: null, resume_url: null });
+  // Scoped to the owners whose legacy original was actually deleted on this run. It was
+  // previously an unscoped `db.update(profiles).set({...: null})` with no WHERE, which nulled both
+  // columns for EVERY profile on every successful sweep, including the zero-deletion nights that
+  // are now all of them. That is a no-op against today's data (0 of 17 profiles have either column
+  // set) but it is a standing trap for any future feature that legitimately populates them: the
+  // nightly cron would silently blank it. Note a bare `.where(isNotNull(...))` would NOT have
+  // closed that - a future non-null value matches the filter and still gets nulled. Only "the
+  // owners whose file we just destroyed" is the correct set.
+  clearLegacyPointers: async (userIds) => {
+    if (userIds.length === 0) return;
+    await db
+      .update(profiles)
+      .set({ resume_object_key: null, resume_url: null })
+      .where(inArray(profiles.user_id, userIds));
   },
 };
 
@@ -61,6 +67,14 @@ const productionDependencies: ResumeRetentionDependencies = {
 // The generated_resumes row (the tailoring decision, kept for audit) is deliberately left
 // alone; only the PDF goes. GET /resume/download 404s for a swept file, which is the intended
 // end state, not an error.
+//
+// There is deliberately no query parameter that can narrow or skip the sweep. One used to exist:
+// `?run=<operation id>` claimed a one-shot usage_counters slot to perform an approved legacy
+// -original cleanup, and it is why this endpoint returned `{"already_processed": true}` at HTTP 200
+// without sweeping anything for the eight days after 2026-08-03. The operation completed, the slot
+// is spent, and the branch was redundant even when it claimed, since the sweep deletes legacy
+// originals unconditionally on both paths. A future gated one-shot belongs on its own endpoint,
+// not as a query string on the endpoint the privacy promise depends on.
 async function handleSweep(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -88,38 +102,12 @@ async function handleSweep(
     return reply.status(503).send({ error: 'BLOB_READ_WRITE_TOKEN not configured' });
   }
 
-  const rawRun = (request.query as { run?: unknown }).run;
-  if (rawRun !== undefined && rawRun !== '' && rawRun !== LEGACY_ORIGINAL_CLEANUP_OPERATION_ID) {
-    return reply.status(400).send({ error: 'unknown retention operation' });
-  }
-
-  if (rawRun === LEGACY_ORIGINAL_CLEANUP_OPERATION_ID) {
-    try {
-      const claim = await dependencies.claimCounterSlot(
-        RETENTION_OPERATION_COUNTER_KEY,
-        LEGACY_ORIGINAL_CLEANUP_OPERATION_ID,
-        RETENTION_OPERATION_COUNTER_KIND,
-        1,
-      );
-      if (claim === null) {
-        fastify.log.info(
-          { operationId: LEGACY_ORIGINAL_CLEANUP_OPERATION_ID },
-          'resume retention one-shot already processed',
-        );
-        return reply.status(200).send({ already_processed: true });
-      }
-    } catch (err) {
-      fastify.log.error(err, 'resume retention one-shot claim failed');
-      return reply.status(500).send({ error: 'operation claim failed' });
-    }
-  }
-
   try {
-    const { scanned, deleted, deletedByCategory, unclassified, unclassifiedSample } =
+    const { scanned, deleted, deletedPathnames, deletedByCategory, unclassified, unclassifiedSample } =
       await dependencies.sweepExpiredResumeBlobs();
     // The blob deletion succeeded, so stale legacy pointers can no longer lead an export or
     // onboarding response to claim the original still exists.
-    await dependencies.clearLegacyPointers();
+    await dependencies.clearLegacyPointers(legacyOriginalOwnerIds(deletedPathnames));
     // A key shape no retention rule recognises is kept, because deleting an artifact nobody has
     // classified is the worse mistake - but it is never kept SILENTLY. Form previews sat
     // unswept for the life of the feature because a new prefix simply fell through the old
