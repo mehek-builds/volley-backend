@@ -281,6 +281,44 @@ test('an email-route migration requires regeneration before uncertainty and says
   assert.doesNotMatch(out.attentionReason, /could not verify/i);
 });
 
+/* THE ONE THIS EXISTS FOR. buildPacket throws before a browser session is opened, but the submit()
+   call site runs after claimSubmission, so before this arm existed an expired packet inherited
+   uncertainAfterClaim and told the applicant to go and check her email for the confirmation of an
+   application that was never filled in. Measured 2026-08-11: the first live packet crosses the
+   30-day line around 2026-08-21. */
+test('an expired packet says nothing was sent, and never sends anyone looking for a receipt', () => {
+  const out = submissionFailureOutcome({ ...base, packetDocumentExpired: true });
+  assert.equal(out.status, 'needs_attention');
+  assert.match(out.attentionReason, /nothing was sent to the employer/i);
+  assert.doesNotMatch(out.attentionReason, /check the portal or your email/i,
+    'the sentence this arm exists to outrank');
+  assert.doesNotMatch(out.attentionReason, /could not verify/i);
+});
+
+test('the expired-packet sentence names the retention window and asks for a regenerate, not a retry', () => {
+  /* The recovery has to be the one that works. Retrying re-reads the same missing object, so a
+     sentence that invited one would loop the applicant through an identical failure. */
+  const reason = submissionFailureOutcome({ ...base, packetDocumentExpired: true }).attentionReason!;
+  assert.match(reason, /30 days/, 'the promise on the privacy page is the explanation, so say it');
+  assert.match(reason, /regenerate/i);
+  assert.doesNotMatch(reason, /try again in a few minutes|something went wrong/i,
+    'this is the retention policy working, not an outage to wait out');
+});
+
+test('a stop reason outranks an expired packet, because both are true and only one is the stop', () => {
+  /* An expired packet is discovered while ASSEMBLING, so it cannot coexist with a captcha in a real
+     run. Pinned anyway: the precedence chain is edited often, and this fixes where the new arm sits
+     rather than leaving the next edit to rediscover it. */
+  assert.match(
+    submissionFailureOutcome({ ...base, packetDocumentExpired: true, captchaStop: 'at_submit' }).attentionReason!,
+    /prove you are human/,
+  );
+  assert.match(
+    submissionFailureOutcome({ ...base, packetDocumentExpired: true, regenerationRequired: true }).attentionReason!,
+    /must be regenerated/i,
+  );
+});
+
 test('the no-submit-control message names no cause, because it has four', () => {
   /* Multi-step first page, a page that renders nothing headless, a control relabelled mid-run, and
      a click that timed out before dispatching. Naming one would be false most of the time. */

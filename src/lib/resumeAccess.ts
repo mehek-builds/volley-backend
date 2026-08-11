@@ -158,6 +158,46 @@ export function retentionDaysForCategory(
   }
 }
 
+/**
+ * A packet's stored document is no longer in Blob storage, so the packet cannot be assembled.
+ *
+ * IT IS A TYPE RATHER THAN A BARE Error FOR ONE REASON. fail() reads its typed error family as "the
+ * click provably did not happen" and ranks those above uncertainAfterClaim; anything untyped
+ * inherits "the final submission was attempted, but Litos could not verify the employer
+ * confirmation. Check the portal or your email", which sends someone hunting for a receipt that
+ * cannot exist. That inheritance was not theoretical: buildPacket is called inside submit() as well
+ * as inside prepare(), and the submit() call runs AFTER claimSubmission has set
+ * submission_claimed_at. A packet whose file vanished between a successful prepare and its submit
+ * therefore told the applicant to go looking for a confirmation of an application that was never
+ * filled in, because the packet could not be built at all.
+ *
+ * THE USUAL CAUSE IS THIS MODULE'S OWN SWEEP, which is why the type lives here beside the constant
+ * that causes it rather than beside the runner that throws it. RESUME_RETENTION_DAYS is 30, the
+ * privacy page promises deletion at 30 days, and nothing re-derives a document at send time
+ * (see submissionEducationGuard on the freeze). So a packet approved more than 30 days after it was
+ * built has no file left to send, by design, and that is not a malfunction to apologise for.
+ *
+ * Measured against the prod Neon DB and the Blob store on 2026-08-11: no live packet was affected
+ * yet, and the oldest approvable packet's resume blob was 20.1 days old, which puts the first real
+ * occurrence around 2026-08-21. The sentence this error produces is what the applicant sees then.
+ *
+ * The message text is unchanged from the two bare throws this replaced, so existing logs and any
+ * operator grep for it keep working.
+ */
+export class PacketDocumentExpiredError extends Error {
+  /* Which document went missing. The resume is fatal to the packet; a cover letter is not, because
+     packetForCoverLetterCapability degrades and sends the application without it. The runner needs
+     to tell those two apart, and a single type with a discriminant keeps the retention reasoning in
+     one place instead of splitting it across two near-identical classes. */
+  readonly document: 'resume' | 'cover_letter';
+
+  constructor(document: 'resume' | 'cover_letter') {
+    super(`Generated ${document === 'resume' ? 'resume' : 'cover letter'} file is unavailable`);
+    this.name = 'PacketDocumentExpiredError';
+    this.document = document;
+  }
+}
+
 export function resumePrefix(userId: string): string {
   return `users/${userId}/resumes/`;
 }

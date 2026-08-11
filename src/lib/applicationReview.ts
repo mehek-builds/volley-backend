@@ -54,6 +54,13 @@ export type ApplicationAttentionCategory =
    * something rather than a person fixing something, and because a state this expensive to be in
    * has to be countable. */
   | 'unverified_submission'
+  /* The packet's generated resume passed its 30-day retention window and the file was deleted, so
+   * there was nothing to send and nothing was sent. Deliberately NOT 'required_document', which
+   * means an EMPLOYER is waiting on a document from the applicant, and deliberately not
+   * 'run_failed', which is the "Litos broke, try again" bucket: retrying changes nothing here and
+   * only regenerating does. It is also the one attention state that is a promise being kept rather
+   * than a defect, so it has to be countable separately from the defects. */
+  | 'packet_expired'
   | 'required_document'
   | 'sensitive_attestation'
   | 'required_field'
@@ -477,6 +484,15 @@ export type ApplicationReviewState = {
     pdfSha256: string;
     pdfSizeBytes: number;
     acknowledged_at: string;
+    /* WHO LOOKED. Absent means the applicant did, which is what every acknowledgement written
+     * before this field meant, so old rows keep their meaning without a backfill.
+     *
+     * 'auto_restored' is written by restoreExpiredPacketResume when a packet's file had aged out of
+     * the 30-day window and was rebuilt from the frozen spec at send time. Nobody re-read that PDF.
+     * The content is identical by construction, since every render input is frozen on the row, but
+     * "a human confirmed these bytes" and "a machine rebuilt these bytes" are different facts and a
+     * corpus that cannot tell them apart can never answer which packets were actually reviewed. */
+    source?: 'applicant' | 'auto_restored';
   };
   filled_fields?: string[];
   /* THE DOCUMENTS THIS FORM DEMANDS AND THIS RUN LEFT HER NO WAY TO GIVE IT.
