@@ -2,13 +2,37 @@
 
 /* Standardized test scores.
  *
- * RUN THIS BEFORE THE DEPLOY THAT DECLARES THESE COLUMNS, not after. The columns are additive and
- * nullable, so they are backward compatible with the code already in production: applying this
- * migration first breaks nothing and closes the window in which a deploy would 42703. There is no
- * write-path tolerance for an unmigrated database and there cannot be one, because Drizzle names
- * every declared column in an INSERT regardless of payload; see the note in lib/applicationFacts.ts.
+ * ---------------------------------------------------------------------------------------------
+ * HOW TO RUN THIS: BY HAND, AGAINST PRODUCTION, BEFORE MERGING THE BRANCH THAT DECLARES THE
+ * COLUMNS. There is no GitHub Actions workflow for it, deliberately.
  *
- * MEASURED, NOT GUESSED. Counted over the owner account's full 158-packet corpus on 2026-08-11,
+ *   DATABASE_URL='<the production connection string>' npm run db:standardized-test-scores
+ *
+ * A workflow WAS written for this and was removed, because it could not have worked. A
+ * `workflow_dispatch` workflow is only addressable once it exists ON THE DEFAULT BRANCH: GitHub
+ * assigns the workflow id at that point, and without an id there is nothing for the Run workflow
+ * button or the dispatch API to target. Measured: the sibling
+ * country-work-eligibility-migration.yml resolves to a live workflow id, and a file present only on
+ * a feature branch 404s. So a migration workflow shipped in the SAME pull request as its script can
+ * never be dispatched before that pull request merges, which makes it precisely useless for the one
+ * ordering it exists to serve. Removing the `if: github.ref` gate did not change this; the gate was
+ * never the binding constraint.
+ *
+ * If a workflow is wanted later, it has to land on main in its own change that declares no columns,
+ * so it registers first and is dispatchable afterwards.
+ *
+ * ---------------------------------------------------------------------------------------------
+ * WHY THE ORDER IS MIGRATION FIRST, THEN MERGE. These columns are additive and nullable, so they
+ * are backward compatible with the code already in production and applying them early breaks
+ * nothing. Deploying first does break things, and not only the feature: Drizzle names every declared
+ * column in an INSERT regardless of payload, so with the columns absent, PUT /profile/application
+ * 500s even for a payload that never mentions them, POST /profile/harvest 500s, and the academic
+ * prefill is silently dropped. Reads survive, because selectApplicationProfileRow narrows its
+ * projection. See lib/applicationFacts.ts for why the write path has no equivalent tolerance and
+ * cannot be given one.
+ *
+ * MEASURED, NOT GUESSED. Counted over the owner account's full 158-packet corpus on 2026-08-11
+ * (366 packets carry a review-questions array across all accounts; this count is the owner's),
  * from attention_reason lines of the shape `"X" is required and is still empty`, as DISTINCT
  * packets blocked:
  *

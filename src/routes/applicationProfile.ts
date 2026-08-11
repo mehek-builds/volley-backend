@@ -133,7 +133,8 @@ export const bodySchema = z.object({
   availability_valid_through: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
 
   /* ---- standardized test scores ----
-   * See schema.ts for the 9-packets-each measurement behind all three. Plaintext, so none is in
+   * See schema.ts for the 8-packets-each measurement behind all three, and for why that count is
+   * not on its own the argument for the columns. Plaintext, so none is in
    * ENCRYPTED_FIELDS above: they are read off the RAW row by lib/applicationFacts.ts, and a
    * decrypt step on that path would hand ciphertext to an employer's form.
    *

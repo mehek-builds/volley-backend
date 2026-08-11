@@ -604,37 +604,47 @@ function militaryServiceAnswer(label: string, ap: ApplicationProfileLike): { val
  * ("Both" and "SAT" both fit it), and a type of "SAT" is not evidence of any particular number.
  */
 
-/* Words that mean the field wants a FIGURE, or names the part of the test it wants one for. Section
- * names are in here because the commonest real ATS shape is a bare section label - "SAT Math",
+/* Words that mean the field wants a FIGURE, or name the part of the test it wants one for. The
+ * section names are here because the commonest real ATS shape is a bare section label - "SAT Math",
  * "ACT English", "SAT Total (Evidence-Based Reading and Writing + Math)" - which asks for a number
- * without ever saying "score". A gate that demanded a value word returned null on all of those, and
- * null is the worst of the three outcomes: it falls through to the essay drafter instead of
- * producing a skipReason that leaves the question for the student. */
-const TEST_CONTEXT_WORD =
-  /^(?:results?|scores?|marks?|grades?|composite|superscored?|percentile|maths?|mathematics|reading|writing|english|science|verbal|section|subscores?|total|exam|test)$/i;
-
-/* "sat" IS ALSO THE PAST TENSE OF "sit", which the previous version of this rule missed while
- * carefully guarding the same problem for "act". "Have you sat for the CPA exam? Score:" cleared
- * both old gates and would have typed an SAT score into a CPA field. Litos targets finance, so that
- * is not a hypothetical label.
+ * without ever saying "score". A gate demanding a value word returned null on all of those, and null
+ * is the worst of the three outcomes: it falls through to the essay drafter instead of producing a
+ * skipReason that leaves the question for the student.
  *
- * The verb is distinguished by what FOLLOWS it: one sits FOR an exam, IN a room, ON a board. The
- * test name is a noun and takes none of these. */
-const SAT_VERB_FOLLOWER =
-  /^(?:for|in|on|at|through|down|beside|with|across|near|by|among|amongst|alongside|behind)$/i;
+ * `section` IS DELIBERATELY ABSENT, and it was here once. It is the single token by which every
+ * statute is cited - "Rehabilitation Act, Section 503" is the literal citation on the OFCCP
+ * disability self-identification form - so including it made a legal citation look exactly like a
+ * test subscore and put "34" into a disability question. No corpus label needs it. */
+const TEST_CONTEXT_WORD =
+  /^(?:results?|scores?|marks?|grades?|composite|superscored?|percentile|maths?|mathematics|reading|writing|english|science|verbal|subscores?|total|exam|test)$/i;
 
-/* "act" IS THE NAME OF MOST LEGISLATION, and an employer form is exactly where such a name appears.
- * Distinguished by what PRECEDES it: a statute is named after the thing it governs. This list is
- * why "Equality Act score" and "Section 503 Disability Act score" are refused even though both put
- * a value word directly beside the word "act". */
-const LEGAL_ACT_QUALIFIER =
-  /^(?:equality|disabilit(?:y|ies)|civil|rights|americans|section|title|privacy|protection|employment|labou?r|slate|care|safety|security|freedom|patriot|sarbanes|oxley|dodd|frank|accessibility|discrimination|harassment|reform|amendment|federal|state|companies|bribery|modern|slavery)$/i;
+/* WHAT MAY STAND IMMEDIATELY BEFORE A TEST NAME. An ALLOWLIST, and the inversion is the point.
+ *
+ * This replaced two denylists: one of prepositions that may follow "sat" (the verb, as in "sat FOR
+ * the exam") and one of nouns that may precede "act" (the statute, as in "Equality Act"). Both
+ * leaked, and they leaked in the way denylists always do - by omission rather than by error:
+ *
+ *   "Rehabilitation Act, Section 503"      not in the statute list -> filled "34"
+ *   "Investment Advisers Act score"        not in the statute list -> filled "34"
+ *   "Fair Credit Reporting Act - total"    not in the statute list -> filled "34"
+ *   "ADA Amendments Act score"             `amendment` was listed, `amendments` was not
+ *   "Date you sat the exam"                the verb here is FOLLOWED by "the", not a preposition
+ *   "Have you ever sat this exam?"         same, and the corpus already has a UK-English employer
+ *
+ * A list of every statute that could appear on an employer form cannot be completed, and neither
+ * can a list of every way English can phrase sitting an exam. The set of words that may introduce a
+ * TEST NAME, though, is tiny and closed: a determiner, a preposition, a qualifier, or nothing at
+ * all when the label opens with the test. Everything above is preceded by a noun or a pronoun and
+ * so is refused by default, which is the failure direction this belongs on. All three corpus labels
+ * pass, each preceded by "on". */
+const TEST_NAME_PRECEDER =
+  /^(?:your|the|a|an|on|in|best|highest|composite|superscored|total|and|or)$/i;
 
 function tokens(label: string): string[] {
   return label.toLowerCase().split(/[^a-z0-9+#]+/i).filter(Boolean);
 }
 
-/* ADJACENCY, NOT LENGTH. The old gate capped the label at eight words, which refused
+/* ADJACENCY, NOT LENGTH. An earlier gate capped the label at eight words, which refused
  * "Please provide your ACT composite score if you have taken the exam" (13 words, unmistakably an
  * ACT field) while still admitting any short sentence that happened to contain both "act" and
  * "score". Requiring the context word to sit WITHIN TWO TOKENS of the test name is what actually
@@ -646,8 +656,8 @@ function namesTestValue(label: string, test: 'sat' | 'act'): boolean {
   const parts = tokens(label);
   for (let i = 0; i < parts.length; i += 1) {
     if (parts[i] !== test && parts[i] !== `${test}s`) continue;
-    if (test === 'sat' && SAT_VERB_FOLLOWER.test(parts[i + 1] ?? '')) continue;
-    if (test === 'act' && LEGAL_ACT_QUALIFIER.test(parts[i - 1] ?? '')) continue;
+    // Start of label is allowed: "SAT Math" is a field name. Anything else must be a determiner.
+    if (i > 0 && !TEST_NAME_PRECEDER.test(parts[i - 1])) continue;
     for (let j = Math.max(0, i - TEST_CONTEXT_MAX_DISTANCE); j <= Math.min(parts.length - 1, i + TEST_CONTEXT_MAX_DISTANCE); j += 1) {
       if (j !== i && TEST_CONTEXT_WORD.test(parts[j])) return true;
     }
@@ -663,11 +673,25 @@ export function isActScoreQuestion(label: string): boolean {
   return namesTestValue(label, 'act');
 }
 
-/* The TYPE question needs no value-word gate: "standardized test" is unambiguous wording that no
- * other kind of question uses. Matched only after both score patterns have refused, so a label
- * naming a specific test is never answered with the type. */
+/* THE TYPE QUESTION NEEDS A TYPE CUE, not merely a mention of a standardized test.
+ *
+ * A bare `\bstandardi[sz]ed\s+tests?\b` alternative used to be the first branch here, on the theory
+ * that the phrase is unambiguous. It is not. TESTING-ACCOMMODATION questions are disability
+ * questions that name a standardized test without ever containing the string `disab`, so they slip
+ * EEO_QUESTION as well, and this pattern then typed "Both" into a yes/no control:
+ *
+ *   Did you receive an accommodation on a standardized test?
+ *   Do you require accommodations for a standardized test?
+ *
+ * So the pattern now requires wording that asks WHICH test or names the field as a TYPE. The one
+ * corpus label, "select your standardized test score type", matches on `test score type`. */
 export const STANDARDIZED_TEST_TYPE_QUESTION =
-  /\bstandardi[sz]ed\s+tests?\b|\btest\s+score\s+type\b|\bwhich\s+(?:standardi[sz]ed\s+)?tests?\b/i;
+  /\btests?\s+scores?\s+type\b|\bstandardi[sz]ed\s+tests?\s+(?:scores?\s+)?type\b|\b(?:which|what)\s+standardi[sz]ed\s+tests?\b|\b(?:which|what)\s+tests?\s+did\s+you\s+take\b/i;
+
+/* An accommodation question is a DISABILITY question wearing a test's vocabulary, and a request for
+ * accommodations is never a request for a score or a test name. Kept separate from EEO_QUESTION
+ * because it is exactly the family EEO_QUESTION misses: the word `disab` need never appear. */
+const TESTING_ACCOMMODATION_QUESTION = /\baccommodat/i;
 
 function standardizedTestAnswer(
   label: string,
@@ -684,11 +708,16 @@ function standardizedTestAnswer(
    * Act score" matches both, and end to end it filled "34" - verbatim the failure the comment above
    * these matchers says must never happen.
    *
-   * The LEGAL_ACT_QUALIFIER list refuses that particular label a second time, and no real EEO label
-   * in the corpus reaches this branch. Both facts are reasons to keep the guard, not to skip it: an
+   * The preceder allowlist refuses that particular label a second time, and no real EEO label in
+   * the corpus reaches this branch. Both facts are reasons to keep the guard, not to skip it: an
    * absolute claim needs a check that does not depend on a word list staying complete. Returning
-   * null hands the label to the EEO branch, which is the rule that should own it. */
-  if (EEO_QUESTION.test(label)) return null;
+   * null hands the label to the EEO branch, which is the rule that should own it.
+   *
+   * The accommodation check is the same refusal for the family EEO_QUESTION cannot see. "Do you
+   * require accommodations for the ACT exam?" contains a test name, a context word beside it and a
+   * determiner in front of it, so every gate above passes it; it is still a disability question and
+   * the answer to it is never a score. */
+  if (EEO_QUESTION.test(label) || TESTING_ACCOMMODATION_QUESTION.test(label)) return null;
 
   // A specific test named in the label wants that test's number, so these are matched before the
   // "which test" pattern, which also matches many of the same labels.

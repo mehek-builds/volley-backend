@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { bodySchema } from '../routes/applicationProfile';
 import { resolveKnownAnswer, type ApplicationProfileLike } from './questionDiscovery';
 import { APPLICATION_FACT_COLUMNS } from './applicationFacts';
@@ -83,7 +83,8 @@ describe('standardized test scores: stored', () => {
 /* THE ACTUAL LABELS, taken from the owner's 158 packets rather than invented.
  *
  * The first version of this rule was written against "What is your SAT score?", which sounds right
- * and appears in the corpus zero times. Extracted from all 300 distinct labels, the complete set of
+ * and appears in the corpus zero times, in the owner's 300 distinct labels or in all 507 across
+ * every account. Extracted from the owner's labels, the complete set of
  * standardized-test questions is these three. Each is required, text, and was blank on all 8 of the
  * packets it appears in. Answering the middle one and missing the other two, which is what a
  * "score"-keyed pattern does, is a migration that delivers a third of what it claims. */
@@ -120,11 +121,16 @@ describe('standardized test scores: the measured labels are answered', () => {
   });
 });
 
-/* THE GATES THAT KEEP "act" FROM MEANING THE TEST. "act" is an ordinary English word and the name
- * of most legislation, so a bare `\bact\b` would type a test score into a disability question. Two
- * gates: a value word must be present, and the label must be field-name length. Measured over the
- * corpus, `\bacts?\b` and `\bsats?\b` each appear in exactly one of the 300 labels and it is the
- * test question both times, so these guard the forms not yet seen. */
+/* THE GATES THAT KEEP "act" FROM MEANING THE TEST, AND "sat" FROM MEANING "sat down".
+ *
+ * Two gates, both failing closed. A context word must sit within two tokens of the test name, and
+ * the token immediately before the test name must be on a short ALLOWLIST of determiners, or the
+ * label must open with the test. The second gate replaced two denylists - one of statutes, one of
+ * prepositions - that leaked by omission, which is the only way a denylist ever leaks.
+ *
+ * Measured end to end over all 507 distinct labels across every account: exactly 3 receive a test
+ * value, and they are the 3 real questions. None of the 50 EEO labels or the 4 accommodation labels
+ * receives one. These cases guard the forms not yet seen. */
 describe('standardized test scores: what must never match', () => {
   const mustNotMatch = [
     'are you protected under the americans with disabilities act?',
@@ -183,6 +189,32 @@ describe('standardized test scores: the gates fail in neither direction', () => 
     { label: 'Please provide your ACT composite score if you have taken the exam', expect: '34', why: 'thirteen words and still an ACT field' },
     // A criminal-record label from another user's corpus, correctly refused.
     { label: '(clean slate) act?', expect: undefined, why: 'a statute with no value word' },
+
+    /* STATUTE CITATIONS. Every one of these filled "34" while `section` was a context word and the
+     * statute guard was a denylist. The first is the literal citation on the OFCCP disability
+     * self-identification form, so this is round 2's disability failure reached through the
+     * statute's own citation format rather than through the word "disability". */
+    { label: 'Rehabilitation Act, Section 503', expect: undefined, why: 'the OFCCP disability form citation' },
+    { label: 'Uniform Securities Act exam', expect: undefined, why: 'a finance statute, and Litos targets finance' },
+    { label: 'Investment Advisers Act score', expect: undefined, why: 'a finance statute' },
+    { label: 'Fair Credit Reporting Act - total accounts', expect: undefined, why: 'a finance statute with a value word' },
+    { label: 'Fair Labor Standards Act score', expect: undefined, why: 'a statute with a value word' },
+    { label: 'Securities Exchange Act reading', expect: undefined, why: 'a statute beside a section name' },
+    { label: 'ADA Amendments Act score', expect: undefined, why: 'the inflection the old denylist missed' },
+    { label: 'Nondiscrimination Act score', expect: undefined, why: 'the other inflection it missed' },
+
+    /* THE VERB, GUARDED IN THE RIGHT DIRECTION. The old rule keyed on what FOLLOWED "sat", so it
+     * caught "sat for" and nothing else. The corpus already contains a UK-English employer. */
+    { label: 'Date you sat the exam', expect: undefined, why: 'British phrasing, verb followed by a determiner' },
+    { label: 'Have you sat an exam in the last year?', expect: undefined, why: 'verb followed by a determiner' },
+    { label: 'Have you ever sat this exam?', expect: undefined, why: 'verb with an adverb in between' },
+
+    /* ACCOMMODATION QUESTIONS are disability questions that need not contain `disab`, so they slip
+     * EEO_QUESTION. Every gate above passes the first one: a test name, a context word beside it,
+     * and a determiner in front. It is still never a score. */
+    { label: 'Do you require accommodations for the ACT exam?', expect: undefined, why: 'a disability question wearing test vocabulary' },
+    { label: 'Did you receive an accommodation on a standardized test?', expect: undefined, why: 'no `disab`, so EEO_QUESTION misses it' },
+    { label: 'Which tests did you request accommodations for?', expect: undefined, why: 'an accommodation question shaped like a type question' },
   ];
 
   for (const { label, expect, why } of cases) {
@@ -291,10 +323,42 @@ describe('standardized test scores: schema and migration agree', () => {
     assert.doesNotMatch(migration, /\btext\s+default\b/i);
   });
 
-  test('the migration is manual-dispatch only and cannot run itself on a merge', () => {
-    const workflow = readFileSync('.github/workflows/standardized-test-scores-migration.yml', 'utf8');
-    assert.match(workflow, /github\.ref == 'refs\/heads\/main'/);
-    assert.match(workflow, /npm run db:standardized-test-scores/);
-    assert.doesNotMatch(workflow, /^on:\s*\n\s*push/m);
+  /* THERE IS NO WORKFLOW, AND THAT IS THE ASSERTION.
+   *
+   * A workflow shipped here briefly, and the test guarding it asserted the OPPOSITE of the change
+   * it was written for: it required `github.ref == 'refs/heads/main'` to be PRESENT after that gate
+   * had been deliberately removed, and it passed anyway because the string survived inside a COMMENT
+   * explaining the removal. A green assertion, satisfied by prose, pinning the reverse of the truth.
+   *
+   * The workflow itself could not have worked either: a `workflow_dispatch` workflow is only
+   * addressable once it exists on the default branch, so one shipped in the same pull request as its
+   * script cannot be dispatched until that pull request merges - after the moment it was for.
+   *
+   * So the file is gone and the procedure is a hand-run, documented in the migration script. Both
+   * halves are asserted below, and against a COMMENT-STRIPPED copy, which is the whole lesson. */
+  test('no migration workflow ships in the same change as its script', () => {
+    assert.equal(
+      existsSync('.github/workflows/standardized-test-scores-migration.yml'),
+      false,
+      'a workflow_dispatch workflow is not addressable until it is on the default branch',
+    );
+  });
+
+  test('the hand-run procedure is written down where the operator will look', () => {
+    const raw = readFileSync('scripts/apply-standardized-test-scores-schema.mjs', 'utf8');
+    assert.match(raw, /npm run db:standardized-test-scores/);
+    assert.match(raw, /BEFORE MERGING/);
+  });
+
+  /* The assertion the old one should have been. Comments are stripped first, so an explanation of a
+   * removed key can never satisfy a check that the key is absent. */
+  test('no workflow in the repo runs this migration automatically', () => {
+    const dir = '.github/workflows';
+    for (const file of readdirSync(dir)) {
+      const source = readFileSync(`${dir}/${file}`, 'utf8');
+      const code = source.replace(/#.*$/gm, '');
+      if (!/db:standardized-test-scores/.test(code)) continue;
+      assert.fail(`${file} runs this migration; it must be a hand-run until the workflow is registered`);
+    }
   });
 });
