@@ -41,6 +41,7 @@ import {
   HANDOFF_WINDOW_MS,
   isBrowserbaseConfigured,
   isManagedStratusProvider,
+  managedApplicationSubmitOptions,
   managedContinuationFingerprint,
   runManagedBrowser,
 } from '../lib/browserbase';
@@ -94,6 +95,7 @@ import {
   type SupportedPortal,
   ManagedActionBudgetError,
   assertManagedRequiredFieldsConfirmed,
+  managedApplicationProofIsRequired,
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import {
@@ -3086,18 +3088,32 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * renders one after a submit has been refused. So a code cannot be attached to this list. It is
      * attached to the CONTINUATION below, which runs on the very DOM this submit produced. */
     const initialActions = buildManagedPortalActions(portal, packet, true);
+    /* NO continuationCheckpoint, AND THE COMMENT THAT USED TO SIT HERE WAS SIMPLY WRONG.
+     *
+     * It said "an ordinary unknown receipt does not offer a continuation, so it needs an explicit
+     * checkpoint". Read against the merged runner, stratus-browser-cloud@48ea9b5:
+     *
+     *     const pressedUnknown = phase === 0 && submitOutcome.pressed === true
+     *       && submitOutcome.state === 'unknown';
+     *     const continuationOffered = input.requestContinuation === true
+     *       && (Boolean(humanVerification) || input.continuationCheckpoint === true || pressedUnknown);
+     *
+     * pressedUnknown alone already offers it. The flag bought nothing, and it cost two things.
+     *
+     * FIRST, the observation window. receiptObservationOnly requires continuationCheckpoint to be
+     * absent, and it is what caps the held employer page at 15 seconds. With the flag the cap became
+     * this caller's full clamped TTL, so a live sandbox sat on the employer's post-submit page for
+     * minutes rather than for the seconds the one read-only look needs.
+     *
+     * SECOND, and worse, continuationOffered became true for EVERY managed submit outcome, including
+     * confirmed, rejected and not_attempted. continuationEligible returns that value verbatim, so
+     * keepAlive stayed true and sandbox.stop() was skipped in the finally of every successful
+     * submission, leaking one sandbox per application while the runner waited on a continuation
+     * nothing was going to send. */
     const result = await runManagedBrowser(
       applicationUrl,
       initialActions,
-      {
-        allowSubmit: true,
-        requestContinuation: true,
-        // The same held page serves two post-click outcomes. A visible code wall offers a
-        // continuation on its own; an ordinary unknown receipt does not, so it needs an explicit
-        // checkpoint before the read-only observer below can take its one bounded second look.
-        continuationCheckpoint: true,
-        continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS,
-      },
+      managedApplicationSubmitOptions(SECURITY_CODE_CONTINUATION_TTL_SECONDS),
     );
     const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);
     const initialSubmitOutcome = readManagedSubmitOutcome(result);
@@ -3115,11 +3131,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     // Required-field confirmation is a barrier inside the same remote action list, immediately
     // before submit. Require its per-field proof as well: an older runner that ignores or does not
     // understand the protocol must not be allowed to turn a silent fill into a submitted state.
-    // A retained security-code wall is the result of an earlier application submit. Stratus does
-    // not press the disabled application control again, so there is intentionally no new application
-    // confirmation pass to assert. The only click allowed from that state is the verification pass
-    // below, which carries the inbox code and asserts its own exact atomic proof.
-    if (!initialChallenge) assertManagedRequiredFieldsConfirmed(result, 'application');
+    if (managedApplicationProofIsRequired(initialChallenge, initialSubmitOutcome)) {
+      assertManagedRequiredFieldsConfirmed(result, 'application');
+    }
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
     const initialSecurityCodeState = initialChallenge
@@ -3876,7 +3890,32 @@ export function preClickVerificationContinuationBlockedReview(
   });
 }
 
-/** A delayed post-click code wall has consumed its one continuation and must remain submit-locked. */
+/* A DELAYED POST-CLICK CODE WALL IS STILL A CODE WALL, AND IT NEEDS THE SAME DOOR AS ITS SIBLINGS.
+ *
+ * This wrote status 'needs_attention' while keeping the claim, and that combination closed every
+ * exit the packet had:
+ *
+ *   submitRequestDisposition('needs_attention', claimed) is 'reject', and resumeEditDisposition
+ *   delegates to it, so neither another run nor a resume edit could move it.
+ *
+ *   POST /applications/:id/security-code answered 'not_awaiting', because finishSecurityCodeSubmission
+ *   requires status 'awaiting_security_code' - and claimSecurityCodeSubmission additionally requires
+ *   submission_claimed_at to be null, so the status alone would not have been enough.
+ *
+ *   POST /applications/:id/submission/unverified answered 409, because unverified_submission was
+ *   explicitly cleared and that route resolves nothing else.
+ *
+ * A packet in that state could not be finished, retried, edited or resolved by anybody. That is the
+ * exact trap submitRequestDisposition names in its own parameter docs, and the one the Skydio packet
+ * 13bccb2d work existed to remove.
+ *
+ * SO IT NOW WRITES WHAT ITS SIBLINGS WRITE. preClickSecurityRecipientMismatchReview and the ordinary
+ * post-click challenge branch both land on 'awaiting_security_code' with the claim released, and
+ * that pair is not a relaxation: submitRequestDisposition rejects 'awaiting_security_code' outright,
+ * claim or no claim, so the ordinary path still cannot re-run and re-send. What it opens is the ONE
+ * route that is safe from here, the applicant's own code, which re-enters on the standing wall the
+ * employer is already holding rather than on a fresh form.
+ */
 export function delayedSecurityCodeHandoffReview(
   current: ApplicationReviewState,
   input: {
@@ -3887,15 +3926,21 @@ export function delayedSecurityCodeHandoffReview(
   },
 ): ApplicationReviewState {
   return nextReview(current, {
-    status: 'needs_attention',
+    status: 'awaiting_security_code',
     verification: input.verification,
     security_code: input.securityCode,
     submission_attempted_at: input.attemptedAt,
     preview_screenshot_url: input.screenshotUrl,
     submission_error: undefined,
-    attention_reason: 'The employer showed a verification-code step after Litos used its one safe receipt check. Litos will not open a fresh form or send this application again automatically. Open the employer portal and finish the verification there.',
+    attention_reason: 'The employer showed a verification-code step after Litos used its one safe receipt check. Litos will not open a fresh form or send this application again on its own. Enter the code the employer emailed you, or open the employer portal and finish the verification there.',
     attention_categories: ['security_code', 'evidence_gap'],
     unverified_submission: undefined,
+    // Released together with the status, because both are required for the code route to open:
+    // finishSecurityCodeSubmission checks the status and claimSecurityCodeSubmission checks that the
+    // claim is null. The lock that matters is kept by the status itself.
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_authorization: undefined,
   });
 }
 

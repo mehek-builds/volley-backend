@@ -9,6 +9,7 @@ import {
   COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT,
   MANAGED_ACTION_LIMIT,
   MANAGED_FINAL_SUBMIT_SELECTOR,
+  managedApplicationProofIsRequired,
   ManagedActionBudgetError,
   ManagedRequiredFieldConfirmationError,
   type SubmissionPacket,
@@ -139,6 +140,47 @@ test('each remote run attests exactly one physical click with the expected kind'
   assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(receipt, 'verification'));
   receipt.requiredFieldConfirmation!.passes = [application, verification];
   assert.throws(() => assertManagedRequiredFieldsConfirmed(receipt), /confirmation passes/);
+});
+
+/* THE ONE STATE THAT OWES NO APPLICATION PROOF, AND IT IS NARROWER THAN THE SKIP WAS WRITTEN.
+ *
+ * A code wall that was ALREADY STANDING when the page loaded produces no application submit pass,
+ * because Stratus will not press the disabled application control from there, so asserting one
+ * would fail every retained-wall run. Everything else does owe the proof, including the ordinary
+ * way a Greenhouse wall appears: press Send, get refused, get asked for a code. Keying the skip on
+ * the challenge alone excused that run too, so a runner that pressed with its required-field proof
+ * blocked, malformed or absent walked past the only place this service checks it.
+ */
+test('only an already standing code wall is excused the application submit proof', () => {
+  const standingWall = { digits: 8, sentTo: 'app@apply.trylitos.com' };
+  assert.equal(managedApplicationProofIsRequired(standingWall, { pressed: false }), false,
+    'no application pass exists on a wall Stratus refused to press through');
+  assert.equal(managedApplicationProofIsRequired(standingWall, { pressed: true }), true,
+    'a run that pressed Send and then met a code wall still has to prove what it pressed');
+  assert.equal(managedApplicationProofIsRequired(null, { pressed: true }), true);
+  assert.equal(managedApplicationProofIsRequired(null, { pressed: false }), true);
+  // A runner too old to report submitOutcome says nothing about its own click, so it is not excused.
+  assert.equal(managedApplicationProofIsRequired(standingWall, null), true);
+  assert.equal(managedApplicationProofIsRequired(standingWall, {}), true);
+});
+
+test('the pressed half of the skip is what catches an unproven send at a code wall', () => {
+  // End to end through the real assertion: the receipt below carries no proof at all, which is the
+  // exact shape an older or misbehaving runner returns, and the guard has to reach it.
+  const unproven = { requiredFieldConfirmation: undefined } as Record<string, unknown>;
+  const standingWall = { digits: 8, sentTo: 'app@apply.trylitos.com' };
+  const check = (challenge: unknown, pressed: boolean) => {
+    if (!managedApplicationProofIsRequired(challenge, { pressed })) return 'skipped';
+    try {
+      assertManagedRequiredFieldsConfirmed(unproven, 'application');
+      return 'passed';
+    } catch {
+      return 'caught';
+    }
+  };
+  assert.equal(check(standingWall, true), 'caught', 'the regression let this one through');
+  assert.equal(check(null, true), 'caught');
+  assert.equal(check(standingWall, false), 'skipped');
 });
 
 test('a replaced submit node cannot satisfy the atomic scope proof', () => {

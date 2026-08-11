@@ -82,6 +82,32 @@ export type ManagedSubmitVerdict =
   /** The runner is older than submitOutcome. Fall back to whatever the caller did before. */
   | { kind: 'unreported' };
 
+/* A REFUSAL IS A DEFINITE STATEMENT, SO IT HAS TO BE PROVEN LIKE ONE.
+ *
+ * The confirmed arm has been gated on both sides of the wire for a while: this module refuses an
+ * empty confirmation just below, and Stratus refuses a confirmed container that is empty or that
+ * sits over a live form. The rejected arm had neither gate on either side, and Stratus's rejected
+ * arm returns the FIRST visible '.ashby-application-form-failure-container' it finds without
+ * reading its text or asking whether the form is gone. So an empty container was enough to make
+ * this function say 'refused'.
+ *
+ * WHAT THAT COSTS, and it is the worst pair of outputs in the system arriving together. The runner
+ * writes "Nothing was filed, so there is no confirmation to look for" onto a packet whose submit
+ * request may well have reached the employer, AND it releases submission_claimed_at, so the packet
+ * becomes re-runnable and a second application follows the first.
+ *
+ * SO THE FAILURE DIRECTION IS FIXED HERE: a rejection that cannot prove itself falls to 'unknown',
+ * which keeps the claim and asks the applicant to look. It never falls to 'refused'.
+ *
+ * NOTE WHAT THIS COSTS IN THE OTHER DIRECTION, honestly: an ATS that renders its refusal banner
+ * ABOVE a still-live form so the applicant can correct and retry will now be reported unverified
+ * rather than refused. That is one extra question asked of her on a packet that is still fully
+ * resolvable, against a duplicate application filed at an employer who may cap re-applications.
+ */
+function refusalIsProven(outcome: ManagedSubmitOutcome): boolean {
+  return Boolean(outcome.message?.trim()) && outcome.formStillPresent === false;
+}
+
 /**
  * The verdict, from the run's own reading of the page.
  *
@@ -93,7 +119,13 @@ export function managedSubmitVerdict(result: MaybeOutcome | null | undefined): M
   const outcome = readManagedSubmitOutcome(result);
   if (!outcome) return { kind: 'unreported' };
   if (outcome.state === 'rejected') {
-    return { kind: 'refused', message: outcome.message ?? 'The employer refused this application.' };
+    if (refusalIsProven(outcome)) return { kind: 'refused', message: outcome.message!.trim() };
+    /* An unproven refusal must not fall through to the confirmed arm below - a page that has both
+     * refused and congratulated is a page that refused - so the two honest answers are taken here.
+     * A runner that says it never pressed is still believed, because that is a claim about this
+     * process rather than about the employer's page. */
+    if (outcome.pressed === false) return { kind: 'not_attempted' };
+    return { kind: 'unverified', cause: 'no_confirmation_state' };
   }
   if (outcome.state === 'confirmed') {
     /* An empty confirmation is not a confirmation. The runner will not emit 'confirmed' without a
@@ -230,7 +262,12 @@ function exactAtsReceipt(
   const url = new URL(result.url);
   if (expected.family === 'ashby' && outcome.source === 'ats_state') {
     if (outcome.state === 'confirmed') return outcome.evidence === '.ashby-application-form-success-container';
-    if (outcome.state === 'rejected') return outcome.evidence === '.ashby-application-form-failure-container';
+    // Same gate as managedSubmitVerdict, applied one step earlier so an unproven refusal cannot even
+    // become the receipt result. The two are deliberately checked twice: this decides which page the
+    // row is written from, and that decides what the row says.
+    if (outcome.state === 'rejected') {
+      return outcome.evidence === '.ashby-application-form-failure-container' && refusalIsProven(outcome);
+    }
     return false;
   }
   const greenhousePath = /\/(?:application_)?confirmation\/?$/.test(url.pathname);
