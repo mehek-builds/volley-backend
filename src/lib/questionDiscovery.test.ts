@@ -2354,7 +2354,6 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     'year of high school graduation',
     'when did you graduate from high school?',
     'high school graduation year',
-    'highschool graduation year',   // the shared noun is what reaches this spelling; was "May 2028"
     /* The Akuna "month and year" wording. One draft tested the bare word `name` to catch Palantir's
        two-part card, and matched "the NAME of the month" here - refusing a date that was on file. */
     'when did you graduate from high school? please enter the name of the month and the year.',
@@ -2363,6 +2362,13 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: 'May 2023' }, label);
     refuses(label);
   }
+  /* "Highschool Graduation Year" gets a BLOCKER, not the date, and that is the deliberate side of
+     the trade. Widening this matcher's literal past main's exact `high\s+school` reached that
+     spelling, and cost three labels main had right - "expected graduation date (not highschool)"
+     came back with the high-school date, and "our high-school internship - when can you start?"
+     put a graduation date in an availability box. The literal stays narrow; the label still
+     improves on main's answer, which was the UNIVERSITY's May 2028. */
+  assert.equal(questionRefusedAsHighSchool('highschool graduation year', HS), true);
   for (const label of [
     'do you have a high school diploma or equivalent?',
     // A wide spelling the narrow graduation matcher does not reach. The refusal above it used to
@@ -2424,9 +2430,35 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     // Not an education field at all. One draft's guard sat above the city, phone, language and
     // availability arms of classifyField and took them with it.
     ['what city do you live in? (not the city of your high school)', PROD_OWNER_PROFILE.address_city],
+    /* THE GRADUATION MATCHER NEEDS THE VETO TOO. It runs before every other rule and its own window
+       reaches 200 characters, so a UNIVERSITY graduation control that names the high school in
+       order to exclude it was answered with the high-school date. */
+    ['university graduation year (high-school year not required)', 'May 2028'],
+    ['expected graduation date (not highschool)', 'May 2028'],
+    ['college graduation date - high-school dates are not needed', 'May 2028'],
+    ['undergraduate graduation date (high-school graduation not required)', 'May 2028'],
+    ['what is your expected graduation date? high-school dates are not accepted', 'May 2028'],
+    /* The strip inside the veto is anchored. Unanchored it ate "secondary school" out of the MIDDLE
+       of "postsecondary school" and destroyed the only institution noun in the label. */
+    ['high school and postsecondary school names', PROD_OWNER_PROFILE.school],
+    ['high school / postsecondary school name', PROD_OWNER_PROFILE.school],
+    // ...and the lookbehind knows typographic dashes, not only the ASCII hyphen.
+    ['post\u2013secondary school name', PROD_OWNER_PROFILE.school],
+    ['post\u2014secondary school name', PROD_OWNER_PROFILE.school],
   ] as const) {
     assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: expected }, label);
   }
+  /* Families that own their own labels. Self-identification has its own ladder and its own stored
+     preference, and an open-ended prompt is the essay drafter's; neither classifies to a profile
+     key, so the refusal was shadowing both. */
+  for (const label of [
+    'what is your race/ethnicity? (as recorded in high school)',
+    'gender (optional) - high school records not used',
+  ]) {
+    assert.equal(questionRefusedAsHighSchool(label, HS), false, label);
+  }
+  assert.equal(questionRefusedAsHighSchool('describe your leadership experience in high school', HS), false);
+
   assert.equal(classifyField('what city do you live in? (not the city of your high school)'), 'address_city');
   assert.equal(classifyField('which languages do you speak? include any studied in high school.'), 'languages');
 
