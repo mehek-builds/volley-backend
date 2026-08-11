@@ -2,6 +2,7 @@ import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import type { PacketAudit } from './packetAudit';
 import type { RequiredDocumentAsk } from './requiredDocuments';
+import type { SubmissionStopRecord } from './submissionStop';
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported, type AutofillApplicantSnapshot } from './portalSubmission';
 
 export type ApplicationReviewQuestion = {
@@ -416,6 +417,26 @@ export type ApplicationReviewState = {
    * null, and all three had a Greenhouse security-code email timestamped to the minute of the run.
    * An application had reached an employer and no field in this object could say so. */
   submission_attempted_at?: string;
+  /* WHERE THE LAST RUN STOPPED, TYPED, and whether that stop provably preceded the final click.
+   *
+   * The companion to submission_attempted_at above and its exact opposite in intent: that field
+   * records that a submit MAY have landed, this one records a stop that is structurally ahead of the
+   * click. Written by the runner at failure time, which is the only moment the answer is known for
+   * certain, and read by submissionProvablyNotSent.
+   *
+   * IT EXISTS BECAUSE THE ONLY PRIOR PROOF WAS A SENTENCE. A row read back out of the database
+   * carried nothing about its stop except attention_reason, which is prose, and submission_error,
+   * which is whatever text the runner happened to throw - and a Stratus error crosses the HTTP
+   * boundary stringified, so `Error: ` on the front of it was enough to make the one predicate that
+   * read it answer false at the writer AND at the reader. A typed field cannot be reworded.
+   *
+   * ABSENT MEANS UNKNOWN, NEVER "nothing was sent". Every row written before this shipped has no
+   * record, and no reader may treat that as a pre-click stop. See lib/submissionStop.ts.
+   *
+   * Cleared, not carried, whenever a new send run takes the claim: a stop is evidence about ONE
+   * attempt, and a stale one read as current would be the same false certainty this whole field
+   * exists to remove. */
+  submission_stop?: SubmissionStopRecord;
   security_code?: SecurityCodeState;
   handoff_expires_at?: string;
   final_approved_at?: string;
