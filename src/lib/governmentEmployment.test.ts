@@ -1036,11 +1036,12 @@ describe('prior government employment, answered from the experience bank', () =>
       refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], declaredNone, context),
       [{ question: label, answer: 'No' }],
     );
-    // And the rule this branch exists for: nothing declared, Litos has sent nothing, answer No.
-    assert.deepEqual(
-      resolveKnownAnswer(label, 'text', { submitted_application_companies: [] }, context),
-      { value: 'No' },
-    );
+    /* And nothing declared is HELD, whatever Litos' own send log says. An empty send log is Litos
+     * reporting on itself: it cannot see an application she made herself, made before Litos
+     * existed, or made anywhere else, so it cannot answer a question about her history. */
+    const undeclared = resolveKnownAnswer(label, 'text', { submitted_application_companies: [] }, context);
+    assert.ok(undeclared && 'skipReason' in undeclared, JSON.stringify(undeclared));
+    assert.match(undeclared.skipReason, /prior application question left for you/);
 
     const unsupportedTail = `${label} Please explain why.`;
     const held = resolveKnownAnswer(

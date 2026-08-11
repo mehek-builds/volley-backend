@@ -111,11 +111,11 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
    * application at, from `job_context.company` on the rows lib/duplicateApplication.ts counts as
    * having reached an employer. Loaded by lib/applicationProfileLike.ts.
    *
-   * TRI-STATE, and the third state is the one that matters. `[]` is "Litos looked and has never
-   * sent anything for you", which is what licenses the default "No" to "have you applied to us
-   * before?". `undefined` is "nobody looked" - an older caller, or a history read that failed - and
-   * it must NOT license that answer, so a company-scoped question with nothing declared stays held
-   * exactly as it is today. Absence of a read is not evidence of absence. */
+   * IT IS NOT AN ANSWER TO "have you applied to us before?", in either direction. `[]` is "Litos
+   * looked and has never sent anything for you", which says nothing about the applications she made
+   * herself, made before Litos existed, or made through another channel, and `undefined` is
+   * "nobody looked". Absence here is not evidence of absence, so neither value may produce a "No";
+   * see previouslyAppliedAnswer, where a named employer only ever WITHDRAWS an answer. */
   submitted_application_companies?: string[];
   has_outstanding_offers?: boolean;
   outstanding_offer_details?: string;
@@ -728,9 +728,11 @@ function employerMatchesTarget(declared: string, target: string): boolean {
 /**
  * Whether Litos' own history already shows an application at the employer THIS packet is for.
  *
- * Three answers, not two. `undefined` is "the history was not read", which is a different thing
- * from "the history is clear" and may never be treated as one - see submitted_application_companies
- * on ApplicationProfileLike. `false` is the only value that licenses an answer.
+ * Three answers, not two, and only `true` does anything. `undefined` is "the history was not read"
+ * and `false` is "Litos has sent nothing there", and NEITHER licenses an answer: the send log
+ * cannot see an application she made herself, made before Litos existed, or made anywhere else, so
+ * its silence is not a fact about her history. `true` withdraws an answer she would otherwise get,
+ * which is the one direction a partial record can be read in.
  *
  * The comparison is lib/companyIdentity.ts's, which is the duplicate guard's own rule for whether
  * two packets are for the same employer, on the two strings it already compares: the packet's
@@ -750,28 +752,36 @@ function applicationAlreadyAtPacketEmployer(
 }
 
 /**
- * "Have you applied to us before?", and why the default is now No.
+ * "Have you applied to us before?", and why only SHE can answer No.
  *
- * The old rule answered nothing without `prior_application_employers`, an onboarding column most
- * accounts have never filled, so every company-scoped prior-application question was handed back.
- * On the live IMC form on 2026-08-10 that was one of the blockers holding a real application.
+ * A "No" here is a statement about the applicant's whole history, and Litos holds no record that
+ * covers it. `submitted_application_companies` is Litos' own send log: it knows nothing about
+ * applications she made herself, applications she made before Litos existed, or applications made
+ * through any other channel. An empty send log is therefore an absence of evidence and never
+ * evidence of absence, and answering "No" from it states a fact to an employer that nobody
+ * established. The measured IMC label makes the cost concrete: it says an applicant not selected
+ * this season may only reapply in 2027, so a wrong "No" both misstates her history and pushes
+ * through the exact duplicate the question exists to catch, with no attention flag on it.
  *
- * A company-scoped question has exactly one honest default, and it is No: Litos knows what it has
- * sent for this user, and if it has sent nothing to this employer there is nothing to declare. The
- * one thing that withdraws that answer is Litos' own history showing an application already at this
- * employer - and the withdrawal is a HAND-BACK, never a "Yes". The questions carry windows ("within
- * the last 12-18 months") and role scopes that a list of employers cannot settle, and a wrong Yes
- * costs the applicant exactly as much as a wrong No.
+ * So "No" comes from a POSITIVE DECLARATION and nothing else - `prior_application_employers`
+ * recorded as `[]`, which is her saying she has not applied anywhere, or a declared list that does
+ * not name this employer. `undefined` on that column is "never asked" and holds the question,
+ * exactly as main did before the send log was wired in here.
+ *
+ * The send log still has one job, and it is the opposite one: it WITHDRAWS an answer, never grants
+ * it. An employer named in it is handed back rather than answered "Yes", because those rows carry
+ * no window ("within the last 12-18 months"), no role scope, and include unverified sends that may
+ * never have reached the employer at all (see submittedApplicationCompanies in
+ * lib/duplicateApplication.ts). A wrong Yes costs the applicant exactly what a wrong No costs her.
  *
  * The order below is the argument:
  *   1. A declared employer is a statement she made herself, and it answers Yes. No history read can
  *      contradict a Yes, so it is settled first.
- *   2. Global history ("have you applied anywhere before?") is NOT company-scoped, so the
- *      company-scoped evidence says nothing about it and its behaviour is unchanged.
- *   3. A company Litos has already applied to is handed back, whichever record said so.
- *   4. A declared list that does not name this employer still answers No, exactly as it did before
- *      this rule existed, whether or not the history was readable.
- *   5. Nothing declared answers No only when the history was actually read and is clear.
+ *   2. Global history ("have you applied anywhere before?") is answered only from her declaration.
+ *   3. A company Litos' own send log already shows an application at is handed back, even against
+ *      her declaration: the declaration was made at onboarding and the send came after it.
+ *   4. A declared list that does not name this employer answers No.
+ *   5. Nothing declared holds, whatever the send log says.
  *
  * AND ONE MORE, WHICH RUNS BEFORE ALL FIVE. Where a trailing help-text sentence was removed from
  * the label, the question's true scope is unknown, and this file will not guess at it: see
@@ -783,18 +793,17 @@ function applicationAlreadyAtPacketEmployer(
  * So under a removed sentence the rule is about the RECORDS, not the words:
  *   - never Yes, from any record. A Yes rests on an application whose membership in the restated
  *     scope cannot be established.
- *   - No only where there is no positive record ANYWHERE - not "none for this employer", none at
- *     all. With zero applications to any employer, "No" is true under every restriction, every
- *     widening, every time window and every group-entity rewording, because there is nothing for a
- *     restatement to bring into scope. This is what keeps the default-No path, the whole point of
- *     this change, exactly as it is: nothing sent and nothing declared answers No, tail or no tail.
+ *   - No only where SHE has declared none anywhere and no send is recorded anywhere either - not
+ *     "none for this employer", none at all. Her declared `[]` is true under every restriction,
+ *     every widening, every time window and every group-entity rewording, because there is nothing
+ *     for a restatement to bring into scope. An empty send log alone cannot stand in for that
+ *     declaration here for the same reason it cannot stand in for it anywhere else in this
+ *     function.
  *   - otherwise hold.
  *
- * THE COST, STATED. A student who has declared any prior application to any employer gets a
- * hand-back on a question carrying such a tail, where main would sometimes have answered. That is
- * one question she answers herself, against a wrong statement on a live application. It is also
- * what withdraws main's "Yes" on the one measured IMC reminder when her declared list names IMC;
- * governmentEmployment.test.ts pins the new behaviour and the reasoning.
+ * THE COST, STATED. An account that never filled the onboarding column gets this question handed
+ * back, which is one question she answers herself instead of a sentence Litos wrote for her out of
+ * a record that could not see it. applicationFacts.test.ts pins it.
  */
 function previouslyAppliedAnswer(
   label: string,
@@ -809,17 +818,17 @@ function previouslyAppliedAnswer(
   const declared = ap.prior_application_employers;
   const history = ap.submitted_application_companies;
 
-  /* A REMOVED SENTENCE RESTATED THE SCOPE, AND ONLY AN EMPTY RECORD SURVIVES THAT.
+  /* A REMOVED SENTENCE RESTATED THE SCOPE, AND ONLY HER OWN EMPTY DECLARATION SURVIVES THAT.
    *
    * Both records are read for their CONTENT, not for this employer: a widening tail is exactly the
-   * case where an application to some other employer is the one that counts. `[]` on either record
-   * is a positive statement that there are none - hers in prior_application_employers, Litos' own
-   * in the send history - and undefined on both is nobody having looked, which cannot establish
-   * anything and holds. */
+   * case where an application to some other employer is the one that counts. `[]` in
+   * prior_application_employers is her statement that there are none anywhere, which is what
+   * survives any restatement of scope. An empty SEND LOG is not that statement - it is Litos
+   * reporting on itself, and a widening tail is precisely where the applications it cannot see
+   * would count - so it cannot license the answer here any more than it can below. */
   if (withoutTrailingHelpText(label).stripped) {
     const anyRecord = (declared?.length ?? 0) > 0 || (history?.length ?? 0) > 0;
-    const provenNone = declared?.length === 0 || history?.length === 0;
-    return !anyRecord && provenNone ? { value: 'No' } : held;
+    return !anyRecord && declared?.length === 0 ? { value: 'No' } : held;
   }
 
   if (declared && declared.length > 0) {
@@ -834,10 +843,14 @@ function previouslyAppliedAnswer(
   // before, which answers No for every employer - the two must not be collapsed.
   if (parsed.globalPriorApplicationHistory) return declared ? { value: 'No' } : held;
 
-  const alreadyThere = applicationAlreadyAtPacketEmployer(ap, jdText);
-  if (alreadyThere === true) return held;
-  if (declared) return { value: 'No' };
-  return alreadyThere === false ? { value: 'No' } : held;
+  /* The send log is consulted for ONE purpose: to withdraw an answer she would otherwise get. A
+     packet already sent to this employer means her onboarding declaration is out of date, so even a
+     declared list that does not name this employer stops answering. It never adds an answer of its
+     own - not "Yes", which its rows cannot support, and not "No", which is the defect this ordering
+     exists to close. */
+  if (applicationAlreadyAtPacketEmployer(ap, jdText) === true) return held;
+  // Her declaration, or nothing. An unread column and an unnamed employer are not the same fact.
+  return declared ? { value: 'No' } : held;
 }
 
 function referralAnswer(

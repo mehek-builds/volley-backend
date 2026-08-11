@@ -1,6 +1,14 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyField, frozenJobEmployerContext, resolveKnownAnswer, type ApplicationProfileLike } from './questionDiscovery';
+import {
+  classifyField,
+  frozenJobEmployerContext,
+  questionRequiresHumanAttention,
+  refreshKnownQuestionAnswers,
+  resolveKnownAnswer,
+  sensitiveQuestionRequiresAttention,
+  type ApplicationProfileLike,
+} from './questionDiscovery';
 import { resolveProfileField } from './profileFieldResolution';
 import {
   APPLICATION_FACT_COLUMNS,
@@ -168,52 +176,139 @@ describe('stored application facts reach the control on the real employer questi
     assert.match(heldFor(labels.imc, applied), /prior application question left for you/);
   });
 
-  /* THE DEFAULT IS NO, AND LITOS' OWN SEND HISTORY IS THE ONLY THING THAT WITHDRAWS IT.
+  /* ONLY HER OWN DECLARATION ANSWERS NO, AND LITOS' SEND LOG IS NOT HER DECLARATION.
    *
-   * `prior_application_employers` is an onboarding column most accounts have never filled, so
-   * before this every company-scoped prior-application question was handed back. The IMC label
-   * below is the exact string off the live form on 2026-08-10, reminder sentence and all, and it
-   * was one of the blockers stopping a real application from going out.
+   * THIS BLOCK REPLACES ONE THAT ASSERTED THE OPPOSITE, and the replacement is the point. PR #500
+   * read `submitted_application_companies: []` as a licence to answer "No". It is not one. That
+   * column is built from this user's own generated_resumes rows (lib/duplicateApplication.ts), so
+   * it knows nothing about an application she made herself, one she made before Litos existed, or
+   * one she made through any other channel. Its silence is an absence of evidence, and an absence
+   * of evidence is not evidence of absence.
    *
-   * The evidence is `submitted_application_companies`: the employers Litos has already sent an
-   * application to for this user, read by lib/applicationProfileLike.ts from the rows
-   * lib/duplicateApplication.ts counts as having reached an employer. `[]` is "Litos looked and has
-   * sent nothing", which is what licenses the answer. `undefined` is "nobody looked" and holds.
+   * The IMC label below is the exact string off the live form on 2026-08-10, reminder sentence and
+   * all, and that sentence is what makes the cost concrete: an applicant not selected this season
+   * may only reapply in 2027. A wrong "No" there misstates her history to the employer AND pushes
+   * through the exact duplicate the question exists to catch, and it went out unflagged, because
+   * these labels are in neither NEVER_FILL_PATTERNS nor the attention set.
+   *
+   * `prior_application_employers` is the record that does answer: `[]` is her saying she has
+   * applied nowhere, and a list that does not name this employer is her saying she has not applied
+   * here. `undefined` is "never asked" and holds.
    */
   const IMC_PRIOR_APPLICATION_LABEL = 'Have you applied to this role or another role @IMC within the last 12-18 months? '
     + 'As a reminder, if you have already applied for this position during the current recruitment season and were not '
     + 'selected, you may reapply when the next recruitment season begins in 2027.';
 
-  test('a company-scoped prior-application question answers No when Litos has sent nothing to that employer', () => {
+  const PLAIN_PRIOR_APPLICATION_LABELS = [
+    'Have you previously applied to this company?',
+    'Have you applied to us before?',
+  ];
+
+  test('an empty Litos send log does not answer a company-scoped prior-application question', () => {
     const imc = frozenJobEmployerContext('IMC');
     const nothingSent: ApplicationProfileLike = { submitted_application_companies: [] };
 
-    // The compound IMC form. "This role or another role at IMC" is entirely inside the company
-    // scope the evidence covers, so the disjunction no longer makes the question unanswerable.
-    assert.deepEqual(resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', nothingSent, imc), { value: 'No' });
-    // Discovery lowercases every label it captures, so the lowercased spelling is the one that
-    // actually arrives and it has to answer identically.
-    assert.deepEqual(
-      resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL.toLowerCase(), 'text', nothingSent, imc),
-      { value: 'No' },
-    );
-    // And it reaches a real yes/no control rather than producing a value nothing can select.
+    for (const label of [
+      IMC_PRIOR_APPLICATION_LABEL,
+      // Discovery lowercases every label it captures, so this is the spelling that actually arrives.
+      IMC_PRIOR_APPLICATION_LABEL.toLowerCase(),
+      ...PLAIN_PRIOR_APPLICATION_LABELS,
+    ]) {
+      const resolved = resolveKnownAnswer(label, 'text', nothingSent, imc);
+      assert.ok(resolved && 'skipReason' in resolved, `${label} -> ${JSON.stringify(resolved)}`);
+      assert.match(resolved.skipReason, /prior application question left for you/, label);
+      // Held by the missing declaration, NOT by the compound refusal the live label used to hit:
+      // the reminder sentence is still stripped and the label is still read as one question.
+      assert.doesNotMatch(resolved.skipReason, /compound application question/, label);
+    }
+    // Nothing reaches the control, so the employer gets a blank she fills rather than a claim.
     assert.equal(
       filled(IMC_PRIOR_APPLICATION_LABEL, nothingSent, { inputType: 'select', options: YES_NO, context: imc }),
-      'No',
+      null,
     );
 
-    // The plain forms of the same question.
-    for (const label of ['Have you previously applied to this company?', 'Have you applied to us before?']) {
-      assert.deepEqual(resolveKnownAnswer(label, 'text', nothingSent, imc), { value: 'No' }, label);
-    }
-
-    // NOTHING READ IS NOT THE SAME AS NOTHING SENT. With no history on the profile at all the
-    // question stays held, exactly as it did before this rule existed - and it is now held for the
-    // right reason, because the label itself is a complete question rather than a compound one.
+    // Nothing read at all is held for the same reason, and for the same reason it always was.
     const unread = heldFor(IMC_PRIOR_APPLICATION_LABEL, {}, 'text', imc);
     assert.match(unread, /prior application question left for you/);
     assert.doesNotMatch(unread, /compound application question/);
+  });
+
+  /* WHY THIS FAMILY IS NOT IN THE ATTENTION SET, WHICH IS A CHOICE AND NOT AN OVERSIGHT.
+   *
+   * The obvious second repair is to add these labels to NEVER_FILL_PATTERNS, or to the set
+   * isRefusedQuestion reads, so that a prior-application answer always stops the packet for review.
+   * Both were considered and both are worse than the hold.
+   *
+   * The attention machinery is a SEND BLOCK, not a nudge: sensitiveQuestionRequiresAttention flags
+   * whenever the resolver's own value does not equal the answer on the packet, the final-approval
+   * route turns that into a 422, and it has no exemption for an answer the applicant reviewed
+   * herself. After this fix the resolver has no value for exactly the accounts that must answer by
+   * hand, so the flag would fire on her own typed answer and there would be no way to clear it
+   * short of filling an onboarding column. That converts "one question she answers herself" into
+   * "an application she cannot send", which is a bigger harm than the one being fixed.
+   *
+   * What replaces the flag is that Litos now writes nothing at all here, and takes back what it
+   * wrote before: an unsupported answer is blanked on the next refresh, a blank required answer
+   * already stops final approval on its own, and answer reuse has vetoed this family since it
+   * shipped (Veto 3 in lib/answerReuse.ts), so no "No" can arrive from another posting either.
+   */
+  test('a held prior-application question is blanked rather than flagged, and her declaration still travels', () => {
+    const imc = frozenJobEmployerContext('IMC');
+    const nothingSent: ApplicationProfileLike = { submitted_application_companies: [] };
+
+    assert.equal(questionRequiresHumanAttention({ question: IMC_PRIOR_APPLICATION_LABEL, answer: '' }), false);
+    assert.equal(questionRequiresHumanAttention({ question: IMC_PRIOR_APPLICATION_LABEL, answer: 'No' }), false);
+    assert.equal(
+      sensitiveQuestionRequiresAttention(IMC_PRIOR_APPLICATION_LABEL, 'No', 'text', nothingSent, imc),
+      false,
+    );
+
+    // The answer PR #500 would have shipped is withdrawn from the packet rather than sent.
+    assert.deepEqual(
+      refreshKnownQuestionAnswers([{ question: IMC_PRIOR_APPLICATION_LABEL, answer: 'No' }], nothingSent, imc),
+      [{ question: IMC_PRIOR_APPLICATION_LABEL, answer: '' }],
+    );
+    // And an account that filled the onboarding column is not held up by any of this.
+    assert.deepEqual(
+      refreshKnownQuestionAnswers(
+        [{ question: IMC_PRIOR_APPLICATION_LABEL, answer: '' }],
+        { prior_application_employers: [] },
+        imc,
+      ),
+      [{ question: IMC_PRIOR_APPLICATION_LABEL, answer: 'No' }],
+    );
+  });
+
+  test('an explicit declaration that she has applied nowhere answers No', () => {
+    const imc = frozenJobEmployerContext('IMC');
+    const declaredNone: ApplicationProfileLike = { prior_application_employers: [] };
+
+    for (const label of [
+      IMC_PRIOR_APPLICATION_LABEL,
+      IMC_PRIOR_APPLICATION_LABEL.toLowerCase(),
+      ...PLAIN_PRIOR_APPLICATION_LABELS,
+    ]) {
+      assert.deepEqual(resolveKnownAnswer(label, 'text', declaredNone, imc), { value: 'No' }, label);
+    }
+    // And it reaches a real yes/no control rather than producing a value nothing can select.
+    assert.equal(
+      filled(IMC_PRIOR_APPLICATION_LABEL, declaredNone, { inputType: 'select', options: YES_NO, context: imc }),
+      'No',
+    );
+    // A declared list that does not name this employer says the same thing about this employer.
+    for (const label of PLAIN_PRIOR_APPLICATION_LABELS) {
+      assert.deepEqual(
+        resolveKnownAnswer(label, 'text', { prior_application_employers: ['Akuna'] }, imc),
+        { value: 'No' },
+        label,
+      );
+    }
+    // Her declaration stands whether or not Litos ever read its own send history.
+    assert.deepEqual(
+      resolveKnownAnswer('Have you applied to us before?', 'text',
+        { prior_application_employers: [], submitted_application_companies: [] }, imc),
+      { value: 'No' },
+    );
   });
 
   test('a submitted application to that same company hands the question back, and never answers Yes', () => {
@@ -221,8 +316,10 @@ describe('stored application facts reach the control on the real employer questi
     const sentToImc: ApplicationProfileLike = { submitted_application_companies: ['IMC'] };
 
     /* NOT "Yes". The label asks about a 12-18 month window and about "this role or another role",
-     * and a list of employers settles neither. A wrong Yes costs her the same as a wrong No, so the
-     * exception restores exactly today's behaviour rather than flipping the answer. */
+     * and a list of employers settles neither. Those rows also include sends that were pressed and
+     * lost, which the employer may never have received (submittedApplicationCompanies in
+     * lib/duplicateApplication.ts), so a "Yes" off one of them is as much a false statement as the
+     * "No" this rule exists to stop. A wrong Yes costs her the same as a wrong No. */
     const held = resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', sentToImc, imc);
     assert.ok(held && 'skipReason' in held, JSON.stringify(held));
     assert.match(held.skipReason, /prior application question left for you/);
@@ -235,9 +332,18 @@ describe('stored application facts reach the control on the real employer questi
     // The plain forms are withdrawn by the same evidence.
     assert.match(heldFor('Have you applied to us before?', sentToImc, 'text', imc), /prior application question/);
 
+    /* THE SEND LOG WITHDRAWS AN ANSWER SHE WOULD OTHERWISE GET, and that is its whole job here.
+     * Her declared list was taken at onboarding and a send came after it, so a packet already at
+     * this employer stops the declaration answering rather than contradicting it. */
+    const declaredElsewhere: ApplicationProfileLike = { prior_application_employers: ['Akuna'] };
+    const withdrawn = resolveKnownAnswer('Have you previously applied to this company?', 'text',
+      { ...declaredElsewhere, submitted_application_companies: ['IMC'] }, imc);
+    assert.ok(withdrawn && 'skipReason' in withdrawn, JSON.stringify(withdrawn));
+    assert.match(withdrawn.skipReason, /prior application question left for you/);
+
     /* COMPANY IDENTITY IS EXACT, on the duplicate guard's own folding of job_context.company. A
      * submitted application to a similarly-named but different company withdraws nothing: if it
-     * did, the near-miss would answer a live employer's question out of another company's history.
+     * did, the near-miss would take away an answer her own declaration supports.
      *
      * Asserted on a label with NO trailing sentence, deliberately. IMC's real label carries one, and
      * a removed sentence withdraws every answer that rests on a positive record wherever it sits -
@@ -248,10 +354,14 @@ describe('stored application facts reach the control on the real employer questi
     assert.match(heldFor(bare, sentToImc, 'text', imc), /prior application question left for you/);
     for (const other of ['IMC Trading', 'Imcorp', 'IMC Health']) {
       assert.deepEqual(
-        resolveKnownAnswer(bare, 'text', { submitted_application_companies: [other] }, imc),
+        resolveKnownAnswer(bare, 'text', { ...declaredElsewhere, submitted_application_companies: [other] }, imc),
         { value: 'No' },
         other,
       );
+      // And with nothing declared the near miss changes nothing either: the question was already
+      // hers to answer, because no record on file speaks to her own applications.
+      const undeclared = resolveKnownAnswer(bare, 'text', { submitted_application_companies: [other] }, imc);
+      assert.ok(undeclared && 'skipReason' in undeclared, `${other} -> ${JSON.stringify(undeclared)}`);
     }
   });
 
@@ -334,15 +444,14 @@ describe('stored application facts reach the control on the real employer questi
     }
   });
 
-  test('a scope-restating tail does not narrow the default No, because No survives every restatement', () => {
+  test('a scope-restating tail does not narrow her declared No, because that No survives every restatement', () => {
     const imc = frozenJobEmployerContext('IMC');
     /* THE REGRESSION GUARD FOR THE WRONG REPAIR. Refusing to strip a restating tail would put every
-     * one of these back in the compound refusal. With no application to any employer there is
-     * nothing for a narrowing or a widening to act on, so No is true either way, and the default-No
-     * rule this branch exists for holds under all four kinds of restatement. */
+     * one of these back in the compound refusal. Her declared `[]` is a statement that the set of
+     * applications is empty, and there is nothing for a narrowing or a widening to act on in an
+     * empty set, so No is true under all four kinds of restatement. */
     for (const tail of SCOPE_RESTATING_TAILS) {
       for (const ap of [
-        { submitted_application_companies: [] },
         { prior_application_employers: [] },
         { prior_application_employers: [], submitted_application_companies: [] },
       ] satisfies ApplicationProfileLike[]) {
@@ -352,6 +461,12 @@ describe('stored application facts reach the control on the real employer questi
           `${tail} / ${JSON.stringify(ap)}`,
         );
       }
+      /* AND THE SEND LOG DOES NOT STAND IN FOR THAT DECLARATION, here least of all. A widening tail
+       * is exactly the case where an application Litos never sent is the one that counts, so an
+       * empty send log with nothing declared holds rather than answering. */
+      const sendLogOnly = resolveKnownAnswer(questionWith(tail), 'text', { submitted_application_companies: [] }, imc);
+      assert.ok(sendLogOnly && 'skipReason' in sendLogOnly, `${tail} -> ${JSON.stringify(sendLogOnly)}`);
+      assert.match(sendLogOnly.skipReason, /prior application question left for you/, tail);
     }
     // And with no tail at all nothing above applies: the ordinary rules answer as they always did.
     assert.deepEqual(
@@ -362,14 +477,14 @@ describe('stored application facts reach the control on the real employer questi
       resolveKnownAnswer('Have you applied to a role at IMC?', 'text', { prior_application_employers: ['Akuna'] }, imc),
       { value: 'No' },
     );
-    // IMC's real tail is removed like any other, and the blocker this branch exists for stays fixed.
+    // IMC's real tail is removed like any other, and her declaration answers through it.
     assert.deepEqual(
-      resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', { submitted_application_companies: [] }, imc),
+      resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', { prior_application_employers: [] }, imc),
       { value: 'No' },
     );
   });
 
-  test('the new default is company-scoped, and reaches nothing else', () => {
+  test('the prior-application rule is company-scoped, and reaches nothing else', () => {
     const imc = frozenJobEmployerContext('IMC');
     const nothingSent: ApplicationProfileLike = { submitted_application_companies: [] };
 

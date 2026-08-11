@@ -526,6 +526,65 @@ export function createPacketAudit(input: CreatePacketAuditInput): PacketAudit {
   return { ...withoutDigest, audit_digest: auditDigest(withoutDigest) };
 }
 
+/**
+ * The six fields an acknowledgement pins, as a structural type rather than an import.
+ *
+ * The record itself lives on ApplicationReviewState, which this module does not know about and must
+ * not start knowing about: applicationReview.ts imports PacketAudit from here.
+ */
+export type PacketAuditAcknowledgementBinding = {
+  ownerSha256: string;
+  applicationId: string;
+  audit_digest: string;
+  packet_version: string;
+  pdfSha256: string;
+  pdfSizeBytes: number;
+};
+
+/**
+ * Whether an acknowledgement is an acknowledgement OF this audit.
+ *
+ * ONE COPY, because two would drift and the drift would be silent in the permissive direction. The
+ * send gate (currentAcknowledgedPacketAudit) asks this question of the stored acknowledgement, and
+ * the retention restore asks it of the acknowledgement it is deciding whether to carry forward. If
+ * those two comparisons ever disagreed, the restore could re-issue an acknowledgement the gate
+ * would not have accepted, which is a human approval invented out of a record that never matched.
+ */
+export function acknowledgementBindsAudit(
+  acknowledgement: PacketAuditAcknowledgementBinding | undefined | null,
+  audit: PacketAudit,
+): boolean {
+  return Boolean(acknowledgement)
+    && acknowledgement!.ownerSha256 === audit.bindings.ownerSha256
+    && acknowledgement!.applicationId === audit.bindings.applicationId
+    && acknowledgement!.audit_digest === audit.audit_digest
+    && acknowledgement!.packet_version === audit.packet_version
+    && acknowledgement!.pdfSha256 === audit.bindings.pdf.sha256
+    && acknowledgement!.pdfSizeBytes === audit.bindings.pdf.sizeBytes;
+}
+
+/**
+ * Everything an audit says about a packet EXCEPT which file carries it.
+ *
+ * THE BYTES ARE NEVER IDENTICAL ACROSS A REBUILD, so a rule written on them would decide nothing.
+ * renderResumePdf stamps a CreationDate, the restored file gets a new object key, and
+ * packet_version and audit_digest are hashes over both - three fields that differ by construction
+ * between a packet and the same packet rebuilt from the same frozen inputs.
+ *
+ * What CAN be identical is everything else: the owner, the application, the JD, the spec, the job
+ * context, the questions, the applicant snapshot, both email identities, and every clause, term and
+ * verdict the audit drew from them. That is what the applicant was shown and what she was agreeing
+ * to. Comparing this identity is how the restore decides whether her earlier acknowledgement still
+ * describes the packet, and it is not guaranteed to match: scoring reads the calendar (a "Present"
+ * date range grows) and a cached judgement can move, so an audit that now says something different
+ * about the packet correctly loses the old approval.
+ */
+export function packetAuditContentIdentity(audit: PacketAudit): string {
+  const { audit_digest: _digest, packet_version: _version, bindings, ...rest } = audit;
+  const { pdf: _pdf, ...contentBindings } = bindings;
+  return packetAuditSha256({ ...rest, bindings: contentBindings });
+}
+
 export function packetAuditIsSubmissionReady(audit: unknown): audit is PacketAudit {
   try {
     if (!audit || typeof audit !== 'object') return false;
