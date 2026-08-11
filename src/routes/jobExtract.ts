@@ -17,6 +17,27 @@ export function clipJdText(rawText: string | undefined | null): string {
   return (rawText ?? '').trim().slice(0, MAX_JD_TEXT_CHARS);
 }
 
+const WORKABLE_APPLICATION_PATH = /^\/([a-z0-9][a-z0-9._-]*)\/j\/([a-z0-9]+)\/apply\/?$/i;
+
+/**
+ * Workable's application route contains form labels, not the job description. Read the exact job
+ * overview for extraction while leaving the caller's application URL untouched for submission.
+ */
+export function jobDescriptionSourceUrl(rawUrl: string): string {
+  const url = new URL(rawUrl);
+  if (url.origin !== 'https://apply.workable.com') return rawUrl;
+
+  const workableApplication = url.pathname.match(WORKABLE_APPLICATION_PATH);
+  if (!workableApplication) return rawUrl;
+
+  const [, tenant, jobToken] = workableApplication;
+  url.pathname = `/${tenant}/j/${jobToken}/`;
+  // These values belong to the application form and are not needed to identify its job overview.
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+}
+
 export async function jobExtractRoutes(fastify: FastifyInstance) {
   // POST /jobs/extract - given a posting URL, render it in the managed browser (the same
   // provider used for portal submission) and return its visible text as a starting point for the
@@ -55,6 +76,7 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       });
     }
 
+    const extractionUrl = jobDescriptionSourceUrl(body.job_url);
     let result: Awaited<ReturnType<typeof runManagedBrowser>>;
     try {
       // The Stratus run validates every action and requires a non-empty selector, even for
@@ -68,7 +90,7 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       // A selector that can never match forces waitForSelector to burn its FULL timeout before
       // 'optional' lets the run continue - a deterministic render-delay that does not depend on
       // guessing any site's heading markup.
-      result = await runManagedBrowser(body.job_url, [
+      result = await runManagedBrowser(extractionUrl, [
         { type: 'waitForSelector', selector: '.litos-jd-extract-render-delay-noop', timeout: 5000, optional: true },
         { type: 'extract', selector: 'body' },
       ]);
@@ -81,7 +103,15 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
     }
 
     fastify.log.info(
-      { userId, job_url: body.job_url, title: result.title, url: result.url, textLen: result.text?.length ?? 0, blockers: result.blockers },
+      {
+        userId,
+        job_url: body.job_url,
+        extraction_url: extractionUrl,
+        title: result.title,
+        url: result.url,
+        textLen: result.text?.length ?? 0,
+        blockers: result.blockers,
+      },
       'job description extraction result',
     );
     const jdText = clipJdText(result.text);
