@@ -170,11 +170,34 @@ export async function resolveBlobUrl(objectKey: string): Promise<string | null> 
   return blobs.find((b) => b.pathname === objectKey)?.url ?? null;
 }
 
-async function listAll(prefix: string): Promise<StoredResumeBlob[]> {
+// The two Blob calls the sweep makes, as an injectable seam. Narrowed to the surface actually
+// consumed rather than restating @vercel/blob's types: `list` is generic over folded/expanded mode
+// and its blobs carry size, etag and downloadUrl that nothing here reads, so a fake would have to
+// fabricate fields only to satisfy the compiler.
+export type BlobListPage = {
+  blobs: Array<{ url: string; pathname: string; uploadedAt: Date }>;
+  cursor?: string;
+  hasMore: boolean;
+};
+
+export type ResumeBlobStore = {
+  list: (options: { prefix: string; cursor?: string; limit: number }) => Promise<BlobListPage>;
+  del: (urls: string[]) => Promise<void>;
+};
+
+const productionBlobStore: ResumeBlobStore = {
+  list: (options) => list(options),
+  del: (urls) => del(urls),
+};
+
+async function listAll(
+  prefix: string,
+  store: ResumeBlobStore = productionBlobStore,
+): Promise<StoredResumeBlob[]> {
   const out: StoredResumeBlob[] = [];
   let cursor: string | undefined;
   do {
-    const res = await list({ prefix, cursor, limit: 1000 });
+    const res = await store.list({ prefix, cursor, limit: 1000 });
     out.push(...res.blobs.map((b) => ({ url: b.url, pathname: b.pathname, uploadedAt: b.uploadedAt })));
     cursor = res.hasMore ? res.cursor : undefined;
   } while (cursor);
@@ -218,13 +241,53 @@ export async function deleteUploadedResumeThenClear(
   await clearLegacyPointers();
 }
 
+export interface ResumeSweepResult {
+  scanned: number;
+  deleted: number;
+  /**
+   * Pathnames actually handed to del(), so a caller can scope follow-up work to the owners whose
+   * files really went. Deliberately not surfaced in the HTTP response: these keys embed user ids.
+   */
+  deletedPathnames: string[];
+}
+
+/**
+ * Owner ids for the legacy originals among a set of deleted pathnames, deduplicated.
+ *
+ * Only legacy originals matter here. profiles.resume_object_key / resume_url point at the raw
+ * upload under the user root; generated files under resumes/ are tracked in generated_resumes and
+ * clearing a profile pointer for one of those would be scoping by coincidence.
+ */
+export function legacyOriginalOwnerIds(pathnames: string[]): string[] {
+  const ids = new Set<string>();
+  for (const pathname of pathnames) {
+    if (!isUploadedResumeBlob(pathname)) continue;
+    // isUploadedResumeBlob has already pinned the shape to users/<id>/resume*.pdf|docx.
+    const userId = pathname.split('/')[1];
+    if (userId) ids.add(userId);
+  }
+  return [...ids];
+}
+
 // Deletes legacy original uploads immediately and generated files after RESUME_RETENTION_DAYS.
+//
+// blobStore exists because this is the only function in this file that permanently destroys user
+// files, and it was the only one with no test: every retention test stubbed it out at the route
+// boundary, so the cursor loop in listAll and the bulk del() below ran unexercised in CI and were
+// first exercised in production. Overriding is partial, so a test can replace del alone and still
+// page through a real listing fake.
 export async function sweepExpiredResumeBlobs(
-  now = Date.now(),
-  retentionDays = RESUME_RETENTION_DAYS,
-): Promise<{ scanned: number; deleted: number }> {
-  const blobs = await listAll('users/');
+  opts: { now?: number; retentionDays?: number; blobStore?: Partial<ResumeBlobStore> } = {},
+): Promise<ResumeSweepResult> {
+  const now = opts.now ?? Date.now();
+  const retentionDays = opts.retentionDays ?? RESUME_RETENTION_DAYS;
+  const store: ResumeBlobStore = { ...productionBlobStore, ...opts.blobStore };
+  const blobs = await listAll('users/', store);
   const due = resumeBlobsDueForDeletion(blobs, now, retentionDays);
-  if (due.length > 0) await del(due.map((blob) => blob.url));
-  return { scanned: blobs.length, deleted: due.length };
+  if (due.length > 0) await store.del(due.map((blob) => blob.url));
+  return {
+    scanned: blobs.length,
+    deleted: due.length,
+    deletedPathnames: due.map((blob) => blob.pathname),
+  };
 }
