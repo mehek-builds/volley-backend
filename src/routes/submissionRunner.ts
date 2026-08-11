@@ -3361,6 +3361,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     if (!initialChallenge) {
       const observation = await observeManagedReceiptOnce({
         initial: receiptResult,
+        expectedApplicationUrl: applicationUrl,
         observe: (continuationToken) => continueManagedBrowser(continuationToken, [], { screenshot: true }),
       });
       receiptResult = observation.receiptResult;
@@ -3404,19 +3405,11 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         authorized: true,
         existing: claimedReview.security_code,
       });
-      await writeReview(row, nextReview(claimedReview, {
-        status: 'needs_attention',
+      await writeReview(row, delayedSecurityCodeHandoffReview(claimedReview, {
         verification,
-        security_code: securityCode,
-        submission_attempted_at: capturedAt,
-        preview_screenshot_url: blob.url,
-        submission_error: undefined,
-        attention_reason: 'The employer showed a verification-code step after Litos used its one safe receipt check. Litos will not open a fresh form or send this application again automatically. Open the employer portal and finish the verification there.',
-        attention_categories: ['security_code', 'evidence_gap'],
-        submission_claimed_at: undefined,
-        submission_claim_id: undefined,
-        submission_authorization: undefined,
-        unverified_submission: undefined,
+        securityCode,
+        attemptedAt: capturedAt,
+        screenshotUrl: blob.url,
       }));
       fastify.log.warn({
         applicationId: row.id,
@@ -3870,6 +3863,29 @@ export function preClickVerificationContinuationBlockedReview(
         : 'Application email route changed before security-code continuation',
     attention_reason: attentionReason,
     attention_categories: ['security_code', 'evidence_gap'],
+  });
+}
+
+/** A delayed post-click code wall has consumed its one continuation and must remain submit-locked. */
+export function delayedSecurityCodeHandoffReview(
+  current: ApplicationReviewState,
+  input: {
+    securityCode: NonNullable<ApplicationReviewState['security_code']>;
+    verification: NonNullable<ApplicationReviewState['verification']>;
+    attemptedAt: string;
+    screenshotUrl: string;
+  },
+): ApplicationReviewState {
+  return nextReview(current, {
+    status: 'needs_attention',
+    verification: input.verification,
+    security_code: input.securityCode,
+    submission_attempted_at: input.attemptedAt,
+    preview_screenshot_url: input.screenshotUrl,
+    submission_error: undefined,
+    attention_reason: 'The employer showed a verification-code step after Litos used its one safe receipt check. Litos will not open a fresh form or send this application again automatically. Open the employer portal and finish the verification there.',
+    attention_categories: ['security_code', 'evidence_gap'],
+    unverified_submission: undefined,
   });
 }
 

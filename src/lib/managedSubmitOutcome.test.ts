@@ -11,13 +11,28 @@ import {
   isManagedNoSubmitControl,
   isManagedRunTimeout,
   managedSubmitVerdict,
-  observeManagedReceiptOnce,
+  observeManagedReceiptOnce as observeManagedReceiptOnceWithBinding,
   readManagedSubmitOutcome,
   unverifiedSubmissionReason,
 } from './managedSubmitOutcome';
 import { submitRequestDisposition } from './submissionSafety';
 import { duplicateAmong, type SubmittedTwinRow } from './duplicateApplication';
 import { attentionCategoriesForReasons } from './submissionTerminalCause';
+
+type ManagedReceiptFixture = Parameters<typeof observeManagedReceiptOnceWithBinding>[0]['initial'];
+
+function observeManagedReceiptOnce<T extends ManagedReceiptFixture>(input: {
+  initial: T;
+  expectedApplicationUrl?: string;
+  observe: (continuationToken: string) => Promise<T>;
+  nowMs?: number;
+}) {
+  return observeManagedReceiptOnceWithBinding({
+    ...input,
+    expectedApplicationUrl: input.expectedApplicationUrl
+      ?? (typeof input.initial.url === 'string' ? input.initial.url : ''),
+  });
+}
 
 /* The exact shape the runner writes on a successful Ashby submit. The container class and the
    sentence are both real: read from jobs.ashbyhq.com/skydio/.../application and from the bundle
@@ -441,6 +456,63 @@ describe('an unknown pressed result gets one bounded read-only receipt observati
       });
       assert.equal(calls, 0, `invalid ATS origin must not spend its token: ${url}`);
       assert.equal(result.attempted, false);
+    }
+  });
+
+  test('the frozen Ashby application rejects a same-host crossed job before token use', async () => {
+    for (const url of [
+      'https://jobs.ashbyhq.com/kos/other-job/application',
+      'https://jobs.ashbyhq.com/other-org/software-engineer-intern/application',
+    ]) {
+      let calls = 0;
+      const result = await observeManagedReceiptOnce({
+        initial: { ...unknown, url },
+        expectedApplicationUrl: unknown.url,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => { calls += 1; throw new Error('must not run'); },
+      });
+      assert.equal(calls, 0, url);
+      assert.equal(result.attempted, false, url);
+      assert.equal(result.receiptResult.url, url);
+    }
+  });
+
+  test('the frozen Greenhouse application rejects a same-host crossed job before token use', async () => {
+    const expectedApplicationUrl = 'https://job-boards.greenhouse.io/haizelabs/jobs/4685944008';
+    for (const url of [
+      'https://job-boards.greenhouse.io/haizelabs/jobs/9999999999',
+      'https://job-boards.greenhouse.io/other-tenant/jobs/4685944008',
+      'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
+    ]) {
+      let calls = 0;
+      const result = await observeManagedReceiptOnce({
+        initial: { ...unknown, url },
+        expectedApplicationUrl,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => { calls += 1; throw new Error('must not run'); },
+      });
+      assert.equal(calls, 0, url);
+      assert.equal(result.attempted, false, url);
+      assert.equal(result.receiptResult.url, url);
+    }
+  });
+
+  test('the frozen binding rejects family, origin, and shape crossings before token use', async () => {
+    const expectedApplicationUrl = 'https://job-boards.greenhouse.io/haizelabs/jobs/4685944008';
+    for (const url of [
+      'https://jobs.ashbyhq.com/haizelabs/4685944008/application',
+      'https://job-boards.eu.greenhouse.io/haizelabs/jobs/4685944008',
+      'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
+    ]) {
+      let calls = 0;
+      const result = await observeManagedReceiptOnce({
+        initial: { ...unknown, url },
+        expectedApplicationUrl,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => { calls += 1; throw new Error('must not run'); },
+      });
+      assert.equal(calls, 0, url);
+      assert.equal(result.attempted, false, url);
     }
   });
 

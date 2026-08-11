@@ -129,8 +129,9 @@ test('unknown receipt observation is one empty-action continuation with no URL o
   const observation = runner.slice(start, end);
   assert.match(observation, /if \(!initialChallenge\)/);
   assert.equal((observation.match(/continueManagedBrowser\(/g) ?? []).length, 1);
+  assert.match(observation, /expectedApplicationUrl: applicationUrl/);
   assert.match(observation, /continueManagedBrowser\(continuationToken, \[\], \{ screenshot: true \}\)/);
-  assert.doesNotMatch(observation, /runManagedBrowser|result\.url|applicationUrl|codeActions|confirmAndSubmit|type: 'click'/);
+  assert.doesNotMatch(observation, /runManagedBrowser|result\.url|codeActions|confirmAndSubmit|type: 'click'/);
 });
 
 test('a delayed typed code wall fails closed after its one observation capability is consumed', async () => {
@@ -146,14 +147,11 @@ test('a delayed typed code wall fails closed after its one observation capabilit
   assert.match(observation, /receiptResult = observation\.observedResult/);
   assert.match(observation, /status: 'verification_pending'/);
   const challengeBranch = runner.slice(handoff, handoffEnd);
-  assert.match(challengeBranch, /status: 'needs_attention'/);
-  assert.match(challengeBranch, /preview_screenshot_url: blob\.url/);
-  assert.match(challengeBranch, /submission_claimed_at: undefined/);
-  assert.match(challengeBranch, /submission_claim_id: undefined/);
-  assert.match(challengeBranch, /submission_authorization: undefined/);
-  assert.match(challengeBranch, /unverified_submission: undefined/);
-  assert.match(challengeBranch, /will not open a fresh form or send this application again automatically/);
-  assert.doesNotMatch(challengeBranch, /status: 'awaiting_security_code'/);
+  assert.match(challengeBranch, /delayedSecurityCodeHandoffReview\(claimedReview/);
+  assert.match(challengeBranch, /screenshotUrl: blob\.url/);
+  assert.doesNotMatch(challengeBranch, /submission_claimed_at: undefined/);
+  assert.doesNotMatch(challengeBranch, /submission_claim_id: undefined/);
+  assert.doesNotMatch(challengeBranch, /submission_authorization: undefined/);
   assert.doesNotMatch(challengeBranch, /continueManagedBrowser|runManagedBrowser/);
   assert.match(challengeBranch, /return;/);
 });

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  delayedSecurityCodeHandoffReview,
   preClickNoSubmitReview,
   preClickSecurityRecipientMismatchReview,
   preClickVerificationContinuationBlockedReview,
@@ -103,6 +104,58 @@ test('a standing code wall for another alias stays non-restartable and preserves
   assert.match(persisted.attention_reason!, /different application email/i);
   assert.match(persisted.attention_reason!, /already waiting/i);
   assert.equal(submitRequestDisposition(persisted.status), 'reject');
+});
+
+test('a delayed post-click code wall preserves the unresolved external-side-effect lock', () => {
+  const current = {
+    status: 'submitting',
+    submission_claimed_at: '2026-08-11T12:00:00.000Z',
+    submission_claim_id: 'claim-id',
+    submission_authorization: {
+      source: 'standing_consent',
+      authorized_at: '2026-08-11T11:59:59.000Z',
+    },
+    unverified_submission: {
+      at: '2026-08-11T12:00:01.000Z',
+      cause: 'no_confirmation_state',
+    },
+    updated_at: '2026-08-11T12:00:00.000Z',
+  } as unknown as Parameters<typeof delayedSecurityCodeHandoffReview>[0];
+  const persisted = delayedSecurityCodeHandoffReview(current, {
+    securityCode: {
+      digits: 8,
+      sent_to: 'app-exact@apply.trylitos.com',
+      requested_at: '2026-08-11T12:00:03.000Z',
+      submit_was_authorized: true,
+    },
+    verification: {
+      status: 'verification_pending',
+      requested_at: '2026-08-11T12:00:03.000Z',
+      retry_count: 0,
+    },
+    attemptedAt: '2026-08-11T12:00:03.000Z',
+    screenshotUrl: 'https://proof.example/receipt.png',
+  });
+  assert.equal(persisted.status, 'needs_attention');
+  assert.equal(persisted.submission_claimed_at, '2026-08-11T12:00:00.000Z');
+  assert.equal(persisted.submission_claim_id, 'claim-id');
+  assert.deepEqual(persisted.submission_authorization, current.submission_authorization);
+  assert.equal(persisted.submission_attempted_at, '2026-08-11T12:00:03.000Z');
+  assert.equal(persisted.preview_screenshot_url, 'https://proof.example/receipt.png');
+  assert.equal(persisted.security_code?.sent_to, 'app-exact@apply.trylitos.com');
+  assert.equal(persisted.verification?.status, 'verification_pending');
+  assert.equal(persisted.unverified_submission, undefined);
+  assert.equal(persisted.submission_error, undefined);
+  assert.deepEqual(persisted.attention_categories, ['security_code', 'evidence_gap']);
+  assert.match(persisted.attention_reason!, /will not open a fresh form or send this application again automatically/);
+  assert.equal(submitRequestDisposition('needs_attention', false), 'start', 'the cleared-claim regression would restart');
+  assert.equal(
+    submitRequestDisposition(
+      persisted.status,
+      Boolean(persisted.submission_claimed_at),
+    ),
+    'reject',
+  );
 });
 
 for (const cause of ['authorization_revoked', 'email_route_changed', 'email_permission_revoked'] as const) {

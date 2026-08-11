@@ -266,6 +266,8 @@ export type ManagedReceiptObservation<T extends ManagedReceiptResult> = {
  */
 export async function observeManagedReceiptOnce<T extends ManagedReceiptResult>(input: {
   initial: T;
+  /** Frozen from the packet before the employer page runs. Employer-returned URLs cannot set it. */
+  expectedApplicationUrl: string;
   observe: (continuationToken: string) => Promise<T>;
   nowMs?: number;
 }): Promise<ManagedReceiptObservation<T>> {
@@ -277,8 +279,9 @@ export async function observeManagedReceiptOnce<T extends ManagedReceiptResult>(
   });
   const initialOutcome = readManagedSubmitOutcome(input.initial);
   if (initialOutcome?.pressed !== true || initialOutcome.state !== 'unknown') return unchanged();
+  const expectedBinding = managedAtsBinding({ url: input.expectedApplicationUrl });
   const initialBinding = managedAtsBinding(input.initial);
-  if (!initialBinding) return unchanged();
+  if (!sameAtsBinding(initialBinding, expectedBinding)) return unchanged();
   if (input.initial.humanVerification != null || input.initial.continuationOffered !== true) return unchanged();
   const token = input.initial.continuationToken;
   const expiresAt = input.initial.continuationExpiresAt;
@@ -296,8 +299,9 @@ export async function observeManagedReceiptOnce<T extends ManagedReceiptResult>(
   const observedOutcome = readManagedSubmitOutcome(observed);
   const atsTerminal = observedOutcome?.pressed === true
     && (observedOutcome.state === 'confirmed' || observedOutcome.state === 'rejected')
-    && exactAtsReceipt(observed, observedOutcome, initialBinding);
-  const heldPageMatches = sameAtsBinding(managedAtsBinding(observed), initialBinding);
+    && !!expectedBinding
+    && exactAtsReceipt(observed, observedOutcome, expectedBinding);
+  const heldPageMatches = sameAtsBinding(managedAtsBinding(observed), expectedBinding);
   const evidenceResult = observed.screenshot && (atsTerminal || heldPageMatches) ? observed : input.initial;
   return {
     receiptResult: atsTerminal ? observed : input.initial,
