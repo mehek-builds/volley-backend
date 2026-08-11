@@ -103,6 +103,18 @@ export function attentionCategoriesForReasons(reasons: readonly string[]): Appli
       categories.add('run_failed');
     } else if (/filled form did not record|preview did not include|preview looks like/.test(normalized)) {
       categories.add('evidence_gap');
+    } else if (/resume file for this application is no longer stored/.test(normalized)) {
+      /* AHEAD OF required_document, and that ordering is the entire reason this branch is written
+         as its own arm rather than left to fall through. The arm below fires on a bare /file/, and
+         the expired-packet sentence contains the word twice, so without this it lands in the
+         category that means "the employer is waiting on a document from you". That is the opposite
+         of what happened: no employer has seen this application, and the applicant would go looking
+         for an upload control on a form nothing was ever sent to.
+
+         Matched on the clause, not on /resume/ or /expired/, for the same reason the security-code
+         branch above matches a clause: an employer's own field label reaching a blocker line
+         ("\"Resume\" is required and is still empty") must not be read as a retention deletion. */
+      categories.add('packet_expired');
     } else if (/\b(?:transcripts?|uploads?|uploaded|uploading|attach(?:es|ed|ing|ment|ments)?|files?|documents?|documentation)\b/.test(normalized)) {
       /* WORD BOUNDARIES, BECAUSE `file` LIVES INSIDE `profile`.
        *

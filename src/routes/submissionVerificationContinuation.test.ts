@@ -22,10 +22,12 @@ test('managed verification resumes once by token, never by URL, then verifies th
   const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true)');
   const end = runner.indexOf("if (!claimedReview.browser_session_id)", firstSubmit);
   const managed = runner.slice(firstSubmit, end);
-  assert.match(managed, /requestContinuation: true/);
-  assert.match(managed, /continuationCheckpoint: true/);
-  assert.match(managed, /continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS/);
-  assert.match(managed, /allowSubmit: true/);
+  // The submit options are one named builder now, asserted for what they do in browserbase.test.ts.
+  // No continuationCheckpoint: Stratus already offers a continuation on a pressed-unknown receipt,
+  // and setting the flag also made continuationOffered true on confirmed, rejected and not_attempted
+  // outcomes, which kept the sandbox alive after every successful submission.
+  assert.match(managed, /managedApplicationSubmitOptions\(SECURITY_CODE_CONTINUATION_TTL_SECONDS\)/);
+  assert.doesNotMatch(managed, /continuationCheckpoint: true/);
   assert.match(managed, /readManagedSecurityCodeChallenge\(receiptResult\)/);
   assert.match(managed, /securityCodeChallengeMatchesRecipient\(initialChallengeCandidate, packet\.email\)/);
   assert.match(managed, /securityCodeChallengeMatchesRecipient\(challengeCandidate, packet\.email\)/);
@@ -87,7 +89,7 @@ test('a retained Greenhouse wall may read the exact older alias code once but ne
 test('a standing code wall for another recipient exits before mailbox or continuation work', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const start = runner.indexOf('if (initialChallengeCandidate && initialSubmitOutcome?.pressed === false && !initialChallenge)');
-  const end = runner.indexOf('if (!initialChallenge) assertManagedRequiredFieldsConfirmed', start);
+  const end = runner.indexOf('if (managedApplicationProofIsRequired(', start);
   const mismatch = runner.slice(start, end);
   assert.ok(start > 0 && end > start);
   assert.match(mismatch, /preClickSecurityRecipientMismatchReview\(\s*claimedReview,\s*initialChallengeCandidate/);
@@ -129,8 +131,8 @@ test('unknown receipt observation is one empty-action continuation with no URL o
   const end = runner.indexOf("if (!receiptEvidenceResult.screenshot)", start);
   assert.ok(firstSubmit > 0 && start > firstSubmit && end > start);
   const initialRun = runner.slice(firstSubmit, start);
-  assert.match(initialRun, /requestContinuation: true/);
-  assert.match(initialRun, /continuationCheckpoint: true/);
+  assert.match(initialRun, /managedApplicationSubmitOptions\(SECURITY_CODE_CONTINUATION_TTL_SECONDS\)/);
+  assert.doesNotMatch(initialRun, /continuationCheckpoint: true/);
   const observation = runner.slice(start, end);
   assert.match(observation, /if \(!initialChallenge\)/);
   assert.equal((observation.match(/continueManagedBrowser\(/g) ?? []).length, 1);

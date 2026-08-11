@@ -251,6 +251,17 @@ export function withSecurityCodeAttempt(
   return withSecurityCodeAttempts(state, [attempt]);
 }
 
+/* WHICH OUTCOMES MEAN THE CODE ITSELF IS BURNT.
+ *
+ * 'no_control' and 'not_entered' say Litos never got the string into the page, so the code is as
+ * good as it ever was and forgetting it costs nothing. Every other outcome says the code was used,
+ * or was killed by a send, and its fingerprint is the only thing standing between it and being
+ * selected again by the standing 24 hour mailbox lookback.
+ */
+function attemptBurnsTheCode(attempt: SecurityCodeAttempt): boolean {
+  return attempt.outcome !== 'no_control' && attempt.outcome !== 'not_entered';
+}
+
 /**
  * One run can now produce two attempts, and both have to survive.
  *
@@ -260,8 +271,18 @@ export function withSecurityCodeAttempt(
  * losing the superseded record is the one that matters: its fingerprint is the only thing standing
  * between a dead code and an endless sequence of resends, each of which emails her another code.
  *
- * Still capped at the last ten, and still nothing but fingerprints.
+ * THE CAP USED TO BE A PLAIN slice(-10), AND THAT GAVE A SPENT CODE A WAY BACK. Ten further
+ * attempts - reachable by supplying ten wrong codes, each of which records one 'superseded' row -
+ * pushed the spent fingerprint off the front, findSecurityCodeAttempt stopped finding it, and the
+ * 24 hour mailbox lookback was free to select and re-spend it. The blast radius is bounded (a
+ * verification click on a wall that is already standing, not a second application send), but the
+ * fix is cheap: the rows that mark a code burnt are evicted last and are held to a much larger cap,
+ * so the trimming falls on the rows that were never protecting anything. Still nothing but
+ * fingerprints, so the larger cap is a few kilobytes at its very worst.
  */
+const SECURITY_CODE_ATTEMPT_CAP = 10;
+const SECURITY_CODE_BURNT_ATTEMPT_CAP = 200;
+
 export function withSecurityCodeAttempts(
   state: SecurityCodeState,
   attempts: readonly SecurityCodeAttempt[],
@@ -275,7 +296,16 @@ export function withSecurityCodeAttempts(
     merged = merged.filter((existing) => existing.fingerprint !== attempt.fingerprint);
     merged.push(attempt);
   }
-  return { ...state, attempts: merged.slice(-10) };
+  if (merged.length > SECURITY_CODE_ATTEMPT_CAP) {
+    // Order is preserved: the kept rows are re-read out of `merged` rather than concatenated, so
+    // the newest-last invariant every reader of `attempts` relies on survives the trim.
+    const keep = new Set([
+      ...merged.filter(attemptBurnsTheCode).slice(-SECURITY_CODE_BURNT_ATTEMPT_CAP),
+      ...merged.slice(-SECURITY_CODE_ATTEMPT_CAP),
+    ]);
+    merged = merged.filter((attempt) => keep.has(attempt));
+  }
+  return { ...state, attempts: merged };
 }
 
 /**

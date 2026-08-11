@@ -68,12 +68,71 @@ describe('the run reads the outcome off the page, and the caller keys off that',
         source: 'ats_state',
         evidence: '.ashby-application-form-failure-container',
         message: 'We couldn’t submit your application',
-        formStillPresent: true,
+        formStillPresent: false,
       },
     });
     assert.equal(verdict.kind, 'refused');
     if (verdict.kind !== 'refused') return;
     assert.match(verdict.message, /couldn’t submit/i);
+  });
+
+  /* A REFUSAL IS ALSO A DEFINITE ANSWER, AND IT IS THE ONE THAT RELEASES THE CLAIM.
+   *
+   * The runner writes "Nothing was filed, so there is no confirmation to look for" off this verdict
+   * and clears submission_claimed_at with it, so an unproven 'refused' is a wrong sentence and a
+   * duplicate application in the same write. Stratus's rejected arm returns the first VISIBLE
+   * failure container it finds without reading its text or asking whether the form is gone, so both
+   * of these arrive over the wire looking exactly like the real thing. */
+  for (const [name, over] of [
+    ['an empty failure container', { message: '', formStillPresent: false }],
+    ['a failure container over a live form', { message: 'We couldn’t submit your application', formStillPresent: true }],
+    ['both at once', { message: '   ', formStillPresent: true }],
+    ['a runner too old to say whether the form is gone', { message: 'We couldn’t submit your application', formStillPresent: null }],
+  ] as const) {
+    test(`${name} is unverified, never refused`, () => {
+      const verdict = managedSubmitVerdict({
+        submitOutcome: {
+          pressed: true,
+          state: 'rejected',
+          source: 'ats_state',
+          evidence: '.ashby-application-form-failure-container',
+          ...over,
+        },
+      });
+      assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
+        'an unproven refusal must keep the claim and ask her to look, never announce that nothing was filed');
+    });
+  }
+
+  test('an unproven refusal never falls through to a confirmation on the same page', () => {
+    // 'rejected' outranks 'confirmed' and has to keep outranking it when it fails its own gate:
+    // falling through would let a page that refused be read off its congratulatory prose instead.
+    const verdict = managedSubmitVerdict({
+      submitOutcome: {
+        pressed: true,
+        state: 'rejected',
+        source: 'ats_state',
+        evidence: '.ashby-application-form-failure-container',
+        message: 'Thank you for submitting your application.',
+        formStillPresent: true,
+      },
+    });
+    assert.equal(verdict.kind, 'unverified');
+  });
+
+  test('an unproven refusal from a run that never pressed is still not_attempted', () => {
+    const verdict = managedSubmitVerdict({
+      submitOutcome: {
+        pressed: false,
+        state: 'rejected',
+        source: 'ats_state',
+        evidence: '.ashby-application-form-failure-container',
+        message: '',
+        formStillPresent: true,
+      },
+    });
+    assert.deepEqual(verdict, { kind: 'not_attempted' },
+      'the runner is believed about its own click even when the page proved nothing');
   });
 
   test('a page that never said is unverified, not submitted and not failed', () => {
@@ -234,7 +293,7 @@ describe('an unknown pressed result gets one bounded read-only receipt observati
         source: 'ats_state',
         evidence: '.ashby-application-form-failure-container',
         message: 'We could not submit your application.',
-        formStillPresent: true,
+        formStillPresent: false,
       },
     });
     const refusedResult = await observeManagedReceiptOnce({
@@ -243,6 +302,34 @@ describe('an unknown pressed result gets one bounded read-only receipt observati
       observe: async () => refused,
     });
     assert.equal(managedSubmitVerdict(refusedResult.receiptResult).kind, 'refused');
+
+    /* THE OBSERVATION IS WHERE AN UNPROVEN REFUSAL DOES ITS DAMAGE, because this is the arm that
+     * turns a still-unknown receipt into a definite one. An empty failure container, or one sitting
+     * over a live form, must not become the receiptResult at all: the initial unknown stays, and the
+     * packet keeps its claim instead of being told nothing was filed and released for a re-run. */
+    for (const weakRefusal of [
+      { message: '', formStillPresent: false },
+      { message: 'We could not submit your application.', formStillPresent: true },
+    ] as const) {
+      const observed = atsResult({
+        url: 'https://jobs.ashbyhq.com/kos/software-engineer-intern/application',
+        submitOutcome: {
+          pressed: true,
+          state: 'rejected',
+          source: 'ats_state',
+          evidence: '.ashby-application-form-failure-container',
+          ...weakRefusal,
+        },
+      });
+      const weak = await observeManagedReceiptOnce({
+        initial: unknown,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => observed,
+      });
+      assert.equal(weak.receiptResult, unknown, 'an unproven refusal must not become the receipt');
+      assert.equal(managedSubmitVerdict(weak.receiptResult).kind, 'unverified');
+      assert.equal(weak.evidenceResult, observed, 'the latest post-click screenshot remains visible');
+    }
 
     for (const observed of [
       atsResult({

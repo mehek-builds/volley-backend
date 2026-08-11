@@ -42,6 +42,7 @@ import {
   HANDOFF_WINDOW_MS,
   isBrowserbaseConfigured,
   isManagedStratusProvider,
+  managedApplicationSubmitOptions,
   managedContinuationFingerprint,
   runManagedBrowser,
 } from '../lib/browserbase';
@@ -97,6 +98,7 @@ import {
   type SupportedPortal,
   ManagedActionBudgetError,
   assertManagedRequiredFieldsConfirmed,
+  managedApplicationProofIsRequired,
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import {
@@ -116,7 +118,9 @@ import {
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { documentAsksOpenToReuse, requiredDocumentAsks, type RequiredDocumentAsk } from '../lib/requiredDocuments';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
-import { resolveBlobUrl } from '../lib/resumeAccess';
+import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess';
+import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
+import { PACKET_EXPIRED_REASON } from '../lib/packetResumeRestore';
 import { currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
 import { createDashboardHandoffBinding } from '../lib/extensionHandoffPacket';
 import { decryptRow } from './applicationProfile';
@@ -608,10 +612,44 @@ export async function resumeBytesForPacket(
     return Buffer.from('%PDF-1.4\n% Litos controlled submission fixture\n%%EOF\n');
   }
   const blobUrl = await dependencies.resolveObjectUrl(objectKey);
-  if (!blobUrl) throw new Error('Generated resume file is unavailable');
+  /* Typed, because this is the retention sweep arriving rather than a malfunction. See
+     PacketDocumentExpiredError for why an untyped throw here told the applicant to go and look for
+     a confirmation of an application that was never filled in. Only the resolve is typed: a key that
+     resolves to a URL which then fails to download is a live storage fault, not an expired packet,
+     and the two owe different sentences. */
+  if (!blobUrl) throw new PacketDocumentExpiredError('resume');
   const response = await dependencies.fetchObject(blobUrl);
   if (!response.ok) throw new Error('Generated resume file could not be downloaded');
   return Buffer.from(await response.arrayBuffer());
+}
+
+async function fetchStoredCoverLetter(url: string): Promise<Buffer> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error('Generated cover letter file could not be downloaded');
+  return Buffer.from(await response.arrayBuffer());
+}
+
+/**
+ * The letter rebuilt from the row, for a packet whose letter file has been swept.
+ *
+ * Reads through storedCoverLetter rather than the raw `_cover_letter` object so that a half-written
+ * artifact is treated as no letter at all, exactly as every other reader of it does. A letter that
+ * cannot be rebuilt raises the typed error, which packetForCoverLetterCapability degrades into
+ * "written but not attached" - the same outcome an unreachable file already produced, so nothing
+ * gets worse than it was when the rebuild is impossible.
+ */
+async function rerenderStoredCoverLetter(row: ResumeRow, stored: StoredSpec): Promise<Buffer> {
+  const artifact = storedCoverLetter(row);
+  const job = (row.job_context ?? {}) as { company?: unknown };
+  const contact = (stored._contact ?? {}) as Record<string, unknown>;
+  if (!artifact || typeof job.company !== 'string') throw new PacketDocumentExpiredError('cover_letter');
+  return rerenderFrozenCoverLetter({
+    fullName: String(contact.full_name ?? '').trim(),
+    email: typeof contact.email === 'string' ? contact.email : undefined,
+    company: job.company,
+    body: artifact.body,
+    generatedAt: artifact.generated_at,
+  });
 }
 
 /**
@@ -698,6 +736,18 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const parsed = (profileRow[0]?.parsed_json ?? {}) as Record<string, unknown>;
   const review = readApplicationReview(stored);
   if (!review) throw new Error('We could not find this application');
+  /* NO REBUILD HERE, DELIBERATELY, and this is the second design it has had.
+     It first rebuilt the resume in memory at this line. That could never run: every send path
+     passes a packet-audit gate that loads resume_object_key and refuses before buildPacket is
+     called. Worse, it would have been wrong if it had run. renderResumePdf is not byte-deterministic
+     (pdfkit stamps CreationDate; two renders of one spec differ in sha256 at identical length), and
+     three records bind the exact bytes: the generation binding, packet_audit.bindings.pdf.sha256,
+     and the acknowledgement. An in-memory rebuild here would have the audit verifying one document
+     and the employer receiving another.
+     The rebuild now happens once, before the gate, in restoreExpiredPacketResume, which writes the
+     file and re-issues all three records against it. By the time buildPacket runs the file exists,
+     so a throw here means the file went missing AFTER the audit passed, which is a real anomaly and
+     should stop the run rather than be papered over with unaudited bytes. */
   const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest);
   /* THE ATTACHED TRANSCRIPT, LOADED HERE AND NOT ALLOWED TO THROW.
    *
@@ -736,10 +786,12 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const coverLetterKey = coverLetterObjectKeyToAttach(stored);
   if (coverLetterKey) {
     const coverLetterUrl = await resolveBlobUrl(coverLetterKey);
-    if (!coverLetterUrl) throw new Error('Generated cover letter file is unavailable');
-    const coverLetterResponse = await fetch(coverLetterUrl);
-    if (!coverLetterResponse.ok) throw new Error('Generated cover letter file could not be downloaded');
-    coverLetter = Buffer.from(await coverLetterResponse.arrayBuffer());
+    coverLetter = coverLetterUrl
+      ? await fetchStoredCoverLetter(coverLetterUrl)
+      /* Same recovery, same frozen inputs, and it matters more here than it looks: the letter's own
+         degrade path sends the application WITHOUT the attachment, so before this an expired letter
+         quietly cost the applicant the one document she wrote by hand. */
+      : await rerenderStoredCoverLetter(row, stored);
   }
   const fullName = String(contact.full_name ?? parsed.full_name ?? '').trim();
   const accountEmail = String(userRow[0]?.email ?? '').trim();
@@ -1332,6 +1384,14 @@ async function packetForCoverLetterCapability(
   try {
     return { packet: await buildPacket(rows[0], controlledTest) };
   } catch (error) {
+    /* THE RESUME IS NOT THE COVER LETTER'S PROBLEM TO DEGRADE.
+       buildPacket loads both documents, so an expired RESUME lands in this catch too. Degrading it
+       here was wrong twice over: it logged a resume failure under 'Cover letter file could not be
+       attached', and the rebuild below re-enters buildPacket, which throws on the same missing
+       resume a second time. The rethrow costs nothing that was ever recoverable - a packet with no
+       resume has nothing to send either way - and it keeps the typed error intact for fail(), which
+       is the whole point of typing it. */
+    if (error instanceof PacketDocumentExpiredError && error.document === 'resume') throw error;
     fastify.log.warn({ error, applicationId: row.id }, 'Cover letter file could not be attached, continuing without it');
     return {
       packet: omitCoverLetter(await buildPacket(
@@ -2791,12 +2851,13 @@ async function prepareManagedAttendedAccountGate(
 }
 
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
-  const stored = row.spec as StoredSpec;
-  const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
-  let current = readApplicationReview(stored);
+  let current = readApplicationReview(row.spec);
   if (!current) throw new Error('We do not have a link to the company application page');
   current = await repairReviewPortalFromMonitoredJob(row, current);
-  const packetAudit = await currentPacketAudit(row);
+  /* The audit is also where a packet past its retention window gets its file rebuilt, so the row it
+     returns can carry a NEW resume_object_key. Everything below reads from that row, never from
+     inputRow, or the run assembles a packet from the key the sweep deleted. */
+  const packetAudit = await currentPacketAudit(row, { restoreExpiredResume: true });
   if (!packetAudit.valid) {
     fastify.log.warn(
       { applicationId: row.id, code: packetAudit.code },
@@ -2805,13 +2866,20 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     await writeReview(row, nextReview(current, {
       status: 'needs_attention',
       attention_reason: packetAudit.reason,
-      attention_categories: ['evidence_gap'],
+      /* An expired packet is not an evidence gap. It gets the category whose next step is the one
+         that works, a regenerate, rather than the bucket that reads as "Litos broke, try again". */
+      attention_categories: packetAudit.code === 'PACKET_RESUME_EXPIRED' ? ['packet_expired'] : ['evidence_gap'],
       submission_authorization: undefined,
       submission_claimed_at: undefined,
       submission_claim_id: undefined,
     }));
     return;
   }
+  row = packetAudit.row;
+  const stored = row.spec as StoredSpec;
+  const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
+  // Re-read: a retention restore rewrote _review with a fresh audit and acknowledgement.
+  current = readApplicationReview(stored) ?? current;
   const portalUrl = current.portal_url;
   if (!portalUrl) throw new Error('We do not have a link to the company application page');
   const portal = detectPortal(portalUrl);
@@ -3377,7 +3445,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
 } = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
-  const packetAudit = await currentAcknowledgedPacketAudit(row);
+  const packetAudit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: true });
   if (!packetAudit.valid) {
     const finishingSecurityCode = Boolean(options.securityCode) && Boolean(current.security_code);
     fastify.log.error(
@@ -3389,7 +3457,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       attention_reason: finishingSecurityCode
         ? `${securityCodeAttentionReason(current.security_code!)}\n${packetAudit.reason}`
         : packetAudit.reason,
-      attention_categories: finishingSecurityCode ? ['security_code', 'evidence_gap'] : ['evidence_gap'],
+      attention_categories: packetAudit.code === 'PACKET_RESUME_EXPIRED'
+        ? (finishingSecurityCode ? ['security_code', 'packet_expired'] : ['packet_expired'])
+        : (finishingSecurityCode ? ['security_code', 'evidence_gap'] : ['evidence_gap']),
       submission_authorization: undefined,
       submission_claimed_at: undefined,
       submission_claim_id: undefined,
@@ -3480,6 +3550,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     }));
     return;
   }
+  /* Adopted here, not earlier: a retention restore inside the audit gives the packet a new
+     resume_object_key, and claimSubmission and everything after it must work from that row. */
+  row = packetAudit.row;
   const claimedRow = await claimSubmission(row, options.claimAlreadyHeld);
   if (!claimedRow) return;
   row = claimedRow;
@@ -3649,18 +3722,32 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * renders one after a submit has been refused. So a code cannot be attached to this list. It is
      * attached to the CONTINUATION below, which runs on the very DOM this submit produced. */
     const initialActions = buildManagedPortalActions(portal, packet, true);
+    /* NO continuationCheckpoint, AND THE COMMENT THAT USED TO SIT HERE WAS SIMPLY WRONG.
+     *
+     * It said "an ordinary unknown receipt does not offer a continuation, so it needs an explicit
+     * checkpoint". Read against the merged runner, stratus-browser-cloud@48ea9b5:
+     *
+     *     const pressedUnknown = phase === 0 && submitOutcome.pressed === true
+     *       && submitOutcome.state === 'unknown';
+     *     const continuationOffered = input.requestContinuation === true
+     *       && (Boolean(humanVerification) || input.continuationCheckpoint === true || pressedUnknown);
+     *
+     * pressedUnknown alone already offers it. The flag bought nothing, and it cost two things.
+     *
+     * FIRST, the observation window. receiptObservationOnly requires continuationCheckpoint to be
+     * absent, and it is what caps the held employer page at 15 seconds. With the flag the cap became
+     * this caller's full clamped TTL, so a live sandbox sat on the employer's post-submit page for
+     * minutes rather than for the seconds the one read-only look needs.
+     *
+     * SECOND, and worse, continuationOffered became true for EVERY managed submit outcome, including
+     * confirmed, rejected and not_attempted. continuationEligible returns that value verbatim, so
+     * keepAlive stayed true and sandbox.stop() was skipped in the finally of every successful
+     * submission, leaking one sandbox per application while the runner waited on a continuation
+     * nothing was going to send. */
     const result = await runManagedBrowser(
       applicationUrl,
       initialActions,
-      {
-        allowSubmit: true,
-        requestContinuation: true,
-        // The same held page serves two post-click outcomes. A visible code wall offers a
-        // continuation on its own; an ordinary unknown receipt does not, so it needs an explicit
-        // checkpoint before the read-only observer below can take its one bounded second look.
-        continuationCheckpoint: true,
-        continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS,
-      },
+      managedApplicationSubmitOptions(SECURITY_CODE_CONTINUATION_TTL_SECONDS),
     );
     const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);
     const initialSubmitOutcome = readManagedSubmitOutcome(result);
@@ -3678,11 +3765,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     // Required-field confirmation is a barrier inside the same remote action list, immediately
     // before submit. Require its per-field proof as well: an older runner that ignores or does not
     // understand the protocol must not be allowed to turn a silent fill into a submitted state.
-    // A retained security-code wall is the result of an earlier application submit. Stratus does
-    // not press the disabled application control again, so there is intentionally no new application
-    // confirmation pass to assert. The only click allowed from that state is the verification pass
-    // below, which carries the inbox code and asserts its own exact atomic proof.
-    if (!initialChallenge) assertManagedRequiredFieldsConfirmed(result, 'application');
+    if (managedApplicationProofIsRequired(initialChallenge, initialSubmitOutcome)) {
+      assertManagedRequiredFieldsConfirmed(result, 'application');
+    }
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
     const initialSecurityCodeState = initialChallenge
@@ -4278,6 +4363,8 @@ export function submissionFailureOutcome(input: {
   captchaStop: 'before_fill' | 'at_submit' | null;
   noSubmitControl: boolean;
   regenerationRequired?: boolean;
+  /* The packet's own resume file is gone from storage, so no packet could be assembled at all. */
+  packetDocumentExpired?: boolean;
   /* The applicant-facing sentence from a ManagedActionBudgetError, or null. A string rather than a
      boolean because the error composes its own reason from the portal and the question count, and
      re-deriving it here would be a second place to keep that wording correct. */
@@ -4287,8 +4374,8 @@ export function submissionFailureOutcome(input: {
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || actionBudgetStop || uncertainAfterClaim || providerSessionFailure
+  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -4297,6 +4384,24 @@ export function submissionFailureOutcome(input: {
       ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
       : regenerationRequired
         ? 'This application must be regenerated before submission because its stored Litos email no longer matches the active inbound email route. Nothing was sent to the employer.'
+      : packetDocumentExpired
+        /* Ranked here for the same reason as its neighbours, and it is the earliest stop of the
+           whole family: buildPacket throws before a browser session is opened, so nothing was
+           filled and nothing was sent. Without this arm it inherited uncertainAfterClaim, because
+           the submit() call site runs after the claim.
+
+           THE RETENTION IS NAMED, not hidden behind "something went wrong". This is the privacy
+           promise working exactly as published (RESUME_RETENTION_DAYS, and app/privacy on the site
+           says the file is gone after 30 days), so the honest thing is to say so. An apology for a
+           malfunction would be a lie about a feature, and it would leave the applicant expecting a
+           retry to fix it when only a regenerate will.
+
+           "normally what has happened here" rather than a flat assertion: the throw fires whenever
+           the object key resolves to nothing, and retention is the overwhelmingly likely cause but
+           not a proven one on any given row. Same discipline as the cause-neutral wording on
+           noSubmitControl below. The recovery is identical either way, so nothing is lost by not
+           claiming more than is known. */
+        ? PACKET_EXPIRED_REASON
       : actionBudgetStop
         /* Ranked above uncertainAfterClaim for the same reason as its two neighbours: the throw
            happens before the browser is driven, so nothing was sent and there is no confirmation to
@@ -4444,7 +4549,32 @@ export function preClickVerificationContinuationBlockedReview(
   });
 }
 
-/** A delayed post-click code wall has consumed its one continuation and must remain submit-locked. */
+/* A DELAYED POST-CLICK CODE WALL IS STILL A CODE WALL, AND IT NEEDS THE SAME DOOR AS ITS SIBLINGS.
+ *
+ * This wrote status 'needs_attention' while keeping the claim, and that combination closed every
+ * exit the packet had:
+ *
+ *   submitRequestDisposition('needs_attention', claimed) is 'reject', and resumeEditDisposition
+ *   delegates to it, so neither another run nor a resume edit could move it.
+ *
+ *   POST /applications/:id/security-code answered 'not_awaiting', because finishSecurityCodeSubmission
+ *   requires status 'awaiting_security_code' - and claimSecurityCodeSubmission additionally requires
+ *   submission_claimed_at to be null, so the status alone would not have been enough.
+ *
+ *   POST /applications/:id/submission/unverified answered 409, because unverified_submission was
+ *   explicitly cleared and that route resolves nothing else.
+ *
+ * A packet in that state could not be finished, retried, edited or resolved by anybody. That is the
+ * exact trap submitRequestDisposition names in its own parameter docs, and the one the Skydio packet
+ * 13bccb2d work existed to remove.
+ *
+ * SO IT NOW WRITES WHAT ITS SIBLINGS WRITE. preClickSecurityRecipientMismatchReview and the ordinary
+ * post-click challenge branch both land on 'awaiting_security_code' with the claim released, and
+ * that pair is not a relaxation: submitRequestDisposition rejects 'awaiting_security_code' outright,
+ * claim or no claim, so the ordinary path still cannot re-run and re-send. What it opens is the ONE
+ * route that is safe from here, the applicant's own code, which re-enters on the standing wall the
+ * employer is already holding rather than on a fresh form.
+ */
 export function delayedSecurityCodeHandoffReview(
   current: ApplicationReviewState,
   input: {
@@ -4455,15 +4585,21 @@ export function delayedSecurityCodeHandoffReview(
   },
 ): ApplicationReviewState {
   return nextReview(current, {
-    status: 'needs_attention',
+    status: 'awaiting_security_code',
     verification: input.verification,
     security_code: input.securityCode,
     submission_attempted_at: input.attemptedAt,
     preview_screenshot_url: input.screenshotUrl,
     submission_error: undefined,
-    attention_reason: 'The employer showed a verification-code step after Litos used its one safe receipt check. Litos will not open a fresh form or send this application again automatically. Open the employer portal and finish the verification there.',
+    attention_reason: 'The employer showed a verification-code step after Litos used its one safe receipt check. Litos will not open a fresh form or send this application again on its own. Enter the code the employer emailed you, or open the employer portal and finish the verification there.',
     attention_categories: ['security_code', 'evidence_gap'],
     unverified_submission: undefined,
+    // Released together with the status, because both are required for the code route to open:
+    // finishSecurityCodeSubmission checks the status and claimSecurityCodeSubmission checks that the
+    // claim is null. The lock that matters is kept by the status itself.
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_authorization: undefined,
   });
 }
 
@@ -4569,6 +4705,9 @@ async function fail(row: ResumeRow, error: unknown) {
      the packet at needs_attention-after-claim, which submitRequestDisposition refuses to re-run: an
      application permanently stuck behind a receipt that cannot exist. */
   const actionBudgetStop = error instanceof ManagedActionBudgetError ? error.blocker : null;
+  /* Only the resume. An expired cover letter never reaches here: packetForCoverLetterCapability
+     degrades and the application still goes, with its own sentence. */
+  const packetDocumentExpired = error instanceof PacketDocumentExpiredError && error.document === 'resume';
 
   if (noSubmitControl) {
     await writeReview(latestRows[0], preClickNoSubmitReview(current, message));
@@ -4576,7 +4715,7 @@ async function fail(row: ResumeRow, error: unknown) {
   }
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, regenerationRequired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure,
     currentAttentionReason: current.attention_reason,
   });
 
@@ -4590,7 +4729,14 @@ async function fail(row: ResumeRow, error: unknown) {
       })
       : {}),
     status: outcome.status,
-    ...(regenerationRequired
+    /* THE CLAIM IS RELEASED, and packetDocumentExpired is here for the same reason
+       regenerationRequired is: both sentences end by telling the applicant to regenerate and send
+       again, and submitRequestDisposition refuses to re-run a needs_attention row that still wears
+       a claim. Leaving it on would make the instruction impossible to follow, which is the
+       "permanently stuck behind a receipt that cannot exist" shape recorded on actionBudgetStop.
+       Safe in both cases because the claim exists to stop a SECOND application reaching an employer
+       that already has one, and here the packet could not be assembled, so no first one went. */
+    ...(regenerationRequired || packetDocumentExpired
       ? {
         submission_claimed_at: undefined,
         submission_claim_id: undefined,

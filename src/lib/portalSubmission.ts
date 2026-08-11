@@ -7846,6 +7846,25 @@ function confirmationContractError(message: string): never {
   throw new ManagedRequiredFieldConfirmationError([], `Litos did not press submit: required-field confirmation proof is malformed (${message})`);
 }
 
+/* WHEN THE APPLICATION SEND MAY GO UNPROVEN, AND IT IS NARROWER THAN IT WAS WRITTEN.
+ *
+ * There is exactly one state in which the initial managed run owes no application-submit proof: a
+ * security-code wall that was ALREADY STANDING when the page loaded. Stratus will not press the
+ * disabled application control from there, so no application pass exists to assert, and the only
+ * click that follows is the verification pass, which asserts its own proof.
+ *
+ * The skip used to be keyed on the challenge alone. That also excused a run that DID press Send and
+ * then landed on a code wall - which is the ordinary way a Greenhouse wall appears - so a runner
+ * that pressed with its required-field proof blocked, malformed or absent was no longer caught at
+ * the one place this service checks. The pressed half is the half that matters, so it is asked for.
+ */
+export function managedApplicationProofIsRequired(
+  standingChallenge: unknown,
+  initialSubmitOutcome: { pressed?: boolean } | null | undefined,
+): boolean {
+  return !(standingChallenge && initialSubmitOutcome?.pressed === false);
+}
+
 /**
  * Require the remote runner's per-field proof before this service records a receipt. The action
  * itself is the pre-click barrier. This read is the independent reporting barrier, so an older
