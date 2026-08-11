@@ -23,6 +23,7 @@ test('managed verification resumes once by token, never by URL, then verifies th
   const end = runner.indexOf("if (!claimedReview.browser_session_id)", firstSubmit);
   const managed = runner.slice(firstSubmit, end);
   assert.match(managed, /requestContinuation: true/);
+  assert.match(managed, /continuationCheckpoint: true/);
   assert.match(managed, /continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS/);
   assert.match(managed, /allowSubmit: true/);
   assert.match(managed, /readManagedSecurityCodeChallenge\(receiptResult\)/);
@@ -123,9 +124,13 @@ test('uncertain continuation outcome is handed off without a retry or URL reopen
 
 test('unknown receipt observation is one empty-action continuation with no URL or submit action', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true)');
   const start = runner.indexOf('let receiptEvidenceResult = receiptResult');
   const end = runner.indexOf("if (!receiptEvidenceResult.screenshot)", start);
-  assert.ok(start > 0 && end > start);
+  assert.ok(firstSubmit > 0 && start > firstSubmit && end > start);
+  const initialRun = runner.slice(firstSubmit, start);
+  assert.match(initialRun, /requestContinuation: true/);
+  assert.match(initialRun, /continuationCheckpoint: true/);
   const observation = runner.slice(start, end);
   assert.match(observation, /if \(!initialChallenge\)/);
   assert.equal((observation.match(/continueManagedBrowser\(/g) ?? []).length, 1);

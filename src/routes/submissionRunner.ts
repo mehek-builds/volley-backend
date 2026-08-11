@@ -3087,7 +3087,15 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     const result = await runManagedBrowser(
       applicationUrl,
       initialActions,
-      { allowSubmit: true, requestContinuation: true, continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS },
+      {
+        allowSubmit: true,
+        requestContinuation: true,
+        // The same held page serves two post-click outcomes. A visible code wall offers a
+        // continuation on its own; an ordinary unknown receipt does not, so it needs an explicit
+        // checkpoint before the read-only observer below can take its one bounded second look.
+        continuationCheckpoint: true,
+        continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS,
+      },
     );
     const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);
     const initialSubmitOutcome = readManagedSubmitOutcome(result);
