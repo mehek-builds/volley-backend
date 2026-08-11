@@ -79,6 +79,7 @@ import {
   hasCoverLetterUpload,
   hasTranscriptUpload,
   managedResultFilledFields,
+  managedResumeUploadDisplacement,
   managedAnswerLossReasons,
   managedResultHasCoverLetterUpload,
   managedResultHasTranscriptUpload,
@@ -1046,12 +1047,42 @@ function normalizedFilledFields(fields: readonly string[] | undefined): Set<stri
   return new Set((fields ?? []).map((field) => field.toLowerCase().replace(/[^a-z0-9]/g, '')));
 }
 
-function filledFieldBlockers(fields: readonly string[] | undefined, packet: SubmissionPacket): string[] {
+/* WHAT THE FILLED FIELDS PROVE, AND THE ONE THING THEY CANNOT.
+ *
+ * `fields` is a list of labels the run pushed after each control accepted what it was given. Every
+ * check below is therefore an absence check, and absence was the only failure this function knew how
+ * to describe. A resume that was uploaded correctly and then REPLACED by a later document leaves
+ * 'resume' in that list, because it really was recorded, at the moment it was true. The run then
+ * reports both documents attached and an application goes out with a transcript in the resume's slot
+ * and no resume at all, which is the worst outcome this file exists to prevent and the one it could
+ * not see.
+ *
+ * So the evidence argument. It carries the managed runner's read-back of the resume's own control,
+ * taken after the last upload that could have taken it, and managedResumeUploadDisplacement turns it
+ * into a named answer. The direct Playwright path has no such read and needs none: it holds the live
+ * page, claims each control by DOM node as it fills it, and refuses the second upload outright
+ * rather than replacing the first. Two paths, two mechanisms, one thing that must never happen.
+ *
+ * Optional so that the callers with no evidence to offer keep working unchanged; every one of them
+ * is a path where displacement is structurally impossible or already reported. */
+function filledFieldBlockers(
+  fields: readonly string[] | undefined,
+  packet: SubmissionPacket,
+  evidence?: ReadonlyArray<{ label?: string; selector?: string; value: string | null }>,
+): string[] {
   const normalized = normalizedFilledFields(fields);
   const has = (needle: string) => [...normalized].some((field) => field.includes(needle));
   const issues: string[] = [];
   if (!has('email')) issues.push('The filled form did not record an email field.');
   if (!has('resume')) issues.push('The filled form did not record a resume upload.');
+  const displacedBy = managedResumeUploadDisplacement(evidence, packet);
+  if (displacedBy) {
+    issues.push(
+      `The form's resume control is holding your ${displacedBy === 'transcript' ? 'transcript' : 'cover letter'} `
+      + 'instead of your resume, so this application would be sent without a resume. Nothing has been '
+      + 'sent. Please attach the documents yourself on the employer\'s form.',
+    );
+  }
   if (!has('name') && !(has('first') && has('last'))) {
     issues.push('The filled form did not record the applicant name fields.');
   }
@@ -1276,7 +1307,7 @@ export function preparationEvidenceBlockers(
   })) {
     return [FORM_NOT_REACHED_REASON];
   }
-  return filledFieldBlockers(result.filledFields, packet);
+  return filledFieldBlockers(result.filledFields, packet, result.extracted);
 }
 
 // Classification now lives in lib/submissionTerminalCause so that applyReviewPatch, which is in

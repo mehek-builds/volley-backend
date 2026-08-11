@@ -26,7 +26,7 @@ import {
   resolveProfileField,
   selfIdentificationDeclineWording,
 } from './profileFieldResolution';
-import type { Locator } from 'playwright-core';
+import type { ElementHandle, Locator } from 'playwright-core';
 import { browserApplicationCapability, type BrowserApplicationFamily } from './browserApplicationCapabilities';
 import { isControlledTestPortalUrl } from './controlledTestPortal';
 import { chooseCanonicalFinalSubmit } from './finalSubmitChooserPolicy';
@@ -2462,6 +2462,11 @@ const ASHBY_LOCATION_SELECTOR =
 const ASHBY_RESUME_SELECTOR = 'input#_systemfield_resume[type="file"], input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
 const ASHBY_COVER_LETTER_SELECTOR = 'input#cover_letter[type="file"], input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
 
+// Lever's resume control, named rather than written inline in the two fill paths. It was the last
+// family whose resume selector existed only as a literal inside its branch, which is precisely the
+// shape that left RESUME_UPLOAD_SELECTORS with nothing to point at.
+const LEVER_RESUME_SELECTOR = 'input[name="resume"][type="file"]';
+
 function cssString(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
@@ -4075,7 +4080,11 @@ function isProtectedManagedAction(
   // that merge were adding to this one list rather than disagreeing about it, so the resolution is
   // the union: a Workable form that cannot report itself ready and a transcript control that cannot
   // report itself present are two separate reads, and dropping either one loses a different fact.
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_preflight$|workable_application_form_ready$)/
+  // resume_upload_verify is protected for the same reason and one step further along: it is the read
+  // that says whether the transcript upload took the resume's control. A trim that dropped it would
+  // leave the run unable to tell a resume that is still attached from one that was replaced, which
+  // is the exact silence this read was added to break.
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_preflight$|workable_application_form_ready$)/
     .test(label);
 }
 
@@ -4568,6 +4577,108 @@ const BULLHORN_COVER_LETTER_SELECTOR = 'input[type="file"][name="bullhornCoverLe
 // the autonomous families is ambiguous here and could press Cancel. Moot while BambooHR is
 // CAPTCHA-gated and therefore never auto-submits, which is exactly why it is written down.
 
+/* WHERE THE RESUME GOES, WRITTEN DOWN ONCE SO THAT EVERY LATER UPLOAD CAN BE TOLD TO STAY OFF IT.
+ *
+ * Until this map existed, "which control is the resume" was knowledge that lived only inside each
+ * family branch of pushFixedFieldActions and fillPortal, and the transcript upload, which runs after
+ * all of them, had no way to ask. It guessed instead, with a name/id blocklist that spelled the word
+ * "resume" - and seven of the families identify their resume input by something else entirely
+ * (data-ui, data-testid, candidate.cv, documents.cv, an id-scoped wrapper, a bare cv). Against those
+ * the blocklist was inert, setInputFiles replaces rather than appends, and the transcript took the
+ * resume's slot on a form that was then submitted.
+ *
+ * A longer blocklist would have been the same mistake one family wider. This is the same fact stated
+ * positively and in one place: the family's own resume selector, the one its fill path really uses.
+ * uploadFirst reserves whatever it matches before any other document is offered a control, and
+ * transcriptUploadSelector subtracts it from every arm it hands the managed runner. A family added
+ * tomorrow gets both protections by having an entry here, which it needs anyway in order to upload a
+ * resume at all - there is nothing separate left to remember. resumeSelectorMatchesFillPath (see
+ * documentUploadIdentity.test.ts) measures that this map still names what the fill paths use.
+ *
+ * Keyed by family rather than by portal because the fill branches dispatch on family; the controlled
+ * QA portals and manual_recruitee resolve through portalFamily to the same answer their real
+ * counterpart gives. */
+const RESUME_UPLOAD_SELECTORS: Record<PortalFamily, string> = {
+  // Every arm the managed path pushes an upload action for, which is a superset of the direct
+  // path's GREENHOUSE_RESUME_SELECTOR. Read from the function rather than restated, so the two
+  // cannot drift.
+  greenhouse: greenhouseCoreFieldEvidenceSelectors('resume').join(', '),
+  lever: LEVER_RESUME_SELECTOR,
+  ashby: ASHBY_RESUME_SELECTOR,
+  smartrecruiters: SMARTRECRUITERS_RESUME_SELECTOR,
+  workable: WORKABLE_RESUME_SELECTOR,
+  jazzhr: JAZZHR_RESUME_SELECTOR,
+  paylocity: PAYLOCITY_RESUME_SELECTOR,
+  rippling: RIPPLING_RESUME_SELECTOR,
+  breezy: BREEZY_RESUME_SELECTOR,
+  bamboohr: BAMBOOHR_RESUME_SELECTOR,
+  recruitee: RECRUITEE_RESUME_SELECTOR,
+  teamtailor: TEAMTAILOR_RESUME_SELECTOR,
+  personio: PERSONIO_RESUME_SELECTOR,
+  pinpoint: PINPOINT_RESUME_SELECTOR,
+  comeet: COMEET_RESUME_SELECTOR,
+  zoho_recruit: ZOHO_RECRUIT_RESUME_SELECTOR,
+  bullhorn: BULLHORN_RESUME_SELECTOR,
+  // The account-walled families reach no application form, so no control on the page in front of a
+  // run is theirs to claim. A never-matching selector is the honest answer, and it keeps every
+  // caller from having to special-case the list.
+  sap_successfactors: 'input[type="file"][name="noResumeControlReachableWithoutSuccessFactorsAccount"]',
+  oracle_taleo: 'input[type="file"][name="noResumeControlReachableWithoutTaleoLegalAcceptance"]',
+  adp_recruiting: 'input[type="file"][name="noResumeControlReachableWithoutAdpAccount"]',
+  avature: 'input[type="file"][name="noResumeControlReachableWithoutAvatureAccount"]',
+  jobvite: 'input[type="file"][name="noResumeControlReachableWithoutConsent"]',
+  icims: 'input[type="file"][name="noResumeControlReachableWithoutAccount"]',
+  oraclecloud: 'input[type="file"][name="noResumeControlReachableWithoutAuthCode"]',
+  ultipro: 'input[type="file"][name="noResumeControlCaptured"]',
+};
+
+export function resumeUploadSelector(portal: SupportedPortal): string {
+  return RESUME_UPLOAD_SELECTORS[portalFamily(portal)];
+}
+
+/** The label on the managed read-back of the resume's control. See pushResumeUploadVerifyAction. */
+export const RESUME_UPLOAD_VERIFY_LABEL = 'resume_upload_verify';
+
+/** `C:\fakepath\Mehek Mandal Resume.pdf` is what a browser reports for a file input's value. */
+function uploadedFileName(value: string | null | undefined): string {
+  const raw = (value ?? '').trim();
+  if (!raw) return '';
+  return raw.split(/[\\/]/).pop()?.trim().toLowerCase() ?? '';
+}
+
+/* WHICH DOCUMENT IS SITTING IN THE RESUME'S CONTROL, READ OFF THE FORM ITSELF.
+ *
+ * The managed runner reports the read pushed by pushResumeUploadVerifyAction. This turns it into the
+ * only question worth asking of it: does the resume's own control now hold a DIFFERENT document of
+ * hers? That is the failure that reports itself as success, because both uploads returned cleanly
+ * and both labels reached filled_fields.
+ *
+ * Three readings and only one of them is a finding:
+ *   - the resume's own file name: the upload held, nothing to say;
+ *   - the transcript's or the cover letter's file name: displaced, and the resume is gone;
+ *   - anything else, including empty: NOT a finding. An uploader that consumes the file and resets
+ *     its own input reads back empty on a form where everything worked, and calling that a lost
+ *     resume would block correct runs. The missing-upload case is already covered by the filled
+ *     fields, so nothing is lost by being strict here.
+ * Ordering is deliberate: one arm reading back the resume settles it, whatever any other arm says. */
+export function managedResumeUploadDisplacement(
+  extracted: ReadonlyArray<{ label?: string; selector?: string; value: string | null }> | undefined,
+  packet: Pick<SubmissionPacket, 'resumeName' | 'transcriptName' | 'coverLetterName'>,
+): 'transcript' | 'cover_letter' | null {
+  const readings = (extracted ?? [])
+    .filter((item) => item.label === RESUME_UPLOAD_VERIFY_LABEL)
+    .map((item) => uploadedFileName(item.value))
+    .filter((name) => name.length > 0);
+  if (readings.length === 0) return null;
+  const resume = uploadedFileName(packet.resumeName);
+  if (resume && readings.includes(resume)) return null;
+  const transcript = uploadedFileName(packet.transcriptName);
+  if (transcript && readings.includes(transcript)) return 'transcript';
+  const coverLetter = uploadedFileName(packet.coverLetterName);
+  if (coverLetter && readings.includes(coverLetter)) return 'cover_letter';
+  return null;
+}
+
 const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   greenhouse: 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i], input[type="file"][id*="cover_letter" i], label:has-text("Cover Letter") input[type="file"]',
   lever: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
@@ -4652,6 +4763,125 @@ export function blockersRequireCoverLetter(blockers: readonly string[] | undefin
   return (blockers ?? []).some((blocker) => COVER_LETTER_REQUIRED_BLOCKER.test(blocker ?? ''));
 }
 
+/* ELEMENT IDENTITY, AND WHY THE SECOND DOCUMENT IS EXCLUDED BY IT RATHER THAN BY A NAME.
+ *
+ * On the direct Playwright path the run holds the live page, so it does not have to reason about how
+ * a family spells its resume input: it can hold the node the resume actually went into and refuse to
+ * hand that same node to anything else. That is what this ledger is. It compares DOM nodes through
+ * the browser (`node === other`), so no naming convention, attribute, label text or document order
+ * can defeat it, and it needs no update when a new ATS arrives.
+ *
+ * Two things go into it. uploadFirst claims the exact control it uploaded to, which is the precise
+ * answer whenever an upload happened. reserveUploadControls claims the family's declared resume and
+ * cover-letter controls whether or not an upload happened, which covers the run that carried no
+ * resume or whose resume upload failed: the transcript must not be posted into the resume's slot
+ * even when the resume never made it there, because the employer reads that slot as the resume.
+ *
+ * DEGRADATION, stated rather than hidden: identity needs elementHandles/evaluate. A page object that
+ * does not offer them (a stub in a test, a future non-Playwright driver) yields no claims, and every
+ * caller here then falls back to the attribute exclusions derived in transcriptUploadSelector. That
+ * is weaker, and it is a fallback behind identity rather than the guard itself. */
+type DocumentUploadLabel = 'resume' | 'cover_letter' | 'transcript';
+
+const DOCUMENT_UPLOAD_WORDS: Record<DocumentUploadLabel, string> = {
+  resume: 'resume',
+  cover_letter: 'cover letter',
+  transcript: 'transcript',
+};
+
+export type UploadClaimLedger = {
+  /** The controls already spoken for, in the order they were claimed. */
+  claimed: { label: DocumentUploadLabel; handle: ElementHandle }[];
+  /** One sentence per document that had nowhere left to go. See uploadControlConflictBlocker. */
+  conflicts: string[];
+};
+
+export function newUploadClaimLedger(): UploadClaimLedger {
+  return { claimed: [], conflicts: [] };
+}
+
+/* THE SENTENCE FOR THE OUTCOME THIS WHOLE MECHANISM EXISTS TO CHOOSE INSTEAD.
+ *
+ * When the only control a second document can reach is one that already holds another, there are two
+ * available behaviours and one of them is unacceptable. Replacing it sends the employer a transcript
+ * where the resume should be, with no resume anywhere in the application, and the run reports both
+ * documents attached because setInputFiles succeeded. Not uploading loses the transcript, which is
+ * visible, recoverable and said out loud right here.
+ *
+ * Deliberately not phrased as "<field> is required": sanitizeProviderBlockers rewrites that shape
+ * into its own required-field wording and this is not a required field, it is a collision. */
+function uploadControlConflictBlocker(label: DocumentUploadLabel, holder: DocumentUploadLabel): string {
+  const document = DOCUMENT_UPLOAD_WORDS[label];
+  const held = DOCUMENT_UPLOAD_WORDS[holder];
+  return `Litos did not attach your ${document}: the only upload control it could find for it on this `
+    + `form is the one already holding your ${held}. Your ${held} was left in place rather than `
+    + `replaced, so please add the ${document} yourself before sending.`;
+}
+
+/** Can this page object answer "same element?" at all. See the degradation note above. */
+function pageSupportsElementIdentity(page: Page): boolean {
+  const probe = page.locator('input') as unknown as { elementHandles?: unknown };
+  return typeof probe.elementHandles === 'function';
+}
+
+/** Every element the selector resolves to, or null when this page object cannot answer by identity. */
+async function locatorElementHandles(locator: Locator): Promise<ElementHandle[] | null> {
+  const candidate = locator as unknown as { elementHandles?: () => Promise<ElementHandle[]> };
+  if (typeof candidate.elementHandles !== 'function') return null;
+  return await candidate.elementHandles().catch(() => null);
+}
+
+async function locatorElementHandle(locator: Locator): Promise<ElementHandle | null> {
+  const candidate = locator as unknown as { elementHandle?: () => Promise<ElementHandle | null> };
+  if (typeof candidate.elementHandle !== 'function') return null;
+  return await candidate.elementHandle().catch(() => null);
+}
+
+/** Same DOM node, asked of the browser rather than inferred. A failed comparison is never a match. */
+async function isSameElement(left: ElementHandle, right: ElementHandle): Promise<boolean> {
+  return await left.evaluate((node, other) => node === other, right).catch(() => false) === true;
+}
+
+async function uploadClaimHolder(
+  handle: ElementHandle,
+  ledger: UploadClaimLedger,
+): Promise<DocumentUploadLabel | null> {
+  for (const claim of ledger.claimed) {
+    if (await isSameElement(handle, claim.handle)) return claim.label;
+  }
+  return null;
+}
+
+/* Claim a family's declared controls without uploading to them.
+ *
+ * Only the element-identifying arms are reserved: a text-scoped arm names a region, and reserving
+ * every file input inside a label that mentions "Resume" would delete a transcript control that
+ * happens to share that label. The control a resume upload really used is claimed by uploadFirst
+ * itself, by identity, so nothing precise is lost by leaving the region arms out here. */
+async function reserveUploadControls(
+  page: Page,
+  selectors: string[],
+  label: DocumentUploadLabel,
+  ledger: UploadClaimLedger,
+): Promise<void> {
+  for (const selector of selectors) {
+    const handles = await locatorElementHandles(page.locator(selector));
+    if (!handles) continue;
+    for (const handle of handles) {
+      if (await uploadClaimHolder(handle, ledger)) continue;
+      ledger.claimed.push({ label, handle });
+    }
+  }
+}
+
+async function documentUploadControlCount(page: Page, portal: SupportedPortal): Promise<number> {
+  let total = 0;
+  for (const selector of [resumeUploadSelector(portal), coverLetterUploadSelector(portal)]) {
+    total += await page.locator(selector).count().catch(() => 0);
+  }
+  return total;
+}
+
 export async function hasCoverLetterUpload(page: Page, portal: SupportedPortal): Promise<boolean> {
   if ((await page.locator(coverLetterUploadSelector(portal)).count()) > 0) return true;
   const labelled = page.getByLabel(/cover\s*letter/i);
@@ -4681,14 +4911,78 @@ export async function hasCoverLetterUpload(page: Page, portal: SupportedPortal):
  * the label-scoped case, where a "Transcript" heading can sit above a block that also holds the
  * resume input and the label scope alone would not tell them apart.
  */
+/* AND THE PART THAT WAS WRONG, WHICH IS THE SENTENCE DIRECTLY ABOVE THIS ONE.
+ *
+ * NOT_RESUME_OR_COVER_FILE below spells the words "resume" and "cover" and excludes any input whose
+ * name or id contains them. Greenhouse and Ashby do carry name*="resume", so the guard was true of
+ * the two families it was written against and read as though it were true of all of them. Seven do
+ * not identify their resume input that way at all: Workable by data-ui, Rippling by data-testid,
+ * Recruitee by candidate.cv, Teamtailor by an id-scoped wrapper, Personio by documents.cv, Pinpoint
+ * by application_form[application][cv], Comeet by a bare cv. Against every one of those the guard
+ * excluded nothing, the label-scoped arm reached the resume input, and setInputFiles replaced the
+ * resume with the transcript on a form the run then reported as complete with both attached.
+ *
+ * So the exclusion is no longer a spelling. transcriptUploadSelector subtracts the family's OWN
+ * resume and cover-letter selectors, the same strings its fill path uploads to, arm by arm. Nothing
+ * here has to know how a family spells its resume input, and a family added later is covered by the
+ * entry it must add to RESUME_UPLOAD_SELECTORS in order to upload a resume at all.
+ *
+ * NOT_RESUME_OR_COVER_FILE is kept behind that, not in front of it. It is the answer for a control
+ * that belongs to no family selector at all, such as an employer-added second resume field on a
+ * posting, and for the manual QA portals. It is a fallback, and it was never sufficient alone. */
 const NOT_RESUME_OR_COVER_FILE =
   ':not([name*="resume" i]):not([id*="resume" i]):not([name*="cover" i]):not([id*="cover" i])';
-const TRANSCRIPT_UPLOAD_SELECTOR = [
-  `input[type="file"][name*="transcript" i]${NOT_RESUME_OR_COVER_FILE}`,
-  `input[type="file"][id*="transcript" i]${NOT_RESUME_OR_COVER_FILE}`,
-  `input[type="file"][aria-label*="transcript" i]${NOT_RESUME_OR_COVER_FILE}`,
-  `label:has-text("Transcript") input[type="file"]${NOT_RESUME_OR_COVER_FILE}`,
-].join(', ');
+const TRANSCRIPT_UPLOAD_ARMS = [
+  'input[type="file"][name*="transcript" i]',
+  'input[type="file"][id*="transcript" i]',
+  'input[type="file"][aria-label*="transcript" i]',
+  'label:has-text("Transcript") input[type="file"]',
+] as const;
+const TRANSCRIPT_UPLOAD_SELECTOR = TRANSCRIPT_UPLOAD_ARMS
+  .map((arm) => `${arm}${NOT_RESUME_OR_COVER_FILE}`)
+  .join(', ');
+
+/* Which arms of a document selector name ONE ELEMENT, and are therefore safe to subtract.
+ *
+ * An arm carrying a text pseudo-class (`label:has-text("Resume") input[type="file"]`) names a
+ * REGION, not a control: it matches every file input inside any label whose text mentions the word.
+ * Subtracting that would delete the transcript control too on any form where one label covers a
+ * documents section, which is the exact shape this selector exists to serve. So arms with a
+ * parenthesised pseudo-class are left out of the exclusion, and the direct path's element-identity
+ * reservation is what covers them - it compares nodes, so text scoping cannot mislead it.
+ *
+ * Everything else, including id-scoped and tag-scoped descendants such as Teamtailor's
+ * `#upload_resume_field input[type="file"]` and SmartRecruiters' `spl-dropzone[...] input`, is
+ * element-identifying and is subtracted. Complex arguments to :not() were measured against the real
+ * engine before this shipped: Playwright resolves `:not(#upload_resume_field input[type="file"])`
+ * exactly as the CSS spec says, and the arms it produces are still one comma-free string each, which
+ * is what every caller that splits a selector on ', ' depends on. */
+function elementIdentifyingSelectorArms(selector: string): string[] {
+  return selector
+    .split(', ')
+    .map((arm) => arm.trim())
+    .filter((arm) => arm.length > 0 && !arm.includes('('));
+}
+
+/* Memoised because transcriptUploadSelector is called per action built and per capability read, and
+ * the answer is a pure function of two constant maps. Keyed by portal, not by family: the controlled
+ * QA portals carry their own cover-letter selectors. */
+const DERIVED_TRANSCRIPT_SELECTORS = new Map<SupportedPortal, string>();
+
+function derivedTranscriptUploadSelector(portal: SupportedPortal): string {
+  const cached = DERIVED_TRANSCRIPT_SELECTORS.get(portal);
+  if (cached) return cached;
+  const claimed = [
+    ...elementIdentifyingSelectorArms(resumeUploadSelector(portal)),
+    ...elementIdentifyingSelectorArms(coverLetterUploadSelector(portal)),
+  ];
+  const exclusions = [...new Set(claimed)].map((arm) => `:not(${arm})`).join('');
+  const derived = TRANSCRIPT_UPLOAD_ARMS
+    .map((arm) => `${arm}${NOT_RESUME_OR_COVER_FILE}${exclusions}`)
+    .join(', ');
+  DERIVED_TRANSCRIPT_SELECTORS.set(portal, derived);
+  return derived;
+}
 
 /* The honest answer for a family where a transcript could not be attached even if the employer did
  * ask for one, and the rule that decides which families those are: a family gets a real selector
@@ -4746,7 +5040,11 @@ const TRANSCRIPT_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
 };
 
 export function transcriptUploadSelector(portal: SupportedPortal): string {
-  return TRANSCRIPT_UPLOAD_SELECTORS[portal];
+  const base = TRANSCRIPT_UPLOAD_SELECTORS[portal];
+  // The sentinel families answer "no" and must keep answering it with the exact string
+  // portalMayAttachTranscript compares against.
+  if (base !== TRANSCRIPT_UPLOAD_SELECTOR) return base;
+  return derivedTranscriptUploadSelector(portal);
 }
 
 /**
@@ -4779,13 +5077,42 @@ export function managedResultHasTranscriptUpload(result: ManagedBrowserResult | 
  * path pushes no transcript upload at all, and the answer would then be recorded as
  * transcript_supported: true on a run that can never attach one. "The page has such a control" and
  * "this run can use it" are two different questions, and only the second one is worth writing down.
- */
+ *
+ * THE SECOND DEPARTURE, and it is the one that made this function part of the same defect. The
+ * label fallback below carried no exclusion at all, not even the spelled one the selector had. So on
+ * a form where a single control is labelled in a way that mentions a transcript - the shared
+ * "Attach your documents" block that produced this bug in the first place - the RESUME's own input
+ * answered this question yes, transcript_supported was written as true, and the packet was then
+ * built to carry a transcript precisely on the forms where the upload would land on the resume. The
+ * capability read and the upload were failing in the same direction, which is why neither caught the
+ * other. A labelled control that IS the resume or the cover letter is now excluded by identity. */
 export async function hasTranscriptUpload(page: Page, portal: SupportedPortal): Promise<boolean> {
   if (!portalMayAttachTranscript(portal)) return false;
   if ((await page.locator(transcriptUploadSelector(portal)).count()) > 0) return true;
+  const ledger = newUploadClaimLedger();
+  await reserveUploadControls(page, elementIdentifyingSelectorArms(resumeUploadSelector(portal)), 'resume', ledger);
+  await reserveUploadControls(
+    page,
+    elementIdentifyingSelectorArms(coverLetterUploadSelector(portal)),
+    'cover_letter',
+    ledger,
+  );
+  // Nothing on this page belongs to another document, so a labelled file input cannot be one and
+  // the identity check has nothing to say. This is the ordinary case and it answers as it always did.
+  const documentControls = await documentUploadControlCount(page, portal);
   const labelled = page.getByLabel(/transcript/i);
   for (let index = 0; index < await labelled.count(); index += 1) {
-    if ((await labelled.nth(index).getAttribute('type'))?.toLowerCase() === 'file') return true;
+    const field = labelled.nth(index);
+    if ((await field.getAttribute('type'))?.toLowerCase() !== 'file') continue;
+    if (documentControls === 0) return true;
+    const handle = await locatorElementHandle(field);
+    // A document control is on the page and identity is unavailable, so this control cannot be
+    // shown to be anything other than the resume. Claiming the capability here is what wrote a
+    // transcript onto a packet that had nowhere to put it; not claiming it costs a transcript she
+    // is told about.
+    if (!handle) continue;
+    if (await uploadClaimHolder(handle, ledger)) continue;
+    return true;
   }
   return false;
 }
@@ -5112,7 +5439,7 @@ function pushFixedFieldActions(
     managedFill(actions, 'input[name="urls[LinkedIn]"]', packet.linkedinUrl, 'linkedin');
     managedFill(actions, 'input[name="urls[GitHub]"]', packet.githubUrl, 'github');
     managedFill(actions, 'input[name="urls[Portfolio]"]', packet.portfolioUrl, 'portfolio');
-    managedUpload(actions, 'input[name="resume"][type="file"]', 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, LEVER_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, 'input[type="file"][name*="cover" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else if (family === 'smartrecruiters') {
     // See navigateToApplicationForm/SMARTRECRUITERS_APPLY_LINK_SELECTOR: the JD page and the
@@ -5352,8 +5679,38 @@ function pushFixedFieldActions(
    * selector cannot match anything. Greenhouse measures at exactly MANAGED_ACTION_LIMIT with a cover
    * letter, so an action spent on a control that provably does not exist is not free there. */
   if (portalMayAttachTranscript(portal)) {
+    const before = actions.length;
     managedUpload(actions, transcriptUploadSelector(portal), 'transcript', packet.transcript, packet.transcriptName);
+    if (actions.length > before) pushResumeUploadVerifyAction(actions, portal);
   }
+}
+
+/* READ THE RESUME'S CONTROL BACK, AFTER THE LAST THING THAT COULD HAVE TAKEN IT.
+ *
+ * The managed runner is a remote process handed a list of selectors, so nothing on this side can
+ * compare DOM nodes the way the direct path's ledger does. transcriptUploadSelector subtracts the
+ * family's own resume and cover-letter selectors from every arm, which is the structural half of the
+ * answer, and this is the measurement that says whether it held on the form actually in front of the
+ * run. A file input reads its value back as `C:\fakepath\<name>`, so a resume slot that comes back
+ * holding the transcript's file name is a displaced resume, stated by the form itself.
+ *
+ * Pushed only when a transcript upload was actually pushed, which is the only ordering that can
+ * displace anything and keeps the read off every run that carries no transcript. Greenhouse lives
+ * against MANAGED_ACTION_LIMIT and one action is not free there.
+ *
+ * What it does NOT prove: that the employer's uploader kept the file. A control that resets its own
+ * value after reading it comes back empty, and empty is not read as displacement here for exactly
+ * that reason. This catches the specific, silent, worst case: the slot now holds a different
+ * document of ours. */
+function pushResumeUploadVerifyAction(actions: ManagedBrowserAction[], portal: SupportedPortal) {
+  actions.push({
+    type: 'extract',
+    selector: resumeUploadSelector(portal),
+    attribute: 'value',
+    label: RESUME_UPLOAD_VERIFY_LABEL,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
 }
 
 // A cheap first pass: fill the fixed fields (idempotent - the real run below fills them again,
@@ -6477,29 +6834,68 @@ async function fillGreenhouseDemographicAliases(page: Page, packet: SubmissionPa
   }
 }
 
+/* setInputFiles REPLACES. That one fact is the whole reason this function has a ledger.
+ *
+ * Every document after the first is offered controls that an earlier one may already be holding, and
+ * the old behaviour was to take the first match and overwrite it. On the seven families whose resume
+ * input is not spelled "resume", that is what happened: the transcript landed in the resume's slot,
+ * the resume was gone, out.push('transcript') recorded a success, and the application went to the
+ * employer with a transcript where the resume should have been and no resume at all.
+ *
+ * So a control that is already claimed is skipped by node identity, and if skipping leaves this
+ * document nowhere to go, it is NOT uploaded and a sentence naming the collision is recorded
+ * instead. Losing a transcript loudly beats losing a resume silently, and there is no third option
+ * available at this point in the run.
+ *
+ * Without a ledger this is exactly the function it was, including the first-match-per-selector rule
+ * and the two quiet `continue`s. Only claimed controls are stepped over. */
 async function uploadFirst(
   page: Page,
   selectors: string[],
   file: Buffer | undefined,
   fileName: string | undefined,
-  label: 'resume' | 'cover_letter' | 'transcript',
+  label: DocumentUploadLabel,
   out: string[],
+  ledger?: UploadClaimLedger,
 ) {
   if (!file || !fileName) return;
+  let heldBy: DocumentUploadLabel | null = null;
   for (const selector of selectors) {
-    const field = page.locator(selector).first();
-    if ((await field.count()) > 0) {
-      const type = await field.getAttribute('type').catch(() => null);
-      if (type?.toLowerCase() !== 'file') continue;
-      try {
-        await field.setInputFiles({ name: fileName, mimeType: 'application/pdf', buffer: file });
-        out.push(label);
-        return;
-      } catch {
-        continue;
+    const locator = page.locator(selector);
+    const handles = ledger ? await locatorElementHandles(locator) : null;
+    let chosen: ElementHandle | null = null;
+    if (handles) {
+      for (const handle of handles) {
+        const holder = await uploadClaimHolder(handle, ledger!);
+        if (holder) {
+          heldBy ??= holder;
+          continue;
+        }
+        chosen = handle;
+        break;
       }
+      // Every control this selector reaches already holds another document. Fail closed.
+      if (!chosen) continue;
+    } else if ((await locator.count()) === 0) continue;
+    const field = (chosen ?? locator.first()) as {
+      getAttribute(name: string): Promise<string | null>;
+      setInputFiles(files: { name: string; mimeType: string; buffer: Buffer }): Promise<void>;
+    };
+    const type = await field.getAttribute('type').catch(() => null);
+    if (type?.toLowerCase() !== 'file') continue;
+    try {
+      await field.setInputFiles({ name: fileName, mimeType: 'application/pdf', buffer: file });
+      out.push(label);
+      if (ledger) {
+        const claimed = chosen ?? await locatorElementHandle(locator.first());
+        if (claimed) ledger.claimed.push({ label, handle: claimed });
+      }
+      return;
+    } catch {
+      continue;
     }
   }
+  if (heldBy) ledger?.conflicts.push(uploadControlConflictBlocker(label, heldBy));
 }
 
 async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet: SubmissionPacket, out: string[]) {
@@ -6648,6 +7044,9 @@ export function portalUnknownRequiredBlocker(
 
 export async function fillPortal(page: Page, portal: SupportedPortal, packet: SubmissionPacket): Promise<FillResult> {
   const filledFields: string[] = [];
+  // Which control is holding which document, by DOM node. Threaded through every upload below so
+  // that no second document can be given a control a first one already has. See UploadClaimLedger.
+  const claims = newUploadClaimLedger();
   const family = portalFamily(portal);
   // Same stop as pushFixedFieldActions, and it has to be repeated here rather than inherited: these
   // are two independent paths to the same portals (managed runner vs direct Playwright), and the
@@ -6664,8 +7063,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillComboboxFirst(page, ['#country'], countryForPhoneField(packet.phone, packet.country), 'phone_country', filledFields);
     await fillPhoneField(page, GREENHOUSE_PHONE_SELECTOR.split(', '), portal, packet.phone, 'phone', filledFields);
     await fillComboboxFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], greenhouseLocationSearch(packet), 'location', filledFields);
-    await uploadFirst(page, GREENHOUSE_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, GREENHOUSE_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
     await fillGreenhouseDemographicAliases(page, packet, filledFields);
   } else if (family === 'lever') {
     await fillFirst(page, ['input[name="name"]'], packet.fullName, 'name', filledFields);
@@ -6674,8 +7073,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="urls[LinkedIn]"]'], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ['input[name="urls[GitHub]"]'], packet.githubUrl, 'github', filledFields);
     await fillFirst(page, ['input[name="urls[Portfolio]"]'], packet.portfolioUrl, 'portfolio', filledFields);
-    await uploadFirst(page, ['input[name="resume"][type="file"]'], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, ['input[type="file"][name*="cover" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [LEVER_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, ['input[type="file"][name*="cover" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'smartrecruiters') {
     const parts = packet.fullName.trim().split(/\s+/);
     const controlled = portal === 'controlled_smartrecruiters';
@@ -6686,7 +7085,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillPhoneField(page, [controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR], portal, packet.phone, 'phone', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
-    await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
     // The direct Playwright path has its own reviewed-question and required-field writers below.
     // Stop before both. SmartRecruiters is proven only for these exact first-page selectors, and a
     // packet selector or generic required field must never expand that trust boundary.
@@ -6700,8 +7099,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="city"]'], packet.city, 'location', filledFields);
-    await uploadFirst(page, [WORKABLE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, WORKABLE_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [WORKABLE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, WORKABLE_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'jazzhr') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="resumator-firstname-value"]'], parts[0], 'first_name', filledFields);
@@ -6710,7 +7109,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="resumator-phone-value"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="resumator-city-value"]'], packet.city, 'location', filledFields);
     await fillFirst(page, ['input[name="resumator-linkedin-value"]'], packet.linkedinUrl, 'linkedin', filledFields);
-    await uploadFirst(page, [JAZZHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [JAZZHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
     const blockers = [portalHandoffReason(portal)!];
     if (await hasUnresolvedCaptcha(page)) blockers.push(CAPTCHA_BLOCKER);
     return { filledFields, blockers };
@@ -6722,22 +7121,22 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, [paylocityId('info.cellPhone')], packet.phone, 'phone', filledFields);
     await fillFirst(page, [paylocityId('info.linkedIn')], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ['#public-site-address-city'], packet.city, 'location', filledFields);
-    await uploadFirst(page, [PAYLOCITY_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [PAYLOCITY_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [PAYLOCITY_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [PAYLOCITY_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'rippling') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['[data-testid="input-first_name"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['[data-testid="input-last_name"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['[data-testid="input-email"]'], packet.email, 'email', filledFields);
     await fillPhoneField(page, ['[data-testid="input-phone_number"]'], portal, packet.phone, 'phone', filledFields);
-    await uploadFirst(page, [RIPPLING_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [RIPPLING_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [RIPPLING_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [RIPPLING_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'breezy') {
     await fillFirst(page, ['input[name="cName"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="cEmail"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="cPhoneNumber"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="cAddress"]'], packet.city, 'location', filledFields);
-    await uploadFirst(page, [BREEZY_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [BREEZY_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
   } else if (family === 'bamboohr') {
     // Unlike the managed path this one CAN branch, so the button is clicked only when it is there.
     const opener = page.locator(BAMBOOHR_OPEN_FORM_SELECTOR).first();
@@ -6759,21 +7158,21 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="city.value"]'], packet.city, 'location', filledFields);
     await fillFirst(page, ['input[name="linkedinUrl"]'], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
-    await uploadFirst(page, [BAMBOOHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [BAMBOOHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
   } else if (family === 'recruitee') {
     await fillFirst(page, ['input[name="candidate.name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="candidate.email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="candidate.phone"]'], packet.phone, 'phone', filledFields);
-    await uploadFirst(page, [RECRUITEE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [RECRUITEE_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [RECRUITEE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [RECRUITEE_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'teamtailor') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="candidate[first_name]"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['input[name="candidate[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['input[name="candidate[email]"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="candidate[phone]"]'], packet.phone, 'phone', filledFields);
-    await uploadFirst(page, [TEAMTAILOR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [TEAMTAILOR_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [TEAMTAILOR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [TEAMTAILOR_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'personio') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="first_name"]'], parts[0], 'first_name', filledFields);
@@ -6782,8 +7181,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="location"]'], packet.city, 'location', filledFields);
     await fillFirst(page, ['input[name="public_profile"]'], packet.linkedinUrl ?? packet.portfolioUrl, 'public_profile', filledFields);
-    await uploadFirst(page, [PERSONIO_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [PERSONIO_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [PERSONIO_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [PERSONIO_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'pinpoint') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="application_form[application][first_name]"]'], parts[0], 'first_name', filledFields);
@@ -6792,8 +7191,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="application_form[application][phone]"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="application_form[application][town]"]'], packet.city, 'location', filledFields);
     await fillFirst(page, ['input[name="application_form[application][linkedin_url]"][type="text"]'], packet.linkedinUrl, 'linkedin', filledFields);
-    await uploadFirst(page, [PINPOINT_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [PINPOINT_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [PINPOINT_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [PINPOINT_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'comeet') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="firstName"]'], parts[0], 'first_name', filledFields);
@@ -6801,22 +7200,22 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.linkedinUrl ?? packet.githubUrl, 'portfolio', filledFields);
-    await uploadFirst(page, [COMEET_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [COMEET_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [COMEET_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [COMEET_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'zoho_recruit') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="First_Name"]', 'input[name="firstName"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['input[name="Last_Name"]', 'input[name="lastName"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['input[name="Email"]', 'input[name="email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="Phone"]', 'input[name="phone"]'], packet.phone, 'phone', filledFields);
-    await uploadFirst(page, ZOHO_RECRUIT_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, ZOHO_RECRUIT_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields, claims);
   } else if (family === 'bullhorn') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[formcontrolname="firstName"]', 'input[name="firstName"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['input[formcontrolname="lastName"]', 'input[name="lastName"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['input[formcontrolname="email"]', 'input[name="email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[formcontrolname="phone"]', 'input[name="phone"]'], packet.phone, 'phone', filledFields);
-    await uploadFirst(page, BULLHORN_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, BULLHORN_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields, claims);
   } else if (family === 'sap_successfactors') {
     // The public job page transitions into an account wall. No identity or credential is entered.
   } else {
@@ -6829,8 +7228,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ASHBY_LINKEDIN_SELECTOR.split(', '), packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ASHBY_GITHUB_SELECTOR.split(', '), packet.githubUrl, 'github', filledFields);
     await fillFirst(page, ASHBY_PORTFOLIO_SELECTOR.split(', '), packet.portfolioUrl, 'portfolio', filledFields);
-    await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   }
   /* The direct-Playwright twin of the transcript upload in pushFixedFieldActions, and it sits here
    * for the same two reasons: after every family's own uploads, because uploadFirst is
@@ -6838,15 +7237,44 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
    * return at the top of this function, because those families reach no form to upload to.
    *
    * The families that return early inside the chain above - SmartRecruiters and JazzHR - never reach
-   * this line, and both carry the never-match sentinel anyway, so the two answers agree. */
-  if (portalMayAttachTranscript(portal)) {
+   * this line, and both carry the never-match sentinel anyway, so the two answers agree.
+   *
+   * ORDER IS NO LONGER THE PROTECTION, and that is the point of the reservation immediately below.
+   * Running last only helps if the last upload can tell which control the earlier ones took, and for
+   * seven families it could not. The reservation states it: the family's own resume and cover-letter
+   * controls are claimed by identity before the transcript is offered anything, whether or not those
+   * uploads happened or even had a file to place. uploadFirst has already claimed the exact controls
+   * it used; this covers the run that carried no resume, or whose resume upload failed, where the
+   * transcript would otherwise be free to occupy the slot the employer reads as the resume. */
+  if (portalMayAttachTranscript(portal) && packet.transcript && packet.transcriptName) {
+    await reserveUploadControls(page, elementIdentifyingSelectorArms(resumeUploadSelector(portal)), 'resume', claims);
+    await reserveUploadControls(
+      page,
+      elementIdentifyingSelectorArms(coverLetterUploadSelector(portal)),
+      'cover_letter',
+      claims,
+    );
+    /* IDENTITY FIRST, THE DERIVED SELECTOR ONLY WHEN THERE IS NO IDENTITY TO BE HAD.
+     *
+     * The two guards are not equal in strength. transcriptUploadSelector subtracts the family's
+     * element-identifying resume and cover-letter arms, which is everything the reservation above
+     * claims; the ledger claims that same set AND the exact control each upload really used, which
+     * a text-scoped arm can reach and a subtraction cannot express. So where identity works it is
+     * the whole answer, and running the base arms through it means a collision is SEEN rather than
+     * quietly selected away: the run can then say which document is in the way instead of reporting
+     * a transcript that matched nothing. Where identity is unavailable the derived selector is what
+     * is left, and it is still far stronger than the spelled exclusion it replaced. */
+    const transcriptSelectors = pageSupportsElementIdentity(page)
+      ? TRANSCRIPT_UPLOAD_SELECTOR.split(', ')
+      : transcriptUploadSelector(portal).split(', ');
     await uploadFirst(
       page,
-      transcriptUploadSelector(portal).split(', '),
+      transcriptSelectors,
       packet.transcript,
       packet.transcriptName,
       'transcript',
       filledFields,
+      claims,
     );
   }
   if (family !== 'zoho_recruit' && family !== 'bullhorn' && family !== 'bamboohr') {
@@ -6854,6 +7282,10 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   }
 
   const blockers: string[] = [];
+  /* A document that was NOT uploaded because its only control already held another one. First,
+   * because it is the sentence that explains an application she will otherwise read as complete,
+   * and because it is the whole justification for the upload having been skipped. */
+  blockers.push(...claims.conflicts);
   if (CONSENT_GATED_FAMILIES.has(family) || ACCOUNT_WALLED_FAMILIES.has(family) || family === 'zoho_recruit' || family === 'bullhorn') {
     blockers.push(portalHandoffReason(portal)!);
   }
