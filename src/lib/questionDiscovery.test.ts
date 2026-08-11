@@ -1995,6 +1995,24 @@ test('Ashby fixed profile fields never reappear as editable custom questions', (
   ]);
 });
 
+test('JazzHR fixed phone and city stay out of review while state and questionnaire fields remain', () => {
+  const normalized = normalizeStoredPortalQuestions([
+    { id: 'phone', question: 'Phone number*', answer: '+971 567417451' },
+    { id: 'city', question: 'City', answer: 'Dubai' },
+    { id: 'custom-phone', question: 'What is your phone number?', answer: '+971 567417451' },
+    { id: 'custom-city', question: 'What city do you live in?', answer: 'Dubai' },
+    { id: 'state', question: 'State', answer: 'Dubai' },
+    { id: 'screen', question: 'Do you have any experience in Python backend development?*', answer: 'Yes' },
+  ], 'jazzhr');
+
+  assert.deepEqual(normalized, [
+    { id: 'custom-phone', question: 'What is your phone number?', answer: '+971 567417451' },
+    { id: 'custom-city', question: 'What city do you live in?', answer: 'Dubai' },
+    { id: 'state', question: 'State', answer: 'Dubai' },
+    { id: 'screen', question: 'Do you have any experience in Python backend development?', answer: 'Yes' },
+  ]);
+});
+
 test('review question labels are never empty or longer than the managed runner limit', () => {
   assert.equal(normalizeReviewQuestionLabel('required field'), '');
   assert.equal(normalizeReviewQuestionLabel('56f41b98-0250-4e12-a2d1-aa038a33af27'), '');

@@ -65,7 +65,7 @@ test('Taleo and ADP account or legal walls are structurally zero-action', async 
   }
 });
 
-test('JazzHR fills only exact factual controls and never replays packet questions', () => {
+test('JazzHR replays only exact provider questionnaire and state controls', () => {
   assert.equal(detectPortal('https://utilidata.applytojob.com/apply/jobs/details/VSeisrJblO?source=test'), 'jazzhr');
   assert.equal(detectPortal('https://foundationai.applytojob.com/apply/jobs/details/ZBfHaf2Nv9'), 'jazzhr');
   assert.equal(canonicalSupportedPortalUrl('https://utilidata.applytojob.com/apply/jobs/details/VSeisrJblO/?source=test'), 'https://utilidata.applytojob.com/apply/jobs/details/VSeisrJblO');
@@ -73,7 +73,18 @@ test('JazzHR fills only exact factual controls and never replays packet question
   assert.throws(() => detectPortal('https://evil.applytojob.com/apply/jobs/details/VSeisrJblO'));
   assert.throws(() => detectPortal('https://utilidata.applytojob.com/apply/VSeisrJblO/engineer'));
   assert.throws(() => detectPortal('https://utilidata.applytojob.com/apply/jobs/details/VSeisrJblO/engineer'));
-  const actions = buildManagedPortalActions('jazzhr', packet, true);
+  const actions = buildManagedPortalActions('jazzhr', {
+    ...packet,
+    questions: [
+      { question: 'Are you currently based out of Columbia?', answer: 'No', portalSelector: '#resumator-questionnaire-q2849909', portalInputType: 'select' },
+      { question: 'Do you have any experience in Python backend development?', answer: 'Yes', portalSelector: '#resumator-questionnaire-q2849910', portalInputType: 'select' },
+      { question: 'If yes, which Python frameworks and libraries have you worked with?', answer: 'FastAPI', portalSelector: '#resumator-questionnaire-q2849911', portalInputType: 'textarea' },
+      { question: 'State', answer: 'Dubai', portalSelector: '#resumator-state-value', portalInputType: 'text' },
+      { question: 'Tell us about yourself', answer: 'unsafe', portalSelector: 'textarea[name="bio"]', portalInputType: 'textarea' },
+      { question: 'Gender', answer: 'Female', portalSelector: 'select[id="resumator-eeo_gender-value"]', portalInputType: 'select' },
+      { question: 'Submit Application', answer: 'Yes', portalSelector: 'input[id="resumator-submit-resume"]', portalInputType: 'button' },
+    ],
+  }, true);
   assert.deepEqual(actions.filter((action) => action.type === 'fill').map((action) => action.selector), [
     'input[name="resumator-firstname-value"]',
     'input[name="resumator-lastname-value"]',
@@ -81,9 +92,13 @@ test('JazzHR fills only exact factual controls and never replays packet question
     'input[name="resumator-phone-value"]',
     'input[name="resumator-city-value"]',
     'input[name="resumator-linkedin-value"]',
+    '#resumator-questionnaire-q2849909',
+    '#resumator-questionnaire-q2849910',
+    '#resumator-questionnaire-q2849911',
+    '#resumator-state-value',
   ]);
   assert.ok(actions.some((action) => action.type === 'upload' && action.selector === 'input[type="file"][name="resumator-resume-value"]'));
-  assert.equal(actions.some((action) => /bio|color|travel/i.test(`${action.selector ?? ''} ${action.label ?? ''}`)), false);
+  assert.equal(actions.some((action) => /bio|eeo_gender|submit-resume/i.test(`${action.selector ?? ''} ${action.label ?? ''}`)), false);
   assert.equal(actions.some((action) => action.type === 'click' || action.type === 'fillByLabelText'), false);
   assert.equal(portalMayResolveUnknownRequired('jazzhr'), false);
 });

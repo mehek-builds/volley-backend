@@ -1065,6 +1065,22 @@ function reviewQuestionPortalInputType(item: SubmissionPacket['questions'][numbe
   return item.portalInputType ?? item.portal_input_type;
 }
 
+/**
+ * JazzHR's reviewed controls are replayable only inside the provider-owned questionnaire
+ * namespace, plus the one built-in state field that is intentionally not part of the fixed packet
+ * actions. The packet is untrusted here: accepting an arbitrary stored selector would let an old or
+ * malformed review target the CAPTCHA, EEO, cancel, or terminal submit controls on the same page.
+ */
+function jazzhrReviewedQuestionSelector(selector: string | undefined): string | undefined {
+  const trimmed = selector?.trim();
+  if (!trimmed) return undefined;
+  if (/^#resumator-questionnaire-q\d{1,10}$/.test(trimmed)) return trimmed;
+  if (/^(?:select|textarea|input)\[id="resumator-questionnaire-q\d{1,10}"\]$/.test(trimmed)) return trimmed;
+  if (trimmed === '#resumator-state-value') return trimmed;
+  if (/^input\[(?:id|name)="resumator-state-value"\]$/.test(trimmed)) return trimmed;
+  return undefined;
+}
+
 function managedComboboxFill(
   actions: ManagedBrowserAction[],
   selector: string,
@@ -5326,10 +5342,10 @@ export function buildManagedPortalActions(
   // form at all, while Zoho Recruit and Bullhorn have only the exact identity and resume controls
   // mapped above. A stale or malicious reviewed-question packet must never widen that surface.
   if (family === 'sap_successfactors') return actions;
-  // SmartRecruiters capability also ends after the exact captured first-page controls. Returning
-  // here is stronger than filtering legal-looking questions: no packet selector or input type can
-  // widen the adapter into later tenant-specific steps.
-  if (family === 'smartrecruiters' || family === 'jazzhr' || family === 'bamboohr') return actions;
+  // SmartRecruiters and BambooHR capability ends after their exact captured controls. JazzHR is
+  // handled below through its provider-owned questionnaire selector namespace, while CAPTCHA and
+  // final submit remain structurally unreachable.
+  if (family === 'smartrecruiters' || family === 'bamboohr') return actions;
   const mayReplayReviewedQuestions = family !== 'zoho_recruit' && family !== 'bullhorn';
   if (family === 'greenhouse') {
     pushGreenhouseAkunaSafeTextActions(actions, packet);
@@ -5347,7 +5363,11 @@ export function buildManagedPortalActions(
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
     if (shouldSkipPortalConsentQuestion(portalFamily(portal), reviewedQuestionSafetyContext(item, packet))) continue;
-    const rawPortalSelector = reviewQuestionPortalSelector(item);
+    const storedPortalSelector = reviewQuestionPortalSelector(item);
+    const rawPortalSelector = family === 'jazzhr'
+      ? jazzhrReviewedQuestionSelector(storedPortalSelector)
+      : storedPortalSelector;
+    if (family === 'jazzhr' && !rawPortalSelector) continue;
     const portalInputType = reviewQuestionPortalInputType(item);
     const portalSelector = durablePortalSelector(rawPortalSelector);
     const runtimeGreenhouseSelector = portalFamily(portal) === 'greenhouse'
