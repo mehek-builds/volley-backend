@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import {
+  canonicalizePacketAuditTerms,
   canonicalPacketJson,
   createPacketAudit,
   createResumeEvidencePointer,
@@ -176,6 +177,150 @@ test('complete clause evidence can be ready with no token highlights', () => {
   const audit = createPacketAudit(input);
   assert.deepEqual(audit.terms, { covered: [], missing: [], edited: [] });
   assert.equal(packetAuditIsSubmissionReady(audit), true);
+});
+
+test('canonical highlight selection resolves duplicate, nested, and partial overlaps without changing offsets', () => {
+  const evidence = createResumeEvidencePointer(spec, '/experience/0/bullets/0');
+  const input = {
+    missing: [
+      { start: 20, end: 30 },
+      { start: 20, end: 30 },
+      { start: 22, end: 28 },
+      { start: 40, end: 48 },
+      { start: 44, end: 52 },
+    ],
+    covered: [
+      { start: 60, end: 72, evidence },
+      { start: 62, end: 70, evidence },
+      { start: 80, end: 88, evidence },
+    ],
+    edited: [
+      { start: 80, end: 88, evidence },
+      { start: 100, end: 108, evidence },
+    ],
+  };
+  const selected = canonicalizePacketAuditTerms(input, 200);
+  assert.deepEqual(selected.missing, [
+    { start: 20, end: 30 },
+    { start: 40, end: 48 },
+  ]);
+  assert.deepEqual(selected.covered, [{ start: 60, end: 72, evidence }]);
+  assert.deepEqual(selected.edited, [
+    { start: 80, end: 88, evidence },
+    { start: 100, end: 108, evidence },
+  ]);
+  const selectedRanges = Object.values(selected).flat();
+  for (const [index, range] of selectedRanges.entries()) {
+    assert.equal(input.missing.includes(range as { start: number; end: number })
+      || input.covered.includes(range as { start: number; end: number; evidence: typeof evidence })
+      || input.edited.includes(range as { start: number; end: number; evidence: typeof evidence }), true);
+    for (const other of selectedRanges.slice(index + 1)) {
+      assert.equal(range.start < other.end && other.start < range.end, false);
+    }
+  }
+});
+
+test('canonical highlight selection prefers conservative and edited tones while retaining exact evidence', () => {
+  const coveredEvidence = createResumeEvidencePointer(spec, '/experience/0/bullets/0');
+  const editedEvidence = createResumeEvidencePointer(spec, '/experience/0/bullets/1');
+  const selected = canonicalizePacketAuditTerms({
+    missing: [{ start: 10, end: 24 }],
+    covered: [
+      { start: 12, end: 20, evidence: coveredEvidence },
+      { start: 40, end: 50, evidence: coveredEvidence },
+    ],
+    edited: [{ start: 40, end: 50, evidence: editedEvidence }],
+  }, 100);
+  assert.deepEqual(selected.missing, [{ start: 10, end: 24 }]);
+  assert.deepEqual(selected.covered, []);
+  assert.deepEqual(selected.edited, [{ start: 40, end: 50, evidence: editedEvidence }]);
+});
+
+test('canonical highlight selection preserves malformed offsets for fail-closed validation', () => {
+  const invalid = { start: -1, end: 4 };
+  assert.deepEqual(canonicalizePacketAuditTerms({
+    covered: [],
+    missing: [invalid],
+    edited: [],
+  }, JD.length).missing, [invalid]);
+});
+
+test('canonical highlight selection resolves the production-shaped Law overlap and preserves adjacent terms', () => {
+  const forward = {
+    covered: [],
+    missing: [
+      { start: 4023, end: 4026 },
+      { start: 4023, end: 4038 },
+      { start: 4038, end: 4045 },
+      { start: 4040, end: 4047 },
+    ],
+    edited: [],
+  };
+  const reversed = { ...forward, missing: [...forward.missing].reverse() };
+  const selected = canonicalizePacketAuditTerms(forward, 5000);
+  const selectedFromReversed = canonicalizePacketAuditTerms(reversed, 5000);
+  assert.deepEqual(selected.missing, [
+    { start: 4023, end: 4038 },
+    { start: 4038, end: 4045 },
+  ]);
+  assert.deepEqual(selectedFromReversed, selected);
+  assert.equal(packetAuditSha256(selectedFromReversed), packetAuditSha256(selected));
+});
+
+test('canonical duplicate evidence selection is stable across input permutations', () => {
+  const firstEvidence = createResumeEvidencePointer(spec, '/experience/0/bullets/0');
+  const secondEvidence = createResumeEvidencePointer(spec, '/experience/0/bullets/1');
+  const forward = {
+    covered: [
+      { start: 60, end: 70, evidence: firstEvidence },
+      { start: 60, end: 70, evidence: secondEvidence },
+    ],
+    missing: [],
+    edited: [],
+  };
+  const reversed = { ...forward, covered: [...forward.covered].reverse() };
+  const selected = canonicalizePacketAuditTerms(forward, 100);
+  const selectedFromReversed = canonicalizePacketAuditTerms(reversed, 100);
+  assert.equal(selected.covered.length, 1);
+  assert.deepEqual(selectedFromReversed, selected);
+  assert.equal(packetAuditSha256(selectedFromReversed), packetAuditSha256(selected));
+});
+
+test('canonical duplicate selection is locale-independent for non-ASCII evidence', () => {
+  const first = {
+    start: 60,
+    end: 70,
+    evidence: { source: 'resume_spec' as const, path: '/first', quote: 'Évidence', sha256: '1'.repeat(64) },
+  };
+  const second = {
+    start: 60,
+    end: 70,
+    evidence: { source: 'resume_spec' as const, path: '/second', quote: 'Åvidence', sha256: '2'.repeat(64) },
+  };
+  const selected = canonicalizePacketAuditTerms({ covered: [first, second], missing: [], edited: [] }, 100);
+  const reversed = canonicalizePacketAuditTerms({ covered: [second, first], missing: [], edited: [] }, 100);
+  assert.deepEqual(reversed, selected);
+  assert.equal(packetAuditSha256(reversed), packetAuditSha256(selected));
+});
+
+test('raw overlapping highlights remain invalid while canonical service input is accepted', () => {
+  const input = validInput();
+  const rust = exactRange('Rust');
+  input.terms.missing = [
+    { start: rust.start, end: rust.end },
+    { start: rust.start, end: rust.end },
+  ];
+  assert.throws(
+    () => createPacketAudit(input),
+    (error: unknown) => error instanceof PacketAuditValidationError && /overlaps/u.test(error.message),
+  );
+  input.terms = canonicalizePacketAuditTerms(input.terms, input.jdText.length);
+  const audit = createPacketAudit(input);
+  assert.deepEqual(audit.terms.missing.map(({ start, end }) => ({ start, end })), [
+    { start: rust.start, end: rust.end },
+  ]);
+  assert.equal(audit.clauses.length, input.clauses.length);
+  assert.equal(audit.clauses.find((clause) => clause.text === missingClause.text)?.verdict, 'missing');
 });
 
 test('attaching the audit under spec._review does not invalidate its own canonical spec binding', () => {

@@ -41,7 +41,7 @@
  *      names the bullet it came from so a student can see why it counted.
  */
 
-import { extractJdTerms, resumeCovers, type JdContext } from './jdMatch';
+import { extractJdTerms, resumeCovers, type JdContext, type JdTerm } from './jdMatch';
 
 /** What we know about the candidate as FACTS rather than as prose. */
 export interface CandidateFacts {
@@ -67,6 +67,12 @@ export interface CandidateFacts {
   monthsOfProfessionalExperience?: number | null;
   /** Frozen structured enrollment fact. Undefined means it was not captured. */
   currentlyEnrolled?: boolean | null;
+  /** Exact saved bullet proving a project or internship track record, when one exists. */
+  projectOrInternshipEvidence?: string | null;
+  /** Frozen applicant declaration for routine office-attendance questions. */
+  onsiteCommitment?: 'anywhere' | 'listed_locations' | 'no' | null;
+  /** Exact frozen locations that bound a listed-locations declaration. */
+  onsiteLocations?: string[] | null;
 }
 
 export type ClauseVerdict = 'met' | 'unmet' | 'unscoreable' | 'pending';
@@ -78,7 +84,7 @@ export interface RequirementClause {
   weight: number;
   verdict: ClauseVerdict;
   /** Which rule decided it, so the student can be shown why. */
-  basis: 'terms' | 'degree' | 'graduation' | 'experience-years' | 'competency' | 'none';
+  basis: 'terms' | 'degree' | 'graduation' | 'experience-years' | 'project-evidence' | 'onsite-commitment' | 'availability' | 'competency' | 'none';
   /** Plain-English evidence, quoting the candidate's own words wherever possible. */
   evidence?: string;
   /** For a terms clause, what is still missing. */
@@ -116,15 +122,18 @@ const UNSCOREABLE = [
   /\b(curious|curiosity|passion(ate)?|enthusias|excited|motivated|self[- ]starter|growth mindset)\b/i,
   /\b(thrive|comfortable with ambiguity|fast[- ]paced|bias for action|scrappy|humble|low ego)\b/i,
   /\b(team player|culture|values|fun|energy)\b/i,
+  /\bhungry to ship code into production\b/i,
+  /\brather ship one thing a customer touches than polish\b/i,
 ];
 
 /* ---------- 2. structured facts ---------- */
 
-const DEGREE_CLAUSE = /\b(bachelor|bachelors|ba|bs|b\.s|master|masters|ms|m\.s|phd|doctorate|degree|undergraduate|enrolled|pursuing|currently studying)\b/i;
+const DEGREE_CLAUSE = /\b(bachelor|bachelors|ba|bs|b\.s|master|masters|ms|m\.s|phd|doctorate|degree|undergrad|undergraduate|enrolled|pursuing|currently studying)\b/i;
 
 /** Fields named often enough to be worth checking literally. Never inferred from one another. */
 const FIELD_SYNONYMS: Record<string, RegExp> = {
   'computer science': /\b(computer science|cs)\b/i,
+  'data science': /\bdata science\b/i,
   engineering: /\bengineering\b/i,
   business: /\b(business|business administration|commerce)\b/i,
   economics: /\beconomics\b/i,
@@ -151,6 +160,7 @@ const FIELD_SYNONYMS: Record<string, RegExp> = {
  */
 const DEGREE_FIELDS = new Set([
   'computer science',
+  'cs',
   'computer engineering',
   'electrical engineering',
   'data science',
@@ -207,6 +217,107 @@ export function statesTiming(clause: string): boolean {
 }
 
 const YEARS_CLAUSE = /(\d+)\s*\+?\s*(?:or more\s*)?years?\b/i;
+
+type TermCoverageDecision = {
+  decidable: boolean;
+  met: boolean;
+  covered: JdTerm[];
+  missing: JdTerm[];
+};
+
+const ALTERNATIVE_LANGUAGE = /\b(?:Go|PHP|Java|Python|TypeScript|JavaScript|Rust|Kotlin|Swift)\b|C\+\+|C#/g;
+
+function addValidatedAlternativeLanguageTerms(text: string, terms: JdTerm[], weight: number): void {
+  if (!/\b(?:languages?|programming|fluent|proficien|experience|development|using|with)\b/i.test(text)) return;
+  const languages = [...text.matchAll(ALTERNATIVE_LANGUAGE)].map((match) => ({
+    display: match[0],
+    start: match.index,
+    end: match.index + match[0].length,
+  }));
+  const connectors: Array<{ left: number; right: number }> = [];
+  for (let index = 0; index < languages.length - 1; index += 1) {
+    if (/^\s*,?\s*(?:and\/or|or)\s*$/i.test(text.slice(languages[index].end, languages[index + 1].start))) {
+      connectors.push({ left: index, right: index + 1 });
+    }
+  }
+  if (connectors.length !== 1) return;
+  let first = connectors[0].left;
+  while (first > 0 && /^\s*,\s*$/u.test(text.slice(languages[first - 1].end, languages[first].start))) first -= 1;
+  const group = languages.slice(first, connectors[0].right + 1);
+  const go = group.find((language) => language.display === 'Go');
+  if (!go || terms.some((term) => term.term === 'go')) return;
+  terms.push({
+    term: 'go',
+    display: 'Go',
+    weight,
+    kind: 'body',
+    signal: true,
+    mentions: 1,
+    order: go.start,
+  });
+}
+
+function termCoverageDecision(text: string, terms: JdTerm[], resumeText: string): TermCoverageDecision {
+  const covered = terms.filter((term) => resumeCovers(resumeText, term.term));
+  const allRequired = (): TermCoverageDecision => ({
+    decidable: true,
+    met: covered.length === terms.length,
+    covered,
+    missing: terms.filter((term) => !covered.includes(term)),
+  });
+  if (terms.length === 0 || !/\b(?:and\/or|or)\b/i.test(text)) return allRequired();
+
+  const occurrences = terms.map((term) => {
+    const start = typeof term.order === 'number' ? term.order : -1;
+    const exact = Number.isInteger(start) && start >= 0
+      && text.slice(start, start + term.display.length).toLowerCase() === term.display.toLowerCase();
+    return { term, start, end: start + term.display.length, exact };
+  });
+  if (occurrences.some((occurrence) => !occurrence.exact)) {
+    return { decidable: false, met: false, covered, missing: [] };
+  }
+
+  const connectors = [...text.matchAll(/\b(?:and\/or|or)\b/gi)]
+    .map((match) => ({ start: match.index, end: match.index + match[0].length }))
+    .filter((connector) => occurrences.some((occurrence) => occurrence.end <= connector.start)
+      && occurrences.some((occurrence) => occurrence.start >= connector.end));
+  if (connectors.length === 0) return allRequired();
+  if (connectors.length !== 1) return { decidable: false, met: false, covered, missing: [] };
+  const connector = connectors[0];
+
+  const ordered = [...occurrences].sort((a, b) => a.start - b.start || a.end - b.end);
+  let leftIndex = -1;
+  for (let index = 0; index < ordered.length; index += 1) {
+    if (ordered[index].end <= connector.start) leftIndex = index;
+  }
+  const rightIndex = ordered.findIndex((occurrence) => occurrence.start >= connector.end);
+  if (leftIndex < 0 || rightIndex !== leftIndex + 1
+    || !/^\s*,?\s*(?:and\/or|or)\s*$/i.test(text.slice(ordered[leftIndex].end, ordered[rightIndex].start))) {
+    return { decidable: false, met: false, covered, missing: [] };
+  }
+  let firstAlternative = leftIndex;
+  while (firstAlternative > 0
+    && /^\s*,\s*$/u.test(text.slice(ordered[firstAlternative - 1].end, ordered[firstAlternative].start))) {
+    firstAlternative -= 1;
+  }
+  const alternatives = ordered.slice(firstAlternative, rightIndex + 1);
+  const alternativeTerms = new Set(alternatives.map((occurrence) => occurrence.term));
+  const mandatory = ordered.map((occurrence) => occurrence.term)
+    .filter((term) => !alternativeTerms.has(term));
+  const missingMandatory = mandatory.filter((term) => !covered.includes(term));
+  const coveredAlternative = alternatives.map((occurrence) => occurrence.term)
+    .find((term) => covered.includes(term));
+  const missing = [
+    ...missingMandatory,
+    ...(coveredAlternative ? [] : alternatives.map((occurrence) => occurrence.term)),
+  ];
+  return {
+    decidable: true,
+    met: missing.length === 0,
+    covered,
+    missing,
+  };
+}
 
 /* ---------- 3. competency cues ---------- */
 
@@ -282,12 +393,68 @@ export function matchClause(
   weight: number,
   facts: CandidateFacts,
   context?: JdContext,
+  requiredCategory?: string,
 ): RequirementClause {
   const base = { text, weight };
 
   // 4. Dispositions leave the denominator, in either direction.
   if (UNSCOREABLE.some((re) => re.test(text)) && !DEGREE_CLAUSE.test(text)) {
     return { ...base, verdict: 'unscoreable', basis: 'none' };
+  }
+
+  const handsOnAiBuild = /\bplayed with\b[^.]*\b(llms?|agents?|computer[- ]use)\b[^.]*\.\s*you(?:'ve| have) built something\b/i.test(text);
+  if (handsOnAiBuild) {
+    const evidence = (facts.bullets ?? []).find((bullet) =>
+      /\b(build|built|create|created|develop|developed|implement|implemented|play|played|ship|shipped)\b/i.test(bullet)
+      && /\b(llms?|agents?|computer[- ]use)\b/i.test(bullet));
+    return {
+      ...base,
+      verdict: evidence ? 'met' : 'unmet',
+      basis: 'project-evidence',
+      evidence,
+    };
+  }
+
+  const exactCtgtFullTimeOnsite = /\bFull-time,\s+in person in San Francisco\b/i.test(text);
+  if (exactCtgtFullTimeOnsite) {
+    return { ...base, verdict: 'unscoreable', basis: 'onsite-commitment' };
+  }
+
+  const exactSfOnsiteCommitment = /\bcomfortable working in-person at our SF office for the whole internship\b/i.test(text);
+  if (exactSfOnsiteCommitment) {
+    if (facts.onsiteCommitment === 'anywhere') {
+      return {
+        ...base,
+        verdict: 'met',
+        basis: 'onsite-commitment',
+        evidence: 'frozen onsite commitment applies to any listed US office',
+      };
+    }
+    if (facts.onsiteCommitment === 'no') {
+      return {
+        ...base,
+        verdict: 'unmet',
+        basis: 'onsite-commitment',
+        evidence: 'candidate declined onsite work',
+      };
+    }
+    if (facts.onsiteCommitment === 'listed_locations') {
+      const locations = facts.onsiteLocations ?? [];
+      if (locations.length === 0) return { ...base, verdict: 'unscoreable', basis: 'onsite-commitment' };
+      const sfCovered = locations.some((location) => /\b(?:san francisco|san fran|sf)\b/i.test(location));
+      return {
+        ...base,
+        verdict: sfCovered ? 'met' : 'unmet',
+        basis: 'onsite-commitment',
+        evidence: sfCovered ? 'frozen onsite locations include San Francisco' : 'frozen onsite locations exclude San Francisco',
+      };
+    }
+    return { ...base, verdict: 'unscoreable', basis: 'onsite-commitment' };
+  }
+
+  const exactCtgtInternshipWindow = /\b10\s*(?:to|-)\s*12\s+weeks?\s+between\s+May\/June\s+and\s+August\/September\s+2027\b/i.test(text);
+  if (exactCtgtInternshipWindow) {
+    return { ...base, verdict: 'unscoreable', basis: 'availability' };
   }
 
   // 1. Named technologies, when the clause names any. Most literal, so it goes first.
@@ -313,10 +480,28 @@ export function matchClause(
   //
   // ONLY WHEN NOTHING ELSE IS NAMED, so the exclusion cannot swallow a real tool: "Bachelor's in
   // computer science with strong Python" keeps `python`, stays here, and is answered literally.
-  const signalTerms = extractJdTerms(text, context).filter((t) => t.signal);
+  const termText = text.replace(/^(?:Requirements?|Preferred|Technical skills):\s*/iu, '');
+  const signalTerms = extractJdTerms(termText, context).filter((t) => t.signal);
+  addValidatedAlternativeLanguageTerms(termText, signalTerms, weight);
+  if (requiredCategory) {
+    const display = requiredCategory.trim();
+    const key = display.toLowerCase().replace(/[^a-z0-9+#]+/g, ' ').trim();
+    if (key && !signalTerms.some((term) => term.term === key)) {
+      signalTerms.push({
+        term: key,
+        display,
+        weight,
+        kind: 'body',
+        signal: true,
+        mentions: 1,
+        order: termText.indexOf(display),
+      });
+    }
+  }
   const terms = DEGREE_CLAUSE.test(text)
     ? signalTerms.filter((t) => !DEGREE_FIELDS.has(t.term))
     : signalTerms;
+  const enrollmentAsked = /\b(current\s+(?:cs|ml)\b|currently\s+enrolled|enrolled|pursuing|currently\s+studying|\b(?:undergrad|master'?s)\s+student\b)/i.test(text);
 
   // A named technology must never hide a structured duration floor. For a clause such as
   // "5+ years with Python", both the dated experience and Python evidence are mandatory.
@@ -330,31 +515,32 @@ export function matchClause(
       return { ...base, verdict: 'unscoreable', basis: 'experience-years' };
     }
     const wanted = Number(years[1]) * 12;
-    const covered = terms.filter((t) => resumeCovers(facts.resumeText, t.term));
-    const anySuffices = /\b(and\/or|or)\b/i.test(text);
-    const termsMet = terms.length === 0
-      || (anySuffices ? covered.length > 0 : covered.length === terms.length);
+    const termCoverage = termCoverageDecision(termText, terms, facts.resumeText);
+    if (!termCoverage.decidable) {
+      return { ...base, verdict: 'unscoreable', basis: 'experience-years' };
+    }
+    const termsMet = termCoverage.met;
     const durationMet = experienceMonths >= wanted;
     return {
       ...base,
       verdict: durationMet && termsMet ? 'met' : 'unmet',
       basis: 'experience-years',
       evidence: `${Math.round(experienceMonths / 12 * 10) / 10} years on the resume vs ${years[1]} asked`,
-      missingTerms: terms.filter((t) => !covered.includes(t)).map((t) => t.display),
+      missingTerms: termCoverage.missing.map((term) => term.display),
     };
   }
 
-  if (terms.length > 0) {
-    const covered = terms.filter((t) => resumeCovers(facts.resumeText, t.term));
-    // "SQL and/or Python" and "Java or Kotlin" are satisfied by one. An unqualified list is not.
-    const anySuffices = /\b(and\/or|or)\b/i.test(text);
-    const met = anySuffices ? covered.length > 0 : covered.length === terms.length;
+  if (terms.length > 0 && !enrollmentAsked) {
+    const termCoverage = termCoverageDecision(termText, terms, facts.resumeText);
+    if (!termCoverage.decidable) return { ...base, verdict: 'unscoreable', basis: 'terms' };
     return {
       ...base,
-      verdict: met ? 'met' : 'unmet',
+      verdict: termCoverage.met ? 'met' : 'unmet',
       basis: 'terms',
-      evidence: covered.length ? `resume has ${covered.map((t) => t.display).join(', ')}` : undefined,
-      missingTerms: terms.filter((t) => !covered.includes(t)).map((t) => t.display),
+      evidence: termCoverage.covered.length
+        ? `resume has ${termCoverage.covered.map((term) => term.display).join(', ')}`
+        : undefined,
+      missingTerms: termCoverage.missing.map((term) => term.display),
     };
   }
 
@@ -377,7 +563,6 @@ export function matchClause(
       return { ...base, verdict: 'pending', basis: 'graduation' };
     }
 
-    const enrollmentAsked = /\b(currently\s+enrolled|enrolled|pursuing|currently\s+studying)\b/i.test(text);
     if (enrollmentAsked && facts.currentlyEnrolled == null) {
       return { ...base, verdict: 'unscoreable', basis: 'degree' };
     }
@@ -386,28 +571,35 @@ export function matchClause(
     }
 
     const degreeLevels = [
-      { rank: 1, pattern: /\b(bachelor|bachelors|bachelor's|undergraduate|b\.?s\.?|b\.?a\.?)\b/i },
+      { rank: 1, pattern: /\b(bachelor|bachelors|bachelor's|undergrad|undergraduate|b\.?s\.?|b\.?a\.?)\b/i },
       { rank: 2, pattern: /\b(master|masters|master's|m\.?s\.?|m\.?a\.?|mba)\b/i },
       { rank: 3, pattern: /\b(ph\.?d\.?|doctorate|doctoral)\b/i },
     ];
-    const levelAsked = degreeLevels.find((level) => level.pattern.test(text));
+    const levelsAsked = degreeLevels.filter((level) => level.pattern.test(text));
     const levelHeld = [...degreeLevels].reverse().find((level) => level.pattern.test(degree));
-    const levelMet = !levelAsked || (levelHeld != null && (enrollmentAsked
-      ? levelHeld.rank === levelAsked.rank
-      : levelHeld.rank >= levelAsked.rank));
+    const levelMet = levelsAsked.length === 0 || (levelHeld != null && (enrollmentAsked
+      ? levelsAsked.some((level) => level.rank === levelHeld.rank)
+      : levelHeld.rank >= Math.min(...levelsAsked.map((level) => level.rank))));
+    const kosEnrollmentFieldAlternative = /\bcurrent\s+cs\s+or\s+ml\s+(?:undergrad|undergraduate|student)\b/i.test(text);
     const fieldsAsked = Object.entries(FIELD_SYNONYMS).filter(([, re]) => re.test(text));
-    const fieldMet =
-      fieldsAsked.length === 0 || fieldsAsked.some(([, re]) => re.test(degree) || re.test(school));
+    const fieldMet = kosEnrollmentFieldAlternative
+      ? /\b(?:computer science|cs|machine learning|ml)\b/i.test(degree)
+      : fieldsAsked.length === 0 || fieldsAsked.some(([, re]) => re.test(degree));
     const why = fieldsAsked.length
       ? fieldMet
         ? `field matches (${degree})`
         : `field asked: ${fieldsAsked.map(([n]) => n).join('/')}`
-      : '';
-    const met = fieldMet && levelMet;
+      : kosEnrollmentFieldAlternative
+        ? fieldMet ? `field matches (${degree})` : 'field asked: computer science/machine learning'
+        : '';
+    const trackRecordAsked = /\b(?:project(?:\s+or\s+internship)?|internship)\s+track record\b/i.test(text);
+    const trackRecordMet = !trackRecordAsked || Boolean(facts.projectOrInternshipEvidence);
+    const met = fieldMet && levelMet && trackRecordMet;
     const evidence = [
       enrollmentAsked ? 'candidate is currently enrolled' : '',
-      levelAsked ? (levelMet ? `degree level matches (${degree})` : `degree level does not match (${degree})`) : '',
+      levelsAsked.length ? (levelMet ? `degree level matches (${degree})` : `degree level does not match (${degree})`) : '',
       why,
+      trackRecordAsked && facts.projectOrInternshipEvidence ? facts.projectOrInternshipEvidence : '',
     ].filter(Boolean).join('; ');
     return { ...base, verdict: met ? 'met' : 'unmet', basis: 'degree', evidence: evidence || undefined };
   }
@@ -431,6 +623,22 @@ export function matchClause(
 
   // Nothing in this clause is checkable. It leaves rather than counting as a miss.
   return { ...base, verdict: 'unscoreable', basis: 'none' };
+}
+
+/**
+ * A one-of child must be visibly labelled as one of the captured engineering disciplines. This is
+ * deliberately narrower than "anything before a colon": headings such as "Requirements" and
+ * "Technical skills" are not candidate facts, and making them mandatory would invent gaps. The
+ * bounded list mirrors the measured Mercari role-family group. Unknown shapes stay outside the
+ * group and are scored normally, or leave the parent unscoreable when no measured child follows.
+ */
+function oneOfBranchCategory(text: string): string | null {
+  const match = text.match(/^([^:\n]{1,48}):\s+\S/u);
+  if (!match) return null;
+  const label = match[1].trim();
+  return /^(?:Backend|Frontend|Mobile(?:\s*\([^)]*\))?|Machine Learning|Platform Engineering|Site Reliability Engineering|Data Engineer|Security Engineer)$/u.test(label)
+    ? label
+    : null;
 }
 
 /* ---------- the two-phase scorer ---------- */
@@ -471,7 +679,41 @@ export async function scorePosting(
   const clauses: RequirementClause[] = [];
   for (const sec of segment(jdText)) {
     if (!CANDIDATE_KINDS.has(sec.kind)) continue;
-    for (const text of splitClauses(sec.text)) clauses.push(matchClause(text, sec.weight, facts, context));
+    const texts = splitClauses(sec.text);
+    let index = 0;
+    while (index < texts.length) {
+      const text = texts[index];
+      if (!/\b(?:at least\s+)?one of the following\b/i.test(text)) {
+        clauses.push(matchClause(text, sec.weight, facts, context));
+        index += 1;
+        continue;
+      }
+
+      const parent = matchClause(text, sec.weight, facts, context);
+      const alternatives: RequirementClause[] = [];
+      let next = index + 1;
+      while (next < texts.length) {
+        const category = oneOfBranchCategory(texts[next]);
+        if (!category) break;
+        alternatives.push(matchClause(texts[next], sec.weight, facts, context, category));
+        next += 1;
+      }
+
+      if (alternatives.length === 0 || !alternatives.every((clause) => clause.basis === 'terms')) {
+        clauses.push({ ...parent, verdict: 'unscoreable', basis: 'terms', evidence: undefined, missingTerms: [] });
+        index += 1;
+        continue;
+      }
+      const covered = alternatives.filter((clause) => clause.verdict === 'met');
+      if (covered.length > 0) {
+        clauses.push(covered[0]);
+      } else if (alternatives.every((clause) => clause.verdict === 'unmet')) {
+        clauses.push({ ...parent, verdict: 'unmet', basis: 'terms', evidence: undefined, missingTerms: [] });
+      } else {
+        clauses.push({ ...parent, verdict: 'unscoreable', basis: 'terms', evidence: undefined, missingTerms: [] });
+      }
+      index = next;
+    }
   }
 
   /* Both classes are asked in ONE call. They are the same request with different corpora, and

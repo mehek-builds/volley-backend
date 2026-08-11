@@ -256,13 +256,356 @@ test('covered duration clauses retain every contributing saved date range', asyn
   const review = {
     jd_text: 'Requirements\n5+ years of professional experience building software systems',
     questions: [], edited_terms: [], status: 'ready_to_submit',
-  } as never;
-  const scored = await scoreAuditEvidence({ spec, job_context: { role: 'Engineer' } } as never, review);
+  };
+  const scored = await scoreAuditEvidence({ spec, job_context: { role: 'Engineer' } } as never, review as never);
   assert.equal(scored.clauses[0]?.verdict, 'covered');
   assert.deepEqual(scored.clauses[0]?.evidence?.map((pointer) => pointer.path), [
     '/experience/0/date_range',
     '/experience/1/date_range',
   ]);
+});
+
+test('packet scoring canonicalizes nested compound terms before audit validation', async () => {
+  const jdText = [
+    'Qualifications',
+    '- Experience with Salesforce administration.',
+    '- Experience with merchant compliance.',
+    '- Experience with cost accounting.',
+    '- Experience with GitHub Actions.',
+    '- Experience with regulatory policy.',
+  ].join('\n');
+  const spec = {
+    target_role: 'Engineer', school: '', degree: '', grad_date: '', gpa: '', school_location: '', coursework: '',
+    experience: [], skills: [], _review: {},
+  };
+  const scored = await scoreAuditEvidence(
+    { spec, job_context: { role: 'Engineer' } } as never,
+    { jd_text: jdText, questions: [], edited_terms: [], status: 'ready_to_submit' } as never,
+  );
+  const githubClause = scored.clauses.find((clause) => clause.text === 'Experience with GitHub Actions.');
+  assert.deepEqual(githubClause, {
+    text: 'Experience with GitHub Actions.',
+    start: 136,
+    end: 167,
+    verdict: 'missing',
+  });
+  assert.deepEqual(scored.terms.missing.filter((term) => term.start >= 136 && term.end <= 167), [
+    { start: 152, end: 166 },
+  ]);
+  const ranges = Object.values(scored.terms).flat();
+  for (const [index, range] of ranges.entries()) {
+    for (const other of ranges.slice(index + 1)) {
+      assert.equal(range.start < other.end && other.start < range.end, false);
+    }
+  }
+});
+
+test('packet scoring returns only canonical edited metadata after nested term selection', async () => {
+  const jdText = [
+    'Qualifications',
+    '- Experience with Salesforce administration.',
+    '- Experience with merchant compliance.',
+    '- Experience with cost accounting.',
+    '- Experience with GitHub Actions in production.',
+    '- Experience with regulatory policy.',
+  ].join('\n');
+  const spec = {
+    target_role: 'Engineer', school: '', degree: '', grad_date: '', gpa: '', school_location: '', coursework: '', skills: [],
+    experience: [{
+      type: 'project' as const,
+      org: 'Automation Project',
+      title: 'Engineer',
+      location: '',
+      date_range: 'Jan 2025 - Dec 2025',
+      bullets: ['Used GitHub Actions in production'],
+    }],
+    _review: {},
+  };
+  const scored = await scoreAuditEvidence(
+    { spec, job_context: { role: 'Engineer' } } as never,
+    { jd_text: jdText, questions: [], edited_terms: ['github', 'github actions'], status: 'ready_to_submit' } as never,
+  );
+  assert.deepEqual(scored.terms.edited.map((term) => jdText.slice(term.start, term.end)), ['GitHub Actions']);
+  assert.deepEqual(scored.editedTerms, ['github actions']);
+});
+
+test('Mercari multilingual clause keeps generic API evidence separate from language alternatives', async () => {
+  const jdText = [
+    'Qualifications',
+    '- Possessing one of the following 5 BOLD characteristics:',
+    '- Co-creation with AI: Those who can maximize output using technology as a weapon.',
+    'Required Experience / Skills',
+    '- Experience in delivering results through projects utilizing the latest AI technologies and tools',
+    '- Basic knowledge of RDBMS and SQL',
+    '- Practical or research-level development experience in at least one of the following:',
+    '- Backend: API development experience using languages such as Go, PHP, or Java.',
+    '- Frontend: Development experience using JavaScript, React, etc.',
+    '- Mobile (iOS or Android): Development experience using Swift or Kotlin.',
+    '- Machine Learning: Practical experience in ML modeling or development experience in ML systems.',
+    '- Platform Engineering: Development experience using Go and Kubernetes.',
+    '- Site Reliability Engineering: Development experience using Go, Kubernetes, and Terraform.',
+    '- Data Engineer: Experience in data aggregation, analysis, or visualization using Python, SQL, etc.',
+    '- Security Engineer: Development experience using programming languages such as Go, Python, PHP, or JavaScript.',
+    '',
+    '求める経験・スキル',
+    '- Backend：Go、PHP、Javaなど言語を用いたAPIの開発経験',
+  ].join('\n');
+  const spec = {
+    target_role: 'Software Engineer Internship',
+    school: 'USC',
+    degree: 'Bachelor of Science',
+    grad_date: 'May 2027',
+    gpa: '',
+    school_location: '',
+    coursework: '',
+    skills: ['API'],
+    experience: [{
+      type: 'project' as const,
+      org: 'Student Product',
+      title: 'Engineer',
+      location: '',
+      date_range: 'Jan 2025 - Dec 2025',
+      bullets: ['Built and documented an API for a student product'],
+    }],
+    _review: {},
+  };
+  const scored = await scoreAuditEvidence(
+    { spec, job_context: { company: 'Mercari', role: 'Class of 2028 Software Engineer Internship' } } as never,
+    { jd_text: jdText, questions: [], edited_terms: [], status: 'ready_to_submit' } as never,
+  );
+  const clauseText = 'Practical or research-level development experience in at least one of the following:';
+  const clause = scored.clauses.find((candidate) => candidate.text === clauseText);
+  assert.deepEqual(clause, {
+    text: clauseText,
+    start: jdText.indexOf(clauseText),
+    end: jdText.indexOf(clauseText) + clauseText.length,
+    verdict: 'unscoreable',
+  });
+  assert.equal(clause?.evidence, undefined);
+  assert.equal(scored.degraded, true);
+  assert.equal(scored.clauses.some((candidate) => candidate.text.startsWith('Backend:')), false);
+  assert.equal(scored.clauses.some((candidate) => candidate.text.startsWith('Security Engineer:')), false);
+
+  const frontendSpec = {
+    ...spec,
+    skills: ['Frontend', 'JavaScript', 'React'],
+    experience: [{
+      type: 'project' as const,
+      org: 'Student Product',
+      title: 'Frontend Engineer',
+      location: '',
+      date_range: 'Jan 2025 - Dec 2025',
+      bullets: [
+        'Built Frontend JavaScript interfaces with React for a student product',
+        'Developed Frontend React components and JavaScript tests',
+      ],
+    }],
+  };
+  const frontend = await scoreAuditEvidence(
+    { spec: frontendSpec, job_context: { company: 'Mercari', role: 'Class of 2028 Software Engineer Internship' } } as never,
+    { jd_text: jdText, questions: [], edited_terms: [], status: 'ready_to_submit' } as never,
+  );
+  const branchClauses = frontend.clauses.filter((candidate) => /^(?:Backend|Frontend|Mobile|Machine Learning|Platform Engineering|Site Reliability Engineering|Data Engineer|Security Engineer):/u.test(candidate.text));
+  assert.equal(branchClauses.length, 1);
+  assert.equal(branchClauses[0].text.startsWith('Frontend:'), true);
+  assert.equal(branchClauses[0].verdict, 'covered');
+  assert.ok(branchClauses[0].evidence?.length);
+  assert.equal(frontend.clauses.some((candidate) => candidate.text.startsWith('Security Engineer:')), false);
+});
+
+test('kos.ai Ashby bare You section emits exact auditable requirements with frozen evidence', async () => {
+  const jdText = "What you'll do: Build and ship a bounded project in one of: eval infrastructure, ERP integration stubs, internal ops dashboards, or the agent training pipeline Partner with the founding team. They're your reviewer and your mentor. Learn how an AI-native product works under the hood. The agent loop, the eval harness, the production plumbing. Not the marketing version. Contribute to code reviews, design discussions, and the culture of the team You Current CS or ML undergrad or Master's student with a hands-on project or internship track record Fluent in one of Python, TypeScript, or Go. You pick up whatever else the project needs. You've played with LLMs, agents, or computer-use workflows. You've built something, not just read about it. You're hungry to ship code into production, not complete a rotational checklist You'd rather ship one thing a customer touches than polish ten projects that live on a demo-day slide You're comfortable working in-person at our SF office for the whole internship Comp and Benefits Relocation benefits Visa sponsorship for eligible candidates";
+  const spec = {
+    target_role: 'Software Engineer Intern',
+    school: 'USC',
+    degree: 'Bachelor of Science in Computer Science',
+    grad_date: 'May 2027',
+    gpa: '',
+    school_location: '',
+    coursework: '',
+    skills: ['Python'],
+    experience: [{
+      type: 'project' as const,
+      org: 'AI Project',
+      title: 'Engineer',
+      location: '',
+      date_range: 'Jan 2025 - Dec 2025',
+      bullets: ['Built LLM agent workflows in Python and shipped them to users'],
+    }],
+    _review: {},
+  };
+  const review = {
+    jd_text: jdText,
+    questions: [],
+    edited_terms: [],
+    status: 'ready_to_submit',
+    applicant_snapshot: {
+      profile: { currently_enrolled: true },
+      application_profile: {
+        onsite_commitment: 'listed_locations',
+        onsite_locations: ['San Francisco'],
+      },
+    },
+  };
+  const scored = await scoreAuditEvidence(
+    { spec, job_context: { company: 'kos.ai', role: 'Software Engineer Intern' } } as never,
+    review as never,
+  );
+  assert.ok(scored.clauses.length > 0);
+  const academicClause = scored.clauses.find((clause) => clause.text.startsWith('Current CS or ML'));
+  assert.equal(academicClause?.verdict, 'covered');
+  assert.deepEqual(academicClause?.evidence?.map((pointer) => pointer.path), [
+    '/degree',
+    '/profile/currently_enrolled',
+    '/experience/0/bullets/0',
+  ]);
+  const pythonClause = scored.clauses.find((clause) => clause.text.startsWith('Fluent in one of Python'));
+  assert.ok(pythonClause);
+  assert.equal(pythonClause.verdict, 'covered');
+  assert.equal(pythonClause.text, jdText.slice(pythonClause.start, pythonClause.end));
+  assert.ok(pythonClause.evidence?.some((pointer) => pointer.source === 'resume_spec' && /Python/.test(pointer.quote)));
+  const handsOnClause = scored.clauses.find((clause) => clause.text.startsWith("You've played with LLMs"));
+  assert.equal(handsOnClause?.verdict, 'covered', JSON.stringify(handsOnClause));
+  assert.ok(handsOnClause?.evidence?.some((pointer) => pointer.path === '/experience/0/bullets/0'));
+  const onsiteClause = scored.clauses.find((clause) => clause.text.startsWith("You're comfortable working in-person"));
+  assert.equal(onsiteClause?.verdict, 'covered');
+  assert.deepEqual(onsiteClause?.evidence?.map((pointer) => pointer.path), [
+    '/application_profile/onsite_commitment',
+    '/application_profile/onsite_locations/0',
+  ]);
+  assert.equal(scored.degraded, false);
+  assert.deepEqual(scored.rejected, []);
+  assert.deepEqual(scored.terms.covered.map((term) => jdText.slice(term.start, term.end)), ['Python']);
+  assert.doesNotThrow(() => createPacketAudit({
+    ownerId: 'owner-kos',
+    applicationId: 'application-kos',
+    jdText,
+    spec,
+    jobContext: { company: 'kos.ai', role: 'Software Engineer Intern' },
+    questions: [],
+    applicantSnapshot: review.applicant_snapshot,
+    resumeEmail: 'student@example.edu',
+    applicantEmail: 'app-kos@apply.trylitos.com',
+    pdfObjectKey: 'users/owner-kos/resumes/application-kos.pdf',
+    pdfBytes: Buffer.from('%PDF-1.7\nkos packet'),
+    editedTerms: scored.editedTerms,
+    clauses: scored.clauses,
+    rejected: scored.rejected,
+    degraded: scored.degraded,
+    terms: scored.terms,
+  }));
+  for (const clause of scored.clauses) {
+    assert.equal(clause.text, jdText.slice(clause.start, clause.end));
+    assert.doesNotMatch(clause.text, /Comp and Benefits|Relocation benefits/);
+  }
+
+  const falseEnrollment = await scoreAuditEvidence(
+    { spec, job_context: { company: 'kos.ai', role: 'Software Engineer Intern' } } as never,
+    { ...review, applicant_snapshot: { profile: { currently_enrolled: false }, application_profile: {} } } as never,
+  );
+  assert.equal(falseEnrollment.clauses.find((clause) => clause.text.startsWith('Current CS or ML'))?.verdict, 'missing');
+  const unknownEnrollment = await scoreAuditEvidence(
+    { spec, job_context: { company: 'kos.ai', role: 'Software Engineer Intern' } } as never,
+    { ...review, applicant_snapshot: { profile: {}, application_profile: {} } } as never,
+  );
+  assert.equal(unknownEnrollment.clauses.find((clause) => clause.text.startsWith('Current CS or ML'))?.verdict, 'unscoreable');
+  assert.equal(unknownEnrollment.degraded, true);
+
+  const resumeLocationCannotAuthorizeOnsite = await scoreAuditEvidence(
+    {
+      spec: {
+        ...spec,
+        experience: [{ ...spec.experience[0], location: 'San Francisco, CA' }],
+        skills: [...spec.skills, 'SF'],
+      },
+      job_context: { company: 'kos.ai', role: 'Software Engineer Intern', location: 'San Francisco' },
+    } as never,
+    {
+      ...review,
+      applicant_snapshot: {
+        profile: { currently_enrolled: true },
+        application_profile: {},
+      },
+    } as never,
+  );
+  assert.equal(
+    resumeLocationCannotAuthorizeOnsite.clauses.find((clause) => clause.text.startsWith("You're comfortable working in-person"))?.verdict,
+    'unscoreable',
+  );
+  assert.equal(resumeLocationCannotAuthorizeOnsite.degraded, true);
+
+  const wrongOnsiteCity = await scoreAuditEvidence(
+    { spec, job_context: { company: 'kos.ai', role: 'Software Engineer Intern', location: 'San Francisco' } } as never,
+    {
+      ...review,
+      applicant_snapshot: {
+        profile: { currently_enrolled: true },
+        application_profile: { onsite_commitment: 'listed_locations', onsite_locations: ['Los Angeles'] },
+      },
+    } as never,
+  );
+  assert.equal(
+    wrongOnsiteCity.clauses.find((clause) => clause.text.startsWith("You're comfortable working in-person"))?.verdict,
+    'missing',
+  );
+
+  const skillOnly = await scoreAuditEvidence(
+    { spec: { ...spec, skills: ['LLMs'], experience: [] }, job_context: { company: 'kos.ai', role: 'Software Engineer Intern' } } as never,
+    review as never,
+  );
+  assert.notEqual(skillOnly.clauses.find((clause) => clause.text.startsWith("You've played with LLMs"))?.verdict, 'covered');
+});
+
+test('a met clause without one exact frozen evidence pointer remains degraded and unscoreable', async () => {
+  const jdText = 'Requirements\nExperience with Machine Learning.';
+  const spec = {
+    target_role: '', school: '', degree: '', grad_date: '', gpa: '', school_location: '', coursework: '',
+    experience: [], skills: ['Machine', 'Learning'], _review: {},
+  };
+  const scored = await scoreAuditEvidence(
+    { spec, job_context: { role: 'Engineer' } } as never,
+    { jd_text: jdText, questions: [], edited_terms: [], status: 'ready_to_submit' } as never,
+  );
+  assert.equal(scored.clauses[0]?.verdict, 'unscoreable');
+  assert.equal(scored.clauses[0]?.evidence, undefined);
+  assert.equal(scored.degraded, true);
+});
+
+test('CTGT Summer 2027 duration remains exact and blocks without scoped availability facts', async () => {
+  const jdText = [
+    'Requirements',
+    'Full-time, in person in San Francisco',
+    '10 to 12 weeks between May/June and August/September 2027',
+    'We sponsor US visas',
+  ].join('\n');
+  const spec = {
+    target_role: 'Software Engineer Intern',
+    school: 'USC',
+    degree: 'Bachelor of Science in Computer Science',
+    grad_date: 'May 2028',
+    gpa: '', school_location: '', coursework: '', skills: ['Python'], experience: [], _review: {},
+  };
+  const scored = await scoreAuditEvidence(
+    {
+      spec,
+      job_context: { company: 'CTGT', role: 'Software Engineer Intern', location: 'San Francisco' },
+    } as never,
+    {
+      jd_text: jdText,
+      questions: [], edited_terms: [], status: 'ready_to_submit',
+      applicant_snapshot: {
+        profile: { currently_enrolled: true },
+        application_profile: { onsite_commitment: 'anywhere' },
+      },
+    } as never,
+  );
+  const availability = scored.clauses.find((clause) => clause.text.startsWith('10 to 12 weeks'));
+  const onsite = scored.clauses.find((clause) => clause.text.startsWith('Full-time, in person'));
+  assert.equal(onsite?.verdict, 'unscoreable');
+  assert.equal(onsite?.text, jdText.slice(onsite.start, onsite.end));
+  assert.equal(availability?.verdict, 'unscoreable');
+  assert.equal(availability?.text, jdText.slice(availability.start, availability.end));
+  assert.equal(scored.degraded, true);
 });
 
 test('current packet identities require the explicit profile resume email and active exact alias', async () => {

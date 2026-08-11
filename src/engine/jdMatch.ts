@@ -318,7 +318,10 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // `about SECOND_PERSON_SUBJECT` is the other half of the exclusion carved out of the noise rule
   // above, reading the same constant so the two cannot drift. It is reached only because noise
   // declines these forms first.
-  { kind: 'required', re: new RegExp(String.raw`\b(requirements?|qualifications?|what you'?ll need|what you should have|what we('?re)? look(ing)? for|what would make you a strong fit|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about\s+${SECOND_PERSON_SUBJECT})\b`, 'i') },
+  // kos.ai's measured Ashby posting uses the entire bare line `You` between `What you'll do` and
+  // its candidate requirements. The anchors are the safety boundary: ordinary prose containing
+  // the pronoun remains content, while the standalone candidate heading closes responsibilities.
+  { kind: 'required', re: new RegExp(String.raw`^you:?$|\b(requirements?|qualifications?|what you'?ll need|what you should have|what we('?re)? look(ing)? for|what would make you a strong fit|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about\s+${SECOND_PERSON_SUBJECT})\b`, 'i') },
   { kind: 'responsibilities', re: /\b(responsibilities|what you'?ll do|what you will do|the role|(your|the) impact|make an impact|day[- ]to[- ]day|in this role|duties)\b/i },
 ];
 
@@ -825,8 +828,37 @@ function isCompanySpecialFooterHeading(line: string, company: string | null | un
   return heading === `what makes ${companyName} special`;
 }
 
+function restoreFlattenedCandidateSection(jdText: string): string {
+  if (jdText.split(/\r?\n/).length > 3) return jdText;
+  const responsibility = /what you['’]ll do:/i.exec(jdText);
+  if (!responsibility) return jdText;
+  const afterResponsibility = responsibility.index + responsibility[0].length;
+  const candidateHeading = /\sYou\s+(?=(?:Current|Fluent|You've played with|You're hungry|You'd rather|You're comfortable)\b)/g;
+  candidateHeading.lastIndex = afterResponsibility;
+  const candidate = candidateHeading.exec(jdText);
+  if (!candidate) return jdText;
+  const footerHeading = /\sComp and Benefits\s+/gi;
+  footerHeading.lastIndex = candidate.index + candidate[0].length;
+  const footer = footerHeading.exec(jdText);
+  if (!footer) return jdText;
+
+  const candidateText = jdText
+    .slice(candidate.index + candidate[0].length, footer.index)
+    .trim()
+    .replace(/\s+(?=(?:Fluent|You've played with|You're hungry|You'd rather|You're comfortable)\b)/g, '\n');
+  return [
+    jdText.slice(0, responsibility.index).trimEnd(),
+    responsibility[0],
+    jdText.slice(afterResponsibility, candidate.index).trim(),
+    'You',
+    candidateText,
+    'Comp and Benefits',
+    jdText.slice(footer.index + footer[0].length).trimStart(),
+  ].filter(Boolean).join('\n');
+}
+
 export function segmentJd(jdText: string, context?: JdContext): JdSection[] {
-  const lines = jdText.split(/\r?\n/);
+  const lines = restoreFlattenedCandidateSection(jdText).split(/\r?\n/);
   const sections: JdSection[] = [];
   let current: JdSection = { kind: 'body', weight: SECTION_WEIGHT.body, text: '' };
 

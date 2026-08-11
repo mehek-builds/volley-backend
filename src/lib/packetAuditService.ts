@@ -13,9 +13,11 @@ import {
   type ApplicationReviewState,
 } from './applicationReview';
 import {
+  canonicalizePacketAuditTerms,
   createPacketAudit,
   createApplicantSnapshotEvidencePointer,
   createResumeEvidencePointer,
+  packetAuditEvidenceSupportsHighlight,
   packetAuditIsSubmissionReady,
   verifyCurrentPacketAudit,
   type PacketAudit,
@@ -174,12 +176,17 @@ function evidenceForClause(
 ): EvidencePointer[] | undefined {
   if (clause.basis === 'degree') {
     const evidence = spec.degree ? [createResumeEvidencePointer(spec, '/degree')] : [];
-    if (/\b(currently\s+enrolled|enrolled|pursuing|currently\s+studying)\b/i.test(clause.text)) {
+    if (/\b(current\s+(?:cs|ml)\b|currently\s+enrolled|enrolled|pursuing|currently\s+studying|\b(?:undergrad|master'?s)\s+student\b)/i.test(clause.text)) {
       const profileValue = review.applicant_snapshot?.profile.currently_enrolled;
       const path = typeof profileValue === 'boolean'
         ? '/profile/currently_enrolled'
         : '/application_profile/currently_enrolled';
       evidence.push(createApplicantSnapshotEvidencePointer(review.applicant_snapshot, path));
+    }
+    if (/\b(?:project(?:\s+or\s+internship)?|internship)\s+track record\b/i.test(clause.text)) {
+      const entryIndex = spec.experience.findIndex((entry) => entry.bullets.length > 0
+        && (entry.type === 'project' || /\bintern(?:ship)?\b/i.test(`${entry.title} ${entry.org}`)));
+      if (entryIndex >= 0) evidence.push(createResumeEvidencePointer(spec, `/experience/${entryIndex}/bullets/0`));
     }
     return evidence.length > 0 ? evidence : undefined;
   }
@@ -193,6 +200,24 @@ function evidenceForClause(
       .filter(({ entry }) => entry.date_range.trim() && (!professionalOnly || entry.type === 'job'))
       .map(({ index }) => createResumeEvidencePointer(spec, `/experience/${index}/date_range`));
     return evidence.length > 0 ? evidence : undefined;
+  }
+  if (clause.basis === 'onsite-commitment') {
+    const profile = review.applicant_snapshot?.application_profile;
+    if (!profile?.onsite_commitment) return undefined;
+    const evidence = [createApplicantSnapshotEvidencePointer(
+      review.applicant_snapshot,
+      '/application_profile/onsite_commitment',
+    )];
+    if (profile.onsite_commitment === 'listed_locations') {
+      const locationIndex = (profile.onsite_locations ?? [])
+        .findIndex((location) => /\b(?:san francisco|san fran|sf)\b/i.test(location));
+      if (locationIndex < 0) return undefined;
+      evidence.push(createApplicantSnapshotEvidencePointer(
+        review.applicant_snapshot,
+        `/application_profile/onsite_locations/${locationIndex}`,
+      ));
+    }
+    return evidence;
   }
   const quoted = (clause.evidence ?? '').trim().replace(/^"|"$/g, '');
   const evidence = specStrings(spec).find((value) => value.quote === quoted)
@@ -299,6 +324,10 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
     currentlyEnrolled: review.applicant_snapshot?.profile.currently_enrolled
       ?? review.applicant_snapshot?.application_profile.currently_enrolled
       ?? null,
+    projectOrInternshipEvidence: spec.experience.find((entry) => entry.bullets.length > 0
+      && (entry.type === 'project' || /\bintern(?:ship)?\b/i.test(`${entry.title} ${entry.org}`)))?.bullets[0] ?? null,
+    onsiteCommitment: review.applicant_snapshot?.application_profile.onsite_commitment ?? null,
+    onsiteLocations: review.applicant_snapshot?.application_profile.onsite_locations ?? null,
   };
   const scored = await scorePosting(
     review.jd_text,
@@ -318,6 +347,7 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
     const evidence = evidenceForTerm(term, spec, review.jd_text, context);
     if (evidence) termEvidence.set(term.term, evidence);
   }
+  let hasUngroundedCoveredClause = false;
   const clauses = auditableClauses.map((clause, index) => {
     const offset = offsets[index]!;
     let rawEvidence = clause.verdict === 'met' && clause.evidence
@@ -333,16 +363,18 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
         .find((value): value is EvidencePointer => Boolean(value));
       rawEvidence = fallbackEvidence ? [fallbackEvidence] : undefined;
     }
+    const groundedCovered = clause.verdict === 'met' && Boolean(rawEvidence?.length);
+    if (clause.verdict === 'met' && !groundedCovered) hasUngroundedCoveredClause = true;
     return {
       text: clause.text,
       start: offset.start,
       end: offset.end,
-      verdict: clause.verdict === 'met'
+      verdict: groundedCovered
         ? 'covered' as const
         : clause.verdict === 'unmet'
           ? 'missing' as const
           : 'unscoreable' as const,
-      ...(rawEvidence ? { evidence: rawEvidence } : {}),
+      ...(groundedCovered ? { evidence: rawEvidence } : {}),
     };
   });
   const edited = new Set(review.edited_terms.map(normalized));
@@ -361,16 +393,18 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
     }
     return null;
   };
-  const auditedEditedTerms = new Set<string>();
   for (const term of match.matched) {
     const occurrence = occurrenceInsideClause(term, 'covered');
     const evidence = termEvidence.get(term.term);
     if (!occurrence || !evidence) continue;
+    if (!packetAuditEvidenceSupportsHighlight(
+      evidence.quote,
+      review.jd_text.slice(occurrence.start, occurrence.end),
+    )) continue;
     if (!clauseFor(occurrence, 'covered')) continue;
     const isEdited = edited.has(normalized(term.term)) || edited.has(normalized(term.display));
     const target = isEdited ? terms.edited : terms.covered;
     target.push({ ...occurrence, evidence });
-    if (isEdited) auditedEditedTerms.add(normalized(review.jd_text.slice(occurrence.start, occurrence.end)));
   }
   for (const term of match.missing) {
     const occurrence = occurrenceInsideClause(term, 'missing');
@@ -378,12 +412,14 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
   }
   const degraded = scored.clauses.some((clause) => clause.verdict === 'pending'
     || (clause.verdict === 'unscoreable' && clause.basis !== 'none')
-    || (clause.verdict === 'unscoreable' && /\b\d+(?:\.\d+)?\+?\s*(?:years?|yrs?)\b/i.test(clause.text)));
+    || (clause.verdict === 'unscoreable' && /\b\d+(?:\.\d+)?\+?\s*(?:years?|yrs?)\b/i.test(clause.text)))
+    || hasUngroundedCoveredClause;
+  const canonicalTerms = canonicalizePacketAuditTerms(terms, review.jd_text.length);
   return {
     spec,
     clauses,
-    terms,
-    editedTerms: [...auditedEditedTerms],
+    terms: canonicalTerms,
+    editedTerms: canonicalTerms.edited.map((term) => normalized(review.jd_text.slice(term.start, term.end))),
     rejected: scored.rejected,
     degraded,
   };
