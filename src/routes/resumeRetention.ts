@@ -2,7 +2,12 @@ import { FastifyInstance, FastifyRequest, FastifyReply, FastifyPluginOptions } f
 import { db } from '../db/index';
 import { profiles } from '../db/schema';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
-import { sweepExpiredResumeBlobs, RESUME_RETENTION_DAYS } from '../lib/resumeAccess';
+import {
+  sweepExpiredResumeBlobs,
+  RESUME_RETENTION_DAYS,
+  SUBMISSION_PREVIEW_RETENTION_DAYS,
+  type UserBlobCategory,
+} from '../lib/resumeAccess';
 import { claimCounterSlot } from '../middleware/quota';
 
 export const LEGACY_ORIGINAL_CLEANUP_OPERATION_ID =
@@ -10,7 +15,16 @@ export const LEGACY_ORIGINAL_CLEANUP_OPERATION_ID =
 export const RETENTION_OPERATION_COUNTER_KEY = 'system:resume-retention-operation';
 export const RETENTION_OPERATION_COUNTER_KIND = 'one-shot';
 
-type SweepResult = { scanned: number; deleted: number };
+// The breakdown fields are optional because they describe a sweep's own bookkeeping, not the
+// contract a caller depends on: the production implementation always fills them, and a test
+// double that only cares about ordering can still return the two counts and nothing else.
+type SweepResult = {
+  scanned: number;
+  deleted: number;
+  deletedByCategory?: Partial<Record<UserBlobCategory, number>>;
+  unclassified?: number;
+  unclassifiedSample?: string[];
+};
 
 export type ResumeRetentionDependencies = {
   claimCounterSlot: (
@@ -101,15 +115,42 @@ async function handleSweep(
   }
 
   try {
-    const { scanned, deleted } = await dependencies.sweepExpiredResumeBlobs();
+    const { scanned, deleted, deletedByCategory, unclassified, unclassifiedSample } =
+      await dependencies.sweepExpiredResumeBlobs();
     // The blob deletion succeeded, so stale legacy pointers can no longer lead an export or
     // onboarding response to claim the original still exists.
     await dependencies.clearLegacyPointers();
+    // A key shape no retention rule recognises is kept, because deleting an artifact nobody has
+    // classified is the worse mistake - but it is never kept SILENTLY. Form previews sat
+    // unswept for the life of the feature because a new prefix simply fell through the old
+    // allowlist and nothing said so; this is the line that would have said so on day one.
+    if (unclassified) {
+      fastify.log.warn(
+        { unclassified, sample: unclassifiedSample },
+        'resume retention sweep found blobs no retention rule classifies: they are being KEPT indefinitely and need a retention decision',
+      );
+    }
     // Logged at info on every run, including no-op runs: a retention promise that quietly stops
     // running looks identical to one that has nothing to do, and the privacy policy now states
     // this window as fact.
-    fastify.log.info({ scanned, deleted, retentionDays: RESUME_RETENTION_DAYS }, 'resume retention sweep complete');
-    return reply.status(200).send({ scanned, deleted, retention_days: RESUME_RETENTION_DAYS });
+    fastify.log.info(
+      {
+        scanned,
+        deleted,
+        deletedByCategory,
+        retentionDays: RESUME_RETENTION_DAYS,
+        previewRetentionDays: SUBMISSION_PREVIEW_RETENTION_DAYS,
+      },
+      'resume retention sweep complete',
+    );
+    return reply.status(200).send({
+      scanned,
+      deleted,
+      deleted_by_category: deletedByCategory,
+      unclassified,
+      retention_days: RESUME_RETENTION_DAYS,
+      preview_retention_days: SUBMISSION_PREVIEW_RETENTION_DAYS,
+    });
   } catch (err) {
     fastify.log.error(err, 'resume retention sweep failed');
     return reply.status(500).send({ error: 'sweep failed' });

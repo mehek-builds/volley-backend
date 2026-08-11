@@ -147,7 +147,15 @@ test('the normal daily path remains unclaimed and performs the same sweep', asyn
       headers: authorizedHeaders,
     });
     assert.equal(response.statusCode, 200);
-    assert.deepEqual(response.json(), { scanned: 4, deleted: 2, retention_days: 30 });
+    // Both windows are reported, because a sweep that silently stopped covering one category is
+    // exactly the failure this route exists to make visible. deleted_by_category and unclassified
+    // are absent here only because this harness's sweep double does not compute them.
+    assert.deepEqual(response.json(), {
+      scanned: 4,
+      deleted: 2,
+      retention_days: 30,
+      preview_retention_days: 7,
+    });
     assert.equal(harness.calls.claim, 0);
     assert.equal(harness.calls.sweep, 1);
     assert.equal(harness.calls.clear, 1);
