@@ -1242,6 +1242,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         current.status,
         Boolean(current.submission_claimed_at),
         current.unverified_submission?.resolution,
+        // The row itself, so a packet whose stored evidence proves nothing reached the employer can
+        // answer the retry question without the applicant being sent to look for an application that
+        // was never filed. See submissionProvablyNotSent.
+        current,
       );
       if (disposition === 'submitted') {
         return reply.status(200).send({ application_id: row.id, review: current, cover_letter: storedCoverLetter(row) });

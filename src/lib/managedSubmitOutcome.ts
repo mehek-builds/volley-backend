@@ -358,6 +358,60 @@ export function isManagedNoSubmitControl(message: string): boolean {
   return message.trim() === 'Atomic submit control was missing or ambiguous';
 }
 
+/**
+ * Everything a stored row keeps about whether its last run reached the employer.
+ *
+ * An ApplicationReviewState satisfies this structurally, so callers pass the row itself. The
+ * `submitOutcome` field is the runner's own post-click read, which is NOT persisted: a caller still
+ * holding the result can supply it, and a row read back out of the database cannot.
+ */
+export type PreClickNoSendEvidence = Pick<
+  ApplicationReviewState,
+  'submission_attempted_at' | 'receipt' | 'unverified_submission' | 'security_code' | 'submission_error'
+> & MaybeOutcome;
+
+/* NOTHING WAS SENT, AND THE ROW CAN PROVE IT.
+ *
+ * kos.ai, production, 2026-08-11. The managed run stopped inside the atomic chooser, which throws
+ * before submitHandle.click is ever reached, and the row it left behind carried: no
+ * submission_attempted_at, no receipt, no unverified_submission, no security_code, no
+ * browser_session_id, and submission_error 'Atomic submit control was missing or ambiguous'. Every
+ * one of those is a statement that no application exists on the employer side. The packet still sat
+ * at needs_attention wearing the claim its run had taken, which submitRequestDisposition refuses,
+ * and "Try again" answered "This application cannot start another submission run from its current
+ * state" forever. PR 494 releases the claim on this path, but a fix that only runs at write time
+ * cannot reach a row that was already written.
+ *
+ * SO THE PROOF IS ASKED OF THE ROW RATHER THAN OF THE CLOCK, and it has to be a POSITIVE proof.
+ * Absence alone proves nothing: the Skydio shape - a run killed mid-submit on a build that predates
+ * unverified_submission - has all the same fields empty and is precisely the case where an employer
+ * may hold the application. What separates them is a recorded stop that is known to occur before the
+ * click, which is what isManagedNoSubmitControl and managedSubmitVerdict's 'not_attempted' arm
+ * already mean. This function adds no new classification of its own; it asks the two that exist.
+ *
+ * The five refusals below are each a case where something may have reached the employer, and the
+ * security_code one is the least obvious and the most important: a retained code wall is the
+ * employer's own record that an application arrived and is parked at verification, and it stays true
+ * even when THIS run never pressed anything. See delayedSecurityCodeHandoffReview.
+ */
+export function submissionProvablyNotSent(evidence: PreClickNoSendEvidence): boolean {
+  if (evidence.submission_attempted_at) return false;
+  if (evidence.receipt) return false;
+  if (evidence.unverified_submission) return false;
+  if (evidence.security_code) return false;
+  // Checked ahead of the verdict rather than through it. managedSubmitVerdict believes a runner that
+  // reports state 'not_attempted', and a result that says both 'not_attempted' and pressed:true is
+  // contradicting itself about the one fact that matters here.
+  if (readManagedSubmitOutcome(evidence)?.pressed === true) return false;
+  const verdict = managedSubmitVerdict(evidence);
+  if (verdict.kind === 'not_attempted') return true;
+  // Any other reported verdict describes a click that landed, so it is not this function's case.
+  if (verdict.kind !== 'unreported') return false;
+  // No outcome was reported at all, which is every persisted row. The stored stop is the only proof
+  // left, and it must name the chooser that throws before the click.
+  return isManagedNoSubmitControl(evidence.submission_error ?? '');
+}
+
 /* WHAT A SENT APPLICATION LOOKS LIKE ONCE SHE GETS THERE, per board.
  *
  * "Check the portal" is not an instruction, it is a shrug. Ashby's confirmation is a green panel
