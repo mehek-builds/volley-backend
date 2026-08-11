@@ -477,6 +477,37 @@ test('a failing verdict still withholds a message that has not been forwarded', 
   assert.deepEqual(calls.decisions, ['withheld:sender_authentication_failed']);
 });
 
+/* THE QUESTION IS ABOUT NOW, and this is the assertion that pins it.
+ *
+ * "Is a run spending a code" was asked with the row's own received_at, which never advances, so for
+ * a message that arrived during a window the answer was frozen at yes forever and no later delivery
+ * or sweep could release it. Mutating the argument back to the frozen value keeps every other test
+ * in the suite green, which is why this one reads the timestamp the handler actually passes rather
+ * than only the outcome. */
+test('the in-flight question is asked about the present, not about when the message arrived', async () => {
+  const asked: Date[] = [];
+  const { deps } = handlerDeps();
+  const longAgo = new Date(Date.now() - 45 * 60 * 1000);
+  await handleStoredEmployerMessage({
+    aliasRow: ALIAS_ROW,
+    message: storedMessage({ received_at: longAgo }),
+    classification: 'verification_code',
+    receivedAt: longAgo,
+  }, {
+    ...deps,
+    securityCodeInFlight: async ({ at }) => {
+      asked.push(at);
+      return false;
+    },
+  });
+  assert.equal(asked.length, 1);
+  assert.ok(
+    Math.abs(asked[0].getTime() - Date.now()) < 5000,
+    'the window has to be measured from now, or it can never close',
+  );
+  assert.notEqual(asked[0].getTime(), longAgo.getTime(), 'and never from the frozen arrival time');
+});
+
 /* The stickiness is deliberately narrow. A code withheld because a run was spending it must forward
  * once the run is over, or a one-off race would bury the message permanently. */
 test('the security-code withhold is not sticky, because that window closes', async () => {

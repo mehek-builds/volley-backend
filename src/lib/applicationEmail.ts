@@ -492,9 +492,13 @@ const READER_CONTEXT_WINDOW = 100;
  *
  * Two components each correct on their own, disagreeing about what a newline means.
  *
- * The invariant this restores, and the one the parity test asserts directly: ANYTHING THE READER
- * CAN EXTRACT A CODE FROM CLASSIFIES AS verification_code. The classifier may be broader; it may
- * never be narrower. */
+ * WHAT THIS DOES AND DOES NOT ENTITLE YOU TO CONCLUDE. It mirrors the INNER half of the reader,
+ * and the inner half is not the reader: extractVerificationCode gates it on the sender domain, the
+ * recipient alias, a ten minute window and a single unambiguous candidate before it will believe
+ * anything it returns. None of those gates exist here, so this answers a deliberately weaker
+ * question than "is there a code in this message". It answers "is there something in here the
+ * reader would be willing to look at", and on an ordinary application receipt that includes the
+ * year. See the call site, which is LAST for exactly that reason. */
 function readerCouldExtractACode(flattened: string): boolean {
   for (const match of flattened.matchAll(CODE_SHAPED_TOKEN_GLOBAL)) {
     const at = match.index ?? 0;
@@ -543,7 +547,7 @@ export function classifyApplicationEmail(subject = '', text = ''): ApplicationEm
     new RegExp(`\\bcode\\b\\s*(?:is|:|=|-)\\s*${CODE_SHAPED_TOKEN}`).test(flattened)
     || new RegExp(`\\b(?:enter|use|type|paste|copy|provide|submit|input)\\b.{0,60}\\bcode\\b.{0,80}${CODE_SHAPED_TOKEN}`).test(flattened)
     || new RegExp(`${CODE_SHAPED_TOKEN}\\s+is\\s+your\\b.{0,30}\\bcode\\b`).test(flattened);
-  if (namesACredential || handsOverACode || readerCouldExtractACode(flattened)) {
+  if (namesACredential || handsOverACode) {
     return 'verification_code';
   }
   /* BEFORE the account-wall test, so a confirmation that opens "Welcome to Acme" and closes with a
@@ -577,6 +581,38 @@ export function classifyApplicationEmail(subject = '', text = ''): ApplicationEm
   if (/\b(recruiter|talent|hiring team|next steps|following up)\b/.test(haystack)) {
     return 'recruiter_reply';
   }
+  /* LAST, AND ONLY OVER 'other'. This limb used to sit at the top, and putting it there was a
+   * regression that re-created the bug this whole area exists to fix.
+   *
+   * The instruction it was written to satisfy was "nothing the reader can extract a code from
+   * escapes verification_code". That invariant is FALSE ON ITS FACE, and the reason is worth
+   * keeping: extractCodeFromVerificationText is the INNER half of the reader. It is safe only
+   * because its caller gates it on the sender domain, the recipient alias, a ten minute window and
+   * `candidates.size === 1`. The classifier has none of those gates, so mirroring the inner half
+   * alone means any four to eight digit run within a hundred characters of the word "confirmation"
+   * wins. A YEAR IS A FOUR DIGIT RUN. Measured against origin/main, an ordinary "Thank you for
+   * applying" receipt carrying "2026" classified verification_code, which stopped it resolving its
+   * packet at all: resolution only fires on submission_confirmation, and the backfill filters on
+   * the same classification, so the packet could not even be recovered later. That is the Cresta
+   * bug rebuilt out of a well-meant invariant.
+   *
+   * So the true statement is the weaker one, and it is what this position expresses: AN OTHERWISE
+   * UNRECOGNISED MESSAGE THAT THE READER COULD TAKE A CODE FROM IS TREATED AS A CREDENTIAL
+   * HANDOVER. It can upgrade 'other'. It can never outrank a receipt, an account-wall step, an
+   * interview or a recruiter reply, because each of those has already returned above it.
+   *
+   * IT IS STILL NOT EXACT, and cannot be. An offer letter that happens to say "confirmation" beside
+   * a salary or a year still lands here and is withheld while a run is spending a code. That is why
+   * a withhold has to be recoverable rather than permanent; see releaseExpiredSecurityCodeWithholds
+   * and the delivery-time window in handleStoredEmployerMessage. Precision here buys less than
+   * reversibility there.
+   *
+   * KNOWN AND DELIBERATELY NOT CHASED: the reader's stripMarkup also strips tags, while this
+   * flattens whitespace only, so a code separated from its context by more than about forty bytes
+   * of markup still escapes. That gap is identical on origin/main, this change fixed the plaintext
+   * and zero-gap cases and made nothing worse, and closing it means sharing a stripper across the
+   * import cycle. Not new, not a regression, not chased. */
+  if (readerCouldExtractACode(flattened)) return 'verification_code';
   return 'other';
 }
 
@@ -649,7 +685,15 @@ export function managedSessionIsConsumingSecurityCode(
  *   whoever types it first. If the runner is mid-submit and she is also handed the code, the two
  *   race, the code burns, and the application is filed by neither. Outside that window (see
  *   managedSessionIsConsumingSecurityCode) nothing is racing her, so the code forwards like
- *   everything else, which is what makes a stalled or failed run recoverable by hand.
+ *   everything else.
+ *
+ *   THIS ONE IS A PAUSE, NOT A DELETION, and that took two mechanisms rather than a sentence. The
+ *   window question is asked at DELIVERY time rather than against the row's frozen received_at, so
+ *   it can close; and releaseExpiredSecurityCodeWithholds re-runs the forwarding path for rows the
+ *   window has since released, because the webhook answers 202 on a withhold and Resend therefore
+ *   never redelivers anything for the corrected question to be asked about. An earlier version of
+ *   this comment claimed the outcome was "recoverable by hand" when nothing in the system could
+ *   recover it. Reversibility is what buys the right to withhold on an inexact classifier.
  *
  *   applicant_reply is listed too, but it is not a policy: it is her own message on its way OUT
  *   through relayApplicantReply, and mailing it back to her would be an echo between two mail
@@ -1425,7 +1469,13 @@ export async function handleStoredEmployerMessage(input: {
     ? await deps.securityCodeInFlight({
       applicationId: aliasRow.generated_resume_id,
       userId: aliasRow.user_id,
-      at: message?.received_at ?? receivedAt,
+      /* NOW, NOT WHEN THE MESSAGE ARRIVED, and the difference is the difference between a pause
+       * and a deletion. "Is a run spending a code" is a question about the present. Asked with the
+       * row's own received_at it was frozen at the instant the message landed, so a message
+       * withheld once answered yes forever and no later delivery could ever release it. Combined
+       * with a classifier that cannot be exact, that turned every misfiling into a permanent
+       * disappearance rather than a ten minute delay. */
+      at: new Date(),
     })
     : false;
   const forwardingDecision = applicationEmailForwardingDecision(classification, {
@@ -1812,6 +1862,86 @@ async function listStoredConfirmations(query: { userId?: string; limit: number }
     subject: row.subject,
     receivedAt: row.receivedAt ?? row.createdAt,
   }));
+}
+
+export type ReleasedWithholdSummary = {
+  examined: number;
+  released: number;
+  still_in_flight: number;
+  /** Set when the migration has not run, so nothing could be examined. Never confused with zero. */
+  unavailable?: 'forward_decision_column_missing';
+};
+
+/* THE WAY OUT FOR A MESSAGE WITHHELD WHILE A RUN WAS SPENDING A CODE.
+ *
+ * Recomputing the window at delivery time is necessary and not sufficient, because there is no
+ * second delivery to recompute at: the webhook answers 202 on a withhold, deliberately, so Resend
+ * treats it as accepted and never retries. Without this function a withhold is therefore permanent
+ * in practice however correct the window question becomes, and "recoverable" would be a claim with
+ * nothing behind it. That matters more than it used to: the classifier provably cannot be exact
+ * (see the last limb of classifyApplicationEmail), so some ordinary employer mail will be withheld
+ * by mistake, and the design has to make that a delay rather than a disappearance.
+ *
+ * It re-runs the ORDINARY forwarding path rather than sending anything itself, so the claim, the
+ * send, the markForwarded and the decision annotation are all the same code as a live delivery.
+ * Only rows withheld for the code reason are eligible: a row refused for authentication carries a
+ * different decision value, is never selected here, and stays refused.
+ *
+ * NOT WIRED TO A SCHEDULER, in the same way and for the same reason as
+ * reconcileSubmissionConfirmations: there is no cron entry for it and nothing calls it, because
+ * adding one is a separate decision with its own blast radius. It is callable from a route, a
+ * script, or a one-off. */
+export async function releaseExpiredSecurityCodeWithholds(
+  input: { userId?: string; limit?: number } = {},
+): Promise<ReleasedWithholdSummary> {
+  const limit = Math.min(Math.max(input.limit ?? 100, 1), 500);
+  let rows;
+  try {
+    rows = await db
+      .select({
+        message: LEDGER_ROW_SELECTION,
+        alias: application_email_aliases.alias,
+        user_id: application_email_aliases.user_id,
+        generated_resume_id: application_email_aliases.generated_resume_id,
+        forward_to: application_email_aliases.forward_to,
+      })
+      .from(application_email_messages)
+      .innerJoin(application_email_aliases, eq(application_email_messages.alias, application_email_aliases.alias))
+      .where(and(
+        eq(application_email_messages.forward_decision, withheldForwardDecision('security_code_in_flight')),
+        sql`${application_email_messages.forwarded_at} is null`,
+        sql`${application_email_messages.direction} <> 'outbound'`,
+        ...(input.userId ? [eq(application_email_messages.user_id, input.userId)] : []),
+      ))
+      .orderBy(desc(sql`coalesce(${application_email_messages.received_at}, ${application_email_messages.created_at})`))
+      .limit(limit);
+  } catch (error) {
+    if (!isUndefinedColumnError(error)) throw error;
+    return { examined: 0, released: 0, still_in_flight: 0, unavailable: 'forward_decision_column_missing' };
+  }
+
+  let released = 0;
+  let stillInFlight = 0;
+  for (const row of rows) {
+    const result = await handleStoredEmployerMessage({
+      aliasRow: {
+        alias: row.alias,
+        user_id: row.user_id,
+        generated_resume_id: row.generated_resume_id,
+        forward_to: row.forward_to,
+      },
+      message: row.message,
+      classification: storedApplicationEmailClassification(row.message.classification),
+      receivedAt: row.message.received_at ?? new Date(),
+      /* False, not re-derived: the stored decision says this row was withheld for the code, and a
+       * row withheld for authentication is not selected above. The handler still consults the
+       * stored decision itself, so a refusal recorded later cannot be released here either. */
+      senderAuthenticationFailed: false,
+    }, storedEmployerMessageDeps());
+    if (result.forwarded) released += 1;
+    else if (result.reason === 'security_code_in_flight') stillInFlight += 1;
+  }
+  return { examined: rows.length, released, still_in_flight: stillInFlight };
 }
 
 export type ApplicationEmailHealth = {

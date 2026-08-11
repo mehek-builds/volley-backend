@@ -360,18 +360,24 @@ test('forwarding is a list of what to WITHHOLD, and everything not on it reaches
   }
 });
 
-/* THE INVARIANT BETWEEN THE CLASSIFIER AND THE READER, asserted by running BOTH.
+/* THE INVARIANT BETWEEN THE CLASSIFIER AND THE READER, corrected. The strong version was false.
  *
- * The gate only works if the classifier's verification_code set contains everything the managed
- * session's reader can pull a code out of. It did not. The reader calls stripMarkup, which
- * collapses whitespace, so a code on its own line sits beside the sentence introducing it; the
- * classifier used `.` with no `s` flag and could not cross the newline. Two components, each
- * correct read alone, disagreeing about what a newline means. Driven end to end with a live code
- * window, three ordinary ATS layouts classified account_registration, which has no in-flight gate,
- * and forwarded while the runner could still read the code out of the same row.
+ * This test used to assert "if the reader gets a code, the classifier says verification_code", and
+ * the classifier was built to satisfy it. That invariant cannot hold and should never have been
+ * asked for. extractCodeFromVerificationText is the INNER half of the reader: it is safe only
+ * because extractVerificationCode gates it on the sender domain, the recipient alias, a ten minute
+ * window and a single unambiguous candidate. Nothing the classifier can see supplies those gates,
+ * so the honest measurement is that THE READER RETURNS A CODE FOR AN ORDINARY APPLICATION RECEIPT.
+ * It returns "2026".
  *
- * This asserts the implication directly rather than through examples of it: for every body, if the
- * reader gets a code, the classifier says verification_code. Nothing about newlines is assumed. */
+ * Satisfying the strong version therefore promoted receipts, interviews and offers into
+ * verification_code, and a receipt that is not classified submission_confirmation never resolves
+ * its packet: resolution fires only on that classification and the backfill filters on it too. The
+ * Cresta bug, rebuilt out of an invariant that sounded careful.
+ *
+ * The true statement is weaker and is what the code now expresses: AN OTHERWISE UNRECOGNISED
+ * MESSAGE THAT THE READER COULD TAKE A CODE FROM IS TREATED AS A CREDENTIAL HANDOVER. Everything
+ * the classifier already recognises outranks it. */
 const CODE_CORPUS: Array<{ subject: string; text: string; readerFinds: string | null }> = [
   {
     subject: 'Your security code',
@@ -401,7 +407,7 @@ const CODE_CORPUS: Array<{ subject: string; text: string; readerFinds: string | 
   },
 ];
 
-test('anything the managed reader can extract a code from is classified as a code', () => {
+test('an otherwise unrecognised message the reader could take a code from is treated as a code', () => {
   for (const { subject, text, readerFinds } of CODE_CORPUS) {
     // The real reader, not a restatement of it.
     assert.equal(extractCodeFromVerificationText(`${subject}\n${text}`), readerFinds, subject);
@@ -413,6 +419,112 @@ test('anything the managed reader can extract a code from is classified as a cod
       { forward: false, reason: 'security_code_in_flight' },
       subject,
     );
+  }
+});
+
+/* THE REGRESSION THE STRONG INVARIANT CAUSED, pinned shape by shape.
+ *
+ * Every one of these makes the real reader return a code, so under "anything the reader can extract
+ * a code from is a verification_code" every one of them was misclassified. Three were receipts,
+ * which is the expensive kind: a receipt that is not submission_confirmation never resolves its
+ * packet, and listStoredConfirmations filters on the same classification so the backfill cannot
+ * recover it either. The packet sits in `submitting` forever with the employer's own receipt one
+ * row away.
+ *
+ * The expectations below are the MEASURED behaviour, including the two that are still wrong, which
+ * are recorded as facts rather than hidden behind a passing test. */
+const READER_FALSE_POSITIVES: Array<{
+  name: string;
+  subject: string;
+  text: string;
+  readerFinds: string;
+  classification: ApplicationEmailClassification;
+  exact: boolean;
+}> = [
+  {
+    name: 'receipt + copyright year',
+    subject: 'Thank you for applying to Cresta',
+    text: 'We have received your application. This email is your confirmation. Copyright 2026 Cresta Inc.',
+    readerFinds: '2026',
+    classification: 'submission_confirmation',
+    exact: true,
+  },
+  {
+    name: 'receipt + confirmation number',
+    subject: 'Thank you for applying',
+    text: 'Your application has been received. Confirmation number: 48392017.',
+    readerFinds: '48392017',
+    classification: 'submission_confirmation',
+    exact: true,
+  },
+  {
+    name: 'receipt + reference number',
+    subject: 'Application received',
+    text: 'Thanks for applying. Your confirmation reference is 7741204.',
+    readerFinds: '7741204',
+    classification: 'submission_confirmation',
+    exact: true,
+  },
+  {
+    name: 'interview + dial-in number',
+    subject: 'Interview availability',
+    text: 'Can you schedule a call with our recruiter? Dial-in confirmation 8461920.',
+    readerFinds: '8461920',
+    classification: 'interview_request',
+    exact: true,
+  },
+  {
+    name: 'recruiter note + year',
+    subject: 'Quick note from our talent team',
+    text: 'Our talent team wanted to reach out. Confirmation of interest by 2026 please.',
+    readerFinds: '2026',
+    classification: 'recruiter_reply',
+    exact: true,
+  },
+  /* STILL WRONG, and recorded rather than papered over. An offer letter is 'other' on origin/main,
+   * so nothing outranks the last limb and a salary or a year beside the word "confirmation" reads
+   * as a code. Demoting the limb cannot fix these, and neither can any ordering: the classifier has
+   * none of the gates that make the reader safe. What makes it tolerable is that the consequence is
+   * now a pause rather than a deletion. It costs a withhold only while a run is actually spending a
+   * code, and releaseExpiredSecurityCodeWithholds forwards it once that window closes. */
+  {
+    name: 'offer + confirmation + year',
+    subject: 'Your offer from Acme',
+    text: 'We are delighted to extend an offer. Please send written confirmation by 2026.',
+    readerFinds: '2026',
+    classification: 'verification_code',
+    exact: false,
+  },
+  {
+    name: 'offer + confirmation + salary',
+    subject: 'Your offer from Acme',
+    text: 'Base salary 120000. Reply with your confirmation.',
+    readerFinds: '120000',
+    classification: 'verification_code',
+    exact: false,
+  },
+];
+
+test('a message the reader would take a year out of is still a receipt, an interview or a reply', () => {
+  for (const shape of READER_FALSE_POSITIVES) {
+    // The reader really does return a code for every one of these. That is the point.
+    assert.equal(extractCodeFromVerificationText(`${shape.subject}\n${shape.text}`), shape.readerFinds, shape.name);
+    assert.equal(classifyApplicationEmail(shape.subject, shape.text), shape.classification, shape.name);
+  }
+  // Five of the seven are exact. The two that are not are offers, and both are known and stated.
+  assert.deepEqual(
+    READER_FALSE_POSITIVES.filter((shape) => !shape.exact).map((shape) => shape.name),
+    ['offer + confirmation + year', 'offer + confirmation + salary'],
+    'the set of known-imprecise shapes must not grow without somebody saying so',
+  );
+});
+
+/* THE EXPENSIVE CONSEQUENCE, asserted directly rather than through the classification alone.
+ * Only submission_confirmation resolves a packet, so a receipt promoted out of that class stops
+ * applications being filed and cannot be recovered by the backfill either. */
+test('a receipt carrying a number still resolves its packet', () => {
+  for (const shape of READER_FALSE_POSITIVES.filter((entry) => entry.classification === 'submission_confirmation')) {
+    assert.equal(classifyApplicationEmail(shape.subject, shape.text), 'submission_confirmation', shape.name);
   }
 });
 

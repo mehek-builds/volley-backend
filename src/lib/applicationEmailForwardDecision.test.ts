@@ -140,6 +140,25 @@ async function messageByProviderId(providerMessageId: string) {
   return rows[0];
 }
 
+/* Move the whole fixture back in time by `minutes`: the run's code request AND the arrival of every
+ * message already stored. That is what the passage of time looks like to both formulations of the
+ * window question, so a test built on it cannot pass by accident on the frozen one. */
+async function ageTheFixtureBy(minutes: number) {
+  const requestedAt = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+  await db.update(schema.generated_resumes).set({
+    spec: {
+      _review: {
+        jd_text: 'fixture',
+        status: 'awaiting_security_code',
+        security_code: { digits: 8, requested_at: requestedAt, submit_was_authorized: true },
+      },
+    },
+  }).where(eq(schema.generated_resumes.id, applicationId));
+  await db.update(schema.application_email_messages)
+    .set({ received_at: new Date(Date.now() - minutes * 60 * 1000) })
+    .where(eq(schema.application_email_messages.user_id, userId));
+}
+
 /* THE ORDINARY ATS LAYOUT, driven through the live path with a code window open.
  *
  * This is how the classifier and the reader were caught disagreeing: the code sits on its own line,
@@ -354,6 +373,95 @@ test('the health probe can see the withheld messages, which last_inbound_message
   // The field that used to be the only message fact here is fresh at the same moment, which is why
   // it could not report the outage.
   assert.ok(health.last_inbound_message_at);
+});
+
+/* A WITHHOLD IS A PAUSE, NOT A DELETION, part one: the window closes on a later delivery.
+ *
+ * The in-flight question used to be asked with the row's own received_at, which never advances, so
+ * a message withheld once was withheld forever. The fixture is aged by moving BOTH the run's code
+ * request and the stored arrival time into the past, which is what twenty minutes passing actually
+ * looks like, so this cannot pass on the frozen formulation: under it the two move together and the
+ * answer stays zero minutes into the window.
+ */
+test('a code withheld during a run is forwarded on a later delivery, once the window has closed', async () => {
+  captureSends();
+  const message = {
+    provider: 'resend' as const,
+    providerMessageId: 'boundary-1',
+    from: 'no-reply@us.greenhouse-mail.io',
+    to: [ALIAS],
+    subject: 'Your security code',
+    text: 'Enter this code to continue: 552104',
+    receivedAt: new Date(),
+  };
+  const first = await service.processInboundApplicationEmail(message);
+  assert.equal(first.classification, 'verification_code');
+  assert.equal(first.forwarded, false, 'the runner is spending it right now');
+  assert.equal(first.reason, 'security_code_in_flight');
+  assert.equal(sends.length, 0);
+
+  await ageTheFixtureBy(20);
+
+  const second = await service.processInboundApplicationEmail(message);
+  assert.equal(second.forwarded, true, 'the run is over, so the message is hers after all');
+  assert.equal(sends.length, 1);
+  const row = await messageByProviderId('boundary-1');
+  assert.ok(row?.forwarded_at);
+  assert.equal(row?.forward_decision, 'forward', 'and the row says what was finally decided');
+});
+
+/* Part two, which is the half that actually runs in production: there IS no later delivery.
+ *
+ * The webhook answers 202 on a withhold, deliberately, so Resend records success and never retries.
+ * Recomputing the window at delivery time is therefore necessary and not sufficient on its own, and
+ * without a sweep "recoverable" would be a claim with nothing behind it. */
+test('the sweep releases what the window has released, with no delivery at all', async () => {
+  // Put the fixture back into a live run and take a fresh withhold that no redelivery will revisit.
+  await ageTheFixtureBy(0);
+  captureSends();
+  const withheld = await service.processInboundApplicationEmail({
+    provider: 'resend',
+    providerMessageId: 'sweep-1',
+    from: 'no-reply@us.greenhouse-mail.io',
+    to: [ALIAS],
+    subject: 'Your security code',
+    text: 'Enter this code to continue: 903471',
+    receivedAt: new Date(),
+  });
+  assert.equal(withheld.forwarded, false);
+  assert.equal(withheld.reason, 'security_code_in_flight');
+  assert.equal(sends.length, 0);
+
+  // Nothing is released while the run is still spending a code.
+  const early = await service.releaseExpiredSecurityCodeWithholds({ userId });
+  assert.equal(early.released, 0, 'the sweep must not race the runner either');
+  assert.ok(early.still_in_flight > 0);
+  assert.equal((await messageByProviderId('sweep-1'))?.forward_decision, 'withheld:security_code_in_flight');
+
+  await ageTheFixtureBy(20);
+  captureSends();
+  const released = await service.releaseExpiredSecurityCodeWithholds({ userId });
+  assert.ok(released.released > 0, 'once the window closes the messages are hers');
+  assert.equal(released.still_in_flight, 0);
+  assert.equal(sends.length, released.released, 'one send per released message, through the ordinary path');
+
+  const row = await messageByProviderId('sweep-1');
+  assert.ok(row?.forwarded_at, 'and the row records the send rather than the refusal');
+  assert.equal(row?.forward_decision, 'forward');
+  assert.equal(row?.direction, 'forwarded');
+});
+
+/* The sweep is scoped to the code reason. A message refused for authentication is a different
+ * decision value, is never selected, and stays refused however long it sits there. */
+test('the sweep never releases a message that was refused for authentication', async () => {
+  const before = await messageByProviderId('spoofed-offer-1');
+  assert.equal(before?.forward_decision, 'withheld:sender_authentication_failed');
+  captureSends();
+  await service.releaseExpiredSecurityCodeWithholds({ userId });
+  const after = await messageByProviderId('spoofed-offer-1');
+  assert.equal(after?.forward_decision, 'withheld:sender_authentication_failed');
+  assert.equal(after?.forwarded_at, null);
+  assert.equal(sends.length, 0);
 });
 
 /* THE DEPLOY THAT LEADS ITS MIGRATION, measured rather than asserted.
