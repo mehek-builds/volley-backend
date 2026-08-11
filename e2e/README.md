@@ -12,6 +12,8 @@ npm run test:e2e
 ```bash
 createdb litos_e2e_jobid
 DATABASE_URL="postgresql://$(whoami)@localhost:5432/litos_e2e_jobid" npx drizzle-kit push --force
+createdb litos_alias_e2e
+DATABASE_URL="postgresql://$(whoami)@localhost:5432/litos_alias_e2e" npx drizzle-kit push --force
 ```
 
 The test connects to `litos_e2e_jobid` on localhost and **truncates its tables on every run**. It
@@ -25,6 +27,21 @@ Phase 1 reports two inventory interpretations: raw postings and distinct roles g
 employer, title, and ATS family. The test inserts two Greenhouse location postings for one role
 and one Lever posting with the same employer and title. It then proves that the public grouped API
 reports two roles across three openings and that the cron inventory query returns the same totals.
+
+## What `packet-alias.e2e.mts` covers
+
+Every generated packet must have a Litos alias row, or the applicant's personal address ends up on
+the employer's form and Litos cannot read the security code the employer mails back.
+
+It connects to `litos_alias_e2e` and deletes from three tables on every run.
+
+The BEFORE side runs `origin/main`'s own `body.application` gate and refuses to start unless it
+still finds that gate in `git show origin/main:src/routes/resume.ts`, so the comparison cannot
+quietly become a story about code that no longer exists. The AFTER side runs the real
+`planPacketApplicantEmail` and the real `ensureApplicationEmailAlias` against the real foreign key.
+
+`POST /resume/generate` is not called over HTTP here either, for the same reason as below: its
+alias code sits behind a live Anthropic call, a PDF render and a blob upload.
 
 ## What `applied-badge.e2e.mts` covers
 
