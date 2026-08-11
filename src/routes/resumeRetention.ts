@@ -7,11 +7,28 @@ import {
   legacyOriginalOwnerIds,
   sweepExpiredResumeBlobs,
   RESUME_RETENTION_DAYS,
-  type ResumeSweepResult,
+  SUBMISSION_PREVIEW_RETENTION_DAYS,
+  type UserBlobCategory,
 } from '../lib/resumeAccess';
 
+// The breakdown fields are optional because they describe a sweep's own bookkeeping, not the
+// contract a caller depends on: the production implementation always fills them, and a test
+// double that only cares about ordering can still return the two counts and nothing else.
+//
+// deletedPathnames is NOT optional, because it is the only one that decides a write. The pointer
+// clear below is scoped from it, so a double that omitted it would silently scope to nobody and
+// the test asserting the scoping would pass without ever exercising it.
+type SweepResult = {
+  scanned: number;
+  deleted: number;
+  deletedPathnames: string[];
+  deletedByCategory?: Partial<Record<UserBlobCategory, number>>;
+  unclassified?: number;
+  unclassifiedSample?: string[];
+};
+
 export type ResumeRetentionDependencies = {
-  sweepExpiredResumeBlobs: () => Promise<ResumeSweepResult>;
+  sweepExpiredResumeBlobs: () => Promise<SweepResult>;
   clearLegacyPointers: (userIds: string[]) => Promise<void>;
 };
 
@@ -86,15 +103,42 @@ async function handleSweep(
   }
 
   try {
-    const { scanned, deleted, deletedPathnames } = await dependencies.sweepExpiredResumeBlobs();
+    const { scanned, deleted, deletedPathnames, deletedByCategory, unclassified, unclassifiedSample } =
+      await dependencies.sweepExpiredResumeBlobs();
     // The blob deletion succeeded, so stale legacy pointers can no longer lead an export or
     // onboarding response to claim the original still exists.
     await dependencies.clearLegacyPointers(legacyOriginalOwnerIds(deletedPathnames));
+    // A key shape no retention rule recognises is kept, because deleting an artifact nobody has
+    // classified is the worse mistake - but it is never kept SILENTLY. Form previews sat
+    // unswept for the life of the feature because a new prefix simply fell through the old
+    // allowlist and nothing said so; this is the line that would have said so on day one.
+    if (unclassified) {
+      fastify.log.warn(
+        { unclassified, sample: unclassifiedSample },
+        'resume retention sweep found blobs no retention rule classifies: they are being KEPT indefinitely and need a retention decision',
+      );
+    }
     // Logged at info on every run, including no-op runs: a retention promise that quietly stops
     // running looks identical to one that has nothing to do, and the privacy policy now states
     // this window as fact.
-    fastify.log.info({ scanned, deleted, retentionDays: RESUME_RETENTION_DAYS }, 'resume retention sweep complete');
-    return reply.status(200).send({ scanned, deleted, retention_days: RESUME_RETENTION_DAYS });
+    fastify.log.info(
+      {
+        scanned,
+        deleted,
+        deletedByCategory,
+        retentionDays: RESUME_RETENTION_DAYS,
+        previewRetentionDays: SUBMISSION_PREVIEW_RETENTION_DAYS,
+      },
+      'resume retention sweep complete',
+    );
+    return reply.status(200).send({
+      scanned,
+      deleted,
+      deleted_by_category: deletedByCategory,
+      unclassified,
+      retention_days: RESUME_RETENTION_DAYS,
+      preview_retention_days: SUBMISSION_PREVIEW_RETENTION_DAYS,
+    });
   } catch (err) {
     fastify.log.error(err, 'resume retention sweep failed');
     return reply.status(500).send({ error: 'sweep failed' });

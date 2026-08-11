@@ -36,6 +36,95 @@ export const DOWNLOAD_TOKEN_TTL_MS = 60 * 60 * 1000;
 // revoked. The spec row in generated_resumes is kept for audit; only the file goes.
 export const RESUME_RETENTION_DAYS = 30;
 
+// How long a filled-form preview screenshot is kept. These are full-page PNGs of a completed
+// application, so one image carries the student's name, address, phone, work history and every
+// free-text answer at once - the same PII class as a generated resume, at roughly twenty times
+// the bytes (465 KB mean against 23 KB, measured over the whole store on 2026-08-11).
+//
+// The number is NOT a guess at how long the file is useful. A preview's functional lifetime is
+// 55 MINUTES. submissionRunner stamps handoff_expires_at = now + HANDOFF_WINDOW_MS on every
+// prepared packet, and that window is BROWSER_SESSION_TIMEOUT_SECONDS minus five minutes of
+// slack, so it expires just before the Browserbase session the submit path needs in order to
+// click anything. The dashboard folds handoffExpired straight into finalApprovalBlocked, so Send
+// is already disabled by then. Measured against prod on 2026-08-11, all 295 packets holding a
+// preview URL were past that expiry, so not one preview in the store could still be sent from.
+//
+// The window is set instead by the one surface that still reads a preview after expiry: the
+// dashboard's "What the form looked like after we filled it in" card on a needs_attention
+// packet, which is how a student sees why an application stalled. That card carries no Send
+// button and degrades to a plain sentence when the image 404s, so an expired preview costs an
+// explanation, not a flow. Seven days keeps that explanation across a normal week - 258 of the
+// 265 stalled packets in prod were already older than a day, so a 24-hour window would blank
+// essentially the whole queue - while holding the bulk PII to a quarter of the resume window.
+export const SUBMISSION_PREVIEW_RETENTION_DAYS = 7;
+
+// Every key shape this codebase writes under `users/`. The old policy was an allowlist of things
+// to DELETE, which meant any new key shape defaulted to "keep forever, silently" - that default,
+// not an oversight about screenshots specifically, is why 281.8 MB of form previews accumulated
+// untouched. Classification is now total: a path this function does not recognise comes back
+// 'unclassified', is still kept (deleting an unknown artifact is the worse mistake), and is
+// counted and logged by the sweep so a new category announces itself on the first run after it
+// ships rather than in a blob-store audit twenty days later.
+export type UserBlobCategory =
+  | 'legacy-original'
+  | 'generated-resume'
+  | 'submission-preview'
+  | 'submission-receipt'
+  | 'unclassified';
+
+const SUBMISSION_RUN_FILE_RE = /^users\/[^/]+\/submission-runs\/[^/]+\/([^/]+)$/;
+const GENERATED_RESUME_RE = /^users\/[^/]+\/resumes\/[^/]+$/;
+
+export function classifyUserBlob(pathname: string): UserBlobCategory {
+  if (isUploadedResumeBlob(pathname)) return 'legacy-original';
+  const runFile = SUBMISSION_RUN_FILE_RE.exec(pathname)?.[1];
+  if (runFile !== undefined) {
+    // Every submission-run write passes addRandomSuffix: true (a retry reuses the run id, so the
+    // un-suffixed key would collide and fail the run). The stored name is therefore
+    // `filled-<hash>.png`, never the `filled.png` the call site asks for, and matching the bare
+    // name would classify nothing that actually exists in the store.
+    if (/^filled(?:-[^/]*)?\.png$/i.test(runFile)) return 'submission-preview';
+    if (/^receipt(?:-[^/]*)?\.png$/i.test(runFile)) return 'submission-receipt';
+    return 'unclassified';
+  }
+  // Anchored, where the old rule was a bare `pathname.includes('/resumes/')` substring test. That
+  // test would classify `users/<id>/anything/resumes/x.png` as a generated resume and delete it at
+  // 30 days, which would make the "an unrecognised shape is kept" guarantee above false for any
+  // nested path that happens to contain the segment. Every real generated key is exactly one
+  // segment under resumes/ (resume.ts, applications.ts and coverLetterService.ts all build
+  // `users/<id>/resumes/<name>.pdf`, plus put()'s random suffix), so anchoring loses nothing and
+  // sends anything else to 'unclassified', which is kept and logged rather than deleted.
+  if (GENERATED_RESUME_RE.test(pathname)) return 'generated-resume';
+  return 'unclassified';
+}
+
+/**
+ * Days after which a category ages out, or null when it is deliberately exempt from the age
+ * sweep and only account deletion removes it.
+ */
+export function retentionDaysForCategory(
+  category: UserBlobCategory,
+  retentionDays = RESUME_RETENTION_DAYS,
+  previewRetentionDays = SUBMISSION_PREVIEW_RETENTION_DAYS,
+): number | null {
+  switch (category) {
+    // Legacy raw uploads are deleted on sight regardless of age; the approved cleanup already
+    // took the last of them on 2026-08-03 and this keeps any straggler from surviving.
+    case 'legacy-original': return 0;
+    case 'generated-resume': return retentionDays;
+    case 'submission-preview': return previewRetentionDays;
+    // Deliberately exempt, not forgotten. A receipt is the product's proof-of-submission
+    // surface: the dashboard renders it permanently under "Proof it was sent", and it is the
+    // only durable visual evidence that Litos did the thing it promised - exactly the record a
+    // student would want months later when asking whether an application really went. Ageing it
+    // out would delete the answer to that question to reclaim 2.0 MB, 0.7% of the store. It stays
+    // for as long as the account is open, which is what the privacy page already promises for
+    // account-linked product data, and deleteBlobsForUser removes it on account deletion.
+    case 'submission-receipt': return null;
+    case 'unclassified': return null;
+  }
+}
+
 export function resumePrefix(userId: string): string {
   return `users/${userId}/resumes/`;
 }
@@ -56,18 +145,28 @@ export function isUploadedResumeBlob(pathname: string): boolean {
 }
 
 /**
- * Original uploads are deleted regardless of age. Generated files retain their approved window.
+ * Original uploads are deleted regardless of age. Every other category ages out on the window
+ * retentionDaysForCategory gives it, and a null window means only account deletion reaches it.
  */
 export function resumeBlobsDueForDeletion(
   blobs: StoredResumeBlob[],
   now = Date.now(),
   retentionDays = RESUME_RETENTION_DAYS,
+  previewRetentionDays = SUBMISSION_PREVIEW_RETENTION_DAYS,
 ): StoredResumeBlob[] {
-  const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
-  return blobs.filter((blob) =>
-    isUploadedResumeBlob(blob.pathname)
-    || (blob.pathname.includes('/resumes/') && blob.uploadedAt.getTime() < cutoff),
-  );
+  return blobs.filter((blob) => {
+    const days = retentionDaysForCategory(
+      classifyUserBlob(blob.pathname),
+      retentionDays,
+      previewRetentionDays,
+    );
+    if (days === null) return false;
+    // Zero means "on sight", which is NOT the same as "older than zero days": a strict age
+    // comparison would spare a blob written in the same millisecond as the sweep, or any blob
+    // whose uploadedAt is ahead of now under clock skew. Legacy originals are unconditional.
+    if (days === 0) return true;
+    return blob.uploadedAt.getTime() < now - days * 24 * 60 * 60 * 1000;
+  });
 }
 
 // Domain-separated from fieldCrypto's application_profile key: same ENCRYPTION_KEY env var,
@@ -170,7 +269,7 @@ export async function resolveBlobUrl(objectKey: string): Promise<string | null> 
   return blobs.find((b) => b.pathname === objectKey)?.url ?? null;
 }
 
-// The two Blob calls the sweep makes, as an injectable seam. Narrowed to the surface actually
+// The two Blob calls this module makes, as an injectable seam. Narrowed to the surface actually
 // consumed rather than restating @vercel/blob's types: `list` is generic over folded/expanded mode
 // and its blobs carry size, etag and downloadUrl that nothing here reads, so a fake would have to
 // fabricate fields only to satisfy the compiler.
@@ -189,6 +288,29 @@ const productionBlobStore: ResumeBlobStore = {
   list: (options) => list(options),
   del: (urls) => del(urls),
 };
+
+// @vercel/blob's del() rejects a batch above this size outright, so an oversized call deletes
+// nothing and throws. It matters most on the run that carries a backlog, which is precisely the
+// run that follows an outage like the one that stopped this sweep between 3 and 11 August.
+const DELETE_BATCH_SIZE = 1000;
+
+// del() takes at most DELETE_BATCH_SIZE URLs per call and rejects the whole batch
+// above that, so EVERY caller has to chunk, not just the sweep. Account deletion is the one that
+// matters most: it is the only thing that reaches an exempt receipt, so a single oversized call
+// there would throw, leave the user's PII in the store, and break the promise the exemption rests
+// on. Deleting per user is unbounded by age, so a long-lived heavy account is exactly where the
+// limit gets hit first.
+//
+// The store is threaded through rather than closed over so that a test exercising the batching can
+// count the calls: chunking is the kind of arithmetic that is only ever wrong at a boundary.
+async function delInBatches(
+  urls: string[],
+  store: ResumeBlobStore = productionBlobStore,
+): Promise<void> {
+  for (let i = 0; i < urls.length; i += DELETE_BATCH_SIZE) {
+    await store.del(urls.slice(i, i + DELETE_BATCH_SIZE));
+  }
+}
 
 async function listAll(
   prefix: string,
@@ -215,7 +337,7 @@ async function listAll(
 export async function deleteBlobsForUser(userId: string): Promise<number> {
   const blobs = await listAll(userBlobPrefix(userId));
   if (blobs.length === 0) return 0;
-  await del(blobs.map((b) => b.url));
+  await delInBatches(blobs.map((b) => b.url));
   return blobs.length;
 }
 
@@ -225,7 +347,7 @@ export async function deleteUploadedResumeBlobsForUser(userId: string): Promise<
     isUploadedResumeBlob(blob.pathname),
   );
   if (blobs.length === 0) return 0;
-  await del(blobs.map((blob) => blob.url));
+  await delInBatches(blobs.map((blob) => blob.url));
   return blobs.length;
 }
 
@@ -239,16 +361,6 @@ export async function deleteUploadedResumeThenClear(
 ): Promise<void> {
   await deleteUploadedResume();
   await clearLegacyPointers();
-}
-
-export interface ResumeSweepResult {
-  scanned: number;
-  deleted: number;
-  /**
-   * Pathnames actually handed to del(), so a caller can scope follow-up work to the owners whose
-   * files really went. Deliberately not surfaced in the HTTP response: these keys embed user ids.
-   */
-  deletedPathnames: string[];
 }
 
 /**
@@ -269,25 +381,60 @@ export function legacyOriginalOwnerIds(pathnames: string[]): string[] {
   return [...ids];
 }
 
-// Deletes legacy original uploads immediately and generated files after RESUME_RETENTION_DAYS.
+export interface BlobSweepResult {
+  scanned: number;
+  deleted: number;
+  /** Deleted count per category, so a window change is visible in the logs the day it ships. */
+  deletedByCategory: Record<UserBlobCategory, number>;
+  /** Retained because nothing classified them. Non-zero means a new key shape needs a decision. */
+  unclassified: number;
+  /** A few offending paths, enough to identify the writer without dumping the store into a log. */
+  unclassifiedSample: string[];
+  /**
+   * Pathnames actually handed to del(), so a caller can scope follow-up work to the owners whose
+   * files really went. Deliberately not surfaced in the HTTP response: these keys embed user ids.
+   */
+  deletedPathnames: string[];
+}
+
+// Deletes legacy original uploads on sight, generated files after RESUME_RETENTION_DAYS, and
+// filled-form previews after SUBMISSION_PREVIEW_RETENTION_DAYS. Receipts are exempt by decision.
 //
 // blobStore exists because this is the only function in this file that permanently destroys user
 // files, and it was the only one with no test: every retention test stubbed it out at the route
-// boundary, so the cursor loop in listAll and the bulk del() below ran unexercised in CI and were
-// first exercised in production. Overriding is partial, so a test can replace del alone and still
-// page through a real listing fake.
+// boundary, so the cursor loop in listAll and the batching in delInBatches ran unexercised in CI
+// and were first exercised in production. Overriding is partial, so a test can replace del alone
+// and still page through a real listing fake.
 export async function sweepExpiredResumeBlobs(
-  opts: { now?: number; retentionDays?: number; blobStore?: Partial<ResumeBlobStore> } = {},
-): Promise<ResumeSweepResult> {
+  opts: {
+    now?: number;
+    retentionDays?: number;
+    previewRetentionDays?: number;
+    blobStore?: Partial<ResumeBlobStore>;
+  } = {},
+): Promise<BlobSweepResult> {
   const now = opts.now ?? Date.now();
   const retentionDays = opts.retentionDays ?? RESUME_RETENTION_DAYS;
+  const previewRetentionDays = opts.previewRetentionDays ?? SUBMISSION_PREVIEW_RETENTION_DAYS;
   const store: ResumeBlobStore = { ...productionBlobStore, ...opts.blobStore };
   const blobs = await listAll('users/', store);
-  const due = resumeBlobsDueForDeletion(blobs, now, retentionDays);
-  if (due.length > 0) await store.del(due.map((blob) => blob.url));
+  const due = resumeBlobsDueForDeletion(blobs, now, retentionDays, previewRetentionDays);
+  await delInBatches(due.map((blob) => blob.url), store);
+  const deletedByCategory: Record<UserBlobCategory, number> = {
+    'legacy-original': 0,
+    'generated-resume': 0,
+    'submission-preview': 0,
+    'submission-receipt': 0,
+    unclassified: 0,
+  };
+  for (const blob of due) deletedByCategory[classifyUserBlob(blob.pathname)] += 1;
+  const unclassified = blobs.filter((blob) => classifyUserBlob(blob.pathname) === 'unclassified');
   return {
     scanned: blobs.length,
     deleted: due.length,
+    deletedByCategory,
+    unclassified: unclassified.length,
+    unclassifiedSample: unclassified.slice(0, 5).map((blob) => blob.pathname),
     deletedPathnames: due.map((blob) => blob.pathname),
   };
 }

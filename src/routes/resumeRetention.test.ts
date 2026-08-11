@@ -103,7 +103,15 @@ test('the daily sweep runs unconditionally and reports what it deleted', async (
   await withApp(harness.dependencies, async (app) => {
     const response = await app.inject({ method: 'GET', url: sweepUrl, headers: authorizedHeaders });
     assert.equal(response.statusCode, 200);
-    assert.deepEqual(response.json(), { scanned: 4, deleted: 2, retention_days: 30 });
+    // Both windows are reported, because a sweep that silently stopped covering one category is
+    // exactly the failure this route exists to make visible. deleted_by_category and unclassified
+    // are absent here only because this harness's sweep double does not compute them.
+    assert.deepEqual(response.json(), {
+      scanned: 4,
+      deleted: 2,
+      retention_days: 30,
+      preview_retention_days: 7,
+    });
     assert.equal(harness.calls.sweep, 1);
     assert.equal(harness.calls.clear, 1);
   });
@@ -234,7 +242,12 @@ test('a sweep that deletes no legacy original clears no pointers', async () => {
   await withApp(harness.dependencies, async (app) => {
     const response = await app.inject({ method: 'GET', url: sweepUrl, headers: authorizedHeaders });
     assert.equal(response.statusCode, 200);
-    assert.deepEqual(response.json(), { scanned: 900, deleted: 11, retention_days: 30 });
+    assert.deepEqual(response.json(), {
+      scanned: 900,
+      deleted: 11,
+      retention_days: 30,
+      preview_retention_days: 7,
+    });
     assert.deepEqual(harness.calls.clearedUserIds, [], 'no profile pointer is implicated');
   });
 });
