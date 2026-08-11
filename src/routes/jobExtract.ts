@@ -18,20 +18,30 @@ export function clipJdText(rawText: string | undefined | null): string {
 }
 
 const WORKABLE_APPLICATION_PATH = /^\/((?:[a-z0-9][a-z0-9._-]*\/)?j\/[a-z0-9]+)\/apply\/?$/i;
+const BREEZY_APPLICATION_PATH = /^(\/p\/[^/]+)\/apply\/?$/i;
 
 /**
- * Workable's application route contains form labels, not the job description. Read the exact job
+ * Some ATS application routes contain form labels, not the job description. Read the exact job
  * overview for extraction while leaving the caller's application URL untouched for submission.
  */
 export function jobDescriptionSourceUrl(rawUrl: string): string {
   const url = new URL(rawUrl);
-  if (url.origin !== 'https://apply.workable.com') return rawUrl;
+  if (url.origin === 'https://apply.workable.com') {
+    const workableApplication = url.pathname.match(WORKABLE_APPLICATION_PATH);
+    if (!workableApplication) return rawUrl;
 
-  const workableApplication = url.pathname.match(WORKABLE_APPLICATION_PATH);
-  if (!workableApplication) return rawUrl;
+    const [, overviewPath] = workableApplication;
+    url.pathname = `/${overviewPath}/`;
+  } else {
+    const breezyApplication = url.pathname.match(BREEZY_APPLICATION_PATH);
+    const isBreezyTenant = url.protocol === 'https:'
+      && url.port === ''
+      && url.hostname.toLowerCase().endsWith('.breezy.hr');
+    if (!isBreezyTenant || !breezyApplication) return rawUrl;
 
-  const [, overviewPath] = workableApplication;
-  url.pathname = `/${overviewPath}/`;
+    url.pathname = breezyApplication[1]!;
+  }
+
   // These values belong to the application form and are not needed to identify its job overview.
   url.search = '';
   url.hash = '';
