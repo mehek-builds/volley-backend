@@ -24,6 +24,7 @@ import {
   unansweredRequiredBlockerLabels,
   type ResumeRow,
 } from './submissionRunner';
+import { PacketDocumentExpiredError } from '../lib/resumeAccess';
 import { savedAnswerKey } from '../lib/answerReuse';
 import {
   refreshKnownQuestionAnswers,
@@ -784,6 +785,57 @@ test('only a signed controlled portal can select fixture resume bytes; Greenhous
     if (previous.nodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previous.nodeEnv;
   }
+});
+
+test('a resume whose object key resolves to nothing throws the typed expired error, not a bare Error', async () => {
+  /* The type is the entire mechanism. fail() reads it to rank the stop above uncertainAfterClaim,
+     so a bare Error here silently restores the "check the portal or your email" sentence on a
+     packet that was never filled in. Asserting instanceof rather than the message pins the half
+     that fail() actually reads. */
+  await assert.rejects(
+    () => resumeBytesForPacket('users/user-1/resumes/gone.pdf', false, {
+      resolveObjectUrl: async () => null,
+      fetchObject: async () => { throw new Error('must not be fetched once the key is gone'); },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof PacketDocumentExpiredError);
+      assert.equal(error.document, 'resume');
+      assert.match(error.message, /Generated resume file is unavailable/,
+        'message kept verbatim so existing logs and operator greps still match');
+      return true;
+    },
+  );
+});
+
+test('a key that resolves but fails to download is NOT an expired packet', () => {
+  /* A live storage fault and a deleted file owe different sentences: one is worth retrying and the
+     other can only be regenerated. Typing both would collapse that distinction and tell someone to
+     regenerate a resume that is still sitting in the blob store. */
+  return assert.rejects(
+    () => resumeBytesForPacket('users/user-1/resumes/present.pdf', false, {
+      resolveObjectUrl: async () => 'https://blob.example.test/present.pdf',
+      fetchObject: async () => ({ ok: false, arrayBuffer: async () => new ArrayBuffer(0) }),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok(!(error instanceof PacketDocumentExpiredError));
+      assert.match(error.message, /could not be downloaded/);
+      return true;
+    },
+  );
+});
+
+test('the cover-letter degrade never swallows an expired resume', () => {
+  /* buildPacket loads both documents, so an expired RESUME lands in the cover-letter catch too.
+     Degrading it there logged a resume failure as an attachment problem and then re-entered
+     buildPacket, which threw on the same missing file a second time. */
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const guard = /if \(error instanceof PacketDocumentExpiredError && error\.document === 'resume'\) throw error;/;
+  assert.match(source, guard);
+  const catchIndex = source.indexOf('Cover letter file could not be attached');
+  assert.ok(catchIndex > 0);
+  assert.ok(source.slice(0, catchIndex).search(guard) > 0,
+    'the rethrow has to come BEFORE the degrade, or the degrade is what runs');
 });
 
 test('managed prepare and final or security-code submit rebuild controlled packets with the exact portal predicate', () => {

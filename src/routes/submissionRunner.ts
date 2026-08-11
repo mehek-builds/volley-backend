@@ -108,7 +108,7 @@ import {
 } from '../lib/submissionTerminalCause';
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
-import { resolveBlobUrl } from '../lib/resumeAccess';
+import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess';
 import { currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
 import { createDashboardHandoffBinding } from '../lib/extensionHandoffPacket';
 import { decryptRow } from './applicationProfile';
@@ -567,7 +567,12 @@ export async function resumeBytesForPacket(
     return Buffer.from('%PDF-1.4\n% Litos controlled submission fixture\n%%EOF\n');
   }
   const blobUrl = await dependencies.resolveObjectUrl(objectKey);
-  if (!blobUrl) throw new Error('Generated resume file is unavailable');
+  /* Typed, because this is the retention sweep arriving rather than a malfunction. See
+     PacketDocumentExpiredError for why an untyped throw here told the applicant to go and look for
+     a confirmation of an application that was never filled in. Only the resolve is typed: a key that
+     resolves to a URL which then fails to download is a live storage fault, not an expired packet,
+     and the two owe different sentences. */
+  if (!blobUrl) throw new PacketDocumentExpiredError('resume');
   const response = await dependencies.fetchObject(blobUrl);
   if (!response.ok) throw new Error('Generated resume file could not be downloaded');
   return Buffer.from(await response.arrayBuffer());
@@ -592,7 +597,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const coverLetterKey = coverLetterObjectKeyToAttach(stored);
   if (coverLetterKey) {
     const coverLetterUrl = await resolveBlobUrl(coverLetterKey);
-    if (!coverLetterUrl) throw new Error('Generated cover letter file is unavailable');
+    if (!coverLetterUrl) throw new PacketDocumentExpiredError('cover_letter');
     const coverLetterResponse = await fetch(coverLetterUrl);
     if (!coverLetterResponse.ok) throw new Error('Generated cover letter file could not be downloaded');
     coverLetter = Buffer.from(await coverLetterResponse.arrayBuffer());
@@ -1151,6 +1156,14 @@ async function packetForCoverLetterCapability(
   try {
     return { packet: await buildPacket(rows[0], controlledTest) };
   } catch (error) {
+    /* THE RESUME IS NOT THE COVER LETTER'S PROBLEM TO DEGRADE.
+       buildPacket loads both documents, so an expired RESUME lands in this catch too. Degrading it
+       here was wrong twice over: it logged a resume failure under 'Cover letter file could not be
+       attached', and the rebuild below re-enters buildPacket, which throws on the same missing
+       resume a second time. The rethrow costs nothing that was ever recoverable - a packet with no
+       resume has nothing to send either way - and it keeps the typed error intact for fail(), which
+       is the whole point of typing it. */
+    if (error instanceof PacketDocumentExpiredError && error.document === 'resume') throw error;
     fastify.log.warn({ error, applicationId: row.id }, 'Cover letter file could not be attached, continuing without it');
     return {
       packet: omitCoverLetter(await buildPacket(
@@ -3537,6 +3550,8 @@ export function submissionFailureOutcome(input: {
   captchaStop: 'before_fill' | 'at_submit' | null;
   noSubmitControl: boolean;
   regenerationRequired?: boolean;
+  /* The packet's own resume file is gone from storage, so no packet could be assembled at all. */
+  packetDocumentExpired?: boolean;
   /* The applicant-facing sentence from a ManagedActionBudgetError, or null. A string rather than a
      boolean because the error composes its own reason from the portal and the question count, and
      re-deriving it here would be a second place to keep that wording correct. */
@@ -3546,8 +3561,8 @@ export function submissionFailureOutcome(input: {
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || actionBudgetStop || uncertainAfterClaim || providerSessionFailure
+  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -3556,6 +3571,24 @@ export function submissionFailureOutcome(input: {
       ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
       : regenerationRequired
         ? 'This application must be regenerated before submission because its stored Litos email no longer matches the active inbound email route. Nothing was sent to the employer.'
+      : packetDocumentExpired
+        /* Ranked here for the same reason as its neighbours, and it is the earliest stop of the
+           whole family: buildPacket throws before a browser session is opened, so nothing was
+           filled and nothing was sent. Without this arm it inherited uncertainAfterClaim, because
+           the submit() call site runs after the claim.
+
+           THE RETENTION IS NAMED, not hidden behind "something went wrong". This is the privacy
+           promise working exactly as published (RESUME_RETENTION_DAYS, and app/privacy on the site
+           says the file is gone after 30 days), so the honest thing is to say so. An apology for a
+           malfunction would be a lie about a feature, and it would leave the applicant expecting a
+           retry to fix it when only a regenerate will.
+
+           "normally what has happened here" rather than a flat assertion: the throw fires whenever
+           the object key resolves to nothing, and retention is the overwhelmingly likely cause but
+           not a proven one on any given row. Same discipline as the cause-neutral wording on
+           noSubmitControl below. The recovery is identical either way, so nothing is lost by not
+           claiming more than is known. */
+        ? 'The resume file for this application is no longer stored, so Litos could not put the application together and nothing was sent to the employer. Litos deletes the resumes it generates after 30 days, which is normally what has happened here. Regenerate this application and send it again.'
       : actionBudgetStop
         /* Ranked above uncertainAfterClaim for the same reason as its two neighbours: the throw
            happens before the browser is driven, so nothing was sent and there is no confirmation to
@@ -3697,9 +3730,12 @@ async function fail(row: ResumeRow, error: unknown) {
      the packet at needs_attention-after-claim, which submitRequestDisposition refuses to re-run: an
      application permanently stuck behind a receipt that cannot exist. */
   const actionBudgetStop = error instanceof ManagedActionBudgetError ? error.blocker : null;
+  /* Only the resume. An expired cover letter never reaches here: packetForCoverLetterCapability
+     degrades and the application still goes, with its own sentence. */
+  const packetDocumentExpired = error instanceof PacketDocumentExpiredError && error.document === 'resume';
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, regenerationRequired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure,
     currentAttentionReason: current.attention_reason,
   });
 
@@ -3713,7 +3749,14 @@ async function fail(row: ResumeRow, error: unknown) {
       })
       : {}),
     status: outcome.status,
-    ...(regenerationRequired
+    /* THE CLAIM IS RELEASED, and packetDocumentExpired is here for the same reason
+       regenerationRequired is: both sentences end by telling the applicant to regenerate and send
+       again, and submitRequestDisposition refuses to re-run a needs_attention row that still wears
+       a claim. Leaving it on would make the instruction impossible to follow, which is the
+       "permanently stuck behind a receipt that cannot exist" shape recorded on actionBudgetStop.
+       Safe in both cases because the claim exists to stop a SECOND application reaching an employer
+       that already has one, and here the packet could not be assembled, so no first one went. */
+    ...(regenerationRequired || packetDocumentExpired
       ? {
         submission_claimed_at: undefined,
         submission_claim_id: undefined,

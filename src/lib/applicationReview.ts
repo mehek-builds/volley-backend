@@ -53,6 +53,13 @@ export type ApplicationAttentionCategory =
    * something rather than a person fixing something, and because a state this expensive to be in
    * has to be countable. */
   | 'unverified_submission'
+  /* The packet's generated resume passed its 30-day retention window and the file was deleted, so
+   * there was nothing to send and nothing was sent. Deliberately NOT 'required_document', which
+   * means an EMPLOYER is waiting on a document from the applicant, and deliberately not
+   * 'run_failed', which is the "Litos broke, try again" bucket: retrying changes nothing here and
+   * only regenerating does. It is also the one attention state that is a promise being kept rather
+   * than a defect, so it has to be countable separately from the defects. */
+  | 'packet_expired'
   | 'required_document'
   | 'sensitive_attestation'
   | 'required_field'
