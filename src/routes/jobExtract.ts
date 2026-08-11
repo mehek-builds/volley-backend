@@ -18,12 +18,19 @@ export function clipJdText(rawText: string | undefined | null): string {
 }
 
 const WORKABLE_APPLICATION_PATH = /^\/((?:[a-z0-9][a-z0-9._-]*\/)?j\/[a-z0-9]+)\/apply\/?$/i;
+const JOBVITE_APPLICATION_URL = /^https:\/\/jobs\.jobvite\.com\/([a-z0-9][a-z0-9._-]*)\/job\/([a-z0-9]+)\/apply\/?(?:[?#].*)?$/i;
 
 /**
  * Workable's application route contains form labels, not the job description. Read the exact job
  * overview for extraction while leaving the caller's application URL untouched for submission.
  */
 export function jobDescriptionSourceUrl(rawUrl: string): string {
+  const jobviteApplication = rawUrl.match(JOBVITE_APPLICATION_URL);
+  if (jobviteApplication) {
+    const [, tenant, jobToken] = jobviteApplication;
+    return `https://jobs.jobvite.com/${tenant}/job/${jobToken}`;
+  }
+
   const url = new URL(rawUrl);
   if (url.origin !== 'https://apply.workable.com') return rawUrl;
 

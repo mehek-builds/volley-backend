@@ -63,6 +63,22 @@ describe('clipJdText', () => {
 });
 
 describe('jobDescriptionSourceUrl', () => {
+  test('reads an exact Jobvite application URL from its job listing instead of the consent gate', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr/apply'),
+      'https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr',
+    );
+  });
+
+  test('drops application-gate tracking state when moving to an exact Jobvite listing', () => {
+    assert.equal(
+      jobDescriptionSourceUrl(
+        'https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr/apply/?source=board#consent',
+      ),
+      'https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr',
+    );
+  });
+
   test('reads an exact Workable application URL from its job overview instead of the candidate form', () => {
     assert.equal(
       jobDescriptionSourceUrl('https://apply.workable.com/remote-recruitment/j/D4CA268A39/apply/'),
@@ -103,6 +119,24 @@ describe('jobDescriptionSourceUrl', () => {
       'https://apply.workable.com:444/remote-recruitment/j/D4CA268A39/apply',
       'https://www.workable.com/remote-recruitment/j/D4CA268A39/apply',
       'https://example.com/remote-recruitment/j/D4CA268A39/apply',
+    ]) {
+      assert.equal(jobDescriptionSourceUrl(url), url);
+    }
+  });
+
+  test('does not rewrite non-form Jobvite paths or raw routes that need URL normalization', () => {
+    for (const url of [
+      'https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr',
+      'https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr/apply/extra',
+      'https://jobs.jobvite.com/genpactexperience/jobs/oZCwAfwr/apply',
+      'https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr/apply\\extra',
+      'https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr/%61pply',
+      'https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr/apply/%2e%2e',
+      'https://jobs.jobvite.com:444/genpactexperience/job/oZCwAfwr/apply',
+      'https://user@jobs.jobvite.com/genpactexperience/job/oZCwAfwr/apply',
+      'https://www.jobvite.com/genpactexperience/job/oZCwAfwr/apply',
+      'https://jobs.jobvite.com.example.com/genpactexperience/job/oZCwAfwr/apply',
+      'http://jobs.jobvite.com/genpactexperience/job/oZCwAfwr/apply',
     ]) {
       assert.equal(jobDescriptionSourceUrl(url), url);
     }
