@@ -247,6 +247,77 @@ describe('stored application facts reach the control on the real employer questi
     }
   });
 
+  /* HELP TEXT THAT SAYS WHICH APPLICATIONS COUNT IS NOT HELP TEXT.
+   *
+   * PR #500 blocked on exactly this. The opener test said where the sentence sat and nothing said
+   * whether it mattered, so both labels below answered "Yes" off a declared "IMC" while the only
+   * sentence saying what qualifies had just been discarded. A declared employer proves she applied;
+   * it does not prove the application was an internship, or that she was not terminated for cause.
+   * main held both, and it was right to.
+   *
+   * The repair restricts the ANSWER, not the strip. Where nothing has been sent and nothing is
+   * declared, "No" is true under every restriction of a set that is empty to begin with, so the
+   * default-No path - the whole point of this change - is untouched by a scoping tail.
+   */
+  const SCOPED_TAIL_LABELS = [
+    'Have you applied to a role at IMC? Note this refers only to internship applications.',
+    'Have you applied to a role at IMC? Please note that you must also confirm you were not terminated for cause.',
+  ];
+
+  test('a help-text tail that scopes which applications count withdraws every positive answer', () => {
+    const imc = frozenJobEmployerContext('IMC');
+    for (const label of SCOPED_TAIL_LABELS) {
+      // The declared record says she applied to IMC. It does not say the application qualifies
+      // under the restriction, so the question is hers, with or without a history read.
+      for (const ap of [
+        { prior_application_employers: ['IMC'] },
+        { prior_application_employers: ['IMC'], submitted_application_companies: [] },
+        { prior_application_employers: ['IMC'], submitted_application_companies: ['IMC'] },
+      ] satisfies ApplicationProfileLike[]) {
+        const resolved = resolveKnownAnswer(label, 'text', ap, imc);
+        assert.ok(resolved && 'skipReason' in resolved, `${label} -> ${JSON.stringify(resolved)}`);
+        assert.match(resolved.skipReason, /prior application question left for you/, label);
+      }
+      // Global scope is restricted by the same sentence for the same reason.
+      const global = `Have you ever applied for a job before? ${label.split('? ')[1]}`;
+      const globalResolved = resolveKnownAnswer(global, 'text', { prior_application_employers: ['IMC'] }, imc);
+      assert.ok(globalResolved && 'skipReason' in globalResolved, JSON.stringify(globalResolved));
+    }
+  });
+
+  test('a scoping tail does not narrow the default No, because No survives every restriction', () => {
+    const imc = frozenJobEmployerContext('IMC');
+    for (const label of SCOPED_TAIL_LABELS) {
+      // Nothing sent and nothing declared: there is no application for the restriction to qualify.
+      assert.deepEqual(
+        resolveKnownAnswer(label, 'text', { submitted_application_companies: [] }, imc),
+        { value: 'No' },
+        label,
+      );
+      // A declared list that names other employers is the same case: none of them is IMC.
+      assert.deepEqual(
+        resolveKnownAnswer(label, 'text', { prior_application_employers: ['Akuna'] }, imc),
+        { value: 'No' },
+        label,
+      );
+      // And the history exception still outranks the default.
+      const held = resolveKnownAnswer(label, 'text', { submitted_application_companies: ['IMC'] }, imc);
+      assert.ok(held && 'skipReason' in held, JSON.stringify(held));
+    }
+
+    /* IMC'S REAL TAIL IS INERT and must stay strippable, or the blocker this branch exists for comes
+     * straight back. It talks about what happens NEXT ("you may reapply when the next recruitment
+     * season begins in 2027"), not about which past applications are being counted. */
+    assert.deepEqual(
+      resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', { submitted_application_companies: [] }, imc),
+      { value: 'No' },
+    );
+    assert.deepEqual(
+      resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', { prior_application_employers: ['IMC'] }, imc),
+      { value: 'Yes' },
+    );
+  });
+
   test('the new default is company-scoped, and reaches nothing else', () => {
     const imc = frozenJobEmployerContext('IMC');
     const nothingSent: ApplicationProfileLike = { submitted_application_companies: [] };

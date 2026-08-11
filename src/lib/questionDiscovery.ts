@@ -772,6 +772,12 @@ function applicationAlreadyAtPacketEmployer(
  *   4. A declared list that does not name this employer still answers No, exactly as it did before
  *      this rule existed, whether or not the history was readable.
  *   5. Nothing declared answers No only when the history was actually read and is clear.
+ *
+ * AND ONE MORE, ADDED ON REVIEW. Where the employer's help text restricts WHICH applications the
+ * question counts (see HELP_TEXT_SCOPING_FORCE), no answer resting on a positive record may be
+ * given: not the Yes off her declared list, and not a No asserted over a declared application whose
+ * type the restriction may have excluded. Only a No backed by no positive record at all survives,
+ * because "no application to this employer" stays No under every restriction of it.
  */
 function previouslyAppliedAnswer(
   label: string,
@@ -783,14 +789,17 @@ function previouslyAppliedAnswer(
   const held = { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
   if (!parsed.valid || (!parsed.target && !parsed.globalPriorApplicationHistory)) return held;
 
+  const { scoped } = withoutTrailingHelpText(label);
   const declared = ap.prior_application_employers;
-  if (declared && declared.length > 0) {
-    if (parsed.globalPriorApplicationHistory) return { value: 'Yes' };
-    if (declared.some((employer) =>
-      employerMatchesTarget(canonicalSiblingEmployerIdentity(employer), parsed.target!))) {
-      return { value: 'Yes' };
-    }
-  }
+  const declaresThisApplication = Boolean(declared && declared.length > 0 && (
+    parsed.globalPriorApplicationHistory
+    || declared.some((employer) =>
+      employerMatchesTarget(canonicalSiblingEmployerIdentity(employer), parsed.target!))
+  ));
+  // Her own statement, and no history read can contradict it - unless the help text restricts which
+  // applications count, in which case the record proves she applied and not that it qualifies.
+  if (declaresThisApplication) return scoped ? held : { value: 'Yes' };
+
   // undefined is "never asked". An empty array is the student saying she has not applied anywhere
   // before, which answers No for every employer - the two must not be collapsed.
   if (parsed.globalPriorApplicationHistory) return declared ? { value: 'No' } : held;
@@ -2213,22 +2222,72 @@ function validatedSiblingEmployerTarget(raw: string, packetEmployer: string | un
  */
 const QUESTION_HELP_TEXT_OPENER = /^(?:as a reminder|reminder|please note|note)\b/i;
 
-function withoutTrailingHelpText(label: string): string {
+/* WHETHER THE TAIL IS INERT, OR IS THE ONLY THING SAYING WHICH APPLICATIONS COUNT.
+ *
+ * The opener test above says where a sentence sits. It does not say whether the sentence MATTERS,
+ * and on review that gap answered "Yes" twice off a scope it had just discarded:
+ *
+ *   "...applied to a role at IMC? Note this refers only to internship applications."
+ *   "...applied to a role at IMC? Please note that you must also confirm you were not terminated
+ *    for cause."
+ *
+ * A declared "IMC" does not tell anyone whether that application was an internship, so both of
+ * those are hers to answer and main held them.
+ *
+ * The four classes below are what gives a sentence force over the answer set, each a closed
+ * alternation of function words playing one named role - the same construction as
+ * SUBMISSION_NEGATION, DEFINITE_APPLICATION_SAFE_MODIFIER and applicationCategoryHead elsewhere in
+ * this grammar. Anything matching one of them is treated as scoping, which fails CLOSED: an inert
+ * sentence wrongly read as scoping costs one question the applicant answers herself.
+ *
+ * Verified against the two tails Litos has actually measured. IMC's real reminder ("...you may
+ * reapply when the next recruitment season begins in 2027") and the shorter one ("...you will not
+ * be reconsidered") match none of these: both talk about what happens NEXT, not about which past
+ * applications the question is counting.
+ */
+const HELP_TEXT_SCOPING_FORCE = new RegExp([
+  // Restrictive: narrows the set to a part of itself.
+  String.raw`\b(?:only|solely|exclusively|just|merely)\b`,
+  // Exceptive: takes something out of the set, or puts something into it.
+  String.raw`\b(?:except|unless|excluding|including|other than|apart from|aside from|besides)\b`,
+  // Deontic: makes the answer conditional on a requirement placed on the applicant.
+  String.raw`\b(?:must|shall|required to|have to|has to|need to|needs to)\b`,
+  // Additive: adds a second thing to what is being asked.
+  String.raw`\b(?:also|in addition|as well as)\b`,
+  // Set membership: states outright what does and does not count.
+  String.raw`\b(?:counts?|counted|includes?|included|excludes?|excluded|refers? to|applies to|apply to|means|covers?|qualifies|limited to|restricted to)\b`,
+].join('|'), 'i');
+
+type QuestionWithoutHelpText = {
+  /** The label with an inert trailing sentence removed, for the shape grammar to read. */
+  questionText: string;
+  /** Whether what was removed restricts which applications the question is counting. */
+  scoped: boolean;
+};
+
+function withoutTrailingHelpText(label: string): QuestionWithoutHelpText {
   const trimmed = label.trim();
   const mark = trimmed.indexOf('?');
-  if (mark < 0) return label;
+  const unchanged = { questionText: label, scoped: false };
+  if (mark < 0) return unchanged;
   const tail = trimmed.slice(mark + 1).trim();
-  if (!tail || tail.includes('?')) return label;
-  if (!QUESTION_HELP_TEXT_OPENER.test(tail)) return label;
-  if (/[.!]/.test(tail.replace(/[.!]+$/, ''))) return label;
-  return trimmed.slice(0, mark + 1);
+  if (!tail || tail.includes('?')) return unchanged;
+  if (!QUESTION_HELP_TEXT_OPENER.test(tail)) return unchanged;
+  if (/[.!]/.test(tail.replace(/[.!]+$/, ''))) return unchanged;
+  /* THE STRIP HAPPENS EITHER WAY, and only the ANSWER is restricted. Refusing to strip a scoping
+   * tail would put the label back in the compound refusal for every profile, which would narrow the
+   * default-No path to fix a problem it does not have: where Litos has sent nothing and she has
+   * declared nothing, "No" is true under every restriction of a set that is empty to begin with, so
+   * the discarded sentence cannot change it. See previouslyAppliedAnswer for the half that does not
+   * survive: any answer resting on a positive record, which is exactly what the scope would qualify. */
+  return { questionText: trimmed.slice(0, mark + 1), scoped: HELP_TEXT_SCOPING_FORCE.test(tail) };
 }
 
 function parsePriorApplicationQuestion(
   label: string,
   jdText?: string,
 ): ParsedSiblingQuestion | null {
-  const questionText = withoutTrailingHelpText(label);
+  const { questionText } = withoutTrailingHelpText(label);
   const value = normalizedSiblingQuestionLabel(questionText);
   if (/\bapplication (?:support|systems?|software|development|engineering|programming|security)\b/i.test(value)
     || (/\b(?:previous|prior) (?:applicant|application)\b/i.test(value)
