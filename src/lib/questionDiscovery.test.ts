@@ -2296,6 +2296,21 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     'high school city',
     'high school gpa',                      // was "3.89", the UNIVERSITY GPA
     'high school degree',                   // was "Bachelor of Science in Computer Science"
+    /* Spellings a form actually uses. Every one of these reached a university value before the
+       high-school noun was shared between the graduation matcher and this rule: "highschool gpa"
+       -> "3.89", "hs gpa" -> "3.89", "12th grade school name" -> the university. */
+    'highschool name', 'highschool gpa', 'hs gpa',
+    '12th grade school name', 'grade 12 school name',
+    'prep school name', 'preparatory school name', 'senior secondary school name',
+    'secondary education institution name',
+    /* The ordering hole. The first draft of this fix returned null here instead of refusing, and
+       the label fell past the graduation handler into the classifier, which read "graduation year"
+       and answered "May 2028" - the UNIVERSITY year. That made the branch strictly worse than the
+       code it replaced, on the exact defect it was written to fix. A refusal cannot fall through. */
+    'highest level of education high school name & graduation year',
+    'highest level of education, high school name and year of graduation',
+    'highest education: high school name',
+    'level of education: high school gpa',
   ]) {
     refuses(label, 'textarea', HS);
     refuses(label, 'textarea');             // and with no high-school fact stored at all
@@ -2325,6 +2340,12 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     'year of high school graduation',
     'when did you graduate from high school?',
     'high school graduation year',
+    'highschool graduation year',   // the shared noun is what reaches this spelling; was "May 2028"
+    /* The Akuna "month and year" wording. The first draft tested the bare word `name` to catch
+       Palantir's two-part card, and matched "the NAME of the month" here - refusing a date that
+       was on file. The name test has to name the SCHOOL's name, not any name. */
+    'when did you graduate from high school? please enter the name of the month and the year.',
+    'high school graduation date (name the month and year)',
   ]) {
     assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: 'May 2023' }, label);
     refuses(label);
@@ -2334,11 +2355,35 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     { value: 'Yes' },
   );
 
+  /* ADJACENCY, NOT PRESENCE - and this half is what makes that distinction load-bearing rather
+     than academic. Employers name a high school most often in order to EXCLUDE it, and a rule that
+     fired on the mere presence of the words answered every one of these with a blocker. A gloss
+     written to stop her answering with her high school, answered with a blank, is the same failure
+     the gloss exists to prevent. Each expected value below is what the code shipped before any of
+     this, and has to keep shipping. */
+  for (const [label, expected] of [
+    ['which university do you attend? do not list your high school.', PROD_OWNER_PROFILE.school],
+    ['what is the name of the university you attend? (not high school)', PROD_OWNER_PROFILE.school],
+    ['name of institution (university, college or high school)', PROD_OWNER_PROFILE.school],
+    // POST-secondary is the university in North American usage, so the noun must not match inside it.
+    ['name of post-secondary institution', PROD_OWNER_PROFILE.school],
+    ['post-secondary school name', PROD_OWNER_PROFILE.school],
+    ['what is your gpa? (high school gpa if you are a freshman)', PROD_OWNER_PROFILE.gpa],
+    // Not an education field at all. The first draft's guard sat above the city, phone, language
+    // and availability arms of classifyField and took them with it.
+    ['what city do you live in? (not the city of your high school)', PROD_OWNER_PROFILE.address_city],
+  ] as const) {
+    assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: expected }, label);
+  }
+  assert.equal(classifyField('what city do you live in? (not the city of your high school)'), 'address_city');
+  assert.equal(classifyField('which languages do you speak? include any studied in high school.'), 'languages');
+
   /* And the one family that names a high school WITHOUT being about one: an education-LEVEL list
      enumerates it beside bachelor's and master's, and the answer there is the current degree. */
   for (const label of [
     'highest level of education completed (e.g. high school, bachelor’s, master’s)',
     'what is your highest level of education? high school, associate, bachelor',
+    'education level (high school)',
   ]) {
     assert.equal(classifyField(label), 'degree', label);
     assert.deepEqual(resolveKnownAnswer(label, 'select', HS, undefined), { value: "Bachelor's Degree" }, label);

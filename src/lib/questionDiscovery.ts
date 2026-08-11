@@ -601,9 +601,15 @@ function highSchoolGraduationAnswer(
   /* One control asking for the school's NAME as well as the year cannot be satisfied by the year.
    * Palantir's card is "High School Name & Graduation Year", and typing "May 2023" into it answers
    * half the question while reading as an answer to all of it. Same rule as educationStartAnswer's
-   * "a single control asking for the whole range needs both ends": fall through to the refusal
-   * below rather than send a partial answer. */
-  if (/\bname\b/i.test(label)) return null;
+   * "a single control asking for the whole range needs both ends".
+   *
+   * REFUSES HERE rather than returning null. Null was the first draft and it opened a hole: the
+   * label fell past this function to the classifier, which read "graduation year" and answered
+   * "May 2028" - the UNIVERSITY year, on a high-school control, a wrong answer this branch did not
+   * have before. A refusal cannot fall through to anything. */
+  if (HIGH_SCHOOL_NAME_REQUEST.test(label)) {
+    return { skipReason: `high school question left for you: "${label.slice(0, 60)}"` };
+  }
   const stored = ap.high_school_grad_date;
   if (!stored) {
     return { skipReason: `high school graduation question left for you: "${label.slice(0, 60)}"` };
@@ -2670,8 +2676,26 @@ const PREFERRED_NAME_QUESTION =
 // Akuna's "please confirm the month and year" diploma question and IMC's "When did you graduate
 // from High School?". Distinct from every other graduation rule in this file, and checked before
 // them, so the UNIVERSITY graduation date can never be replayed as a high-school one.
-export const HIGH_SCHOOL_GRADUATION_QUESTION =
-  /\bhigh\s+school\b[\s\S]{0,200}\b(?:graduat\w*|diploma|ged|month\s+and\s+year|when)\b|\b(?:graduat\w*|when|month|year)\b[\s\S]{0,120}\bhigh\s+school\b/i;
+/* THE HIGH SCHOOL, IN THE SPELLINGS FORMS ACTUALLY USE FOR IT.
+ *
+ * One definition, shared by the graduation matcher below and by the subject rule under it, so a
+ * spelling recognised for answering is recognised for refusing. Before this was shared, the two
+ * disagreed and the gap was a wrong answer: `\bhigh\s+school\b` does not match "Highschool", so
+ * "Highschool Graduation Year" missed HIGH_SCHOOL_GRADUATION_QUESTION, fell through to the
+ * classifier's `graduation_year`, and came back "May 2028" - the UNIVERSITY year. Measured
+ * 2026-08-11, along with "HS GPA" -> "3.89" and "12th Grade School Name" -> the university.
+ */
+const HIGH_SCHOOL_WORD = String.raw`(?:high[\s-]?schools?|hs|h\.\s?s\.|(?:sr\.?|senior)\s+secondary(?:\s+school)?|(?<!post[\s-])secondary\s+(?:schools?|education)|(?:12th|twelfth)\s+grade(?:\s+school)?|grade\s+12(?:\s+school)?|prep(?:aratory)?\s+schools?)`;
+/* The lookbehind is not decoration. In North American usage POST-secondary education is the
+ * university, so `\bsecondary\s+education\b` matches inside "post-secondary education" and would
+ * refuse the current-programme question it names. "Name of post-secondary institution" is a real
+ * label shape, and it must still answer with the university. */
+
+export const HIGH_SCHOOL_GRADUATION_QUESTION = new RegExp(
+  String.raw`\b${HIGH_SCHOOL_WORD}\b[\s\S]{0,200}\b(?:graduat\w*|diploma|ged|month\s+and\s+year|when)\b`
+  + String.raw`|\b(?:graduat\w*|when|month|year)\b[\s\S]{0,120}\b${HIGH_SCHOOL_WORD}\b`,
+  'i',
+);
 
 /* A HIGH SCHOOL IS NOT THE SCHOOL THE PROFILE HOLDS.
  *
@@ -2701,19 +2725,69 @@ export const HIGH_SCHOOL_GRADUATION_QUESTION =
  * function is ever consulted. Nothing on the profile holds a high school's NAME, city, GPA or
  * degree - there is no column for any of them - so those are refused rather than answered from the
  * university's.
+ *
+ * ADJACENCY, NOT PRESENCE. The rule fires only when the high school is the SUBJECT of the fact
+ * requested - the noun sitting next to the value being asked for. Mere presence was the first
+ * draft of this and it was measurably worse than no rule at all, because employers name a high
+ * school most often in order to EXCLUDE it. Measured on the same profile, presence-matching turned
+ * four correct answers into blockers:
+ *
+ *   "Which university do you attend? Do not list your high school."   USC       -> refused
+ *   "What is the name of the university you attend? (not high school)" USC      -> refused
+ *   "What is your GPA? (high school GPA if you are a freshman)"        "3.89"   -> refused
+ *   "What city do you live in? (not the city of your high school)"     "Dubai"  -> refused
+ *
+ * A gloss written to stop the applicant answering with her high school, answered with a blank, is
+ * the same failure the gloss exists to prevent. So the two exclusions below are load-bearing, not
+ * defensive: a label that also names the current programme, or that names the high school inside a
+ * negation or a conditional, is not a question about her high school.
  */
-const HIGH_SCHOOL_NOUN = /\bhigh[\s-]school\b|\bsecondary[\s-]school\b/i;
-/* The one place "high school" appears WITHOUT being the subject: an education-LEVEL list
- * enumerates it beside bachelor's and master's ("Highest level of education completed (e.g. High
- * School, Bachelor's)"), and the answer there is the current degree. Excluding this family is what
- * keeps the rule above from costing the six level-of-education labels in the corpus. */
-const EDUCATION_LEVEL_QUESTION =
-  /\beducation\s+level\b|\blevel\s+of\s+education\b|\bhighest\s+(?:level|degree|qualification|education)\b/i;
+const HIGH_SCHOOL_FACT =
+  String.raw`(?:names?|institutions?|gpa|grade\s+point\s+average|degrees?|diplomas?|cit(?:y|ies)|towns?|states?|addresss?es?|graduat\w*|attend\w*|years?|dates?)`;
+
+/* The fact sits beside the noun ("high school name"), or the noun sits behind a preposition
+ * ("name of your high school"), or the label asks WHICH one, or the whole label IS the noun -
+ * which is how a two-column education row prints it: "High School" and nothing else. */
+const HIGH_SCHOOL_SUBJECT_QUESTION = new RegExp(
+  String.raw`\b${HIGH_SCHOOL_WORD}(?:['’]s)?\s+${HIGH_SCHOOL_FACT}\b`
+  + String.raw`|\b${HIGH_SCHOOL_FACT}\s+(?:of|at|from|in|for)\s+(?:your\s+|the\s+|my\s+)?${HIGH_SCHOOL_WORD}\b`
+  + String.raw`|\b(?:which|what)\s+${HIGH_SCHOOL_WORD}\b`
+  + String.raw`|^\s*${HIGH_SCHOOL_WORD}\s*[*✱:]?\s*$`,
+  'i',
+);
+
+/* The label names the CURRENT programme too, so the high school is one item in a list rather than
+ * the subject: "Name of institution (university, college or high school)". The stored school is
+ * the honest answer to those. */
+const CURRENT_PROGRAMME_ALSO_NAMED = /\b(?:universit(?:y|ies)|college|undergraduate|undergrad|bachelors?)\b/i;
+
+/* The high school named in order to be EXCLUDED, or under a condition that is not hers. Both
+ * directions, because the qualifier lands on either side of the noun in real labels: "do not list
+ * your high school" before it, "high school GPA if you are a freshman" after it. Bounded by
+ * sentence punctuation so it cannot reach across into a different question. */
+const HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT = new RegExp(
+  String.raw`\b(?:not|n['’]t|exclud\w*|other\s+than|rather\s+than|instead\s+of|in\s+lieu\s+of|if\s+you)\b[^.?!]{0,60}?${HIGH_SCHOOL_WORD}`
+  + String.raw`|${HIGH_SCHOOL_WORD}[^.?!]{0,60}?\b(?:if\s+you|does\s+not\s+count|is\s+not\s+required|only\s+if)\b`,
+  'i',
+);
 
 /** Whether the label's subject is the applicant's HIGH SCHOOL rather than her current programme. */
 export function questionIsScopedToHighSchool(label: string): boolean {
-  return HIGH_SCHOOL_NOUN.test(label) && !EDUCATION_LEVEL_QUESTION.test(label);
+  const l = label ?? '';
+  if (!HIGH_SCHOOL_SUBJECT_QUESTION.test(l)) return false;
+  if (CURRENT_PROGRAMME_ALSO_NAMED.test(l)) return false;
+  return !HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(l);
 }
+
+/* Does the label ask for the high school's NAME? Distinct from the subject rule because the
+ * graduation handler needs exactly this question and no wider one: a control asking for the name
+ * as well as the year cannot be satisfied by the year. The first draft tested the bare word
+ * `name`, which matched "please enter the NAME of the month and the year" - the Akuna wording the
+ * graduation rule exists for - and refused a date that was on file. */
+const HIGH_SCHOOL_NAME_REQUEST = new RegExp(
+  String.raw`\b${HIGH_SCHOOL_WORD}(?:['’]s)?\s+names?\b|\bnames?\s+of\s+(?:your\s+|the\s+|my\s+)?${HIGH_SCHOOL_WORD}\b`,
+  'i',
+);
 
 // Further education AFTER the current degree. Checked before every graduation-date rule so that
 // "when is your potential master's graduation date?" cannot be handed the undergraduate date -
@@ -2855,6 +2929,22 @@ const EXPLICIT_CITY_QUESTION =
 // ordering - refusals first, citizenship before residence, term before start date, state before
 // city). `label` must already be lowercased by the caller.
 export function classifyField(label: string, type?: string): ProfileKey | null {
+  const key = classifyFieldIntent(label, type);
+  /* THE CURRENT PROGRAMME CANNOT ANSWER A QUESTION ABOUT THE HIGH SCHOOL.
+   *
+   * Gated on the KEY, not on where the rule sits in the chain below. The first draft was an early
+   * `return null` partway down that chain, and it silently took the arms underneath it with it:
+   * "What city do you live in? (not the city of your high school)" stopped classifying as
+   * address_city, and languages, phone and availability_date sat below it too. Reading the key
+   * makes the blast radius exactly the education facts and nothing else, by construction rather
+   * than by placement - the same shape as the CURRENT_PROGRAMME_KEYS gate resolveKnownAnswer
+   * already applies to a FUTURE programme. See questionIsScopedToHighSchool for the measured wrong
+   * answers on both sides of this. */
+  if (key && CURRENT_PROGRAMME_KEYS.has(key) && questionIsScopedToHighSchool(label ?? '')) return null;
+  return key;
+}
+
+function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
   const l = label ?? '';
   if (isRefusedQuestion(l)) return null;
   /* Belt and braces on the "Dubai" defect. resolveKnownAnswer already short-circuits these labels,
@@ -2896,14 +2986,6 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   if (STORED_ONSITE_COMMITMENT_QUESTION.test(l) && (ONSITE_DAY_COUNT_QUESTION.test(l) || !/relocat/i.test(l))) {
     return 'onsite_commitment';
   }
-  /* EVERY EDUCATION ARM BELOW THIS LINE READS THE CURRENT UNIVERSITY PROGRAMME, so a label whose
-   * subject is the applicant's HIGH SCHOOL stops here. See questionIsScopedToHighSchool for the
-   * four measured wrong answers this refuses and for why the refusal has to live in the classifier
-   * rather than only in resolveKnownAnswer. Placed here, after residence, referral, employer and
-   * contact-detail routing, so it narrows nothing except the education block and the bare-keyword
-   * fallbacks underneath it - which is the whole of what could reach a university fact.
-   * The one high-school fact on file is answered before this function runs. */
-  if (questionIsScopedToHighSchool(l)) return null;
   if (/\bcurrent\s+year\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b/i.test(l)) return 'study_year';
   if (GRADUATION_MONTH_QUESTION.test(l)) return 'graduation_month';
   if (GRADUATION_YEAR_QUESTION.test(l)) return 'graduation_year';
@@ -2928,9 +3010,6 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
 
   if (/\bgpa\b|grade average|grade point|academic performance/i.test(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
-  // Subsumed by the questionIsScopedToHighSchool guard above for every label that reaches it; kept
-  // as the narrower statement of the same refusal, and still the live one for the education-LEVEL
-  // phrasings that guard deliberately lets through.
   if (/\bhigh school\b/i.test(l) && /graduat|when|date|year/i.test(l)) return null;
   if (LANGUAGE_QUESTION.test(l)) return 'languages';
   if (/\bdegree\b(?!\s+(?:program|subject))|education level|level of education/i.test(l)) return 'degree';
