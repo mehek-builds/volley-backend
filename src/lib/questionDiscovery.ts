@@ -634,6 +634,19 @@ function highSchoolGraduationAnswer(
  */
 function highSchoolRecordRefusal(label: string): { skipReason: string } | null {
   if (!questionIsScopedToHighSchool(label)) return null;
+  /* GATED ON THE SAME KEY SET AS classifyField's WRAPPER, and for the same reason: a label can name
+   * her high school while asking for something that is not an education fact at all. "What city do
+   * you live in? (not the city of your high school)" is an address question, and refusing it hands
+   * back exactly the blank the gloss was written to prevent. Reading the intent keeps both sides of
+   * this rule - the classifier's and the resolver's - answering to one definition instead of two
+   * that can drift.
+   *
+   * Only a key that is NOT an education fact stands the refusal down. A label that classifies as
+   * nothing at all still refuses, and has to: "What high school did you go to?" matches no arm in
+   * this file, so leaving it null would drop it to the essay drafter, and a drafted high school
+   * name is the same wrong answer arriving by a different route. */
+  const intent = classifyFieldIntent(label);
+  if (intent && !CURRENT_PROGRAMME_KEYS.has(intent)) return null;
   return { skipReason: `high school question left for you: "${label.slice(0, 60)}"` };
 }
 
@@ -2691,9 +2704,20 @@ const HIGH_SCHOOL_WORD = String.raw`(?:high[\s-]?schools?|hs|h\.\s?s\.|(?:sr\.?|
  * refuse the current-programme question it names. "Name of post-secondary institution" is a real
  * label shape, and it must still answer with the university. */
 
+/* THE PROXIMITY ARM KEEPS THE NARROW LITERAL, and that asymmetry is the whole point.
+ *
+ * Arm one reads noun-then-graduation-word and is safe with any spelling. Arm two reads a bare
+ * "year"/"when" and then looks up to 120 characters ahead for the noun, which is only safe while
+ * the noun is unambiguous. Widening THAT arm to the full spelling list turned ordinary
+ * education-sector employment questions into high-school graduation dates: measured on the branch
+ * before this split, "what year did you start teaching in secondary education?" and "when did you
+ * last teach grade 12?" both answered "May 2023", where main had answered nothing. A blank is
+ * recoverable; a date typed into an employment-history box is not. */
+const HIGH_SCHOOL_LITERAL = String.raw`high[\s-]?schools?`;
+
 export const HIGH_SCHOOL_GRADUATION_QUESTION = new RegExp(
   String.raw`\b${HIGH_SCHOOL_WORD}\b[\s\S]{0,200}\b(?:graduat\w*|diploma|ged|month\s+and\s+year|when)\b`
-  + String.raw`|\b(?:graduat\w*|when|month|year)\b[\s\S]{0,120}\b${HIGH_SCHOOL_WORD}\b`,
+  + String.raw`|\b(?:graduat\w*|when|month|year)\b[\s\S]{0,120}\b${HIGH_SCHOOL_LITERAL}\b`,
   'i',
 );
 
@@ -2726,57 +2750,87 @@ export const HIGH_SCHOOL_GRADUATION_QUESTION = new RegExp(
  * degree - there is no column for any of them - so those are refused rather than answered from the
  * university's.
  *
- * ADJACENCY, NOT PRESENCE. The rule fires only when the high school is the SUBJECT of the fact
- * requested - the noun sitting next to the value being asked for. Mere presence was the first
- * draft of this and it was measurably worse than no rule at all, because employers name a high
- * school most often in order to EXCLUDE it. Measured on the same profile, presence-matching turned
- * four correct answers into blockers:
+ * PRESENCE, THEN WHICH INSTITUTION THE QUALIFIER GOVERNS. The rule is not adjacency. Requiring the
+ * fact word to sit next to the noun was the second draft, and it missed every phrasing that
+ * separates them with punctuation, which is most of them: "GPA (high school)" -> "3.89",
+ * "High School: Name" -> the university, "High school, city, state" -> the university, "Where did
+ * you attend high school?" -> the university. Chasing separators is unbounded. Presence is not.
+ *
+ * What presence alone got wrong is narrower and has a real shape: employers name a high school
+ * most often in order to EXCLUDE it, and answering that gloss with a blank is the same failure the
+ * gloss was written to prevent. Measured, presence-only turned these correct answers into blockers:
  *
  *   "Which university do you attend? Do not list your high school."   USC       -> refused
  *   "What is the name of the university you attend? (not high school)" USC      -> refused
  *   "What is your GPA? (high school GPA if you are a freshman)"        "3.89"   -> refused
- *   "What city do you live in? (not the city of your high school)"     "Dubai"  -> refused
  *
- * A gloss written to stop the applicant answering with her high school, answered with a blank, is
- * the same failure the gloss exists to prevent. So the two exclusions below are load-bearing, not
- * defensive: a label that also names the current programme, or that names the high school inside a
- * negation or a conditional, is not a question about her high school.
+ * So the question is never "are the words present" but WHICH INSTITUTION THE NEGATION GOVERNS. Both
+ * directions occur and they mean opposite things:
+ *
+ *   "do not list your high school"        the high school is excluded  -> the university answers
+ *   "high school GPA (not college GPA)"   the college is excluded      -> the high school is asked
+ *
+ * The second of those is why a bare "the label also says college" exclusion is not enough: it read
+ * "(not college GPA)" as the university being co-named and answered "3.89". Attachment, not
+ * presence, on that side too.
+ *
+ * A fourth case needs no rule here at all. "What city do you live in? (not the city of your high
+ * school)" is not an education question, and classifyField's wrapper gates this on the KEY, so
+ * address_city, phone, languages and availability_date are out of reach by construction.
  */
-const HIGH_SCHOOL_FACT =
-  String.raw`(?:names?|institutions?|gpa|grade\s+point\s+average|degrees?|diplomas?|cit(?:y|ies)|towns?|states?|addresss?es?|graduat\w*|attend\w*|years?|dates?)`;
+const CURRENT_PROGRAMME_WORD = String.raw`(?:universit(?:y|ies)|colleges?|undergrad\w*|bachelors?)`;
+const HIGH_SCHOOL_PRESENT = new RegExp(String.raw`\b${HIGH_SCHOOL_WORD}`, 'i');
+const CURRENT_PROGRAMME_NAMED = new RegExp(String.raw`\b${CURRENT_PROGRAMME_WORD}\b`, 'i');
 
-/* The fact sits beside the noun ("high school name"), or the noun sits behind a preposition
- * ("name of your high school"), or the label asks WHICH one, or the whole label IS the noun -
- * which is how a two-column education row prints it: "High School" and nothing else. */
-const HIGH_SCHOOL_SUBJECT_QUESTION = new RegExp(
-  String.raw`\b${HIGH_SCHOOL_WORD}(?:['’]s)?\s+${HIGH_SCHOOL_FACT}\b`
-  + String.raw`|\b${HIGH_SCHOOL_FACT}\s+(?:of|at|from|in|for)\s+(?:your\s+|the\s+|my\s+)?${HIGH_SCHOOL_WORD}\b`
-  + String.raw`|\b(?:which|what)\s+${HIGH_SCHOOL_WORD}\b`
-  + String.raw`|^\s*${HIGH_SCHOOL_WORD}\s*[*✱:]?\s*$`,
-  'i',
-);
+const EXCLUSION_WORD = String.raw`(?:not|n['’]t|exclud\w*|other\s+than|rather\s+than|instead\s+of|in\s+lieu\s+of|omit)`;
+/* The verbs a form uses when it tells you which institution to put in the box. Requiring one (or
+ * the bare noun) is what separates "do not LIST your high school" - an exclusion - from "do not
+ * ABBREVIATE your high school name", which is an instruction about formatting and still a
+ * high-school question. Without the verb list the second one answered with the university. */
+const LISTING_VERB = String.raw`(?:list|enter|include|use|report|give|provide|write|put|name|state|specify|submit|mention)\w*`;
 
-/* The label names the CURRENT programme too, so the high school is one item in a list rather than
- * the subject: "Name of institution (university, college or high school)". The stored school is
- * the honest answer to those. */
-const CURRENT_PROGRAMME_ALSO_NAMED = /\b(?:universit(?:y|ies)|college|undergraduate|undergrad|bachelors?)\b/i;
-
-/* The high school named in order to be EXCLUDED, or under a condition that is not hers. Both
- * directions, because the qualifier lands on either side of the noun in real labels: "do not list
- * your high school" before it, "high school GPA if you are a freshman" after it. Bounded by
- * sentence punctuation so it cannot reach across into a different question. */
 const HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT = new RegExp(
-  String.raw`\b(?:not|n['’]t|exclud\w*|other\s+than|rather\s+than|instead\s+of|in\s+lieu\s+of|if\s+you)\b[^.?!]{0,60}?${HIGH_SCHOOL_WORD}`
-  + String.raw`|${HIGH_SCHOOL_WORD}[^.?!]{0,60}?\b(?:if\s+you|does\s+not\s+count|is\s+not\s+required|only\s+if)\b`,
+  String.raw`\b${EXCLUSION_WORD}\b\s*(?:${LISTING_VERB}\s+)?(?:your\s+|the\s+|a\s+|an\s+|any\s+)?${HIGH_SCHOOL_WORD}`,
   'i',
 );
+const CURRENT_PROGRAMME_NAMED_TO_EXCLUDE_IT = new RegExp(
+  String.raw`\b${EXCLUSION_WORD}\b[^.?!]{0,40}?${CURRENT_PROGRAMME_WORD}`,
+  'i',
+);
+
+/* A condition that is not hers. "High school GPA if you are a freshman" asks a freshman for a
+ * high-school GPA and everyone else for the university one, and she is not a freshman. Deliberately
+ * narrow: a bare "if you" also opens "if you attended more than one high school, list the most
+ * recent", which IS a high-school question. */
+const CONDITIONAL_ON_BEING_A_SCHOOL_LEAVER =
+  /\bif\s+you\s+(?:are|were)\b[^.?!]{0,40}?\b(?:freshman|first[\s-]year|high[\s-]?school\s+student|still\s+in\s+high[\s-]?school)\b|\bdoes\s+not\s+count\b|\bonly\s+if\s+you\s+(?:are|were)\b/i;
+
+const HIGH_SCHOOL_FACT =
+  String.raw`(?:names?|institutions?|gpa|grade\s+point\s+average|degrees?|diplomas?|cit(?:y|ies)|towns?|states?|addresses|graduat\w*|attend\w*|years?|dates?)`;
+/* Adjacency survives in exactly one job: telling an education-LEVEL list apart from a high-school
+ * fact. "Education level (high school)" enumerates it as an option and the answer is the current
+ * degree; "Level of education: high school GPA" attaches a fact to it and is a high-school
+ * question. Punctuation-tolerant in both directions, because that is how forms print it. */
+const HIGH_SCHOOL_FACT_ATTACHED = new RegExp(
+  String.raw`${HIGH_SCHOOL_WORD}(?:['’]s)?[\s:,\-–—/()]{1,3}${HIGH_SCHOOL_FACT}\b`
+  + String.raw`|\b${HIGH_SCHOOL_FACT}[\s:,\-–—/()]{1,3}(?:(?:of|at|from|in|for|during)\s+)?(?:your\s+|the\s+|my\s+)?${HIGH_SCHOOL_WORD}`,
+  'i',
+);
+const EDUCATION_LEVEL_QUESTION =
+  /\beducation\s+level\b|\blevel\s+of\s+education\b|\bhighest\s+(?:level|degree|qualification|education)\b/i;
 
 /** Whether the label's subject is the applicant's HIGH SCHOOL rather than her current programme. */
 export function questionIsScopedToHighSchool(label: string): boolean {
   const l = label ?? '';
-  if (!HIGH_SCHOOL_SUBJECT_QUESTION.test(l)) return false;
-  if (CURRENT_PROGRAMME_ALSO_NAMED.test(l)) return false;
-  return !HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(l);
+  if (!HIGH_SCHOOL_PRESENT.test(l)) return false;
+  // Ordered, and the order is the meaning. The high school excluded by name loses first; the
+  // current programme excluded by name wins next; only then does co-naming mean a coordinate list.
+  if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(l)) return false;
+  if (CURRENT_PROGRAMME_NAMED_TO_EXCLUDE_IT.test(l)) return true;
+  if (CURRENT_PROGRAMME_NAMED.test(l)) return false;
+  if (CONDITIONAL_ON_BEING_A_SCHOOL_LEAVER.test(l)) return false;
+  // An education-level list naming it as an option, with no fact hung on it, is a degree question.
+  return !(EDUCATION_LEVEL_QUESTION.test(l) && !HIGH_SCHOOL_FACT_ATTACHED.test(l));
 }
 
 /* Does the label ask for the high school's NAME? Distinct from the subject rule because the

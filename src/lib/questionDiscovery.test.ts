@@ -2311,6 +2311,25 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     'highest level of education, high school name and year of graduation',
     'highest education: high school name',
     'level of education: high school gpa',
+    /* Punctuation between the noun and the fact. An adjacency rule was the second draft and it
+       missed every one of these, which is most of how forms actually print the control. Chasing
+       separators is unbounded; presence plus a negation-attachment test is not. */
+    'gpa (high school)', 'what was your gpa during high school?',
+    'high school: name', 'high school (name)', 'high school (most recent)',
+    'school name (high school)', 'high school, city, state', 'high school / secondary school',
+    'where did you attend high school?', 'enter your high school', 'please enter your high school below',
+    /* The negation attaches to the COLLEGE, so the high school IS the subject. A rule that only
+       asked whether the label mentions a college read "(not college GPA)" as the university being
+       co-named and answered "3.89". */
+    'high school gpa (not college gpa)',
+    'what was your high school gpa? (do not enter your college gpa.)',
+    'high school name (do not list your college)',
+    'enter your high school name if you did not attend college',
+    /* A "not" that is not an exclusion, and an "if you" that is not disqualifying. Both are still
+       high-school questions, and both answered with the university before the exclusion tests
+       required the negation to govern the institution rather than merely precede it. */
+    'do not abbreviate your high school name',
+    'if you attended more than one high school, list the most recent high school name',
   ]) {
     refuses(label, 'textarea', HS);
     refuses(label, 'textarea');             // and with no high-school fact stored at all
@@ -2377,6 +2396,20 @@ test('a question about HIGH SCHOOL is never answered from the university profile
   }
   assert.equal(classifyField('what city do you live in? (not the city of your high school)'), 'address_city');
   assert.equal(classifyField('which languages do you speak? include any studied in high school.'), 'languages');
+
+  /* Employment history in the education sector. The high-school noun is wide enough to catch
+     "12th grade" and "secondary education", and feeding that width to the graduation matcher's
+     120-character proximity arm answered these with her own graduation date - a date typed into an
+     employment-history box, where main had left a blank. The proximity arm keeps the narrow
+     literal for exactly this reason. */
+  for (const label of [
+    'what year did you start teaching in secondary education?',
+    'when did you last teach grade 12?',
+    'what year did you receive your hs certification?',
+  ]) {
+    const answered = resolveKnownAnswer(label, 'text', HS, undefined);
+    assert.notDeepEqual(answered, { value: 'May 2023' }, label);
+  }
 
   /* And the one family that names a high school WITHOUT being about one: an education-LEVEL list
      enumerates it beside bachelor's and master's, and the answer there is the current degree. */
