@@ -2442,6 +2442,15 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     // Not an education field at all. One draft's guard sat above the city, phone, language and
     // availability arms of classifyField and took them with it.
     ['what city do you live in? (not the city of your high school)', PROD_OWNER_PROFILE.address_city],
+    /* Exclusion glosses in the wordings forms actually use. The negation list recognised only a
+       closed set - and `n['’]t` on its own was dead, a word boundary can never hold inside "don't"
+       - so contracted and near-synonym glosses turned correct GPA, degree and major answers into
+       blockers. */
+    ["gpa (don't enter your high school gpa)", PROD_OWNER_PROFILE.gpa],
+    ['what is your gpa? we do not accept high school gpas.', PROD_OWNER_PROFILE.gpa],
+    ['gpa - no high school gpas please', PROD_OWNER_PROFILE.gpa],
+    ['field of study - please leave out high school', PROD_OWNER_PROFILE.major],
+    ['major (high school not applicable)', PROD_OWNER_PROFILE.major],
     /* THE GRADUATION MATCHER NEEDS THE VETO TOO. It runs before every other rule and its own window
        reaches 200 characters, so a UNIVERSITY graduation control that names the high school in
        order to exclude it was answered with the high-school date. */
@@ -2471,9 +2480,29 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     'graduation year (high school). school name is entered separately.',
     'year of graduation from high school (school name below)',
     'what year did you graduate from high school? if you attended more than one school, list the most recent.',
+    /* Forms say "finish", "complete" and "leave" as readily as "graduate". Reading only the last of
+       those left the others vetoed, and they fell through to the classifier and were answered with
+       the UNIVERSITY'S NAME - while the "graduate" spelling of the same sentence answered right. */
+    'in what year did you finish high school? please also enter the school name',
+    'in what year did you complete high school? please also enter the school name',
+    'what year did you leave high school? please also enter the school name',
+    'year of completion of high school and name of institution',
+    'month and year you finished high school, plus the school name',
+    'year you left high school (and the school’s name)',
   ]) {
     assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: 'May 2023' }, label);
   }
+
+  /* And when the veto DOES stand, it refuses rather than returning null. That is the structural
+     half of the fix and it is why a wider verb list alone was not enough: past this point
+     HIGH_SCHOOL_GRADUATION_QUESTION has matched, so the label names a high school, and letting it
+     fall through hands it to the classifier - which holds the university. Two labels reached the
+     essay drafter that way. This one asks for the year AND the name AND the city, and one part of
+     three is not an answer, the same rule Palantir's combined card gets. */
+  assert.equal(
+    questionRefusedAsHighSchool('in what year did you graduate? please name the high school and the city of the school.', HS),
+    true,
+  );
 
   /* A fact request is not an essay prompt, however long the label. Standing down on length alone
      let "What is the name of the high school you attended most recently?" reach the drafter, to
@@ -2548,8 +2577,17 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     'hsa contribution', 'hsbc holdings employment history', 'do you have an hse certification?',
     'hsts / hsts preload experience', 'have you used hspice?', 'hs code for exported goods',
     'rate your proficiency in hsql', 'have you worked at hsbc?',
+    /* "Grade 12" gets the same treatment, and for the same reason: it is a federal pay grade as
+       well as a school year, so these were manufactured into high-school blockers. */
+    'highest federal grade held (e.g., grade 12)',
+    'are you currently at grade 12 or above on the gs scale?',
+    'grade 12 pay band',
   ]) {
     assert.equal(questionRefusedAsHighSchool(label, HS), false, label);
+  }
+  // ...while the same token with an education fact beside it is unambiguous and still refuses.
+  for (const label of ['grade 12 gpa', '12th grade school name', 'grade 12 school name']) {
+    assert.equal(questionRefusedAsHighSchool(label, HS), true, label);
   }
 });
 

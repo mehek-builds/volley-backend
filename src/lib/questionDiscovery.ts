@@ -616,7 +616,13 @@ function highSchoolGraduationAnswer(
   if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(label)) return null;
   if (!HIGH_SCHOOL_OWNS_THE_GRADUATION.test(label)
       && (CURRENT_PROGRAMME_NAMED.test(label) || labelNamesAnotherInstitution(label))) {
-    return null;
+    /* A REFUSAL, not a null, and this is the structural half of the fix rather than a wider verb
+     * list. HIGH_SCHOOL_GRADUATION_QUESTION has already matched by this point, so the label names a
+     * high school; letting it fall through hands it to the classifier, which holds the university.
+     * That is how "please also enter the school name" got answered with the university's full name,
+     * and how two labels reached the essay drafter. Only the exclusion test above may return null,
+     * because there the university genuinely owns the control. */
+    return { skipReason: `high school question left for you: "${label.slice(0, 60)}"` };
   }
   /* One control asking for the school's NAME as well as the year cannot be satisfied by the year.
    * Palantir's card is "High School Name & Graduation Year", and typing "May 2023" into it answers
@@ -2734,7 +2740,7 @@ const PREFERRED_NAME_QUESTION =
  * classifier's `graduation_year`, and came back "May 2028" - the UNIVERSITY year. Measured
  * 2026-08-11, along with "HS GPA" -> "3.89" and "12th Grade School Name" -> the university.
  */
-const HIGH_SCHOOL_WORD = String.raw`(?:high[\s-]?schools?|(?:sr\.?|senior)\s+secondary(?:\s+school)?|(?<!post[\s‐-―-])secondary\s+schools?|(?:12th|twelfth)\s+grade(?:\s+school)?|grade\s+12(?:\s+school)?|prep(?:aratory)?\s+schools?)`;
+const HIGH_SCHOOL_WORD = String.raw`(?:high[\s-]?schools?|(?:sr\.?|senior)\s+secondary(?:\s+school)?|(?<!post[\s‐-―-])secondary\s+schools?|(?:12th|twelfth)\s+grade\s+school|grade\s+12\s+school|prep(?:aratory)?\s+schools?)`;
 /* "Secondary education" is deliberately NOT here, though it names the same institution. It is also
  * the name of a MAJOR, and a field-of-study control that lists it as an example - "Major / field of
  * study (e.g. Nursing, Secondary Education, Engineering)" - was refused where main answered
@@ -2748,8 +2754,15 @@ const HIGH_SCHOOL_WORD = String.raw`(?:high[\s-]?schools?|(?:sr\.?|senior)\s+sec
  * abbreviation counts only with an education fact beside it, which is how a form writes it: "HS
  * GPA", "HS Diploma", "GPA (HS)". */
 const HS_FACT = String.raw`(?:gpa|names?|diplomas?|graduat\w*|schools?|transcripts?|cit(?:y|ies)|grades?|years?)`;
+/* "Grade 12" gets the same treatment as "HS" and for the same reason: it is a federal pay grade as
+ * well as a school year, so "Highest federal grade held (e.g., Grade 12)" and "Grade 12 pay band"
+ * were manufactured into high-school blockers. Bare, it means nothing here; with an education fact
+ * beside it, it is unambiguous. `<n>th grade school` stays in the noun list above, where the word
+ * school already disambiguates it. */
+const GRADE_TWELVE = String.raw`(?:(?:12th|twelfth)\s+grade|grade\s+12)`;
 const HIGH_SCHOOL_ABBREVIATED = new RegExp(
-  String.raw`\bh\.?\s?s\.?\s+${HS_FACT}\b|\b${HS_FACT}\s+h\.?\s?s\.?(?!\w)`,
+  String.raw`\bh\.?\s?s\.?\s+${HS_FACT}\b|\b${HS_FACT}\s+h\.?\s?s\.?(?!\w)`
+  + String.raw`|\b${GRADE_TWELVE}\s+${HS_FACT}\b|\b${HS_FACT}\s+(?:of\s+|in\s+|at\s+)?${GRADE_TWELVE}\b`,
   'i',
 );
 /* The lookbehind is not decoration. In North American usage POST-secondary education is the
@@ -2891,13 +2904,14 @@ function labelNamesAnotherInstitution(label: string): boolean {
  * rules that had to go were the ones that widened this into a proximity window or mirrored it onto
  * the college side; nothing was ever wrong with reading a negation's immediate object. */
 const HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT = new RegExp(
-  String.raw`\b(?:not|n['’]t|exclud\w*|other\s+than|rather\s+than|instead\s+of|omit)\b\s*`
-  + String.raw`(?:(?:list|enter|include|use|report|give|provide|write|put|name|state|specify|submit|mention|type|select|choose|repeat|fill)\w*\s+)?`
+  String.raw`(?:\b(?:not|no|never|exclud\w*|other\s+than|rather\s+than|instead\s+of|omit|leave\s+(?:out|off)|ignor\w*|skip|avoid|without|cannot|except|apart\s+from|aside\s+from)\b|\w+n['’]t)\s*`
+  + String.raw`(?:(?:list|enter|include|use|report|give|provide|write|put|name|state|specify|submit|mention|type|select|choose|repeat|fill|accept|count|consider|qualif|permit)\w*\s+)?`
   + String.raw`(?:your\s+|the\s+|a\s+|an\s+|any\s+)?${HIGH_SCHOOL_WORD}\b`
   /* One passive form, kept deliberately narrow to a closed verb list rather than reopened into a
    * window: "high-school dates are not accepted" reads the exclusion backwards from every other
    * phrasing, and without it a university graduation control came back blank. */
-  + String.raw`|${HIGH_SCHOOL_WORD}\b[^.?!]{0,30}?\b(?:is|are)\s+not\s+(?:accept\w*|requir\w*|need\w*|used|consider\w*|count\w*)`,
+  + String.raw`|${HIGH_SCHOOL_WORD}\b[^.?!]{0,30}?(?:\b(?:is|are|will\s+be|would\s+be|do|does|did)\s+not\b|\w+n['’]t|\bnot\b)\s*(?:be\s+)?`
+  + String.raw`(?:accept\w*|requir\w*|need\w*|used|consider\w*|count\w*|qualif\w*|applicab\w*|permit\w*|relevant)`,
   'i',
 );
 
@@ -2907,9 +2921,14 @@ const HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT = new RegExp(
  * it names, and standing down there returned a blank where main returned the stored date. Adjacency
  * decides it, and only here - the noun sitting directly on the graduation word, not merely in the
  * same sentence. */
+/* Forms say "finish", "complete" and "leave" as readily as "graduate", and reading only the last
+ * of those left the others vetoed: "In what year did you finish high school? Please also enter the
+ * school name" fell through to the classifier and was answered with the UNIVERSITY'S NAME, while
+ * the "graduate" spelling of the same sentence answered correctly. */
+const SCHOOL_LEAVING_WORD = String.raw`graduat\w*|diploma|ged|finish\w*|complet\w*|left|leav\w*`;
 const HIGH_SCHOOL_OWNS_THE_GRADUATION = new RegExp(
-  String.raw`\b${HIGH_SCHOOL_LITERAL}\b[^.?!]{0,20}?(?:graduat\w*|diploma|ged)`
-  + String.raw`|(?:graduat\w*|diploma|ged)[^.?!]{0,20}?\b${HIGH_SCHOOL_LITERAL}\b`,
+  String.raw`\b${HIGH_SCHOOL_LITERAL}\b[^.?!]{0,20}?(?:${SCHOOL_LEAVING_WORD})`
+  + String.raw`|(?:${SCHOOL_LEAVING_WORD})[^.?!]{0,20}?\b${HIGH_SCHOOL_LITERAL}\b`,
   'i',
 );
 
