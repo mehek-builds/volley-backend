@@ -24,6 +24,7 @@ import {
   findSecurityCodeAttempt,
   normalizeSecurityCode,
   readManagedSecurityCodeChallenge,
+  securityCodeChallengeMatchesRecipient,
   securityCodeAttentionReason,
   securityCodeContinuationActions,
   securityCodeFingerprint,
@@ -96,8 +97,11 @@ import {
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import {
+  isManagedNoSubmitControl,
   isManagedRunTimeout,
   managedSubmitVerdict,
+  observeManagedReceiptOnce,
+  readManagedSubmitOutcome,
   unverifiedSubmissionReason,
 } from '../lib/managedSubmitOutcome';
 import { applyReviewPatch, beginStall } from '../lib/applicationStall';
@@ -3085,15 +3089,47 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     const result = await runManagedBrowser(
       applicationUrl,
       initialActions,
-      { allowSubmit: true, requestContinuation: true, continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS },
+      {
+        allowSubmit: true,
+        requestContinuation: true,
+        // The same held page serves two post-click outcomes. A visible code wall offers a
+        // continuation on its own; an ordinary unknown receipt does not, so it needs an explicit
+        // checkpoint before the read-only observer below can take its one bounded second look.
+        continuationCheckpoint: true,
+        continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS,
+      },
     );
+    const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);
+    const initialSubmitOutcome = readManagedSubmitOutcome(result);
+    const initialChallenge = securityCodeChallengeMatchesRecipient(initialChallengeCandidate, packet.email)
+      ? initialChallengeCandidate
+      : null;
+    if (initialChallengeCandidate && initialSubmitOutcome?.pressed === false && !initialChallenge) {
+      await writeReview(row, preClickSecurityRecipientMismatchReview(
+        claimedReview,
+        initialChallengeCandidate,
+        verificationRequestedAt.toISOString(),
+      ));
+      return;
+    }
     // Required-field confirmation is a barrier inside the same remote action list, immediately
     // before submit. Require its per-field proof as well: an older runner that ignores or does not
     // understand the protocol must not be allowed to turn a silent fill into a submitted state.
-    assertManagedRequiredFieldsConfirmed(result, 'application');
+    // A retained security-code wall is the result of an earlier application submit. Stratus does
+    // not press the disabled application control again, so there is intentionally no new application
+    // confirmation pass to assert. The only click allowed from that state is the verification pass
+    // below, which carries the inbox code and asserts its own exact atomic proof.
+    if (!initialChallenge) assertManagedRequiredFieldsConfirmed(result, 'application');
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
-    const initialChallenge = readManagedSecurityCodeChallenge(result);
+    const initialSecurityCodeState = initialChallenge
+      ? beginSecurityCodeState({
+        challenge: initialChallenge,
+        attemptedAt: verificationRequestedAt.toISOString(),
+        authorized: true,
+        existing: claimedReview.security_code,
+      })
+      : claimedReview.security_code;
     /* THE SECOND HALF HAPPENS ON THE PAGE THE FIRST HALF PRODUCED, and there is now only one way in.
      *
      * WHAT WAS MEASURED, on a live Cresta application on 2026-08-09. Greenhouse emailed this
@@ -3111,10 +3147,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * stale, and the packet's own attention_reason told her, honestly and uselessly, to "use the
      * newest email".
      *
-     * So there is one branch, not two. The run that raises the challenge is the run that answers it:
-     * it holds its page open, reads the code its own submit caused out of the connected mailbox, and
-     * types it into the control that is still standing in front of it. No second send, and therefore
-     * nothing to go stale.
+     * So there is one continuation branch, not a resend branch. A newly raised challenge reads the
+     * code its own submit caused. A retained Greenhouse challenge may instead read the newest code
+     * already bound to this exact active application alias during the preceding 24 hours. In both
+     * cases the security-code control is already standing, so no second application send occurs.
      *
      * THE WAIT IS BOUNDED AND SHORT BECAUSE THE READER IS NOT A PERSON. A held browser session is a
      * bad place to wait for a human to open an email; it is a fine place to wait a minute for a
@@ -3134,9 +3170,23 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         outcome: 'superseded',
       });
     }
-    // The code this run actually typed, and the only kind there is: one read in-session, from the
-    // window opened by this run's own submit. Null until a mailbox read produces one.
+    // The code this run actually typed. It is either read just after this run raises the wall, or,
+    // for an already standing Greenhouse wall only, is the newest authenticated code for this exact
+    // active application alias. Null until a mailbox read produces one.
     let enteredCode: string | null = null;
+    let enteredSecurityCodeState = initialSecurityCodeState;
+    const recordEnteredCodeOutcome = (
+      outcome: SecurityCodeAttempt['outcome'],
+      at: string,
+    ): ApplicationReviewState['security_code'] => {
+      if (!enteredCode || !enteredSecurityCodeState) return enteredSecurityCodeState;
+      enteredSecurityCodeState = withSecurityCodeAttempt(enteredSecurityCodeState, {
+        at,
+        fingerprint: securityCodeFingerprint(row.id, enteredCode),
+        outcome,
+      });
+      return enteredSecurityCodeState;
+    };
     if (initialChallenge && managedResultNeedsEmailVerification(result)) {
       const requestedAt = verificationRequestedAt.toISOString();
       const continuationExpiresAt = result.continuationExpiresAt;
@@ -3181,10 +3231,48 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           permissionGranted: true,
           expectedRecipient: packet.email,
           applicationId: row.id,
+          standingChallenge: initialSubmitOutcome?.pressed === false,
           attempts: SECURITY_CODE_MAILBOX_ATTEMPTS,
           delayMs: SECURITY_CODE_MAILBOX_DELAY_MS,
         });
-        if (prepared.status === 'ready' && Date.parse(continuationExpiresAt) > Date.now()) {
+        const codeWasAlreadyAttempted = prepared.status === 'ready'
+          && Boolean(initialSecurityCodeState && findSecurityCodeAttempt(
+            initialSecurityCodeState,
+            securityCodeFingerprint(row.id, prepared.code),
+          ));
+        if (prepared.status === 'ready' && !codeWasAlreadyAttempted && Date.parse(continuationExpiresAt) > Date.now()) {
+          const actionAuthorizationValid = await authorizationValidAtClick(row, claimedReview);
+          const actionVerificationRoute = await resolveVerificationEmailRoute({
+            userId: row.user_id,
+            applicationId: row.id,
+            expectedRecipient: packet.email,
+          });
+          const actionPersonalVerificationEnabled = verificationRoute === 'personal_address'
+            ? (await db.select({ enabled: users.automatic_verification_enabled })
+              .from(users).where(eq(users.id, row.user_id)).limit(1))[0]?.enabled === true
+            : false;
+          const actionVerificationRouteValid = verificationRoute === 'application_alias'
+            ? actionVerificationRoute === 'application_alias'
+            : verificationRoute === 'personal_address'
+              && actionVerificationRoute === 'personal_address'
+              && actionPersonalVerificationEnabled;
+          if (!actionAuthorizationValid || !actionVerificationRouteValid) {
+            if (!initialSecurityCodeState) throw new Error('Managed security-code state was not initialized');
+            const actionBlockCause = !actionAuthorizationValid
+              ? 'authorization_revoked' as const
+              : verificationRoute === 'personal_address'
+                  && actionVerificationRoute === 'personal_address'
+                  && !actionPersonalVerificationEnabled
+                ? 'email_permission_revoked' as const
+                : 'email_route_changed' as const;
+            await writeReview(row, preClickVerificationContinuationBlockedReview(
+              claimedReview,
+              initialSecurityCodeState,
+              actionBlockCause,
+              initialSubmitOutcome?.pressed === true ? verificationRequestedAt.toISOString() : undefined,
+            ));
+            return;
+          }
           /* THE PACKET'S OWN SUBMIT ACTION, CARRYING THE CODE, and it is one action rather than ten.
            *
            * securityCodeContinuationActions derives the terminal atomic submit from the list this
@@ -3194,6 +3282,19 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
            * the fallback for a packet with no atomic submit to derive from, which is the same
            * upstream gate portalCanAutoSubmit already applies. */
           enteredCode = prepared.code;
+          const spentAt = new Date().toISOString();
+          if (!initialSecurityCodeState) throw new Error('Managed security-code state was not initialized');
+          enteredSecurityCodeState = withSecurityCodeAttempts(initialSecurityCodeState, [
+            ...codeAttempts,
+            {
+              at: spentAt,
+              fingerprint: securityCodeFingerprint(row.id, prepared.code),
+              outcome: 'error',
+            },
+          ]);
+          // Spend the exact code before the one-shot remote call. If the worker stops after this
+          // write, the same retained code cannot be selected and submitted on another run.
+          await writeReview(row, nextReview(claimedReview, { security_code: enteredSecurityCodeState }));
           const codeActions = securityCodeContinuationActions(initialActions, prepared.code) ?? prepared.actions;
           try {
             // Exactly one continuation call. An uncertain click is never retried.
@@ -3220,14 +3321,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
             const failedAt = new Date().toISOString();
             await writeReview(row, nextReview(claimedReview, {
               status: 'needs_attention',
-              ...(claimedReview.security_code
-                ? {
-                  security_code: withSecurityCodeAttempts(claimedReview.security_code, [
-                    ...codeAttempts,
-                    { at: failedAt, fingerprint: securityCodeFingerprint(row.id, prepared.code), outcome: 'error' },
-                  ]),
-                }
-                : {}),
+              security_code: recordEnteredCodeOutcome('error', failedAt),
               verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
               attention_reason: 'Litos entered the employer verification step, but could not prove the final result. Check the employer portal before trying anything again.',
               submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Managed verification continuation failed',
@@ -3259,12 +3353,81 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0, ...continuationEvidence };
       }
     }
-    if (!receiptResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
+    /* ONE READ-ONLY SECOND LOOK, ONLY WHEN THE CLICK LANDED AND THE FIRST VERDICT WAS UNKNOWN.
+     *
+     * Ashby and Greenhouse both replace their application UI after the request completes. The
+     * runner waits a bounded three seconds, but two production sends reached that deadline between
+     * the click and the ATS state transition. They were written as terminal unverified rows even
+     * though the exact browser page was still alive behind the continuation capability this request
+     * had already asked Stratus to create.
+     *
+     * The observer receives no URL and the continuation receives an empty action list. It cannot
+     * reopen, navigate, click, or submit. It only lets Stratus run its existing ATS readers on the
+     * same Page once more. The helper accepts only Ashby's published success/failure containers or
+     * Greenhouse's confirmation route; timeout, weak page text, and a second unknown keep the
+     * original unverified verdict. An uncertain submit is never retried. */
+    let receiptEvidenceResult = receiptResult;
+    let delayedObservedChallenge = false;
+    if (!initialChallenge) {
+      const observation = await observeManagedReceiptOnce({
+        initial: receiptResult,
+        expectedApplicationUrl: applicationUrl,
+        observe: (continuationToken) => continueManagedBrowser(continuationToken, [], { screenshot: true }),
+      });
+      receiptResult = observation.receiptResult;
+      receiptEvidenceResult = observation.evidenceResult;
+      const delayedChallengeCandidate = observation.observedResult
+        ? readManagedSecurityCodeChallenge(observation.observedResult)
+        : null;
+      const delayedChallenge = securityCodeChallengeMatchesRecipient(delayedChallengeCandidate, packet.email)
+        ? delayedChallengeCandidate
+        : null;
+      if (delayedChallenge && observation.observedResult) {
+        // The empty observation can land after the click but before a delayed Greenhouse code wall
+        // renders. Its one-shot token is already consumed, so this run cannot safely recurse into a
+        // second continuation. Carry the exact typed challenge into the ordinary handoff below,
+        // keep its latest screenshot, and release the claim without ever calling it unverified.
+        receiptResult = observation.observedResult;
+        delayedObservedChallenge = true;
+        verification = {
+          status: 'verification_pending',
+          requested_at: verificationRequestedAt.toISOString(),
+          retry_count: 0,
+        };
+      }
+      if (observation.error) {
+        const detail = String(observation.error instanceof Error ? observation.error.message : observation.error).slice(0, 200);
+        fastify.log.warn({ applicationId: row.id, detail }, 'Managed receipt observation failed closed');
+      }
+    }
+    if (!receiptEvidenceResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();
     const blob = await storeReceiptScreenshot(
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
-      Buffer.from(receiptResult.screenshot, 'base64'),
+      Buffer.from(receiptEvidenceResult.screenshot, 'base64'),
     );
+    if (delayedObservedChallenge) {
+      const delayedChallenge = readManagedSecurityCodeChallenge(receiptResult);
+      if (!delayedChallenge) throw new Error('Delayed security-code challenge disappeared before handoff');
+      const securityCode = beginSecurityCodeState({
+        challenge: delayedChallenge,
+        attemptedAt: capturedAt,
+        authorized: true,
+        existing: claimedReview.security_code,
+      });
+      await writeReview(row, delayedSecurityCodeHandoffReview(claimedReview, {
+        verification,
+        securityCode,
+        attemptedAt: capturedAt,
+        screenshotUrl: blob.url,
+      }));
+      fastify.log.warn({
+        applicationId: row.id,
+        sentTo: securityCode.sent_to,
+        digits: securityCode.digits,
+      }, 'Employer security-code challenge appeared after the receipt observation capability was consumed');
+      return;
+    }
     /* THE SUBMIT LANDED AND THE EMPLOYER ASKED FOR A CODE, so this is not 'submitted'.
      *
      * Read off the control the runner found, never off the page's text: readManagedReceipt scrapes
@@ -3275,13 +3438,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      *
      * The screenshot is kept either way. It is the evidence of what was actually on screen, and it
      * is what makes the next state debuggable rather than a claim. */
-    const challenge = readManagedSecurityCodeChallenge(receiptResult);
+    const challengeCandidate = readManagedSecurityCodeChallenge(receiptResult);
+    const challenge = securityCodeChallengeMatchesRecipient(challengeCandidate, packet.email)
+      ? challengeCandidate
+      : null;
     if (challenge) {
       const securityCode = beginSecurityCodeState({
         challenge,
         attemptedAt: capturedAt,
         authorized: true,
-        existing: claimedReview.security_code,
+        existing: enteredSecurityCodeState,
       });
       const attempted = withSecurityCodeAttempts(securityCode, [
         ...codeAttempts,
@@ -3341,8 +3507,12 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      */
     const verdict = managedSubmitVerdict(receiptResult);
     if (verdict.kind === 'refused') {
+      const refusedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'rejected'
+        ? 'rejected' as const
+        : 'error' as const;
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
+        ...(enteredCode ? { security_code: recordEnteredCodeOutcome(refusedCodeOutcome, capturedAt) } : {}),
         submission_attempted_at: capturedAt,
         preview_screenshot_url: blob.url,
         submission_error: undefined,
@@ -3362,8 +3532,14 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * that blocks every later application to this posting. The claim is released because the packet
      * is safe to run again the moment the missing answer exists. */
     if (verdict.kind === 'not_attempted') {
+      const notAttemptedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'no_control'
+        ? 'no_control' as const
+        : receiptResult.securityCodeAttempt?.outcome === 'not_entered'
+          ? 'not_entered' as const
+          : 'error' as const;
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
+        ...(enteredCode ? { security_code: recordEnteredCodeOutcome(notAttemptedCodeOutcome, capturedAt) } : {}),
         submission_attempted_at: capturedAt,
         preview_screenshot_url: blob.url,
         submission_error: undefined,
@@ -3377,11 +3553,21 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       return;
     }
     if (verdict.kind === 'unverified') {
-      await writeReview(row, nextReview(claimedReview, unverifiedSubmissionPatch(claimedReview, {
-        at: capturedAt,
-        cause: 'no_confirmation_state',
-        previewUrl: blob.url,
-      })));
+      const unverifiedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'rejected'
+        ? 'rejected' as const
+        : receiptResult.securityCodeAttempt?.outcome === 'no_control'
+          ? 'no_control' as const
+          : receiptResult.securityCodeAttempt?.outcome === 'not_entered'
+            ? 'not_entered' as const
+            : 'error' as const;
+      await writeReview(row, nextReview(claimedReview, {
+        ...unverifiedSubmissionPatch(claimedReview, {
+          at: capturedAt,
+          cause: 'no_confirmation_state',
+          previewUrl: blob.url,
+        }),
+        ...(enteredCode ? { security_code: recordEnteredCodeOutcome(unverifiedCodeOutcome, capturedAt) } : {}),
+      }));
       return;
     }
     /* A CODE RUN OWES TWO PROOFS, AND "NO ERROR VISIBLE" IS NEITHER OF THEM.
@@ -3409,21 +3595,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
             cause: 'no_confirmation_state',
             previewUrl: blob.url,
           }),
-          ...(claimedReview.security_code
-            ? {
-              security_code: withSecurityCodeAttempts(claimedReview.security_code, [
-                ...codeAttempts,
-                {
-                  at: capturedAt,
-                  fingerprint: securityCodeFingerprint(row.id, enteredCode),
-                  outcome: codeOutcome === 'rejected' ? 'rejected'
-                    : codeOutcome === 'no_control' ? 'no_control'
-                      : codeOutcome === 'accepted' ? 'error'
-                        : 'not_entered',
-                },
-              ]),
-            }
-            : {}),
+          security_code: recordEnteredCodeOutcome(
+            codeOutcome === 'rejected' ? 'rejected'
+              : codeOutcome === 'no_control' ? 'no_control'
+                : codeOutcome === 'not_entered' ? 'not_entered'
+                  : 'error',
+            capturedAt,
+          ),
         }));
         return;
       }
@@ -3447,18 +3625,11 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       // Present only when a code finished this one, and it is the fact that makes the receipt
       // legible: this application was sent, refused, and completed with the code the same run read
       // out of the mailbox while holding the challenged page open.
-      ...(claimedReview.security_code && (enteredCode || codeAttempts.length > 0)
-        ? {
-          security_code: withSecurityCodeAttempts(claimedReview.security_code, [
-            ...codeAttempts,
-            ...(enteredCode ? [{
-              at: capturedAt,
-              fingerprint: securityCodeFingerprint(row.id, enteredCode),
-              outcome: 'accepted' as const,
-            }] : []),
-          ]),
-        }
-        : {}),
+      ...(enteredCode
+        ? { security_code: recordEnteredCodeOutcome('accepted', capturedAt) }
+        : enteredSecurityCodeState && codeAttempts.length > 0
+          ? { security_code: withSecurityCodeAttempts(enteredSecurityCodeState, codeAttempts) }
+          : {}),
       receipt: {
         confirmation_text: receipt.confirmationText,
         final_url: receipt.finalUrl,
@@ -3597,6 +3768,137 @@ export function submissionFailureOutcome(input: {
   };
 }
 
+/** Fields a managed atomic chooser failure must remove because it occurs before any submit click. */
+export function preClickNoSubmitReleasePatch(): Partial<ApplicationReviewState> {
+  return {
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_authorization: undefined,
+    submission_attempted_at: undefined,
+    unverified_submission: undefined,
+    submitted_at: undefined,
+    receipt: undefined,
+  };
+}
+
+/** The exact persisted review for an atomic chooser stop that occurs before submitHandle.click. */
+export function preClickNoSubmitReview(
+  current: ApplicationReviewState,
+  message: string,
+): ApplicationReviewState {
+  const outcome = submissionFailureOutcome({
+    captchaStop: null,
+    noSubmitControl: true,
+    uncertainAfterClaim: true,
+    externalGate: false,
+    providerSessionFailure: false,
+    currentAttentionReason: current.attention_reason,
+  });
+  return nextReview(current, {
+    status: outcome.status,
+    ...preClickNoSubmitReleasePatch(),
+    ...(current.verification?.status === 'searching'
+      ? { verification: { ...current.verification, status: 'verification_pending' as const } }
+      : {}),
+    submission_error: message,
+    attention_reason: outcome.attentionReason,
+    attention_categories: outcome.attentionCategories,
+  });
+}
+
+/** A standing code wall for another recipient is pre-click and must never enter mailbox handling. */
+export function preClickSecurityRecipientMismatchReview(
+  current: ApplicationReviewState,
+  challenge: NonNullable<ReturnType<typeof readManagedSecurityCodeChallenge>>,
+  observedAt: string,
+): ApplicationReviewState {
+  const matchingExistingState = current.security_code?.sent_to
+    && securityCodeChallengeMatchesRecipient(challenge, current.security_code.sent_to)
+    ? current.security_code
+    : undefined;
+  const securityCode = beginSecurityCodeState({
+    challenge,
+    attemptedAt: observedAt,
+    authorized: matchingExistingState?.submit_was_authorized ?? false,
+    existing: matchingExistingState,
+  });
+  const attentionReason = 'This application is already waiting at the employer security-code step, but that step names a different application email than this packet. Litos did not click the verification button. Open the employer portal and resolve the email mismatch before regenerating or retrying this application.';
+  return nextReview(current, {
+    status: 'awaiting_security_code',
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_authorization: undefined,
+    unverified_submission: undefined,
+    submitted_at: undefined,
+    receipt: undefined,
+    security_code: securityCode,
+    verification: { status: 'verification_pending', requested_at: observedAt, retry_count: 0 },
+    submission_error: 'Managed security-code recipient did not match the packet email',
+    attention_reason: attentionReason,
+    attention_categories: ['security_code', 'evidence_gap'],
+  });
+}
+
+/** A code match grants no click if consent or the exact email route changed during mailbox polling. */
+export function preClickVerificationContinuationBlockedReview(
+  current: ApplicationReviewState,
+  securityCode: NonNullable<ApplicationReviewState['security_code']>,
+  cause: 'authorization_revoked' | 'email_route_changed' | 'email_permission_revoked',
+  attemptedAt?: string,
+): ApplicationReviewState {
+  const attentionReason = cause === 'authorization_revoked'
+    ? 'This application is already waiting at the employer security-code step. Automatic submission permission was revoked before Litos could finish verification, so Litos stopped without clicking the verification button. Review this application before authorizing another attempt.'
+    : cause === 'email_permission_revoked'
+      ? 'This application is already waiting at the employer security-code step. Automatic inbox verification was turned off before Litos could finish, so Litos stopped without clicking the verification button. Review this application before authorizing another attempt.'
+    : 'This application is already waiting at the employer security-code step. Its email route changed before Litos could finish verification, so Litos stopped without clicking the verification button. Regenerate this application before trying again.';
+  return nextReview(current, {
+    status: 'awaiting_security_code',
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_authorization: undefined,
+    submission_attempted_at: current.submission_attempted_at ?? attemptedAt,
+    unverified_submission: undefined,
+    submitted_at: undefined,
+    receipt: undefined,
+    security_code: securityCode,
+    verification: {
+      status: 'verification_pending',
+      requested_at: securityCode.requested_at,
+      retry_count: 0,
+    },
+    submission_error: cause === 'authorization_revoked'
+      ? 'Submission authorization was revoked before security-code continuation'
+      : cause === 'email_permission_revoked'
+        ? 'Automatic inbox verification was disabled before security-code continuation'
+        : 'Application email route changed before security-code continuation',
+    attention_reason: attentionReason,
+    attention_categories: ['security_code', 'evidence_gap'],
+  });
+}
+
+/** A delayed post-click code wall has consumed its one continuation and must remain submit-locked. */
+export function delayedSecurityCodeHandoffReview(
+  current: ApplicationReviewState,
+  input: {
+    securityCode: NonNullable<ApplicationReviewState['security_code']>;
+    verification: NonNullable<ApplicationReviewState['verification']>;
+    attemptedAt: string;
+    screenshotUrl: string;
+  },
+): ApplicationReviewState {
+  return nextReview(current, {
+    status: 'needs_attention',
+    verification: input.verification,
+    security_code: input.securityCode,
+    submission_attempted_at: input.attemptedAt,
+    preview_screenshot_url: input.screenshotUrl,
+    submission_error: undefined,
+    attention_reason: 'The employer showed a verification-code step after Litos used its one safe receipt check. Litos will not open a fresh form or send this application again automatically. Open the employer portal and finish the verification there.',
+    attention_categories: ['security_code', 'evidence_gap'],
+    unverified_submission: undefined,
+  });
+}
+
 /* THE PATCH FOR "LITOS DOES NOT KNOW", IN ONE PLACE.
  *
  * Two call sites reach it - a run that finished and could not read a confirmation, and a run that
@@ -3688,7 +3990,7 @@ async function fail(row: ResumeRow, error: unknown) {
      submit control the click PROVABLY did not happen, so uncertainAfterClaim's "check the portal
      or your email" is the one thing that must not be said: there is no receipt to find. This is
      the routine outcome on a multi-step first page, not an edge case. */
-  const noSubmitControl = error instanceof NoSubmitControlError;
+  const noSubmitControl = error instanceof NoSubmitControlError || isManagedNoSubmitControl(message);
   const regenerationRequired = error instanceof ApplicantEmailRegenerationRequiredError;
   /* The third member of the same family as the two branches above, and it arrives with proof.
      buildManagedPortalActions throws this while ASSEMBLING the action list, before runManagedBrowser
@@ -3699,6 +4001,11 @@ async function fail(row: ResumeRow, error: unknown) {
      the packet at needs_attention-after-claim, which submitRequestDisposition refuses to re-run: an
      application permanently stuck behind a receipt that cannot exist. */
   const actionBudgetStop = error instanceof ManagedActionBudgetError ? error.blocker : null;
+
+  if (noSubmitControl) {
+    await writeReview(latestRows[0], preClickNoSubmitReview(current, message));
+    return;
+  }
 
   const outcome = submissionFailureOutcome({
     captchaStop, noSubmitControl, regenerationRequired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure,
