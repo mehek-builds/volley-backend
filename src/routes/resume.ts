@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, desc, and, inArray, sql } from 'drizzle-orm';
+import { eq, desc, and, getTableColumns, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
@@ -57,6 +57,7 @@ import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '
 import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
+import { decodeHistoryCursor, historyPage, type HistoryCursor } from '../lib/historyCursor';
 import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
 import { resumeEmailOfRecord } from '../lib/resumeEmail';
 
@@ -343,6 +344,78 @@ export const autofillEventSchema = z.object({
   auto_submitted: z.boolean().optional(),
   r030_candidate_labels: z.array(z.string().max(200)).max(50).optional(),
 });
+
+/**
+ * How many history rows one GET /resume/history answers with by default.
+ *
+ * UNCHANGED AT 50 ON PURPOSE. The bug was never that 50 was too small; it was that the response
+ * did not say a window existed and no caller could ask for the rest. A client that sends no
+ * parameters gets exactly the payload it got before this change, now with the total and the cursor
+ * beside it, so nothing has to be deployed in lockstep. Every row carries the whole tailoring spec
+ * as jsonb, which is why the page stays small rather than growing to swallow the corpus.
+ */
+const HISTORY_PAGE_SIZE = 50;
+/**
+ * The most one request may ask for. A caller that wants everything pages for it; a caller that
+ * asks for ten thousand jsonb specs in one response does not get to.
+ */
+const HISTORY_PAGE_SIZE_MAX = 100;
+
+// GET /resume/history's query. Both fields optional, so the no-parameter call keeps working.
+export const historyQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(HISTORY_PAGE_SIZE_MAX).default(HISTORY_PAGE_SIZE),
+  cursor: z.string().min(1).max(512).optional(),
+});
+
+/**
+ * The stored row, plus the one derived column the cursor needs.
+ *
+ * `created_at_exact` is created_at rendered BY POSTGRES at the precision Postgres stores, six
+ * fractional digits. The row's own `created_at` cannot serve: node-postgres parses timestamptz into
+ * a JavaScript Date, which holds milliseconds, so a cursor built from it names a boundary up to
+ * 999 microseconds earlier than the row it points at and the strict descending compare then skips
+ * every row inside that gap. See the HistoryCursor type for the measurement.
+ *
+ * Selected here rather than fetched in a second query so the timestamp and the row it belongs to
+ * come from one snapshot. It is stripped before the row is sent, by withoutCursorColumn: it is a
+ * detail of how the next page is asked for, not a field of the packet.
+ */
+export const HISTORY_ROW_COLUMNS = {
+  ...getTableColumns(generated_resumes),
+  created_at_exact: sql<string | null>`to_char(${generated_resumes.created_at} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+};
+
+/** Drops the cursor-only projection, so the wire shape of a history row is unchanged. */
+function withoutCursorColumn<T extends { created_at_exact: string | null }>(row: T): Omit<T, 'created_at_exact'> {
+  const { created_at_exact: _cursorOnly, ...rest } = row;
+  return rest;
+}
+
+/**
+ * "Strictly after this row" in the (created_at desc, id desc) ordering the route uses.
+ *
+ * The null branch is not theoretical tidiness. generated_resumes.created_at is nullable
+ * (defaultNow() without notNull), and Postgres sorts NULLs FIRST under a plain DESC, so an undated
+ * row sits at the top of history. A tuple comparison against a NULL yields NULL, which is not
+ * true, so folding both cases into one compare would drop every undated row from page two onward:
+ * the same class of silent disappearance this whole change exists to remove.
+ */
+export function afterHistoryCursor(cursor: HistoryCursor) {
+  if (cursor.createdAt === null) {
+    return or(
+      and(isNull(generated_resumes.created_at), lt(generated_resumes.id, cursor.id)),
+      isNotNull(generated_resumes.created_at),
+    );
+  }
+  return and(
+    isNotNull(generated_resumes.created_at),
+    /* Bound as the text Postgres itself produced and cast back on the server side, so the boundary
+       is compared at the precision the column is stored at. Passing a JS Date here, or calling
+       .toISOString() on one, silently rounds the boundary down and skips whatever sits between the
+       rounded value and the real one. */
+    sql`(${generated_resumes.created_at}, ${generated_resumes.id}) < (${cursor.createdAt}::timestamptz, ${cursor.id}::uuid)`,
+  );
+}
 
 export async function resumeRoutes(fastify: FastifyInstance) {
   // POST /resume/generate - tailor a resume to a specific JD from the student's experience bank
@@ -1294,14 +1367,115 @@ export async function resumeRoutes(fastify: FastifyInstance) {
   // key, so nothing could actually retrieve a past resume; the token makes the list usable and
   // is minted per-request so the links expire with the response rather than being stored.
   // Files older than the retention window are gone, and their link 404s by design.
+  //
+  // PAGINATED, AND IT SAYS SO. The window was a bare .limit(50) and nothing in the response
+  // admitted a window had been applied, so a caller could not tell a student with fifty
+  // applications apart from a student with a hundred and fifty. Measured on the owner account on
+  // 2026-08-11: 158 rows in the table, 50 in this response, and /applications/board sending all
+  // 158 because its own bound is 200. `total` and `next_cursor` are what make the two numbers
+  // reconcilable on one screen. See lib/historyCursor for why the cursor is a keyset and not an
+  // offset, and why the fix is not a bigger limit.
   fastify.get('/resume/history', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
-    const rows = await db
+    const query = historyQuerySchema.safeParse(request.query ?? {});
+    if (!query.success) {
+      return reply.status(400).send({ error: `limit must be a whole number between 1 and ${HISTORY_PAGE_SIZE_MAX}` });
+    }
+    const { limit } = query.data;
+    // A cursor this route did not mint decodes to null and is treated as "start at the top", not
+    // as a 400: it reaches here from a bookmarked or hand-edited URL, and the first page is a
+    // better answer to that than an error the student cannot act on.
+    const cursor = decodeHistoryCursor(query.data.cursor);
+
+    const [rowsPlusOne, [counted]] = await Promise.all([
+      db
+        .select(HISTORY_ROW_COLUMNS)
+        .from(generated_resumes)
+        .where(cursor ? and(eq(generated_resumes.user_id, userId), afterHistoryCursor(cursor)) : eq(generated_resumes.user_id, userId))
+        // id breaks the tie. created_at is unique only by accident, and two resumes written in the
+        // same prewarm batch must not be able to swap places between two requests for one page.
+        .orderBy(desc(generated_resumes.created_at), desc(generated_resumes.id))
+        // One more than asked for, so "is there another page?" is answered by the query rather
+        // than inferred from a full page, which is wrong exactly when the total is a multiple of
+        // the page size and hands the student a Load more that finds nothing.
+        .limit(limit + 1),
+      db
+        .select({
+          total: sql<number>`count(*)::int`,
+          // Two counts, because the tracker's ledger is a list of REVIEWABLE applications and its
+          // heading is a fraction over that list. Sending only `total` would swap one wrong
+          // denominator for another on any account still holding resumes saved before they became
+          // applications: the screen already names those separately as "N resumes saved".
+          reviewable_total: sql<number>`count(*) filter (where ${generated_resumes.spec}->'_review' is not null)::int`,
+        })
+        .from(generated_resumes)
+        .where(eq(generated_resumes.user_id, userId)),
+    ]);
+
+    const { rows, nextCursor } = historyPage(rowsPlusOne, limit);
+    const resumes = await buildHistoryPackets(userId, rows.map(withoutCursorColumn), request);
+    return reply.status(200).send({
+      resumes,
+      // The size of the whole corpus, not of this page. The tracker prints "50 of 158" off these,
+      // which is the sentence the old response made it impossible to write truthfully.
+      total: counted?.total ?? resumes.length,
+      reviewable_total: counted?.reviewable_total ?? resumes.length,
+      limit,
+      next_cursor: nextCursor,
+    });
+  });
+
+  /**
+   * GET /resume/history/:id - one packet, by id.
+   *
+   * WHY THIS EXISTS SEPARATELY FROM THE LIST. Openability was a property of the WINDOW: the
+   * tracker could only open a packet the last /resume/history call happened to include, so a board
+   * card or a ?application=<id> link for anything older was inert. That is the wrong shape. Whether
+   * a student can open their own application should be a fact about the application, not about how
+   * recently it was made, and a list bound of any size leaves that fact wrong for everything past
+   * the bound.
+   *
+   * Same row shape as one element of the list, minted the same way through buildHistoryPackets, so
+   * a caller can drop the result straight into the array it already holds.
+   *
+   * 404, not 403, for a packet belonging to someone else: the where clause is scoped to the
+   * caller's own user_id, so an id they do not own is indistinguishable from an id that does not
+   * exist, and saying which would confirm the existence of another student's row.
+   */
+  fastify.get('/resume/history/:id', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    const params = z.object({ id: z.string().uuid() }).safeParse(request.params);
+    // A malformed id reached Postgres as a uuid comparison and came back a 500 on the sibling
+    // stage route; validated here for the same reason.
+    if (!params.success) return reply.status(400).send({ error: 'Invalid application id' });
+
+    const [row] = await db
       .select()
       .from(generated_resumes)
-      .where(eq(generated_resumes.user_id, userId))
-      .orderBy(desc(generated_resumes.created_at))
-      .limit(50);
+      .where(and(eq(generated_resumes.id, params.data.id), eq(generated_resumes.user_id, userId)))
+      .limit(1);
+    if (!row) return reply.status(404).send({ error: 'Application not found' });
+
+    const [resume] = await buildHistoryPackets(userId, [row], request);
+    return reply.status(200).send({ resume });
+  });
+
+  /**
+   * The history row as the tracker consumes it: the stored row, its spec repaired against the
+   * monitored posting and refreshed against the current profile, and freshly minted download links
+   * for the resume and any cover letter.
+   *
+   * Shared by the list and the single-packet route ON PURPOSE. Two copies would drift, and the
+   * whole point of the single-packet route is that a packet fetched on demand is the same object
+   * the list would have sent, so the caller can splice it into the array it already has without
+   * the row it opened behaving differently from its neighbours.
+   */
+  async function buildHistoryPackets(
+    userId: string,
+    rows: (typeof generated_resumes.$inferSelect)[],
+    request: FastifyRequest,
+  ) {
+    if (rows.length === 0) return [];
     const jobIds = [...new Set(rows.map(generatedResumeJobId).filter((id): id is string => Boolean(id)))];
     const monitoredRows = jobIds.length === 0 ? [] : await db
       .select({
@@ -1335,7 +1509,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       loadApplicationProfileLike(userId),
       Promise.resolve(apiBaseFor(request)),
     ]);
-    const resumes = rows.map((row) => {
+    return rows.map((row) => {
       const coverLetter = ((row.spec as Record<string, unknown>)._cover_letter ?? {}) as Record<string, unknown>;
       const contact = ((row.spec as Record<string, unknown>)._contact ?? {}) as Record<string, unknown>;
       const job = (row.job_context ?? {}) as { role?: unknown };
@@ -1349,6 +1523,5 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           : undefined,
       };
     });
-    return reply.status(200).send({ resumes });
-  });
+  }
 }
