@@ -16,6 +16,7 @@ import {
   application_email_messages,
 } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
+import { specWithoutDocumentPointers } from '../lib/documentStore';
 import { deleteBlobsForUser, mintDownloadToken } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import { decryptRow } from './applicationProfile';
@@ -67,6 +68,23 @@ export async function accountRoutes(fastify: FastifyInstance) {
       experience_bank: bank,
       generated_resumes: resumes.map((row) => ({
         ...row,
+        /* THE ROW IS SPREAD WHOLE, WHICH IS WHY THE SPEC IS OVERRIDDEN AFTER IT.
+         *
+         * An export is every column of every application, so it picks up a new jsonb field the day
+         * that field is written and without a line of this file changing: it began shipping
+         * _documents.transcript.object_key, for every application with an attachment, as soon as
+         * attachments existed. A Blob object is written `access: 'public'` because that is the only
+         * mode the SDK has, so the key plus the store's stable base URL is permanent
+         * unauthenticated access to the file, and an export is a JSON document a student is
+         * expected to save, mail to herself and hand to whoever asks for it.
+         *
+         * The override has to come AFTER the spread or the raw spec wins and the strip is
+         * decoration. That ordering is asserted in documentResponseContract.test.ts, because it is
+         * a one-line move away from being wrong and looking right.
+         *
+         * She loses nothing by it: the file itself is not in the export either way, and what the
+         * spec still records is that a transcript was attached, under what name and when. */
+        spec: specWithoutDocumentPointers(row.spec),
         // Links expire (DOWNLOAD_TOKEN_TTL_MS), and files past the retention window are already
         // gone, so this 404s rather than resolving. Called out in `notes` so an empty download
         // does not read as data loss.
