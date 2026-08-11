@@ -321,8 +321,30 @@ const RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY =
  */
 const CURRENT_SPONSORSHIP_QUESTION = /\b(?:currently|now|right now|at present|before (?:you|the applicant) start)\b/i;
 const FUTURE_SPONSORSHIP_QUESTION = /\b(?:in the future|future sponsorship|later|will you (?:need|require))\b/i;
+/* "What is your visa status?" is a request for a value. "Will you require sponsorship for
+ * employment visa status?" is a yes/no question that happens to contain the same two words, and it
+ * is the commonest US sponsorship wording there is: 31 of the owner's stored questions carry it.
+ * A bare `visa status` alternative here read every one of them as a request for her authorization
+ * type, found none stored, and held a question two consented columns answer. So the phrase now
+ * only counts when something in front of it actually asks for the status.
+ *
+ * DATED IN PRODUCTION, because the regression is younger than the family it broke and a future
+ * reader will want to know which side of the line a packet fell on. One employer, one label
+ * ("will you now, or in the future, require sponsorship for employment visa status to work in the
+ * united states?"), three packets:
+ *
+ *   60df0c83  2026-08-09 13:30  answer "Yes"
+ *   8b5f3dd9  2026-08-09 19:40  answer "Yes"
+ *   df44f30   2026-08-10 14:42  PR 456 merges, adding the bare `visa status` alternative
+ *   cbebbfaa  2026-08-11 02:23  answer ""      <- 28 fields filled, one field short of submitting
+ *
+ * The blanking is not this function's doing on its own: refreshKnownQuestionAnswers below
+ * overwrites any stored answer with '' once the resolver refuses, so a refusal here erases an
+ * answer the applicant supplied by hand. Measured across every distinct label Litos has stored
+ * (509 on 2026-08-11), the narrowing moves exactly 5 label families from held to answered, all of
+ * them yes/no sponsorship questions, and moves nothing in the other direction. */
 const AUTHORIZATION_TYPE_QUESTION =
-  /\b(?:current immigration status|visa status|work permit type|authorization type|basis of (?:your )?(?:current )?work authorization)\b/i;
+  /\b(?:current immigration status|work permit type|authorization type|basis of (?:your )?(?:current )?work authorization)\b|\b(?:what\s+is|please\s+(?:provide|specify|state|indicate|describe|list|explain)|which)\b[^?]{0,40}\b(?:visa|immigration|work\s+permit|work\s+authorization)\s+status\b/i;
 const AUTHORIZATION_EXPIRY_QUESTION =
   /\b(?:when (?:does|will) (?:your )?(?:visa|work permit|work authorization|authorization) expire|(?:visa|work permit|work authorization|authorization) exp(?:iry|iration)(?: date)?)\b/i;
 

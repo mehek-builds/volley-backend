@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { postingCountryForLegalScope, postingCountryFromJobContext } from './jobLocation';
+import {
+  postingCountryCodeFromJobContext,
+  postingCountryForLegalScope,
+  postingCountryFromJobContext,
+} from './jobLocation';
 import { resolveKnownAnswer, type ApplicationProfileLike } from './questionDiscovery';
 
 /* THE PRODUCTION BLOCKER THIS FILE EXISTS FOR.
@@ -275,5 +279,199 @@ test('the sponsorship screen describes what this resolver actually does', async 
     source,
     /posting's location is a JD inference/,
     'the stale justification must not outlive the rule it justified',
+  );
+});
+
+/* "VISA STATUS" INSIDE A YES/NO SPONSORSHIP QUESTION IS NOT A REQUEST FOR HER VISA STATUS.
+ *
+ * AUTHORIZATION_TYPE_QUESTION carried a bare `visa status` alternative from PR 456 (df44f30,
+ * 2026-08-10 14:42) until the change these tests pin. "Will you now, or in the future, require
+ * sponsorship for employment visa status?" is the commonest US sponsorship wording there is, and
+ * every one of them matched: the resolver read a yes/no disclosure as a request for her
+ * authorization type, found none stored, and refused. refreshKnownQuestionAnswers then blanks any
+ * answer a refused question already holds, so the refusal did not merely decline to fill the
+ * field, it erased what was in it.
+ *
+ * Measured on production, read-only, 2026-08-11. One employer, one label, three packets:
+ * 60df0c83 (2026-08-09 13:30) answered "Yes", 8b5f3dd9 (2026-08-09 19:40) answered "Yes", and
+ * cbebbfaa (2026-08-11 02:23, after the merge) came back "" with 28 fields filled and a resume
+ * uploaded, one field short of submitting.
+ *
+ * Nothing covered this family in either direction, which is how it reached production unnoticed,
+ * so both directions are pinned below: the sponsorship families answer, and the labels that
+ * genuinely ask for a status or a written explanation still refuse.
+ */
+
+/* The five label families this moved, verbatim as production stores them, with the number of
+ * stored questions carrying each on 2026-08-11. All 31 occur on US postings. */
+const SPONSORSHIP_VISA_STATUS_LABELS = [
+  // 14x
+  'will you now or in the future require sponsorship for employment visa status?',
+  // 9x
+  'will you now or in the future require sponsorship for employment visa status (e.g. h-1b visa status)? if yes, please explain',
+  // 5x, the Flow Traders label that stopped packet cbebbfaa
+  'will you now, or in the future, require sponsorship for employment visa status to work in the united states?',
+  // 2x
+  'do you now or will you in the future need sponsorship for employment visa status in the country in which you are applying?',
+  // 1x
+  'will you now or in the future require sponsorship for employment visa status (e.g., h-1b status)',
+] as const;
+
+/* The Flow Traders packet's own job_context, copied off generated_resumes.cbebbfaa. Its country
+ * evidence is the single field the portal published, and it was always sufficient: the packet was
+ * never missing a country. */
+const FLOW_TRADERS_JOB_CONTEXT = {
+  role: 'Quantitative Trading Intern Summer 2027',
+  job_id: 'dc6c8231-5da5-4a1c-a88e-495b905a0e6a',
+  company: 'Flow Traders',
+  jd_hash: '5bd055148b3c5fab',
+  location: 'New York',
+};
+
+test('a sponsorship question that mentions visa status discloses the need instead of refusing', () => {
+  const country = postingCountryFromJobContext(FLOW_TRADERS_JOB_CONTEXT);
+  const code = postingCountryCodeFromJobContext(FLOW_TRADERS_JOB_CONTEXT);
+  assert.equal(country, 'us');
+  assert.equal(code, 'US', 'the packet carries an exact country and always did');
+
+  for (const label of SPONSORSHIP_VISA_STATUS_LABELS) {
+    assert.deepEqual(
+      resolveKnownAnswer(label, 'text', CPT_STUDENT, undefined, country, code),
+      { value: 'Yes' },
+      label.slice(0, 70),
+    );
+  }
+});
+
+test('the label that names the country answers without the posting saying anything', () => {
+  /* Two of the five spell the United States out, so they were never waiting on a posting country.
+   * That is what makes the missing-country diagnosis testable: supply nothing and they still
+   * answer, which means a refusal here could only ever have come from the label classifier. */
+  for (const label of [
+    'will you now, or in the future, require sponsorship for employment visa status to work in the united states?',
+    'are you authorized to work in the united states?',
+  ]) {
+    assert.deepEqual(
+      resolveKnownAnswer(label, 'text', CPT_STUDENT, undefined),
+      { value: 'Yes' },
+      label.slice(0, 70),
+    );
+  }
+});
+
+test('the questions that really do ask for a status or an explanation still refuse', () => {
+  const country = postingCountryFromJobContext(FLOW_TRADERS_JOB_CONTEXT);
+  const code = postingCountryCodeFromJobContext(FLOW_TRADERS_JOB_CONTEXT);
+
+  /* Two shapes, both live in the corpus. The first asks what her immigration status IS, which
+   * nothing stored answers because application_profile holds no authorization_type. The second
+   * asks for prose in a textarea, where "Yes" is not an answer at all: PR 456 held these by
+   * accident and they must keep being held on purpose. */
+  for (const label of [
+    'if you answered “yes” above to requiring visa sponsorship now or in the future for work authorization, please respond to the following questions. what is your current immigration status/basis of your current work authorization?',
+    'what is your current immigration status?',
+    'please describe the basis of your current work authorization',
+    'if so, please explain (visa status and expiration). if you do not require sponsorship, please type "n/a"',
+    'if so, please explain (visa status and expiration). if you do not require sponsorship, please type "n/a".* if so, please explain (visa status and expiration). if you do not require sponsorship, please type "n/a".',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'text', CPT_STUDENT, undefined, country, code);
+    assert.ok(resolved && 'skipReason' in resolved, label.slice(0, 80));
+  }
+
+  /* A bare request for the status, with none of the sponsorship or authorization words that admit
+   * a label to this family, is not this resolver's question at all and never was: it returns null
+   * and the field is handled elsewhere. What must never happen is a legal yes or no appearing on
+   * a form that asked her to name a document. */
+  for (const label of [
+    'what is your visa status?',
+    'please provide your current visa status',
+    'which work permit status do you hold?',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'text', CPT_STUDENT, undefined, country, code);
+    assert.ok(
+      !(resolved && 'value' in resolved && /^(yes|no)$/i.test(resolved.value)),
+      label,
+    );
+  }
+});
+
+test('narrowing the status pattern did not loosen a single country rule', () => {
+  /* The unscoped wording, so the posting is the only thing that can scope it. Every refusal below
+   * is a country the stored declaration does not cover, and the two answers are the one country it
+   * does. A posting that names two countries has not said which it means, and the board filter's
+   * habit of letting the US win that tie is exactly what must not leak in here. */
+  const UNSCOPED = 'will you now or in the future require sponsorship for employment visa status?';
+
+  for (const jobContext of [
+    { company: 'Somebody', role: 'Something' },
+    { location: 'New York, London, or Paris' },
+    { location: 'New York / Dublin' },
+    { location: 'Remote' },
+    { location: 'Remote - Anywhere' },
+    { location: 'London' },
+    { portal_country: 'India', location: 'Mumbai' },
+    { portal_country: 'United States | Canada' },
+    { locations: ['San Francisco, CA', 'London'] },
+  ]) {
+    const country = postingCountryFromJobContext(jobContext);
+    const code = postingCountryCodeFromJobContext(jobContext);
+    const resolved = resolveKnownAnswer(UNSCOPED, 'text', CPT_STUDENT, undefined, country, code);
+    assert.ok(resolved && 'skipReason' in resolved, JSON.stringify(jobContext));
+  }
+
+  // The exact-country cases, which are the whole point of the country scope existing.
+  for (const jobContext of [{ location: 'New York' }, { location: 'USA | Remote' }, { portal_country: 'US' }]) {
+    const country = postingCountryFromJobContext(jobContext);
+    const code = postingCountryCodeFromJobContext(jobContext);
+    assert.equal(code, 'US', JSON.stringify(jobContext));
+    assert.deepEqual(
+      resolveKnownAnswer(UNSCOPED, 'text', CPT_STUDENT, undefined, country, code),
+      { value: 'Yes' },
+      JSON.stringify(jobContext),
+    );
+  }
+});
+
+test('the pair the employer reads together stays the honest one', () => {
+  /* "Yes, I am authorized" and "Yes, I will need sponsorship" are both true of a student on
+   * CPT/OPT and are not a contradiction. The narrowing must not turn one of them into an
+   * unrestricted-authorization claim, which is the R-004 failure this whole family guards. */
+  const country = postingCountryFromJobContext(FLOW_TRADERS_JOB_CONTEXT);
+  const code = postingCountryCodeFromJobContext(FLOW_TRADERS_JOB_CONTEXT);
+
+  assert.deepEqual(
+    resolveKnownAnswer('are you authorized to work in the united states?', 'text', CPT_STUDENT, undefined, country, code),
+    { value: 'Yes' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(SPONSORSHIP_VISA_STATUS_LABELS[2], 'text', CPT_STUDENT, undefined, country, code),
+    { value: 'Yes' },
+  );
+  const unrestricted = resolveKnownAnswer(
+    'are you authorized to work for all employers in the united states without sponsorship?',
+    'text', CPT_STUDENT, undefined, country, code,
+  );
+  assert.ok(unrestricted && 'skipReason' in unrestricted, 'she needs sponsorship, so this one is not hers to claim');
+});
+
+test('a sponsorship question mentioning visa status is still refused for a country on file for nobody', () => {
+  /* The narrowing changed which classifier the label lands in. It must not change whose
+   * declaration answers it: a British posting has no record behind it and holds, with or without
+   * the words "visa status" in the question. */
+  const country = postingCountryFromJobContext({ location: 'London, United Kingdom' });
+  const code = postingCountryCodeFromJobContext({ location: 'London, United Kingdom' });
+  assert.equal(code, 'GB');
+  for (const label of SPONSORSHIP_VISA_STATUS_LABELS.filter((one) => !/united states/.test(one))) {
+    const resolved = resolveKnownAnswer(label, 'text', CPT_STUDENT, undefined, country, code);
+    assert.ok(resolved && 'skipReason' in resolved, label.slice(0, 70));
+  }
+
+  /* The fifth still answers, and that is not a leak. It spells out "to work in the united states",
+   * so the country it means is its own words and not the header above it, which is the mirror of
+   * the rule that already stops a US posting answering a question about Canada. */
+  assert.deepEqual(
+    resolveKnownAnswer(SPONSORSHIP_VISA_STATUS_LABELS[2], 'text', CPT_STUDENT, undefined, country, code),
+    { value: 'Yes' },
+    'the label names the country, so a British posting does not silence it',
   );
 });
