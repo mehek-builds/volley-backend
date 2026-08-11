@@ -1201,7 +1201,26 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
-      if (submitRequestDisposition(current.status) !== 'start') {
+      /* THE CLAIM IS PART OF THE QUESTION, and leaving it out made this the shortest way past every
+       * submission gate in the product.
+       *
+       * submissionWasClaimed defaults to false, so a one-argument call asks "is this status
+       * re-runnable when nothing has been claimed", which is not the question a claimed row is
+       * posing. A needs_attention row wearing the claim its run took answered 'start' here, and
+       * applyApplicationReviewEdit writes status 'questions_ready' or 'ready_to_submit' over the
+       * top of a `...current` spread - so ONE request turned a packet holding a confirmed receipt,
+       * an unresolved unverified_submission or a standing security_code into a state
+       * submitRequestDisposition starts unconditionally, with all of that evidence still on the
+       * row. That is a duplicate application at an employer who caps them, and it cannot be taken
+       * back.
+       *
+       * DELIBERATELY THE TWO-ARGUMENT FORM, not the four-argument one submit-request uses. The
+       * third and fourth parameters are UNLOCK KEYS whose safety was argued for the send path
+       * specifically - the applicant's own "I looked and it is not there", and the row's own proof
+       * that a stop preceded the click - and widening a security fix to hand those keys to a
+       * different route is a change nobody has measured. Nothing is trapped by leaving them out:
+       * both keyed states keep their exit through POST /submit-request, which does pass them. */
+      if (submitRequestDisposition(current.status, Boolean(current.submission_claimed_at)) !== 'start') {
         return reply.status(409).send({ error: 'This application can no longer be edited from its current submission state' });
       }
       // Not a spread here: an edit that changes portal_url has to re-derive portal_supported with
@@ -2065,7 +2084,26 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
-      if (submitRequestDisposition(current.status) !== 'start') {
+      /* THE CLAIM IS PART OF THE QUESTION HERE TOO, and this route is where a missing second
+       * argument bought a second application at an employer.
+       *
+       * The one-argument call evaluated a CLAIMED needs_attention row as though it were unclaimed,
+       * hit the `!submissionWasClaimed` arm and answered 'start'. The write below is a `...current`
+       * spread, so the claim, the receipt, the security_code and an unresolved unverified_submission
+       * all survived it, and the destination status 'failed' is one submitRequestDisposition starts
+       * UNCONDITIONALLY. Two requests - this one, then POST /submit-request - and a packet the
+       * employer may already be holding was runnable again.
+       *
+       * THE GUARD IS THE WHOLE BOUNDARY, and the spread is deliberately left alone. With the claim
+       * counted, every source status this route still accepts is one whose disposition is already
+       * 'start', and the destination is 'start', so the route is disposition-PRESERVING: it can no
+       * longer manufacture re-runnability out of a state that did not have it. Stripping the
+       * receipt, the security_code or the unverified_submission record would not close a gate - it
+       * would delete the evidence the gates READ. submissionProvablyNotSent, duplicateApplicationVerdict
+       * and POST /submission/unverified all decide from exactly those three fields whether an
+       * application ever reached an employer, and a "the company turned this down" update is not a
+       * reason to forget that it did. A hole in a gate is fixed by fixing the gate. */
+      if (submitRequestDisposition(current.status, Boolean(current.submission_claimed_at)) !== 'start') {
         return reply.status(409).send({ error: 'An active or completed submission cannot be replaced by a delayed failure update' });
       }
       const now = new Date().toISOString();
