@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
-import { eq, desc, and, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
+import { eq, desc, and, getTableColumns, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
@@ -368,6 +368,30 @@ export const historyQuerySchema = z.object({
 });
 
 /**
+ * The stored row, plus the one derived column the cursor needs.
+ *
+ * `created_at_exact` is created_at rendered BY POSTGRES at the precision Postgres stores, six
+ * fractional digits. The row's own `created_at` cannot serve: node-postgres parses timestamptz into
+ * a JavaScript Date, which holds milliseconds, so a cursor built from it names a boundary up to
+ * 999 microseconds earlier than the row it points at and the strict descending compare then skips
+ * every row inside that gap. See the HistoryCursor type for the measurement.
+ *
+ * Selected here rather than fetched in a second query so the timestamp and the row it belongs to
+ * come from one snapshot. It is stripped before the row is sent, by withoutCursorColumn: it is a
+ * detail of how the next page is asked for, not a field of the packet.
+ */
+export const HISTORY_ROW_COLUMNS = {
+  ...getTableColumns(generated_resumes),
+  created_at_exact: sql<string | null>`to_char(${generated_resumes.created_at} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+};
+
+/** Drops the cursor-only projection, so the wire shape of a history row is unchanged. */
+function withoutCursorColumn<T extends { created_at_exact: string | null }>(row: T): Omit<T, 'created_at_exact'> {
+  const { created_at_exact: _cursorOnly, ...rest } = row;
+  return rest;
+}
+
+/**
  * "Strictly after this row" in the (created_at desc, id desc) ordering the route uses.
  *
  * The null branch is not theoretical tidiness. generated_resumes.created_at is nullable
@@ -385,7 +409,11 @@ export function afterHistoryCursor(cursor: HistoryCursor) {
   }
   return and(
     isNotNull(generated_resumes.created_at),
-    sql`(${generated_resumes.created_at}, ${generated_resumes.id}) < (${cursor.createdAt.toISOString()}::timestamptz, ${cursor.id}::uuid)`,
+    /* Bound as the text Postgres itself produced and cast back on the server side, so the boundary
+       is compared at the precision the column is stored at. Passing a JS Date here, or calling
+       .toISOString() on one, silently rounds the boundary down and skips whatever sits between the
+       rounded value and the real one. */
+    sql`(${generated_resumes.created_at}, ${generated_resumes.id}) < (${cursor.createdAt}::timestamptz, ${cursor.id}::uuid)`,
   );
 }
 
@@ -1275,7 +1303,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     const [rowsPlusOne, [counted]] = await Promise.all([
       db
-        .select()
+        .select(HISTORY_ROW_COLUMNS)
         .from(generated_resumes)
         .where(cursor ? and(eq(generated_resumes.user_id, userId), afterHistoryCursor(cursor)) : eq(generated_resumes.user_id, userId))
         // id breaks the tie. created_at is unique only by accident, and two resumes written in the
@@ -1299,7 +1327,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     ]);
 
     const { rows, nextCursor } = historyPage(rowsPlusOne, limit);
-    const resumes = await buildHistoryPackets(userId, rows, request);
+    const resumes = await buildHistoryPackets(userId, rows.map(withoutCursorColumn), request);
     return reply.status(200).send({
       resumes,
       // The size of the whole corpus, not of this page. The tracker prints "50 of 158" off these,

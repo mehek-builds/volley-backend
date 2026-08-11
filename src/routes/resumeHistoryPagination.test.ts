@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { eq, and, desc, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { generated_resumes } from '../db/schema';
-import { afterHistoryCursor, historyQuerySchema } from './resume';
+import { afterHistoryCursor, historyQuerySchema, HISTORY_ROW_COLUMNS } from './resume';
 import { decodeHistoryCursor, encodeHistoryCursor, historyPage } from '../lib/historyCursor';
 
 /**
@@ -58,10 +58,31 @@ describe('GET /resume/history accepts a page request', () => {
 
 describe('the history cursor', () => {
   test('round-trips a dated row', () => {
-    const at = new Date('2026-08-08T10:28:59.755Z');
+    const at = '2026-08-08T10:28:59.755000Z';
     const decoded = decodeHistoryCursor(encodeHistoryCursor({ createdAt: at, id: PACKET }));
     assert.equal(decoded?.id, PACKET);
-    assert.equal(decoded?.createdAt?.toISOString(), at.toISOString());
+    assert.equal(decoded?.createdAt, at);
+  });
+
+  test('MICROSECONDS SURVIVE THE ROUND TRIP, to the last digit', () => {
+    /* The repair for the BLOCK on PR 471. The cursor used to carry a JavaScript Date, which holds
+       milliseconds, so this value came back as ...755000Z: a boundary 123 microseconds EARLIER
+       than the row it names. The ordering is descending and the compare is strict, so every row
+       inside that gap fails `created_at < boundary` and is skipped, silently and permanently.
+       Parsing the string back through `new Date()` on the way out would reintroduce it, which is
+       why decode validates the shape instead of parsing the value. */
+    const at = '2026-08-08T10:28:59.755123Z';
+    assert.equal(decodeHistoryCursor(encodeHistoryCursor({ createdAt: at, id: PACKET }))?.createdAt, at);
+    assert.notEqual(new Date(at).toISOString(), at, 'a JS Date cannot hold this value, which is the point');
+  });
+
+  test('every precision Postgres can store is accepted, and nothing longer', () => {
+    for (const at of ['2026-08-08T10:28:59Z', '2026-08-08T10:28:59.7Z', '2026-08-08T10:28:59.755Z', '2026-08-08T10:28:59.755123Z']) {
+      assert.equal(decodeHistoryCursor(encodeHistoryCursor({ createdAt: at, id: PACKET }))?.createdAt, at, at);
+    }
+    for (const at of ['2026-08-08T10:28:59.7551234Z', '2026-08-08T10:28:59', '2026-08-08 10:28:59Z', '2026-02-31T00:00:00Z', "2026-08-08T10:28:59Z'--"]) {
+      assert.equal(decodeHistoryCursor(Buffer.from(`${at}|${PACKET}`).toString('base64url')), null, at);
+    }
   });
 
   test('round-trips an undated row, because created_at is nullable on the table', () => {
@@ -78,13 +99,17 @@ describe('the history cursor', () => {
   });
 
   test('it carries nothing the caller was not already sent', () => {
-    const raw = Buffer.from(encodeHistoryCursor({ createdAt: new Date(0), id: PACKET }), 'base64url').toString('utf8');
-    assert.equal(raw, `1970-01-01T00:00:00.000Z|${PACKET}`);
+    const raw = Buffer.from(encodeHistoryCursor({ createdAt: '1970-01-01T00:00:00.000000Z', id: PACKET }), 'base64url').toString('utf8');
+    assert.equal(raw, `1970-01-01T00:00:00.000000Z|${PACKET}`);
   });
 });
 
 describe('page assembly', () => {
-  const row = (n: number) => ({ id: `0000000${n}-0000-4000-8000-000000000001`, created_at: new Date(2026, 0, 100 - n) });
+  const row = (n: number) => ({
+    id: `0000000${n}-0000-4000-8000-000000000001`,
+    // As Postgres renders it, to microseconds, which is what the route selects alongside the row.
+    created_at_exact: `2026-01-${String(30 - n).padStart(2, '0')}T00:00:00.000000Z`,
+  });
 
   test('a full page plus one more row means there IS another page', () => {
     const page = historyPage([row(1), row(2), row(3)], 2);
@@ -110,7 +135,7 @@ describe('the paged query drizzle builds', () => {
   function pageQuery(cursorParam?: string, limit = 50) {
     const cursor = decodeHistoryCursor(cursorParam);
     return db
-      .select()
+      .select(HISTORY_ROW_COLUMNS)
       .from(generated_resumes)
       .where(cursor ? and(eq(generated_resumes.user_id, UID), afterHistoryCursor(cursor)) : eq(generated_resumes.user_id, UID))
       .orderBy(desc(generated_resumes.created_at), desc(generated_resumes.id))
@@ -135,12 +160,22 @@ describe('the paged query drizzle builds', () => {
   });
 
   test('a cursor narrows on BOTH sort columns, so a duplicate timestamp cannot repeat a row', () => {
-    const at = new Date('2026-08-08T10:28:59.755Z');
+    const at = '2026-08-08T10:28:59.755123Z';
     const q = pageQuery(encodeHistoryCursor({ createdAt: at, id: PACKET }));
     assert.match(q.sql, /"created_at"/);
     assert.match(q.sql, /"id"\)\s*<\s*\(/i, 'expected a tuple comparison over (created_at, id)');
-    assert.ok(q.params.includes(at.toISOString()), 'the cursor timestamp must ride as a bound parameter');
+    // Bound at full precision. A parameter reading ...755Z here is the truncation that skips rows.
+    assert.ok(q.params.includes(at), 'the cursor timestamp must ride as a bound parameter, undegraded');
     assert.ok(q.params.includes(PACKET), 'the cursor id must ride as a bound parameter');
+  });
+
+  test('the page selects the exact timestamp the cursor will be built from', () => {
+    // to_char at microsecond precision, from Postgres, alongside the row. Without it the only
+    // timestamp available to build a cursor from is the driver's millisecond-truncated Date.
+    const q = db.select(HISTORY_ROW_COLUMNS).from(generated_resumes).toSQL();
+    assert.match(q.sql, /to_char\(/i);
+    assert.match(q.sql, /HH24:MI:SS\.US/);
+    assert.match(q.sql, /at time zone 'UTC'/i);
   });
 
   test('an undated cursor keeps the remaining undated rows AND everything dated', () => {
