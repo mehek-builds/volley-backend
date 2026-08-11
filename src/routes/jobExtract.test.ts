@@ -63,6 +63,24 @@ describe('clipJdText', () => {
 });
 
 describe('jobDescriptionSourceUrl', () => {
+  test('reads an exact Breezy application URL from its job overview instead of the candidate form', () => {
+    assert.equal(
+      jobDescriptionSourceUrl(
+        'https://focus-group-panel.breezy.hr/p/d736ee50f94c-100-remote-position-work-at-home-focus-group-panelist/apply',
+      ),
+      'https://focus-group-panel.breezy.hr/p/d736ee50f94c-100-remote-position-work-at-home-focus-group-panelist',
+    );
+  });
+
+  test('drops application-form tracking state when moving to an exact Breezy overview', () => {
+    assert.equal(
+      jobDescriptionSourceUrl(
+        'https://focus-group-panel.breezy.hr/p/d736ee50f94c-100-remote-position-work-at-home-focus-group-panelist/apply/?source=board#application',
+      ),
+      'https://focus-group-panel.breezy.hr/p/d736ee50f94c-100-remote-position-work-at-home-focus-group-panelist',
+    );
+  });
+
   test('reads an exact Workable application URL from its job overview instead of the candidate form', () => {
     assert.equal(
       jobDescriptionSourceUrl('https://apply.workable.com/remote-recruitment/j/D4CA268A39/apply/'),
@@ -103,6 +121,21 @@ describe('jobDescriptionSourceUrl', () => {
       'https://apply.workable.com:444/remote-recruitment/j/D4CA268A39/apply',
       'https://www.workable.com/remote-recruitment/j/D4CA268A39/apply',
       'https://example.com/remote-recruitment/j/D4CA268A39/apply',
+    ]) {
+      assert.equal(jobDescriptionSourceUrl(url), url);
+    }
+  });
+
+  test('does not rewrite non-form Breezy paths or untrusted lookalike origins', () => {
+    for (const url of [
+      'https://focus-group-panel.breezy.hr/p/d736ee50f94c-100-remote-position-work-at-home-focus-group-panelist',
+      'https://focus-group-panel.breezy.hr/p/d736ee50f94c-100-remote-position-work-at-home-focus-group-panelist/apply/extra',
+      'https://focus-group-panel.breezy.hr/',
+      'https://breezy.hr/p/d736ee50f94c-100-remote-position-work-at-home-focus-group-panelist/apply',
+      'https://focus-group-panel.breezy.hr:444/p/d736ee50f94c-100-remote-position-work-at-home-focus-group-panelist/apply',
+      'http://focus-group-panel.breezy.hr/p/d736ee50f94c-100-remote-position-work-at-home-focus-group-panelist/apply',
+      'https://focus-group-panel.breezy.hr.example.com/p/d736ee50f94c-100-remote-position-work-at-home-focus-group-panelist/apply',
+      'https://example.com/p/d736ee50f94c-100-remote-position-work-at-home-focus-group-panelist/apply',
     ]) {
       assert.equal(jobDescriptionSourceUrl(url), url);
     }
