@@ -610,6 +610,102 @@ test('a met clause without one exact frozen evidence pointer is unscoreable but 
   }));
 });
 
+test('an all-uncheckable recognized requirement set remains exact and nonblocking', async () => {
+  const requirement = 'A curious, motivated self-starter who thrives in ambiguity.';
+  const jdText = ['Requirements', requirement].join('\n');
+  const spec = {
+    target_role: 'Operations Intern', school: '', degree: '', grad_date: '', gpa: '', school_location: '', coursework: '',
+    experience: [], skills: [], _review: {},
+  };
+  const scored = await scoreAuditEvidence(
+    { spec, job_context: { company: 'Example', role: 'Operations Intern' } } as never,
+    { jd_text: jdText, questions: [], edited_terms: [], status: 'ready_to_submit' } as never,
+  );
+
+  assert.deepEqual(scored.clauses, [{
+    text: requirement,
+    start: jdText.indexOf(requirement),
+    end: jdText.length,
+    verdict: 'unscoreable',
+  }]);
+  assert.equal(scored.degraded, false);
+  assert.deepEqual(scored.terms, { covered: [], missing: [], edited: [] });
+});
+
+test('CBS German headings fall back to exact unscoreable JD clauses without weakening packet integrity', async () => {
+  const degree = 'Erstklassiger Hochschulabschluss in Wirtschaftswissenschaften, Wirtschaftsinformatik, Maschinenbau, Logistik oder einem vergleichbaren Studiengang';
+  const experience = 'Mindestens sieben Jahre Erfahrung als SAP-Berater mit SAP CS und/oder SAP CRM';
+  const languages = 'Sehr gute Deutsch- und Englischkenntnisse in Wort und Schrift';
+  const jdText = [
+    'Stellenanforderungen',
+    'Was wir uns wünschen',
+    degree,
+    experience,
+    languages,
+    'Reisebereitschaft',
+  ].join('\n');
+  const spec = {
+    target_role: 'Manager SAP S/4HANA Service',
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science',
+    grad_date: 'May 2028',
+    gpa: '', school_location: '', coursework: '', skills: [], experience: [], _review: {},
+  };
+  const scored = await scoreAuditEvidence(
+    { spec, job_context: { company: 'CBS', role: 'Manager SAP S/4HANA Service' } } as never,
+    { jd_text: jdText, questions: [], edited_terms: [], status: 'ready_to_submit' } as never,
+  );
+
+  assert.equal(scored.clauses.length > 0, true);
+  assert.equal(scored.clauses.some((clause) => clause.text === degree), true);
+  assert.equal(scored.clauses.some((clause) => clause.text === experience), true);
+  assert.equal(scored.clauses.some((clause) => clause.text === languages), true);
+  assert.equal(scored.clauses.every((clause) => clause.verdict === 'unscoreable'), true);
+  assert.equal(scored.clauses.every((clause) => clause.evidence === undefined), true);
+  assert.equal(scored.clauses.every((clause) => clause.text === jdText.slice(clause.start, clause.end)), true);
+  assert.deepEqual(scored.terms, { covered: [], missing: [], edited: [] });
+  assert.equal(scored.degraded, false);
+  assert.doesNotThrow(() => createPacketAudit({
+    ownerId: 'owner-cbs',
+    applicationId: 'application-cbs',
+    jdText,
+    spec,
+    jobContext: { company: 'CBS', role: 'Manager SAP S/4HANA Service' },
+    questions: [],
+    applicantSnapshot: null,
+    resumeEmail: 'student@example.edu',
+    applicantEmail: 'app-cbs@apply.trylitos.com',
+    pdfObjectKey: 'users/owner-cbs/resumes/application.pdf',
+    pdfBytes: Buffer.from('%PDF-1.7\nCBS packet'),
+    editedTerms: scored.editedTerms,
+    clauses: scored.clauses,
+    rejected: scored.rejected,
+    degraded: scored.degraded,
+    terms: scored.terms,
+  }));
+});
+
+test('a short unheaded JD still receives one exact unscoreable binding', async () => {
+  const jdText = 'Build reliable systems.';
+  const spec = {
+    target_role: 'Engineer', school: '', degree: '', grad_date: '', gpa: '', school_location: '', coursework: '',
+    experience: [], skills: [], _review: {},
+  };
+  const scored = await scoreAuditEvidence(
+    { spec, job_context: { company: 'Example', role: 'Engineer' } } as never,
+    { jd_text: jdText, questions: [], edited_terms: [], status: 'ready_to_submit' } as never,
+  );
+
+  assert.deepEqual(scored.clauses, [{
+    text: jdText,
+    start: 0,
+    end: jdText.length,
+    verdict: 'unscoreable',
+  }]);
+  assert.deepEqual(scored.terms, { covered: [], missing: [], edited: [] });
+  assert.equal(scored.degraded, false);
+});
+
 test('Remote Recruitment negated degree and AI term gaps stay visible without blocking exact packet audit', async () => {
   const noDegree = 'You do not need a perfect CV or a university degree. Attitude, work ethic, commercial awareness, coachability, and resilience are more important than traditional qualifications.';
   const aiFeedback = 'The successful candidate will receive regular performance feedback and coaching, with AI technology used to analyse calls and support ongoing development.';

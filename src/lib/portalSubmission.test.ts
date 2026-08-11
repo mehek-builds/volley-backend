@@ -725,8 +725,13 @@ test('Greenhouse managed fill selects phone country and city comboboxes', () => 
   ]);
 });
 
-function directFillPage(selectors: string[]) {
+function directFillPage(
+  selectors: string[],
+  dialCodesBySelector: Record<string, string[]> = {},
+  persistedValuesBySelector: Record<string, string> = {},
+) {
   const values = new Map<string, string>();
+  const events: string[] = [];
   const makeLocator = (selector: string, index?: number): any => {
     const present = selectors.includes(selector);
     return {
@@ -738,7 +743,16 @@ function directFillPage(selectors: string[]) {
         if (present) values.set(selector, value);
       },
       press: async (key: string) => {
-        if (present) values.set(`${selector}::press`, key);
+        if (!present) return;
+        events.push(`${selector}:press:${key}`);
+        if (key === 'Backspace') values.set(selector, '');
+        values.set(`${selector}::press`, key);
+      },
+      focus: async () => { if (present) events.push(`${selector}:focus`); },
+      pressSequentially: async (value: string) => {
+        if (!present) return;
+        events.push(`${selector}:type:${value}`);
+        values.set(selector, value);
       },
       selectOption: async (option: string | { label?: string }) => {
         if (!present) return [];
@@ -748,18 +762,22 @@ function directFillPage(selectors: string[]) {
         return [value];
       },
       getAttribute: async () => null,
-      inputValue: async () => values.get(selector) ?? '',
+      inputValue: async () => Object.hasOwn(persistedValuesBySelector, selector)
+        ? persistedValuesBySelector[selector]
+        : values.get(selector) ?? '',
       locator: () => makeLocator(`${selector} child`, 0),
-      evaluate: async () => false,
+      evaluate: async () => dialCodesBySelector[selector] ?? false,
       waitFor: async () => undefined,
       click: async () => undefined,
     };
   };
   const page = {
     values,
+    events,
     page: {
       locator: (selector: string) => makeLocator(selector),
       getByText: () => makeLocator('missing text'),
+      waitForTimeout: async () => undefined,
     } as unknown as Page,
   };
   return page;
@@ -820,6 +838,56 @@ test('direct Greenhouse fill confirms phone country and city comboboxes', async 
   assert.equal(values.get('#phone'), '+971 50 123 4567');
   assert.equal(values.get('#candidate-location'), 'Dubai, United Arab Emirates');
   assert.equal(values.get('#candidate-location::press'), 'Enter');
+});
+
+test('direct Workable phone fill uses the controlled intl-tel event path', async () => {
+  const phone = 'input[name="phone"]';
+  const { page, values, events } = directFillPage([
+    'input[name="firstname"]',
+    'input[name="lastname"]',
+    'input[name="email"]',
+    phone,
+  ], { [phone]: ['971'] });
+
+  const result = await fillPortal(page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  assert.equal(values.get(phone), '567417451');
+  assert.deepEqual(events.filter((event) => event.startsWith(`${phone}:`)), [
+    `${phone}:focus`,
+    `${phone}:press:ControlOrMeta+A`,
+    `${phone}:press:Backspace`,
+    `${phone}:type:567417451`,
+  ]);
+  assert.equal(events.some((event) => event === `${phone}:press:Enter`), false);
+  assert.ok(result.filledFields.includes('phone'));
+});
+
+test('direct Workable phone fill never reports a controlled value that was restored empty', async () => {
+  const phone = 'input[name="phone"]';
+  const { page } = directFillPage([
+    'input[name="firstname"]',
+    'input[name="lastname"]',
+    'input[name="email"]',
+    phone,
+  ], { [phone]: ['971'] }, { [phone]: '' });
+
+  const result = await fillPortal(page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  assert.equal(result.filledFields.includes('phone'), false);
 });
 
 test('direct Greenhouse reviewed graduation fill prefers packet date over stale reviewed answer', async () => {

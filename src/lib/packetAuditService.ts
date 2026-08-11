@@ -1,7 +1,7 @@
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { generated_resumes, profiles } from '../db/schema';
-import { scorePosting, type CandidateFacts } from '../engine/clauseMatch';
+import { scorePosting, splitClauses, type CandidateFacts, type RequirementClause } from '../engine/clauseMatch';
 import { scoreJdMatch, segmentJd, type JdContext, type JdTerm } from '../engine/jdMatch';
 import { resumeSpecText } from '../engine/resumeValidate';
 import { judgeCompetenciesCached } from '../llm/competencyCache';
@@ -256,6 +256,17 @@ function exactClauseOccurrences(jdText: string, clauses: readonly { text: string
   return offsets;
 }
 
+function exactUnscoreableFallbackClauses(jdText: string): RequirementClause[] {
+  const split = splitClauses(jdText);
+  const texts = split.length > 0 ? split : [jdText.trim()].filter(Boolean);
+  return texts.map((text) => ({
+    text,
+    weight: 0,
+    verdict: 'unscoreable',
+    basis: 'none',
+  }));
+}
+
 function jobContext(value: unknown): JdContext {
   const context = value && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -349,7 +360,16 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
       return { verdicts: judged.verdicts, rejected: judged.rejected };
     },
   );
-  const auditableClauses = scored.clauses.filter((clause) => !(clause.verdict === 'unscoreable' && clause.basis === 'none'));
+  const filteredClauses = scored.clauses.filter((clause) => !(clause.verdict === 'unscoreable' && clause.basis === 'none'));
+  /* Keep the current filtered set whenever it exists. If filtering would make a recognized
+     requirement set empty, retain those exact clauses as honest unscoreable statements. A posting
+     whose language or headings produced no recognized requirement sections still needs a
+     non-vacuous binding to the saved JD, so split its exact lines without making any fit claim. */
+  const auditableClauses = filteredClauses.length > 0
+    ? filteredClauses
+    : scored.clauses.length > 0
+      ? scored.clauses
+      : exactUnscoreableFallbackClauses(review.jd_text);
   const offsets = exactClauseOccurrences(review.jd_text, auditableClauses);
   const match = scoreJdMatch(resumeSpecText(spec), review.jd_text, context);
   const termEvidence = new Map<string, EvidencePointer>();

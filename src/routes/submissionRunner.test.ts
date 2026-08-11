@@ -952,6 +952,46 @@ test('discovered US work authorization and sponsorship become reviewed Yes answe
   );
 });
 
+test('managed Workable discovery dedupes only selectors owned by fixed phone and city actions', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'Remote Recruitment role.',
+    role: 'Recruitment Consultant',
+    portal_url: 'https://apply.workable.com/remote-recruitment/j/ABC123/',
+    ats_name: 'workable',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const field = (label: string, durableSelector: string) => ({
+    label,
+    selector: '[data-litos-discovered-1]',
+    durableSelector,
+    inputType: 'text',
+    maxLength: null,
+  });
+
+  const result = await discoverAndResolveQuestions(
+    [
+      field('* Phone +971 phone', '[name="phone"]'),
+      field('City city', '[name="city"]'),
+      field('What is your phone number?', '[name="QA_PHONE"]'),
+      field('What city do you live in?', '[name="QA_CITY"]'),
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { phone: '+971 56 741 7451', address_city: 'Dubai' },
+    true,
+    'workable',
+  );
+
+  assert.deepEqual(result.questions.map(({ question, portal_selector }) => ({ question, portal_selector })), [
+    { question: 'What is your phone number?', portal_selector: '[name="QA_PHONE"]' },
+    { question: 'What city do you live in?', portal_selector: '[name="QA_CITY"]' },
+  ]);
+});
+
 test('portal country metadata reaches managed send resolution without borrowing another country', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship is based in London.',

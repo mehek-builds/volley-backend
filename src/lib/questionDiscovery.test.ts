@@ -1995,6 +1995,142 @@ test('Ashby fixed profile fields never reappear as editable custom questions', (
   ]);
 });
 
+test('Workable fixed phone and city never duplicate reviewed questions', () => {
+  const captured = [
+    {
+      id: 'legacy-phone',
+      question: 'Phone',
+      answer: '+971 567417451',
+    },
+    {
+      id: 'legacy-city',
+      question: 'City',
+      answer: 'Dubai',
+    },
+    {
+      id: 'phone',
+      question: '* Phone +971 phone',
+      answer: '+971 567417451',
+      portal_selector: 'input[name="phone"]',
+    },
+    {
+      id: 'city',
+      question: 'City city',
+      answer: 'Dubai',
+      portal_selector: '[name="city"]',
+    },
+    {
+      id: 'south-africa',
+      question: 'Do you live in South Africa?',
+      answer: '',
+      portal_selector: '[name="QA_12261637"]',
+      portal_input_type: 'radio',
+    },
+    {
+      id: 'custom-phone',
+      question: 'What is your phone number?',
+      answer: '',
+      portal_selector: '[name="QA_PHONE"]',
+    },
+    {
+      id: 'custom-city',
+      question: 'What city do you live in?',
+      answer: '',
+      portal_selector: '[name="QA_CITY"]',
+    },
+    {
+      id: 'callback-phone',
+      question: 'What is the best phone number to contact you after 5pm?',
+      answer: '',
+    },
+  ];
+
+  for (const portal of ['workable', 'controlled_workable'] as const) {
+    assert.deepEqual(normalizeStoredPortalQuestions(captured, portal), [
+      {
+        id: 'south-africa',
+        question: 'Do you live in South Africa?',
+        answer: '',
+        portal_selector: '[name="QA_12261637"]',
+        portal_input_type: 'radio',
+      },
+      {
+        id: 'custom-phone',
+        question: 'What is your phone number?',
+        answer: '',
+        portal_selector: '[name="QA_PHONE"]',
+      },
+      {
+        id: 'custom-city',
+        question: 'What city do you live in?',
+        answer: '',
+        portal_selector: '[name="QA_CITY"]',
+      },
+      {
+        id: 'callback-phone',
+        question: 'What is the best phone number to contact you after 5pm?',
+        answer: '',
+      },
+    ], portal);
+  }
+});
+
+test('Workable selectorless custom phone and city questions are not legacy fixed-field rows', () => {
+  const selectorlessCustom = [
+    {
+      id: 'custom-phone-without-selector',
+      question: 'What is your phone number?',
+      answer: '',
+    },
+    {
+      id: 'custom-city-without-selector',
+      question: 'What city do you live in?',
+      answer: '',
+    },
+  ];
+
+  for (const portal of ['workable', 'controlled_workable'] as const) {
+    assert.deepEqual(normalizeStoredPortalQuestions(selectorlessCustom, portal), selectorlessCustom, portal);
+  }
+});
+
+test('direct choice discovery prefers the group question over an option aria-labelledby label', () => {
+  const start = DISCOVER_QUESTIONS_SCRIPT.indexOf('function recoveredGroupLabel(el) {');
+  const end = DISCOVER_QUESTIONS_SCRIPT.indexOf('function isProviderHandleOnly(value) {', start);
+  assert.ok(start >= 0 && end > start, 'the direct discovery group-label helper must remain extractable');
+  const helperSource = DISCOVER_QUESTIONS_SCRIPT.slice(start, end);
+  const references = new Map([
+    ['workable-south-africa-label', { innerText: 'Do you live in South Africa?' }],
+    ['workable-south-africa-yes', { innerText: 'YES' }],
+  ]);
+  const documentStub = {
+    getElementById(id: string) {
+      return references.get(id) ?? null;
+    },
+  };
+  const group = {
+    getAttribute(name: string) {
+      return name === 'aria-labelledby' ? 'workable-south-africa-label' : '';
+    },
+  };
+  const option = {
+    getAttribute(name: string) {
+      return name === 'aria-labelledby' ? 'workable-south-africa-yes' : '';
+    },
+    closest() {
+      return group;
+    },
+    parentElement: null,
+  };
+  const recoveredGroupLabel = new Function(
+    'document',
+    'clean',
+    `${helperSource}; return recoveredGroupLabel;`,
+  )(documentStub, (value: unknown) => String(value ?? '').trim()) as (node: typeof option) => string;
+
+  assert.equal(recoveredGroupLabel(option), 'Do you live in South Africa?');
+});
+
 test('review question labels are never empty or longer than the managed runner limit', () => {
   assert.equal(normalizeReviewQuestionLabel('required field'), '');
   assert.equal(normalizeReviewQuestionLabel('56f41b98-0250-4e12-a2d1-aa038a33af27'), '');

@@ -4185,7 +4185,11 @@ export function discoveredFieldIsNotAQuestion(
   return discoveredLabelIsAnswerToken(label);
 }
 
-function isFixedPortalProfileField(portal: SupportedPortal, label: string): boolean {
+function isFixedPortalProfileField(
+  portal: SupportedPortal,
+  label: string,
+  portalSelector?: string,
+): boolean {
   const key = classifyField(label);
   if (portal === 'ashby') {
     return key === 'phone' || key === 'address_city' || key === 'linkedin_url'
@@ -4199,6 +4203,19 @@ function isFixedPortalProfileField(portal: SupportedPortal, label: string): bool
   }
   if (portal === 'smartrecruiters') {
     return key === 'phone' || key === 'linkedin_url' || key === 'portfolio_url';
+  }
+  // Workable rows saved before selector persistence used the exact normalized labels "Phone" and
+  // "City". A selectorless employer question can still classify to the same profile key, so the
+  // missing selector alone is not ownership. New rows with the exact fixed selector are still
+  // removed, while any explicitly different QA selector remains an employer question.
+  if (portal === 'workable' || portal === 'controlled_workable') {
+    const selector = (portalSelector ?? '').trim();
+    const legacyLabel = label.trim().toLowerCase();
+    if (!selector && (legacyLabel === 'phone' || legacyLabel === 'city')) return true;
+    const ownsNamedInput = (name: 'phone' | 'city'): boolean =>
+      selector === `input[name="${name}"]` || selector === `[name="${name}"]`;
+    return (key === 'phone' && ownsNamedInput('phone'))
+      || (key === 'address_city' && ownsNamedInput('city'));
   }
   // Added 2026-07-29 with the three new fillable families. Each entry lists only the fields that
   // family's fixed selectors ALREADY fill - anything else the employer asks stays a real question for
@@ -4218,7 +4235,11 @@ function isFixedPortalProfileField(portal: SupportedPortal, label: string): bool
 }
 
 /** Normalize legacy provider labels and remove controls already owned by fixed portal selectors. */
-export function normalizeStoredPortalQuestions<T extends { question: string; answer: string }>(
+export function normalizeStoredPortalQuestions<T extends {
+  question: string;
+  answer: string;
+  portal_selector?: string;
+}>(
   questions: readonly T[],
   portal: SupportedPortal,
 ): T[] {
@@ -4226,7 +4247,7 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
   const indexByLabel = new Map<string, number>();
   for (const question of questions) {
     const label = normalizeDiscoveredLabel(question.question);
-    if (!label || isFixedPortalProfileField(portal, label)) continue;
+    if (!label || isFixedPortalProfileField(portal, label, question.portal_selector)) continue;
     const reviewLabel = normalizeReviewQuestionLabel(label);
     if (!reviewLabel) continue;
     const key = reviewLabel.toLowerCase();
@@ -4303,8 +4324,8 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
    * first by questionLabel (fieldset/legend, role=group[aria-label]); these are what is left when a
    * board renders a group as plain divs, which Lever's custom-question cards do.
    *
-   *   1. aria-labelledby on the control or on its group. An explicit pointer to the question, and
-   *      the only one of these three that the page author wrote on purpose.
+   *   1. aria-labelledby on the group or control. The group owns the question while a control-level
+   *      reference commonly owns only one option, such as Yes or No.
    *   2. The heading of the block the control sits in. Bounded to the nearest ancestor that holds
    *      MORE THAN ONE choice control - that is what makes it a group rather than a single field -
    *      and read from a heading element or the block's first label, never from the whole subtree.
@@ -4326,11 +4347,11 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
       }
       return clean(out.join(' '));
     };
-    var own = byIds(el);
-    if (own) return own;
     var group = el.closest('[role="group"], [role="radiogroup"], fieldset');
     var viaGroup = group ? byIds(group) : '';
     if (viaGroup) return viaGroup;
+    var own = byIds(el);
+    if (own) return own;
     var node = el.parentElement;
     for (var depth = 0; node && depth < 6; depth += 1) {
       var controls = node.querySelectorAll('input[type="radio"], input[type="checkbox"]');

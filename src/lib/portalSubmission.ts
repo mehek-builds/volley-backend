@@ -6266,7 +6266,24 @@ async function fillPhoneField(
     const dialCodes = await field.evaluate(readFieldGroupDialCodes).catch(() => [] as string[]);
     const value = phoneForPortalField(portal, phone, dialCodes);
     if (!value) return;
-    await field.fill(value);
+    if (dialCodes.length > 0) {
+      /* React-controlled intl-tel widgets commit through their own key handlers. Workable's live
+       * component accepted a one-shot fill long enough for the immediate read to pass, then restored
+       * its empty props value on the next render. Aimed selection and deletion clear any stale value,
+       * sequential typing drives the widget's keyup path, and blur commits change without clicking a
+       * country control or pressing Enter. Verify only after the bounded controlled render. */
+      await field.focus();
+      await field.press('ControlOrMeta+A');
+      await field.press('Backspace');
+      await field.pressSequentially(value, { delay: 5 });
+      await field.evaluate((element) => element.blur()).catch(() => undefined);
+      await page.waitForTimeout(100);
+      const expectedDigits = value.replace(/\D/g, '');
+      const actualDigits = (await field.inputValue().catch(() => '')).replace(/\D/g, '');
+      if (!expectedDigits || actualDigits !== expectedDigits) return;
+    } else {
+      await field.fill(value);
+    }
     out.push(label);
     return;
   }
@@ -6549,7 +6566,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="firstname"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['input[name="lastname"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
-    await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
+    await fillPhoneField(page, ['input[name="phone"]'], portal, packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="city"]'], packet.city, 'location', filledFields);
     await uploadFirst(page, [WORKABLE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
     await uploadFirst(page, WORKABLE_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
