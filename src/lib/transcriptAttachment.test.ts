@@ -552,6 +552,19 @@ test('transcript_supported is written by both prepares and read by all three sub
   assert.match(runner, /const transcriptSupported = managedResultHasTranscriptUpload\(discoveryResult, portal\)/);
   assert.match(runner, /const transcriptSupported = await hasTranscriptUpload\(page, portal\)/);
 
+  /* THE MANAGED WRITE IS GUARDED ON THE DISCOVERY PASS HAVING RUN, and that guard is the whole
+   * difference between a measurement and an invention.
+   *
+   * runManagedBrowser's catch returns null for any failure, and managedResultHasTranscriptUpload
+   * ends `=== true`, so null reads as false. Writing the flag unconditionally therefore records
+   * `transcript_supported: false` whenever discovery merely errored, and false is not "unknown" to
+   * anything downstream: it means "this employer's form has nowhere to put a transcript". The
+   * screen states that to her as fact, files the ask undeliverable, withholds the Add control and
+   * tells her to finish by hand a form that may well have accepted the file. Absent is the third
+   * state and the only honest one, matching cover_letter_required in the same object literal. */
+  assert.match(runner, /\.\.\.\(discoveryFailures\.length === 0 \? \{ transcript_supported: transcriptSupported \} : \{\}\),/,
+    'the managed prepare must write the flag only when the discovery pass actually ran');
+
   assert.equal(runner.match(/transcript_supported === true/g)?.length, 3,
     'the ATS API channel and both browser submits re-derive the attach decision from the flag');
   assert.match(runner, /review\.transcript_supported === true \? withCoverLetter : omitTranscript\(withCoverLetter\)/);

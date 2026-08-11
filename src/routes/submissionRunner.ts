@@ -2621,12 +2621,22 @@ async function prepareManaged(
     cover_letter_attached: Boolean(packet.coverLetter),
     /* Whether this form has somewhere to put a transcript, measured by the discovery pass.
      *
-     * Written on every managed prepare, including false, because the SUBMIT run re-derives its
-     * attach decision from this flag rather than probing the page again - it has no discovery pass
-     * of its own. A prepare that measured the capability and did not write it down produces the one
-     * failure with no symptom: the transcript attaches on the preview she approves and is missing
-     * from the application that is actually sent, with nothing recorded either way. */
-    transcript_supported: transcriptSupported,
+     * Written including false, because the SUBMIT run re-derives its attach decision from this flag
+     * rather than probing the page again - it has no discovery pass of its own. A prepare that
+     * measured the capability and did not write it down produces the one failure with no symptom:
+     * the transcript attaches on the preview she approves and is missing from the application that
+     * is actually sent, with nothing recorded either way.
+     *
+     * But written ONLY when the discovery pass actually ran. `runManagedBrowser`'s catch above
+     * returns null for any failure, and managedResultHasTranscriptUpload(null) is false, so writing
+     * this unconditionally records "this employer's form has nowhere to put a transcript" whenever
+     * discovery merely errored. That is a measurement Litos never took, and the screen states it to
+     * her as fact: the ask is filed undeliverable, the Add control is withheld, and she is told to
+     * go and finish the application by hand on a form that may well have taken the file. Absent
+     * means never measured, which is the same tri-state cover_letter_required uses ten lines above
+     * and the same one the website reads. A discovery failure already holds the run back on its own
+     * evidence; it must not also invent a fact about the employer. */
+    ...(discoveryFailures.length === 0 ? { transcript_supported: transcriptSupported } : {}),
     // The security-code sentence LEADS when there is one, and it leads because it is the only line
     // here that says an application has already reached the employer. The blockers below it are
     // still worth reading - they describe the form that was sent - but a list of empty fields shown
