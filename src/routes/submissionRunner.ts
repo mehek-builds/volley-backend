@@ -2075,6 +2075,50 @@ export function describeDiscoveryFailure(error: unknown): string {
 }
 
 /**
+ * ONE CONTROL LITOS COULD NOT READ, NAMED ON ITS OWN.
+ *
+ * THIS CHANGES WHAT THE PACKET SAYS, NOT WHAT REACHES THE FORM. Read that sentence before trusting
+ * anything else here, because the first version of this comment claimed the opposite and was wrong.
+ *
+ * A control whose option list came back unreadable used to be pushed into `discoveryFailures`. That
+ * array is the run-level honesty gate, so a single windowed control made the packet tell her "we
+ * could not read the questions this form asks", about a form whose other questions had been read
+ * perfectly. That sentence is the defect, and a per-control sentence is the fix.
+ *
+ * What it did NOT do is change any answer. `discoveryFailures` is read in exactly five places in
+ * prepareManaged, all of them after `discoverAndResolveQuestions` and `mergeDiscoveredPortalQuestions`
+ * have already run, and neither takes it as an argument. Resolution and the merge cannot see it.
+ * Verified by running the chain at unmodified main: the merged answer is the same either way.
+ *
+ * Measured on IMC packet 920a6751, 2026-08-11: `question_9177934101` legitimately failed its option
+ * read because its list was windowed at the render cap, and `question_9176667101` beside it read
+ * fine and resolved to "January 2028 - July 2028". The applicant was told the form was unreadable.
+ * She was told that about a form Litos had read. Separately, and NOT caused by this, the graduation
+ * control was still sent a bucket rather than its resolved answer; see the open defect noted on the
+ * test fixture for where that actually comes from.
+ *
+ * The honesty the old code was protecting is kept, at the scope it belongs to: the failed control is
+ * still removed from `discoveredFields` before any alias resolution, still carried in
+ * `packet.failedFields` so no action can target it, still never silently answered, and it still
+ * holds the send. What it no longer does is speak for controls it knows nothing about.
+ *
+ * The label is preferred over the durable id because it is the only half of the pair she can find on
+ * the page; the id is the fallback for a control discovery reported without one.
+ */
+export function optionProbeAttentionReasons(
+  failures: readonly { controlId: string; reason: string }[],
+  failedFields: readonly { controlId: string; label?: string }[],
+): string[] {
+  const labelById = new Map(failedFields.map((field) => [field.controlId, field.label?.trim()]));
+  return failures.map(({ controlId, reason }) => {
+    const label = labelById.get(controlId);
+    const named = label ? `"${label.slice(0, 80)}"` : `the control ${controlId.slice(0, 80)}`;
+    return `Litos could not read the choices ${named} offers, so it was left for you rather than `
+      + `answered with a guess (${reason.slice(0, 160)}). The other questions on this form are unaffected.`;
+  });
+}
+
+/**
  * What the run owes the applicant about its own blind spots, in her words.
  *
  * Two separate admissions, and they are not the same failure. The first is "the scan did not run";
@@ -2220,9 +2264,17 @@ async function prepareManaged(
     optionProbeBatchFailures,
     discoveryRoleCapability,
   );
+  /* NOT pushed into discoveryFailures. That array is the WHOLE-FORM honesty gate, and a per-control
+   * read failure promoted into it made Litos tell her it could not read any of this form's questions
+   * when it had read all but one of them. The failure is real and stays visible, and it still holds
+   * the send below; what changes is that it now speaks only for the control it happened to.
+   *
+   * This is a change to the packet's account of itself, not to any answer. See
+   * optionProbeAttentionReasons for why resolution cannot see this array at all. */
   if (optionProbe.failures.length > 0) {
-    discoveryFailures.push(
-      `closed-control option discovery failed: ${optionProbe.failures.map(({ controlId, reason }) => `${controlId}: ${reason}`).join('; ').slice(0, 800)}`,
+    fastify.log.error(
+      { applicationId: row.id, portal, controls: optionProbe.failures },
+      'Closed controls whose option list could not be read, so each one alone is left for the applicant',
     );
   }
   const fieldOptions = optionProbe.options;
@@ -2231,6 +2283,7 @@ async function prepareManaged(
     if (!controlId || !optionProbe.failedIds.has(controlId)) return [];
     return [{ controlId, label: field.label, selector: field.selector, inputType: field.inputType }];
   });
+  const optionProbeAttention = optionProbeAttentionReasons(optionProbe.failures, failedFields);
   const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
     .filter((field) => {
       const controlId = managedOptionProbeControlId(field);
@@ -2504,6 +2557,7 @@ async function prepareManaged(
     ...answerLossReasons,
     ...unexplainedAnswerReasons,
     ...budgetShortfallReasons,
+    ...optionProbeAttention,
     ...honestyReasons,
   ];
   const attentionCategories = attentionCategoriesForReasons(attentionReasons);
@@ -2520,11 +2574,18 @@ async function prepareManaged(
   // call, so this is the only thing between an unanswered required question and a click on this
   // path. Not safe means ready_for_final_approval, where she is shown the blank question and can
   // answer it - which is exactly the loop the run gate had no exit from.
+  //
+  // The optionProbe term holds the send for exactly as long as it did while a per-control read
+  // failure was promoted to the run level. Narrowing the blast radius of the MESSAGE is not
+  // permission to send a form carrying a question Litos knowingly left blank. It reads the failure
+  // ARRAY rather than the rendered prose, for the reason the direct path's comment below gives: a
+  // sentence that renders to nothing must never be able to restore `safe`.
   const unansweredRequiredQuestions = blankRequiredQuestionLabels(mergedQuestions);
   const safe = blockers.length === 0
     && discoveryAttention.length === 0
     && evidenceBlockers.length === 0
     && discoveryFailures.length === 0
+    && optionProbe.failures.length === 0
     && coverLetterAttention.length === 0
     // A question the run never attempted is an answer she gave Litos and Litos did not use. The
     // submit path refuses outright rather than trade one away; this is the same refusal on the path

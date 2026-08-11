@@ -1929,6 +1929,114 @@ function packetHasFailedReferralField(packet: SubmissionPacket): boolean {
   return packet.failedFields?.some((field) => isReferralSourceQuestion(field.label)) === true;
 }
 
+/**
+ * The families the speculative alias ladders guess at.
+ *
+ * Separate from managedClosedFieldFamily, which is the FAILED-control matcher: widening that one
+ * would change which fills a failed option read suppresses, and that is a different question with a
+ * different measurement behind it. This adds the single family the graduation-date ladder needs and
+ * otherwise defers to it. "graduation date" is required as a phrase so that "expected graduation
+ * year" keeps falling through to the year family rather than being claimed here.
+ */
+function managedSpeculativeAliasFamily(label: string): string | undefined {
+  const normalized = normalizedFailedFieldLabel(label);
+  if (!normalized) return undefined;
+  if (/\bgraduation date\b|\bdate of graduation\b/.test(normalized)) return 'education-graduation-date';
+  return managedClosedFieldFamily(label);
+}
+
+/** The option list the probe actually READ for the control a reviewed question was resolved against. */
+function packetReadOptionsForQuestion(
+  packet: SubmissionPacket,
+  item: SubmissionPacket['questions'][number],
+): string[] | undefined {
+  const selector = reviewQuestionPortalSelector(item);
+  const controlId = selector?.match(/^#([A-Za-z0-9][A-Za-z0-9_-]*)$/)?.[1]
+    ?? selector?.match(/^\[id=["']([A-Za-z0-9][A-Za-z0-9_-]*)["']\]$/)?.[1];
+  if (!controlId) return undefined;
+  const options = packet.fieldOptions?.[controlId];
+  return options && options.length > 0 ? options : undefined;
+}
+
+/**
+ * A GUESS FIRED AT A CONTROL THAT WAS ALREADY ANSWERED CORRECTLY, AND CANNOT BE RIGHT.
+ *
+ * The alias ladders below push the RAW profile value at a label: "3.89" at "GPA", "May 2028" at
+ * "Graduation Date". fillByLabelText resolves a label to its own container's input, so on a form
+ * whose GPA control is a list of bands this lands in the SAME react-select the resolver has just
+ * filled with the exact band, "3.81 - 3.9". The raw value is not on the employer's list, so it
+ * fails, and the failure is read back to her as `Litos could not leave an answer on the form: no
+ * option matched "3.89"` about a field that is filled correctly.
+ *
+ * Measured across the five prod packets carrying that exact sentence, 2026-08-11: all five have the
+ * GPA field present in filled_fields and none has a GPA required-and-empty blocker. Five false
+ * alarms, zero real ones.
+ *
+ * THE CONDITION IS DELIBERATELY THE PROVABLE ONE, not "some question mentions GPA". All four of
+ * these have to hold, and the fourth is what makes this safe:
+ *
+ *   1. a reviewed question names the same control, by exact label or shared closed-field family;
+ *   2. that question is not itself suppressed as a failed control, because then the ladder is the
+ *      control's ONLY remaining chance and must survive;
+ *   3. the option probe READ that control's list, so there is evidence rather than an assumption
+ *      about what shape the control is;
+ *   4. the resolver's answer is on that list and the guess is not.
+ *
+ * Without 3 and 4 this suppressed a plain fillByLabelText at a control the resolver only ever
+ * attempts as a react-select - Databricks' graduation date is the measured example - which would
+ * trade a false alarm for an actually empty field. A value the employer does not offer is the one
+ * thing that can be dropped with no loss, because it could never have been accepted.
+ */
+function packetAnswerOutranksAliasGuess(
+  packet: SubmissionPacket,
+  label: string,
+  guesses: readonly (string | undefined)[],
+): boolean {
+  const candidates = guesses.flatMap((value) => {
+    const trimmed = value?.trim().toLowerCase();
+    return trimmed ? [trimmed] : [];
+  });
+  if (candidates.length === 0) return false;
+  const targetLabel = normalizedFailedFieldLabel(label);
+  if (!targetLabel) return false;
+  const targetFamily = managedSpeculativeAliasFamily(label);
+  return packet.questions.some((item) => {
+    if (packetQuestionFailed(packet, item)) return false;
+    const answer = item.answer?.trim();
+    if (!answer) return false;
+    const answeredLabel = normalizedFailedFieldLabel(item.question);
+    if (!answeredLabel) return false;
+    if (answeredLabel !== targetLabel) {
+      const answeredFamily = managedSpeculativeAliasFamily(item.question);
+      if (!targetFamily || !answeredFamily || targetFamily !== answeredFamily) return false;
+    }
+    const options = packetReadOptionsForQuestion(packet, item);
+    if (!options) return false;
+    const offered = new Set(options.map((option) => option.trim().toLowerCase()));
+    return offered.has(answer.toLowerCase()) && candidates.every((value) => !offered.has(value));
+  });
+}
+
+/**
+ * The one gate every speculative label-scoped alias fill passes through.
+ *
+ * Two independent refusals, and they are not the same fact. `packetLabelFailed` says Litos could not
+ * READ this control, so guessing at it is forbidden. `packetAnswerOutranksAliasGuess` says Litos has
+ * already answered it with an option the employer offers, and this guess is one it does not, so
+ * firing it can only fail and lie about a field that is filled.
+ *
+ * Scoped to LABEL-resolved fills only. An id-scoped fill (`#school--0`, `#end-year--0`) targets a
+ * fixed control the reviewed question may have nothing to do with, and suppressing one of those over
+ * a same-named custom question would leave a required fixed field empty.
+ */
+function managedSpeculativeLabelFillSuppressed(
+  packet: SubmissionPacket,
+  label: string,
+  ...guesses: Array<string | undefined>
+): boolean {
+  return packetLabelFailed(packet, label) || packetAnswerOutranksAliasGuess(packet, label, guesses);
+}
+
 function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: SubmissionPacket): boolean {
   if (!packet.failedFields?.length) return false;
   if (action.text && packetLabelFailed(packet, action.text)) return true;
@@ -1949,14 +2057,14 @@ function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: S
   });
 }
 
-function managedFillByLabelUnlessFailed(
+function managedFillByLabelUnlessHandled(
   actions: ManagedBrowserAction[],
   packet: SubmissionPacket,
   text: string,
   value: string | undefined,
   label: string,
 ) {
-  if (packetLabelFailed(packet, text)) return;
+  if (managedSpeculativeLabelFillSuppressed(packet, text, value)) return;
   managedFillByLabel(actions, text, value, label);
 }
 
@@ -2077,7 +2185,11 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
   const selectorLimit = databricks ? 3 : QUESTION_COMBOBOX_SELECTOR_LIMIT;
   const labelPrefix = databricks ? 'databricks_graduation_date_combo' : 'education_graduation_date_combo';
   for (const label of labels) {
-    if (packetLabelFailed(packet, label)) continue;
+    // Suppressed when the resolver already answered this control with an option the employer offers:
+    // these selectors are derived from the label, so they land in the SAME react-select the reviewed
+    // answer is about to fill, and every value below is the stored date or a bucket of it rather
+    // than a read option. The whole set is passed, so one candidate that IS on the list keeps them.
+    if (managedSpeculativeLabelFillSuppressed(packet, label, ...values)) continue;
     for (const value of values) {
       for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, selectorLimit)) {
         managedGreenhouseScopedReactSelectFill(
@@ -2103,7 +2215,7 @@ function pushGreenhouseFixedQuestionComboboxActions(actions: ManagedBrowserActio
     { label: 'What is your GPA?', value: packet.gpa },
   ];
   for (const item of fixedQuestions) {
-    if (packetLabelFailed(packet, item.label)) continue;
+    if (managedSpeculativeLabelFillSuppressed(packet, item.label, item.value)) continue;
     pushGreenhouseQuestionComboboxLabelActions(actions, item.label, item.value ?? '', 'greenhouse_fixed_question', packet.jdText);
   }
 }
@@ -2130,7 +2242,7 @@ function pushGreenhousePreferredLocationFallbackActions(actions: ManagedBrowserA
   ];
   let index = 0;
   for (const label of labels) {
-    if (packetLabelFailed(packet, label)) continue;
+    if (managedSpeculativeLabelFillSuppressed(packet, label, value)) continue;
     for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
       managedGreenhouseScopedReactSelectFill(
         actions,
@@ -4819,37 +4931,34 @@ function pushFixedFieldActions(
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
     if (!packetLooksAkuna(packet)) {
       pushGreenhouseEducationComboboxActions(actions, packet);
-      managedFillByLabelUnlessFailed(actions, packet, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
-      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
-      managedFillByLabelUnlessFailed(actions, packet, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
+      managedFillByLabelUnlessHandled(actions, packet, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
+      managedFillByLabelUnlessHandled(actions, packet, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
     }
     if (packetLooksDatabricks(packet)) {
-      managedFillByLabelUnlessFailed(actions, packet, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
     }
     if (!packetLooksAkuna(packet)) {
-      managedFillByLabelUnlessFailed(actions, packet, 'End date month', packet.graduationMonth, 'education_end_month');
-      managedFillByLabelUnlessFailed(actions, packet, 'End date year', packet.graduationYear, 'education_end_year');
-      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
-      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
-      managedFillByLabelUnlessFailed(actions, packet, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
+      managedFillByLabelUnlessHandled(actions, packet, 'End date month', packet.graduationMonth, 'education_end_month');
+      managedFillByLabelUnlessHandled(actions, packet, 'End date year', packet.graduationYear, 'education_end_year');
+      managedFillByLabelUnlessHandled(actions, packet, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
+      managedFillByLabelUnlessHandled(actions, packet, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
       // Same value the id-scoped fill uses, for the same reason: this lands in the SAME react-select
       // (fillByLabelText resolves the label's container to its one input), so handing it the stored
       // sentence leaves unmatched search text sitting in a control that was about to be filled
       // correctly.
-      if (!packetControlFailed(packet, 'discipline--0') && !packetLabelFailed(packet, 'Discipline')) {
-        managedFillByLabel(
-          actions,
-          'Discipline',
-          greenhouseReactSelectValue(packet, 'discipline--0', greenhouseDisciplineAliases(packet)),
-          'education_discipline_label',
-        );
+      const disciplineValue = greenhouseReactSelectValue(packet, 'discipline--0', greenhouseDisciplineAliases(packet));
+      if (!packetControlFailed(packet, 'discipline--0')
+        && !managedSpeculativeLabelFillSuppressed(packet, 'Discipline', disciplineValue)) {
+        managedFillByLabel(actions, 'Discipline', disciplineValue, 'education_discipline_label');
       }
     }
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) {
-      managedFillByLabelUnlessFailed(actions, packet, 'GPA', packet.gpa, 'gpa');
-      managedFillByLabelUnlessFailed(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question');
+      managedFillByLabelUnlessHandled(actions, packet, 'GPA', packet.gpa, 'gpa');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question');
     }
     pushGreenhousePreferredLocationFallbackActions(actions, packet);
     for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {

@@ -5309,6 +5309,99 @@ test('failed exact applicant GPA, degree, and university controls still suppress
   }
 });
 
+/* A SPECULATIVE ALIAS FIRED AT A CONTROL THAT WAS ALREADY ANSWERED CORRECTLY.
+ *
+ * The alias ladders push the RAW profile value at a label: "3.89" at "GPA", "May 2028" at
+ * "Graduation Date". fillByLabelText resolves a label to its own container's input, so on a form
+ * whose GPA control is a list of bands this lands in the SAME react-select the resolver has just
+ * filled with the exact band, "3.81 - 3.9". The raw value is not on the employer's list, so the fill
+ * fails, and the failure is then read back to her as `Litos could not leave an answer on the form:
+ * no option matched "3.89"` about a field that is filled correctly.
+ *
+ * Measured across the five prod packets carrying that exact sentence, 2026-08-11: all five have the
+ * GPA field present in filled_fields and none has a GPA required-and-empty blocker. Five false
+ * alarms, zero real ones.
+ *
+ * The action is suppressed rather than the message, because a react-select gets ONE attempt: a raw
+ * guess fired after the exact answer is a live risk to the answer, not only a lie about it. */
+const PROBED_GPA_BANDS = ['Below 3.0', '3.0 - 3.5', '3.51 - 3.8', '3.81 - 3.9', '3.91 - 4.0'];
+const PROBED_GRADUATION_WINDOWS = ['July 2027 - December 2027', 'January 2028 - July 2028'];
+
+test('a speculative alias never fires at a control the resolver has already answered', () => {
+  const answered = buildManagedPortalActions('greenhouse', andurilPacket({
+    // The probe read both lists off the live page. That is what makes "3.89" and "May 2028"
+    // provably unofferable here rather than merely redundant.
+    fieldOptions: {
+      question_5550001: PROBED_GPA_BANDS,
+      question_9176667101: PROBED_GRADUATION_WINDOWS,
+    },
+    questions: [
+      { question: 'What is your GPA?', answer: '3.81 - 3.9', portalSelector: '#question_5550001', portalInputType: 'combobox' },
+      { question: 'Expected graduation date', answer: 'January 2028 - July 2028', portalSelector: '#question_9176667101', portalInputType: 'combobox' },
+    ],
+  }));
+  assert.equal(answered.some((action) => action.value === '3.89'), false, 'raw GPA must not be guessed at an answered control');
+  assert.equal(answered.some((action) => action.value === 'May 2028'), false, 'raw graduation date must not be guessed at an answered control');
+  assert.deepEqual(answered.filter((action) => /^(?:gpa|gpa_question|graduation_date)/.test(action.label ?? '')), []);
+  assert.deepEqual(answered.filter((action) => action.label?.startsWith('education_graduation_date_combo')), []);
+  // The resolver's own attempts are untouched: suppressing the guess must not suppress the answer.
+  assert.ok(answered.some((action) => action.selector === '#question_9176667101'));
+  assert.ok(answered.some((action) => action.selector === '#question_5550001'));
+});
+
+test('the alias ladder still fires at a control the resolver did not answer', () => {
+  // The other half of the same rule, and the reason the predicate is narrow. On a form whose
+  // controls carry no label discovery can resolve, the ladder is the only thing that fills anything,
+  // so an empty question list must leave it working exactly as it did.
+  const unanswered = buildManagedPortalActions('greenhouse', andurilPacket({ questions: [] }));
+  assert.ok(unanswered.some((action) => action.label === 'gpa' && action.value === '3.89'));
+  assert.ok(unanswered.some((action) => action.label === 'gpa_question' && action.value === '3.89'));
+  assert.ok(unanswered.some((action) => action.label === 'graduation_date_label' && action.value === 'May 2028'));
+  assert.ok(unanswered.some((action) => action.label?.startsWith('education_graduation_date_combo')));
+
+  // An unrelated answered question does not suppress an unrelated ladder either: the match is an
+  // exact label or a shared closed-field family, never "this packet has some questions in it".
+  const unrelated = buildManagedPortalActions('greenhouse', andurilPacket({
+    fieldOptions: { question_5550003: ['Yes', 'No'] },
+    questions: [{ question: 'Are you able to work onsite three days a week?', answer: 'Yes', portalSelector: '#question_5550003', portalInputType: 'combobox' }],
+  }));
+  assert.ok(unrelated.some((action) => action.label === 'gpa' && action.value === '3.89'));
+  assert.ok(unrelated.some((action) => action.label === 'graduation_date_label' && action.value === 'May 2028'));
+
+  /* NO PROBED LIST, NO SUPPRESSION, and this is the case that decides whether the rule is safe.
+   *
+   * Databricks' graduation date is a reviewed question with no durable selector, so the resolver
+   * only ever attempts it as a scoped react-select. The plain fillByLabelText below is the only
+   * thing that would fill it were the control a text input, and there is no read option list saying
+   * otherwise. Dropping it would trade a false alarm for an actually empty field. */
+  const answeredWithoutProbe = buildManagedPortalActions('greenhouse', andurilPacket({
+    questions: [
+      { question: 'What is your GPA?', answer: '3.81 - 3.9' },
+      { question: 'What is your graduation date?', answer: 'January 2028 - July 2028' },
+    ],
+  }));
+  assert.ok(answeredWithoutProbe.some((action) => action.label === 'gpa' && action.value === '3.89'));
+  assert.ok(answeredWithoutProbe.some((action) => action.label === 'graduation_date' && action.value === 'May 2028'));
+
+  // A guess that IS on the employer's list is not a guess. It stays, because it can succeed.
+  const offeredGuess = buildManagedPortalActions('greenhouse', andurilPacket({
+    fieldOptions: { question_5550004: ['3.89', '3.81 - 3.9'] },
+    questions: [{ question: 'What is your GPA?', answer: '3.81 - 3.9', portalSelector: '#question_5550004', portalInputType: 'combobox' }],
+  }));
+  assert.ok(offeredGuess.some((action) => action.label === 'gpa' && action.value === '3.89'));
+
+  /* A question this run will NOT attempt is not an answer. The failed-control filter drops the
+   * resolver's fill, so the ladder would be the control's only remaining chance - which is why the
+   * refusal here has to come from packetLabelFailed, the rule that says a control Litos could not
+   * read must not be guessed at, rather than from the answered check. */
+  const failedAndAnswered = buildManagedPortalActions('greenhouse', andurilPacket({
+    failedFields: [{ controlId: 'question_5550002', label: 'Expected graduation date', selector: '#question_5550002', inputType: 'combobox' }],
+    questions: [{ question: 'Expected graduation date', answer: 'January 2028 - July 2028', portalSelector: '#question_5550002', portalInputType: 'combobox' }],
+  }));
+  assert.equal(failedAndAnswered.some((action) => action.selector?.includes('question_5550002')), false);
+  assert.equal(failedAndAnswered.some((action) => action.value === 'January 2028 - July 2028'), false);
+});
+
 test('two passes of reads become one map, and an empty read never overwrites a real list', () => {
   const merged = mergeManagedFieldOptions(
     { 'discipline--0': ['Computer Science'], 'degree--0': ["Bachelor's Degree"] },
