@@ -30,6 +30,7 @@ import {
   coverLetterUploadSelector,
   managedResultHasTranscriptUpload,
   portalMayAttachTranscript,
+  resumeUploadSelector,
   transcriptUploadSelector,
   type SubmissionPacket,
   type SupportedPortal,
@@ -215,14 +216,33 @@ test('every document upload is pushed after the resume, and none of them shares 
   }
 });
 
-test('ashby pays exactly one action for the transcript and nothing else', () => {
+/* The price went from one action to two, deliberately, and this is where that is recorded.
+ *
+ * The second is not a fill. It is the read-back of the resume's own control, taken after the
+ * transcript upload, and it exists because the managed runner is a remote process that cannot
+ * compare DOM nodes the way the direct path does: without it, a transcript that landed in the
+ * resume's slot is indistinguishable from one that landed correctly, and both come back reported as
+ * attached. One action to notice a sent-with-no-resume application is the cheapest thing in this
+ * file. It is still ONLY on the runs that carry a transcript, and still nothing else. */
+test('ashby pays one action for the transcript and one to prove the resume survived it', () => {
   const withTranscript = buildManagedPortalActions('ashby', transcriptPacket());
   const without = buildManagedPortalActions('ashby', transcriptPacket({
     transcript: undefined,
     transcriptName: undefined,
   }));
-  assert.equal(withTranscript.length - without.length, 1);
+  assert.equal(withTranscript.length - without.length, 2);
   assert.equal(withTranscript.filter((action) => action.label === 'transcript').length, 1);
+  const verify = withTranscript.filter((action) => action.label === 'resume_upload_verify');
+  assert.equal(verify.length, 1);
+  assert.equal(verify[0]?.type, 'extract');
+  assert.equal(verify[0]?.selector, resumeUploadSelector('ashby'));
+  // After the upload it is checking, or it proves nothing.
+  assert.ok(
+    withTranscript.findIndex((action) => action.label === 'resume_upload_verify')
+    > withTranscript.findIndex((action) => action.label === 'transcript'),
+  );
+  // And a run with no transcript pays for neither.
+  assert.equal(without.some((action) => action.label === 'resume_upload_verify'), false);
 });
 
 /* A PORTAL THAT CANNOT TAKE ONE PAYS NOTHING AND CLAIMS NOTHING.

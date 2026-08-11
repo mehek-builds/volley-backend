@@ -420,7 +420,11 @@ test('preview evidence blocks broken pages and incomplete form fills before fina
   const runner = routeSource('submissionRunner.ts');
   assert.match(runner, /function previewContentBlockers\(text: string \| undefined\): string\[\]/);
   assert.match(runner, /can\(\?:not\|\u0027t\)/);
-  assert.match(runner, /function filledFieldBlockers\(fields: readonly string\[\] \| undefined, packet: SubmissionPacket\): string\[\]/);
+  /* Loosened from the one-line signature, which broke when the run's own evidence was added as a
+     third argument so that a resume displaced by a later upload could be reported and not only a
+     missing one. The requirement is that the function still takes the filled fields and the packet
+     and returns sentences, not that it takes exactly two parameters. */
+  assert.match(runner, /function filledFieldBlockers\(\s*fields: readonly string\[\] \| undefined,\s*packet: SubmissionPacket,[\s\S]{0,200}?\): string\[\]/);
   assert.match(runner, /The filled form did not record an email field/);
   assert.match(runner, /The filled form did not record a resume upload/);
   assert.match(runner, /The filled form did not record the applicant name fields/);
