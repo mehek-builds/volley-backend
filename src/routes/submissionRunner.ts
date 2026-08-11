@@ -2077,22 +2077,30 @@ export function describeDiscoveryFailure(error: unknown): string {
 /**
  * ONE CONTROL LITOS COULD NOT READ, NAMED ON ITS OWN.
  *
- * This used to be a run-level admission. A single control whose option list came back unreadable was
- * pushed into `discoveryFailures`, which is the whole-form honesty gate, so the packet said "we could
- * not read the questions this form asks" and every OTHER custom question on the same form was
- * treated as unread too.
+ * THIS CHANGES WHAT THE PACKET SAYS, NOT WHAT REACHES THE FORM. Read that sentence before trusting
+ * anything else here, because the first version of this comment claimed the opposite and was wrong.
+ *
+ * A control whose option list came back unreadable used to be pushed into `discoveryFailures`. That
+ * array is the run-level honesty gate, so a single windowed control made the packet tell her "we
+ * could not read the questions this form asks", about a form whose other questions had been read
+ * perfectly. That sentence is the defect, and a per-control sentence is the fix.
+ *
+ * What it did NOT do is change any answer. `discoveryFailures` is read in exactly five places in
+ * prepareManaged, all of them after `discoverAndResolveQuestions` and `mergeDiscoveredPortalQuestions`
+ * have already run, and neither takes it as an argument. Resolution and the merge cannot see it.
+ * Verified by running the chain at unmodified main: the merged answer is the same either way.
  *
  * Measured on IMC packet 920a6751, 2026-08-11: `question_9177934101` legitimately failed its option
- * read (its list was windowed at the render cap). The graduation control beside it,
- * `question_9176667101`, read fine and its answer snapped correctly to "January 2028 - July 2028".
- * The run then declared the form unread, the snapped answer was thrown away for a blind alias ladder
- * that fired "May 2028" and "Spring 2028", and the field came back required and still empty. One bad
- * control cost the applicant every good one.
+ * read because its list was windowed at the render cap, and `question_9176667101` beside it read
+ * fine and resolved to "January 2028 - July 2028". The applicant was told the form was unreadable.
+ * She was told that about a form Litos had read. Separately, and NOT caused by this, the graduation
+ * control was still sent a bucket rather than its resolved answer; see the open defect noted on the
+ * test fixture for where that actually comes from.
  *
- * The honesty the old code was protecting is kept, at the scope it actually belongs to: the failed
- * control is still removed from `discoveredFields` before any alias resolution, still carried in
- * `packet.failedFields` so no action can target it, and still named here so she can see it. What it
- * no longer does is speak for controls it knows nothing about.
+ * The honesty the old code was protecting is kept, at the scope it belongs to: the failed control is
+ * still removed from `discoveredFields` before any alias resolution, still carried in
+ * `packet.failedFields` so no action can target it, still never silently answered, and it still
+ * holds the send. What it no longer does is speak for controls it knows nothing about.
  *
  * The label is preferred over the durable id because it is the only half of the pair she can find on
  * the page; the id is the fallback for a control discovery reported without one.
@@ -2256,11 +2264,13 @@ async function prepareManaged(
     optionProbeBatchFailures,
     discoveryRoleCapability,
   );
-  /* NOT pushed into discoveryFailures. See optionProbeAttentionReasons for the measurement: that
-   * array is the WHOLE-FORM honesty gate, and a per-control read failure promoted into it made Litos
-   * say it could not read any of this form's questions, which sent every correctly read control on
-   * the same page back to a blind alias ladder. The failure is real and stays visible; its scope is
-   * the one control it happened to. */
+  /* NOT pushed into discoveryFailures. That array is the WHOLE-FORM honesty gate, and a per-control
+   * read failure promoted into it made Litos tell her it could not read any of this form's questions
+   * when it had read all but one of them. The failure is real and stays visible, and it still holds
+   * the send below; what changes is that it now speaks only for the control it happened to.
+   *
+   * This is a change to the packet's account of itself, not to any answer. See
+   * optionProbeAttentionReasons for why resolution cannot see this array at all. */
   if (optionProbe.failures.length > 0) {
     fastify.log.error(
       { applicationId: row.id, portal, controls: optionProbe.failures },

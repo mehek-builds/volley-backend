@@ -2067,13 +2067,18 @@ test('neither prepare path can call a form safe on the strength of a scan that f
  *
  * Two closed controls on one Greenhouse page. `question_9177934101` renders more choices than the
  * option probe's window, so its list genuinely cannot be read. `question_9176667101` beside it reads
- * perfectly, and its answer snaps to the employer's own wording, "January 2028 - July 2028".
+ * perfectly, and resolves to the employer's own wording, "January 2028 - July 2028".
  *
- * The failed one used to be promoted into `discoveryFailures`, which is the run-level honesty gate,
- * so the packet declared that Litos could not read the questions this form asks AT ALL. The snapped
- * graduation answer was thrown away, a blind alias ladder fired in its place, and the field came back
- * to her as required and still empty. One control the employer chose to render long cost her every
- * control on the page that had been read correctly.
+ * WHAT THE CHANGE UNDER TEST DOES, STATED NARROWLY. The failed control used to be promoted into
+ * `discoveryFailures`, the run-level honesty gate, so the packet told her Litos could not read the
+ * questions this form asks AT ALL. It had read all but one of them. The fix scopes that sentence to
+ * the control it belongs to.
+ *
+ * WHAT IT DOES NOT DO, stated because the first version of this comment claimed otherwise: it does
+ * not change any answer. `discoveryFailures` is read only after resolution and the merge have run,
+ * and neither takes it as an argument, so the resolved answer below is identical on both branches.
+ * The assertions on the merged answer are fixture invariants, not evidence of a fix. The assertions
+ * that discriminate are the ones on the attention reasons, and the source-level pins above.
  *
  * This walks the real chain prepareManaged walks, minus the browser: probe analysis, option
  * attachment, the failed-control filter, resolution, the question merge, and the action list. */
@@ -2146,8 +2151,9 @@ test('one control that could not be read does not silence the questions that rea
   assert.doesNotMatch(reasons[0]!, /Expected graduation date/);
   assert.match(reasons[0]!, /windowed at the render cap/);
 
-  // The control that read fine keeps its options, resolves against them, and snaps to the
-  // employer's own wording rather than the profile's "May 2028".
+  // The control that read fine keeps its options and resolves against them. FIXTURE INVARIANT, not
+  // a result of this change: it holds identically at unmodified main, because resolution never sees
+  // discoveryFailures. It is here to pin the input the assertions below are read against.
   assert.deepEqual(kept.map((field) => field.selector), [`#${IMC_GRADUATION_ID}`]);
   const resolved = await discoverAndResolveQuestions(
     kept.map((field) => ({ ...field, maxLength: null })),
@@ -2169,8 +2175,8 @@ test('one control that could not be read does not silence the questions that rea
   );
   const merged = mergeDiscoveredPortalQuestions(resolved.questions, [], [], analysis.failedIds);
   const graduation = merged.find((question) => question.portal_selector === `#${IMC_GRADUATION_ID}`);
-  assert.equal(graduation?.answer, 'January 2028 - July 2028',
-    'the snapped answer must survive a sibling control failing its option read');
+  // Same again: true on both branches. The resolved answer is the employer's own wording.
+  assert.equal(graduation?.answer, 'January 2028 - July 2028');
 
   // And it reaches the action list, while the unreadable control reaches nothing.
   const actions = buildManagedPortalActions('greenhouse', {
@@ -2194,9 +2200,33 @@ test('one control that could not be read does not silence the questions that rea
       portalInputType: 'combobox',
     })),
   } as Parameters<typeof buildManagedPortalActions>[1]);
-  assert.ok(actions.some((action) => action.selector === `#${IMC_GRADUATION_ID}`),
-    'the control that read fine must still be attempted');
   assert.equal(actions.some((action) => action.selector?.includes(IMC_UNREADABLE_ID)), false);
+
+  /* THE VALUE, NOT JUST THE SELECTOR, AND IT IS STILL WRONG. THIS PIN RECORDS AN OPEN DEFECT.
+   *
+   * An earlier version of this test asserted only that SOME action reached this selector, which is
+   * true and useless: it passes while the fill carries anything at all. The one fill that reaches
+   * the control carries "Spring 2028". The resolved answer, "January 2028 - July 2028", is on the
+   * employer's list and is not what gets sent.
+   *
+   * Neither of this PR's two fixes causes or repairs that, and the value is byte-identical at
+   * unmodified main. Two things upstream produce it, both out of scope here and both needing their
+   * own measurement:
+   *
+   *   greenhouseReviewedQuestionAnswer   replaces a graduation-date question's resolved answer with
+   *                                      the raw profile value, "May 2028", unconditionally.
+   *   greenhouseComboboxValuesForQuestion unshifts greenhouseGraduationBucket ahead of everything,
+   *                                      and comboboxValueLimit returns 1, so the bucket is the only
+   *                                      value attempted and "Spring 2028" is what lands.
+   *
+   * Pinned rather than left unasserted so the next reader cannot mistake this fixture for proof that
+   * IMC is fixed. It is not. When the ordering defect is fixed, this assertion SHOULD fail, and the
+   * right change is to flip it to the resolved answer. */
+  const graduationFills = actions.filter((action) => action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill');
+  assert.deepEqual(graduationFills.map((action) => action.value), ['Spring 2028'],
+    'open defect: the control is attempted with a bucket, not with its resolved answer');
+  assert.equal(graduationFills.some((action) => action.value === graduation?.answer), false,
+    'open defect: the resolved answer is not the value that reaches the form');
 });
 
 /* THE HONESTY THE OLD CODE WAS PROTECTING, kept at the scope it belongs to.
