@@ -63,6 +63,11 @@ describe('clipJdText', () => {
 });
 
 describe('jobDescriptionSourceUrl', () => {
+  test('keeps the Forsight wrapper as the Comeet job-description source', () => {
+    const wrapper = 'https://forsightrobotics.com/positions/position-35_c68';
+    assert.equal(jobDescriptionSourceUrl(wrapper), wrapper);
+  });
+
   test('reads an exact Workable application URL from its job overview instead of the candidate form', () => {
     assert.equal(
       jobDescriptionSourceUrl('https://apply.workable.com/remote-recruitment/j/D4CA268A39/apply/'),

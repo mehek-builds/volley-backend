@@ -123,6 +123,11 @@ import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
 import { PACKET_EXPIRED_REASON } from '../lib/packetResumeRestore';
 import { currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
 import { createDashboardHandoffBinding } from '../lib/extensionHandoffPacket';
+import {
+  isTrustedComeetWrapperUrl,
+  resolveTrustedComeetWrapperApplicationUrl,
+  type ComeetWrapperFetch,
+} from '../lib/comeetWrapper';
 import { decryptRow } from './applicationProfile';
 import { readExperienceBank } from '../db/experienceBank';
 import { declaredSkillsList } from './profile';
@@ -2153,6 +2158,7 @@ async function prepareManaged(
   runId: string,
   fastify: FastifyInstance,
   authorization: StandingAuthorization,
+  applicationUrlOverride?: string,
 ) {
   await writeReview(row, nextReview(current, {
     status: 'filling',
@@ -2169,7 +2175,7 @@ async function prepareManaged(
   // questions - the only way this path ever sees the live DOM, since /api/run is otherwise
   // stateless. Resolved through the SAME questionDiscovery.ts logic the direct-Playwright path
   // uses, so the two providers can never answer a question differently.
-  const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
+  const applicationUrl = applicationUrlOverride ?? portalApplicationUrl(portal, current.portal_url!);
   /* `.catch(() => null)` used to be the whole error handling here, and it is how a total failure of
    * the discovery pass became indistinguishable from a form that simply had no custom questions.
    *
@@ -3016,11 +3022,17 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     return;
   }
   if (isManagedStratusProvider()) {
-    await prepareManaged(row, current, portal, runId, fastify, authorization);
+    const applicationUrl = portal === 'comeet'
+      ? await comeetDashboardApplicationUrl(portalUrl)
+      : undefined;
+    await prepareManaged(row, current, portal, runId, fastify, authorization, applicationUrl);
     return;
   }
+  const applicationUrl = portal === 'comeet'
+    ? await comeetDashboardApplicationUrl(portalUrl)
+    : portalUrl;
   const contextId = current.browser_context_id ?? (await createBrowserContext());
-  const session = await createBrowserSession(contextId, portalUrl);
+  const session = await createBrowserSession(contextId, applicationUrl);
   {
     const verificationRequestedAt = new Date();
     const connected = await connectToSession(session);
@@ -3032,7 +3044,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       browser_session_id: session.id,
       submission_error: undefined,
     }));
-    await page.goto(portalUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.goto(applicationUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
     // SmartRecruiters follows its captured link. Workable canonicalizes to /apply and clears its
     // optional-cookie overlay. Every other portal is a no-op here.
     await navigateToApplicationForm(page, portal);
@@ -3285,6 +3297,18 @@ function controlledChromeExecutable(): string {
 
 export function shouldUseLocalControlledBrowser(portal: SupportedPortal): boolean {
   return portal === 'controlled_test' && !isManagedStratusProvider();
+}
+
+export async function comeetDashboardApplicationUrl(
+  rawUrl: string,
+  fetchImpl: ComeetWrapperFetch = fetch,
+): Promise<string> {
+  if (!isTrustedComeetWrapperUrl(rawUrl)) return rawUrl;
+  const applicationUrl = await resolveTrustedComeetWrapperApplicationUrl(rawUrl, fetchImpl);
+  if (!applicationUrl) {
+    throw new Error('Litos could not verify the Comeet form bound to this Forsight Robotics position');
+  }
+  return applicationUrl;
 }
 
 function assertControlledPortalEnabled(portal: SupportedPortal): void {

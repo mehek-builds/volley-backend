@@ -90,6 +90,10 @@ test('requires a nonempty opaque Comeet iframe token and preserves it byte-for-b
   assert.equal(canonicalSupportedPortalUrl(wrapper, 'comeet'), undefined);
   assert.throws(() => detectPortal(wrapper));
 
+  const trustedWrapper = 'https://forsightrobotics.com/positions/position-35_c68';
+  assert.equal(detectPortal(trustedWrapper), 'comeet');
+  assert.equal(canonicalSupportedPortalUrl(trustedWrapper, 'comeet'), undefined);
+
   const missing = 'https://www.comeet.co/jobs/A0.002/46.A6A/apply';
   const empty = 'https://www.comeet.co/jobs/A0.002/46.A6A/apply?token=';
   assert.throws(() => detectPortal(missing));
@@ -100,6 +104,28 @@ test('requires a nonempty opaque Comeet iframe token and preserves it byte-for-b
   const iframe = 'https://www.comeet.co/jobs/A0.002/46.A6A/apply?source=x&token=%2FAbC%2B_9&lang=en';
   assert.equal(detectPortal(iframe), 'comeet');
   assert.equal(canonicalSupportedPortalUrl(iframe, 'comeet'), iframe);
+});
+
+test('refuses malformed Forsight direct form identity without narrowing unrelated Comeet tenants', () => {
+  const trusted = 'https://www.comeet.co/jobs/E9.008/35.C68/apply?token=9E845581DB8009E83B7027A001DB8';
+  assert.equal(detectPortal(trusted), 'comeet');
+  assert.equal(canonicalSupportedPortalUrl(trusted, 'comeet'), trusted);
+  for (const url of [
+    `${trusted}&token=9E845581DB8009E83B7027A001DB8`,
+    `${trusted}&source=other`,
+    trusted.replace('www.comeet.co', 'user@www.comeet.co'),
+    trusted.replace('www.comeet.co', 'www.comeet.co:444'),
+    trusted.replace('/35.C68/apply', '/other/../35.C68/apply'),
+    trusted.replace('/35.C68/apply', '/%2e/35.C68/apply'),
+    trusted.replace('/35.C68/apply', '/35.C68%2Fapply'),
+    trusted.replace('/35.C68/apply', '/35.C68%5Capply'),
+  ]) {
+    assert.throws(() => detectPortal(url), url);
+    assert.equal(canonicalSupportedPortalUrl(url, 'comeet'), undefined, url);
+  }
+  const unrelated = 'https://www.comeet.co/jobs/A0.002/46.A6A/apply?source=x&token=%2FAbC%2B_9&lang=en';
+  assert.equal(detectPortal(unrelated), 'comeet');
+  assert.equal(canonicalSupportedPortalUrl(unrelated, 'comeet'), unrelated);
 });
 
 test('does not claim the Pinpoint vendor site as a tenant', () => {

@@ -6,6 +6,7 @@ import {
   applicationContextForQuestionResolution,
   attentionBlockersForManagedResult,
   atsApiSubmissionEnabled,
+  comeetDashboardApplicationUrl,
   describeDiscoveryFailure,
   discoverAndResolveQuestions,
   discoveryHonestyReasons,
@@ -26,6 +27,11 @@ import {
   unansweredRequiredBlockerLabels,
   type ResumeRow,
 } from './submissionRunner';
+import {
+  FORSIGHT_COMEET_APPLICATION_URL,
+  FORSIGHT_COMEET_WRAPPER_URL,
+  type ComeetWrapperFetch,
+} from '../lib/comeetWrapper';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
 import { savedAnswerKey } from '../lib/answerReuse';
 import {
@@ -905,6 +911,50 @@ test('managed prepare and final or security-code submit rebuild controlled packe
   const coverLetterBlock = buildBody.slice(buildBody.indexOf('let coverLetter:'));
   assert.doesNotMatch(coverLetterBlock, /controlledTest|packetUsesControlledResumeFixture/,
     'controlled resume bytes must not bypass or suppress normal cover-letter resolution');
+});
+
+test('dashboard preparation hands the exact accepted Comeet form URL to both provider paths', async () => {
+  const html = `
+    <script type="comeet-applyform" data-position-uid="35.C68"></script>
+    <script>
+      window.comeetInit = function() {
+        COMEET.init({"token":"9E845581DB8009E83B7027A001DB8","company-uid":"E9.008"});
+      };
+      var js = {}; js.src = "//www.comeet.co/careers-api/api.js";
+    </script>
+  `;
+  const fetchImpl: ComeetWrapperFetch = async () => ({
+    headers: new Headers({ 'content-type': 'text/html' }),
+    ok: true,
+    status: 200,
+    text: async () => html,
+    url: FORSIGHT_COMEET_WRAPPER_URL,
+  });
+  assert.equal(
+    await comeetDashboardApplicationUrl(FORSIGHT_COMEET_WRAPPER_URL, fetchImpl),
+    FORSIGHT_COMEET_APPLICATION_URL,
+  );
+
+  const direct = 'https://www.comeet.co/jobs/E9.008/35.C68/apply?token=opaque-direct-token';
+  assert.equal(
+    await comeetDashboardApplicationUrl(direct, async () => {
+      throw new Error('direct forms must not fetch a wrapper');
+    }),
+    direct,
+  );
+
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const prepareStart = source.indexOf('async function prepare(');
+  const prepareEnd = source.indexOf('\nfunction controlledChromeExecutable', prepareStart);
+  const prepareBody = source.slice(prepareStart, prepareEnd);
+  assert.match(
+    prepareBody,
+    /const applicationUrl = portal === 'comeet'[\s\S]*?comeetDashboardApplicationUrl\(portalUrl\)[\s\S]*?prepareManaged\(row, current, portal, runId, fastify, authorization, applicationUrl\)/,
+  );
+  assert.match(
+    prepareBody,
+    /const applicationUrl = portal === 'comeet'[\s\S]*?comeetDashboardApplicationUrl\(portalUrl\)[\s\S]*?createBrowserSession\(contextId, applicationUrl\)[\s\S]*?page\.goto\(applicationUrl,/,
+  );
 });
 
 test('discovered US work authorization and sponsorship become reviewed Yes answers', async () => {

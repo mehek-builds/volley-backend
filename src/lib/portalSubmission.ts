@@ -35,6 +35,7 @@ import {
   type ReferralSourceEvidence,
 } from './referralSource';
 import { embeddedGreenhouseApplicationUrl, embeddedGreenhouseJobId } from './greenhouseEmbeddedBoards';
+import { isTrustedComeetApplicationUrl, isTrustedComeetWrapperUrl } from './comeetWrapper';
 import {
   postingCountryCodeFromJobContext,
   postingCountryFromJobContext,
@@ -5932,6 +5933,7 @@ export function detectPortal(rawUrl: string): SupportedPortal {
   if (embeddedGreenhouseJobId(url)) {
     return 'greenhouse';
   }
+  if (isTrustedComeetWrapperUrl(rawUrl)) return 'comeet';
   const bullhornHash = url.hash.match(/^#\/jobs\/(\d+)(?:\/apply)?\/?$/i);
   const isBullhornTenant = HOSTS.bullhorn.test(url.hostname);
   if (isBullhornTenant && APPLY_PATHS.bullhorn!.test(url.pathname) && bullhornHash) return 'bullhorn';
@@ -5942,7 +5944,12 @@ export function detectPortal(rawUrl: string): SupportedPortal {
     // serves logins, marketing pages, or in Oracle's case entire unrelated products.
     const applyPath = APPLY_PATHS[portal as PortalFamily];
     if (applyPath && !applyPath.test(url.pathname)) continue;
-    if (portal === 'comeet' && !hasComeetApplicationToken(url)) continue;
+    if (portal === 'comeet') {
+      const isForsightFormIdentity = url.pathname.toLowerCase() === '/jobs/e9.008/35.c68/apply';
+      if (isForsightFormIdentity
+        ? !isTrustedComeetApplicationUrl(rawUrl)
+        : !hasComeetApplicationToken(url)) continue;
+    }
     if (portal === 'sap_successfactors') {
       const jobId = url.searchParams.get('jobId') ?? url.searchParams.get('career_job_req_id') ?? url.searchParams.get('job_application');
       const tenant = url.searchParams.get('company');
@@ -6002,6 +6009,7 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== 'https:') return undefined;
+    if (isTrustedComeetWrapperUrl(rawUrl)) return undefined;
     const greenhouseJobId = databricksGreenhouseJobId(url);
     if (greenhouseJobId) return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
     const embeddedBoardUrl = embeddedGreenhouseApplicationUrl(url);
