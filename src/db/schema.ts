@@ -101,6 +101,33 @@ export const users = pgTable('users', {
   automatic_captcha_enabled: boolean('automatic_captcha_enabled').default(false).notNull(),
   automatic_captcha_consented_at: timestamp('automatic_captcha_consented_at', { withTimezone: true }),
   automatic_captcha_consent_version: text('automatic_captcha_consent_version'),
+  /* Standing permission to ACCEPT an employer's privacy statement, terms, or code of conduct on the
+     applicant's behalf, asked once instead of once per employer.
+     Its whole value is that the agreement stays hers: granted on a date, against a version of the
+     words she was shown, and revocable from settings. That is why it is a users.* consent triple
+     and not a behaviour Litos simply adopted, and why the runner records the grant on the question
+     it ticks rather than letting the tick look like hers.
+     IT LICENSES ONE CLASS AND CANNOT REACH ANOTHER. Consents and acknowledgements only: privacy
+     notices, data-processing consent, applicant terms, codes of conduct. Every FACTUAL declaration
+     - work authorization, age, degree, criminal history, health, veteran status, EEO, background
+     and reference authorizations, truth attestations, restrictive covenants - is held exactly as it
+     is today whatever this column says. See isConsentAcknowledgementQuestion in
+     lib/questionDiscovery.ts, whose veto is what makes that a structural property and not a promise.
+     Submission permission never implies it: sending a form and agreeing to a legal notice on it are
+     different acts, and the runner still stops at everything it stopped at before. */
+  automatic_consent_acceptance_enabled: boolean('automatic_consent_acceptance_enabled').default(false).notNull(),
+  automatic_consent_acceptance_consented_at: timestamp('automatic_consent_acceptance_consented_at', { withTimezone: true }),
+  automatic_consent_acceptance_consent_version: text('automatic_consent_acceptance_consent_version'),
+  /* THE SECOND PERMISSION, for codes of conduct, and it is separate from the one above on purpose.
+     The comment on CODE_OF_CONDUCT_ACKNOWLEDGEMENT in lib/questionDiscovery.ts records why: IMC's
+     "Interview Code of Conduct" was once auto-answered "Yes" with nothing stored behind it, that was
+     judged wrong, and it was corrected. A privacy notice is the routine condition of applying at
+     all; a code of conduct binds how she behaves in a live interview. One grant must not license
+     the other, or this is that same reversion arriving by a tidier route, so a label naming both
+     documents needs both permissions and either can be revoked alone. */
+  automatic_conduct_acceptance_enabled: boolean('automatic_conduct_acceptance_enabled').default(false).notNull(),
+  automatic_conduct_acceptance_consented_at: timestamp('automatic_conduct_acceptance_consented_at', { withTimezone: true }),
+  automatic_conduct_acceptance_consent_version: text('automatic_conduct_acceptance_consent_version'),
   // ---- visa sponsorship ----
   //
   // Answered ONCE, during onboarding, and then permanent. True means the job seeker said they need

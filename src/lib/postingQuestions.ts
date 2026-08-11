@@ -51,6 +51,7 @@ import {
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from './questionDiscovery';
+import { consentAcceptanceValue } from './profileFieldResolution';
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from './selfDeclaration';
 import { answerReuseScope, savedAnswerFor, type AnswerReuseContext } from './answerReuse';
 
@@ -252,6 +253,24 @@ export function resolvePrescript(
       max_length: question.max_length,
       reusable,
     };
+
+    /* THE CONSENT CLASS, ABOVE THE SELF-DECLARATION BRANCH, and only ever when the applicant has
+     * granted standing permission AND the control's accepting value is identifiable.
+     *
+     * Above it because these labels ARE self-declarations by isSelfDeclarationQuestion's reckoning
+     * and always will be: that predicate guards the DRAFTER and answer reuse, where "never invent
+     * one of these" is still exactly right, and it is deliberately left alone. What changes is only
+     * whether this screen hands the consent back to her, and it stops doing that for the one class
+     * she has already agreed Litos may accept.
+     *
+     * consentAcceptanceValue returns null for no permission, for the held class, and for a list
+     * whose accepting option could not be read - all three fall through to the branch below and are
+     * asked, which is what main does with every one of them. */
+    const consentAnswer = consentAcceptanceValue(label, profile, question.options, context.jdText);
+    if (consentAnswer !== null) {
+      out.push({ ...base, ask: false, answer: consentAnswer, remembered: false });
+      continue;
+    }
 
     if (isSelfDeclarationQuestion(label)) {
       out.push({

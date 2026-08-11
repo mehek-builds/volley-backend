@@ -14,7 +14,13 @@ export type ApplicationReviewQuestion = {
   portal_selector?: string;
   portal_input_type?: string;
   ats_api_field?: string;
-  answer_source?: 'applicant_review';
+  /* WHO PUT THIS ANSWER HERE, when it was not simply resolved from the profile.
+   *
+   * 'applicant_review' is her, typing on the review screen. 'consent_permission' is Litos accepting
+   * an employer's privacy statement, applicant terms or code of conduct under the permission she
+   * granted once at onboarding, and it exists so that the packet audit shows an acceptance made on
+   * her behalf rather than a tick that reads as if she had made it herself. */
+  answer_source?: 'applicant_review' | 'consent_permission';
   answer_reviewed_at?: string;
   /**
    * The PROFILE VALUE this answer was snapped from, when discovery could read the control's options
@@ -29,9 +35,88 @@ export type ApplicationReviewQuestion = {
    *
    * Optional forever. Every record written before this field existed lacks it, and absence is read
    * as "cannot prove current", which recomputes. jsonb, so no migration.
+   *
+   * A CONSENT ACCEPTANCE STILL RECORDS IT, and still does not use it to prove currency. A
+   * select-shaped consent records "Yes" here beside an answer of "I agree", which is honest and
+   * worth keeping, but the keep-branch this field feeds requires a date or number BAND and
+   * "I agree" is neither, so borrowing it for consents made the branch unreachable and replaced the
+   * employer's own option text with "Yes" on every refresh. What makes a consent current is whether
+   * the permission is still granted, which refreshKnownQuestionAnswers now asks directly. See the
+   * consent branch there.
    */
   answer_option_source?: string;
+  /* The grant behind a 'consent_permission' answer: when she gave the permission, and the version of
+   * the words she was shown when she gave it. Written per question rather than looked up later,
+   * because the audit has to say what was true at the moment of the acceptance - revoking the
+   * permission tomorrow must not make an application sent today unexplainable.
+   *
+   * ANSWER-CLAIMS, both of them, and the classification is the whole of how they are kept honest.
+   * They assert that THIS ANSWER was accepted under a permission, so they live and die with the
+   * answer: edit the control to "I do not agree" and they are gone, because the value they describe
+   * is gone. See ANSWER_CLAIM_FIELDS below. */
+  consent_permission_granted_at?: string;
+  consent_permission_version?: string;
 };
+
+/* ---- the two kinds of provenance, and the rule that keys each one ----
+ *
+ * PR 496 shipped `answer_option_source` dropped at one site of three. PR 503 root-caused why that
+ * kept happening and fixed it with the distinction below rather than with another list. This branch
+ * adds two fields and classifies them rather than re-deriving anything.
+ *
+ * AN APPLICANT-CLAIM asserts something about the RECORD and about what the applicant did with it:
+ * "she read this exact text and let it stand". A rename, a stale review round or a re-issued id can
+ * falsify that without the answer changing at all, so it is keyed on record identity
+ * (exactReviewedIdentityUnchanged) and drops the moment that identity moves.
+ *
+ * AN ANSWER-CLAIM asserts something about the ANSWER: "this value was snapped for profile value X",
+ * "this value was accepted under a standing permission granted at T". Only replacing the answer can
+ * falsify it, so it is keyed on `answerUnchanged` and survives exactly as long as the answer does,
+ * byte for byte. Keying one of these on record identity is the PR 503 defect: an untouched Save
+ * posts back a machine-resolved answer with no answer_source at all, record identity fails, and a
+ * claim that was still perfectly true is discarded.
+ *
+ * THE CONSENT FIELDS ARE ANSWER-CLAIMS, and that classification is what closes the hole they were
+ * blocked for: when the applicant edits a consent to "I do not agree" the answer changed, so the
+ * acceptance grant drops with it. No strip site had to remember them.
+ *
+ * The two lists partition AnswerProvenanceField exactly, checked at compile time below, so a field
+ * added without being classified does not build.
+ */
+type AnswerProvenanceField =
+  | 'answer_source'
+  | 'answer_reviewed_at'
+  | 'answer_option_source'
+  | 'consent_permission_granted_at'
+  | 'consent_permission_version';
+
+/** Keyed on RECORD IDENTITY. Falsified by a rename or a stale review round. */
+export const APPLICANT_CLAIM_FIELDS = ['answer_source', 'answer_reviewed_at'] as const;
+/** Keyed on THE ANSWER. Falsified only by replacing the answer. */
+export const ANSWER_CLAIM_FIELDS = [
+  'answer_option_source',
+  'consent_permission_granted_at',
+  'consent_permission_version',
+] as const;
+
+/* The partition, enforced by the compiler rather than by a reviewer.
+ *
+ * Written as a call rather than an assignment so the error NAMES the offending field: leaving
+ * `answer_translated_from` out of both lists fails with `Argument of type 'true' is not assignable
+ * to parameter of type '"answer_translated_from"'`, which tells the next person what to do. An
+ * assignment to `never` compiles to "Type 'true' is not assignable to type 'never'", which does not.
+ *
+ * Being in BOTH lists is caught the same way, from the other direction: a field keyed two ways is
+ * keyed by whichever branch runs first, which is not a decision anybody made. */
+type Classified = (typeof APPLICANT_CLAIM_FIELDS)[number] | (typeof ANSWER_CLAIM_FIELDS)[number];
+type Unclassified =
+  | Exclude<AnswerProvenanceField, Classified>
+  | Exclude<Classified, AnswerProvenanceField>
+  | ((typeof APPLICANT_CLAIM_FIELDS)[number] & (typeof ANSWER_CLAIM_FIELDS)[number]);
+function assertEveryProvenanceFieldIsClassifiedExactlyOnce(
+  _classified: [Unclassified] extends [never] ? true : Unclassified,
+): void { void _classified; }
+assertEveryProvenanceFieldIsClassifiedExactlyOnce(true);
 
 export type ApplicationAttentionCategory =
   | 'captcha'
@@ -156,6 +241,11 @@ export function mergeSubmittedApplicationReviewQuestions(
     const submittedMatch = submittedByQuestion.get(questionKey(question.question))
       ?? submittedByUniqueId.get(question.id);
     if (!submittedMatch) {
+      /* APPLICANT-CLAIMS ONLY. This branch does not replace the answer, so every answer-claim on it
+       * is still true and survives, INCLUDING the consent grant - a stored consent that no submit
+       * body mentioned was not edited, and its acceptance record is as valid as it was. Stripping
+       * answer-claims here is the PR 496 defect that PR 503 root-caused; it must not be re-added
+       * for the consent fields by "being thorough". */
       const {
         answer_source: _answerSource,
         answer_reviewed_at: _answerReviewedAt,
@@ -206,13 +296,23 @@ export function mergeSubmittedApplicationReviewQuestions(
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
       answer_option_source: _answerOptionSource,
+      consent_permission_granted_at: _consentGrantedAt,
+      consent_permission_version: _consentVersion,
       ...questionWithoutProvenance
     } = question;
+    /* Every ANSWER-CLAIM rides on `answerUnchanged`, by the rule above rather than field by field.
+     * The consent grant is one of them: an applicant who edits this control to "I do not agree" has
+     * changed the answer, so the record stops saying it was accepted under a machine permission. */
+    const carriedAnswerClaims: Partial<Pick<ApplicationReviewQuestion, (typeof ANSWER_CLAIM_FIELDS)[number]>> = {};
+    if (answerUnchanged) {
+      for (const field of ANSWER_CLAIM_FIELDS) {
+        const value = question[field];
+        if (value !== undefined) carriedAnswerClaims[field] = value;
+      }
+    }
     const carriedForward = exactReviewedIdentityUnchanged
       ? question
-      : answerUnchanged && question.answer_option_source !== undefined
-        ? { ...questionWithoutProvenance, answer_option_source: question.answer_option_source }
-        : questionWithoutProvenance;
+      : { ...questionWithoutProvenance, ...carriedAnswerClaims };
     return {
       ...carriedForward,
       answer: submittedQuestion.answer,
@@ -242,6 +342,8 @@ export function mergeSubmittedApplicationReviewQuestions(
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
       answer_option_source: _answerOptionSource,
+      consent_permission_granted_at: _consentGrantedAt,
+      consent_permission_version: _consentVersion,
       ...submittedWithoutProvenance
     } = question;
     merged.push(submittedWithoutProvenance);

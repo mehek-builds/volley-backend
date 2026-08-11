@@ -12,7 +12,7 @@ import {
 } from './salary';
 import { referralSourceForApplication, type ReferralSourceEvidence } from './referralSource';
 import { usStateScopeSkipReason } from './residenceScope';
-import { declineWordingForControl } from './selfIdentification';
+import { comparableOption, declineWordingForControl } from './selfIdentification';
 import {
   availabilityWindowForPosting,
   formatWindowDate,
@@ -125,6 +125,24 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   advanced_study_plan?: 'no' | 'considering' | 'committed';
   attest_truthful_information?: boolean;
   accept_privacy_notices?: boolean;
+
+  /* STANDING PERMISSION TO ACCEPT EMPLOYER CONSENT ACKNOWLEDGEMENTS, from users.* rather than from
+   * application_profile - the only field in this shape that is not an application fact, and named
+   * so that is obvious at every use.
+   *
+   * PRESENCE IS THE GRANT. The loader sets it only after consentAcceptanceGranted has checked both
+   * the boolean and the consent version, so undefined covers all three of "never asked", "revoked"
+   * and "agreed to a different version of the words", and every one of those holds. The two fields
+   * are carried rather than a bare boolean because the runner writes them onto the question it
+   * ticks: the packet audit has to be able to say WHEN she gave this permission, not just that
+   * something was ticked on her behalf. */
+  consent_acknowledgement_permission?: { granted_at?: string; version: string };
+  /* THE SECOND PERMISSION, and it is separate on purpose rather than for tidiness. A code of
+   * conduct binds how she behaves in a live interview; a privacy notice is the routine condition of
+   * applying at all. CODE_OF_CONDUCT_ACKNOWLEDGEMENT was written because the first was once ticked
+   * with nothing behind it, so licensing it off the privacy grant would be that reversion by a
+   * tidier route. Granted, revoked and versioned independently. */
+  conduct_acknowledgement_permission?: { granted_at?: string; version: string };
 
   /* Legacy location preferences. These are deliberately not sufficient authority for answering an
    * employer commitment. The stored model has no cadence, duration, office, employer or posting
@@ -1463,6 +1481,8 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       answer_source?: unknown;
       answer_reviewed_at?: unknown;
       answer_option_source?: unknown;
+      consent_permission_version?: unknown;
+      consent_permission_granted_at?: unknown;
     };
     const applicantReviewedCurrentAnswer = Boolean(
       question.answer.trim()
@@ -1476,11 +1496,18 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      * it was not derived from is a lie the next reader has no way to detect: a record reading
      * answer "May 2028" with answer_option_source "May 2027" claims a snap that never happened. The
      * one branch that keeps the answer keeps it, which is the whole point of recording it. */
+    /* answer_option_source goes with the answer it describes, and only ever with that answer.
+     *
+     * Every branch below that CHANGES the answer drops it, because a derivation left beside a value
+     * it was not derived from is a lie the next reader has no way to detect. The consent grant is
+     * the same kind of claim and drops on the same rule. */
     const withoutProvenance = (): T => {
       const {
         answer_source: _answerSource,
         answer_reviewed_at: _answerReviewedAt,
         answer_option_source: _answerOptionSource,
+        consent_permission_version: _consentPermissionVersion,
+        consent_permission_granted_at: _consentPermissionGrantedAt,
         ...rest
       } = withProvenance;
       return rest as T;
@@ -1510,6 +1537,51 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      * whose derivation no longer matches the profile is exactly the stale record this function
      * exists to overwrite, and it is overwritten. See storedOptionAnswerIsCurrent. */
     if (known && 'value' in known) {
+      /* A CONSENT IS CURRENT WHILE THE PERMISSION IS GRANTED, and that is a different question from
+       * the one the band mechanism answers.
+       *
+       * The branch below needs a date or number band, because that is the shape of an answer this
+       * function provably could not have computed. "I agree" is neither, so for the consent family
+       * the keep-branch was unreachable and every refresh replaced the employer's own option text
+       * with "Yes" - a value that is not on the control's list at all. That is exactly the
+       * prepare-versus-submit divergence measured on 2026-08-11 and quoted above, reintroduced for
+       * a different family: the applicant approves "I agree" and the employer receives "Yes".
+       *
+       * So currency is keyed on the thing that actually makes a consent current. The profile value
+       * behind it is a constant, so "has the profile moved" can never be the question; "does she
+       * still permit this" always is. Revocation is unaffected and still does the work: once the
+       * permission is withdrawn resolveKnownAnswer stops returning a value for this label, control
+       * never reaches here, and the currentResolverRefuses branch below blanks the answer and strips
+       * its provenance.
+       *
+       * Deliberately NOT keyed on the stored provenance, tempting as that is. mergeReviewedQuestions
+       * strips answer_source whenever a stored question has no counterpart in a submitted review, so
+       * a record can lose its consent marker while remaining a perfectly good accepted consent, and
+       * keying on the marker would resurrect the divergence on exactly those records. */
+      if (label && question.answer.trim() && consentAcknowledgementLicence(label, ap, jdText)) {
+        /* AN EXPLICIT REFUSAL IS NEVER RE-ACCEPTED. She edited this control to "I do not agree",
+         * and the resolver would otherwise overwrite it with the acceptance value, turning her own
+         * refusal into a machine acceptance on a live application. Held exactly as she left it. */
+        if (isConsentRefusingWording(question.answer)) return question;
+        /* A GRANTED PERMISSION IS NECESSARY AND NOT SUFFICIENT, and getting that wrong made this
+         * branch worse than the bug it fixed.
+         *
+         * The dashboard "Review answers" round trip stores the RESOLVED value rather than the
+         * displayed one, so a consent showing "I agree" comes back as "Yes" after an unedited Save.
+         * Keying currency on the permission alone then PRESERVED that "Yes" - locking in a value
+         * that matches nothing on the control, where before it was at least recomputed each run.
+         * A recoverable divergence became a permanent one.
+         *
+         * So the answer must also still look like an option a control offered: an accepting wording
+         * that is not simply the constant this resolver produces. "I agree" qualifies and is kept,
+         * which is the whole point of the branch. A bare "Yes" does not, and falls through to be
+         * recomputed - to "Yes" again, harmlessly, and without freezing it.
+         *
+         * The round trip itself is fixed on fix/review-screen-shows-resolved-answer. This branch
+         * must land after it; see the PR body. */
+        if (isConsentAcceptingWording(question.answer)
+          && comparableOption(question.answer) !== comparableOption(known.value)) return question;
+      }
       const derivedFrom = typeof withProvenance.answer_option_source === 'string'
         ? withProvenance.answer_option_source
         : undefined;
@@ -3217,10 +3289,31 @@ export const FURTHER_EDUCATION_DEGREE_TYPE_QUESTION =
 
 /* ---- attestations ----
  *
- * Two categories, and only two, may ever be ticked by an automated submission, and each only from
- * an explicit stored consent (application_profile.attest_truthful_information and
- * accept_privacy_notices). Everything else here is named so it can be REFUSED by name rather than
- * swept up by a general consent rule.
+ * CORRECTED. This header used to read:
+ *
+ *   "Two categories, and only two, may ever be ticked by an automated submission, and each only
+ *    from an explicit stored consent (application_profile.attest_truthful_information and
+ *    accept_privacy_notices)."
+ *
+ * That stopped being true on 2026-08-09 and the header was not updated. be1bccf ("Harden reviewed
+ * application answer safety", 10:06:38 +0400) deleted the `ap` parameter from
+ * applicationConsentAnswer, narrowed its return type so it was structurally incapable of returning
+ * a value, and removed privacyNoticesAccepted() with it. The function it describes lives 2,500
+ * lines below this comment, so the two sat contradicting each other for three days and cost a
+ * reviewer a full wrong diagnosis: reading this header, the live IMC refusal looks like a bug in
+ * the plumbing, when it was main passing its own suite (questionDiscovery.test.ts pins the hold
+ * with accept_privacy_notices set true).
+ *
+ * WHAT IS TRUE NOW. Nothing is ticked from those two application_profile booleans; they remain
+ * readable for migration compatibility only, exactly as be1bccf left them. What may be ticked is
+ * the CONSENT AND ACKNOWLEDGEMENT CLASS, from a standing permission on the users row
+ * (automatic_consent_acceptance_*), which is a deliberate product reversal of be1bccf for that one
+ * class and is argued where it is implemented, at isConsentAcknowledgementQuestion below.
+ *
+ * Everything else in this section is still named so it can be REFUSED by name rather than swept up
+ * by a general consent rule, and that has not changed: a truthfulness certification, an exclusivity
+ * commitment, a resume-format acknowledgement and every factual declaration are refused whatever
+ * any permission says.
  */
 // Bare-label privacy acknowledgements. Five Rings ships "Privacy Policy Acknowledgement", IMC
 // "Privacy Statement", Point72 just "Privacy": no verb, no sentence, nothing for the prose-shaped
@@ -3231,6 +3324,577 @@ export const BARE_PRIVACY_ACKNOWLEDGEMENT =
 // of Conduct" was previously auto-answered "Yes" with nothing stored behind it.
 export const CODE_OF_CONDUCT_ACKNOWLEDGEMENT =
   /\bcode\s+of\s+conduct\b|\bcode\s+of\s+ethics\b|\bacceptable\s+use\s+policy\b/i;
+
+/* ---- the consent and acknowledgement class ----
+ *
+ * The one class of employer agreement Litos may accept in the applicant's name, and only under the
+ * standing permission she grants once at onboarding (users.automatic_consent_acceptance_*). With no
+ * permission on the row, every label below is held exactly as it is above, which is main's
+ * behaviour and is the default for every account.
+ *
+ * WHAT THE LINE IS, and it is the whole of this feature. A CONSENT is the applicant granting
+ * permission or agreeing to terms the employer wrote: its truth value does not depend on any fact
+ * about her, so accepting one cannot make her say something false. A DECLARATION is a claim about
+ * her - her right to work, her age, her degree, her record, her health, her service - and an
+ * automatic "Yes" to one of those is R-004 again: a false legal statement sent to an employer under
+ * her name. The two look alike on a form (both are usually a required checkbox worded as "I
+ * confirm..."), which is why the separation here is structural rather than a list of phrases.
+ *
+ * THE GRAMMAR IS CLOSED, in the same shape as the sensitive-answer parsers above it, and it is
+ * closed in BOTH directions:
+ *
+ *   1. HELD_DECLARATION_VOCABULARY runs first and vetoes unconditionally. Nothing after it can
+ *      re-open a label it rejects, so no widening of the consent grammar can ever reach the held
+ *      class - that is a property of the order, not of how carefully the alternatives below are
+ *      written. It is deliberately over-broad: a consent it wrongly vetoes is held, which is what
+ *      main does anyway, and holding is the failure this codebase is allowed to have.
+ *   2. The consent side matches only a closed vocabulary of DOCUMENTS (privacy notice, data
+ *      protection notice, applicant terms, code of conduct) and of DATA-HANDLING acts (processing,
+ *      storing, transferring personal data; GDPR; retention for recruitment purposes). A label
+ *      naming no such document and no such act is not a consent, whatever verb it uses. That is why
+ *      "Do you consent to relocate?" is not merely vetoed, it never matches in the first place.
+ *
+ * Deliberately NOT here, and each is a decision rather than an omission:
+ *   - background-check, drug-test and reference-contact authorizations. They grant permission, so
+ *     they read like consents, but each licenses an act with factual and legal weight well past
+ *     data handling. Held, and `authori[sz]e` is vetoed outright to keep the whole family out.
+ *   - truth attestations ("I certify the information is true and complete"). Agreeing to a document
+ *     is not swearing to a fact.
+ *   - EEO and demographic self-identification, which has its own resolver and its own opt-out
+ *     wording and is not touched by anything in this block.
+ */
+
+/* The employer's qualifier on a document name: "Candidate Privacy Notice", "Interview Code of
+ * Conduct", "Job Applicant Privacy Policy". Closed, because the qualifier is the part a bare label
+ * varies and the document noun is the part that must not vary. */
+const CONSENT_DOCUMENT_QUALIFIER =
+  String.raw`(?:job\s+)?(?:applicant|candidate|recruit(?:ment|ing)|interview|employee|employment|data|website|site|user|company|global|general|our|your|the|this)`;
+/* The documents. A privacy or data-protection notice, in the spellings employers actually ship. */
+/* LONGEST SPELLING FIRST, and this ordering is load-bearing rather than cosmetic. Alternation
+ * returns the FIRST matching alternative, not the longest, and classifiedDocumentSpans matches
+ * sticky from each position - so with the bare `privacy` alternative first, "Privacy and Cookies
+ * Policy" matched only "privacy", left "Policy" uncovered, and held a spelling this pattern exists
+ * to support. Any alternative that is a prefix of another must come after it. */
+const PRIVACY_DOCUMENT =
+  String.raw`privacy\s+and\s+cookies?\s+(?:policy|notice)|data\s+protection(?:\s+(?:policy|statement|notice))?|data\s+privacy(?:\s+(?:policy|statement|notice))?|notice\s+at\s+collection|privacy(?:\s+(?:policy|statement|notice|terms))?`;
+const TERMS_DOCUMENT =
+  String.raw`terms\s+(?:and|&)\s+conditions|terms\s+of\s+(?:use|service|application)|applicant\s+terms`;
+const CONDUCT_DOCUMENT =
+  String.raw`code\s+of\s+conduct|code\s+of\s+ethics|acceptable\s+use\s+policy|conduct\s+(?:agreement|policy|guidelines)`;
+/* The acts, for the consents that name no document: what the employer proposes to do with her
+ * personal data, and the legal regime it names while doing it. */
+const DATA_HANDLING_SUBJECT = String.raw`process(?:ing)?\s+of\s+(?:my\s+|your\s+|the\s+)?personal\s+(?:data|information)`
+  + String.raw`|personal\s+(?:data|information)\s+process(?:ing|ed)?`
+  + String.raw`|(?:collect\w*|stor\w*|retain\w*|retention|transfer\w*|shar\w*|process\w*|us(?:e|ing))[\s\S]{0,80}\bpersonal\s+(?:data|information)\b`
+  + String.raw`|\bpersonal\s+(?:data|information)\b[\s\S]{0,80}(?:collect\w*|stor\w*|retain\w*|retention|transfer\w*|shar\w*|process\w*)`
+  + String.raw`|gdpr|general\s+data\s+protection\s+regulation`
+  + String.raw`|recruit(?:ment|ing)\s+purposes`;
+const CONSENT_SUBJECT = `${PRIVACY_DOCUMENT}|${TERMS_DOCUMENT}|${CONDUCT_DOCUMENT}|${DATA_HANDLING_SUBJECT}`;
+/* THE SAME DOCUMENTS, MINUS THE TWO WIDE ALTERNATIVES, for coverage accounting only.
+ *
+ * DATA_HANDLING_SUBJECT's third and fourth alternatives put [\s\S]{0,80} between a handling verb and
+ * "personal data", and eighty characters is room for a whole conduct document name. As a CLASSIFIER
+ * that is right: the label really is a data-processing consent. As COVERAGE it is a hole, because
+ * blanking the matched span also blanks whatever was smuggled inside it, which is exactly how
+ * "consent to storing under the code of business conduct my personal data" survived three previous
+ * rules. Every word those alternatives are built from - collecting, storing, personal, data - is
+ * structural filler in its own right, so dropping them here costs nothing and closes the hole. */
+const DOCUMENT_SPAN_SUBJECT = [
+  PRIVACY_DOCUMENT,
+  TERMS_DOCUMENT,
+  CONDUCT_DOCUMENT,
+  String.raw`process(?:ing)?\s+of\s+(?:my\s+|your\s+|the\s+)?personal\s+(?:data|information)`,
+  String.raw`personal\s+(?:data|information)\s+process(?:ing|ed)?`,
+  String.raw`gdpr|general\s+data\s+protection\s+regulation`,
+  String.raw`recruit(?:ment|ing)\s+purposes`,
+].join('|');
+const DOCUMENT_SPAN_RE = new RegExp(DOCUMENT_SPAN_SUBJECT, 'i');
+/* The act of accepting, closed. "authorize" is NOT on this list and never will be: see the block
+ * header. Nor is any verb that asserts something ("declare", "certify", "warrant"). */
+const CONSENT_ACT = String.raw`agree(?:s|d|ing)?|consent(?:s|ed|ing)?|accept(?:s|ed|ing)?|acknowledg\w*`
+  + String.raw`|confirm(?:s|ed|ing)?|(?:have\s+)?read|understood|understand|review(?:s|ed|ing)?`
+  + String.raw`|(?:tick|check)(?:ing)?\s+this\s+box|by\s+submitting`;
+
+/**
+ * A label that IS a consent document and nothing else: "Privacy Statement", "Interview Code of
+ * Conduct", "Privacy Policy Acknowledgement", "Processing of Personal Data".
+ *
+ * Anchored at both ends on purpose. These are the labels the prose rule cannot see (no verb, no
+ * sentence), and anchoring is what stops the same document noun inside a longer sentence from being
+ * read as a bare acknowledgement when that sentence is asking something else entirely.
+ */
+export const BARE_CONSENT_ACKNOWLEDGEMENT = new RegExp(
+  String.raw`^\s*(?:i\s+)?(?:${CONSENT_DOCUMENT_QUALIFIER}\s+){0,3}(?:${CONSENT_SUBJECT})`
+  + String.raw`(?:\s+(?:acknowledgement|acknowledgment|consent|agreement|acceptance))?\s*[*:.]?\s*$`,
+  'i',
+);
+
+/** A sentence whose act is one of the accepting verbs and whose object is one of the documents. */
+export const CONSENT_ACKNOWLEDGEMENT_SENTENCE = new RegExp(
+  String.raw`\b(?:${CONSENT_ACT})\b[\s\S]{0,200}\b(?:${CONSENT_SUBJECT})\b`
+  + String.raw`|\b(?:${CONSENT_SUBJECT})\b[\s\S]{0,200}\b(?:${CONSENT_ACT})\b`,
+  'i',
+);
+
+/**
+ * THE VETO. Every vocabulary whose presence makes a label a claim about the applicant rather than
+ * an agreement to a document, plus the families that are answered by their own resolver and must
+ * not be disturbed.
+ *
+ * Runs before the consent grammar and cannot be overridden by it. Grouped by the harm rather than
+ * alphabetically, and each group is here because answering it wrongly is a specific, named failure
+ * this repo has already had or has already written a rule to prevent.
+ */
+const HELD_DECLARATION_VOCABULARY = new RegExp([
+  // Legal status and the right to work. R-004's exact family.
+  String.raw`\b(?:visa|immigration|sponsor\w*|work\s+permit|citizen(?:ship)?|nationality|passport|green\s+card|residency|authori[sz]ed\s+to\s+work|right\s+to\s+work|work\s+authori[sz]ation|employment\s+eligibility)\b`,
+  /* ANY grant of authority. Litos accepts terms; it does not authorise an act. This is what holds
+   * background-check, drug-test, credit-check and reference-contact authorizations as a family
+   * rather than one phrasing at a time, and it is deliberately blunt: a data-processing consent
+   * that happens to be worded "I authorize the processing of my personal data" is held too. */
+  String.raw`\bauthori[sz](?:e|es|ed|ing|ation)\b`,
+  // Age, including the 18+ attestation that has its own inverted-polarity resolver.
+  String.raw`\b(?:18|eighteen|minor|date\s+of\s+birth|dob|age|how\s+old)\b`,
+  // Education, completion and timing.
+  String.raw`\b(?:degree|graduat\w*|enroll\w*|diploma|gpa|transcript|university|college|school|coursework|academic)\b`,
+  // Criminal record and background screening.
+  String.raw`\b(?:convict\w*|criminal|felony|misdemean\w*|guilty|arrest\w*|offen[cs]e|background|drug|screening|clearance|polygraph)\b|\bcredit\s+check\b`,
+  // References, and verification of anything she has claimed.
+  String.raw`\breferences?\b|\bverif(?:y|ies|ied|ication)\b|\bemployment\s+history\b`,
+  // Health, disability, accommodation.
+  String.raw`\b(?:health|medical|disab\w*|accommodat\w*|pregnan\w*|illness|injur\w*|vaccin\w*)\b`,
+  // Military and veteran status.
+  String.raw`\b(?:veteran|military|armed\s+forces|national\s+guard|reserv(?:e|ist))\b`,
+  // EEO and demographic self-identification, which has its own resolver and its own opt-out.
+  String.raw`\b(?:race|racial|ethnic\w*|hispanic|latino|gender|transgender|sexual\s+orientation|lgbtq\w*|sex|demographic|self[-\s]?identif\w*|religio\w*|marital|national\s+origin|genetic|caste|pronoun)\b`,
+  // Truth attestations. Agreeing to a document is not swearing to a fact.
+  String.raw`\b(?:certif\w*|attest\w*|swear|sworn|perjury|declare|declaration|warrant|true|truthful)\b|\bbest\s+of\s+my\s+knowledge\b`,
+  // Restrictive covenants and obligations owed to another employer.
+  String.raw`\bnon[-\s]?compet\w*|\bnon[-\s]?solicit\w*|\brestrictive\s+covenant|\bgarden\s+leave\b|\bconfidentiality\s+(?:agreement|obligation)`,
+  // Statements to a government or a regulator.
+  String.raw`\bexport\s+control\w*|\bitar\b|\bear99\b|\bsanction\w*|\bpolitically\s+exposed\b`,
+  /* A FACT WEARING CONSENT WORDING. "Do you consent to relocate?" is the shape this group exists
+   * for: an accepting verb over a subject that is a plan, a commitment or a preference. */
+  String.raw`\brelocat\w*|\bwilling\s+to\b|\bcommit\s+to\b|\btop\s+preference\b|\bstart\s+date\b|\bsalary\b|\bcompensation\b|\bnotice\s+period\b|\bavailab\w*|\btravel\b|\bovertime\b|\bshift\b|\bon[-\s]?call\b`,
+  // Never filled at all, here as well as in NEVER_FILL_PATTERNS.
+  String.raw`\bsocial\s+security\b|\bssn\b|\bdriver'?s?\s*licen[sc]e\b|\bcaptcha\b|\brecord(?:ing|ed)\b`,
+].join('|'), 'i');
+
+/**
+ * ONE SPELLING OF THE LABEL, decided here and nowhere else.
+ *
+ * The three callers hold the label in three different states: the pre-script has the stored
+ * question text, resolveProfileField has already run normalizeDiscoveredLabel over it, and the
+ * submission runner's consent trail has the raw discovered blob with the employer's `*` marker and
+ * Greenhouse's `--0` handles still attached. Three spellings reaching one predicate is how a
+ * control gets accepted on one path and held on another for no reason anybody can see.
+ *
+ * normalizeDiscoveredLabel is idempotent, so normalizing here is free for the caller that already
+ * did it, and the fallback keeps a label that normalizes to nothing testable as its trimmed self.
+ */
+function consentLabelSpelling(label: string): string {
+  return normalizeDiscoveredLabel(label ?? '') || (label ?? '').trim();
+}
+
+/** True when a label is a held factual declaration, whatever else it also looks like. */
+export function isHeldDeclarationLabel(label: string): boolean {
+  return HELD_DECLARATION_VOCABULARY.test(consentLabelSpelling(label));
+}
+
+/* WHICH DOCUMENT A CONSENT LABEL IS ABOUT, because the two are not one permission.
+ *
+ * A behavioural policy is not a privacy notice. CODE_OF_CONDUCT_ACKNOWLEDGEMENT's own comment says
+ * why in the voice of the incident that produced it: IMC's "Interview Code of Conduct" was once
+ * auto-answered "Yes" with nothing stored behind it, and that was judged wrong and corrected. A
+ * privacy notice is the routine condition of applying at all; a code of conduct binds how she
+ * behaves in a live interview. Licensing the second off a grant she gave for the first would be
+ * that same reversion arriving by a tidier route, so they are separate permissions, separately
+ * granted, separately revocable, and a label naming BOTH documents needs BOTH. */
+const CONDUCT_DOCUMENT_RE = new RegExp(CONDUCT_DOCUMENT, 'i');
+const PRIVACY_OR_TERMS_DOCUMENT_RE =
+  new RegExp(`${PRIVACY_DOCUMENT}|${TERMS_DOCUMENT}|${DATA_HANDLING_SUBJECT}`, 'i');
+
+export type ConsentAcknowledgementClass = 'privacy_and_terms' | 'conduct';
+
+/* ---- COVERAGE COMPLETENESS: account for the whole label, or hold it ----
+ *
+ * THREE FRAMINGS FAILED BEFORE THIS ONE, all the same way. A head-noun list missed "expectations".
+ * A coordination rule missed prepositional attachment ("in accordance with the conduct
+ * expectations"), reversed order ("the conduct expectations and the privacy policy"), an intervening
+ * word ("the privacy policy itself and the conduct expectations"), and a possessive determiner
+ * heading the second document ("and my conduct expectations"), which walked straight through the
+ * clause test. Every one of them tried to RECOGNISE the stray document, so every one of them was a
+ * list of things to look for, and the next employer wording walked past it. A closed word class
+ * guarantees the list will not need extending; it does not guarantee its members only appear in the
+ * construction you had in mind.
+ *
+ * SO THIS DOES NOT LOOK FOR ANYTHING. It removes what the label has ACCOUNTED FOR - the document
+ * spans the classifiers matched, any URL path they placed, the consent verbs, the qualifiers those
+ * documents take - and asks whether any substantive token is left. If one is, the label is talking
+ * about something this module cannot place, and it holds. It never has to know that "expectations",
+ * "guidelines", "handbook" or "standards" are documents, because it never asks what the leftovers
+ * are. Only whether there are any. That is fail-closed by construction rather than by enumeration:
+ * a new employer wording cannot slip past a check that has nothing to slip past.
+ *
+ * IT ALSO CLOSES THE BARE-LABEL SMUGGLERS, which two previous rules missed for a subtle reason.
+ * DATA_HANDLING_SUBJECT carries two [\s\S]{0,80} alternatives, so a single matched span can cover a
+ * conduct document name sitting between "storing" and "personal data". Every span-based rule that
+ * asked a question ABOUT the span therefore skipped them. This one blanks the span and reads what is
+ * left, so a document name inside a match is not hidden by the match.
+ *
+ * THE COST IS THE OPPOSITE RISK, AND IT WAS MEASURED RATHER THAN ARGUED. Too much filler and the
+ * check accounts for a stray document; too little and it holds ordinary consents. The corpus run and
+ * its two numbers are in the PR body, where they will not go stale.
+ *
+ * THE FILLER IS CLOSED-CLASS PLUS CONSENT SCAFFOLDING, and the second half is the honest weak point.
+ * Function words are closed by definition. The scaffolding is not: it is the vocabulary of consent
+ * SENTENCES ("by submitting this application", "the information i have provided"), and a missing
+ * entry costs a HOLD rather than an acceptance, which is the direction this feature is allowed to
+ * fail in.
+ *
+ * WHAT KEEPS A STRAY DOCUMENT FROM BEING ABSORBED, stated exactly, because the obvious version of
+ * this sentence is FALSE and was in this comment until review caught it. It is NOT true that no
+ * filler entry is a document name: `notice`, `policy`, `statement`, `terms`, `conditions`,
+ * `agreement`, `consent`, `receipt`, `copy` and `form` are all here, and every one of them names a
+ * document in isolation, so "the privacy policy and the notice" is absorbed. Believing the false
+ * version is how a maintainer talks themselves into adding one more head noun.
+ *
+ * The property that actually holds the boundary is narrower and is about ONE family:
+ *
+ *     NO CONDUCT-FAMILY HEAD NOUN IS IN THIS SET.
+ *
+ * code, codes, conduct, ethics, guidelines, handbook, standards, principles, expectations, rules,
+ * charter, protocol, covenant, pledge, undertaking, declaration, manual, directive - none of them is
+ * filler, so every conduct-shaped stray survives to be counted and holds the label. That is what
+ * makes the two-grant split safe, and it is the only thing that does. Absorbing a PRIVACY-family
+ * head is harmless by comparison: privacy and terms share one grant, so a stray absorbed there
+ * cannot cross a permission boundary.
+ *
+ * consentBoundary.test.ts asserts that disjointness directly. Adding `handbook` or `guidelines` here
+ * as scaffolding would open the conduct boundary silently, and that test is what stops it.
+ */
+/** Exported ONLY so consentBoundary.test.ts can assert the conduct-family disjointness above. */
+export const CONSENT_STRUCTURAL_FILLER: ReadonlySet<string> = new Set([
+  // Determiners and quantifiers.
+  'the', 'a', 'an', 'this', 'that', 'these', 'those', 'my', 'your', 'our', 'its', 'their', 'his',
+  'her', 'no', 'any', 'all', 'each', 'both', 'such', 'same', 'other', 'another', 'some',
+  // Prepositions and conjunctions.
+  'of', 'to', 'in', 'on', 'at', 'by', 'for', 'with', 'from', 'under', 'per', 'via', 'about', 'into',
+  'upon', 'within', 'during', 'as', 'through', 'across', 'between', 'after', 'before', 'against',
+  'and', 'or', 'plus', 'nor', 'but', 'if', 'when', 'while', 'so',
+  // Pronouns and wh-words.
+  'i', 'you', 'we', 'they', 'it', 'me', 'us', 'them', 'who', 'whom', 'whose', 'which', 'what',
+  // Auxiliaries and copulas.
+  'do', 'does', 'did', 'have', 'has', 'had', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'will', 'would', 'shall', 'should', 'can', 'could', 'may', 'might', 'must',
+  // Politeness and discourse scaffolding.
+  'please', 'hereby', 'herein', 'hereto', 'below', 'above', 'following', 'further', 'also', 'then',
+  'thereby', 'accordance', 'accordingly', 'here', 'yes',
+  /* The vocabulary of APPLYING and of the data itself. Not document names: every one of these
+   * describes the act the applicant is performing or the material she is handing over, which is
+   * what a consent sentence is made of once its document name has been removed. */
+  'application', 'applications', 'apply', 'applying', 'submitting', 'submission', 'submit',
+  'box', 'checkbox', 'checking', 'ticking', 'selecting', 'clicking', 'signing', 'form',
+  'information', 'info', 'data', 'details', 'personal', 'provided', 'provide', 'give', 'given',
+  'processed', 'processing', 'process', 'stored', 'storing', 'store', 'storage', 'retained',
+  'retaining', 'retention', 'collected', 'collecting', 'collection', 'used', 'using', 'use',
+  'shared', 'sharing', 'share', 'transferred', 'transfer', 'held', 'keep', 'kept',
+  'purposes', 'purpose', 'recruitment', 'recruiting', 'hiring', 'role', 'position',
+  'job', 'jobs', 'vacancy', 'vacancies', 'opportunity', 'opportunities', 'company', 'employer',
+  'candidate', 'candidates', 'applicant', 'applicants', 'receipt', 'copy', 'terms', 'conditions',
+  'law', 'laws', 'legal', 'rights', 'notice', 'notices', 'policy', 'policies',
+  /* DOCUMENT HEAD NOUNS, and putting them here is safe for a reason worth stating: a stray document
+   * is identified by its MODIFIER, never by its head. "the insider trading policy" leaves "insider"
+   * and "trading"; "the conduct expectations" leaves "conduct" and "expectations"; "the employee
+   * handbook" leaves "handbook". Accounting for the head noun costs nothing and stops
+   * "privacy policy agreement" from being held on its own suffix, which the bare grammar
+   * explicitly supports. */
+  'agreement', 'agreements', 'acknowledgement', 'acknowledgment', 'acknowledgements',
+  'acknowledgments', 'acceptance', 'consent', 'consents', 'statement', 'statements',
+  // The rest of the vocabulary of applying, added because real corpus labels needed it.
+  'assessing', 'assess', 'candidacy', 'consideration', 'considered', 'evaluate', 'evaluating',
+  'residents', 'resident', 'purposes',
+]);
+/* A token that carries meaning. Two letters or fewer cannot be a document name, and a bare number is
+ * a year or a clause reference. Everything else has to be accounted for by something above. */
+const SUBSTANTIVE_TOKEN = /^[a-z]{3,}$/;
+
+/**
+ * Every character range one of the classifying document patterns claims.
+ *
+ * STICKY, POSITION BY POSITION, rather than a global scan, because document names OVERLAP and a
+ * global scan consumes the overlap. "the applicant terms and conditions" contains two matches of one
+ * pattern that share the word "terms": a global scan matched `applicant terms`, resumed after it,
+ * and could no longer match `terms and conditions`, leaving "conditions" unaccounted for and holding
+ * a label that is a plain terms acknowledgement. Measured: it broke the terms positive on the first
+ * run of this rule.
+ *
+ * Trying every start index yields the overlapping spans too. Labels are one sentence, so the cost
+ * does not matter and the correctness does.
+ */
+function classifiedDocumentSpans(value: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const source of [DOCUMENT_SPAN_RE]) {
+    const sticky = new RegExp(source.source, 'iy');
+    for (let index = 0; index < value.length; index += 1) {
+      sticky.lastIndex = index;
+      const match = sticky.exec(value);
+      if (match && match[0].length > 0) spans.push([index, index + match[0].length]);
+    }
+  }
+  return spans;
+}
+
+/**
+ * True when every substantive token in the label is accounted for.
+ *
+ * `spans` are the document ranges the classifiers matched, plus any URL path they placed. Those are
+ * blanked out along with the consent verbs and the qualifiers a document name takes; what is left is
+ * checked token by token against the structural filler. One unexplained token is enough to hold.
+ */
+function consentLabelIsFullyAccountedFor(
+  value: string,
+  spans: readonly [number, number][],
+  employerContext: string | undefined,
+): boolean {
+  const chars = [...value.toLowerCase()];
+  for (const [from, to] of spans) {
+    for (let index = Math.max(0, from); index < to && index < chars.length; index += 1) chars[index] = ' ';
+  }
+  /* THE MODIFIER A DOCUMENT NAME CARRIES, absorbed one token to the LEFT of each span.
+   *
+   * Employers qualify their documents: "the BUSINESS conduct guidelines", "the CALIFORNIA privacy
+   * notice", "the ACME privacy policy". The classifier matches the head of the name and leaves the
+   * modifier stranded, so coverage held documents it had actually placed. English puts modifiers
+   * before heads, which is why this is one token to the left and not to the right: absorbing to the
+   * right would swallow "expectations" in "the code of conduct expectations", a document nobody
+   * placed. Measured: this alone accounted for two of the three remaining false holds. */
+  for (const [from] of spans) {
+    const before = chars.slice(0, from).join('');
+    const modifier = before.match(/([a-z][a-z-]*)\s*$/i);
+    if (!modifier || typeof modifier.index !== 'number') continue;
+    for (let index = modifier.index; index < modifier.index + modifier[1].length; index += 1) chars[index] = ' ';
+  }
+  let residue = chars.join('');
+  /* The verbs that make it a consent, and the qualifiers a document name carries, are accounted for
+   * by the same grammar that matched the document. Removed as spans rather than as words, so a
+   * multi-word act ("by submitting", "checking this box") goes in one piece. */
+  for (const source of [CONSENT_ACT, CONSENT_DOCUMENT_QUALIFIER]) {
+    residue = residue.replace(new RegExp(String.raw`\b(?:${source})\b`, 'gi'), ' ');
+  }
+  /* A genitive is a determiner wearing a noun's clothes: "cloudflare's candidate privacy policy"
+   * names the employer, not a second document. */
+  residue = residue.replace(/\b[\w-]+['’]s\b/gi, ' ');
+  /* THE EMPLOYER'S OWN NAME, which was the single largest cause of false holds when this rule was
+   * measured: "i consent to acme collecting...", "do you consent to brex processing...", "faire
+   * candidate privacy policy acknowledgment". A company name is an arbitrary proper noun, and the
+   * labels arrive lowercased, so nothing in the text distinguishes "brex" from "expectations".
+   *
+   * It does not have to. The packet already knows who the employer is and already hands it to this
+   * resolver, on the frozen `[LITOS FROZEN JOB EMPLOYER]` line that jobs like the prior-application
+   * rule read for the same reason. Accounting for exactly that name is not a guess and not a list:
+   * it is the one proper noun the caller can prove belongs here. When the caller passes no context,
+   * nothing is accounted for and the label holds, which is the safe direction. */
+  const employer = frozenJobEmployerFromContext(employerContext);
+  if (employer) {
+    for (const part of employer.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length >= 3)) {
+      residue = residue.replace(new RegExp(String.raw`\b${part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\b`, 'gi'), ' ');
+    }
+  }
+  for (const token of residue.split(/[^a-z]+/i)) {
+    const word = token.toLowerCase();
+    if (!word || !SUBSTANTIVE_TOKEN.test(word)) continue;
+    if (!CONSENT_STRUCTURAL_FILLER.has(word)) return false;
+  }
+  return true;
+}
+
+/* ---- the URL in a consent label ----
+ *
+ * A URL is USUALLY a pointer to the document the sentence already names, and blanking it is right:
+ * "cloudflare.com/candidate-privacy-policy" is the Candidate Privacy Policy, and its hyphens stop
+ * the privacy pattern from covering the "policy" inside it, so leaving it in place made a Cloudflare
+ * positive look like a second, unplaceable document.
+ *
+ * BUT THAT IS A PREMISE, AND IT WAS NEVER CHECKED. A URL can name a DIFFERENT document from the
+ * sentence, and blanking made it invisible: "I agree to the Privacy Policy at acme.com/code-of-conduct"
+ * accepted on the privacy grant alone, with the conduct document erased before anything looked at it.
+ *
+ * So the path is READ rather than discarded. Its separators become spaces in place, preserving every
+ * offset, and the scheme and host become spaces because they name no document. What is left is the
+ * path as words, and the ordinary machinery then sees it: "candidate privacy policy" classifies as
+ * privacy and changes nothing; "code of conduct" classifies as conduct and the label needs both
+ * grants; "code of business conduct" classifies as nothing and holds.
+ *
+ * A path carrying digits or a query string is not a document name - "/apply?src=123" is routing, not
+ * a policy - so those are blanked whole, which is what the old rule did to everything.
+ */
+/* Neither arm may swallow a closing parenthesis or trailing sentence punctuation. A label writes the
+ * link in brackets - "(cloudflare.com/candidate-privacy-policy)" - and with `\S+` the captured URL
+ * ended in ")", which fails the document-name shape test, so the path was blanked whole and the
+ * premise check below never saw it. */
+const CONSENT_LABEL_URL = /\bhttps?:\/\/[^\s,;)\]]+|\b[\w-]+\.(?:com|org|net|io|co|ai|gov|edu)\b[^\s,;)\]]*/gi;
+const URL_PATH_IS_A_DOCUMENT_NAME = /^[a-z][a-z-]*(?:[/_-][a-z-]+)+$/i;
+
+/**
+ * The same string, same length, with URLs replaced by the words of their path (or by spaces), plus
+ * the spans of the paths that were read.
+ *
+ * The spans are what makes the premise checkable. A linked document is not joined to the sentence by
+ * a coordinator - "the Privacy Policy at acme.com/code-of-business-conduct" hangs off a preposition -
+ * so the coordination rule cannot see it. Asking directly whether each path the label points at was
+ * placed by some classifier can.
+ */
+function readableUrlPaths(value: string): { scanned: string; pathSpans: Array<[number, number]> } {
+  const pathSpans: Array<[number, number]> = [];
+  const scanned = value.replace(CONSENT_LABEL_URL, (match, offset: number) => {
+    const blank = ' '.repeat(match.length);
+    const slash = match.indexOf('/', match.startsWith('http') ? match.indexOf('//') + 2 : 0);
+    if (slash === -1) return blank;
+    const path = match.slice(slash + 1).replace(/\.(?:pdf|html?|aspx)$/i, '');
+    if (!path || !URL_PATH_IS_A_DOCUMENT_NAME.test(path)) return blank;
+    const words = path.replace(/[/_-]+/g, ' ');
+    pathSpans.push([offset + slash + 1, offset + slash + 1 + words.length]);
+    // Same length: the host becomes spaces, the path keeps its characters with separators spaced.
+    return ' '.repeat(slash + 1) + words + ' '.repeat(match.length - slash - 1 - words.length);
+  });
+  return { scanned, pathSpans };
+}
+
+/**
+ * The consent classes a label belongs to, or an empty list when it is not a consent at all.
+ *
+ * PURE GRAMMAR. It does not read any permission and does not decide whether anything is filled;
+ * consentAcknowledgementLicence does that. Split so the boundary can be tested as the boundary,
+ * independently of any account's settings.
+ */
+export function consentAcknowledgementClasses(
+  label: string,
+  /* The frozen job context the resolver is already handed. Only the employer line is read from it;
+     omitting it accounts for no company name, which holds rather than accepts. */
+  employerContext?: string,
+): ConsentAcknowledgementClass[] {
+  const value = consentLabelSpelling(label);
+  if (!value) return [];
+  if (HELD_DECLARATION_VOCABULARY.test(value)) return [];
+  if (!BARE_CONSENT_ACKNOWLEDGEMENT.test(value) && !CONSENT_ACKNOWLEDGEMENT_SENTENCE.test(value)) return [];
+  /* NO BARE-LABEL EXEMPTION, and the one that used to be here rested on a property the grammar does
+   * not have. It claimed a BARE_CONSENT_ACKNOWLEDGEMENT label is "anchored end to end, so a second
+   * document cannot fit inside it" - but DATA_HANDLING_SUBJECT carries two [\s\S]{0,80} alternatives,
+   * and eighty characters comfortably holds a conduct document name inside a match that still
+   * reaches both anchors. The English is awkward and the reachability is low, and a structural
+   * argument resting on a false premise is exactly the kind of thing the next reader leans on. The
+   * coordination rule needs no exemption: a bare document name contains no coordinator joining two
+   * documents, so it simply does not fire. */
+  const { scanned, pathSpans } = readableUrlPaths(value);
+  const spans = classifiedDocumentSpans(scanned);
+  if (!consentLabelIsFullyAccountedFor(scanned, spans, employerContext)) return [];
+  /* A document-shaped link nothing could place. Same rule as the coordination one and a different
+   * syntax: "the Privacy Policy at acme.com/code-of-business-conduct" names a second document
+   * through a preposition, where no coordinator joins it to anything. */
+  const placed = (from: number, to: number) => spans.some(([start, end]) => start < to && end > from);
+  if (pathSpans.some(([from, to]) => !placed(from, to))) return [];
+  const classes: ConsentAcknowledgementClass[] = [];
+  if (PRIVACY_OR_TERMS_DOCUMENT_RE.test(scanned)) classes.push('privacy_and_terms');
+  if (CONDUCT_DOCUMENT_RE.test(scanned)) classes.push('conduct');
+  /* Reachable: a label whose only document name sat inside a routing URL matches the grammar and
+   * classifies as nothing. No permission covers a consent with no class, so returning nothing
+   * holds it. */
+  return classes;
+}
+
+/** True when a label is a consent or acknowledgement, in either class. */
+export function isConsentAcknowledgementQuestion(label: string, employerContext?: string): boolean {
+  return consentAcknowledgementClasses(label, employerContext).length > 0;
+}
+
+/* ---- what an option WORDING means ----
+ *
+ * Used twice, and the second use is why they live here rather than beside chooseConsentOption:
+ * picking the accepting option off a control's list, and deciding whether an answer already in a
+ * packet is still an acceptance. Tested against comparableOption output, so apostrophes are gone
+ * ("don't" reads "dont") and punctuation is spaces.
+ */
+/** An option that means "no". Tested FIRST everywhere, because "I do not agree" contains "agree". */
+const CONSENT_REFUSING_OPTION =
+  /\b(?:no|not|dont|doesnt|cant|cannot|wont|never|decline|declined|declining|disagree|disagreed|refuse|refused|deny|denied|reject|rejected|withhold|opt\s*out|unwilling|prefer\s+not)\b/;
+
+/** An option that means "yes", as a WHOLE option and not as a word inside a longer sentence. */
+const CONSENT_ACCEPTING_OPTION = new RegExp(
+  String.raw`^(?:yes|y|true|on|checked`
+  + String.raw`|(?:i\s+)?(?:agree|agreed|accept|accepted|consent|acknowledge|acknowledged|confirm|confirmed)`
+  + String.raw`|(?:i\s+)?(?:have\s+)?read\s+and\s+(?:agree|agreed|accept|accepted|understood|understand|acknowledge|acknowledged)`
+  + String.raw`|yes\s+i\s+(?:agree|accept|consent|acknowledge|confirm)`
+  + String.raw`|(?:i\s+)?(?:agree|accept|consent|acknowledge|confirm)\s+to\s+(?:the\s+)?(?:above|terms|policy|notice|statement|conditions)`
+  + String.raw`)$`,
+);
+
+export function isConsentRefusingWording(value: string): boolean {
+  return CONSENT_REFUSING_OPTION.test(comparableOption(value ?? ''));
+}
+
+export function isConsentAcceptingWording(value: string): boolean {
+  const key = comparableOption(value ?? '');
+  if (!key || CONSENT_REFUSING_OPTION.test(key)) return false;
+  return CONSENT_ACCEPTING_OPTION.test(key);
+}
+
+/** What Litos puts in a consent control when it accepts. Snapped onto the control's own option list
+ *  by chooseConsentOption (lib/profileFieldResolution.ts) whenever the control has one. */
+export const CONSENT_ACCEPTANCE_VALUE = 'Yes';
+
+/** The grant, or grants, that licensed one acceptance. What the packet records. */
+export type ConsentAcknowledgementLicence = { granted_at?: string; version: string };
+
+/**
+ * The permission covering every class this label belongs to, or null.
+ *
+ * ALL classes, not any: a label naming both a privacy notice and a code of conduct is licensed only
+ * by an applicant who granted both, and is held by one who granted either alone. The combined
+ * record is what the packet stores, so `granted_at` is the LATER of the grants, which is the moment
+ * the acceptance actually became licensed, and `version` names every set of words she was shown.
+ *
+ * Null for everything else - no permission, wrong class, vetoed label - so the caller falls through
+ * to the refusals that are already there and nothing about main's behaviour changes for an account
+ * that has not granted this.
+ */
+export function consentAcknowledgementLicence(
+  label: string,
+  ap: ApplicationProfileLike,
+  employerContext?: string,
+): ConsentAcknowledgementLicence | null {
+  const classes = consentAcknowledgementClasses(label, employerContext);
+  if (classes.length === 0) return null;
+  const grants = classes.map((klass) => (klass === 'conduct'
+    ? ap.conduct_acknowledgement_permission
+    : ap.consent_acknowledgement_permission));
+  if (grants.some((grant) => !grant)) return null;
+  const held = grants as ConsentAcknowledgementLicence[];
+  /* NAMED BY CLASS, NOT BY VERSION STRING ALONE. Both permissions currently carry the same date, so
+   * deduping on the version collapsed a two-grant acceptance to one indistinguishable string and the
+   * packet could not say which permissions were used. Pairing each version with the class it belongs
+   * to keeps both visible whether or not their wordings ever diverge. */
+  const versions = classes.map((klass, index) => `${klass}@${held[index].version}`);
+  const dates = held.map((grant) => grant.granted_at).filter((at): at is string => !!at);
+  return {
+    version: versions.join(' + '),
+    // Undefined only when no grant carried a timestamp, which the loader does not produce for a
+    // granted permission. Left optional rather than invented.
+    ...(dates.length === held.length && dates.length > 0
+      ? { granted_at: dates.reduce((latest, at) => (at > latest ? at : latest)) }
+      : {}),
+  };
+}
+
+/** The consent answer, or null. One gate, shared by the resolver, the option matcher and the
+ *  pre-script, so the three cannot disagree about whether a control may be accepted. */
+export function consentAcknowledgementAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+  employerContext?: string,
+): { value: string } | null {
+  return consentAcknowledgementLicence(label, ap, employerContext) ? { value: CONSENT_ACCEPTANCE_VALUE } : null;
+}
 
 const NATIONALITY_TO_COUNTRY: Record<string, string> = {
   indian: 'India', american: 'United States', emirati: 'United Arab Emirates',
@@ -4872,6 +5536,21 @@ export function resolveKnownAnswer(
   const outstandingOffer = outstandingOfferAnswer(label, inputType, ap);
   if (outstandingOffer) return outstandingOffer;
 
+  /* THE CONSENT CLASS, accepted under the applicant's standing permission and not otherwise.
+   *
+   * Placed immediately before the refusals it supersedes, so that with no permission on the row
+   * every label below reaches exactly the handler it reaches on main. It is ABOVE
+   * applicationConsentAnswer because that one holds "privacy statement" and "interview code of
+   * conduct" by name, which are the two labels this exists to accept.
+   *
+   * It is therefore also above workEligibilityAnswer, the EEO branch and isRefusedQuestion, and
+   * that is the reason isConsentAcknowledgementQuestion vetoes on its own held vocabulary before it
+   * matches anything: being early means it cannot rely on a later rule to catch a declaration for
+   * it. Every one of those families is in HELD_DECLARATION_VOCABULARY, and consentBoundary tests
+   * assert it against the same labels those handlers own. */
+  const consentAcknowledgement = consentAcknowledgementAnswer(label, ap, jdText);
+  if (consentAcknowledgement) return consentAcknowledgement;
+
   const applicationConsent = applicationConsentAnswer(label);
   if (applicationConsent) return applicationConsent;
 
@@ -5202,3 +5881,4 @@ export function resolveKnownAnswer(
       return null;
   }
 }
+
