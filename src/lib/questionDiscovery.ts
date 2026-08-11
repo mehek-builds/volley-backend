@@ -3607,6 +3607,46 @@ const EMPTY_BRACKET_HANDLE_RE = /\[\s*\]/g;
 const LEVER_CARD_HANDLE_RE = /\bcards\s*\[\s*field\d+\s*\]/gi;
 const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?:answer\s+)?here(?:\.{3}|…)?\s*$/i;
 
+/* EVERY POSITIVELY IDENTIFIED PROVIDER HANDLE, in one list and in strip order.
+ *
+ * The list is the definition of "this string is a machine handle, not a question", and it is now
+ * read in two places: normalizeDiscoveredLabel below, and the page script's own handle test (see
+ * PROVIDER_HANDLE_ONLY_SCRIPT). Those two have to agree exactly - the whole safety argument for the
+ * page script's fall-through is that a string it calls handle-only is a string this module would
+ * have normalized to '' and dropped - so there is one array rather than two copies of six regexes.
+ *
+ * Order is load-bearing: INLINE_UUID_RE has to run before EMPTY_BRACKET_HANDLE_RE, because clearing
+ * the uuid out of `cards[<uuid>][field0]` is what leaves the bare `[ ]` for it to remove. */
+const PROVIDER_HANDLE_STRIPPERS: readonly RegExp[] = [
+  INLINE_UUID_RE,
+  GREENHOUSE_QUESTION_HANDLE_RE,
+  GREENHOUSE_SECTION_HANDLE_RE,
+  EMPTY_BRACKET_HANDLE_RE,
+  LEVER_CARD_HANDLE_RE,
+  GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE,
+];
+
+function stripProviderHandles(raw: string): string {
+  return PROVIDER_HANDLE_STRIPPERS.reduce((value, handle) => value.replace(handle, ' '), raw ?? '');
+}
+
+/**
+ * NOTHING BUT A PROVIDER HANDLE: every letter in this string belongs to a handle this module can
+ * name, so removing them all leaves no word a person wrote.
+ *
+ * The one test the page script's questionLabel is allowed to fall through on, and deliberately the
+ * same test as "normalizeDiscoveredLabel would return '' for this": a string with no letters left
+ * after the strip is empty or punctuation, tidyLabel cannot rescue it, and isOpaqueIdentifier
+ * rejects anything with no `\p{L}` outright. So a field this returns true for is a field whose
+ * label is discarded today, and recovering it can only add a question, never rename one.
+ *
+ * `\p{L}` and not `[a-z]`: a Japanese or Arabic label is a label. Empty is handle-only by the same
+ * reading (there is nothing a person wrote), and every caller guards for empty separately.
+ */
+export function isProviderHandleOnly(value: string): boolean {
+  return !/\p{L}/u.test(stripProviderHandles(value ?? ''));
+}
+
 function collapseRepeatedLabel(value: string): string {
   const words = value.trim().split(/\s+/).filter(Boolean);
   if (words.length < 2 || words.length % 2 !== 0) return value;
@@ -3623,13 +3663,7 @@ function collapseRepeatedLabel(value: string): string {
  * leaving the employer's full question intact for both display and label-based filling.
  */
 export function normalizeDiscoveredLabel(raw: string): string {
-  const withoutHandles = raw
-    .replace(INLINE_UUID_RE, ' ')
-    .replace(GREENHOUSE_QUESTION_HANDLE_RE, ' ')
-    .replace(GREENHOUSE_SECTION_HANDLE_RE, ' ')
-    .replace(EMPTY_BRACKET_HANDLE_RE, ' ')
-    .replace(LEVER_CARD_HANDLE_RE, ' ')
-    .replace(GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE, ' ')
+  const withoutHandles = stripProviderHandles(raw)
     .replace(/\s+/g, ' ')
     .trim();
   const withoutPlaceholder = withoutHandles.replace(TRAILING_ANSWER_PLACEHOLDER_RE, '').trim();
@@ -3869,6 +3903,22 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
   return normalized;
 }
 
+/* isProviderHandleOnly, compiled for the page.
+ *
+ * The page script cannot import from this module, and a second hand-written copy of six regexes is
+ * exactly the drift that would break the safety argument, so the ONE list above is serialised into
+ * the script instead. The test itself is the same three lines as the TypeScript twin, and
+ * questionDiscovery.test.ts asserts the twin agrees with normalizeDiscoveredLabel on every shape
+ * this file knows about. */
+export const PROVIDER_HANDLE_ONLY_SCRIPT = `function isProviderHandleOnly(value) {
+    var strippers = ${JSON.stringify(PROVIDER_HANDLE_STRIPPERS.map((handle) => [handle.source, handle.flags]))};
+    var rest = value == null ? '' : String(value);
+    for (var s = 0; s < strippers.length; s += 1) {
+      rest = rest.replace(new RegExp(strippers[s][0], strippers[s][1]), ' ');
+    }
+    return !/\\p{L}/u.test(rest);
+  }`;
+
 // Passed to page.evaluate() as a source STRING rather than a typed function: this backend's
 // tsconfig has no "dom" lib (it is a Node project), so a typed function here would need
 // document/HTMLElement/getComputedStyle typed against a lib this project deliberately doesn't
@@ -3879,7 +3929,7 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
 // answer resolution, then filled later by label-scoped actions rather than direct selector typing.
 // Keep this in sync with the extension source by hand, the same as any other ported function in
 // this file.
-const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
+export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   function clean(s) {
     return (s == null ? '' : s).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
   }
@@ -3955,6 +4005,46 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     }
     return '';
   }
+  ${PROVIDER_HANDLE_ONLY_SCRIPT}
+  /* Control text that names the CONTROL and not the question: an Ashby datepicker's own label
+   * reads "Pick date...". Verbatim from the submit-readiness gate's genericControlText in
+   * portalSubmission.ts, and kept identical on purpose - the two walks must not disagree about
+   * which strings are questions. */
+  function genericControlText(value) {
+    return /^(pick|select|choose)\s+(date|option)|^(type|enter|write)\s+(your\s+)?(answer\s+)?here/i.test(clean(value));
+  }
+  /* THE QUESTION A CONTROL SITS UNDER, when the control itself is labelled with nothing but a
+   * provider handle. A verbatim port of nearestQuestionText from READ_SUBMIT_READINESS_SCRIPT in
+   * portalSubmission.ts, which is the walk that already names these very fields in the blocker
+   * text the applicant sees - so recovering the question here makes the Apply screen and the
+   * blocker line say the same words about the same field.
+   *
+   * A BLOCK HOLDING MORE THAN ONE CONTROL ENDS THE WALK, and that bound is the whole safety of it.
+   * The first label inside a block with two controls belongs to one of them in particular, and
+   * borrowing it names the other field wrongly. Measured on the live Palantir Lever form on
+   * 2026-08-11: the "High School Name & Graduation Year" card holds two controls, so the walk stops
+   * and both stay honest "no label Litos can read" blockers, while the seven single-control cards
+   * recover their own headings. A wrong question is worse than a missing one - the resolver answers
+   * "High School Name" out of the education profile and would type her UNIVERSITY into it.
+   *
+   * Returns '' when it finds nothing, and the caller keeps whatever it had. */
+  function nearestQuestionText(el) {
+    var node = el.parentElement;
+    for (var depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+      if (!node.matches || !node.matches('div, section, li, fieldset')) continue;
+      if (node.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
+      var candidate = node.querySelector('label, legend, .question, h3, h4');
+      /* textContent, NOT innerText, and this one is measured rather than inherited. Lever paints
+       * its card headings with text-transform:uppercase, and innerText reports the transformed
+       * glyphs: the same heading read as "UNIVERSITY", "YEAR OF GRADUATION", "UNIVERSITY MAJOR".
+       * That is the employer's styling, not the employer's words, and storing it would show the
+       * applicant a shouted question and disagree with the blocker line about the same field.
+       * textContent reads the markup, which is what the submit-readiness gate reads. */
+      var text = clean((candidate && candidate.textContent) || '');
+      if (text && !genericControlText(text)) return text;
+    }
+    return '';
+  }
   function questionLabel(el) {
     var fieldset = el.closest('fieldset');
     var legend = fieldset ? fieldset.querySelector('legend') : null;
@@ -3976,6 +4066,11 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
      * which is the heading, the required glyph, a typeahead empty state and a loading node fused
      * into one string. innerText reports what a person can actually see. */
     var labelText = labelEl ? (clean(labelEl.innerText || '') || (labelEl.textContent || '')) : '';
+    var written = clean([
+      labelText || '',
+      el.getAttribute('aria-label') || '',
+      el.getAttribute('placeholder') || '',
+    ].join(' '));
     var parts = [
       labelText || '',
       el.getAttribute('aria-label') || '',
@@ -3984,6 +4079,33 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
       el.id || '',
     ];
     var own = clean(parts.join(' '));
+    /* THE HANDLE THAT IS NOT A LABEL.
+     *
+     * own is the visible label, the aria-label and the placeholder concatenated with the control's
+     * name and id, and returning it whenever it is merely non-empty means a field with NOTHING but
+     * a name returns that name. Lever's custom questions are built that way - the question text
+     * sits in a sibling div.application-label, never in a label element, and the control carries
+     * only name="cards[<uuid>][field0]". Measured against the live Palantir posting on 2026-08-11:
+     * nine controls came back as a bare cards handle, normalizeDiscoveredLabel dropped all nine as
+     * handle-only, and the form came back with "University" is required and is still empty, the
+     * same for "Year of Graduation" and "University Major", while the packet held USC Viterbi, 2028
+     * and Computer Science.
+     *
+     * BOTH CONDITIONS, and both are needed:
+     *   - nothing a person wrote (no label text, no aria-label, no placeholder), so a field that has
+     *     any human text keeps it and this branch cannot touch it; and
+     *   - what is left is nothing but handles this module can name (isProviderHandleOnly), so a
+     *     meaningful name or id - firstName, school, gpa - is still a label and is kept.
+     *
+     * That pair is exactly the set of fields whose label is thrown away today, which is why this
+     * cannot rename a question that already reads correctly: it only ever runs where the stored
+     * label would have been the empty string. And when the walk finds nothing either, own is
+     * returned unchanged and the field is dropped as before - no heading is invented for a field
+     * that has none. */
+    if (own && !written && isProviderHandleOnly(own)) {
+      var underHeading = nearestQuestionText(el);
+      if (underHeading) return underHeading;
+    }
     if (own) return own;
     var block = el.closest('div, section, li');
     var fallback = block ? block.querySelector('label, legend, .question, h3, h4') : null;
