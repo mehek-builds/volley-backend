@@ -178,20 +178,43 @@ export function mergeSubmittedApplicationReviewQuestions(
       && submittedQuestion.answer === question.answer;
     /* answer_option_source goes with the answer it describes, and `answer` is replaced below.
      *
-     * The kept branch is safe to leave alone: exactReviewedIdentityUnchanged requires
-     * submittedQuestion.answer === question.answer, so the value the derivation describes is still
-     * the value in the record. Every other path through here substitutes a different answer, and a
-     * derivation that outlives its value claims a snap that never happened for what the record now
+     * A derivation that outlives its value claims a snap that never happened for what the record now
      * holds. Nothing downstream can detect that from the record alone, and storedOptionAnswerIsCurrent
-     * would read the inherited derivation as proof the answer is current. */
+     * would read the inherited derivation as proof the answer is current. So the test is the only one
+     * that settles it: is the answer being written the answer it was derived for.
+     *
+     * THAT TEST IS `answerUnchanged`, AND IT IS NOT exactReviewedIdentityUnchanged. The two agree on
+     * every record the applicant has already hand-edited once and disagree on every other record,
+     * because exactReviewedIdentityUnchanged also demands answer_source 'applicant_review'. The
+     * ordinary question record is machine-resolved and has no answer_source at all - on 2026-08-12
+     * that was 2790 of 2790 in production - so keying the derivation on it dropped the derivation
+     * from a record whose answer had not moved by so much as a byte.
+     *
+     * Which is exactly what a save from the review screen looks like. questionSchema strips every
+     * provenance key, so an untouched screen posts back the answer alone; the merge stripped the
+     * derivation, and refreshKnownQuestionAnswers, called on this function's output at the same call
+     * site, then found a band with nothing to prove it current and replaced it with the raw profile
+     * fact. "January 2028 - July 2028" became "May 2028", which is not on that control's option list
+     * and never could be. Pressing Save and changing nothing undid the resolution.
+     *
+     * answer_source and answer_reviewed_at stay keyed on the stricter identity. They are a claim
+     * about the APPLICANT ("she read this exact text and let it stand"), which a rename or a
+     * stale review round can falsify. This is a claim about the ANSWER ("it was snapped for profile
+     * value X"), and only replacing the answer can falsify that. Different claims, different tests. */
+    const answerUnchanged = submittedQuestion.answer === question.answer;
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
       answer_option_source: _answerOptionSource,
       ...questionWithoutProvenance
     } = question;
+    const carriedForward = exactReviewedIdentityUnchanged
+      ? question
+      : answerUnchanged && question.answer_option_source !== undefined
+        ? { ...questionWithoutProvenance, answer_option_source: question.answer_option_source }
+        : questionWithoutProvenance;
     return {
-      ...(exactReviewedIdentityUnchanged ? question : questionWithoutProvenance),
+      ...carriedForward,
       answer: submittedQuestion.answer,
       kind: submittedQuestion.kind,
       required: question.required || submittedQuestion.required,
@@ -209,9 +232,16 @@ export function mergeSubmittedApplicationReviewQuestions(
     if (consumedSubmittedIndexes.has(index)) continue;
     const key = questionKey(question.question);
     if (!key || storedKeys.has(key)) continue;
+    /* A question that exists only in the submit body brings no provenance with it, including the
+     * option derivation. The two above are stripped because a caller must not assert that the
+     * applicant reviewed something; this one because a derivation is a claim that resolution snapped
+     * this answer onto a control's own option list, and nothing here resolved anything. The route's
+     * questionSchema drops the key before this is ever called, but this function is exported and
+     * this is the one branch that copies a submitted question wholesale. */
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
+      answer_option_source: _answerOptionSource,
       ...submittedWithoutProvenance
     } = question;
     merged.push(submittedWithoutProvenance);
