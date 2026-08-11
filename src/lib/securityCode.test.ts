@@ -591,8 +591,12 @@ test('manual code continuation atomically claims the waiting application', async
   assert.ok(helperStart > 0 && helperEnd > helperStart);
   const helper = source.slice(helperStart, helperEnd);
   assert.match(helper, /status: 'submitting'/);
-  assert.match(helper, /submission_claimed_at: new Date\(\)\.toISOString\(\)/);
-  assert.match(helper, /submission_claim_id: randomUUID\(\)/);
+  /* The claim fields are written by submissionClaimPatch rather than inline, because taking the
+     claim and clearing the previous run's stop record have to be ONE write: a claim site that sets
+     the timestamp by hand leaves a stale before_click:true on a row that is about to press Send.
+     What this line cares about is that the claim is taken here, atomically, with the conditional
+     update below; submissionClaimStopClear.test.ts owns the shape of the patch itself. */
+  assert.match(helper, /\.\.\.submissionClaimPatch\(new Date\(\)\.toISOString\(\), randomUUID\(\)\)/);
   assert.match(helper, /->>'status' = 'awaiting_security_code'/);
   assert.match(helper, /->>'submission_claimed_at' is null/);
   assert.match(helper, /\.returning\(\)/);

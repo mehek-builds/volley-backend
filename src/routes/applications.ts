@@ -46,6 +46,7 @@ import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type A
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
+import { submissionClaimPatch } from '../lib/submissionStop';
 import {
   detectPortal,
   isPortalSupported,
@@ -913,8 +914,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           ...current,
           questions: refreshedQuestions,
           status: 'submitting' as const,
-          submission_claimed_at: now,
-          submission_claim_id: claimId,
+          /* THE FOURTH CLAIM SITE, and the one an inline clear at the other three missed.
+           *
+           * This is a `...current` spread, so a stop record left by an earlier run survives into the
+           * claim unless it is cleared here. It matters most on exactly the path an applicant takes
+           * after a pre-click stop: the managed run finds no submit control, releases the claim and
+           * leaves before_click:true, she retries through the extension, presses Submit herself, and
+           * the confirmation cannot be read - and the 'unknown' outcome writes no evidence that
+           * contradicts the stale record. The packet would then read as provably-not-sent while its
+           * own attention_reason says Submit was clicked. */
+          ...submissionClaimPatch(now, claimId),
           submission_packet_version: precheckPacketVersion!,
           submission_authorization: {
             source: parsed.data.authorization === 'standing_consent' ? 'standing_consent' as const : 'user_initiated_extension' as const,

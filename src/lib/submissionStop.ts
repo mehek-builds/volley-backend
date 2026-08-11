@@ -67,7 +67,21 @@ export type SubmissionStopRecord = {
 
 /* The reasons whose stop site is ahead of the click by construction, each one a throw that happens
  * before any submit control is pressed. Nothing is added here on the strength of a sentence saying
- * nothing was sent: the test is where in the code the throw is, not what the copy claims. */
+ * nothing was sent: the test is where in the code the throw is, not what the copy claims.
+ *
+ * EVERY MEMBER IS BACKED BY AN ERROR TYPE OR AN EXACT-MATCH CONSTANT, and that is the membership
+ * rule rather than an accident of the current list. NoSubmitControlError, CaptchaUnresolvedError,
+ * ManagedActionBudgetError, PacketDocumentExpiredError and ApplicantEmailRegenerationRequiredError
+ * are `instanceof` checks; the one string test that reaches this set, isManagedNoSubmitControl, is
+ * equality against a single constant after one wrapper is stripped.
+ *
+ * 'provider_unconfigured' IS DELIBERATELY ABSENT, and it was here until review caught it. It is
+ * derived from a loose alternation that includes the bare word `browserbase`, and the text it runs
+ * against is `payload.error`, which arrives VERBATIM from the Stratus service. A provider message
+ * merely containing that word, thrown after a click, would have classified as a pre-click stop and
+ * released the claim. The regex is left exactly as it is for the requeue decision it was written
+ * for; what changes is that it is no longer load-bearing for a release. Such a row keeps its claim
+ * and takes the unverified exit, which is the failure direction that cannot cost an application. */
 const PRECEDES_CLICK: ReadonlySet<SubmissionStopReason> = new Set<SubmissionStopReason>([
   'no_submit_control',
   'captcha_before_fill',
@@ -75,7 +89,6 @@ const PRECEDES_CLICK: ReadonlySet<SubmissionStopReason> = new Set<SubmissionStop
   'action_budget',
   'packet_document_expired',
   'applicant_email_regeneration',
-  'provider_unconfigured',
 ]);
 
 export function stopReasonPrecedesClick(reason: SubmissionStopReason): boolean {
@@ -121,5 +134,44 @@ export function submissionStopRecord(
     before_click: stopReasonPrecedesClick(reason),
     at,
     ...(submissionRunId ? { submission_run_id: submissionRunId } : {}),
+  };
+}
+
+/* TAKING THE CLAIM AND CLEARING THE LAST RUN'S STOP ARE ONE WRITE, NOT TWO.
+ *
+ * THE HOLE THIS CLOSES, WHICH WAS INTRODUCED BY THE FIRST VERSION OF THIS FIELD. Clearing was done
+ * inline at the claim sites, under a comment asserting that the claim was "the single line every
+ * send run passes through". There were four claim sites, not three:
+ * POST /applications/:id/submission/extension-start takes the claim over a `...current` spread and
+ * was missed. The resulting chain is worse than anything this PR set out to fix:
+ *
+ *   1. A managed run stops pre-click on a multi-step first page, which the runner itself calls the
+ *      routine outcome rather than an edge case. The claim is released and before_click:true is left
+ *      on the row, correctly.
+ *   2. The applicant retries through the extension. The claim is taken and the STALE stop survives.
+ *   3. She presses Submit in her own browser. The employer now has the application.
+ *   4. The confirmation cannot be read, so extensionOutcomePatch('unknown') writes needs_attention,
+ *      keeps the claim, and writes no receipt, no submission_attempted_at, no unverified record and
+ *      no submission_error.
+ *   5. Nothing on that row contradicts the stale stop, so submissionProvablyNotSent says true and
+ *      the packet is runnable again - while its own attention_reason reads "Litos clicked Submit but
+ *      could not verify the employer confirmation".
+ *
+ * So the two writes are welded together here and every claim site spreads this. A fifth claim site
+ * gets the clear for free; one that hand-rolls the fields instead is caught by the enumeration test
+ * in submissionClaimStopClear.test.ts, which is the only thing that can prove this list is complete.
+ */
+export function submissionClaimPatch(at: string, claimId: string): {
+  submission_claimed_at: string;
+  submission_claim_id: string;
+  submission_stop: undefined;
+} {
+  return {
+    submission_claimed_at: at,
+    submission_claim_id: claimId,
+    /* A stop record describes ONE attempt, and this is the next one. Carrying before_click:true into
+     * a run that is about to press Send leaves the row able to prove something about a click that
+     * has not happened yet, which is the one direction this field must never be wrong in. */
+    submission_stop: undefined,
   };
 }

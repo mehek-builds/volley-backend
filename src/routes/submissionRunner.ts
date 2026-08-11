@@ -110,7 +110,7 @@ import {
   submissionProvablyNotSent,
   unverifiedSubmissionReason,
 } from '../lib/managedSubmitOutcome';
-import { classifySubmissionStop, submissionStopRecord } from '../lib/submissionStop';
+import { classifySubmissionStop, submissionClaimPatch, submissionStopRecord } from '../lib/submissionStop';
 import { applyReviewPatch, beginStall } from '../lib/applicationStall';
 import {
   attentionCategoriesForReasons,
@@ -337,16 +337,7 @@ async function claimSubmission(row: ResumeRow, alreadyHeld = false): Promise<Res
   const current = readApplicationReview(row.spec);
   if (alreadyHeld) return submissionClaimIsHeld(current) ? row : null;
   if (!current || current.status !== 'submitting' || current.submission_claimed_at) return null;
-  const claimed = nextReview(current, {
-    submission_claimed_at: new Date().toISOString(),
-    submission_claim_id: randomUUID(),
-    /* A STOP RECORD DESCRIBES ONE ATTEMPT, AND THIS IS THE NEXT ONE. Carrying the last run's
-     * before_click:true into a run that is about to press Send would leave the row able to prove
-     * something about a click that had not happened yet, which is the one direction this field must
-     * never be wrong in. Cleared at the claim rather than at the write, because the claim is the
-     * single line every send run passes through. */
-    submission_stop: undefined,
-  });
+  const claimed = nextReview(current, submissionClaimPatch(new Date().toISOString(), randomUUID()));
   const rows = await db.update(generated_resumes)
     .set({
       spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(claimed)}::jsonb, true)`,
@@ -380,12 +371,8 @@ async function claimSecurityCodeSubmission(
       source: 'per_application_approval',
       authorized_at: new Date().toISOString(),
     },
-    submission_claimed_at: new Date().toISOString(),
-    submission_claim_id: randomUUID(),
+    ...submissionClaimPatch(new Date().toISOString(), randomUUID()),
     submission_error: undefined,
-    // Same reason as claimSubmission: this run is about to press Send, so the previous run's stop
-    // record stops being true the moment the claim is taken.
-    submission_stop: undefined,
   });
   const rows = await db.update(generated_resumes)
     .set({
