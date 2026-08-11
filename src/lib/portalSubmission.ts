@@ -9,6 +9,7 @@ import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } 
 import {
   classifyField,
   discoveredFieldIsRequired,
+  graduationYearFieldAnswer,
   isLegalConsentQuestion,
   normalizeReviewQuestionLabel,
   resolveKnownAnswer,
@@ -3365,19 +3366,71 @@ function packetLooksDatabricks(packet: SubmissionPacket): boolean {
     || packet.questions.some((item) => /\bdatabricks\b/i.test(`${item.question}\n${item.answer}`));
 }
 
+/* THE ONLY SHAPE THAT MAY BE HANDED MORE THAN A YEAR, and why the test is positive rather than a
+ * list of exclusions.
+ *
+ * An open text-entry control that discovery actually saw and reported. Everything else keeps the
+ * bare year, and each exclusion is a case where widening could only do harm:
+ *   - a closed list (select, radio, checkbox, combobox) is matched against the employer's own option
+ *     text, so a wider answer can only miss an option that "2028" matches exactly;
+ *   - a number or tel box cannot physically carry a month name;
+ *   - NO reported type at all means discovery never saw this control. Greenhouse's known-question
+ *     aliases reach here that way, and every one of them is answered against an option list.
+ * That last exclusion is not theoretical: without it Akuna's "Graduation Year" React-select was
+ * offered "May 2028" beside "2028". */
+const OPEN_GRADUATION_TEXT_CONTROL = /^(?:text|textarea)$/i;
+
+/**
+ * What goes into a control whose LABEL asks for a graduation year.
+ *
+ * WHY THIS IS NOT packet.graduationYear (measured on prod packets bbf0115a, 59fb48ae, cd066fee and
+ * 4bfd5827 - Deepgram on Ashby, 2026-08-08 to 2026-08-11). "Expected Graduation Year" there is a
+ * react-datepicker at day precision behind `[data-field-path="407cc864-..."]`. Handed a bare "2028"
+ * the managed runner deliberately writes nothing and says so, because tabbing off a typed year
+ * commits 01/01/2028 - four months before a May graduation, and a date the employer reads as fact.
+ * All four of those runs then reported "Expected Graduation Year" as required and still empty, on a
+ * packet that was otherwise complete.
+ *
+ * questionDiscovery already settled this: graduationYearFieldAnswer resolves the same label to
+ * "May 2028" and refuses to widen a year-only profile. That answer reached the packet, and this
+ * function overwrote it with the bare year one layer later, which is why the fix in discovery never
+ * showed up on the form. Calling the same helper here is what makes the two layers agree.
+ *
+ * The month is never invented. graduationYearFieldAnswer returns the bare year whenever the profile
+ * states no month, so a year-only profile still hands the runner "2028" and the runner still refuses
+ * the date control rather than picking a month - which is the correct outcome and stays correct.
+ */
+function graduationYearAnswerForControl(
+  item: SubmissionPacket['questions'][number],
+  packet: SubmissionPacket,
+): string {
+  const year = packet.graduationYear?.trim();
+  const inputType = reviewQuestionPortalInputType(item)?.trim() ?? '';
+  if (!OPEN_GRADUATION_TEXT_CONTROL.test(inputType)) return year || item.answer;
+  const yearNumber = year && /^\d{4}$/.test(year) ? Number(year) : undefined;
+  return graduationYearFieldAnswer(packet.graduationDate, yearNumber, inputType)
+    ?? year
+    ?? item.answer;
+}
+
 /**
  * The graduation value this particular control is asking for.
  *
  * THE NARROW TESTS RUN FIRST, and the order is the whole correctness argument. The date branch
  * matches on `expected graduat(ion|e)` with nothing after it, so it also matches "Expected
- * Graduation Year" and "Expected Graduation Month" - and it used to be first, so it won. Measured
- * on the Deepgram packet of 2026-08-08: discovery had resolved "Expected Graduation Year" to
- * "2028", correctly, and this function overwrote it with packet.graduationDate, "May 2028". A month
- * name in a year field is a wrong answer typed onto a real employer's form, and the field that
- * would have carried it is the one the run then reported as required-and-empty.
+ * Graduation Year" and "Expected Graduation Month" - and it used to be first, so it won, which is
+ * why "Graduation Month" once received a whole date.
  *
  * Month before year before date, because that is specific-to-general. "Graduation month" cannot be
  * a date question; "graduation date" can never be more specific than the other two.
+ *
+ * WHAT THE YEAR BRANCH IS NOT. Ordering the tests correctly says which QUESTION is being asked; it
+ * says nothing about what the CONTROL can hold. The first version of this ordering also replaced the
+ * answer with packet.graduationYear, on the reading that a field labelled "Expected Graduation Year"
+ * is a year field. On the live Deepgram Ashby form it is a react-datepicker, and the bare year is
+ * exactly the value it refuses - so that reading cost four consecutive runs the same required field.
+ * The year branch now asks graduationYearAnswerForControl, which narrows only where the control
+ * really is year-shaped.
  */
 function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][number], packet: SubmissionPacket): string {
   const questionText = normalizeReviewQuestionLabel(item.question);
@@ -3391,7 +3444,7 @@ function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][nu
     return packet.graduationMonth?.trim() || item.answer;
   }
   if (/\bgraduat(?:ion|e)\s+year\b|\bwhat\s+is\s+your\s+graduation\s+year\b|\byear\s+of\s+graduation\b/i.test(questionText)) {
-    return packet.graduationYear?.trim() || item.answer;
+    return graduationYearAnswerForControl(item, packet);
   }
   if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)\b/i.test(questionText)) {
     return packet.graduationDate?.trim() || item.answer;
