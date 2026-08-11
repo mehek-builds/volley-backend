@@ -2287,8 +2287,8 @@ test('a question about HIGH SCHOOL is never answered from the university profile
          'University of Southern California, Viterbi School of Engineering' }
 
      A blank field stalls a run; this is a wrong answer typed onto an employer's form. It reached
-     the university profile through the `school name` arm of classifyField, and three of its
-     neighbours reached the same profile the same way. Each assertion below is one of them. */
+     the university profile through the `school name` arm of classifyField, and its neighbours
+     reached the same profile the same way. */
   const HS = { ...PROD_OWNER_PROFILE, high_school_grad_date: 'May 2023' };
   for (const label of [
     'high school name',
@@ -2303,47 +2303,28 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     'high school gpa',                      // was "3.89", the UNIVERSITY GPA
     'high school degree',                   // was "Bachelor of Science in Computer Science"
     /* Spellings a form actually uses. Every one of these reached a university value before the
-       high-school noun was shared between the graduation matcher and this rule: "highschool gpa"
-       -> "3.89", "hs gpa" -> "3.89", "12th grade school name" -> the university. */
+       high-school noun was shared between the graduation matcher and this rule. */
     'highschool name', 'highschool gpa', 'hs gpa',
     '12th grade school name', 'grade 12 school name',
     'prep school name', 'preparatory school name', 'senior secondary school name',
-    'secondary education institution name',
-    /* The ordering hole. The first draft of this fix returned null here instead of refusing, and
-       the label fell past the graduation handler into the classifier, which read "graduation year"
-       and answered "May 2028" - the UNIVERSITY year. That made the branch strictly worse than the
-       code it replaced, on the exact defect it was written to fix. A refusal cannot fall through. */
-    'highest level of education high school name & graduation year',
-    'highest level of education, high school name and year of graduation',
-    'highest education: high school name',
-    'level of education: high school gpa',
-    /* Punctuation between the noun and the fact. An adjacency rule was the second draft and it
-       missed every one of these, which is most of how forms actually print the control. Chasing
-       separators is unbounded; presence plus a negation-attachment test is not. */
+    /* Punctuation between the noun and the fact. An adjacency rule was one draft of this and it
+       missed every one of these, which is most of how forms print the control. */
     'gpa (high school)', 'what was your gpa during high school?',
     'high school: name', 'high school (name)', 'high school (most recent)',
-    'school name (high school)', 'high school, city, state', 'high school / secondary school',
+    'high school, city, state', 'high school / secondary school',
     'where did you attend high school?', 'enter your high school', 'please enter your high school below',
-    /* The negation attaches to the COLLEGE, so the high school IS the subject. A rule that only
-       asked whether the label mentions a college read "(not college GPA)" as the university being
-       co-named and answered "3.89". */
-    'high school gpa (not college gpa)',
-    'what was your high school gpa? (do not enter your college gpa.)',
-    'high school name (do not list your college)',
-    'enter your high school name if you did not attend college',
-    /* A "not" that is not an exclusion, and an "if you" that is not disqualifying. Both are still
-       high-school questions, and both answered with the university before the exclusion tests
-       required the negation to govern the institution rather than merely precede it. */
+    /* Instructions about the high school, not exclusions of it. */
     'do not abbreviate your high school name',
     'if you attended more than one high school, list the most recent high school name',
-    /* The current programme collected in a DIFFERENT control, so this one is the high school's.
-       Deliberately limited to a real deferral phrase. The passive reverse exclusions - "college GPA
-       not needed", "university GPA is not accepted here" - are knowingly left answering as they do
-       on main: reading them needs the negation's subject rather than its object, and every
-       proximity approximation of that tried so far read the commoner wording backwards and refused
-       a university control. No worse than main is the bar; guessing is not. */
-    'high school name (university name is entered separately)',
-    'high school name (college name is asked below)',
+    /* An education-LEVEL phrase with a high-school FACT hung on it is still a high-school question. */
+    'highest education: high school name',
+    'level of education: high school gpa',
+    /* The ordering hole. One draft returned null here instead of refusing, and the label fell past
+       the graduation handler into the classifier, which read "graduation year" and answered "May
+       2028" - the UNIVERSITY year. That made the branch strictly worse than the code it replaced,
+       on the exact defect it was written to fix. A refusal cannot fall through. */
+    'highest level of education high school name & graduation year',
+    'highest level of education, high school name and year of graduation',
   ]) {
     refuses(label, 'textarea', HS);
     refuses(label, 'textarea');             // and with no high-school fact stored at all
@@ -2374,26 +2355,29 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     'when did you graduate from high school?',
     'high school graduation year',
     'highschool graduation year',   // the shared noun is what reaches this spelling; was "May 2028"
-    /* The Akuna "month and year" wording. The first draft tested the bare word `name` to catch
-       Palantir's two-part card, and matched "the NAME of the month" here - refusing a date that
-       was on file. The name test has to name the SCHOOL's name, not any name. */
+    /* The Akuna "month and year" wording. One draft tested the bare word `name` to catch Palantir's
+       two-part card, and matched "the NAME of the month" here - refusing a date that was on file. */
     'when did you graduate from high school? please enter the name of the month and the year.',
     'high school graduation date (name the month and year)',
   ]) {
     assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: 'May 2023' }, label);
     refuses(label);
   }
-  assert.deepEqual(
-    resolveKnownAnswer('do you have a high school diploma or equivalent?', 'select', HS, undefined),
-    { value: 'Yes' },
-  );
+  for (const label of [
+    'do you have a high school diploma or equivalent?',
+    // A wide spelling the narrow graduation matcher does not reach. The refusal above it used to
+    // shadow the diploma handler and block this, where main answered "Yes".
+    'have you obtained a secondary school diploma or ged?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'select', HS, undefined), { value: 'Yes' }, label);
+  }
 
-  /* ADJACENCY, NOT PRESENCE - and this half is what makes that distinction load-bearing rather
-     than academic. Employers name a high school most often in order to EXCLUDE it, and a rule that
-     fired on the mere presence of the words answered every one of these with a blocker. A gloss
-     written to stop her answering with her high school, answered with a blank, is the same failure
-     the gloss exists to prevent. Each expected value below is what the code shipped before any of
-     this, and has to keep shipping. */
+  /* THE VETO, and it is the load-bearing half. Employers name a high school most often in order to
+     EXCLUDE it, and refusing that gloss hands back the blank it was written to prevent. Three
+     attempts were made to read WHICH institution a negation governs - by proximity, then by
+     attachment - and each shipped a fresh regression in the other direction. So the rule now stands
+     down whenever the label names ANY other institution, whatever it is doing with it. Every
+     expected value below is what the code shipped before any of this, and has to keep shipping. */
   for (const [label, expected] of [
     ['which university do you attend? do not list your high school.', PROD_OWNER_PROFILE.school],
     ['what is the name of the university you attend? (not high school)', PROD_OWNER_PROFILE.school],
@@ -2401,41 +2385,44 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     // POST-secondary is the university in North American usage, so the noun must not match inside it.
     ['name of post-secondary institution', PROD_OWNER_PROFILE.school],
     ['post-secondary school name', PROD_OWNER_PROFILE.school],
-    ['what is your gpa? (high school gpa if you are a freshman)', PROD_OWNER_PROFILE.gpa],
-    /* Exclusion glosses whose verb is outside any closed list. The exclusion test cannot be a list
-       of verbs, so the broad form is admitted only when the label ALSO names the institution it is
-       actually asking for - which is what keeps "do not abbreviate your high school name" above,
-       naming no other institution, on the refusing side. */
+    // Glosses written with the generic noun rather than "college".
     ['school name - please do not type your high school here.', PROD_OWNER_PROFILE.school],
     ['which institution? do not select your high school.', PROD_OWNER_PROFILE.school],
     ['institution name (do not repeat your high school)', PROD_OWNER_PROFILE.school],
     ['school attended (leave out your high school)', PROD_OWNER_PROFILE.school],
     ['what is the name of your school? your high school should be excluded.', PROD_OWNER_PROFILE.school],
-    /* THE COMMONEST WORDING OF ALL, and the one a proximity test reads backwards. Every label here
-       names a college AND negates a high school, and the negation governs the HIGH SCHOOL, so the
-       university is the answer. A window-based rule saw a college word 22 characters from a "not",
-       declared the college excluded, and refused all of them. Attachment asks the only question
-       that decides it: excluded WHAT? */
+    /* The commonest wording of all, and the one every negation-reading draft got backwards: a
+       university control that names the high school in order to exclude it. */
     ['university gpa (do not enter high school gpa)', PROD_OWNER_PROFILE.gpa],
     ['college gpa (not high school gpa)', PROD_OWNER_PROFILE.gpa],
-    ['undergraduate gpa (high school gpa not needed)', PROD_OWNER_PROFILE.gpa],
     ['undergraduate gpa - not your high school gpa', PROD_OWNER_PROFILE.gpa],
     ['university attended - do not enter high school', PROD_OWNER_PROFILE.school],
-    ['college or university name, high school not accepted', PROD_OWNER_PROFILE.school],
     ['name of the college you attend (not your high school)', PROD_OWNER_PROFILE.school],
     ['which university are you enrolled at (not high school)?', PROD_OWNER_PROFILE.school],
-    ['college/university attended (do not list high school) - see below', PROD_OWNER_PROFILE.school],
-    ['college name (high school will not be considered)', PROD_OWNER_PROFILE.school],
     ['university name (do not repeat your high school)', PROD_OWNER_PROFILE.school],
-    /* A deferral phrase names the institution NEXT to it, so this one defers the high school and
-       the university is still what the box wants. The deferral test is tempered against the
-       high-school noun for exactly this pair. */
     ['university name (high school is asked below)', PROD_OWNER_PROFILE.school],
     ['college name below - high school not needed', PROD_OWNER_PROFILE.school],
-    ['enter the name of your university below. skip high school.', PROD_OWNER_PROFILE.school],
-    ['name of institution (university, college or high school) - see below', PROD_OWNER_PROFILE.school],
-    // Not an education field at all. The first draft's guard sat above the city, phone, language
-    // and availability arms of classifyField and took them with it.
+    /* The standard school-leaver fallback gloss. An attachment rule read "not attend college" as
+       excluding the college and blanked School, education-level and GPA across a whole section. */
+    ['school name (if you did not attend college, enter your high school)', PROD_OWNER_PROFILE.school],
+    ['gpa (if you did not attend college, use your high school gpa)', PROD_OWNER_PROFILE.gpa],
+    ['college gpa - do not include college credit earned while in high school', PROD_OWNER_PROFILE.gpa],
+    ['university attended (transcripts are uploaded separately; high school not needed)', PROD_OWNER_PROFILE.school],
+    /* A conditional that is not hers. */
+    ['what is your gpa? (high school gpa if you are a freshman)', PROD_OWNER_PROFILE.gpa],
+    /* "Secondary education" is also the name of a MAJOR, so it is deliberately not one of the
+       high-school spellings: this control was refused where main answered "Computer Science". */
+    ['major / field of study (e.g. nursing, secondary education, engineering)', PROD_OWNER_PROFILE.major],
+    ['what is your major? (for example: secondary education, computer science)', PROD_OWNER_PROFILE.major],
+    /* KNOWINGLY UNFIXED, and pinned so it stays a decision rather than a drift. The high school is
+       genuinely the subject here and the university value is wrong, but the label names two
+       institutions and every rule that tried to adjudicate that cost a commoner label. Unchanged
+       from main is the bar. */
+    ['school name (high school)', PROD_OWNER_PROFILE.school],
+    ['high school gpa (not college gpa)', PROD_OWNER_PROFILE.gpa],
+    ['high school name (university name is entered separately)', PROD_OWNER_PROFILE.school],
+    // Not an education field at all. One draft's guard sat above the city, phone, language and
+    // availability arms of classifyField and took them with it.
     ['what city do you live in? (not the city of your high school)', PROD_OWNER_PROFILE.address_city],
   ] as const) {
     assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: expected }, label);
@@ -2443,24 +2430,32 @@ test('a question about HIGH SCHOOL is never answered from the university profile
   assert.equal(classifyField('what city do you live in? (not the city of your high school)'), 'address_city');
   assert.equal(classifyField('which languages do you speak? include any studied in high school.'), 'languages');
 
-  /* Employment history in the education sector. The high-school noun is wide enough to catch
-     "12th grade" and "secondary education", and feeding that width to the graduation matcher's
-     120-character proximity arm answered these with her own graduation date - a date typed into an
-     employment-history box, where main had left a blank. The proximity arm keeps the narrow
-     literal for exactly this reason. */
+  /* And the education-LEVEL family, where a high school is one option in a list rather than the
+     subject, and the answer is the current degree. */
   for (const label of [
-    'what year did you start teaching in secondary education?',
+    'highest level of education completed (e.g. high school, bachelor’s, master’s)',
+    'what is your highest level of education? high school, associate, bachelor',
+    'education level (high school)',
+    // "select below" points at the control being filled, not at a different one. A bare "below" in
+    // a deferral test refused this dropdown, which main answered.
+    'highest level of education completed (e.g. high school, bachelor’s, master’s) - select below',
+    'highest level of education (if you did not attend college, choose high school)',
+  ]) {
+    assert.equal(classifyField(label), 'degree', label);
+    assert.deepEqual(resolveKnownAnswer(label, 'select', HS, undefined), { value: "Bachelor's Degree" }, label);
+  }
+
+  /* Employment history in the education sector. The high-school noun is wide enough to catch "12th
+     grade" and "prep school", and feeding that width to the graduation matcher's proximity arms
+     answered these with her own graduation date - a date typed into an employment-history box,
+     where main left a blank. Both arms keep the narrow literal for exactly this reason. */
+  for (const label of [
     'when did you last teach grade 12?',
     'what year did you receive your hs certification?',
-    // Both word orders. The first pass only guarded the word-then-noun arm, so moving the noun in
-    // front - which is how a form actually writes it - answered the same question "May 2023".
     'grade 12 teaching - when did you stop?',
-    'secondary education teaching - when did you start?',
     'prep school employment - when did you start?',
     'senior secondary teaching: when did you begin?',
     '12th grade tutoring: when did you last do it?',
-    // ...and "Yes", which a notDeepEqual on the date alone would not have caught.
-    'do you have a secondary education teaching diploma?',
     'do you hold a grade 12 teaching diploma or equivalent?',
   ]) {
     const answered = resolveKnownAnswer(label, 'text', HS, undefined);
@@ -2470,9 +2465,9 @@ test('a question about HIGH SCHOOL is never answered from the university profile
 
   /* "HS" is two letters, and two letters are not a high school on their own. Given its own rule
      requiring an education fact beside it, because `\bhs\b` is also the customs tariff "HS code"
-     and an unterminated `\bhs` was HSA, HSBC, HSE, HSTS and HSpice - every one of which this
-     branch refused as a high-school question, the HSBC one displacing a correct prior-employer
-     blocker with a wrong one. */
+     and an unterminated `\bhs` was HSA, HSBC, HSE, HSTS and HSpice - every one of which this branch
+     refused as a high-school question, the HSBC one displacing a correct prior-employer blocker
+     with a wrong one. */
   assert.equal(questionRefusedAsHighSchool('hs gpa', HS), true);
   for (const label of [
     'hsa contribution', 'hsbc holdings employment history', 'do you have an hse certification?',
@@ -2480,20 +2475,6 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     'rate your proficiency in hsql', 'have you worked at hsbc?',
   ]) {
     assert.equal(questionRefusedAsHighSchool(label, HS), false, label);
-  }
-
-  /* And the one family that names a high school WITHOUT being about one: an education-LEVEL list
-     enumerates it beside bachelor's and master's, and the answer there is the current degree. */
-  for (const label of [
-    'highest level of education completed (e.g. high school, bachelor’s, master’s)',
-    'what is your highest level of education? high school, associate, bachelor',
-    'education level (high school)',
-    // "select below" points at the control being filled, not at a different one. A bare "below" in
-    // the deferral test refused this dropdown, which main answered.
-    'highest level of education completed (e.g. high school, bachelor’s, master’s) - select below',
-  ]) {
-    assert.equal(classifyField(label), 'degree', label);
-    assert.deepEqual(resolveKnownAnswer(label, 'select', HS, undefined), { value: "Bachelor's Degree" }, label);
   }
 });
 

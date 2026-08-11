@@ -634,6 +634,11 @@ function highSchoolGraduationAnswer(
  */
 function highSchoolRecordRefusal(label: string): { skipReason: string } | null {
   if (!questionIsScopedToHighSchool(label)) return null;
+  /* The diploma confirmation has its own handler further down this function, answering "Yes" from
+   * the stored graduation date. This one sits above it and would otherwise shadow it whenever the
+   * label uses a spelling the narrow graduation matcher does not reach: "have you obtained a
+   * secondary school diploma or GED?" was blocked where main answered "Yes". */
+  if (HIGH_SCHOOL_DIPLOMA_CONFIRMATION_QUESTION.test(label)) return null;
   /* GATED ON THE SAME KEY SET AS classifyField's WRAPPER, and for the same reason: a label can name
    * her high school while asking for something that is not an education fact at all. "What city do
    * you live in? (not the city of your high school)" is an address question, and refusing it hands
@@ -2698,7 +2703,13 @@ const PREFERRED_NAME_QUESTION =
  * classifier's `graduation_year`, and came back "May 2028" - the UNIVERSITY year. Measured
  * 2026-08-11, along with "HS GPA" -> "3.89" and "12th Grade School Name" -> the university.
  */
-const HIGH_SCHOOL_WORD = String.raw`(?:high[\s-]?schools?|(?:sr\.?|senior)\s+secondary(?:\s+school)?|(?<!post[\s-])secondary\s+(?:schools?|education)|(?:12th|twelfth)\s+grade(?:\s+school)?|grade\s+12(?:\s+school)?|prep(?:aratory)?\s+schools?)`;
+const HIGH_SCHOOL_WORD = String.raw`(?:high[\s-]?schools?|(?:sr\.?|senior)\s+secondary(?:\s+school)?|(?<!post[\s-])secondary\s+schools?|(?:12th|twelfth)\s+grade(?:\s+school)?|grade\s+12(?:\s+school)?|prep(?:aratory)?\s+schools?)`;
+/* "Secondary education" is deliberately NOT here, though it names the same institution. It is also
+ * the name of a MAJOR, and a field-of-study control that lists it as an example - "Major / field of
+ * study (e.g. Nursing, Secondary Education, Engineering)" - was refused where main answered
+ * "Computer Science". The lookbehind on `secondary school` is a related trap: POST-secondary is the
+ * university in North American usage, so "Name of post-secondary institution" must still answer
+ * with it. */
 /* "HS" is kept OUT of the list above and given its own rule, because two letters are not enough on
  * their own. Even with both word boundaries, `\bhs\b` is the customs tariff "HS code", and without
  * the trailing one it was also HSA, HSBC, HSE, HSTS and HSpice - all of which this branch refused
@@ -2769,31 +2780,34 @@ export const HIGH_SCHOOL_GRADUATION_QUESTION = new RegExp(
  * degree - there is no column for any of them - so those are refused rather than answered from the
  * university's.
  *
- * PRESENCE, THEN WHICH INSTITUTION THE QUALIFIER GOVERNS. The rule is not adjacency. Requiring the
- * fact word to sit next to the noun was the second draft, and it missed every phrasing that
- * separates them with punctuation, which is most of them: "GPA (high school)" -> "3.89",
- * "High School: Name" -> the university, "High school, city, state" -> the university, "Where did
- * you attend high school?" -> the university. Chasing separators is unbounded. Presence is not.
+ * PRESENCE, AND THE CURRENT PROGRAMME IS AN ABSOLUTE VETO. The rule is two lines, and both were
+ * arrived at by deleting cleverer ones that measured worse.
  *
- * What presence alone got wrong is narrower and has a real shape: employers name a high school
- * most often in order to EXCLUDE it, and answering that gloss with a blank is the same failure the
- * gloss was written to prevent. Measured, presence-only turned these correct answers into blockers:
+ * Not adjacency. Requiring the fact word to sit next to the noun missed every phrasing that
+ * separates them with punctuation, which is most of them: "GPA (high school)" -> "3.89", "High
+ * School: Name" -> the university, "High school, city, state" -> the university. Chasing
+ * separators is unbounded; presence is not.
  *
- *   "Which university do you attend? Do not list your high school."   USC       -> refused
- *   "What is the name of the university you attend? (not high school)" USC      -> refused
- *   "What is your GPA? (high school GPA if you are a freshman)"        "3.89"   -> refused
+ * And not negation-attachment either, which is the harder lesson. Employers name a high school
+ * most often in order to EXCLUDE it - "which university do you attend? do not list your high
+ * school" - and refusing that gloss hands back the blank it was written to prevent. Three separate
+ * attempts were made to read WHICH institution a negation governs, by proximity and then by
+ * attachment, and every one of them shipped a fresh regression in the opposite direction:
  *
- * So the question is never "are the words present" but WHICH INSTITUTION THE NEGATION GOVERNS. Both
- * directions occur and they mean opposite things:
+ *   proximity  -> "University GPA (do not enter high school GPA)" read the COLLEGE as excluded and
+ *                 refused a control main answered "3.89"
+ *   attachment -> "if you did not attend college, enter your high school" read the same way, and
+ *                 blanked School, education-level and GPA controls across a whole ATS section
  *
- *   "do not list your high school"        the high school is excluded  -> the university answers
- *   "high school GPA (not college GPA)"   the college is excluded      -> the high school is asked
+ * Natural-language negation scope is not a thing a regex decides reliably, and each attempt bought
+ * a handful of exotic labels at the price of a common one. So the veto is unconditional: if the
+ * label names the current programme AT ALL, this rule stands down and behaviour is exactly what it
+ * was before this change. That gives up "High School GPA (not college GPA)", which still answers
+ * "3.89" as it always has - not a regression, just not a fix - and buys a property worth far more
+ * than that label: the ONLY labels whose behaviour changes are those that name a high school and
+ * name no current programme anywhere, and for those the university profile was never the answer.
  *
- * The second of those is why a bare "the label also says college" exclusion is not enough: it read
- * "(not college GPA)" as the university being co-named and answered "3.89". Attachment, not
- * presence, on that side too.
- *
- * A fourth case needs no rule here at all. "What city do you live in? (not the city of your high
+ * One more case needs no rule at all. "What city do you live in? (not the city of your high
  * school)" is not an education question, and classifyField's wrapper gates this on the KEY, so
  * address_city, phone, languages and availability_date are out of reach by construction.
  */
@@ -2805,54 +2819,21 @@ function highSchoolPresent(label: string): boolean {
 }
 const CURRENT_PROGRAMME_NAMED = new RegExp(String.raw`\b${CURRENT_PROGRAMME_WORD}\b`, 'i');
 
-const EXCLUSION_WORD = String.raw`(?:not|n['’]t|exclud\w*|other\s+than|rather\s+than|instead\s+of|in\s+lieu\s+of|omit|leave\s+out|skip|avoid|without)`;
-/* The verbs a form uses when it tells you which institution to put in the box. Requiring one (or
- * the bare noun) is what separates "do not LIST your high school" - an exclusion - from "do not
- * ABBREVIATE your high school name", which is an instruction about formatting and still a
- * high-school question. Without the verb list the second one answered with the university. */
-const LISTING_VERB = String.raw`(?:list|enter|include|use|report|give|provide|write|put|name|state|specify|submit|mention|type|select|choose|repeat|fill|need|attend)\w*`;
-
-/* ATTACHMENT, NOT PROXIMITY, AND THE SAME SHAPE ON BOTH SIDES. The excluded institution is the one
- * that FOLLOWS the negation, and nothing else about the sentence matters. A proximity window is
- * what the current-programme side had for one revision, and it read the negation backwards on the
- * commonest wording of all: "University GPA (do not enter high school GPA)" has a college word 22
- * characters from a "not", so proximity declared the COLLEGE excluded and refused a control main
- * answered "3.89". Attachment reads "not enter high school" and gets it right, in both directions,
- * because it asks the only question that decides the meaning: excluded WHAT? */
-const excludedInstitution = (noun: string) => new RegExp(
-  String.raw`\b${EXCLUSION_WORD}\b\s*(?:${LISTING_VERB}\s+)?(?:your\s+|the\s+|a\s+|an\s+|any\s+)?${noun}\b`,
-  'i',
-);
-
-const HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT = excludedInstitution(HIGH_SCHOOL_WORD);
-/* The same exclusion in any word order and with any verb, admitted ONLY when the label also names
- * the institution it is actually asking for. That second condition is what keeps "do not abbreviate
- * your high school name" - which names no other institution, and is a high-school question - apart
- * from "school name: please do not type your high school here", which names one and is not. */
-const HIGH_SCHOOL_NEAR_AN_EXCLUSION = new RegExp(
-  String.raw`\b${EXCLUSION_WORD}\b[^.?!]{0,40}?${HIGH_SCHOOL_WORD}\b|\b${HIGH_SCHOOL_WORD}\b[^.?!]{0,40}?\b${EXCLUSION_WORD}\b`,
-  'i',
-);
-const ANOTHER_INSTITUTION_NOUN = /\b(?:schools?|institutions?|universit(?:y|ies)|colleges?|alma\s+mater)\b/i;
+/* The veto is any OTHER institution noun, not only a college word, because the same glosses get
+ * written with the generic one: "School name: please do not type your high school here", "Which
+ * institution? Do not select your high school", "School attended (leave out your high school)".
+ * All three are the university's control and main answers them correctly.
+ *
+ * The noun has to survive with the high-school phrase removed, or "high school" would veto itself.
+ * The cost is the parenthetical clarifier - "School name (high school)" keeps answering with the
+ * university, as it does on main - and that is the trade this whole rule is built on: a label that
+ * names two institutions is one a regex should not adjudicate, and leaving it exactly as it was is
+ * the only move that cannot make things worse. */
+const ANOTHER_INSTITUTION_NOUN = /\b(?:schools?|institutions?|alma\s+mater)\b/i;
 const HIGH_SCHOOL_WORD_GLOBAL = new RegExp(HIGH_SCHOOL_WORD, 'gi');
 function labelNamesAnotherInstitution(label: string): boolean {
   return ANOTHER_INSTITUTION_NOUN.test(label.replace(HIGH_SCHOOL_WORD_GLOBAL, ' '));
 }
-
-const CURRENT_PROGRAMME_NAMED_TO_EXCLUDE_IT = excludedInstitution(CURRENT_PROGRAMME_WORD);
-
-/* "College name is asked below": not a negation, and it points the same way - if the current
- * programme is collected in a different control, THIS one is the high school's. Two guards keep it
- * from swallowing the ordinary case. It needs a real deferral phrase, not a bare "below", because
- * "select below" points at the control being filled and refused an education-level dropdown main
- * answered. And it is TEMPERED against the high-school noun, because "university name (high school
- * is asked below)" defers the HIGH SCHOOL: the deferred institution is the one next to the phrase,
- * which is attachment again, in the one place a window is still needed. */
-const CURRENT_PROGRAMME_DEFERRED_ELSEWHERE = new RegExp(
-  String.raw`${CURRENT_PROGRAMME_WORD}(?:(?!${HIGH_SCHOOL_WORD})[^.?!]){0,30}?`
-  + String.raw`\b(?:is|are|will\s+be)\s+(?:\w+\s+){0,2}(?:below|above|separately|elsewhere)\b`,
-  'i',
-);
 
 /* A condition that is not hers. "High school GPA if you are a freshman" asks a freshman for a
  * high-school GPA and everyone else for the university one, and she is not a freshman. Deliberately
@@ -2879,14 +2860,9 @@ const EDUCATION_LEVEL_QUESTION =
 export function questionIsScopedToHighSchool(label: string): boolean {
   const l = label ?? '';
   if (!highSchoolPresent(l)) return false;
-  /* Ordered, and the order is the meaning. An exclusion governing the CURRENT programme wins first:
-   * "(not college GPA)" also contains the word college, so a co-naming test placed above it would
-   * read the exclusion as a mention and answer with the university. Then the two forms of "the high
-   * school is the excluded one". Only after all three does co-naming mean a coordinate list. */
-  if (CURRENT_PROGRAMME_NAMED_TO_EXCLUDE_IT.test(l) || CURRENT_PROGRAMME_DEFERRED_ELSEWHERE.test(l)) return true;
-  if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(l)) return false;
-  if (HIGH_SCHOOL_NEAR_AN_EXCLUSION.test(l) && labelNamesAnotherInstitution(l)) return false;
-  if (CURRENT_PROGRAMME_NAMED.test(l)) return false;
+  // The veto. Whatever the label is doing with the other institution - asking for it, excluding it,
+  // listing it as an option - this rule does not touch it.
+  if (CURRENT_PROGRAMME_NAMED.test(l) || labelNamesAnotherInstitution(l)) return false;
   if (CONDITIONAL_ON_BEING_A_SCHOOL_LEAVER.test(l)) return false;
   // An education-level list naming it as an option, with no fact hung on it, is a degree question.
   return !(EDUCATION_LEVEL_QUESTION.test(l) && !HIGH_SCHOOL_FACT_ATTACHED.test(l));
