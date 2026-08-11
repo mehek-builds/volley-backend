@@ -2806,19 +2806,25 @@ function highSchoolPresent(label: string): boolean {
 const CURRENT_PROGRAMME_NAMED = new RegExp(String.raw`\b${CURRENT_PROGRAMME_WORD}\b`, 'i');
 
 const EXCLUSION_WORD = String.raw`(?:not|n['’]t|exclud\w*|other\s+than|rather\s+than|instead\s+of|in\s+lieu\s+of|omit|leave\s+out|skip|avoid|without)`;
-/* Asked, but in a different box. Not a negation, and it points the same way: if the college name is
- * collected elsewhere, THIS control is the high school's. */
-const DEFERRAL_WORD = String.raw`(?:separately|elsewhere|below|above|in\s+the\s+next|on\s+the\s+next)`;
 /* The verbs a form uses when it tells you which institution to put in the box. Requiring one (or
  * the bare noun) is what separates "do not LIST your high school" - an exclusion - from "do not
  * ABBREVIATE your high school name", which is an instruction about formatting and still a
  * high-school question. Without the verb list the second one answered with the university. */
-const LISTING_VERB = String.raw`(?:list|enter|include|use|report|give|provide|write|put|name|state|specify|submit|mention|type|select|choose|repeat|fill|need)\w*`;
+const LISTING_VERB = String.raw`(?:list|enter|include|use|report|give|provide|write|put|name|state|specify|submit|mention|type|select|choose|repeat|fill|need|attend)\w*`;
 
-const HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT = new RegExp(
-  String.raw`\b${EXCLUSION_WORD}\b\s*(?:${LISTING_VERB}\s+)?(?:your\s+|the\s+|a\s+|an\s+|any\s+)?${HIGH_SCHOOL_WORD}\b`,
+/* ATTACHMENT, NOT PROXIMITY, AND THE SAME SHAPE ON BOTH SIDES. The excluded institution is the one
+ * that FOLLOWS the negation, and nothing else about the sentence matters. A proximity window is
+ * what the current-programme side had for one revision, and it read the negation backwards on the
+ * commonest wording of all: "University GPA (do not enter high school GPA)" has a college word 22
+ * characters from a "not", so proximity declared the COLLEGE excluded and refused a control main
+ * answered "3.89". Attachment reads "not enter high school" and gets it right, in both directions,
+ * because it asks the only question that decides the meaning: excluded WHAT? */
+const excludedInstitution = (noun: string) => new RegExp(
+  String.raw`\b${EXCLUSION_WORD}\b\s*(?:${LISTING_VERB}\s+)?(?:your\s+|the\s+|a\s+|an\s+|any\s+)?${noun}\b`,
   'i',
 );
+
+const HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT = excludedInstitution(HIGH_SCHOOL_WORD);
 /* The same exclusion in any word order and with any verb, admitted ONLY when the label also names
  * the institution it is actually asking for. That second condition is what keeps "do not abbreviate
  * your high school name" - which names no other institution, and is a high-school question - apart
@@ -2833,13 +2839,18 @@ function labelNamesAnotherInstitution(label: string): boolean {
   return ANOTHER_INSTITUTION_NOUN.test(label.replace(HIGH_SCHOOL_WORD_GLOBAL, ' '));
 }
 
-/* BOTH WORD ORDERS, because a form writes the exclusion on either side of the noun it governs:
- * "(not college GPA)" before, "college GPA not needed" and "university name is entered separately"
- * after. Only the forward arm existed at first, so the reverse phrasings fell through to the
- * plain "a college is mentioned" test and typed the UNIVERSITY GPA into a high-school control. */
-const CURRENT_PROGRAMME_NAMED_TO_EXCLUDE_IT = new RegExp(
-  String.raw`\b${EXCLUSION_WORD}\b[^.?!]{0,40}?${CURRENT_PROGRAMME_WORD}`
-  + String.raw`|${CURRENT_PROGRAMME_WORD}[^.?!]{0,40}?\b(?:${EXCLUSION_WORD}|${DEFERRAL_WORD})\b`,
+const CURRENT_PROGRAMME_NAMED_TO_EXCLUDE_IT = excludedInstitution(CURRENT_PROGRAMME_WORD);
+
+/* "College name is asked below": not a negation, and it points the same way - if the current
+ * programme is collected in a different control, THIS one is the high school's. Two guards keep it
+ * from swallowing the ordinary case. It needs a real deferral phrase, not a bare "below", because
+ * "select below" points at the control being filled and refused an education-level dropdown main
+ * answered. And it is TEMPERED against the high-school noun, because "university name (high school
+ * is asked below)" defers the HIGH SCHOOL: the deferred institution is the one next to the phrase,
+ * which is attachment again, in the one place a window is still needed. */
+const CURRENT_PROGRAMME_DEFERRED_ELSEWHERE = new RegExp(
+  String.raw`${CURRENT_PROGRAMME_WORD}(?:(?!${HIGH_SCHOOL_WORD})[^.?!]){0,30}?`
+  + String.raw`\b(?:is|are|will\s+be)\s+(?:\w+\s+){0,2}(?:below|above|separately|elsewhere)\b`,
   'i',
 );
 
@@ -2872,7 +2883,7 @@ export function questionIsScopedToHighSchool(label: string): boolean {
    * "(not college GPA)" also contains the word college, so a co-naming test placed above it would
    * read the exclusion as a mention and answer with the university. Then the two forms of "the high
    * school is the excluded one". Only after all three does co-naming mean a coordinate list. */
-  if (CURRENT_PROGRAMME_NAMED_TO_EXCLUDE_IT.test(l)) return true;
+  if (CURRENT_PROGRAMME_NAMED_TO_EXCLUDE_IT.test(l) || CURRENT_PROGRAMME_DEFERRED_ELSEWHERE.test(l)) return true;
   if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(l)) return false;
   if (HIGH_SCHOOL_NEAR_AN_EXCLUSION.test(l) && labelNamesAnotherInstitution(l)) return false;
   if (CURRENT_PROGRAMME_NAMED.test(l)) return false;

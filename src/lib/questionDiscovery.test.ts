@@ -2336,12 +2336,12 @@ test('a question about HIGH SCHOOL is never answered from the university profile
        required the negation to govern the institution rather than merely precede it. */
     'do not abbreviate your high school name',
     'if you attended more than one high school, list the most recent high school name',
-    /* The college exclusion written the other way round. Only the forward order was recognised at
-       first, so these fell through to the plain "a college is mentioned" test and typed the
-       UNIVERSITY GPA and the UNIVERSITY name into a high-school control. */
-    'high school gpa (college gpa not needed)',
-    'high school gpa - university gpa is not accepted here',
-    'high school name (college name is not required)',
+    /* The current programme collected in a DIFFERENT control, so this one is the high school's.
+       Deliberately limited to a real deferral phrase. The passive reverse exclusions - "college GPA
+       not needed", "university GPA is not accepted here" - are knowingly left answering as they do
+       on main: reading them needs the negation's subject rather than its object, and every
+       proximity approximation of that tried so far read the commoner wording backwards and refused
+       a university control. No worse than main is the bar; guessing is not. */
     'high school name (university name is entered separately)',
     'high school name (college name is asked below)',
   ]) {
@@ -2411,6 +2411,29 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     ['institution name (do not repeat your high school)', PROD_OWNER_PROFILE.school],
     ['school attended (leave out your high school)', PROD_OWNER_PROFILE.school],
     ['what is the name of your school? your high school should be excluded.', PROD_OWNER_PROFILE.school],
+    /* THE COMMONEST WORDING OF ALL, and the one a proximity test reads backwards. Every label here
+       names a college AND negates a high school, and the negation governs the HIGH SCHOOL, so the
+       university is the answer. A window-based rule saw a college word 22 characters from a "not",
+       declared the college excluded, and refused all of them. Attachment asks the only question
+       that decides it: excluded WHAT? */
+    ['university gpa (do not enter high school gpa)', PROD_OWNER_PROFILE.gpa],
+    ['college gpa (not high school gpa)', PROD_OWNER_PROFILE.gpa],
+    ['undergraduate gpa (high school gpa not needed)', PROD_OWNER_PROFILE.gpa],
+    ['undergraduate gpa - not your high school gpa', PROD_OWNER_PROFILE.gpa],
+    ['university attended - do not enter high school', PROD_OWNER_PROFILE.school],
+    ['college or university name, high school not accepted', PROD_OWNER_PROFILE.school],
+    ['name of the college you attend (not your high school)', PROD_OWNER_PROFILE.school],
+    ['which university are you enrolled at (not high school)?', PROD_OWNER_PROFILE.school],
+    ['college/university attended (do not list high school) - see below', PROD_OWNER_PROFILE.school],
+    ['college name (high school will not be considered)', PROD_OWNER_PROFILE.school],
+    ['university name (do not repeat your high school)', PROD_OWNER_PROFILE.school],
+    /* A deferral phrase names the institution NEXT to it, so this one defers the high school and
+       the university is still what the box wants. The deferral test is tempered against the
+       high-school noun for exactly this pair. */
+    ['university name (high school is asked below)', PROD_OWNER_PROFILE.school],
+    ['college name below - high school not needed', PROD_OWNER_PROFILE.school],
+    ['enter the name of your university below. skip high school.', PROD_OWNER_PROFILE.school],
+    ['name of institution (university, college or high school) - see below', PROD_OWNER_PROFILE.school],
     // Not an education field at all. The first draft's guard sat above the city, phone, language
     // and availability arms of classifyField and took them with it.
     ['what city do you live in? (not the city of your high school)', PROD_OWNER_PROFILE.address_city],
@@ -2465,6 +2488,9 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     'highest level of education completed (e.g. high school, bachelor’s, master’s)',
     'what is your highest level of education? high school, associate, bachelor',
     'education level (high school)',
+    // "select below" points at the control being filled, not at a different one. A bare "below" in
+    // the deferral test refused this dropdown, which main answered.
+    'highest level of education completed (e.g. high school, bachelor’s, master’s) - select below',
   ]) {
     assert.equal(classifyField(label), 'degree', label);
     assert.deepEqual(resolveKnownAnswer(label, 'select', HS, undefined), { value: "Bachelor's Degree" }, label);
