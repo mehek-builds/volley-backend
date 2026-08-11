@@ -410,9 +410,13 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
     const occurrence = occurrenceInsideClause(term, 'missing');
     if (occurrence && clauseFor(occurrence, 'missing')) terms.missing.push(occurrence);
   }
-  const degraded = scored.clauses.some((clause) => clause.verdict === 'pending'
-    || (clause.verdict === 'unscoreable' && clause.basis !== 'none')
-    || (clause.verdict === 'unscoreable' && /\b\d+(?:\.\d+)?\+?\s*(?:years?|yrs?)\b/i.test(clause.text)))
+  /* Requirement fit is evidence, not packet integrity. An unscoreable requirement says only that
+     the frozen packet cannot prove or disprove it. The audit already records that exact clause as
+     `unscoreable`, so blocking the whole packet here turns an honest unknown into a submission
+     outage. Keep failing closed on internal pending state and on any claimed coverage without one
+     exact frozen evidence pointer. Missing and unscoreable job requirements remain visible but do
+     not invalidate an otherwise exact resume, PDF, identity, answer set, or employer form. */
+  const degraded = scored.clauses.some((clause) => clause.verdict === 'pending')
     || hasUngroundedCoveredClause;
   const canonicalTerms = canonicalizePacketAuditTerms(terms, review.jd_text.length);
   return {
@@ -420,7 +424,11 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
     clauses,
     terms: canonicalTerms,
     editedTerms: canonicalTerms.edited.map((term) => normalized(review.jd_text.slice(term.start, term.end))),
-    rejected: scored.rejected,
+    /* The judgement validator never admits a rejected model verdict. Its clause is downgraded to
+       unscoreable, so there is no claim for the packet audit to trust. Preserve the warnings for
+       diagnostics while giving the audit constructor only the admitted, grounded evidence. */
+    rejected: [],
+    judgementWarnings: scored.rejected,
     degraded,
   };
 }
