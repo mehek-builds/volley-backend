@@ -242,6 +242,12 @@ export function freshSubmitRequestReview(
      * The route's own comment says the packet is "re-runnable exactly once". This is the line that
      * makes that true. */
     unverified_submission: undefined,
+    /* AND THE TYPED STOP EXPIRES WITH IT, for the same reason and with more force. "This run stopped
+     * before the click" is a fact about the run that just ended; left on the row it would still be
+     * answering yes after the NEXT run pressed Send, so submissionProvablyNotSent would reopen a
+     * packet an employer really holds. Cleared here and again at every claim (see claimSubmission),
+     * because this route is not the only way a send starts. */
+    submission_stop: undefined,
   };
 }
 

@@ -895,6 +895,23 @@ describe('the duplicate guard can see a submit it is not sure about', () => {
   });
 });
 
+/** A packet mid-send: status 'submitting' with the claim its run took at the top. */
+function claimedRunningRow(): import('./applicationReview').ApplicationReviewState {
+  return {
+    jd_text: 'jd',
+    status: 'submitting',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: '2026-08-11T12:00:00.000Z',
+    portal_url: 'https://jobs.ashbyhq.com/kos/job/application',
+    submission_run_id: 'run-1',
+    submission_claimed_at: '2026-08-11T12:00:00.000Z',
+    submission_claim_id: 'claim-1',
+    submission_authorization: { source: 'standing_consent', authorized_at: '2026-08-11T11:59:00.000Z' },
+  };
+}
+
 describe('the send path is wired to the reading, not to the scrape', () => {
   test('the verdict is consulted before any receipt is parsed', async () => {
     const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
@@ -904,23 +921,41 @@ describe('the send path is wired to the reading, not to the scrape', () => {
     assert.ok(scrape > verdict, 'the body scrape is enrichment now, not the proof');
   });
 
+  /* THESE TWO WERE SOURCE GREPS UNTIL THE DECISION THEY WATCH WAS EXTRACTED FROM fail().
+   *
+   * They matched regexes against routes/submissionRunner.ts, which cannot tell a correct branch from
+   * a deleted one and cannot see a branch that is present and wrong - and the second of them passed
+   * for the whole life of the defect it was supposedly guarding, because `if (noSubmitControl)` was
+   * right there in the text while the predicate feeding it rejected the format the message is
+   * actually stored in. Now that submissionFailureReview is a pure exported function, both ask the
+   * real thing with a real error instance. */
+
   test('a run cut off mid-submit records the fact, not just a sentence about it', async () => {
-    const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
+    const { submissionFailureReview } = await import('../routes/submissionRunner');
     // submission_attempted_at and the structured record are what make the state resolvable. Packet
     // 13bccb2d had neither, so nothing downstream could tell that a click had happened at all.
-    assert.match(source, /if \(uncertainAfterClaim && isManagedRunTimeout\(message\)\)/);
-    assert.match(source, /submission_attempted_at: input\.at/);
-    assert.match(source, /unverified_submission: \{/);
+    const persisted = submissionFailureReview(
+      claimedRunningRow(),
+      new Error('Managed browser run timed out before it produced a result'),
+    );
+    assert.equal(persisted.status, 'needs_attention');
+    assert.equal(typeof persisted.submission_attempted_at, 'string');
+    assert.equal(persisted.unverified_submission?.cause, 'run_timed_out');
+    assert.equal(persisted.submission_stop?.reason, 'run_timed_out');
+    assert.equal(persisted.submission_stop?.before_click, false,
+      'a run that died without reporting cannot prove where it stopped');
   });
 
   test('a managed chooser stop uses the no-submit copy and releases the stale claim', async () => {
-    const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
-    const failStart = source.indexOf('async function fail(');
-    const failEnd = source.indexOf('export type SecurityCodeSubmissionOutcome', failStart);
-    const failure = source.slice(failStart, failEnd);
-    assert.match(failure, /error instanceof NoSubmitControlError \|\| isManagedNoSubmitControl\(message\)/);
-    assert.match(failure, /if \(noSubmitControl\) \{[\s\S]*preClickNoSubmitReview\(current, message\)[\s\S]*return;/);
-    assert.match(source, /Litos could not find the button that sends this application, so nothing has been sent/);
+    const { submissionFailureReview } = await import('../routes/submissionRunner');
+    const persisted = submissionFailureReview(
+      claimedRunningRow(),
+      new Error('Atomic submit control was missing or ambiguous'),
+    );
+    assert.equal(persisted.submission_claimed_at, undefined);
+    assert.equal(persisted.submission_stop?.reason, 'no_submit_control');
+    assert.match(persisted.attention_reason!,
+      /Litos could not find the button that sends this application, so nothing has been sent/);
   });
 
   test('the resolution route exists and is the thing the refusal points at', async () => {

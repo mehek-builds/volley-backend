@@ -107,8 +107,10 @@ import {
   managedSubmitVerdict,
   observeManagedReceiptOnce,
   readManagedSubmitOutcome,
+  submissionProvablyNotSent,
   unverifiedSubmissionReason,
 } from '../lib/managedSubmitOutcome';
+import { classifySubmissionStop, submissionStopRecord } from '../lib/submissionStop';
 import { applyReviewPatch, beginStall } from '../lib/applicationStall';
 import {
   attentionCategoriesForReasons,
@@ -338,6 +340,12 @@ async function claimSubmission(row: ResumeRow, alreadyHeld = false): Promise<Res
   const claimed = nextReview(current, {
     submission_claimed_at: new Date().toISOString(),
     submission_claim_id: randomUUID(),
+    /* A STOP RECORD DESCRIBES ONE ATTEMPT, AND THIS IS THE NEXT ONE. Carrying the last run's
+     * before_click:true into a run that is about to press Send would leave the row able to prove
+     * something about a click that had not happened yet, which is the one direction this field must
+     * never be wrong in. Cleared at the claim rather than at the write, because the claim is the
+     * single line every send run passes through. */
+    submission_stop: undefined,
   });
   const rows = await db.update(generated_resumes)
     .set({
@@ -375,6 +383,9 @@ async function claimSecurityCodeSubmission(
     submission_claimed_at: new Date().toISOString(),
     submission_claim_id: randomUUID(),
     submission_error: undefined,
+    // Same reason as claimSubmission: this run is about to press Send, so the previous run's stop
+    // record stops being true the moment the claim is taken.
+    submission_stop: undefined,
   });
   const rows = await db.update(generated_resumes)
     .set({
@@ -4468,6 +4479,7 @@ export function preClickNoSubmitReleasePatch(): Partial<ApplicationReviewState> 
 export function preClickNoSubmitReview(
   current: ApplicationReviewState,
   message: string,
+  now: () => string = () => new Date().toISOString(),
 ): ApplicationReviewState {
   const outcome = submissionFailureOutcome({
     captchaStop: null,
@@ -4480,6 +4492,10 @@ export function preClickNoSubmitReview(
   return nextReview(current, {
     status: outcome.status,
     ...preClickNoSubmitReleasePatch(),
+    /* Written even though this branch releases the claim outright, because the release is not the
+     * only reader. A row that lands here and is later moved by another path still carries the typed
+     * proof, so nothing downstream has to re-derive it from the sentence in submission_error. */
+    submission_stop: submissionStopRecord('no_submit_control', now(), current.submission_run_id),
     ...(current.verification?.status === 'searching'
       ? { verification: { ...current.verification, status: 'verification_pending' as const } }
       : {}),
@@ -4665,28 +4681,52 @@ async function fail(row: ResumeRow, error: unknown) {
   const latestRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
   const current = latestRows[0] ? readApplicationReview(latestRows[0].spec) : null;
   if (!current) return;
+  await writeReview(latestRows[0], submissionFailureReview(current, error));
+}
+
+/* WHAT A STOPPED RUN LEAVES ON THE ROW, AND WHETHER THE ROW CAN STILL BE MOVED AFTERWARDS.
+ *
+ * EXTRACTED FROM fail() SO IT CAN BE DRIVEN. Everything below used to sit inside a function that
+ * needs a database and a live runner to reach, so the only thing watching it was a pair of tests
+ * that read this file as text and matched regexes against it - which cannot tell a correct branch
+ * from a deleted one, and is how the defect this function now fixes survived two rounds of repair.
+ * fail() keeps the database read and the write; every decision is here, pure, and tested by calling
+ * it with real error instances.
+ *
+ * THE DEFECT. The claim is taken at the top of a send run, so ANY throw after that point leaves it
+ * on the row. Only two families ever took it off - regenerationRequired/packetDocumentExpired, and
+ * the noSubmitControl branch - so ManagedActionBudgetError, CaptchaUnresolvedError, a provider
+ * session failure and every generic throw landed at needs_attention wearing the claim and carrying
+ * no unverified_submission record. That combination closes all four exits at once:
+ * submitRequestDisposition refuses a claimed needs_attention row, resumeEditDisposition delegates to
+ * it, the security-code route wants a different status, and the unverified-resolution route wants a
+ * record nobody wrote. The comment that used to sit on actionBudgetStop described this trap as
+ * something that arm had dealt with. It had not; it fixed the SENTENCE the applicant reads and left
+ * the lock exactly where it was.
+ *
+ * THE RULE, and it is one rule rather than a list of arms:
+ *
+ *   A stop that PROVABLY preceded the click does not carry the claim forward.
+ *   A stop that cannot be proven pre-click keeps the claim AND is given an exit.
+ *
+ * "Provably" is two things and needs both. The typed stop reason must be one whose throw site is
+ * structurally ahead of the click, and the row's own evidence must agree - the same five refusals
+ * submissionProvablyNotSent already applies, because a CAPTCHA standing on a page can be there
+ * BECAUSE an earlier attempt submitted, and a stop record describes this run only. Where the proof
+ * fails, the lock is right and stays, and the row gets an unverified_submission record so POST
+ * /applications/:id/submission/unverified can reach it. A locked row with a route out is a safety
+ * property. A locked row with no route is the defect.
+ */
+export function submissionFailureReview(
+  current: ApplicationReviewState,
+  error: unknown,
+  now: () => string = () => new Date().toISOString(),
+): ApplicationReviewState {
   const message = error instanceof Error ? error.message : 'Submission runner failed';
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const providerSessionFailure = isProviderSessionFailureMessage(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
-
-  /* A RUN THAT WAS CUT OFF WHILE IT MAY HAVE BEEN SUBMITTING, which is the Skydio case exactly.
-   *
-   * Ranked above every other arm below, and above the generic uncertainAfterClaim sentence, because
-   * it is the only one that knows both halves: the claim was taken so a submit was authorized and
-   * in progress, AND the run died without reporting what it did. Everything else either knows
-   * nothing was sent or knows what stopped it.
-   *
-   * Written here rather than routed through submissionFailureOutcome because this arm writes STATE,
-   * not just a sentence - submission_attempted_at and the unverified_submission record are what
-   * make the state resolvable instead of terminal. */
-  if (uncertainAfterClaim && isManagedRunTimeout(message)) {
-    await writeReview(latestRows[0], nextReview(current, unverifiedSubmissionPatch(current, {
-      at: new Date().toISOString(),
-      cause: 'run_timed_out',
-    })));
-    return;
-  }
+  const stoppedAt = now();
 
   // Takes precedence over uncertainAfterClaim, and that precedence is the whole point. The claim is
   // taken at the top of the run, so by the time clickFinalSubmit refuses to press the button this is
@@ -4695,9 +4735,6 @@ async function fail(row: ResumeRow, error: unknown) {
   // was sent. Telling someone to go check their email for a confirmation of an application that was
   // never submitted sends them looking for a receipt that cannot exist, and costs the trust to
   // believe the next message. Same reasoning as portalHandoffReason vs unattendedHandoffReason.
-  //
-  // Derived rather than early-returned so there stays exactly ONE writeReview call here: a second
-  // one drifts the moment a field is added to the other.
   const captchaError = error instanceof CaptchaUnresolvedError ? error : null;
   const captchaStop = captchaError?.stage ?? null;
   /* Same precedence, same reason as the captcha branch above. When clickFinalSubmit finds no
@@ -4709,27 +4746,53 @@ async function fail(row: ResumeRow, error: unknown) {
   /* The third member of the same family as the two branches above, and it arrives with proof.
      buildManagedPortalActions throws this while ASSEMBLING the action list, before runManagedBrowser
      is called at all, and it records submitActionAppended: false to say so. So the click provably
-     did not happen and nothing reached the employer - the one thing uncertainAfterClaim's "the
-     submission was attempted, check the portal or your email" must never be said about. The claim is
-     taken at the top of the run, so without this the budget stop inherits that sentence AND leaves
-     the packet at needs_attention-after-claim, which submitRequestDisposition refuses to re-run: an
-     application permanently stuck behind a receipt that cannot exist. */
+     did not happen and nothing reached the employer. */
   const actionBudgetStop = error instanceof ManagedActionBudgetError ? error.blocker : null;
   /* Only the resume. An expired cover letter never reaches here: packetForCoverLetterCapability
      degrades and the application still goes, with its own sentence. */
   const packetDocumentExpired = error instanceof PacketDocumentExpiredError && error.document === 'resume';
+  const runTimedOut = isManagedRunTimeout(message);
 
-  if (noSubmitControl) {
-    await writeReview(latestRows[0], preClickNoSubmitReview(current, message));
-    return;
-  }
+  /* THE TYPED HALF, written on every arm including the ones that release outright.
+     Deliberately derived from the SAME booleans the applicant's sentence is derived from, so the
+     prose and the record cannot disagree about what stopped this run. */
+  const stop = submissionStopRecord(
+    classifySubmissionStop({
+      captchaStop,
+      noSubmitControl,
+      regenerationRequired,
+      packetDocumentExpired,
+      actionBudget: actionBudgetStop !== null,
+      providerSessionFailure,
+      runTimedOut,
+      providerUnconfigured: externalGate,
+    }),
+    stoppedAt,
+    current.submission_run_id,
+  );
+
+  /* THE CHOOSER STOP KEEPS ITS OWN WRITER, because it clears more than the claim.
+     preClickNoSubmitReleasePatch also removes submission_attempted_at, submitted_at and the receipt,
+     which is PR 494's decision about a stop known to happen before submitHandle.click, and folding
+     it into the general rule below would quietly change what that branch erases. */
+  if (noSubmitControl) return preClickNoSubmitReview(current, message, now);
+
+  /* CAN THIS ROW PROVE NOTHING WAS SENT? The typed stop is offered to the row's own evidence rather
+     than trusted on its own. submissionProvablyNotSent still refuses a receipt, a standing code
+     wall, an unresolved unverified record, a recorded attempt and a pressed:true outcome, so a
+     pre-click stop on a row that already carries any of those does NOT release anything. */
+  const provablyNotSent = submissionProvablyNotSent({ ...current, submission_stop: stop });
+  const releasesClaim = uncertainAfterClaim && provablyNotSent;
+  /* A claim held with no proof behind it. Every such row must leave here with a door, and the only
+     door that fits a state nobody can classify is the applicant's own look at the employer page. */
+  const needsExit = uncertainAfterClaim && !releasesClaim && !current.unverified_submission;
 
   const outcome = submissionFailureOutcome({
     captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure,
     currentAttentionReason: current.attention_reason,
   });
 
-  await writeReview(latestRows[0], nextReview(current, {
+  return nextReview(current, {
     ...(captchaError
       ? beginStall(current, {
         surface: 'server_run',
@@ -4739,20 +4802,7 @@ async function fail(row: ResumeRow, error: unknown) {
       })
       : {}),
     status: outcome.status,
-    /* THE CLAIM IS RELEASED, and packetDocumentExpired is here for the same reason
-       regenerationRequired is: both sentences end by telling the applicant to regenerate and send
-       again, and submitRequestDisposition refuses to re-run a needs_attention row that still wears
-       a claim. Leaving it on would make the instruction impossible to follow, which is the
-       "permanently stuck behind a receipt that cannot exist" shape recorded on actionBudgetStop.
-       Safe in both cases because the claim exists to stop a SECOND application reaching an employer
-       that already has one, and here the packet could not be assembled, so no first one went. */
-    ...(regenerationRequired || packetDocumentExpired
-      ? {
-        submission_claimed_at: undefined,
-        submission_claim_id: undefined,
-        submission_authorization: undefined,
-      }
-      : {}),
+    submission_stop: stop,
     ...(current.verification?.status === 'searching'
       ? {
         verification: {
@@ -4767,7 +4817,31 @@ async function fail(row: ResumeRow, error: unknown) {
     // without this a 'failed' row was unqueryable as well as unreadable, so "how often does the
     // runner break, and on what" had no answer at all.
     attention_categories: outcome.attentionCategories.length > 0 ? outcome.attentionCategories : undefined,
-  }));
+    /* THE RELEASE, ON THE WRITE PATH AND NOT ONLY ON A READ GATE.
+       regenerationRequired and packetDocumentExpired used to be listed here by name; both are now
+       covered by the rule, because both throw before a browser drives the form and both therefore
+       classify pre-click. What the rule adds is every other pre-click stop - the action-budget throw
+       above all - and what it takes away is the case those two names got wrong: a row that already
+       carries send evidence keeps its lock even when this run stopped early. */
+    ...(releasesClaim
+      ? {
+        submission_claimed_at: undefined,
+        submission_claim_id: undefined,
+        submission_authorization: undefined,
+      }
+      : {}),
+    /* THE EXIT, for the stops that keep their lock. Last in the object on purpose: it overrides the
+       status and the sentence above with the resolvable pair - submission_attempted_at and the
+       unverified_submission record - which is what POST /submission/unverified resolves and what
+       turns a terminal row into one the applicant can answer. The cause is the run's own, so
+       "Litos pressed Send and the secure browser failed" is only said where that is what happened. */
+    ...(needsExit
+      ? unverifiedSubmissionPatch(current, {
+        at: stoppedAt,
+        cause: runTimedOut ? 'run_timed_out' : providerSessionFailure ? 'provider_error' : 'no_confirmation_state',
+      })
+      : {}),
+  });
 }
 
 export type SecurityCodeSubmissionOutcome =

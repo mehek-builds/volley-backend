@@ -353,9 +353,55 @@ export function isManagedRunTimeout(message: string): boolean {
   return /run timed out before it produced a result|continuation timed out|did not produce a (?:continuation )?result/i.test(message);
 }
 
-/** The current Stratus atomic chooser throws this exact error before submitHandle.click executes. */
+/** The exact sentence the Stratus atomic chooser throws before submitHandle.click executes. */
+const MANAGED_NO_SUBMIT_CONTROL_MESSAGE = 'Atomic submit control was missing or ambiguous';
+
+/* The prefix an Error acquires when it is stringified, and nothing else.
+ *
+ * `String(new Error(m))` is `Error: m`, and a subclass gives `TypeError: m`, `SomeError: m`. That is
+ * the shape a thrown error takes crossing the Stratus HTTP boundary: the runner serializes its own
+ * error, the message travels in `payload.error`, and managedBrowserErrorMessage passes it through
+ * VERBATIM into `new Error(...)`. So the row stores the wrapped form and the predicate below was
+ * comparing against the unwrapped one.
+ *
+ * DELIBERATELY REQUIRES THE NAME TO END IN "Error", and deliberately anchored with a single literal
+ * ": ". `Stratus: Atomic submit control...` is not stripped, arbitrary employer text before the
+ * sentence is not stripped, and only ONE layer comes off, so `Error: Error: ...` still fails. This
+ * widens the key by exactly the wrapping that occurs on this path and by nothing else.
+ */
+const THROWN_ERROR_WRAPPER = /^(?:[A-Za-z][A-Za-z0-9_$]*)?Error: /;
+
+/**
+ * The message a thrown error carried, with one stringification wrapper removed.
+ *
+ * Exported so the predicate below and its tests are arguing about the same function rather than two
+ * copies of the same regex.
+ */
+export function unwrapThrownErrorMessage(message: string): string {
+  return message.trim().replace(THROWN_ERROR_WRAPPER, '').trim();
+}
+
+/* THE KEY HAS TO FIT THE LOCK IN THE FORMAT THE LOCK IS ACTUALLY WRITTEN IN.
+ *
+ * kos.ai, production, 2026-08-11, after PR 497 shipped. Try again still answered "This application
+ * cannot start another submission run from its current state". The row cleared all five evidence
+ * checks in submissionProvablyNotSent and fell to its last line, which asked this function about a
+ * stored `Error: Atomic submit control was missing or ambiguous` and got false.
+ *
+ * ONE PREDICATE, TWO FAILURES, and the second one is why the row was ever stuck. This is also the
+ * test fail() uses to decide whether to take the preClickNoSubmitReview early return - the branch PR
+ * 494 added to RELEASE the claim at write time. The wrapped form missed there first, so the run
+ * landed at needs_attention still wearing its claim; then it missed again at read time, so the
+ * reopen could not lift it. Fixing the format fixes both ends at once.
+ *
+ * STILL EXACT AND STILL ANCHORED. Everything an adversarial read of the old key probed is still
+ * refused: a lowercase copy, a trailing period, a one-character truncation, an appended stack, an
+ * inner newline. The comparison is equality against one constant, never a substring or a search over
+ * free text, because a value an employer or a truncating log pipeline can influence must not be able
+ * to reach it.
+ */
 export function isManagedNoSubmitControl(message: string): boolean {
-  return message.trim() === 'Atomic submit control was missing or ambiguous';
+  return unwrapThrownErrorMessage(message) === MANAGED_NO_SUBMIT_CONTROL_MESSAGE;
 }
 
 /**
@@ -368,6 +414,10 @@ export function isManagedNoSubmitControl(message: string): boolean {
 export type PreClickNoSendEvidence = Pick<
   ApplicationReviewState,
   'submission_attempted_at' | 'receipt' | 'unverified_submission' | 'security_code' | 'submission_error'
+  /* The runner's own typed answer, written at failure time. Present on rows written by builds that
+   * carry submission_stop and absent on every older one, which is why the string match below stays
+   * where it is rather than being replaced today. */
+  | 'submission_stop'
 > & MaybeOutcome;
 
 /* NOTHING WAS SENT, AND THE ROW CAN PROVE IT.
@@ -407,8 +457,20 @@ export function submissionProvablyNotSent(evidence: PreClickNoSendEvidence): boo
   if (verdict.kind === 'not_attempted') return true;
   // Any other reported verdict describes a click that landed, so it is not this function's case.
   if (verdict.kind !== 'unreported') return false;
-  // No outcome was reported at all, which is every persisted row. The stored stop is the only proof
-  // left, and it must name the chooser that throws before the click.
+  /* THE TYPED ANSWER FIRST, THE STRING MATCH ONLY AS THE FALLBACK IT ALWAYS WAS.
+   *
+   * The runner knows where it stopped at the moment it stops, and submission_stop is that knowledge
+   * written down. Asking it here is what lets the sentence-matching line below eventually be
+   * DELETED rather than have a second copy of itself grow beside it: once no row predating the field
+   * is still open, this branch answers every case the string one does.
+   *
+   * before_click is not a licence on its own. It is read after the five evidence refusals above, so
+   * a stop that provably preceded THIS run's click still cannot reopen a row that carries a receipt,
+   * a standing code wall, an unresolved unverified record or a recorded attempt from an earlier one. */
+  if (evidence.submission_stop?.before_click === true) return true;
+  // No outcome was reported at all, and no typed stop was recorded, which is every row written
+  // before submission_stop existed. The stored sentence is the only proof left, and it must name the
+  // chooser that throws before the click.
   return isManagedNoSubmitControl(evidence.submission_error ?? '');
 }
 
