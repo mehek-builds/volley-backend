@@ -483,6 +483,15 @@ export type ApplicationReviewState = {
     pdfSha256: string;
     pdfSizeBytes: number;
     acknowledged_at: string;
+    /* WHO LOOKED. Absent means the applicant did, which is what every acknowledgement written
+     * before this field meant, so old rows keep their meaning without a backfill.
+     *
+     * 'auto_restored' is written by restoreExpiredPacketResume when a packet's file had aged out of
+     * the 30-day window and was rebuilt from the frozen spec at send time. Nobody re-read that PDF.
+     * The content is identical by construction, since every render input is frozen on the row, but
+     * "a human confirmed these bytes" and "a machine rebuilt these bytes" are different facts and a
+     * corpus that cannot tell them apart can never answer which packets were actually reviewed. */
+    source?: 'applicant' | 'auto_restored';
   };
   filled_fields?: string[];
   preview_screenshot_url?: string;

@@ -109,7 +109,8 @@ import {
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess';
-import { rerenderFrozenCoverLetter, rerenderFrozenResume } from '../lib/packetDocumentRecovery';
+import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
+import { PACKET_EXPIRED_REASON } from '../lib/packetResumeRestore';
 import { currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
 import { createDashboardHandoffBinding } from '../lib/extensionHandoffPacket';
 import { decryptRow } from './applicationProfile';
@@ -622,22 +623,19 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const parsed = (profileRow[0]?.parsed_json ?? {}) as Record<string, unknown>;
   const review = readApplicationReview(stored);
   if (!review) throw new Error('We could not find this application');
-  /* THE RECOVERY SITS AT THE PRODUCER, not at the call sites, for the reason renderResumePdf states
-     over its own contact guard: there are several paths that assemble a packet, and a check written
-     on one of them leaves the next to be discovered from an employer. buildPacket is the single
-     function that turns a row into documents, so a packet past its retention window is rebuildable
-     everywhere or nowhere.
-
-     No write happens here, deliberately. The rebuilt bytes live for the length of this run and are
-     never put() back into storage, which is what keeps the published promise literally true: the
-     file stays deleted, old links stay dead, and nothing is resurrected for browsing. It also keeps
-     buildPacket read-only, which matters because it runs on preview and controlled-test paths that
-     have no business restarting a retention clock. */
-  const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest)
-    .catch(async (error: unknown) => {
-      if (!(error instanceof PacketDocumentExpiredError) || error.document !== 'resume') throw error;
-      return rerenderFrozenResume({ spec: stored, jdText: review.jd_text ?? '', role: review.role });
-    });
+  /* NO REBUILD HERE, DELIBERATELY, and this is the second design it has had.
+     It first rebuilt the resume in memory at this line. That could never run: every send path
+     passes a packet-audit gate that loads resume_object_key and refuses before buildPacket is
+     called. Worse, it would have been wrong if it had run. renderResumePdf is not byte-deterministic
+     (pdfkit stamps CreationDate; two renders of one spec differ in sha256 at identical length), and
+     three records bind the exact bytes: the generation binding, packet_audit.bindings.pdf.sha256,
+     and the acknowledgement. An in-memory rebuild here would have the audit verifying one document
+     and the employer receiving another.
+     The rebuild now happens once, before the gate, in restoreExpiredPacketResume, which writes the
+     file and re-issues all three records against it. By the time buildPacket runs the file exists,
+     so a throw here means the file went missing AFTER the audit passed, which is a real anomaly and
+     should stop the run rather than be papered over with unaudited bytes. */
+  const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest);
   let coverLetter: Buffer | undefined;
   const coverLetterKey = coverLetterObjectKeyToAttach(stored);
   if (coverLetterKey) {
@@ -2352,28 +2350,36 @@ async function prepareManagedAttendedAccountGate(
   }, 'Application held at an attended account gate without operating it');
 }
 
-async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
-  const stored = row.spec as StoredSpec;
-  const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
-  let current = readApplicationReview(stored);
+async function prepare(inputRow: ResumeRow, fastify: FastifyInstance, unattended = false) {
+  let current = readApplicationReview(inputRow.spec);
   if (!current) throw new Error('We do not have a link to the company application page');
-  current = await repairReviewPortalFromMonitoredJob(row, current);
-  const packetAudit = await currentPacketAudit(row);
+  current = await repairReviewPortalFromMonitoredJob(inputRow, current);
+  /* The audit is also where a packet past its retention window gets its file rebuilt, so the row it
+     returns can carry a NEW resume_object_key. Everything below reads from that row, never from
+     inputRow, or the run assembles a packet from the key the sweep deleted. */
+  const packetAudit = await currentPacketAudit(inputRow);
   if (!packetAudit.valid) {
     fastify.log.warn(
-      { applicationId: row.id, code: packetAudit.code },
+      { applicationId: inputRow.id, code: packetAudit.code },
       'Application preparation withheld because the exact packet audit is missing or stale',
     );
-    await writeReview(row, nextReview(current, {
+    await writeReview(inputRow, nextReview(current, {
       status: 'needs_attention',
       attention_reason: packetAudit.reason,
-      attention_categories: ['evidence_gap'],
+      /* An expired packet is not an evidence gap. It gets the category whose next step is the one
+         that works, a regenerate, rather than the bucket that reads as "Litos broke, try again". */
+      attention_categories: packetAudit.code === 'PACKET_RESUME_EXPIRED' ? ['packet_expired'] : ['evidence_gap'],
       submission_authorization: undefined,
       submission_claimed_at: undefined,
       submission_claim_id: undefined,
     }));
     return;
   }
+  const row = packetAudit.row;
+  const stored = row.spec as StoredSpec;
+  const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
+  // Re-read: a retention restore rewrote _review with a fresh audit and acknowledgement.
+  current = readApplicationReview(stored) ?? current;
   const portalUrl = current.portal_url;
   if (!portalUrl) throw new Error('We do not have a link to the company application page');
   const portal = detectPortal(portalUrl);
@@ -2868,10 +2874,11 @@ const SECURITY_CODE_MAILBOX_DELAY_MS = 3_000;
 // Threaded through submit() rather than given its own run, so the finishing path inherits every
 // guard this one already has: the authorization check, the claim, the daily cap, the portal gates,
 // the ATS channel and the CAPTCHA probe. A parallel path would inherit none of them.
-async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
+async function submit(inputRow: ResumeRow, fastify: FastifyInstance, options: {
   securityCode?: string;
   claimAlreadyHeld?: boolean;
 } = {}) {
+  let row = inputRow;
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
   const packetAudit = await currentAcknowledgedPacketAudit(row);
@@ -2886,7 +2893,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       attention_reason: finishingSecurityCode
         ? `${securityCodeAttentionReason(current.security_code!)}\n${packetAudit.reason}`
         : packetAudit.reason,
-      attention_categories: finishingSecurityCode ? ['security_code', 'evidence_gap'] : ['evidence_gap'],
+      attention_categories: packetAudit.code === 'PACKET_RESUME_EXPIRED'
+        ? (finishingSecurityCode ? ['security_code', 'packet_expired'] : ['packet_expired'])
+        : (finishingSecurityCode ? ['security_code', 'evidence_gap'] : ['evidence_gap']),
       submission_authorization: undefined,
       submission_claimed_at: undefined,
       submission_claim_id: undefined,
@@ -2977,6 +2986,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     }));
     return;
   }
+  /* Adopted here, not earlier: a retention restore inside the audit gives the packet a new
+     resume_object_key, and claimSubmission and everything after it must work from that row. */
+  row = packetAudit.row;
   const claimedRow = await claimSubmission(row, options.claimAlreadyHeld);
   if (!claimedRow) return;
   row = claimedRow;
@@ -3635,7 +3647,7 @@ export function submissionFailureOutcome(input: {
            not a proven one on any given row. Same discipline as the cause-neutral wording on
            noSubmitControl below. The recovery is identical either way, so nothing is lost by not
            claiming more than is known. */
-        ? 'The resume file for this application is no longer stored, so Litos could not put the application together and nothing was sent to the employer. Litos deletes the resumes it generates after 30 days, which is normally what has happened here. Regenerate this application and send it again.'
+        ? PACKET_EXPIRED_REASON
       : actionBudgetStop
         /* Ranked above uncertainAfterClaim for the same reason as its two neighbours: the throw
            happens before the browser is driven, so nothing was sent and there is no confirmation to
