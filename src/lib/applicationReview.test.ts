@@ -515,3 +515,57 @@ test('submit merge preserves provenance only for an exact current reviewed ident
   assert.equal(omitted[0].answer_source, undefined);
   assert.equal(omitted[0].answer_reviewed_at, undefined);
 });
+
+/* A DERIVATION NEVER OUTLIVES THE ANSWER IT DESCRIBES, ON THIS PATH TOO.
+ *
+ * answer_option_source records the profile value an option was snapped from, and
+ * storedOptionAnswerIsCurrent reads it as proof that the answer beside it is still current. That
+ * proof is only worth anything while the answer is the one it was written for. This merge replaces
+ * `answer` from the submit body, so a derivation carried across would describe a value it never
+ * described, and the next refresh and the next fill would both believe it.
+ *
+ * Benign today, because the route is authenticated and user-scoped so the substituted answer is the
+ * applicant's own edit. Pinned anyway: a record that claims a snap which never happened is
+ * undetectable from the record alone, which is the exact failure mode this field was added to end.
+ *
+ * refreshKnownQuestionAnswers already drops it on the branches that recompute. This is the same
+ * invariant on the other function that overwrites an answer. */
+test('submit merge drops the option derivation whenever it replaces the answer', () => {
+  const reviewedAt = '2026-08-09T12:00:00.000Z';
+  const stored = [{
+    id: 'q',
+    question: 'Expected graduation date',
+    answer: 'January 2028 - July 2028',
+    kind: 'required' as const,
+    required: true,
+    answer_source: 'applicant_review' as const,
+    answer_reviewed_at: reviewedAt,
+    answer_option_source: 'May 2028',
+  }];
+
+  // The answer is replaced, so the derivation describes a value that is no longer there.
+  const replaced = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0], answer: 'August 2028 - December 2028' }],
+    reviewedAt,
+  );
+  assert.equal(replaced[0].answer, 'August 2028 - December 2028');
+  assert.equal(replaced[0].answer_option_source, undefined,
+    'a derivation must not describe an answer it was never derived for');
+
+  // Same when the reviewed provenance is stale, which is the ordinary path for a resubmitted packet.
+  const staleReview = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0], answer: 'August 2028 - December 2028' }],
+    '2026-08-09T12:00:01.000Z',
+  );
+  assert.equal(staleReview[0].answer_option_source, undefined);
+
+  // And the one branch that keeps the whole record keeps it, because that branch requires the
+  // answer to be byte-identical. Without this the fix would be a blanket erase, and every
+  // resubmitted packet would lose the evidence that its resolved option is current.
+  const unchanged = mergeSubmittedApplicationReviewQuestions(stored, [{ ...stored[0] }], reviewedAt);
+  assert.equal(unchanged[0].answer, 'January 2028 - July 2028');
+  assert.equal(unchanged[0].answer_option_source, 'May 2028',
+    'an unchanged answer keeps the derivation that still describes it');
+});

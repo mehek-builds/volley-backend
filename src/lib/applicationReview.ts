@@ -175,9 +175,18 @@ export function mergeSubmittedApplicationReviewQuestions(
       && submittedQuestion.question === question.question
       && questionKey(submittedQuestion.question) === questionKey(question.question)
       && submittedQuestion.answer === question.answer;
+    /* answer_option_source goes with the answer it describes, and `answer` is replaced below.
+     *
+     * The kept branch is safe to leave alone: exactReviewedIdentityUnchanged requires
+     * submittedQuestion.answer === question.answer, so the value the derivation describes is still
+     * the value in the record. Every other path through here substitutes a different answer, and a
+     * derivation that outlives its value claims a snap that never happened for what the record now
+     * holds. Nothing downstream can detect that from the record alone, and storedOptionAnswerIsCurrent
+     * would read the inherited derivation as proof the answer is current. */
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
+      answer_option_source: _answerOptionSource,
       ...questionWithoutProvenance
     } = question;
     return {
