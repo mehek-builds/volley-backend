@@ -5,6 +5,7 @@ import { decryptRow } from '../routes/applicationProfile';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import type { ApplicationProfileLike } from './questionDiscovery';
 import { selectApplicationProfileRow, factBoolean, factString, factStringList } from './applicationFacts';
+import { submittedApplicationCompanies } from './duplicateApplication';
 import { countryEligibilityForRead } from './workEligibility';
 
 export function eligibilityFromLoadedApplicationProfile(
@@ -48,7 +49,7 @@ function experienceBankType(value: string): 'job' | 'project' | 'leadership' | u
 }
 
 export async function loadApplicationProfileLike(userId: string): Promise<ApplicationProfileLike> {
-  const [appRow, [profileRow], [userRow], bankRows] = await Promise.all([
+  const [appRow, [profileRow], [userRow], bankRows, submittedCompanies] = await Promise.all([
     // Tolerant read, see lib/applicationFacts.ts. This is the resolver's own profile read, so a
     // 42703 here would stall every in-flight submission, not just the new questions.
     selectApplicationProfileRow(userId),
@@ -67,6 +68,16 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
      * experience" and "you never worked anywhere" must not become the same input. Throwing here
      * would instead stall every submission over a question that is allowed to be left blank. */
     readExperienceBankOrSeedFromBaseResume(userId).catch(() => []),
+    /* Litos' own record of what it has already sent for this user, which is the ONLY thing that may
+     * stand down the default "No" to "have you applied to us before?".
+     *
+     * The catch returns undefined, NOT an empty list, and the difference is the whole safety of the
+     * rule. An empty list says "Litos looked and has sent nothing", which licenses the answer; a
+     * failed read that arrived as an empty list would license the same answer having checked
+     * nothing, and could tell an employer she has never applied on a day the database was down.
+     * undefined reaches the resolver as "not read" and it holds the question, which is what it does
+     * today. Same shape as the experience-bank catch above, opposite value, for opposite reasons. */
+    submittedApplicationCompanies(userId).catch(() => undefined),
   ]);
   const app = appRow ? (decryptRow(appRow) as Record<string, unknown>) : {};
   const parsed = (profileRow?.parsed_json && typeof profileRow.parsed_json === 'object'
@@ -231,6 +242,8 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     preferred_first_name: factString(appRow, 'preferred_first_name'),
     high_school_grad_date: factString(appRow, 'high_school_grad_date'),
     prior_application_employers: factStringList(appRow, 'prior_application_employers'),
+    // Not an onboarding fact and not a declaration: Litos' own send history, read above.
+    submitted_application_companies: submittedCompanies,
     has_outstanding_offers: factBoolean(appRow, 'has_outstanding_offers'),
     outstanding_offer_details: factString(appRow, 'outstanding_offer_details'),
     military_service: factString(appRow, 'military_service'),

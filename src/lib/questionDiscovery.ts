@@ -1,4 +1,5 @@
 import type { Page } from 'playwright-core';
+import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
 import { officeMetrosNamed } from './officeMetros';
@@ -106,6 +107,16 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   high_school_grad_date?: string;
   // [] is a real answer meaning "I have not applied anywhere before". undefined is "never asked".
   prior_application_employers?: string[];
+  /* LITOS' OWN HISTORY, not a declaration she made: every employer this user already has an
+   * application at, from `job_context.company` on the rows lib/duplicateApplication.ts counts as
+   * having reached an employer. Loaded by lib/applicationProfileLike.ts.
+   *
+   * TRI-STATE, and the third state is the one that matters. `[]` is "Litos looked and has never
+   * sent anything for you", which is what licenses the default "No" to "have you applied to us
+   * before?". `undefined` is "nobody looked" - an older caller, or a history read that failed - and
+   * it must NOT license that answer, so a company-scoped question with nothing declared stays held
+   * exactly as it is today. Absence of a read is not evidence of absence. */
+  submitted_application_companies?: string[];
   has_outstanding_offers?: boolean;
   outstanding_offer_details?: string;
   military_service?: string;
@@ -714,6 +725,77 @@ function employerMatchesTarget(declared: string, target: string): boolean {
   return true;
 }
 
+/**
+ * Whether Litos' own history already shows an application at the employer THIS packet is for.
+ *
+ * Three answers, not two. `undefined` is "the history was not read", which is a different thing
+ * from "the history is clear" and may never be treated as one - see submitted_application_companies
+ * on ApplicationProfileLike. `false` is the only value that licenses an answer.
+ *
+ * The comparison is lib/companyIdentity.ts's, which is the duplicate guard's own rule for whether
+ * two packets are for the same employer, on the two strings it already compares: the packet's
+ * `job_context.company` on each side. Exact on the folded identity, so a submitted "IMC Trading"
+ * application does not stand down the answer for a posting at "IMC", and "Imcorp" stands down
+ * nothing at all.
+ */
+function applicationAlreadyAtPacketEmployer(
+  ap: ApplicationProfileLike,
+  jdText?: string,
+): boolean | undefined {
+  const history = ap.submitted_application_companies;
+  if (!history) return undefined;
+  const packetEmployer = frozenJobEmployerFromContext(jdText);
+  if (!packetEmployer) return undefined;
+  return history.some((company) => isSameCompany(company, packetEmployer));
+}
+
+/**
+ * "Have you applied to us before?", and why the default is now No.
+ *
+ * The old rule answered nothing without `prior_application_employers`, an onboarding column most
+ * accounts have never filled, so every company-scoped prior-application question was handed back.
+ * On the live IMC form on 2026-08-10 that was one of the blockers holding a real application.
+ *
+ * A company-scoped question has exactly one honest default, and it is No: Litos knows what it has
+ * sent for this user, and if it has sent nothing to this employer there is nothing to declare. The
+ * one thing that withdraws that answer is Litos' own history showing an application already at this
+ * employer - and the withdrawal is a HAND-BACK, never a "Yes". The questions carry windows ("within
+ * the last 12-18 months") and role scopes that a list of employers cannot settle, and a wrong Yes
+ * costs the applicant exactly as much as a wrong No.
+ *
+ * The order below is the argument:
+ *   1. A declared employer is a statement she made herself, and it answers Yes. No history read can
+ *      contradict a Yes, so it is settled first.
+ *   2. Global history ("have you applied anywhere before?") is NOT company-scoped, so the
+ *      company-scoped evidence says nothing about it and its behaviour is unchanged.
+ *   3. A company Litos has already applied to is handed back, whichever record said so.
+ *   4. A declared list that does not name this employer still answers No, exactly as it did before
+ *      this rule existed, whether or not the history was readable.
+ *   5. Nothing declared answers No only when the history was actually read and is clear.
+ *
+ * AND ONE MORE, WHICH RUNS BEFORE ALL FIVE. Where a trailing help-text sentence was removed from
+ * the label, the question's true scope is unknown, and this file will not guess at it: see
+ * withoutTrailingHelpText for why two rounds of trying to read the sentence were deleted rather
+ * than extended. A removed sentence may have narrowed the question ("only internship applications"),
+ * widened it ("applications to any IMC group entity also count", "our subsidiaries"), moved its
+ * window, or done nothing at all, and nothing here can tell those apart.
+ *
+ * So under a removed sentence the rule is about the RECORDS, not the words:
+ *   - never Yes, from any record. A Yes rests on an application whose membership in the restated
+ *     scope cannot be established.
+ *   - No only where there is no positive record ANYWHERE - not "none for this employer", none at
+ *     all. With zero applications to any employer, "No" is true under every restriction, every
+ *     widening, every time window and every group-entity rewording, because there is nothing for a
+ *     restatement to bring into scope. This is what keeps the default-No path, the whole point of
+ *     this change, exactly as it is: nothing sent and nothing declared answers No, tail or no tail.
+ *   - otherwise hold.
+ *
+ * THE COST, STATED. A student who has declared any prior application to any employer gets a
+ * hand-back on a question carrying such a tail, where main would sometimes have answered. That is
+ * one question she answers herself, against a wrong statement on a live application. It is also
+ * what withdraws main's "Yes" on the one measured IMC reminder when her declared list names IMC;
+ * governmentEmployment.test.ts pins the new behaviour and the reasoning.
+ */
 function previouslyAppliedAnswer(
   label: string,
   ap: ApplicationProfileLike,
@@ -721,21 +803,41 @@ function previouslyAppliedAnswer(
 ): { value: string } | { skipReason: string } | null {
   const parsed = parsePriorApplicationQuestion(label, jdText);
   if (!parsed) return null;
-  if (!parsed.valid || (!parsed.target && !parsed.globalPriorApplicationHistory)) {
-    return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
-  }
+  const held = { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
+  if (!parsed.valid || (!parsed.target && !parsed.globalPriorApplicationHistory)) return held;
+
   const declared = ap.prior_application_employers;
+  const history = ap.submitted_application_companies;
+
+  /* A REMOVED SENTENCE RESTATED THE SCOPE, AND ONLY AN EMPTY RECORD SURVIVES THAT.
+   *
+   * Both records are read for their CONTENT, not for this employer: a widening tail is exactly the
+   * case where an application to some other employer is the one that counts. `[]` on either record
+   * is a positive statement that there are none - hers in prior_application_employers, Litos' own
+   * in the send history - and undefined on both is nobody having looked, which cannot establish
+   * anything and holds. */
+  if (withoutTrailingHelpText(label).stripped) {
+    const anyRecord = (declared?.length ?? 0) > 0 || (history?.length ?? 0) > 0;
+    const provenNone = declared?.length === 0 || history?.length === 0;
+    return !anyRecord && provenNone ? { value: 'No' } : held;
+  }
+
+  if (declared && declared.length > 0) {
+    // Her own statement, and no history read can contradict it.
+    if (parsed.globalPriorApplicationHistory) return { value: 'Yes' };
+    if (declared.some((employer) =>
+      employerMatchesTarget(canonicalSiblingEmployerIdentity(employer), parsed.target!))) {
+      return { value: 'Yes' };
+    }
+  }
   // undefined is "never asked". An empty array is the student saying she has not applied anywhere
   // before, which answers No for every employer - the two must not be collapsed.
-  if (!declared) {
-    return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
-  }
-  if (declared.length === 0) return { value: 'No' };
-  if (parsed.globalPriorApplicationHistory) return { value: 'Yes' };
-  const matched = declared.some((employer) =>
-    employerMatchesTarget(canonicalSiblingEmployerIdentity(employer), parsed.target!),
-  );
-  return { value: matched ? 'Yes' : 'No' };
+  if (parsed.globalPriorApplicationHistory) return declared ? { value: 'No' } : held;
+
+  const alreadyThere = applicationAlreadyAtPacketEmployer(ap, jdText);
+  if (alreadyThere === true) return held;
+  if (declared) return { value: 'No' };
+  return alreadyThere === false ? { value: 'No' } : held;
 }
 
 function referralAnswer(
@@ -2129,11 +2231,76 @@ function validatedSiblingEmployerTarget(raw: string, packetEmployer: string | un
   return matched ? canonicalSiblingEmployerIdentity(packetEmployer) : null;
 }
 
+/* THE SENTENCE AFTER THE QUESTION MARK THAT IS NOT A SECOND QUESTION.
+ *
+ * IMC's live label reads "...within the last 12-18 months? As a reminder, if you have already
+ * applied for this position during the current recruitment season and were not selected, you may
+ * reapply when the next recruitment season begins in 2027." The trailing sentence is the employer
+ * telling the applicant what happens next. It asks her nothing. Read as part of the question it
+ * makes the label compound, and on 2026-08-10 that is exactly why the resolver handed it back with
+ * "because this is a compound application question" while the question itself was answerable.
+ *
+ * CLOSED ON THREE POINTS rather than a keyword strip, because the compound refusal is a real guard
+ * and this must not become a hole in it:
+ *   - the tail must begin after a question mark, so only text the employer put outside the question
+ *     is eligible;
+ *   - it must open with one of a fixed set of help-text markers;
+ *   - it must be exactly ONE sentence, and contain no question mark of its own.
+ * "Have you applied to this role...? As a reminder, ...reconsidered. Please explain why." keeps
+ * every word and stays compound, because the instruction is a second sentence. So does
+ * "...applied here? If yes, please explain.", because "if yes" is not a help-text marker.
+ */
+const QUESTION_HELP_TEXT_OPENER = /^(?:as a reminder|reminder|please note|note)\b/i;
+
+/* THERE IS NO VOCABULARY HERE, AND THAT IS THE POINT.
+ *
+ * An earlier version of this branch tried to sort tails into inert and scoping with five closed
+ * word classes - restrictive, exceptive, deontic, additive, set-membership. It failed twice on
+ * review and both failures were the same failure. It read `only` and `must` and held, and then
+ * answered "Yes" off a declared employer for "we disregard applications made before 2024", "we
+ * ignore internship applications", "for the purposes of this question, internships are separate".
+ * A list over surface forms cannot decide a semantic property: it fails closed on false positives
+ * and OPEN on false negatives, and the open direction is the one that makes a false statement to an
+ * employer. Lengthening the alternation makes it right about a seventh phrasing and wrong about an
+ * eighth.
+ *
+ * So nothing below reads the tail. `stripped` says only THAT a sentence was removed, and
+ * previouslyAppliedAnswer treats a removed sentence as an unknown restatement of scope: it never
+ * answers Yes, and it answers No only where there is no positive record of any application to any
+ * employer at all. With zero records there is nothing for any restatement to bring into or out of
+ * scope, so "No" is true under every restriction, every widening, every time window and every
+ * group-entity rewording. That is a property of the records, established without any judgement
+ * about what the words mean.
+ */
+type QuestionWithoutHelpText = {
+  /** The label with the trailing sentence removed, for the shape grammar to read. */
+  questionText: string;
+  /** Whether a trailing sentence was removed at all. Nothing reads what it said. */
+  stripped: boolean;
+};
+
+function withoutTrailingHelpText(label: string): QuestionWithoutHelpText {
+  const trimmed = label.trim();
+  const mark = trimmed.indexOf('?');
+  const unchanged = { questionText: label, stripped: false };
+  if (mark < 0) return unchanged;
+  const tail = trimmed.slice(mark + 1).trim();
+  if (!tail || tail.includes('?')) return unchanged;
+  if (!QUESTION_HELP_TEXT_OPENER.test(tail)) return unchanged;
+  if (/[.!]/.test(tail.replace(/[.!]+$/, ''))) return unchanged;
+  /* THE STRIP STILL HAPPENS, and only the ANSWER is restricted. Refusing to strip would put the
+   * label back in the compound refusal for every profile, which narrows the default-No path to fix
+   * a problem it does not have: where nothing has been sent and nothing is declared there is no
+   * application for any restatement to qualify, so the removed sentence cannot change the answer. */
+  return { questionText: trimmed.slice(0, mark + 1), stripped: true };
+}
+
 function parsePriorApplicationQuestion(
   label: string,
   jdText?: string,
 ): ParsedSiblingQuestion | null {
-  const value = normalizedSiblingQuestionLabel(label);
+  const { questionText } = withoutTrailingHelpText(label);
+  const value = normalizedSiblingQuestionLabel(questionText);
   if (/\bapplication (?:support|systems?|software|development|engineering|programming|security)\b/i.test(value)
     || (/\b(?:previous|prior) (?:applicant|application)\b/i.test(value)
       && /\b(?:experience|skills?|expertise|knowledge|architecture|analytics|tracking|systems?|software)\b/i.test(value))) {
@@ -2216,7 +2383,7 @@ function parsePriorApplicationQuestion(
   const previousApplicant = value.match(/^previous applicant\b(.*)$/i);
   if (previousApplicant) {
     const tail = previousApplicant[1]?.trim() ?? '';
-    if (tail && !siblingTailSignalsQuestionOrInstruction(label, tail)) return null;
+    if (tail && !siblingTailSignalsQuestionOrInstruction(questionText, tail)) return null;
     return {
       family: 'prior_application',
       valid: !previousApplicant[1]?.trim() && Boolean(packetEmployer),
@@ -2298,7 +2465,15 @@ function parsePriorApplicationQuestion(
       new RegExp(`^(?:at|for|to|with) ${escaped}(?: ${temporal})?$`),
       new RegExp(`^to work (?:at|for) ${escaped}(?: ${temporal})?$`),
       new RegExp(`^(?:to|for) (?:(?:a|an|the|this|any) )?(?:role|position|job) (?:at|with|for) ${escaped}(?: ${temporal})?$`),
-      new RegExp(`^to this role or another role ${escaped} within the last \\d+(?: \\d+)? months?(?: as a reminder if you have already applied you will not be reconsidered)?$`),
+      /* "this role or another role at <employer>" is fully covered by company-scoped evidence:
+         both halves of the disjunction are roles AT this employer, so the answer does not depend on
+         which one. The time window is not covered, and does not need to be - the default answer is
+         No, and "no application at all" is No in every window. Where the history does hold one, the
+         question is handed back precisely because the window cannot be settled.
+         The window itself is the shared priorTime grammar rather than a months-only literal, and the
+         employer's reminder sentence is removed by withoutTrailingHelpText before this runs, so the
+         one measured tail no longer has to be spelled out inside the shape. */
+      new RegExp(`^to (?:this|the) (?:role|position|job) or another (?:role|position|job) (?:(?:at|with|for) )?${escaped}(?: ${temporal})?$`),
     ];
     if (shapes.some((shape) => shape.test(remainder))) {
       return { family: 'prior_application', valid: true, target: canonicalSiblingEmployerIdentity(packetEmployer!) };
