@@ -2316,15 +2316,6 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     /* Instructions about the high school, not exclusions of it. */
     'do not abbreviate your high school name',
     'if you attended more than one high school, list the most recent high school name',
-    /* An education-LEVEL phrase with a high-school FACT hung on it is still a high-school question. */
-    'highest education: high school name',
-    'level of education: high school gpa',
-    /* The ordering hole. One draft returned null here instead of refusing, and the label fell past
-       the graduation handler into the classifier, which read "graduation year" and answered "May
-       2028" - the UNIVERSITY year. That made the branch strictly worse than the code it replaced,
-       on the exact defect it was written to fix. A refusal cannot fall through. */
-    'highest level of education high school name & graduation year',
-    'highest level of education, high school name and year of graduation',
   ]) {
     refuses(label, 'textarea', HS);
     refuses(label, 'textarea');             // and with no high-school fact stored at all
@@ -2334,6 +2325,20 @@ test('a question about HIGH SCHOOL is never answered from the university profile
       /high school question left for you/,
       label,
     );
+  }
+
+  /* The ordering hole. One draft returned null for a combined name-and-year control instead of
+     refusing, and the label fell past the graduation handler into the classifier, which read
+     "graduation year" and answered "May 2028" - the UNIVERSITY year. A refusal cannot fall through.
+     These two carry an education-LEVEL phrase as well, so the classifier is left alone on them and
+     the resolver is what holds: resolveProfileField consults it before building any ladder, so no
+     value can escape behind the refusal. */
+  for (const label of [
+    'highest level of education high school name & graduation year',
+    'highest level of education, high school name and year of graduation',
+  ]) {
+    assert.equal(questionRefusedAsHighSchool(label, HS), true, label);
+    assert.equal(resolveProfileField({ label, inputType: 'text' }, HS), null, label);
   }
 
   /* The classifier is where this has to be fixed, not only the resolver. resolveKnownAnswer was
@@ -2425,6 +2430,13 @@ test('a question about HIGH SCHOOL is never answered from the university profile
        institutions and every rule that tried to adjudicate that cost a commoner label. Unchanged
        from main is the bar. */
     ['school name (high school)', PROD_OWNER_PROFILE.school],
+    /* The education-LEVEL family, in full. An earlier revision made an exception when a fact looked
+       attached to the noun, which bought "level of education: high school GPA" and sold the
+       commonest dropdown in ATS - the fact test could not tell a level word ("high school diploma")
+       or an incidental one ("if you attended high school outside the U.S.") from a real one. Left
+       as main has them. */
+    ['highest education: high school name', PROD_OWNER_PROFILE.school],
+    ['level of education: high school gpa', PROD_OWNER_PROFILE.gpa],
     ['high school gpa (not college gpa)', PROD_OWNER_PROFILE.gpa],
     ['high school name (university name is entered separately)', PROD_OWNER_PROFILE.school],
     // Not an education field at all. One draft's guard sat above the city, phone, language and
@@ -2448,6 +2460,33 @@ test('a question about HIGH SCHOOL is never answered from the university profile
   ] as const) {
     assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: expected }, label);
   }
+  /* A high school that OWNS the graduation word keeps its date, however many institutions the label
+     names. The veto added for university graduation controls returned null here instead of
+     refusing, which dropped the label into the classifier and answered it with the university's
+     NAME - this branch's headline defect, on a new label family. */
+  for (const label of [
+    'in what year did you graduate from high school? please also enter the school name.',
+    'when did you graduate from high school? school name:',
+    'graduation year (high school) - if you attended more than one school, enter the most recent.',
+    'graduation year (high school). school name is entered separately.',
+    'year of graduation from high school (school name below)',
+    'what year did you graduate from high school? if you attended more than one school, list the most recent.',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: 'May 2023' }, label);
+  }
+
+  /* A fact request is not an essay prompt, however long the label. Standing down on length alone
+     let "What is the name of the high school you attended most recently?" reach the drafter, to
+     have a high school invented for it - the one outcome worse than a blank. */
+  for (const label of [
+    'what is the name of the high school you attended most recently?',
+    'what was your gpa in high school, on a 4.0 scale?',
+    'what is your high school name, city and state?',
+  ]) {
+    assert.equal(questionRefusedAsHighSchool(label, HS), true, label);
+  }
+  assert.equal(questionRefusedAsHighSchool('describe your leadership experience in high school', HS), false);
+
   /* Families that own their own labels. Self-identification has its own ladder and its own stored
      preference, and an open-ended prompt is the essay drafter's; neither classifies to a profile
      key, so the refusal was shadowing both. */
@@ -2472,6 +2511,10 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     // a deferral test refused this dropdown, which main answered.
     'highest level of education completed (e.g. high school, bachelor’s, master’s) - select below',
     'highest level of education (if you did not attend college, choose high school)',
+    /* Workday's wording. Every one of these was a blocker where main selected the right degree. */
+    'highest level of education. if you attended high school outside the u.s., select other.',
+    'highest level of education completed (high school names are not collected)',
+    'highest level of education - if you did not attend high school, select n/a',
   ]) {
     assert.equal(classifyField(label), 'degree', label);
     assert.deepEqual(resolveKnownAnswer(label, 'select', HS, undefined), { value: "Bachelor's Degree" }, label);

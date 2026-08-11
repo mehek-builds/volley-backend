@@ -606,9 +606,17 @@ function highSchoolGraduationAnswer(
    * another institution is left exactly as it was - and it holds for the spaced spelling too,
    * which main was already getting wrong. */
   if (!HIGH_SCHOOL_GRADUATION_QUESTION.test(label)) return null;
-  if (!HIGH_SCHOOL_OWNS_THE_GRADUATION.test(label)) {
-    if (CURRENT_PROGRAMME_NAMED.test(label) || labelNamesAnotherInstitution(label)) return null;
-    if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(label)) return null;
+  /* ORDER IS THE MEANING HERE TOO, and getting it wrong put the university's NAME into a
+   * high-school control - the branch's own headline defect, reintroduced on a new label family.
+   * The negation goes first: a high school named as its object means the university owns the box.
+   * Failing that, a high school sitting ON the graduation word owns it, however many institutions
+   * the label names - "In what year did you graduate from high school? Please also enter the school
+   * name" is a high-school control, and standing down there answered it "University of Southern
+   * California". Only a label that does neither falls through to the classifier. */
+  if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(label)) return null;
+  if (!HIGH_SCHOOL_OWNS_THE_GRADUATION.test(label)
+      && (CURRENT_PROGRAMME_NAMED.test(label) || labelNamesAnotherInstitution(label))) {
+    return null;
   }
   /* One control asking for the school's NAME as well as the year cannot be satisfied by the year.
    * Palantir's card is "High School Name & Graduation Year", and typing "May 2023" into it answers
@@ -656,7 +664,7 @@ function highSchoolRecordRefusal(label: string): { skipReason: string } | null {
    * "describe your leadership experience in high school" is a question she can answer at length
    * rather than a fact the profile was asked for. Both were being shadowed by this refusal because
    * neither classifies to a profile key, and the stand-down below only reads the key. */
-  if (EEO_QUESTION.test(label) || isOpenEndedQuestion(label)) return null;
+  if (EEO_QUESTION.test(label)) return null;
   /* GATED ON THE SAME KEY SET AS classifyField's WRAPPER, and for the same reason: a label can name
    * her high school while asking for something that is not an education fact at all. "What city do
    * you live in? (not the city of your high school)" is an address question, and refusing it hands
@@ -670,6 +678,11 @@ function highSchoolRecordRefusal(label: string): { skipReason: string } | null {
    * name is the same wrong answer arriving by a different route. */
   const intent = classifyFieldIntent(label);
   if (intent && !CURRENT_PROGRAMME_KEYS.has(intent)) return null;
+  /* An open-ended prompt is the drafter's - but only when the label is not ALSO a fact request. A
+   * label that classifies as school, GPA or degree is asking for a fact however long it is, and
+   * standing down on length alone is how "What is the name of the high school you attended most
+   * recently?" reached the drafter to have a high school invented for it. */
+  if (!intent && isOpenEndedQuestion(label)) return null;
   return { skipReason: `high school question left for you: "${label.slice(0, 60)}"` };
 }
 
@@ -2895,31 +2908,14 @@ const HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT = new RegExp(
  * decides it, and only here - the noun sitting directly on the graduation word, not merely in the
  * same sentence. */
 const HIGH_SCHOOL_OWNS_THE_GRADUATION = new RegExp(
-  String.raw`\b${HIGH_SCHOOL_LITERAL}\b[\s:,\-–—/()]{0,3}(?:graduat\w*|diploma|ged)`,
+  String.raw`\b${HIGH_SCHOOL_LITERAL}\b[^.?!]{0,20}?(?:graduat\w*|diploma|ged)`
+  + String.raw`|(?:graduat\w*|diploma|ged)[^.?!]{0,20}?\b${HIGH_SCHOOL_LITERAL}\b`,
   'i',
 );
 
 const CONDITIONAL_ON_BEING_A_SCHOOL_LEAVER =
   /\bif\s+you\s+(?:are|were)\b[^.?!]{0,40}?\b(?:freshman|first[\s-]year|high[\s-]?school\s+student|still\s+in\s+high[\s-]?school)\b|\bdoes\s+not\s+count\b|\bonly\s+if\s+you\s+(?:are|were)\b/i;
 
-/* A fact about the SCHOOL, not a name for the LEVEL. "Diploma", "degree", "certificate" and
- * "graduation" are level words: an option list reads "High School Diploma" beside "Associate
- * Degree", and counting that as a fact hung on the high school turned the whole dropdown into a
- * high-school question - "Highest level of education completed (e.g. high school diploma, associate
- * degree, master's degree)" selected "Yes" where main selected "Bachelor's Degree", and the
- * Canadian "Secondary School Diploma" and Indian "Grade 12" spellings were refused outright. Those
- * lists carry no "bachelor", so the veto does not save them. */
-const HIGH_SCHOOL_FACT =
-  String.raw`(?:names?|institutions?|gpa|grade\s+point\s+average|cit(?:y|ies)|towns?|states?|addresses|attend\w*)`;
-/* Adjacency survives in exactly one job: telling an education-LEVEL list apart from a high-school
- * fact. "Education level (high school)" enumerates it as an option and the answer is the current
- * degree; "Level of education: high school GPA" attaches a fact to it and is a high-school
- * question. Punctuation-tolerant in both directions, because that is how forms print it. */
-const HIGH_SCHOOL_FACT_ATTACHED = new RegExp(
-  String.raw`${HIGH_SCHOOL_WORD}(?:['’]s)?[\s:,\-–—/()]{1,3}${HIGH_SCHOOL_FACT}\b`
-  + String.raw`|\b${HIGH_SCHOOL_FACT}[\s:,\-–—/()]{1,3}(?:(?:of|at|from|in|for|during)\s+)?(?:your\s+|the\s+|my\s+)?${HIGH_SCHOOL_WORD}`,
-  'i',
-);
 const EDUCATION_LEVEL_QUESTION =
   /\beducation\s+level\b|\blevel\s+of\s+education\b|\bhighest\s+(?:level|degree|qualification|education)\b/i;
 
@@ -2933,8 +2929,14 @@ export function questionIsScopedToHighSchool(label: string): boolean {
   // ...and the high school named as the negation's immediate object: "(not high school)".
   if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(l)) return false;
   if (CONDITIONAL_ON_BEING_A_SCHOOL_LEAVER.test(l)) return false;
-  // An education-level list naming it as an option, with no fact hung on it, is a degree question.
-  return !(EDUCATION_LEVEL_QUESTION.test(l) && !HIGH_SCHOOL_FACT_ATTACHED.test(l));
+  /* An education-LEVEL control names a high school as one option in a list, and the answer is the
+   * current degree. This used to make an exception when a FACT looked attached to the noun, which
+   * bought "level of education: high school GPA" and sold the commonest dropdown in ATS: the fact
+   * test could not tell a level word ("high school diploma") or an incidental one ("if you attended
+   * high school outside the U.S.") from a real one, and a Workday "Highest Level of Education"
+   * became a blocker where main selected the right degree. The exception is gone; those labels are
+   * left exactly as main had them, which is this rule's whole discipline. */
+  return !EDUCATION_LEVEL_QUESTION.test(l);
 }
 
 /* Does the label ask for the high school's NAME? Distinct from the subject rule because the
