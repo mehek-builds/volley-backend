@@ -2079,6 +2079,12 @@ function skipReasonOf(result: ReturnType<typeof resolveKnownAnswer>): string | n
   return result && 'skipReason' in result ? result.skipReason : null;
 }
 
+/** Whether the resolver blocked this label specifically as a question about the high school. */
+function questionRefusedAsHighSchool(label: string, profile: ApplicationProfileLike): boolean {
+  const reason = skipReasonOf(resolveKnownAnswer(label, 'text', profile, undefined)) ?? '';
+  return /high school question left for you/.test(reason);
+}
+
 function refuses(label: string, inputType = 'text', profile = PROD_OWNER_PROFILE): void {
   const result = resolveKnownAnswer(label, inputType, profile, undefined);
   assert.ok(
@@ -2330,6 +2336,14 @@ test('a question about HIGH SCHOOL is never answered from the university profile
        required the negation to govern the institution rather than merely precede it. */
     'do not abbreviate your high school name',
     'if you attended more than one high school, list the most recent high school name',
+    /* The college exclusion written the other way round. Only the forward order was recognised at
+       first, so these fell through to the plain "a college is mentioned" test and typed the
+       UNIVERSITY GPA and the UNIVERSITY name into a high-school control. */
+    'high school gpa (college gpa not needed)',
+    'high school gpa - university gpa is not accepted here',
+    'high school name (college name is not required)',
+    'high school name (university name is entered separately)',
+    'high school name (college name is asked below)',
   ]) {
     refuses(label, 'textarea', HS);
     refuses(label, 'textarea');             // and with no high-school fact stored at all
@@ -2388,6 +2402,15 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     ['name of post-secondary institution', PROD_OWNER_PROFILE.school],
     ['post-secondary school name', PROD_OWNER_PROFILE.school],
     ['what is your gpa? (high school gpa if you are a freshman)', PROD_OWNER_PROFILE.gpa],
+    /* Exclusion glosses whose verb is outside any closed list. The exclusion test cannot be a list
+       of verbs, so the broad form is admitted only when the label ALSO names the institution it is
+       actually asking for - which is what keeps "do not abbreviate your high school name" above,
+       naming no other institution, on the refusing side. */
+    ['school name - please do not type your high school here.', PROD_OWNER_PROFILE.school],
+    ['which institution? do not select your high school.', PROD_OWNER_PROFILE.school],
+    ['institution name (do not repeat your high school)', PROD_OWNER_PROFILE.school],
+    ['school attended (leave out your high school)', PROD_OWNER_PROFILE.school],
+    ['what is the name of your school? your high school should be excluded.', PROD_OWNER_PROFILE.school],
     // Not an education field at all. The first draft's guard sat above the city, phone, language
     // and availability arms of classifyField and took them with it.
     ['what city do you live in? (not the city of your high school)', PROD_OWNER_PROFILE.address_city],
@@ -2406,9 +2429,34 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     'what year did you start teaching in secondary education?',
     'when did you last teach grade 12?',
     'what year did you receive your hs certification?',
+    // Both word orders. The first pass only guarded the word-then-noun arm, so moving the noun in
+    // front - which is how a form actually writes it - answered the same question "May 2023".
+    'grade 12 teaching - when did you stop?',
+    'secondary education teaching - when did you start?',
+    'prep school employment - when did you start?',
+    'senior secondary teaching: when did you begin?',
+    '12th grade tutoring: when did you last do it?',
+    // ...and "Yes", which a notDeepEqual on the date alone would not have caught.
+    'do you have a secondary education teaching diploma?',
+    'do you hold a grade 12 teaching diploma or equivalent?',
   ]) {
     const answered = resolveKnownAnswer(label, 'text', HS, undefined);
     assert.notDeepEqual(answered, { value: 'May 2023' }, label);
+    assert.notDeepEqual(answered, { value: 'Yes' }, label);
+  }
+
+  /* "HS" is two letters, and two letters are not a high school on their own. Given its own rule
+     requiring an education fact beside it, because `\bhs\b` is also the customs tariff "HS code"
+     and an unterminated `\bhs` was HSA, HSBC, HSE, HSTS and HSpice - every one of which this
+     branch refused as a high-school question, the HSBC one displacing a correct prior-employer
+     blocker with a wrong one. */
+  assert.equal(questionRefusedAsHighSchool('hs gpa', HS), true);
+  for (const label of [
+    'hsa contribution', 'hsbc holdings employment history', 'do you have an hse certification?',
+    'hsts / hsts preload experience', 'have you used hspice?', 'hs code for exported goods',
+    'rate your proficiency in hsql', 'have you worked at hsbc?',
+  ]) {
+    assert.equal(questionRefusedAsHighSchool(label, HS), false, label);
   }
 
   /* And the one family that names a high school WITHOUT being about one: an education-LEVEL list

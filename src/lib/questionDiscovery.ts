@@ -2698,25 +2698,44 @@ const PREFERRED_NAME_QUESTION =
  * classifier's `graduation_year`, and came back "May 2028" - the UNIVERSITY year. Measured
  * 2026-08-11, along with "HS GPA" -> "3.89" and "12th Grade School Name" -> the university.
  */
-const HIGH_SCHOOL_WORD = String.raw`(?:high[\s-]?schools?|hs|h\.\s?s\.|(?:sr\.?|senior)\s+secondary(?:\s+school)?|(?<!post[\s-])secondary\s+(?:schools?|education)|(?:12th|twelfth)\s+grade(?:\s+school)?|grade\s+12(?:\s+school)?|prep(?:aratory)?\s+schools?)`;
+const HIGH_SCHOOL_WORD = String.raw`(?:high[\s-]?schools?|(?:sr\.?|senior)\s+secondary(?:\s+school)?|(?<!post[\s-])secondary\s+(?:schools?|education)|(?:12th|twelfth)\s+grade(?:\s+school)?|grade\s+12(?:\s+school)?|prep(?:aratory)?\s+schools?)`;
+/* "HS" is kept OUT of the list above and given its own rule, because two letters are not enough on
+ * their own. Even with both word boundaries, `\bhs\b` is the customs tariff "HS code", and without
+ * the trailing one it was also HSA, HSBC, HSE, HSTS and HSpice - all of which this branch refused
+ * as high-school questions before, one of them displacing a correct prior-employer blocker. The
+ * abbreviation counts only with an education fact beside it, which is how a form writes it: "HS
+ * GPA", "HS Diploma", "GPA (HS)". */
+const HS_FACT = String.raw`(?:gpa|names?|diplomas?|graduat\w*|schools?|transcripts?|cit(?:y|ies)|grades?|years?)`;
+const HIGH_SCHOOL_ABBREVIATED = new RegExp(
+  String.raw`\bh\.?\s?s\.?\s+${HS_FACT}\b|\b${HS_FACT}\s+h\.?\s?s\.?(?!\w)`,
+  'i',
+);
 /* The lookbehind is not decoration. In North American usage POST-secondary education is the
  * university, so `\bsecondary\s+education\b` matches inside "post-secondary education" and would
  * refuse the current-programme question it names. "Name of post-secondary institution" is a real
  * label shape, and it must still answer with the university. */
 
-/* THE PROXIMITY ARM KEEPS THE NARROW LITERAL, and that asymmetry is the whole point.
+/* THE GRADUATION MATCHER KEEPS THE NARROW LITERAL. BOTH ARMS.
  *
- * Arm one reads noun-then-graduation-word and is safe with any spelling. Arm two reads a bare
- * "year"/"when" and then looks up to 120 characters ahead for the noun, which is only safe while
- * the noun is unambiguous. Widening THAT arm to the full spelling list turned ordinary
- * education-sector employment questions into high-school graduation dates: measured on the branch
- * before this split, "what year did you start teaching in secondary education?" and "when did you
- * last teach grade 12?" both answered "May 2023", where main had answered nothing. A blank is
- * recoverable; a date typed into an employment-history box is not. */
+ * Both arms pair the noun with a graduation word across a wide window - 200 characters one way,
+ * 120 the other - and a window that wide is only safe while the noun cannot mean anything but the
+ * applicant's own school. "High school" cannot. "Grade 12", "secondary education" and "prep
+ * school" can: they are also the subject matter of a teaching job. Widening this matcher to the
+ * full spelling list answered ordinary education-sector employment and credential questions with
+ * her own graduation date, where main had answered nothing:
+ *
+ *   "grade 12 teaching - when did you stop?"               -> "May 2023"
+ *   "secondary education teaching - when did you start?"   -> "May 2023"
+ *   "do you have a secondary education teaching diploma?"  -> "Yes"
+ *
+ * A blank is recoverable; a date typed into an employment-history box is not. The wide spelling
+ * list serves the refusal side only, where the cost of being wrong is a blocker rather than an
+ * answer. The literal still covers "highschool" and "high-school", which is the spelling gap that
+ * made sharing a noun worth doing in the first place. */
 const HIGH_SCHOOL_LITERAL = String.raw`high[\s-]?schools?`;
 
 export const HIGH_SCHOOL_GRADUATION_QUESTION = new RegExp(
-  String.raw`\b${HIGH_SCHOOL_WORD}\b[\s\S]{0,200}\b(?:graduat\w*|diploma|ged|month\s+and\s+year|when)\b`
+  String.raw`\b${HIGH_SCHOOL_LITERAL}\b[\s\S]{0,200}\b(?:graduat\w*|diploma|ged|month\s+and\s+year|when)\b`
   + String.raw`|\b(?:graduat\w*|when|month|year)\b[\s\S]{0,120}\b${HIGH_SCHOOL_LITERAL}\b`,
   'i',
 );
@@ -2779,22 +2798,48 @@ export const HIGH_SCHOOL_GRADUATION_QUESTION = new RegExp(
  * address_city, phone, languages and availability_date are out of reach by construction.
  */
 const CURRENT_PROGRAMME_WORD = String.raw`(?:universit(?:y|ies)|colleges?|undergrad\w*|bachelors?)`;
-const HIGH_SCHOOL_PRESENT = new RegExp(String.raw`\b${HIGH_SCHOOL_WORD}`, 'i');
+// Both boundaries. See HIGH_SCHOOL_ABBREVIATED for what an open-ended one cost.
+const HIGH_SCHOOL_SPELLED_OUT = new RegExp(String.raw`\b${HIGH_SCHOOL_WORD}\b`, 'i');
+function highSchoolPresent(label: string): boolean {
+  return HIGH_SCHOOL_SPELLED_OUT.test(label) || HIGH_SCHOOL_ABBREVIATED.test(label);
+}
 const CURRENT_PROGRAMME_NAMED = new RegExp(String.raw`\b${CURRENT_PROGRAMME_WORD}\b`, 'i');
 
-const EXCLUSION_WORD = String.raw`(?:not|n['’]t|exclud\w*|other\s+than|rather\s+than|instead\s+of|in\s+lieu\s+of|omit)`;
+const EXCLUSION_WORD = String.raw`(?:not|n['’]t|exclud\w*|other\s+than|rather\s+than|instead\s+of|in\s+lieu\s+of|omit|leave\s+out|skip|avoid|without)`;
+/* Asked, but in a different box. Not a negation, and it points the same way: if the college name is
+ * collected elsewhere, THIS control is the high school's. */
+const DEFERRAL_WORD = String.raw`(?:separately|elsewhere|below|above|in\s+the\s+next|on\s+the\s+next)`;
 /* The verbs a form uses when it tells you which institution to put in the box. Requiring one (or
  * the bare noun) is what separates "do not LIST your high school" - an exclusion - from "do not
  * ABBREVIATE your high school name", which is an instruction about formatting and still a
  * high-school question. Without the verb list the second one answered with the university. */
-const LISTING_VERB = String.raw`(?:list|enter|include|use|report|give|provide|write|put|name|state|specify|submit|mention)\w*`;
+const LISTING_VERB = String.raw`(?:list|enter|include|use|report|give|provide|write|put|name|state|specify|submit|mention|type|select|choose|repeat|fill|need)\w*`;
 
 const HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT = new RegExp(
-  String.raw`\b${EXCLUSION_WORD}\b\s*(?:${LISTING_VERB}\s+)?(?:your\s+|the\s+|a\s+|an\s+|any\s+)?${HIGH_SCHOOL_WORD}`,
+  String.raw`\b${EXCLUSION_WORD}\b\s*(?:${LISTING_VERB}\s+)?(?:your\s+|the\s+|a\s+|an\s+|any\s+)?${HIGH_SCHOOL_WORD}\b`,
   'i',
 );
+/* The same exclusion in any word order and with any verb, admitted ONLY when the label also names
+ * the institution it is actually asking for. That second condition is what keeps "do not abbreviate
+ * your high school name" - which names no other institution, and is a high-school question - apart
+ * from "school name: please do not type your high school here", which names one and is not. */
+const HIGH_SCHOOL_NEAR_AN_EXCLUSION = new RegExp(
+  String.raw`\b${EXCLUSION_WORD}\b[^.?!]{0,40}?${HIGH_SCHOOL_WORD}\b|\b${HIGH_SCHOOL_WORD}\b[^.?!]{0,40}?\b${EXCLUSION_WORD}\b`,
+  'i',
+);
+const ANOTHER_INSTITUTION_NOUN = /\b(?:schools?|institutions?|universit(?:y|ies)|colleges?|alma\s+mater)\b/i;
+const HIGH_SCHOOL_WORD_GLOBAL = new RegExp(HIGH_SCHOOL_WORD, 'gi');
+function labelNamesAnotherInstitution(label: string): boolean {
+  return ANOTHER_INSTITUTION_NOUN.test(label.replace(HIGH_SCHOOL_WORD_GLOBAL, ' '));
+}
+
+/* BOTH WORD ORDERS, because a form writes the exclusion on either side of the noun it governs:
+ * "(not college GPA)" before, "college GPA not needed" and "university name is entered separately"
+ * after. Only the forward arm existed at first, so the reverse phrasings fell through to the
+ * plain "a college is mentioned" test and typed the UNIVERSITY GPA into a high-school control. */
 const CURRENT_PROGRAMME_NAMED_TO_EXCLUDE_IT = new RegExp(
-  String.raw`\b${EXCLUSION_WORD}\b[^.?!]{0,40}?${CURRENT_PROGRAMME_WORD}`,
+  String.raw`\b${EXCLUSION_WORD}\b[^.?!]{0,40}?${CURRENT_PROGRAMME_WORD}`
+  + String.raw`|${CURRENT_PROGRAMME_WORD}[^.?!]{0,40}?\b(?:${EXCLUSION_WORD}|${DEFERRAL_WORD})\b`,
   'i',
 );
 
@@ -2822,11 +2867,14 @@ const EDUCATION_LEVEL_QUESTION =
 /** Whether the label's subject is the applicant's HIGH SCHOOL rather than her current programme. */
 export function questionIsScopedToHighSchool(label: string): boolean {
   const l = label ?? '';
-  if (!HIGH_SCHOOL_PRESENT.test(l)) return false;
-  // Ordered, and the order is the meaning. The high school excluded by name loses first; the
-  // current programme excluded by name wins next; only then does co-naming mean a coordinate list.
-  if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(l)) return false;
+  if (!highSchoolPresent(l)) return false;
+  /* Ordered, and the order is the meaning. An exclusion governing the CURRENT programme wins first:
+   * "(not college GPA)" also contains the word college, so a co-naming test placed above it would
+   * read the exclusion as a mention and answer with the university. Then the two forms of "the high
+   * school is the excluded one". Only after all three does co-naming mean a coordinate list. */
   if (CURRENT_PROGRAMME_NAMED_TO_EXCLUDE_IT.test(l)) return true;
+  if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(l)) return false;
+  if (HIGH_SCHOOL_NEAR_AN_EXCLUSION.test(l) && labelNamesAnotherInstitution(l)) return false;
   if (CURRENT_PROGRAMME_NAMED.test(l)) return false;
   if (CONDITIONAL_ON_BEING_A_SCHOOL_LEAVER.test(l)) return false;
   // An education-level list naming it as an option, with no fact hung on it, is a degree question.
