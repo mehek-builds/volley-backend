@@ -190,6 +190,11 @@ function normalizedTextContains(text: string, key: string): boolean {
   return Boolean(key) && (` ${haystack} `).includes(` ${key} `);
 }
 
+/** Whether exact saved evidence can support a displayed JD highlight under the audit validator. */
+export function packetAuditEvidenceSupportsHighlight(evidenceText: string, jdHighlight: string): boolean {
+  return normalizedTextContains(evidenceText, normalizedHighlightKey(jdHighlight));
+}
+
 function jsonPointerSegments(path: string): string[] | null {
   if (!path.startsWith('/') || path === '/') return null;
   const raw = path.slice(1).split('/');
@@ -320,6 +325,69 @@ function packetVersion(bindings: PacketAuditBindings): string {
 
 function compareOffsets(a: { start: number; end: number }, b: { start: number; end: number }): number {
   return a.start - b.start || a.end - b.end;
+}
+
+type PacketAuditTermTone = keyof PacketAuditTermsInput;
+
+const TERM_TONE_PRIORITY: Record<PacketAuditTermTone, number> = {
+  missing: 0,
+  edited: 1,
+  covered: 2,
+};
+
+function rangesOverlap(a: PacketAuditTermInput, b: PacketAuditTermInput): boolean {
+  return a.start < b.end && b.start < a.end;
+}
+
+function compareCanonicalTerms(a: PacketAuditTermInput, b: PacketAuditTermInput): number {
+  const aKey = canonicalPacketJson(a);
+  const bKey = canonicalPacketJson(b);
+  return aKey < bKey ? -1 : aKey > bKey ? 1 : 0;
+}
+
+/**
+ * Selects a deterministic non-overlapping subset of internally scored JD terms.
+ * Every selected range is copied unchanged. The validator remains responsible for
+ * rejecting malformed offsets and any raw overlapping input that bypasses this helper.
+ */
+export function canonicalizePacketAuditTerms(
+  terms: PacketAuditTermsInput,
+  jdTextLength: number,
+): PacketAuditTermsInput {
+  type Candidate = {
+    tone: PacketAuditTermTone;
+    term: PacketAuditTermInput;
+    sourceIndex: number;
+  };
+  const output: PacketAuditTermsInput = { covered: [], missing: [], edited: [] };
+  const candidates: Candidate[] = [];
+  const invalid: Candidate[] = [];
+  for (const tone of ['missing', 'edited', 'covered'] as const) {
+    terms[tone].forEach((term, sourceIndex) => {
+      const candidate = { tone, term, sourceIndex };
+      if (!Number.isInteger(term.start) || !Number.isInteger(term.end)
+        || term.start < 0 || term.end <= term.start || term.end > jdTextLength) {
+        invalid.push(candidate);
+      } else {
+        candidates.push(candidate);
+      }
+    });
+  }
+  candidates.sort((a, b) => TERM_TONE_PRIORITY[a.tone] - TERM_TONE_PRIORITY[b.tone]
+    || (b.term.end - b.term.start) - (a.term.end - a.term.start)
+    || a.term.start - b.term.start
+    || a.term.end - b.term.end
+    || compareCanonicalTerms(a.term, b.term)
+    || a.sourceIndex - b.sourceIndex);
+  const accepted: Candidate[] = [];
+  for (const candidate of candidates) {
+    if (accepted.some((selected) => rangesOverlap(candidate.term, selected.term))) continue;
+    accepted.push(candidate);
+  }
+  for (const candidate of accepted) output[candidate.tone].push(candidate.term);
+  for (const candidate of invalid) output[candidate.tone].push(candidate.term);
+  for (const tone of ['covered', 'missing', 'edited'] as const) output[tone].sort(compareOffsets);
+  return output;
 }
 
 function buildClauses(
