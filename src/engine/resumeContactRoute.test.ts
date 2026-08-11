@@ -155,7 +155,7 @@ describe('every path that can produce or send one of these packets is closed', (
   const applicationsRoute = readFileSync('src/routes/applications.ts', 'utf8');
   const baseResumeRoute = readFileSync('src/routes/baseResume.ts', 'utf8');
 
-  test('generation resolves the contact against the account and refuses before the model call', () => {
+  test('generation requires the explicit personal resume email and refuses before the model call', () => {
     assert.match(resumeRoute, /const resumeEmail = resumeEmailOfRecord\(profileRows\[0\]\?\.parsed_json\)/);
     assert.match(resumeRoute, /if \(!resumeEmail\)[\s\S]*code: 'resume_email_required'/);
     assert.match(resumeRoute, /resumeContactOfRecord\(\{[\s\S]*accountEmail: resumeEmail/);
@@ -166,12 +166,21 @@ describe('every path that can produce or send one of these packets is closed', (
       resumeRoute.indexOf('if (resumeContactIssues(contactOfRecord).length > 0)') < resumeRoute.indexOf('generateResumeSpec('),
       'the contact refusal must precede the model call',
     );
-    // The alias decision reads the RESOLVED email. Keyed off the raw request, a caller with an
-    // empty body.contact.email skipped the alias and shipped a packet with no address of any kind.
-    assert.match(resumeRoute, /body\.application && contactOfRecord\.email/);
+    /* The alias decision reads the RESOLVED personal email. Keyed off the raw request, a caller
+     * with an empty body.contact.email skipped the alias and shipped a packet with no address.
+     *
+     * It is no longer gated on body.application as well: that gate is what put the applicant's
+     * personal address on a Greenhouse form on 2026-08-11. The route now refuses any fallback and
+     * keeps the personal address exclusively in the resume contact block. */
+    assert.match(resumeRoute, /planPacketApplicantEmail\(\{[\s\S]*contactEmail: contactOfRecord\.email/);
     assert.doesNotMatch(resumeRoute, /body\.application && body\.contact\.email/);
-    // The stored block is the resolved one, not the request's.
+    assert.doesNotMatch(resumeRoute, /body\.application && contactOfRecord\.email/);
+    assert.match(resumeRoute, /pinnedApplicantEmail\.source !== 'litos_alias'/);
+    assert.match(resumeRoute, /pinnedApplicantEmail\.tracked !== true/);
+    assert.match(resumeRoute, /pinnedApplicantEmail\.address\.toLowerCase\(\) === resumeEmail\.toLowerCase\(\)/);
+    // The stored PDF block remains personal, while the portal snapshot receives the alias.
     assert.match(resumeRoute, /const applicationContact = contactOfRecord;/);
+    assert.match(resumeRoute, /email: pinnedApplicantEmail\.address/);
   });
 
   test('the packet records the contact verdict instead of leaving an empty array to be misread', () => {

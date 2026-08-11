@@ -33,11 +33,29 @@ export const resumeQualityHoldResponseSchema = z.object({
   quality: resumeQualityResponseSchema.optional(),
 });
 
+/* WHERE EMPLOYER REPLIES WILL LAND, said out loud in the response.
+ *
+ * The decision was already frozen into the packet as `spec._applicant_email`, and that was the
+ * whole problem: a fallback to the applicant's personal address is a fact she has to act on, and
+ * it was legible only to someone reading stored JSON. `notice` is the sentence, already written,
+ * for any caller to show. It is null exactly when `tracked` is true, so a client can render it
+ * unconditionally.
+ *
+ * Optional so the extension and any older client keep parsing responses they already understand. */
+export const resumeApplicantEmailResponseSchema = z.object({
+  address: z.string(),
+  source: z.enum(['litos_alias', 'contact_email', 'account_email']),
+  reason: z.string(),
+  tracked: z.boolean(),
+  notice: z.string().nullable(),
+});
+
 export const resumeGenerateSuccessResponseSchema = z.object({
   resume_id: z.string().uuid(),
   resume_url: z.string(),
   file_name: z.string(),
   spec: z.unknown(),
+  applicant_email: resumeApplicantEmailResponseSchema.optional(),
   application: z.object({
     id: z.string().uuid(),
     job_context: z.object({

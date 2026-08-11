@@ -305,3 +305,26 @@ test('submission packet ignores stored cover-letter artifact names for outbound 
   assert.doesNotMatch(runner, /coverLetterName:[\s\S]{0,120}coverLetterMeta\.file_name/);
   assert.doesNotMatch(runner, /litos-\$\{row\.id\}-cover-letter\.pdf/);
 });
+
+/* ONE STOP, ONE WAIT. The prepared review is built from one object with two conditional spreads,
+ * and both used to apply. A fill run that reached an emailed security-code screen therefore wrote
+ * `status: awaiting_security_code` AND an open human_verification stall, which is a different wait
+ * entirely: the stall is the CAPTCHA queue's entry and the clock its time-to-resolution is measured
+ * from, and this packet is waiting on eight characters out of a mailbox, not on a challenge. Every
+ * such row would have inflated the stall counts with a challenge nobody was holding.
+ *
+ * The captcha attention CATEGORY is deliberately left alone: a page may genuinely carry a widget,
+ * and the category list is allowed to name more than one thing. It is the stall that must belong to
+ * exactly one wait. */
+test('a run stopped on an emailed security code does not also open a CAPTCHA stall', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const patchStart = runner.indexOf('const review = nextReview(current, {\n    ...preparedReviewPatch(authorization, safe),');
+  assert.ok(patchStart > 0, 'could not find the prepared review patch');
+  const patch = runner.slice(patchStart, runner.indexOf('await writeReview(row, review);', patchStart));
+  assert.match(patch, /\.\.\.\(securityCode\s*\n\s*\? \{/);
+  assert.match(patch, /\.\.\.\(captchaAttention && !securityCode\s*\n\s*\? beginStall\(current, \{/);
+  // The evidence is not lost with the stall: the categories still name both.
+  assert.match(runner, /const preparedAttentionCategories = securityCode\s*\n\s*\? \['security_code' as const, \.\.\.attentionCategories/);
+  assert.match(patch, /attention_categories: preparedAttentionCategories/);
+  assert.match(runner, /const attentionCategories = attentionCategoriesForReasons\(attentionReasons\);/);
+});

@@ -5404,11 +5404,24 @@ test('a mention that explains nothing does not count as having reported the loss
  * counted on a real employer's form, not reasoned about.
  * ------------------------------------------------------------------------------------------- */
 
-test('"Expected Graduation Year" is answered with the year, not the whole date', () => {
-  // Deepgram, 2026-08-08. Discovery resolved this to "2028" and stored it on the packet; the
-  // date branch of greenhouseReviewedQuestionAnswer matched "expected graduat(ion)" first and
-  // overwrote it with packet.graduationDate, "May 2028". A month name in a year field is a wrong
-  // answer on a real application, so the narrow tests now run before the broad one.
+test('each graduation question is answered at the precision its own control can hold', () => {
+  /* Deepgram, 2026-08-08. The date branch of greenhouseReviewedQuestionAnswer matched
+   * "expected graduat(ion)" first and so answered "Expected Graduation Year" and
+   * "Graduation Month" with the whole date. Ordering the tests narrow-first fixed that, and the
+   * month and date assertions below are the ones that pin it.
+   *
+   * WHAT CHANGED ON 2026-08-11, and why the year line moved. The first fix also replaced the year
+   * answer with packet.graduationYear, on the reading that a control labelled "year" is a year
+   * control. On the live Ashby form that control is a react-datepicker, and a bare year is the one
+   * value it refuses: four consecutive production runs (bbf0115a, 59fb48ae, cd066fee, 4bfd5827)
+   * reported "Expected Graduation Year" as required and still empty. questionDiscovery had already
+   * settled the rule in graduationYearFieldAnswer - an open text control gets "May 2028", a closed
+   * list and a number box get "2028", and a profile stating no month gets the year either way - and
+   * this layer now defers to it instead of contradicting it one step later.
+   *
+   * These three controls are all reported as open text, which is why all three now carry the month
+   * the profile really holds. The closed-list and no-reported-type cases are pinned in
+   * portalSubmission.graduationYearControl.test.ts. */
   const packet = {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
@@ -5418,16 +5431,22 @@ test('"Expected Graduation Year" is answered with the year, not the whole date',
     graduationMonth: 'May',
     graduationYear: '2028',
     questions: [
-      { question: 'Expected Graduation Year', answer: '2028', portalSelector: '#grad_year', portalInputType: 'text' },
+      { question: 'Expected Graduation Year', answer: 'May 2028', portalSelector: '#grad_year', portalInputType: 'text' },
       { question: 'Graduation Month', answer: 'May', portalSelector: '#grad_month', portalInputType: 'text' },
       { question: 'What is your graduation date?', answer: 'May 2028', portalSelector: '#grad_date', portalInputType: 'text' },
     ],
   };
   const valueFor = (selector: string) => buildManagedPortalActions('greenhouse', packet)
     .find((action) => action.type === 'fill' && action.selector === selector)?.value;
-  assert.equal(valueFor('#grad_year'), '2028');
+  assert.equal(valueFor('#grad_year'), 'May 2028');
   assert.equal(valueFor('#grad_month'), 'May');
   assert.equal(valueFor('#grad_date'), 'May 2028');
+  // A profile that states no month still hands every one of them the year alone. No month is
+  // invented for a date control here or anywhere else; the run reports the empty field instead.
+  const yearOnly = { ...packet, graduationDate: undefined, graduationMonth: undefined };
+  const yearOnlyValueFor = (selector: string) => buildManagedPortalActions('greenhouse', yearOnly)
+    .find((action) => action.type === 'fill' && action.selector === selector)?.value;
+  assert.equal(yearOnlyValueFor('#grad_year'), '2028');
 });
 
 test('an Ashby field handle is descended into, because it names the wrapper', () => {
@@ -5548,4 +5567,72 @@ test('the label\'s "Other" escape hatch reaches a question that has a durable se
     plain.some((action) => action.type === 'fill' && action.label?.includes('which university') && action.value === 'Other'),
     false,
   );
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * THE QUESTION, NOT ITS WORDING.
+ *
+ * Measured on the owner's 158 production packets, 2026-08-11. 22 packets were blocked with a GPA
+ * field required and empty while the packet already carried "3.89". Ten of them asked "What is your
+ * GPA?", which was in GREENHOUSE_REACT_SELECT_LITERALS and got a closed-list chain. Twelve asked
+ * "Overall GPA" (Virtu, 7) or "Please indicate your overall GPA." (Five Rings, 5), which were not,
+ * so their only attempt was a text fill into a control whose options read "3.5-3.9".
+ * --------------------------------------------------------------------------------------------- */
+
+function greenhouseQuestionActions(question: string, answer: string) {
+  return buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{ question, answer }],
+  });
+}
+
+const closedListChain = (question: string, answer: string) =>
+  greenhouseQuestionActions(question, answer).filter((action) => action.label?.startsWith('question_combo_label:'));
+
+test('a closed-list chain is built from what the question ASKS, not from a wording someone typed here', () => {
+  // The two labels that cost 12 packets, and the wording that always worked, all reach the chain.
+  for (const label of ['Overall GPA', 'Please indicate your overall GPA.', 'What is your GPA?']) {
+    assert.ok(closedListChain(label, '3.89').length > 0, `expected a closed-list chain for ${label}`);
+  }
+  // And the phrasings no employer in the corpus has used yet, which is the whole point of asking
+  // the classifier instead of extending a list of strings.
+  for (const label of ['Cumulative GPA', 'GPA (out of 4.0)', 'What was your undergraduate GPA?']) {
+    assert.ok(closedListChain(label, '3.89').length > 0, `expected a closed-list chain for ${label}`);
+  }
+  // "Graduation Year" was in the literals; "Year of Graduation" was not, and Palantir asks it that
+  // way on all 11 of the owner's packets. classifyField calls both graduation_year.
+  for (const label of ['Graduation Year', 'Year of Graduation', 'Anticipated Year of Graduation', 'Class Year']) {
+    assert.ok(closedListChain(label, '2028').length > 0, `expected a closed-list chain for ${label}`);
+  }
+});
+
+test('widening what may be a closed list never takes a text fill away from a text control', () => {
+  /* The strictly-additive property, and the reason there are two predicates rather than one.
+   * isGreenhouseReactSelectQuestion still decides whether to WITHHOLD the scoped text fill, and it
+   * is still literals-only; questionMayBeClosedList only ever decides to ALSO push a menu chain.
+   * Five Rings' GPA control reports inputType text, so losing this fill would trade twelve packets
+   * blocked on a menu for five blocked on a text box. */
+  const actions = greenhouseQuestionActions('Please indicate your overall GPA.', '3.89');
+  const textFill = actions.find((action) => action.label === 'question:Please indicate your overall GPA.');
+  assert.equal(textFill?.type, 'fillByLabelText');
+  assert.equal(textFill?.text, 'Please indicate your overall GPA.');
+  assert.equal(textFill?.value, '3.89');
+  assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:')));
+});
+
+test('a question that names no profile field gains no closed-list chain', () => {
+  // False-capture guards. A wrong entry here spends action budget on a control with no menu, and on
+  // a Greenhouse form under the Akuna budget that is spent instead of a required field's one shot.
+  for (const label of [
+    'What is the most impressive thing you have ever accomplished?',
+    'What is your phone number?',
+    'Desired salary',
+    'LinkedIn Profile',
+    'Please provide additional detail if appropriate.',
+  ]) {
+    assert.equal(closedListChain(label, 'something').length, 0, `did not expect a closed-list chain for ${label}`);
+  }
 });

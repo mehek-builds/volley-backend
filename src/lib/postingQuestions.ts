@@ -41,6 +41,7 @@
 
 import type { JobCountry } from './jobLocation';
 import {
+  discoveredFieldIsNotAQuestion,
   discoveredFieldIsRequired,
   isCoreIdentityField,
   isOpenEndedQuestion,
@@ -128,6 +129,12 @@ export function postingQuestionsFromDiscovered(discovered: readonly DiscoveredQu
     const label = normalizeReviewQuestionLabel(raw);
     if (!label) continue;
     if (isCoreIdentityField(normalizeDiscoveredLabel(raw))) continue;
+    /* A radio's own option, or a widget's rendered subtree, is not a question. Tested on BOTH the
+     * raw label and the normalized one: the handle strippers turn Lever's "Yes cards[<uuid>][field0]"
+     * into "Yes", which is what makes the answer-token vocabulary able to see it at all, while the
+     * widget-subtree markers live in punctuation the normalizer collapses. */
+    if (discoveredFieldIsNotAQuestion({ label: raw, options: field.options })) continue;
+    if (discoveredFieldIsNotAQuestion({ label, options: field.options })) continue;
     const options = Array.isArray(field.options)
       ? [...new Set(field.options.map((option) => (option ?? '').trim()).filter(Boolean))]
       : [];
@@ -145,8 +152,15 @@ export function postingQuestionsFromDiscovered(discovered: readonly DiscoveredQu
       byLabel.set(key, next);
       continue;
     }
-    // Two controls under one label: keep the richer record rather than the later one. A radio group
-    // discovered control-by-control arrives as several rows, and only some of them carry options.
+    /* Two controls under one label: keep the richer record rather than the later one.
+     *
+     * This merge handles the radio group that arrives control-by-control AND SHARES A LABEL, which
+     * is what happens when the group has a fieldset legend or a role=group[aria-label]: every row
+     * reads "Do you require sponsorship?" and only some of them carry options. It is not the whole
+     * of the radio-group problem, and the note that used to sit here implied it was. When there is
+     * no legend the rows do NOT share a label - each one carries its own option text - so they
+     * never collide on this key and nothing here ever sees them. Those are rejected upstream by
+     * discoveredFieldIsNotAQuestion instead. */
     byLabel.set(key, {
       ...existing,
       options: existing.options ?? next.options,

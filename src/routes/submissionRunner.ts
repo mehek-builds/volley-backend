@@ -139,6 +139,7 @@ import {
   frozenJobRelocationLocationContext,
   WORK_ELIGIBILITY_QUESTION,
   workEligibilitySkipReason,
+  discoveredFieldIsNotAQuestion,
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
@@ -1322,6 +1323,13 @@ export async function discoverAndResolveQuestions(
     const label = normalizeDiscoveredLabel(field.label);
     const reviewLabel = normalizeReviewQuestionLabel(field.label);
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
+    /* A radio's own option, or a composite widget's whole rendered subtree, is not a question, and
+     * recording one manufactures work the applicant cannot do: the Apply screen shows her "Yes" and
+     * asks her to answer it. The same test runs on the pre-script's ingest, so the two surfaces
+     * cannot disagree about what the form asked. Both the raw and the normalized label are tested;
+     * see the note at the matching call in postingQuestionsFromDiscovered for why. */
+    if (discoveredFieldIsNotAQuestion({ label: field.label, options: field.options })
+      || discoveredFieldIsNotAQuestion({ label: reviewLabel, options: field.options })) continue;
     // Read from the RAW label, so it has to happen before the normalized label is used anywhere:
     // normalizeDiscoveredLabel strips the employer's `*` required marker along with the handles.
     // Name and email are excluded: the fixed-field pass has already typed them into the page, and
@@ -2118,7 +2126,21 @@ async function prepareManaged(
         submission_attempted_at: securityCode.requested_at,
       }
       : {}),
-    ...(captchaAttention
+    /* A SECURITY-CODE SCREEN OUTRANKS THE CAPTCHA STALL, and until now the two branches simply both
+     * applied to this same patch.
+     *
+     * A stall is the record of a HUMAN-VERIFICATION wait: it is what the "waiting on you" queue is
+     * ordered by and what the time-to-resolution measurement is computed from. A run that reached an
+     * emailed security-code screen is not waiting on a human verification, it is waiting on eight
+     * characters out of her mailbox, and it already carries that state in `security_code` plus its
+     * own attention category. Writing a human_verification stall beside it puts a row in the CAPTCHA
+     * queue that no CAPTCHA is holding, and counts it in the stall metrics as one, which is the
+     * metric confirming a challenge nobody saw.
+     *
+     * The captcha ATTENTION CATEGORY is untouched: the page really may have carried a widget, and
+     * the categories list is allowed to name more than one thing. It is the stall - the queue's
+     * entry and the clock - that must belong to exactly one wait. */
+    ...(captchaAttention && !securityCode
       ? beginStall(current, {
         surface: 'server_run',
         // Read off the page's own markup rather than hard-coded. `unknown` was written on every one

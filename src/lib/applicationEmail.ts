@@ -2,7 +2,8 @@ import { createHash, timingSafeEqual } from 'crypto';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { application_email_aliases, application_email_messages, generated_resumes, users } from '../db/schema';
-import { readApplicationReview } from './applicationReview';
+import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
+import { applyReviewPatch } from './applicationStall';
 import { isUndefinedColumnError } from './applicationFacts';
 import {
   type AliasDeliverability,
@@ -680,40 +681,176 @@ function dedupeKeyFor(input: InboundApplicationEmail): string {
   }), 32)}`;
 }
 
-async function markSubmittedFromConfirmation(input: {
-  applicationId: string;
-  alias: string;
-  subject?: string;
-  receivedAt: Date;
-}) {
-  const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, input.applicationId)).limit(1);
-  const row = rows[0];
-  if (!row) return;
-  const stored = row.spec as Record<string, unknown>;
-  const current = readApplicationReview(stored);
-  if (!current || current.status === 'submitted') return;
+/* WHAT AN EMPLOYER'S OWN CONFIRMATION DOES TO THE PACKET.
+ *
+ * TWO DEFECTS LIVED IN THE FIVE LINES THIS REPLACES, and both of them reached the owner.
+ *
+ * 1. It spread `...current` and overrode only status, submitted_at, updated_at, submission_error
+ *    and receipt. `attention_reason`, `attention_categories` and `security_code` survived untouched,
+ *    so a packet could read `status: submitted` while still telling her, in the same object, that
+ *    Litos had read a code from her mailbox, the employer had not accepted it, and she needed to go
+ *    and finish the application in the portal herself. Measured on packet
+ *    8e29df51-09ed-4c67-b2fc-153966471473 (Cresta): the code was requested at 17:35:04, the employer
+ *    confirmed receipt at 17:36:04, and the row still carries the security-code sentence and the
+ *    'security_code' category next to submitted_at. Those fields are not decoration - they are the
+ *    live instruction the dashboard renders - and an instruction contradicted by the state beside it
+ *    is worse than no instruction at all.
+ *
+ * 2. It built the next review by bare spread and wrote it with a raw jsonb_set, which is exactly the
+ *    shape applyReviewPatch exists to stop. settleStall never ran, so a packet that stalled on a
+ *    human check and was then confirmed by email kept an OPEN stall forever: still in the
+ *    "waiting on you" queue, still accruing time-to-resolution on a wait that had ended.
+ *    withTerminalCause never ran either, which happens to be harmless on this particular transition
+ *    and is not something a caller should have to know.
+ *
+ * The clearing is deliberate rather than incidental. An employer receipt answers every open request
+ * for her hands on THIS application: there is nothing left for her to type, and no code left to
+ * enter. `security_code` is dropped for the same reason - every reader of it (submissionSafety, the
+ * code-entry route, the runner's continuation) is gated on status 'awaiting_security_code', so on a
+ * submitted packet it is inert state whose only remaining effect is to make the row read as unfiled.
+ */
+export function reviewFromSubmissionConfirmation(
+  current: ApplicationReviewState,
+  input: { alias: string; subject?: string; receivedAt: Date },
+): ApplicationReviewState {
   const at = input.receivedAt.toISOString();
-  const next = {
-    ...current,
-    status: 'submitted' as const,
+  return applyReviewPatch(current, {
+    status: 'submitted',
     submitted_at: at,
-    updated_at: at,
     submission_error: undefined,
+    attention_reason: undefined,
+    attention_categories: undefined,
+    security_code: undefined,
     receipt: {
       confirmation_text: input.subject?.trim() || `Application confirmation received at ${input.alias}`,
       final_url: current.portal_url ?? input.alias,
       captured_at: at,
-      source: 'email_fallback' as const,
+      source: 'email_fallback',
     },
+  }, () => at);
+}
+
+/**
+ * `null` means no packet with this id belongs to this user. `{ review: null }` means the packet is
+ * there and carries no review yet. The two are different answers and the caller reports them as
+ * different reasons, because one of them is an ownership failure.
+ */
+export type PacketReviewLookup = { review: ApplicationReviewState | null } | null;
+
+export type SubmissionConfirmationOutcome =
+  | { resolved: true; review: ApplicationReviewState }
+  | {
+    resolved: false;
+    reason: 'packet_not_found' | 'review_missing' | 'already_submitted' | 'stale_confirmation';
   };
+
+/* A RECEIPT MAY ONLY MOVE A PACKET FORWARD, never backwards over something newer.
+ *
+ * Resolution now runs on every delivery of a confirmation rather than only on the first successful
+ * forward, which is the whole point of the reordering above. That opens a window this guard closes:
+ * the same message can arrive twice, and reconcileSubmissionConfirmations can replay a message from
+ * weeks ago. While the packet stays 'submitted' the status check alone is enough. The moment it
+ * leaves - a re-run, a restart, anything that puts a new attempt in front of an employer - a replay
+ * of the OLD confirmation would stamp its receipt over the new one and, worse, clear the
+ * attention_reason and security_code the new run had just written. The clearing in
+ * reviewFromSubmissionConfirmation is correct for the receipt that answers the CURRENT attempt and
+ * wrong for one that answers a previous one.
+ *
+ * Three timestamps decide it, and each is read as "the packet knows about something at least this
+ * recent": a receipt already captured at or after this message, or a submission attempted, claimed
+ * or completed after it. Comparison is a plain string compare on fixed-width ISO-8601 UTC, the same
+ * convention orderByStalledAt relies on: every writer of these fields produces toISOString(), so
+ * lexicographic and chronological order coincide.
+ *
+ * It is not reachable through the webhook today, because submitRequestDisposition refuses to re-run
+ * a submitted packet, so nothing takes a packet back out of 'submitted' for a stale receipt to land
+ * on. It becomes reachable the moment the reconciler is wired to anything, which is precisely why it
+ * is here now rather than in the change that wires it.
+ */
+export function confirmationIsStale(current: ApplicationReviewState, receivedAt: Date): boolean {
+  const at = receivedAt.toISOString();
+  if (current.receipt?.captured_at && current.receipt.captured_at >= at) return true;
+  return [current.submitted_at, current.submission_attempted_at, current.submission_claimed_at]
+    .some((stamp) => Boolean(stamp && stamp > at));
+}
+
+export type SubmissionConfirmationDeps = {
+  loadReview?: (input: { applicationId: string; userId: string }) => Promise<PacketReviewLookup>;
+  saveReview?: (input: {
+    applicationId: string;
+    userId: string;
+    review: ApplicationReviewState;
+    receivedAt: Date;
+  }) => Promise<void>;
+};
+
+/* Scoped by OWNER as well as by id, on both the read and the write.
+ *
+ * The application id on a message row is a foreign key the alias put there, and the alias carries
+ * the user it belongs to. Reading the packet by id alone was correct only for as long as nothing
+ * else could ever supply that id; scoping it means a confirmation can only ever resolve a packet
+ * belonging to the mailbox it arrived at, whatever hands the id to this function later. */
+async function loadPacketReview(input: { applicationId: string; userId: string }): Promise<PacketReviewLookup> {
+  const rows = await db
+    .select({ spec: generated_resumes.spec })
+    .from(generated_resumes)
+    .where(and(
+      eq(generated_resumes.id, input.applicationId),
+      eq(generated_resumes.user_id, input.userId),
+    ))
+    .limit(1);
+  if (rows.length === 0) return null;
+  return { review: readApplicationReview(rows[0].spec) };
+}
+
+async function savePacketReview(input: {
+  applicationId: string;
+  userId: string;
+  review: ApplicationReviewState;
+  receivedAt: Date;
+}): Promise<void> {
   await db.update(generated_resumes).set({
-    spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(next)}::jsonb, true)`,
+    spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(input.review)}::jsonb, true)`,
     pipeline_stage: 'applied',
     pipeline_stage_at: input.receivedAt,
   }).where(and(
     eq(generated_resumes.id, input.applicationId),
+    eq(generated_resumes.user_id, input.userId),
+    // The read and the write are two statements, so the status is re-checked in the WHERE rather
+    // than trusted from the read. A second confirmation arriving in that gap must not restamp a
+    // receipt over the one already recorded.
     sql`${generated_resumes.spec}->'_review'->>'status' <> 'submitted'`,
   ));
+}
+
+/**
+ * Resolve one packet from one employer confirmation. Idempotent: a packet already submitted is left
+ * exactly as it is, and reports why.
+ */
+export async function resolvePacketFromConfirmation(input: {
+  applicationId: string;
+  userId: string;
+  alias: string;
+  subject?: string;
+  receivedAt: Date;
+}, deps: SubmissionConfirmationDeps = {}): Promise<SubmissionConfirmationOutcome> {
+  const lookup = await (deps.loadReview ?? loadPacketReview)({
+    applicationId: input.applicationId,
+    userId: input.userId,
+  });
+  if (!lookup) return { resolved: false, reason: 'packet_not_found' };
+  const current = lookup.review;
+  if (!current) return { resolved: false, reason: 'review_missing' };
+  if (current.status === 'submitted') return { resolved: false, reason: 'already_submitted' };
+  if (confirmationIsStale(current, input.receivedAt)) return { resolved: false, reason: 'stale_confirmation' };
+  const review = reviewFromSubmissionConfirmation(current, input);
+  await (deps.saveReview ?? savePacketReview)({
+    applicationId: input.applicationId,
+    userId: input.userId,
+    review,
+    receivedAt: input.receivedAt,
+  });
+  return { resolved: true, review };
 }
 
 /* THE RETURN LEG: the applicant's reply, sent onward to the employer as the alias.
@@ -799,14 +936,182 @@ async function relayApplicantReply(
   return { accepted: true, alias: aliasRow.alias, classification: 'applicant_reply', relayed: true };
 }
 
-export async function processInboundApplicationEmail(input: InboundApplicationEmail): Promise<{
+export type InboundApplicationEmailResult = {
   accepted: boolean;
   alias?: string;
   classification?: ApplicationEmailClassification;
   forwarded?: boolean;
   relayed?: boolean;
+  /** Whether this message moved its packet to submitted. Absent on paths with no packet to move. */
+  resolved?: boolean;
   reason?: string;
-}> {
+};
+
+/** The stored ledger row, which is what the forward is built from rather than the raw webhook. */
+export type StoredInboundMessage = {
+  id: string;
+  forwarded_at: Date | null;
+  from_email: string | null;
+  subject: string | null;
+  text: string | null;
+  html: string | null;
+  received_at: Date | null;
+};
+
+export type StoredEmployerMessageDeps = {
+  resolveConfirmation: (input: {
+    applicationId: string;
+    userId: string;
+    alias: string;
+    subject?: string;
+    receivedAt: Date;
+  }) => Promise<SubmissionConfirmationOutcome>;
+  /** True when this process now owns the forward. False means another one already does. */
+  claimForwarding: (messageId: string) => Promise<boolean>;
+  forward: (input: {
+    alias: string;
+    forwardTo: string;
+    inbound: InboundApplicationEmail;
+    classification: ApplicationEmailClassification;
+  }) => Promise<void>;
+  markForwarded: (messageId: string) => Promise<void>;
+  recordForwardFailure: (input: { messageId: string; error: string }) => Promise<void>;
+  onResolutionError?: (error: unknown) => void;
+};
+
+/* WHAT HAPPENS TO AN EMPLOYER MESSAGE ONCE IT IS SAFELY IN THE LEDGER, and why resolution comes
+ * first.
+ *
+ * RECEIVING AND CLASSIFYING A CONFIRMATION IS WHAT RESOLVES THE PACKET. It used to be a side effect
+ * of a successful FIRST forward: the call sat at the very end of the function, behind three gates
+ * that each returned before it.
+ *   - a message whose `forwarded_at` was already set returned early, so every row written before
+ *     the resolution existed at all could never resolve, and neither could a redelivery;
+ *   - a lost forwarding claim returned early;
+ *   - and a `sendEmail` that threw rethrew, so the line below it was unreachable.
+ * The consequence is one sentence long: a confirmation that arrived while forwarding was degraded
+ * left the application reading as unsent, indefinitely, with the employer's own receipt sitting in
+ * the ledger one row away. Forwarding is a courtesy copy into her mailbox. Whether the employer
+ * received the application is a fact about the application, and it must not depend on that copy.
+ *
+ * A resolution failure does not block the forward either, and the reverse of the same rule is why:
+ * neither of these two jobs is allowed to swallow the other. It is remembered and rethrown once the
+ * forward has been dealt with, so the webhook still retries; a retry is safe because the dedupe key
+ * makes the store idempotent, `forwarded_at` stops a second copy going out, and the resolution
+ * itself is idempotent. If the FORWARD also throws, that error wins and the resolution error is only
+ * logged - the caller can act on one error, and the forward is the one with a claim to release.
+ */
+export async function handleStoredEmployerMessage(input: {
+  aliasRow: { alias: string; user_id: string; generated_resume_id: string | null; forward_to: string };
+  message: StoredInboundMessage | null;
+  classification: ApplicationEmailClassification;
+  receivedAt: Date;
+}, deps: StoredEmployerMessageDeps): Promise<InboundApplicationEmailResult> {
+  const { aliasRow, message, classification, receivedAt } = input;
+  let resolved = false;
+  let resolutionError: unknown = null;
+  /* THE LEDGER ROW IS REQUIRED, and only the FORWARDING gates were removed.
+   *
+   * A packet reading "submitted, source email_fallback" is a claim about a message, so the message
+   * has to exist to be pointed at: the evidence and the state stay together or the next person
+   * investigating has a status with nothing behind it. This is the one thing the original ordering
+   * got right and it is kept deliberately, separate from the three gates that were wrong.
+   *
+   * It costs nothing. `message` is null only if the insert conflicted AND the follow-up select by
+   * dedupe key then found nothing, which the conflict itself says is impossible; if it ever happens
+   * it is a database anomaly, the webhook is told nothing was accepted, and the redelivery both
+   * stores the row and resolves the packet. */
+  if (classification === 'submission_confirmation' && aliasRow.generated_resume_id && message) {
+    try {
+      const outcome = await deps.resolveConfirmation({
+        applicationId: aliasRow.generated_resume_id,
+        userId: aliasRow.user_id,
+        alias: aliasRow.alias,
+        subject: message.subject ?? undefined,
+        receivedAt: message.received_at ?? receivedAt,
+      });
+      resolved = outcome.resolved;
+    } catch (error) {
+      resolutionError = error;
+      deps.onResolutionError?.(error);
+    }
+  }
+  // Every early return goes through here, so a deferred resolution failure cannot be lost by
+  // whichever branch happens to be taken.
+  const done = (result: InboundApplicationEmailResult): InboundApplicationEmailResult => {
+    if (resolutionError) throw resolutionError;
+    return result;
+  };
+  const base = { accepted: true, alias: aliasRow.alias, classification, resolved };
+
+  const forwardingDecision = applicationEmailForwardingDecision(classification);
+  if (!forwardingDecision.forward) {
+    return done({ ...base, forwarded: false, reason: forwardingDecision.reason });
+  }
+  if (!message) return done({ ...base, forwarded: false, reason: 'message_not_stored' });
+  if (message.forwarded_at) return done({ ...base, forwarded: false, reason: 'already_forwarded' });
+  if (!await deps.claimForwarding(message.id)) {
+    return done({ ...base, forwarded: false, reason: 'claimed_elsewhere' });
+  }
+
+  try {
+    await deps.forward({
+      alias: aliasRow.alias,
+      forwardTo: aliasRow.forward_to,
+      inbound: {
+        from: message.from_email ?? undefined,
+        to: [aliasRow.alias],
+        subject: message.subject ?? undefined,
+        text: message.text ?? undefined,
+        html: message.html ?? undefined,
+        receivedAt: message.received_at ?? undefined,
+      },
+      classification,
+    });
+    await deps.markForwarded(message.id);
+  } catch (error) {
+    await deps.recordForwardFailure({
+      messageId: message.id,
+      error: String(error instanceof Error ? error.message : error).slice(0, 1000),
+    });
+    throw error;
+  }
+  return done({ ...base, forwarded: true });
+}
+
+/** The live collaborators for handleStoredEmployerMessage. Nothing here decides anything. */
+function storedEmployerMessageDeps(): StoredEmployerMessageDeps {
+  return {
+    resolveConfirmation: (confirmation) => resolvePacketFromConfirmation(confirmation),
+    claimForwarding: async (messageId) => {
+      const staleClaimBefore = new Date(Date.now() - 10 * 60 * 1000);
+      const claimed = await db.update(application_email_messages)
+        .set({ forwarding_claimed_at: new Date(), forward_error: null })
+        .where(and(
+          eq(application_email_messages.id, messageId),
+          sql`${application_email_messages.forwarded_at} is null`,
+          sql`(${application_email_messages.forwarding_claimed_at} is null or ${application_email_messages.forwarding_claimed_at} < ${staleClaimBefore})`,
+        ))
+        .returning({ id: application_email_messages.id });
+      return claimed.length > 0;
+    },
+    forward: async (payload) => {
+      await sendEmail(forwardEmailPayload(payload));
+    },
+    markForwarded: async (messageId) => {
+      await db.update(application_email_messages)
+        .set({ direction: 'forwarded', forwarded_at: new Date(), forward_error: null })
+        .where(eq(application_email_messages.id, messageId));
+    },
+    recordForwardFailure: async ({ messageId, error }) => {
+      await db.update(application_email_messages)
+        .set({ forwarding_claimed_at: null, forward_error: error })
+        .where(eq(application_email_messages.id, messageId));
+    },
+  };
+}
+
+export async function processInboundApplicationEmail(input: InboundApplicationEmail): Promise<InboundApplicationEmailResult> {
   const normalizedRecipients = input.to.map((item) => item.trim().toLowerCase()).filter(Boolean);
   const rows = normalizedRecipients.length === 0 ? [] : await db
     .select()
@@ -876,71 +1181,105 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     .from(application_email_messages)
     .where(eq(application_email_messages.dedupe_key, dedupeKey))
     .limit(1))[0];
+  // The STORED classification is the authority from here on, including on the redelivery of a
+  // message this deployment classified differently: the ledger row is what the applicant and the
+  // packet were told, and two answers for one message is worse than either answer.
   const storedClassification = message
     ? storedApplicationEmailClassification(message.classification)
     : classification;
-  const forwardingDecision = applicationEmailForwardingDecision(storedClassification);
-  if (!forwardingDecision.forward) {
-    return {
-      accepted: true,
-      alias: aliasRow.alias,
-      classification: storedClassification,
-      forwarded: false,
-      reason: forwardingDecision.reason,
-    };
-  }
-  if (!message || message.forwarded_at) {
-    return { accepted: true, alias: aliasRow.alias, classification: storedClassification, forwarded: false };
-  }
+  return handleStoredEmployerMessage({
+    aliasRow,
+    message: message ?? null,
+    classification: storedClassification,
+    receivedAt,
+  }, storedEmployerMessageDeps());
+}
 
-  const messageId = message.id;
-  let forwarded = false;
-  const staleClaimBefore = new Date(Date.now() - 10 * 60 * 1000);
-  const claimed = await db.update(application_email_messages)
-    .set({ forwarding_claimed_at: new Date(), forward_error: null })
-    .where(and(
-      eq(application_email_messages.id, messageId),
-      sql`${application_email_messages.forwarded_at} is null`,
-      sql`(${application_email_messages.forwarding_claimed_at} is null or ${application_email_messages.forwarding_claimed_at} < ${staleClaimBefore})`,
-    ))
-    .returning({ id: application_email_messages.id });
-  if (claimed.length === 0) return { accepted: true, alias: aliasRow.alias, classification, forwarded: false };
-
-  try {
-    await sendEmail(forwardEmailPayload({
-      alias: aliasRow.alias,
-      forwardTo: aliasRow.forward_to,
-      inbound: {
-        from: message.from_email ?? undefined,
-        to: [aliasRow.alias],
-        subject: message.subject ?? undefined,
-        text: message.text ?? undefined,
-        html: message.html ?? undefined,
-        receivedAt: message.received_at ?? undefined,
-      },
-      classification: storedClassification,
-    }));
-    forwarded = true;
-    await db.update(application_email_messages)
-      .set({ direction: 'forwarded', forwarded_at: new Date(), forward_error: null })
-      .where(eq(application_email_messages.id, messageId));
-  } catch (error) {
-    const message = String(error instanceof Error ? error.message : error).slice(0, 1000);
-    await db.update(application_email_messages)
-      .set({ forwarding_claimed_at: null, forward_error: message })
-      .where(eq(application_email_messages.id, messageId));
-    throw error;
+/* THE WAY BACK FOR CONFIRMATIONS THAT ARE ALREADY IN THE LEDGER.
+ *
+ * The ordering fix above only helps a message arriving from now on. Every confirmation stored before
+ * it - including every row written before the resolution existed at all, and any stored while
+ * forwarding was failing - is a receipt Litos holds and has never acted on. This is the function
+ * that acts on them.
+ *
+ * Read-only about the mail: it re-reads the ledger and resolves packets. It sends nothing, forwards
+ * nothing, and writes nothing to application_email_messages, so it cannot mail an employer or an
+ * applicant however often it runs.
+ *
+ * NOT WIRED TO A SCHEDULER. There is no cron entry for it in vercel.json and no workflow calling it,
+ * deliberately: adding one is a separate decision with its own blast radius. It is callable from a
+ * route, a script, or a one-off.
+ */
+export async function reconcileSubmissionConfirmations(
+  input: { userId?: string; limit?: number } = {},
+  deps: {
+    listConfirmations?: (query: { userId?: string; limit: number }) => Promise<Array<{
+      applicationId: string;
+      userId: string;
+      alias: string;
+      subject: string | null;
+      receivedAt: Date;
+    }>>;
+    resolve?: typeof resolvePacketFromConfirmation;
+  } = {},
+): Promise<{ scanned: number; resolved: number; unchanged: number; reasons: Record<string, number> }> {
+  const limit = Math.max(1, Math.min(input.limit ?? 200, 1000));
+  const rows = await (deps.listConfirmations ?? listStoredConfirmations)({ userId: input.userId, limit });
+  // Newest first from the query, so the first row seen for a packet is its most recent receipt and
+  // the older ones would only report 'already_submitted' behind it.
+  const newestPerPacket = new Map<string, typeof rows[number]>();
+  for (const row of rows) {
+    if (!newestPerPacket.has(row.applicationId)) newestPerPacket.set(row.applicationId, row);
   }
-
-  if (storedClassification === 'submission_confirmation' && aliasRow.generated_resume_id) {
-    await markSubmittedFromConfirmation({
-      applicationId: aliasRow.generated_resume_id,
-      alias: aliasRow.alias,
-      subject: message.subject ?? undefined,
-      receivedAt: message.received_at ?? receivedAt,
+  const reasons: Record<string, number> = {};
+  let resolved = 0;
+  let unchanged = 0;
+  for (const row of newestPerPacket.values()) {
+    const outcome = await (deps.resolve ?? resolvePacketFromConfirmation)({
+      applicationId: row.applicationId,
+      userId: row.userId,
+      alias: row.alias,
+      subject: row.subject ?? undefined,
+      receivedAt: row.receivedAt,
     });
+    if (outcome.resolved) {
+      resolved += 1;
+      continue;
+    }
+    unchanged += 1;
+    reasons[outcome.reason] = (reasons[outcome.reason] ?? 0) + 1;
   }
-  return { accepted: true, alias: aliasRow.alias, classification: storedClassification, forwarded };
+  return { scanned: newestPerPacket.size, resolved, unchanged, reasons };
+}
+
+async function listStoredConfirmations(query: { userId?: string; limit: number }) {
+  const rows = await db
+    .select({
+      applicationId: application_email_messages.generated_resume_id,
+      userId: application_email_messages.user_id,
+      alias: application_email_messages.alias,
+      subject: application_email_messages.subject,
+      receivedAt: application_email_messages.received_at,
+      createdAt: application_email_messages.created_at,
+    })
+    .from(application_email_messages)
+    .where(and(
+      eq(application_email_messages.classification, 'submission_confirmation'),
+      sql`${application_email_messages.generated_resume_id} is not null`,
+      // Employer mail only. An 'outbound' row is the applicant's own reply leaving through the
+      // alias, and nothing she writes may file her own application.
+      sql`${application_email_messages.direction} <> 'outbound'`,
+      ...(query.userId ? [eq(application_email_messages.user_id, query.userId)] : []),
+    ))
+    .orderBy(desc(sql`coalesce(${application_email_messages.received_at}, ${application_email_messages.created_at})`))
+    .limit(query.limit);
+  return rows.map((row) => ({
+    applicationId: row.applicationId as string,
+    userId: row.userId,
+    alias: row.alias,
+    subject: row.subject,
+    receivedAt: row.receivedAt ?? row.createdAt,
+  }));
 }
 
 export type ApplicationEmailHealth = {

@@ -23,13 +23,11 @@ import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/res
 import { apiBaseFor } from '../lib/apiBase';
 import { resumeGenerateBodySchema, type ResumeGenerateBody } from './resumeRequestSchema';
 import {
-  applicationAliasFor,
-  applicationForwardingAddress,
   ensureApplicationEmailAlias,
   type ApplicantEmailChoice,
   type ApplicationEmailIdentity,
 } from '../lib/applicationEmail';
-import { applicationAliasDeliverability } from '../lib/applicationEmailDeliverability';
+import { planPacketApplicantEmail } from '../lib/packetApplicantEmail';
 import {
   resumeGenerateSuccessResponseSchema,
   resumeQualityHoldResponseSchema,
@@ -482,47 +480,41 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       }));
     }
 
-    /* THE ALIAS IS FROZEN FOR THE EMPLOYER FORM, which is why the deliverability check has to run
-     * here and not only at submission time.
+    /* EVERY PACKET GETS THIS DECISION, not only the ones that arrive carrying a portal link.
      *
-     * applicationContact below is the personal contact block rendered into the resume file, while
-     * the independently generated alias is frozen into the portal snapshot. The check is cached per
-     * domain with a TTL, so this costs one lookup an hour
-     * across the whole deployment rather than one per generation, and it turns itself back on
-     * without a deploy once the MX record exists. */
-    const aliasDeliverability = body.application && contactOfRecord.email
-      ? await applicationAliasDeliverability()
-      : null;
-    const litosApplicationAlias = aliasDeliverability?.deliverable ? applicationAliasFor(userId, resumeId) : null;
-    // The stored preference, not whichever address this request happened to carry. Falls back to
-    // the contact address, which is what this line used unconditionally before.
-    const aliasForwardTo = litosApplicationAlias && contactOfRecord.email
-      ? await applicationForwardingAddress(userId, contactOfRecord.email)
-      : null;
-    const applicationEmail: ApplicationEmailIdentity | null = litosApplicationAlias && aliasForwardTo
-      ? {
-        alias: litosApplicationAlias,
-        forwards_to: aliasForwardTo,
-        mode: 'litos_application_alias',
-      }
-      : null;
-    if (body.application && !applicationEmail) {
+     * This block used to be gated on `body.application`, and that gate is what put the applicant's
+     * personal address on Flow Traders' Greenhouse form on 2026-08-11. `application` is optional in
+     * the request schema, so a packet generated before its apply URL is known got no alias row and
+     * no frozen decision. The URL is then recovered from the monitored posting afterwards
+     * (repairedHistorySpec below, repairReviewPortalFromMonitoredJob), the packet becomes a real
+     * application, and at submission resolveFrozenApplicantEmail has nothing pinned to read and
+     * falls back to the address in `_contact`. The employer emailed a security code to a mailbox
+     * Litos cannot read, and that run cannot finish itself.
+     *
+     * A missing portal link means the link has not been found YET. It never meant "this is not an
+     * application", so it must not decide the address the document is frozen to. See
+     * lib/packetApplicantEmail.ts, which now owns the whole decision. */
+    const applicantEmailPlan = await planPacketApplicantEmail({
+      userId,
+      applicationId: resumeId,
+      contactEmail: contactOfRecord.email,
+      accountEmail: request.jwtPayload!.email,
+      contactFromRequest: Boolean(body.contact.email),
+    });
+    const applicationEmail: ApplicationEmailIdentity | null = applicantEmailPlan.identity;
+    const pinnedApplicantEmail: ApplicantEmailChoice | null = applicantEmailPlan.choice;
+    if (!applicationEmail
+      || !pinnedApplicantEmail
+      || pinnedApplicantEmail.source !== 'litos_alias'
+      || pinnedApplicantEmail.tracked !== true
+      || pinnedApplicantEmail.address.toLowerCase() !== applicationEmail.alias.toLowerCase()
+      || pinnedApplicantEmail.address.toLowerCase() === resumeEmail.toLowerCase()) {
       return reply.status(422).send({
         error: 'Litos could not create the tracked application email for this packet. Try again before applying.',
         code: 'applicant_email_regeneration_required',
       });
     }
     const applicationContact = contactOfRecord;
-    const portalApplicantEmail = applicationEmail?.alias;
-    const pinnedApplicantEmail: ApplicantEmailChoice | null = body.application && portalApplicantEmail
-      ? {
-        address: portalApplicantEmail,
-        source: applicationEmail ? 'litos_alias' : body.contact.email ? 'contact_email' : 'account_email',
-        reason: applicationEmail ? 'deliverable' : aliasDeliverability?.reason ?? 'alias_unavailable',
-        tracked: Boolean(applicationEmail),
-        decided_at: new Date().toISOString(),
-      }
-      : null;
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
     }
@@ -864,8 +856,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       layoutIssues.push(...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues);
       layoutIssues.push(...findPdfSafeMarginIssues(parsedPdf.pages, visualLayout));
       layoutIssues.push(...findPdfTextFidelityIssues(parsedPdf.text, spec, applicationContact));
-      if (pinnedApplicantEmail?.source === 'litos_alias'
-        && parsedPdf.text.toLowerCase().includes(pinnedApplicantEmail.address.toLowerCase())) {
+      if (parsedPdf.text.toLowerCase().includes(pinnedApplicantEmail.address.toLowerCase())) {
         layoutIssues.push('the tracked application routing email must not appear on the resume PDF');
       }
     } catch (err) {
@@ -902,6 +893,18 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       resume_url: 'validated-before-storage',
       file_name: resumeFileName,
       spec,
+      /* Said out loud, not left in the stored packet. A student whose replies are going to her own
+       * inbox has to know while she is looking at the packet, because it is the difference between
+       * an application Litos can finish and one she has to finish herself. */
+      ...(pinnedApplicantEmail ? {
+        applicant_email: {
+          address: pinnedApplicantEmail.address,
+          source: pinnedApplicantEmail.source,
+          reason: pinnedApplicantEmail.reason,
+          tracked: pinnedApplicantEmail.tracked,
+          notice: applicantEmailPlan.notice,
+        },
+      } : {}),
       quality: {
         ready_to_attach: true,
         issues: [],
@@ -982,7 +985,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const parsedProfile = (profileRows[0]?.parsed_json && typeof profileRows[0].parsed_json === 'object'
       ? profileRows[0].parsed_json
       : {}) as Record<string, unknown>;
-    const portalApplicationProfile = body.application ? await loadApplicationProfileLike(userId) : null;
+    const portalApplicationProfile = await loadApplicationProfileLike(userId);
     const parsedExperience = Array.isArray(parsedProfile.experience)
       ? parsedProfile.experience.flatMap((entry) => {
         if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
@@ -1015,25 +1018,23 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         portal_supported: canonicalApplicationPortalSupported,
       } : {}),
       status: body.application ? 'ready_to_submit' as const : 'resume_ready' as const,
-      ...(pinnedApplicantEmail ? { applicant_email: pinnedApplicantEmail } : {}),
-      ...(body.application && pinnedApplicantEmail && portalApplicationProfile ? {
-        applicant_snapshot: {
-          profile: {
-            full_name: applicationContact.full_name,
-            email: pinnedApplicantEmail.address,
-            experience: parsedExperience,
-            skills: declaredSkills,
-            school: education.school,
-            ...(education.degree ? { degree: education.degree } : {}),
-            ...(education.grad_date ? { grad_date: education.grad_date } : {}),
-            grad_year: gradYear,
-            ...(typeof parsedProfile.currently_enrolled === 'boolean'
-              ? { currently_enrolled: parsedProfile.currently_enrolled }
-              : {}),
-          },
-          application_profile: portalApplicationProfile,
+      applicant_email: pinnedApplicantEmail,
+      applicant_snapshot: {
+        profile: {
+          full_name: applicationContact.full_name,
+          email: pinnedApplicantEmail.address,
+          experience: parsedExperience,
+          skills: declaredSkills,
+          school: education.school,
+          ...(education.degree ? { degree: education.degree } : {}),
+          ...(education.grad_date ? { grad_date: education.grad_date } : {}),
+          grad_year: gradYear,
+          ...(typeof parsedProfile.currently_enrolled === 'boolean'
+            ? { currently_enrolled: parsedProfile.currently_enrolled }
+            : {}),
         },
-      } : {}),
+        application_profile: portalApplicationProfile,
+      },
       edited_terms: deriveEditedTerms(spec, bank),
       questions: [],
       skipped_reasons: [],
@@ -1092,17 +1093,14 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         spec: storedSpec,
         resume_object_key: objectKey,
       });
-      if (applicationEmail) {
-        await ensureApplicationEmailAlias({
-          userId,
-          applicationId: resumeId,
-          forwardTo: applicationEmail.forwards_to,
-        });
-      }
       persisted = true;
     } catch (err) {
       fastify.log.error(err);
-      if (body.application) {
+      /* `|| applicationEmail` is not decoration. The alias row is a foreign key onto this row, so a
+       * lost packet means the portal identity frozen beside the PDF can never exist and employer
+       * mail would route nowhere. Returning a document detached from its application identity would
+       * leave an unusable packet. */
+      if (body.application || applicationEmail) {
         return reply.status(500).send({
           error: 'Litos could not save one email across this application. Nothing was prepared for submission. Try again.',
           code: 'application_identity_persistence_failed',
@@ -1110,6 +1108,41 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       }
       // The file is already generated and returned below; failing to log it for audit
       // shouldn't block the student from getting their resume.
+    }
+
+    /* THE ALIAS ROW, AND A LOUD FAILURE IF IT DOES NOT LAND.
+     *
+     * It has to be written after the packet row: application_email_aliases.generated_resume_id is
+     * a foreign key onto generated_resumes.id, so there is nothing to point at until the row above
+     * exists.
+     *
+     * `applicationEmail` is non-null ONLY when the route was measured able to receive mail and a
+     * forwarding address was found, so a failure here is the second kind of failure, the one worth
+     * surfacing: the route is configured and the write went wrong. An unconfigured deployment and
+     * a guest with no confirmed mailbox never reach this branch at all; they took the recorded
+     * fallback in planPacketApplicantEmail and carry its reason.
+     *
+     * Refusing is not optional, because the packet is already frozen to the alias by this point.
+     * The PDF keeps the personal resume address while the employer form uses the routing alias. A
+     * missing route would leave that form address unreadable and hide that nothing can read replies.
+     * The packet row survives the refusal and is inert:
+     * resolveFrozenApplicantEmail refuses to submit a packet whose pinned alias has no active row,
+     * so it becomes a regeneration hold rather than a personal address on a form. */
+    if (persisted && applicationEmail) {
+      try {
+        const written = await ensureApplicationEmailAlias({
+          userId,
+          applicationId: resumeId,
+          forwardTo: applicationEmail.forwards_to,
+        });
+        if (!written) throw new Error('ensureApplicationEmailAlias wrote no alias row');
+      } catch (err) {
+        fastify.log.error({ err, application_id: resumeId }, 'application email alias could not be written for a generated packet');
+        return reply.status(500).send({
+          error: 'Litos could not set up the email address employers reply to, so it did not finish this application. Nothing was prepared for submission. Try again.',
+          code: 'application_identity_persistence_failed',
+        });
+      }
     }
 
     /* Warm the requirement breakdown for this posting while nobody is waiting on it.

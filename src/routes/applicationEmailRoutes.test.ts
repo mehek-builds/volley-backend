@@ -9,19 +9,57 @@ const route = readFileSync('src/routes/applicationEmail.ts', 'utf8');
 const service = readFileSync('src/lib/applicationEmail.ts', 'utf8');
 const routeSelector = readFileSync('src/lib/applicationEmailRoute.ts', 'utf8');
 const applicationsRoute = readFileSync('src/routes/applications.ts', 'utf8');
+const packetEmail = readFileSync('src/lib/packetApplicantEmail.ts', 'utf8');
 
 test('application packet generation uses the Litos alias as the employer-facing email', () => {
-  assert.match(resumeRoute, /applicationAliasFor\(userId, resumeId\)/);
+  assert.match(resumeRoute, /planPacketApplicantEmail\(\{/);
+  assert.match(resumeRoute, /applicationId: resumeId/);
   assert.match(resumeRoute, /const applicationContact = contactOfRecord/);
-  assert.match(resumeRoute, /const portalApplicantEmail = applicationEmail\?\.alias/);
+  assert.match(resumeRoute, /pinnedApplicantEmail\.source !== 'litos_alias'/);
+  assert.match(resumeRoute, /pinnedApplicantEmail\.tracked !== true/);
+  assert.match(resumeRoute, /pinnedApplicantEmail\.address\.toLowerCase\(\) !== applicationEmail\.alias\.toLowerCase\(\)/);
+  assert.match(resumeRoute, /pinnedApplicantEmail\.address\.toLowerCase\(\) === resumeEmail\.toLowerCase\(\)/);
   assert.match(resumeRoute, /_contact: applicationContact/);
   assert.match(resumeRoute, /_applicant_email: pinnedApplicantEmail/);
   assert.match(resumeRoute, /_application_email: applicationEmail/);
   assert.match(resumeRoute, /ensureApplicationEmailAlias/);
   assert.match(resumeRoute, /applicant_email: pinnedApplicantEmail/);
-  assert.match(resumeRoute, /address: portalApplicantEmail/);
-  assert.match(resumeRoute, /if \(body\.application && !applicationEmail\)/);
-  assert.match(resumeRoute, /if \(body\.application\) \{[\s\S]*application_identity_persistence_failed/);
+  assert.match(resumeRoute, /email: pinnedApplicantEmail\.address/);
+  assert.match(packetEmail, /address: alias,\n\s+source: 'litos_alias'/);
+});
+
+/* THE GATE THAT PUT A PERSONAL ADDRESS ON AN EMPLOYER'S FORM.
+ *
+ * Measured on 2026-08-11: packet cbebbfaa was generated with no `application` in the body, so the
+ * old code skipped the alias entirely, and the portal link was recovered from the monitored
+ * posting afterwards. The packet became a live Greenhouse application whose reply address was the
+ * applicant's own Gmail, and the security code Greenhouse emailed there is unreadable by Litos.
+ *
+ * These assertions are about a condition that must NOT come back, so they are written as absence
+ * checks on the two expressions that decide the address and write the row. */
+test('the applicant email decision is not conditioned on a portal link being known yet', () => {
+  const decision = resumeRoute.slice(
+    resumeRoute.indexOf('const applicantEmailPlan = await planPacketApplicantEmail'),
+    resumeRoute.indexOf('const applicationContact = contactOfRecord'),
+  );
+  assert.ok(decision.length > 0);
+  assert.doesNotMatch(decision, /body\.application/);
+  const aliasWrite = resumeRoute.slice(
+    resumeRoute.indexOf('if (persisted && applicationEmail) {'),
+    resumeRoute.indexOf('/* Warm the requirement breakdown'),
+  );
+  assert.ok(aliasWrite.length > 0);
+  assert.doesNotMatch(aliasWrite, /body\.application/);
+  assert.match(aliasWrite, /application_identity_persistence_failed/);
+});
+
+/* A configured route that fails to write is an error. An unconfigured one is not. */
+test('only a configured route turns a missing alias into a refusal', () => {
+  assert.match(packetEmail, /ROUTE_NOT_CONFIGURED_REASONS/);
+  assert.match(packetEmail, /'no_forwarding_address'/);
+  assert.match(packetEmail, /export function applicantEmailNotice/);
+  assert.match(resumeRoute, /notice: applicantEmailPlan\.notice/);
+  assert.match(resumeRoute, /code: 'applicant_email_regeneration_required'/);
 });
 
 test('dashboard resume edits preserve both immutable application email keys', () => {
@@ -74,9 +112,11 @@ test('the alias never reaches a form or a rendered resume without the deliverabi
   // contact block it builds is rendered INTO the PDF, so an undeliverable alias is frozen into the
   // document the employer keeps.
   assert.match(runner, /resolveFrozenApplicantEmail\(\{/);
-  assert.match(resumeRoute, /applicationAliasDeliverability\(\)/);
-  assert.match(resumeRoute, /aliasDeliverability\?\.deliverable \? applicationAliasFor\(userId, resumeId\) : null/);
-  assert.match(service, /pinned\.source !== 'litos_alias' \|\| pinned\.tracked !== true/);
+  // The generation-side precondition moved into lib/packetApplicantEmail.ts with the rest of the
+  // decision. It is still measured, still first, and still the thing that can veto an alias.
+  assert.match(packetEmail, /applicationAliasDeliverability/);
+  assert.match(packetEmail, /if \(!deliverability\.deliverable\) return fallback\(deliverability\.reason\);/);
+  assert.match(packetEmail, /const alias = \(deps\.aliasFor \?\? applicationAliasFor\)\(input\.userId, input\.applicationId\);/);
   assert.match(service, /if \(!check\.deliverable\) return \{ \.\.\.fallback, reason: check\.reason \}/);
 });
 
@@ -118,29 +158,35 @@ test('managed receiving rejects applicant replies before any relay ledger insert
   assert.match(service, /return \/\^\[a-z0-9\].*\\\.resend\\\.app\$\/i\.test\(domain\)/);
 });
 
+/* Storing and disposing are two functions now, so this reads across both instead of inside one.
+ *
+ * The property is exactly what it always was: the ledger row is written FIRST, and only then does
+ * anything decide whether that message may leave Litos. What moved is where the deciding happens -
+ * handleStoredEmployerMessage - and why: resolution of a submission confirmation had to stop being a
+ * side effect of a successful first forward. */
 test('employer mail is stored before the strict forwarding whitelist is applied', () => {
-  const processor = service.slice(
-    service.indexOf('export async function processInboundApplicationEmail'),
-    service.indexOf('export async function applicationEmailHealth'),
-  );
+  const handlerStart = service.indexOf('export async function handleStoredEmployerMessage');
+  const processorStart = service.indexOf('export async function processInboundApplicationEmail');
+  const handler = service.slice(handlerStart, processorStart);
+  const processor = service.slice(processorStart, service.indexOf('export async function reconcileSubmissionConfirmations'));
   const ledgerInsert = processor.indexOf("direction: 'inbound'");
-  const decision = processor.indexOf('applicationEmailForwardingDecision(storedClassification)');
-  const claim = processor.indexOf('forwarding_claimed_at: new Date()');
-  const send = processor.indexOf('sendEmail(forwardEmailPayload');
+  const handoff = processor.indexOf('return handleStoredEmployerMessage({');
   assert.ok(ledgerInsert >= 0);
-  assert.ok(decision > ledgerInsert);
+  assert.ok(handoff > ledgerInsert, 'the message must be in the ledger before anything decides what to do with it');
+  const decision = handler.indexOf('applicationEmailForwardingDecision(classification)');
+  const claim = handler.indexOf('deps.claimForwarding(');
+  const send = handler.indexOf('deps.forward(');
+  assert.ok(decision >= 0);
   assert.ok(claim > decision);
   assert.ok(send > claim);
-  assert.match(processor, /reason: forwardingDecision\.reason/);
+  assert.match(handler, /reason: forwardingDecision\.reason/);
   assert.match(service, /classification === 'submission_confirmation' \|\| classification === 'interview_request'/);
   assert.match(processor, /onConflictDoNothing\(\{ target: application_email_messages\.dedupe_key \}\)/);
-  assert.match(processor, /sql`\(\$\{application_email_messages\.forwarding_claimed_at\} is null or/);
+  assert.match(service, /sql`\(\$\{application_email_messages\.forwarding_claimed_at\} is null or/);
   assert.match(processor, /storedApplicationEmailClassification\(message\.classification\)/);
-  assert.match(processor, /subject: message\.subject \?\? undefined/);
-  assert.doesNotMatch(
-    processor.slice(processor.indexOf('await sendEmail(forwardEmailPayload'), processor.indexOf("if (storedClassification === 'submission_confirmation'")),
-    /inbound: input/,
-  );
+  // The forward is built from the STORED row, never from the raw webhook body.
+  assert.match(handler, /subject: message\.subject \?\? undefined/);
+  assert.doesNotMatch(handler, /inbound: input/);
   const verificationReader = readFileSync('src/lib/emailVerification.ts', 'utf8');
   assert.match(verificationReader, /from\(application_email_messages\)/);
   assert.match(verificationReader, /extractLitosVerificationCode\(rows/);

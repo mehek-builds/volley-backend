@@ -321,8 +321,30 @@ const RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY =
  */
 const CURRENT_SPONSORSHIP_QUESTION = /\b(?:currently|now|right now|at present|before (?:you|the applicant) start)\b/i;
 const FUTURE_SPONSORSHIP_QUESTION = /\b(?:in the future|future sponsorship|later|will you (?:need|require))\b/i;
+/* "What is your visa status?" is a request for a value. "Will you require sponsorship for
+ * employment visa status?" is a yes/no question that happens to contain the same two words, and it
+ * is the commonest US sponsorship wording there is: 31 of the owner's stored questions carry it.
+ * A bare `visa status` alternative here read every one of them as a request for her authorization
+ * type, found none stored, and held a question two consented columns answer. So the phrase now
+ * only counts when something in front of it actually asks for the status.
+ *
+ * DATED IN PRODUCTION, because the regression is younger than the family it broke and a future
+ * reader will want to know which side of the line a packet fell on. One employer, one label
+ * ("will you now, or in the future, require sponsorship for employment visa status to work in the
+ * united states?"), three packets:
+ *
+ *   60df0c83  2026-08-09 13:30  answer "Yes"
+ *   8b5f3dd9  2026-08-09 19:40  answer "Yes"
+ *   df44f30   2026-08-10 14:42  PR 456 merges, adding the bare `visa status` alternative
+ *   cbebbfaa  2026-08-11 02:23  answer ""      <- 28 fields filled, one field short of submitting
+ *
+ * The blanking is not this function's doing on its own: refreshKnownQuestionAnswers below
+ * overwrites any stored answer with '' once the resolver refuses, so a refusal here erases an
+ * answer the applicant supplied by hand. Measured across every distinct label Litos has stored
+ * (509 on 2026-08-11), the narrowing moves exactly 5 label families from held to answered, all of
+ * them yes/no sponsorship questions, and moves nothing in the other direction. */
 const AUTHORIZATION_TYPE_QUESTION =
-  /\b(?:current immigration status|visa status|work permit type|authorization type|basis of (?:your )?(?:current )?work authorization)\b/i;
+  /\b(?:current immigration status|work permit type|authorization type|basis of (?:your )?(?:current )?work authorization)\b|\b(?:what\s+is|please\s+(?:provide|specify|state|indicate|describe|list|explain)|which)\b[^?]{0,40}\b(?:visa|immigration|work\s+permit|work\s+authorization)\s+status\b/i;
 const AUTHORIZATION_EXPIRY_QUESTION =
   /\b(?:when (?:does|will) (?:your )?(?:visa|work permit|work authorization|authorization) expire|(?:visa|work permit|work authorization|authorization) exp(?:iry|iration)(?: date)?)\b/i;
 
@@ -3570,7 +3592,60 @@ const GREENHOUSE_SECTION_HANDLE_RE = /\b[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*--\d+\b/
 // What is left of an array-shaped question name (question_37536799002[]) once the handle above is
 // removed. A bare "[]" is not part of anyone's question.
 const EMPTY_BRACKET_HANDLE_RE = /\[\s*\]/g;
+/* Lever's custom-question handle: name="cards[<uuid>][field0]". Same family as the Greenhouse
+ * section handles above, same damage. Discovery concatenates `name` onto the visible label, the
+ * uuid strip turns the middle bracket into "[ ]" and EMPTY_BRACKET_HANDLE_RE clears it, and what
+ * survives into the stored question is "cards [field0]". Measured on the owner's 11 Palantir
+ * packets of 2026-08-11, which stored questions literally titled "cards [field0]",
+ * "yes cards [field0]" and "english (eng) cards [field0]".
+ *
+ * Stripping it does two things. A question that had real label text keeps only that text, so the
+ * `label:has-text(...)` scope can match the employer's own label. A row that had NO label text
+ * beyond the handle normalizes to the empty string and is dropped by the callers that already drop
+ * empty labels, which is right: "cards [field0]" names a field, tells the applicant nothing, and
+ * cannot be answered by anyone. */
+const LEVER_CARD_HANDLE_RE = /\bcards\s*\[\s*field\d+\s*\]/gi;
 const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?:answer\s+)?here(?:\.{3}|…)?\s*$/i;
+
+/* EVERY POSITIVELY IDENTIFIED PROVIDER HANDLE, in one list and in strip order.
+ *
+ * The list is the definition of "this string is a machine handle, not a question", and it is now
+ * read in two places: normalizeDiscoveredLabel below, and the page script's own handle test (see
+ * PROVIDER_HANDLE_ONLY_SCRIPT). Those two have to agree exactly - the whole safety argument for the
+ * page script's fall-through is that a string it calls handle-only is a string this module would
+ * have normalized to '' and dropped - so there is one array rather than two copies of six regexes.
+ *
+ * Order is load-bearing: INLINE_UUID_RE has to run before EMPTY_BRACKET_HANDLE_RE, because clearing
+ * the uuid out of `cards[<uuid>][field0]` is what leaves the bare `[ ]` for it to remove. */
+const PROVIDER_HANDLE_STRIPPERS: readonly RegExp[] = [
+  INLINE_UUID_RE,
+  GREENHOUSE_QUESTION_HANDLE_RE,
+  GREENHOUSE_SECTION_HANDLE_RE,
+  EMPTY_BRACKET_HANDLE_RE,
+  LEVER_CARD_HANDLE_RE,
+  GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE,
+];
+
+function stripProviderHandles(raw: string): string {
+  return PROVIDER_HANDLE_STRIPPERS.reduce((value, handle) => value.replace(handle, ' '), raw ?? '');
+}
+
+/**
+ * NOTHING BUT A PROVIDER HANDLE: every letter in this string belongs to a handle this module can
+ * name, so removing them all leaves no word a person wrote.
+ *
+ * The one test the page script's questionLabel is allowed to fall through on, and deliberately the
+ * same test as "normalizeDiscoveredLabel would return '' for this": a string with no letters left
+ * after the strip is empty or punctuation, tidyLabel cannot rescue it, and isOpaqueIdentifier
+ * rejects anything with no `\p{L}` outright. So a field this returns true for is a field whose
+ * label is discarded today, and recovering it can only add a question, never rename one.
+ *
+ * `\p{L}` and not `[a-z]`: a Japanese or Arabic label is a label. Empty is handle-only by the same
+ * reading (there is nothing a person wrote), and every caller guards for empty separately.
+ */
+export function isProviderHandleOnly(value: string): boolean {
+  return !/\p{L}/u.test(stripProviderHandles(value ?? ''));
+}
 
 function collapseRepeatedLabel(value: string): string {
   const words = value.trim().split(/\s+/).filter(Boolean);
@@ -3588,12 +3663,7 @@ function collapseRepeatedLabel(value: string): string {
  * leaving the employer's full question intact for both display and label-based filling.
  */
 export function normalizeDiscoveredLabel(raw: string): string {
-  const withoutHandles = raw
-    .replace(INLINE_UUID_RE, ' ')
-    .replace(GREENHOUSE_QUESTION_HANDLE_RE, ' ')
-    .replace(GREENHOUSE_SECTION_HANDLE_RE, ' ')
-    .replace(EMPTY_BRACKET_HANDLE_RE, ' ')
-    .replace(GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE, ' ')
+  const withoutHandles = stripProviderHandles(raw)
     .replace(/\s+/g, ' ')
     .trim();
   const withoutPlaceholder = withoutHandles.replace(TRAILING_ANSWER_PLACEHOLDER_RE, '').trim();
@@ -3611,6 +3681,169 @@ function truncateReviewQuestionLabel(label: string): string {
 export function normalizeReviewQuestionLabel(raw: string): string {
   const label = normalizeDiscoveredLabel(raw);
   return label ? truncateReviewQuestionLabel(label) : '';
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * WHEN A DISCOVERED FIELD IS NOT A QUESTION.
+ *
+ * The DOM walk sweeps `input[type="radio"], input[type="checkbox"]` as individual fields. For a
+ * radio with no fieldset/legend and no role=group[aria-label], questionLabel falls through to
+ * `el.labels[0]`, and for a radio that element is the OPTION's own label. So a stored row reads
+ * `{label: 'Yes', options: ['Yes', 'No']}` - the question is gone and one of its answers is
+ * standing where the question should be.
+ *
+ * Nothing downstream can recover from that. The Apply screen prints "Yes" as a question and asks
+ * her to answer it; the fill pass scopes `label:has-text("yes")`, which matches the first "Yes" on
+ * the page and may belong to a different control entirely. Measured on the owner's 158 packets on
+ * 2026-08-11: 11 Palantir packets each carried "Yes", "Yes, I consent" and "English (ENG)" as
+ * required questions, and the four questions the form actually asked - University, Year of
+ * Graduation, Major, "How did you hear about this internship opportunity?" - had no record at all.
+ *
+ * Three tests, in strength order. Each is narrow on purpose: a rejected required field becomes a
+ * blocker the applicant has to finish by hand, which is better than a wrong answer typed onto an
+ * employer's form and worse than a correct question. Recovery is tried first (see
+ * recoveredGroupQuestionLabel); rejection is what is left when there is nothing to recover.
+ *
+ * WHAT MUST SURVIVE ALL THREE. "Privacy" (8 packets) and "Privacy statement" (7) are Point72's and
+ * IMC's real bare labels for a consent checkbox. They are answered by BARE_PRIVACY_ACKNOWLEDGEMENT
+ * against the accept_privacy_notices column and she has a saved answer for both. They are short and
+ * they are not sentences, so any rule shaped like "reject short labels" or "reject labels that are
+ * not questions" deletes an answer Litos already has. There is no minimum length here for that
+ * reason, and postingQuestions.test.ts fails if either is ever dropped.
+ * --------------------------------------------------------------------------------------------- */
+
+/** Compare the way a human reads a control: case, punctuation and spacing carry no meaning here. */
+function comparableAnswerToken(value: string): string {
+  return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * THE EXACT TEST: the label is a member of its own option list.
+ *
+ * A question is never one of its own answers. When the provider reports options this needs no
+ * vocabulary, no length rule and no judgement, and it cannot be fooled by an employer whose
+ * question happens to be short.
+ */
+export function discoveredLabelIsOwnOption(label: string, options: readonly string[] | null | undefined): boolean {
+  const key = comparableAnswerToken(label);
+  if (!key || !options || options.length < 2) return false;
+  return options.some((option) => comparableAnswerToken(option) === key);
+}
+
+/**
+ * THE CLOSED VOCABULARY, for the managed path where `options` is undefined.
+ *
+ * stratus-browser-cloud reports no option list, so the exact test above has nothing to compare
+ * against and every radio option arrives looking like a question. This is the fallback and it is
+ * deliberately a CLOSED list of answer tokens rather than a shape rule: everything here is a thing
+ * an applicant says back to a form, and none of it is a thing an employer asks.
+ *
+ * Kept short on purpose. Every entry added here is a required field that may stop being asked, so
+ * the bar is "no employer would ever label a control this" - which is why "other", "none" and
+ * "please specify" are absent even though they are common option texts: they are also plausible
+ * bare labels for a free-text follow-up.
+ */
+const ANSWER_TOKEN_LABELS: ReadonlySet<string> = new Set([
+  'yes', 'no', 'yes i consent', 'no i do not consent', 'i consent', 'i do not consent',
+  'i agree', 'i do not agree', 'i accept', 'i decline', 'i acknowledge', 'i confirm',
+  'agree', 'disagree', 'accept', 'decline', 'acknowledge', 'confirm',
+  'true', 'false', 'n a', 'not applicable',
+  'prefer not to say', 'prefer not to answer', 'decline to self identify',
+  'i do not wish to answer', 'i do not want to answer', 'i don t wish to answer',
+]);
+
+/* A language checkbox's own option, "English (ENG)" / "Español (SPA)": a name followed by its
+ * ISO-639 code in brackets and nothing else. Observed on all 11 Palantir packets. An employer
+ * asking about languages writes a sentence ("Which languages do you speak?"), never this. */
+const LANGUAGE_OPTION_SHAPE = /^[\p{L}][\p{L}\s'’-]{1,30}\(\s*[A-Za-z]{2,3}\s*\)$/u;
+
+export function discoveredLabelIsAnswerToken(label: string): boolean {
+  const key = comparableAnswerToken(label);
+  if (!key) return false;
+  if (ANSWER_TOKEN_LABELS.has(key)) return true;
+  return LANGUAGE_OPTION_SHAPE.test((label ?? '').trim());
+}
+
+/**
+ * THE WIDGET-NOISE TEST: the label is a composite control's whole rendered subtree.
+ *
+ * questionLabel used to read `textContent`, not `innerText`, so a `<label>` wrapping a composite
+ * widget returned every text node under it - including the ones the user cannot see - concatenated
+ * with no separators. The DOM script now prefers innerText, which stops NEW captures having this
+ * shape; this test is what handles the captures that already exist and any port still on
+ * textContent (the extension and stratus-browser-cloud each hold their own copy of the walk).
+ *
+ * Matched on markers rather than on length or on fused case, because both of those catch real
+ * questions: employers write 200-character questions, and "LinkedIn" and "JavaScript" have a fused
+ * case boundary in the middle of an ordinary word.
+ *
+ * WHAT IS MEASURED AND WHAT IS REASONED, because the difference matters to whoever edits this next.
+ *
+ *   MEASURED. Over the owner's 158 packets and 1757 stored question rows on 2026-08-11, exactly one
+ *   marker fires: the typeahead empty state, on
+ *       "Current location ✱No location found. Try entering a different locationLoading location
+ *        location-input"
+ *   which is the heading, the required glyph, the empty state and the loading node fused. It is the
+ *   Palantir location blocker, on 11 packets, and it is the only row in the corpus any marker
+ *   rejects. The whole gate rejects 47 rows and every one of them is a Palantir option or handle.
+ *
+ *   REASONED, not observed firing anywhere. The four react-select markers below. They exist because
+ *   the same corpus holds a label that IS this shape and that none of them catch:
+ *       "Disability statusSelect ...Yes, I have a disability...I do not want to answer
+ *        eeo[disability] disabilitySelectElement"
+ *   The fusion is what defeats them: "statusSelect" leaves no word boundary before "select", so
+ *   \bselect never matches. That row is deliberately left alone rather than chased with a looser
+ *   pattern. It is an EEO question Litos already answers correctly from the profile, so rejecting it
+ *   would delete a working answer to tidy up a label, and dropping the \b to catch it would put
+ *   every question containing the word "select" at risk. The markers are kept for the spaced form
+ *   the innerText change now produces, where the boundary exists and the match is unambiguous.
+ *
+ * The general rule for this family is the option-swallowing test below, which needs no vocabulary
+ * at all. These markers are only what covers the managed path, where no options are reported.
+ */
+const WIDGET_SUBTREE_MARKERS: readonly RegExp[] = [
+  // Measured: the only marker the 2026-08-11 corpus exercises.
+  /\bno\s+\w[\w\s]{0,24}\s+found\b[\s\S]{0,60}\btry\s+(?:entering|again|a\s+different)\b/i,
+  // Reasoned: react-select's placeholder and DOM residue, in the spaced form innerText produces.
+  /\bselect\s*\.{3}/i,
+  /\bselect\s*…/,
+  /\bselect\s*element\b/i,
+  /\btype\s+to\s+search\b[\s\S]{0,40}\bloading\b/i,
+];
+
+export function discoveredLabelIsWidgetNoise(
+  label: string,
+  options?: readonly string[] | null,
+): boolean {
+  const raw = (label ?? '').trim();
+  if (!raw) return false;
+  if (WIDGET_SUBTREE_MARKERS.some((marker) => marker.test(raw))) return true;
+  /* The label has swallowed its own answers. Two is the threshold rather than one, because a
+   * legitimate question can quote a single option ("Select Other if not listed"). */
+  if (!options || options.length < 2) return false;
+  const key = comparableAnswerToken(raw);
+  const swallowed = options.filter((option) => {
+    const token = comparableAnswerToken(option);
+    return token.length >= 4 && key.includes(token);
+  });
+  return swallowed.length >= 2;
+}
+
+/**
+ * The one decision the ingest points share: is this row a question at all?
+ *
+ * Both callers - postingQuestionsFromDiscovered for the pre-script, and the submission runner's
+ * discoverAndResolveQuestions for the packet - ask this, so the Apply screen and the fill pass can
+ * never disagree about what the form asked.
+ */
+export function discoveredFieldIsNotAQuestion(
+  field: Pick<DiscoveredQuestion, 'label' | 'options'>,
+): boolean {
+  const label = field?.label ?? '';
+  if (!label.trim()) return false;
+  if (discoveredLabelIsWidgetNoise(label, field.options)) return true;
+  if (discoveredLabelIsOwnOption(label, field.options)) return true;
+  return discoveredLabelIsAnswerToken(label);
 }
 
 function isFixedPortalProfileField(portal: SupportedPortal, label: string): boolean {
@@ -3670,6 +3903,22 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
   return normalized;
 }
 
+/* isProviderHandleOnly, compiled for the page.
+ *
+ * The page script cannot import from this module, and a second hand-written copy of six regexes is
+ * exactly the drift that would break the safety argument, so the ONE list above is serialised into
+ * the script instead. The test itself is the same three lines as the TypeScript twin, and
+ * questionDiscovery.test.ts asserts the twin agrees with normalizeDiscoveredLabel on every shape
+ * this file knows about. */
+export const PROVIDER_HANDLE_ONLY_SCRIPT = `function isProviderHandleOnly(value) {
+    var strippers = ${JSON.stringify(PROVIDER_HANDLE_STRIPPERS.map((handle) => [handle.source, handle.flags]))};
+    var rest = value == null ? '' : String(value);
+    for (var s = 0; s < strippers.length; s += 1) {
+      rest = rest.replace(new RegExp(strippers[s][0], strippers[s][1]), ' ');
+    }
+    return !/\\p{L}/u.test(rest);
+  }`;
+
 // Passed to page.evaluate() as a source STRING rather than a typed function: this backend's
 // tsconfig has no "dom" lib (it is a Node project), so a typed function here would need
 // document/HTMLElement/getComputedStyle typed against a lib this project deliberately doesn't
@@ -3680,7 +3929,7 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
 // answer resolution, then filled later by label-scoped actions rather than direct selector typing.
 // Keep this in sync with the extension source by hand, the same as any other ported function in
 // this file.
-const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
+export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   function clean(s) {
     return (s == null ? '' : s).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
   }
@@ -3708,6 +3957,94 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     var rect = el.getBoundingClientRect();
     return style.opacity === '0' || (rect.width <= 1 && rect.height <= 1);
   }
+  /* THE QUESTION A CHOICE CONTROL BELONGS TO, when the DOM never said so in a standard way.
+   *
+   * For a radio or a checkbox, el.labels[0] is the OPTION's label - "Yes", "English (ENG)" - and
+   * returning it stores an answer where the question should be. The two standard sources are tried
+   * first by questionLabel (fieldset/legend, role=group[aria-label]); these are what is left when a
+   * board renders a group as plain divs, which Lever's custom-question cards do.
+   *
+   *   1. aria-labelledby on the control or on its group. An explicit pointer to the question, and
+   *      the only one of these three that the page author wrote on purpose.
+   *   2. The heading of the block the control sits in. Bounded to the nearest ancestor that holds
+   *      MORE THAN ONE choice control - that is what makes it a group rather than a single field -
+   *      and read from a heading element or the block's first label, never from the whole subtree.
+   *
+   * Returns '' when it finds nothing, and the caller falls through to its existing behaviour. This
+   * only ever adds a question that was previously lost; it cannot rename one that was already right,
+   * because questionLabel reaches it only after legend and aria-label have both come back empty. */
+  function recoveredGroupLabel(el) {
+    var byIds = function (node) {
+      var ids = node && node.getAttribute ? (node.getAttribute('aria-labelledby') || '') : '';
+      if (!ids) return '';
+      var out = [];
+      var list = ids.split(/\s+/);
+      for (var i = 0; i < list.length; i += 1) {
+        if (!list[i]) continue;
+        var ref = document.getElementById(list[i]);
+        var text = ref ? clean(ref.innerText || ref.textContent || '') : '';
+        if (text) out.push(text);
+      }
+      return clean(out.join(' '));
+    };
+    var own = byIds(el);
+    if (own) return own;
+    var group = el.closest('[role="group"], [role="radiogroup"], fieldset');
+    var viaGroup = group ? byIds(group) : '';
+    if (viaGroup) return viaGroup;
+    var node = el.parentElement;
+    for (var depth = 0; node && depth < 6; depth += 1) {
+      var controls = node.querySelectorAll('input[type="radio"], input[type="checkbox"]');
+      if (controls.length > 1) {
+        var heading = node.querySelector('h1, h2, h3, h4, h5, h6, legend, .application-label, .application-question');
+        var headingText = heading ? clean(heading.innerText || heading.textContent || '') : '';
+        if (headingText) return headingText;
+        return '';
+      }
+      node = node.parentElement;
+    }
+    return '';
+  }
+  ${PROVIDER_HANDLE_ONLY_SCRIPT}
+  /* Control text that names the CONTROL and not the question: an Ashby datepicker's own label
+   * reads "Pick date...". Verbatim from the submit-readiness gate's genericControlText in
+   * portalSubmission.ts, and kept identical on purpose - the two walks must not disagree about
+   * which strings are questions. */
+  function genericControlText(value) {
+    return /^(pick|select|choose)\s+(date|option)|^(type|enter|write)\s+(your\s+)?(answer\s+)?here/i.test(clean(value));
+  }
+  /* THE QUESTION A CONTROL SITS UNDER, when the control itself is labelled with nothing but a
+   * provider handle. A verbatim port of nearestQuestionText from READ_SUBMIT_READINESS_SCRIPT in
+   * portalSubmission.ts, which is the walk that already names these very fields in the blocker
+   * text the applicant sees - so recovering the question here makes the Apply screen and the
+   * blocker line say the same words about the same field.
+   *
+   * A BLOCK HOLDING MORE THAN ONE CONTROL ENDS THE WALK, and that bound is the whole safety of it.
+   * The first label inside a block with two controls belongs to one of them in particular, and
+   * borrowing it names the other field wrongly. Measured on the live Palantir Lever form on
+   * 2026-08-11: the "High School Name & Graduation Year" card holds two controls, so the walk stops
+   * and both stay honest "no label Litos can read" blockers, while the seven single-control cards
+   * recover their own headings. A wrong question is worse than a missing one - the resolver answers
+   * "High School Name" out of the education profile and would type her UNIVERSITY into it.
+   *
+   * Returns '' when it finds nothing, and the caller keeps whatever it had. */
+  function nearestQuestionText(el) {
+    var node = el.parentElement;
+    for (var depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+      if (!node.matches || !node.matches('div, section, li, fieldset')) continue;
+      if (node.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
+      var candidate = node.querySelector('label, legend, .question, h3, h4');
+      /* textContent, NOT innerText, and this one is measured rather than inherited. Lever paints
+       * its card headings with text-transform:uppercase, and innerText reports the transformed
+       * glyphs: the same heading read as "UNIVERSITY", "YEAR OF GRADUATION", "UNIVERSITY MAJOR".
+       * That is the employer's styling, not the employer's words, and storing it would show the
+       * applicant a shouted question and disagree with the blocker line about the same field.
+       * textContent reads the markup, which is what the submit-readiness gate reads. */
+      var text = clean((candidate && candidate.textContent) || '');
+      if (text && !genericControlText(text)) return text;
+    }
+    return '';
+  }
   function questionLabel(el) {
     var fieldset = el.closest('fieldset');
     var legend = fieldset ? fieldset.querySelector('legend') : null;
@@ -3716,8 +4053,24 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     var group = el.closest('[role="group"], [role="radiogroup"]');
     var groupLabel = group ? group.getAttribute('aria-label') : null;
     if (groupLabel) return groupLabel;
+    var type = (el.getAttribute('type') || '').toLowerCase();
+    if (type === 'radio' || type === 'checkbox') {
+      var recovered = recoveredGroupLabel(el);
+      if (recovered) return recovered;
+    }
     var labelEl = (el.labels && el.labels[0]) || (el.id ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]') : null);
-    var labelText = labelEl && labelEl.textContent ? labelEl.textContent : '';
+    /* innerText, not textContent, with textContent kept as the fallback for a label that is not
+     * rendered. A <label> wrapping a composite widget contains every text node under it, including
+     * the hidden ones, and textContent concatenates them with no separators: the Palantir location
+     * field stored "Current location ✱No location found. Try entering a different locationLoading",
+     * which is the heading, the required glyph, a typeahead empty state and a loading node fused
+     * into one string. innerText reports what a person can actually see. */
+    var labelText = labelEl ? (clean(labelEl.innerText || '') || (labelEl.textContent || '')) : '';
+    var written = clean([
+      labelText || '',
+      el.getAttribute('aria-label') || '',
+      el.getAttribute('placeholder') || '',
+    ].join(' '));
     var parts = [
       labelText || '',
       el.getAttribute('aria-label') || '',
@@ -3726,6 +4079,33 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
       el.id || '',
     ];
     var own = clean(parts.join(' '));
+    /* THE HANDLE THAT IS NOT A LABEL.
+     *
+     * own is the visible label, the aria-label and the placeholder concatenated with the control's
+     * name and id, and returning it whenever it is merely non-empty means a field with NOTHING but
+     * a name returns that name. Lever's custom questions are built that way - the question text
+     * sits in a sibling div.application-label, never in a label element, and the control carries
+     * only name="cards[<uuid>][field0]". Measured against the live Palantir posting on 2026-08-11:
+     * nine controls came back as a bare cards handle, normalizeDiscoveredLabel dropped all nine as
+     * handle-only, and the form came back with "University" is required and is still empty, the
+     * same for "Year of Graduation" and "University Major", while the packet held USC Viterbi, 2028
+     * and Computer Science.
+     *
+     * BOTH CONDITIONS, and both are needed:
+     *   - nothing a person wrote (no label text, no aria-label, no placeholder), so a field that has
+     *     any human text keeps it and this branch cannot touch it; and
+     *   - what is left is nothing but handles this module can name (isProviderHandleOnly), so a
+     *     meaningful name or id - firstName, school, gpa - is still a label and is kept.
+     *
+     * That pair is exactly the set of fields whose label is thrown away today, which is why this
+     * cannot rename a question that already reads correctly: it only ever runs where the stored
+     * label would have been the empty string. And when the walk finds nothing either, own is
+     * returned unchanged and the field is dropped as before - no heading is invented for a field
+     * that has none. */
+    if (own && !written && isProviderHandleOnly(own)) {
+      var underHeading = nearestQuestionText(el);
+      if (underHeading) return underHeading;
+    }
     if (own) return own;
     var block = el.closest('div, section, li');
     var fallback = block ? block.querySelector('label, legend, .question, h3, h4') : null;

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   classifyField,
+  DISCOVER_QUESTIONS_SCRIPT,
   discoveredFieldIsRequired,
   eeoAnswer,
   isCoreIdentityField,
@@ -13,10 +14,12 @@ import {
   graduationDateAnswer,
   isOpenEndedQuestion,
   isPolarQuestion,
+  isProviderHandleOnly,
   isRefusedQuestion,
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
+  PROVIDER_HANDLE_ONLY_SCRIPT,
   questionRequiresHumanAttention,
   refreshKnownQuestionAnswers,
   REVIEW_QUESTION_TEXT_MAX_LENGTH,
@@ -2849,4 +2852,119 @@ test('a yes/no question is never handed to the essay drafter, however long it ru
   ]) {
     assert.equal(isOpenEndedQuestion(label), true, label);
   }
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * THE LEVER CARD FIELD WHOSE ONLY LABEL IS ITS NAME.
+ *
+ * Measured on the live Palantir posting (jobs.lever.co/palantir/d5486403-.../apply) on 2026-08-11:
+ * nine controls carried NO label text, no aria-label and no placeholder, only
+ * name="cards[<uuid>][field0]". questionLabel returned that handle because it returned `own`
+ * whenever `own` was merely non-empty; normalizeDiscoveredLabel then dropped all nine as
+ * handle-only, and the run came back with '"University" is required and is still empty',
+ * '"Year of Graduation"...' and '"University Major"...' while the packet held USC Viterbi, 2028 and
+ * Computer Science.
+ * --------------------------------------------------------------------------------------------- */
+
+test('a string that is nothing but provider handles is recognised as one', () => {
+  // Lever's custom-question handle, in both the raw and the already-uuid-stripped spellings.
+  assert.equal(isProviderHandleOnly('cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]'), true);
+  assert.equal(isProviderHandleOnly('cards[026d7ce7-7ca4-44ed-9db6-1c7857707f0e][field12]'), true);
+  assert.equal(isProviderHandleOnly('cards [field0]'), true);
+  // Greenhouse's, which the same list already covered.
+  assert.equal(isProviderHandleOnly('question_37536799002[]'), true);
+  assert.equal(isProviderHandleOnly('degree--0'), true);
+  assert.equal(isProviderHandleOnly('5a326a1d-1a9e-42b1-a918-ca74022064dc'), true);
+  assert.equal(isProviderHandleOnly('[]'), true);
+});
+
+test('a name or id a person could read is still a label, and is kept', () => {
+  /* The narrowness IS the fix. Every one of these is a control whose name or id names the field,
+     and questionLabel must go on returning it rather than going looking for a heading. */
+  for (const meaningful of [
+    'firstName',
+    'school',
+    'gpa',
+    'urls[LinkedIn]',
+    'eeo[veteran]',
+    'Degree* degree--0',
+    'Yes cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]',
+    'how did you hear about us?* question_37536799002',
+    '姓名',
+  ]) {
+    assert.equal(isProviderHandleOnly(meaningful), false, meaningful);
+  }
+});
+
+test('handle-only is exactly the set of labels normalizeDiscoveredLabel already throws away', () => {
+  /* THE SAFETY ARGUMENT, as an assertion. The page script may fall through to a heading ONLY for a
+     string this returns true for, so if every such string already normalizes to '' then the
+     fall-through cannot rename a question that reads correctly today - it can only fill in one that
+     was being dropped. */
+  for (const handle of [
+    'cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]',
+    'cards [field1]',
+    'question_37536799002[]',
+    'degree--0',
+    'discipline--0 discipline--0',
+    '5a326a1d-1a9e-42b1-a918-ca74022064dc',
+    '[]',
+    '   ',
+  ]) {
+    assert.equal(isProviderHandleOnly(handle), true, handle);
+    assert.equal(normalizeDiscoveredLabel(handle), '', handle);
+  }
+});
+
+test('the page script and this module use ONE definition of a provider handle', () => {
+  /* The discovery walk runs in the browser and cannot import from here, so the regex list is
+     serialised into it. This executes the serialised copy and asserts it agrees with the twin above
+     on every shape, which is the only thing keeping the two from drifting apart. */
+  const compiled = new Function(`${PROVIDER_HANDLE_ONLY_SCRIPT} return isProviderHandleOnly;`)() as (value: string) => boolean;
+  for (const value of [
+    'cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]',
+    'cards [field0]',
+    'question_37536799002[]',
+    'degree--0',
+    '5a326a1d-1a9e-42b1-a918-ca74022064dc',
+    '[]',
+    '',
+    'firstName',
+    'school',
+    'urls[LinkedIn]',
+    'Degree* degree--0',
+    'Yes cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]',
+    '姓名',
+  ]) {
+    assert.equal(compiled(value), isProviderHandleOnly(value), value);
+  }
+});
+
+test('the discovery walk falls through to a heading only for a handle, and only when it is unambiguous', () => {
+  /* Source assertions, the same way portalSubmission.captcha.test.ts pins READ_SUBMIT_READINESS_SCRIPT:
+     the walk needs a live DOM. The behaviour itself was verified against the live Palantir, Match
+     Group, Shield AI, Ninja Van, Deepgram, ElevenLabs, Workable and Greenhouse forms on 2026-08-11 -
+     39 forms, 1017 controls, 12 labels changed, and every one of the 12 a field that had no stored
+     label at all. */
+
+  // BOTH conditions. Human text anywhere on the control keeps the control's own reading.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /if \(own && !written && isProviderHandleOnly\(own\)\) \{/);
+  // And when the walk finds nothing, own is returned unchanged: no heading is invented.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /if \(underHeading\) return underHeading;\s*\}\s*if \(own\) return own;/);
+
+  // A block holding more than one control ENDS the walk rather than borrowing a neighbour's label.
+  // This is what keeps Palantir's two-field "High School Name & Graduation Year" card honest.
+  assert.match(
+    DISCOVER_QUESTIONS_SCRIPT,
+    /function nearestQuestionText[\s\S]*querySelectorAll\('input:not\(\[type="hidden"\]\), textarea, select, \[role="combobox"\]'\)\.length > 1\) return '';/,
+  );
+  // Same six-level bound and same candidate list as the submit-readiness gate, so the Apply screen
+  // and the blocker line name a field the same way.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /depth < 6; depth \+= 1, node = node\.parentElement/);
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /function nearestQuestionText[\s\S]*querySelector\('label, legend, \.question, h3, h4'\)/);
+  // textContent, not innerText: Lever paints its card headings text-transform:uppercase and
+  // innerText reports the transformed glyphs ("YEAR OF GRADUATION").
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /var text = clean\(\(candidate && candidate\.textContent\) \|\| ''\);/);
+  // A control's own placeholder is not a question.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /if \(text && !genericControlText\(text\)\) return text;/);
 });

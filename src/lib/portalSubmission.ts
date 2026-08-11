@@ -9,11 +9,13 @@ import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } 
 import {
   classifyField,
   discoveredFieldIsRequired,
+  graduationYearFieldAnswer,
   isLegalConsentQuestion,
   normalizeReviewQuestionLabel,
   resolveKnownAnswer,
   ROUTINE_APPLICANT_CONSENT_QUESTION,
   type ApplicationProfileLike,
+  type ProfileKey,
 } from './questionDiscovery';
 import {
   chooseClosestOption,
@@ -24,7 +26,7 @@ import {
   selfIdentificationDeclineWording,
 } from './profileFieldResolution';
 import type { Locator } from 'playwright-core';
-import { browserApplicationCapability } from './browserApplicationCapabilities';
+import { browserApplicationCapability, type BrowserApplicationFamily } from './browserApplicationCapabilities';
 import { isControlledTestPortalUrl } from './controlledTestPortal';
 import { chooseCanonicalFinalSubmit } from './finalSubmitChooserPolicy';
 import {
@@ -48,7 +50,10 @@ function quoteAttr(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
-type PortalFamily =
+/* Exported for one reason: portalSupportInvariants.test.ts enumerates it and asserts that
+ * portalCanAutoSubmit and isAutonomousPortalFamily agree on every member. That agreement is what
+ * makes the CAPTCHA corroboration rule safe, and it is not otherwise enforced anywhere. */
+export type PortalFamily =
   | 'greenhouse'
   | 'lever'
   | 'ashby'
@@ -423,18 +428,39 @@ export function managedPortalReceiptCapability(portal: SupportedPortal): Managed
   return portalCanAutoSubmit(portal) ? 'confirmation_possible' : 'unavailable_before_handoff';
 }
 
+/* The families whose submit capability is decided by the researched capability table rather than by
+ * the deny sets above. portalCanAutoSubmit branches to browserApplicationCapability for exactly
+ * these, and the table denies programmaticSubmit on every one of them today.
+ *
+ * They have to be subtracted here or the type disagrees with the function. zoho_recruit and bullhorn
+ * are in no deny set, so before this line AutonomousPortalFamily claimed both were autonomous while
+ * portalCanAutoSubmit answered false for both, and the array below could not be complete. If the
+ * table ever grants one of them programmaticSubmit, the two answers part company in the other
+ * direction and portalSupportInvariants.test.ts is what says so. */
+type CapabilityReviewedFamily = Extract<PortalFamily, BrowserApplicationFamily>;
+
 // The portal families Litos can carry all the way to a confirmation on its own.
 //
 // Subtracted from PortalFamily rather than hand-listed, so a portal that later turns out to be
-// multi-step or CAPTCHA-gated leaves this type the moment it is added to either set above. There is
-// no second list to remember to update, which is the only version of this that stays true.
+// multi-step or CAPTCHA-gated leaves this type the moment it is added to either set above.
+//
+// The TYPE is subtracted; the VALUE below is still hand-listed, and `satisfies` proves only that
+// every entry belongs, never that every member is present. The completeness half is asserted in
+// portalSupportInvariants.test.ts, which is what makes "no second list to remember to update" true
+// rather than merely intended: a family that lands in none of the sets above joins this type, and if
+// nobody adds it to the array that test stops compiling.
 //
 // This is what the jobs board is allowed to source from. Surfacing a posting Litos cannot finish is
 // worse than not surfacing it at all: the student picks it, tailors a resume to it, and only then
 // discovers the last step needs her anyway. Fewer jobs that all work beats more jobs that mostly do.
 export type AutonomousPortalFamily = Exclude<
   PortalFamily,
-  MultiStepFamily | CaptchaGatedFamily | ConsentGatedFamily | ManualFinalReviewFamily | AccountWalledFamily
+  MultiStepFamily
+  | CaptchaGatedFamily
+  | ConsentGatedFamily
+  | ManualFinalReviewFamily
+  | AccountWalledFamily
+  | CapabilityReviewedFamily
 >;
 
 export const AUTONOMOUS_PORTAL_FAMILIES = [
@@ -2744,8 +2770,74 @@ function greenhouseComboboxValuesForQuestion(
   return uniqueDefined(values);
 }
 
+/**
+ * The wordings somebody has met and written down. Kept, and no longer the whole test.
+ *
+ * Every entry here is one employer's exact phrasing. That is what it is good at - "worked for
+ * databricks", "AI Policy for Interviewers", "majoring in STEM" are not a class of question, they
+ * are strings, and a pattern is the only honest way to hold them. What it is bad at is the ordinary
+ * case: an employer asking a question this codebase already understands, in words nobody happened
+ * to type here. See isGreenhouseReactSelectQuestion for the rung that covers that.
+ */
+const GREENHOUSE_REACT_SELECT_LITERALS =
+  /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bwhere\s+have\s+you\s+learned\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+(?:visa\s+)?sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bsponsor\b[^?]{0,80}\bwork\s+authorization\b|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bprocessing\s+of\s+personal\s+data\b|\bAI\s+Policy\s+for\s+Interviewers\b|\bmajoring\s+in\s+STEM\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:information|true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i;
+
+/**
+ * The closed-list profile fields a Greenhouse form renders as a react-select.
+ *
+ * Every key here was ALREADY reachable through GREENHOUSE_REACT_SELECT_LITERALS for at least one
+ * wording - "what is your gpa", "graduation year", "school", "degree", "major". Naming the field
+ * instead of the sentence is what stops the list from being one employer's phrasing wide. It adds
+ * no new CATEGORY of control, only the other ways of asking for the same thing.
+ *
+ * Deliberately not here: phone, the URL fields, city, state, salary, date of birth, the employer
+ * fields. Greenhouse renders those as text inputs, and pushing a combobox chain at a text input
+ * spends action budget on a control that will never open a menu.
+ */
+const GREENHOUSE_REACT_SELECT_PROFILE_KEYS: ReadonlySet<ProfileKey> = new Set<ProfileKey>([
+  'gpa', 'gpa_scale',
+  'graduation_date', 'graduation_month', 'graduation_year',
+  'education_start_date', 'education_end_date',
+  'school', 'degree', 'major', 'study_year', 'current_enrollment',
+]);
+
+/**
+ * A wording somebody has already met, and knows renders as a react-select.
+ *
+ * This is the STRONG claim: not just "a menu may be here" but "a plain text fill is the wrong
+ * thing for this control". It is what decides to WITHHOLD the scoped text fill, so it stays exactly
+ * as wide as the evidence behind it - one employer's measured phrasing - and no wider. Widening it
+ * would take the text fill away from controls nobody has ever looked at.
+ */
 function isGreenhouseReactSelectQuestion(question: string): boolean {
-  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bwhere\s+have\s+you\s+learned\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+(?:visa\s+)?sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bsponsor\b[^?]{0,80}\bwork\s+authorization\b|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bprocessing\s+of\s+personal\s+data\b|\bAI\s+Policy\s+for\s+Interviewers\b|\bmajoring\s+in\s+STEM\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:information|true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
+  return GREENHOUSE_REACT_SELECT_LITERALS.test(question);
+}
+
+/**
+ * MIGHT THIS CONTROL BE A CLOSED LIST? Answered from the QUESTION, not from its wording.
+ *
+ * The literals used to be the whole test, and the corpus says what that costs. Measured over the
+ * owner's 158 packets on 2026-08-11: 22 were blocked with a GPA field required and empty while the
+ * packet already carried "3.89". Ten asked "What is your GPA?", which is in the literals and was
+ * recognised. The other twelve asked "Overall GPA" (Virtu, 7) and "Please indicate your overall
+ * GPA." (Five Rings, 5), which are not, so no combobox chain was ever built for them and the only
+ * attempt they got was a text fill into a control whose options read "3.5-3.9".
+ *
+ * classifyField called all three of those labels `gpa`. The resolver has understood them the whole
+ * time - it is how "3.89" got into the packet - and only the fill pass had not. So the fix is not
+ * to add two more strings, which leaves the next employer's third phrasing exactly as broken; it is
+ * to ask the question-classifier the codebase already has, the same one resolveKnownAnswer asks,
+ * and stop keeping two disagreeing definitions of what a question means.
+ *
+ * THIS IS THE WEAK CLAIM AND IT IS ONLY EVER ADDITIVE. It gates whether a combobox chain is also
+ * pushed; it never withholds anything. A control that turns out to be a plain text box still gets
+ * its text fill, because isGreenhouseReactSelectQuestion above - not this - is what suppresses that.
+ * The cost of being wrong here is a few spent actions, not an unfilled field.
+ */
+function questionMayBeClosedList(question: string): boolean {
+  if (GREENHOUSE_REACT_SELECT_LITERALS.test(question)) return true;
+  const key = classifyField(question);
+  return key !== null && GREENHOUSE_REACT_SELECT_PROFILE_KEYS.has(key);
 }
 
 function isSamsaraLearnedAboutQuestion(question: string): boolean {
@@ -2787,7 +2879,7 @@ function pushGreenhouseQuestionComboboxActions(
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
 ) {
-  if (!isGreenhouseReactSelectQuestion(questionText)) return;
+  if (!questionMayBeClosedList(questionText)) return;
   const selectors = [selector];
   if (isSamsaraLearnedAboutQuestion(questionText)) {
     selectors.push(
@@ -2923,7 +3015,7 @@ function pushGreenhouseQuestionComboboxLabelActions(
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
 ) {
-  if (!isGreenhouseReactSelectQuestion(questionText)) return;
+  if (!questionMayBeClosedList(questionText)) return;
   let index = 0;
   const valueLimit = comboboxValueLimit(questionText, contextText);
   // The slice happens inside, before the hatch is appended. Running the pair through uniqueDefined
@@ -3343,19 +3435,71 @@ function packetLooksDatabricks(packet: SubmissionPacket): boolean {
     || packet.questions.some((item) => /\bdatabricks\b/i.test(`${item.question}\n${item.answer}`));
 }
 
+/* THE ONLY SHAPE THAT MAY BE HANDED MORE THAN A YEAR, and why the test is positive rather than a
+ * list of exclusions.
+ *
+ * An open text-entry control that discovery actually saw and reported. Everything else keeps the
+ * bare year, and each exclusion is a case where widening could only do harm:
+ *   - a closed list (select, radio, checkbox, combobox) is matched against the employer's own option
+ *     text, so a wider answer can only miss an option that "2028" matches exactly;
+ *   - a number or tel box cannot physically carry a month name;
+ *   - NO reported type at all means discovery never saw this control. Greenhouse's known-question
+ *     aliases reach here that way, and every one of them is answered against an option list.
+ * That last exclusion is not theoretical: without it Akuna's "Graduation Year" React-select was
+ * offered "May 2028" beside "2028". */
+const OPEN_GRADUATION_TEXT_CONTROL = /^(?:text|textarea)$/i;
+
+/**
+ * What goes into a control whose LABEL asks for a graduation year.
+ *
+ * WHY THIS IS NOT packet.graduationYear (measured on prod packets bbf0115a, 59fb48ae, cd066fee and
+ * 4bfd5827 - Deepgram on Ashby, 2026-08-08 to 2026-08-11). "Expected Graduation Year" there is a
+ * react-datepicker at day precision behind `[data-field-path="407cc864-..."]`. Handed a bare "2028"
+ * the managed runner deliberately writes nothing and says so, because tabbing off a typed year
+ * commits 01/01/2028 - four months before a May graduation, and a date the employer reads as fact.
+ * All four of those runs then reported "Expected Graduation Year" as required and still empty, on a
+ * packet that was otherwise complete.
+ *
+ * questionDiscovery already settled this: graduationYearFieldAnswer resolves the same label to
+ * "May 2028" and refuses to widen a year-only profile. That answer reached the packet, and this
+ * function overwrote it with the bare year one layer later, which is why the fix in discovery never
+ * showed up on the form. Calling the same helper here is what makes the two layers agree.
+ *
+ * The month is never invented. graduationYearFieldAnswer returns the bare year whenever the profile
+ * states no month, so a year-only profile still hands the runner "2028" and the runner still refuses
+ * the date control rather than picking a month - which is the correct outcome and stays correct.
+ */
+function graduationYearAnswerForControl(
+  item: SubmissionPacket['questions'][number],
+  packet: SubmissionPacket,
+): string {
+  const year = packet.graduationYear?.trim();
+  const inputType = reviewQuestionPortalInputType(item)?.trim() ?? '';
+  if (!OPEN_GRADUATION_TEXT_CONTROL.test(inputType)) return year || item.answer;
+  const yearNumber = year && /^\d{4}$/.test(year) ? Number(year) : undefined;
+  return graduationYearFieldAnswer(packet.graduationDate, yearNumber, inputType)
+    ?? year
+    ?? item.answer;
+}
+
 /**
  * The graduation value this particular control is asking for.
  *
  * THE NARROW TESTS RUN FIRST, and the order is the whole correctness argument. The date branch
  * matches on `expected graduat(ion|e)` with nothing after it, so it also matches "Expected
- * Graduation Year" and "Expected Graduation Month" - and it used to be first, so it won. Measured
- * on the Deepgram packet of 2026-08-08: discovery had resolved "Expected Graduation Year" to
- * "2028", correctly, and this function overwrote it with packet.graduationDate, "May 2028". A month
- * name in a year field is a wrong answer typed onto a real employer's form, and the field that
- * would have carried it is the one the run then reported as required-and-empty.
+ * Graduation Year" and "Expected Graduation Month" - and it used to be first, so it won, which is
+ * why "Graduation Month" once received a whole date.
  *
  * Month before year before date, because that is specific-to-general. "Graduation month" cannot be
  * a date question; "graduation date" can never be more specific than the other two.
+ *
+ * WHAT THE YEAR BRANCH IS NOT. Ordering the tests correctly says which QUESTION is being asked; it
+ * says nothing about what the CONTROL can hold. The first version of this ordering also replaced the
+ * answer with packet.graduationYear, on the reading that a field labelled "Expected Graduation Year"
+ * is a year field. On the live Deepgram Ashby form it is a react-datepicker, and the bare year is
+ * exactly the value it refuses - so that reading cost four consecutive runs the same required field.
+ * The year branch now asks graduationYearAnswerForControl, which narrows only where the control
+ * really is year-shaped.
  */
 function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][number], packet: SubmissionPacket): string {
   const questionText = normalizeReviewQuestionLabel(item.question);
@@ -3369,7 +3513,7 @@ function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][nu
     return packet.graduationMonth?.trim() || item.answer;
   }
   if (/\bgraduat(?:ion|e)\s+year\b|\bwhat\s+is\s+your\s+graduation\s+year\b|\byear\s+of\s+graduation\b/i.test(questionText)) {
-    return packet.graduationYear?.trim() || item.answer;
+    return graduationYearAnswerForControl(item, packet);
   }
   if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)\b/i.test(questionText)) {
     return packet.graduationDate?.trim() || item.answer;
@@ -6753,6 +6897,27 @@ export function managedCaptchaProvider(
 }
 
 /**
+ * EVERYTHING ON THIS PAGE THAT IS POSITIVE EVIDENCE A HUMAN IS BEING ASKED SOMETHING.
+ *
+ * Named once and shared, because "what counts as evidence" was previously spelled out inline in
+ * the corroboration check and therefore applied to some portals and not others. Each entry is a
+ * direct observation rather than an inference: an open bframe is the image grid a person is looking
+ * at, a rendered widget or anchor is a control that has not declared itself invisible, and an
+ * unexplained challenge sitekey is a widget nothing on the page accounted for.
+ *
+ * Empty means the page said nothing about a challenge. It does NOT mean there is no challenge - a
+ * page that returned no readable text at all produces an empty list too, and that is precisely the
+ * shape the caller has to be able to tell apart from a seen widget.
+ */
+export function managedCaptchaPageEvidence(evidence: ManagedCaptchaEvidence): string[] {
+  return [
+    ...(evidence.bframeSrc ? [evidence.bframeSrc] : []),
+    ...renderedCaptchaEvidence(evidence),
+    ...unexplainedChallengeSitekeys(evidence),
+  ];
+}
+
+/**
  * Does this repo's own read of the page back up the REMOTE RUNNER's claim that a human is needed?
  *
  * WHAT THIS IS, stated precisely, because it used to be described as something it is not. It is a
@@ -6769,33 +6934,74 @@ export function managedCaptchaProvider(
  * defence in depth, it is one check wearing two names, which is worse than one check because it
  * reads as two.
  *
- * Outside the autonomous families the provider's word stands unchallenged - JazzHR and BambooHR
- * really do gate every form, portalCanAutoSubmit already refuses to submit them, and there is
- * nothing to protect.
+ * THIS IS A PAGE QUESTION, so it is now answered the same way for every family. It used to return
+ * true for any portal outside AUTONOMOUS_PORTAL_FAMILIES before looking at a single extract.
+ *
+ * That carve-out was not only a mistake, and the honest version of this note has to say so. It was
+ * written when the exception meant JazzHR and BambooHR, two families measured by hand and known to
+ * gate every form, and for them it was correct. It was also, in effect, the belt for every family
+ * nobody had measured yet: an unmeasured portal kept the runner's CAPTCHA claim, and keeping a
+ * blocker is the cautious direction. What made it wrong was that it silently extended that trust to
+ * families added years after the reasoning was written, so the set it protected and the set it was
+ * argued for drifted apart with nothing to notice. Measured consequence: packet 1d1de862 (SEEKA,
+ * smartrecruiters) carries a CAPTCHA claim and an open human_verification stall on a page whose own
+ * preview recorded no readable text whatsoever, which is the signature of an interstitial rather
+ * than a widget.
+ *
+ * So the belt is kept where it was actually earned and dropped where it was merely inherited. The
+ * three families that CANNOT auto-submit on any path keep their blocker unconditionally, one layer
+ * up in corroborateManagedCaptchaBlockers, which is where a family ceiling belongs. Everything else
+ * has to show the page.
  *
  * Uncorroborating is safe at the point it is used. It drops a blocker off a PREPARE result, which
  * fills a form and screenshots it; it never presses submit. The submit path runs its own probe
  * afterwards, and portalCanAutoSubmit still stands in front of that. The cost of a false negative
  * here is a preview the applicant reviews anyway. The cost of the false positive was the product.
+ *
+ * `portal` is still taken, and still ignored on purpose: the caller passes the portal it is judging
+ * and the answer is deliberately independent of it. Removing the parameter would only hide that
+ * this is a page question rather than a family question.
  */
 export function managedCaptchaVerdictIsCorroborated(
   portal: SupportedPortal,
   result: ManagedBrowserResult | null,
 ): boolean {
+  void portal;
   const evidence = readManagedCaptchaEvidence(result);
   if (isInvisibleRecaptchaEvidence(evidence)) return false;
-  if (!isAutonomousPortalFamily(portalFamily(portal))) return true;
-  return evidence.bframeSrc !== null
-    || renderedCaptchaEvidence(evidence).length > 0
-    || unexplainedChallengeSitekeys(evidence).length > 0;
+  return managedCaptchaPageEvidence(evidence).length > 0;
 }
 
+/**
+ * WHETHER THE RUN STOPS, which is a different question from whether the page agrees.
+ *
+ * The verdict above is about markup. This is about the packet, and it has one more input: a family
+ * whose forms Litos can never finish on its own. On jazzhr, bamboohr and comeet, dropping the
+ * CAPTCHA blocker does not merely lose a warning, it makes `blockers.length === 0` in prepareManaged
+ * and therefore `safe`, which renders a green "Send it" button, or submits outright under standing
+ * consent. She presses it, the approve gate accepts, and the submit path immediately bounces her
+ * back to needs_attention because portalCanAutoSubmit is false for those three. A send button that
+ * cannot work is the failure this module already names as its worst: it is the same shape as the
+ * Cresta cover-letter refusal, pointed the other way.
+ *
+ * So a family ceiling keeps its blocker whatever the page read said, and it costs nothing to do so:
+ * these are exactly the families that cannot auto-submit anyway, so no application is delayed by a
+ * blocker that was going to stop at the handoff regardless. It also keeps the whole of the real fix,
+ * because smartrecruiters, jobvite, icims and oraclecloud are not on that list and still have to
+ * show the page.
+ *
+ * This is deliberately NOT inside managedCaptchaVerdictIsCorroborated. That function answers "does
+ * this repo's read of the markup back the runner up", and a family fact is not evidence about a
+ * page; folding it in would put a family carve-out back into the one place the carve-out did damage,
+ * and would make an assumed stop indistinguishable from an observed one.
+ */
 export function corroborateManagedCaptchaBlockers(
   portal: SupportedPortal,
   blockers: readonly string[],
   result: ManagedBrowserResult | null,
 ): string[] {
   if (!blockersIncludeCaptcha(blockers)) return [...blockers];
+  if (isCaptchaGatedFamily(portal)) return [...blockers];
   if (managedCaptchaVerdictIsCorroborated(portal, result)) return [...blockers];
   return blockers.filter((blocker) => blocker !== CAPTCHA_BLOCKER);
 }

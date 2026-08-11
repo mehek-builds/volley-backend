@@ -1886,3 +1886,90 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   assert.match(runner, /&& discoveryFailures\.length === 0/);
   assert.match(runner, /attentionCount:[^\n]*\+ discoveryFailures\.length/);
 });
+
+test('a radio option is not recorded as a question the applicant has to answer', async () => {
+  /* The packet side of the same gate the pre-script applies. Fixture is the Palantir Lever form as
+   * discovery really reported it on 2026-08-11, across 11 of the owner's packets: the radio and
+   * checkbox rows carry their own OPTION text plus the card's name attribute, and the questions the
+   * form actually asked are the plain cards beside them.
+   *
+   * R-096 records an unanswerable required field on purpose, so without this gate every one of
+   * these becomes a blocker reading '"Yes" is required and is still empty' and a row on the Apply
+   * screen asking her to answer the word "Yes". */
+  const current: ApplicationReviewState = {
+    jd_text: 'Palantir early talent internship.',
+    role: 'Software Engineer Intern',
+    portal_url: 'https://jobs.lever.co/palantir/123',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  // required: true throughout, as the live form marks them. That is what makes each of these a
+  // BLOCKER when it is recorded, and what makes this test fail if the gate is removed.
+  const card = (label: string, inputType: string, options?: string[]) => ({
+    label,
+    selector: '[data-litos-discovered-1]',
+    inputType,
+    maxLength: null,
+    required: true,
+    ...(options ? { options } : {}),
+  });
+
+  const result = await discoverAndResolveQuestions(
+    [
+      card('Yes cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]', 'radio'),
+      card('Yes, I consent cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]', 'checkbox'),
+      card('English (ENG) cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]', 'checkbox'),
+      card('cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field1]', 'text'),
+      // The composite typeahead whose <label> textContent swallowed its own empty state.
+      card('Current location No location found. Try entering a different locationLoading location location-input', 'text'),
+      // A real question on the same form, which has to survive all of it.
+      card('Year of Graduation cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]', 'text'),
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { grad_date: 'May 2028', grad_year: 2028 },
+    true,
+    'lever',
+  );
+
+  const labels = result.questions.map((question) => question.question.toLowerCase());
+  for (const rejected of ['yes', 'yes, i consent', 'english (eng)', 'cards [field0]', 'cards [field1]']) {
+    assert.equal(labels.includes(rejected), false, `${rejected} must not be recorded as a question`);
+  }
+  assert.equal(labels.some((label) => label.includes('no location found')), false);
+  assert.ok(labels.some((label) => label.includes('year of graduation')), 'the real question must survive');
+});
+
+test('a bare privacy label still reaches the packet as a question', async () => {
+  // The packet-side half of the R-PROTECT guard in postingQuestions.test.ts. Point72 and IMC label
+  // their consent checkbox exactly this way, and Litos answers it from accept_privacy_notices.
+  const current: ApplicationReviewState = {
+    jd_text: 'Point72 Academy.',
+    role: 'Investment Analyst Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/1',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions(
+    [
+      { label: 'Privacy', selector: '[data-litos-discovered-1]', inputType: 'checkbox', maxLength: null, required: true },
+      { label: 'Privacy statement', selector: '[data-litos-discovered-2]', inputType: 'checkbox', maxLength: null, required: true },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { accept_privacy_notices: true },
+    true,
+    'greenhouse',
+  );
+  const labels = result.questions.map((question) => question.question.toLowerCase());
+  assert.ok(labels.includes('privacy'), 'the bare "Privacy" label must stay a question');
+  assert.ok(labels.includes('privacy statement'), 'the bare "Privacy statement" label must stay a question');
+});
