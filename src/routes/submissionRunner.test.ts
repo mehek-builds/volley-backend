@@ -12,6 +12,7 @@ import {
   isProviderSessionFailureMessage,
   mergeDiscoveredPortalQuestions,
   managedExtensionHandoffUrl,
+  measuredRequiredDocuments,
   optionProbeAttentionReasons,
   packetUsesControlledResumeFixture,
   preparationEvidenceBlockers,
@@ -325,6 +326,31 @@ test('attention categories distinguish captcha from document and attestation blo
     ]),
     ['evidence_gap', 'required_field'],
   );
+});
+
+test('an empty LinkedIn field is a required field, not a document the employer wants uploaded', () => {
+  /* `file` lives inside `profile`, and the arm that classifies documents had no word boundaries, so
+     every packet stopped on an empty LinkedIn or GitHub URL was counted as a stopped-on-a-document
+     one. Counting only: nothing keys a control off this category, and the dashboard reads
+     review.required_documents instead. See lib/requiredDocuments.ts for why that is structural
+     rather than a second regex. */
+  for (const label of ['LinkedIn Profile', 'LinkedIn Profile URL', 'GitHub profile']) {
+    assert.deepEqual(
+      attentionCategoriesForReasons([`"${label}" is required and is still empty`]),
+      ['required_field'],
+      label,
+    );
+  }
+  // And the boundary must not cost the sentences that really are about a document.
+  for (const reason of [
+    '"Transcript" is required and is still empty',
+    '"Upload transcripts" is required and is still empty',
+    '"Supporting documents" is required and is still empty',
+    '"Attachments" is required and is still empty',
+    '"Additional files" is required and is still empty',
+  ]) {
+    assert.deepEqual(attentionCategoriesForReasons([reason]), ['required_document'], reason);
+  }
 });
 
 test('Greenhouse managed blockers are reconciled with selected React-select preview evidence', () => {
@@ -1756,6 +1782,87 @@ test('a short stored question never swallows a long blocker by prefix', () => {
     unansweredRequiredBlockerLabels(['"GPA and test scores" is required and is still empty'], [{ question: 'GPA' }]),
     ['GPA and test scores'],
   );
+});
+
+/* THE SAME MEASUREMENT, READ FOR WHICH DOCUMENT RATHER THAN HOW MANY.
+ *
+ * unansweredRequiredBlockerLabels answers "how much of this form did we leave her no way to
+ * complete", which is honest and entirely unactionable. measuredRequiredDocuments answers "which of
+ * those is a file she can actually hand over", which is the one the dashboard can draw a control
+ * off. The DRW blocker above is the corpus example of a line that is both. */
+
+test('the DRW transcript blocker is read as a transcript ask, and its neighbours are not', () => {
+  const blockers = [
+    '"Discipline" is required and is still empty',
+    '"LinkedIn Profile" is required and is still empty',
+    '"Please provide a copy of your most recent transcript from your highest degree level." is required and is still empty',
+  ];
+  const unanswered = unansweredRequiredBlockerLabels(blockers, []);
+  assert.equal(unanswered.length, 3, 'all three are unanswerable; only one of them is a document');
+
+  assert.deepEqual(measuredRequiredDocuments(unanswered, []), [{
+    label: 'Please provide a copy of your most recent transcript from your highest degree level.',
+    kind: 'transcript',
+    official_requested: false,
+  }]);
+});
+
+test('a required file question is the second source, and the union is one row', () => {
+  /* NOTHING PRODUCES THIS INPUT TODAY, on either runner. The direct-Playwright walk enumerates
+     text, email, tel, url, number, date, untyped, textarea, select, radio and checkbox
+     (lib/questionDiscovery.ts:4195) and no file input, and stratus's managed discover scan is built
+     the same way. So the blocker sentence is currently the only live source, and this half is
+     forward-compatible rather than reachable. Tested anyway: it is the behaviour that has to be
+     right on the day either walk is widened, and until then nothing exercises it. */
+  const questions = [
+    { question: 'Unofficial transcript', required: true, portal_input_type: 'file' },
+    { question: 'Resume', required: true, portal_input_type: 'file' },
+    // Not required, and required but not a file. Neither is an ask.
+    { question: 'Optional transcript', required: false, portal_input_type: 'file' },
+    { question: 'Tell us about a transcript you enjoyed', required: true, portal_input_type: 'textarea' },
+  ];
+  assert.deepEqual(measuredRequiredDocuments([], questions), [
+    { label: 'Unofficial transcript', kind: 'transcript', official_requested: false },
+  ]);
+
+  // Union'd with the blocker source, and still one row: it is one file the employer wants.
+  assert.deepEqual(measuredRequiredDocuments(['Official transcript'], questions), [
+    { label: 'Official transcript', kind: 'transcript', official_requested: true },
+  ]);
+});
+
+test('a form that asks for no document measures an empty array, not an absent field', () => {
+  // The distinction the dashboard depends on: undefined means no prepare on this build has looked,
+  // and must not be read as "nothing is owed".
+  assert.deepEqual(measuredRequiredDocuments(['First Name', 'LinkedIn Profile'], []), []);
+});
+
+/* BOTH PREPARE PATHS WRITE IT, and that is the entire point of the change.
+ *
+ * The direct-Playwright path never computed this measurement at all: the second argument to
+ * discoveryHonestyReasons was a hard-coded empty array and nothing else there made the comparison.
+ * Measured on one runner only, the "your turn" row fires on managed portals and is silently absent
+ * on the rest of them, which from the dashboard is indistinguishable from the feature not working.
+ *
+ * Asserted against the source for the same reason as the budget gate above: both prepare functions
+ * need a remote runner, a database and blob storage, so the wiring is what can be pinned here. */
+test('required_documents is written by both prepare paths, off both blocker sources', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+
+  assert.equal(
+    [...runner.matchAll(/^\s+required_documents: requiredDocuments,$/gm)].length,
+    2,
+    'one write per prepare path: prepareManaged and the direct-Playwright prepare',
+  );
+  assert.equal(
+    [...runner.matchAll(/measuredRequiredDocuments\(unansweredRequired, mergedQuestions\)/g)].length,
+    2,
+    'and each one computes it from that path\'s own required-and-empty blockers',
+  );
+  // The direct path measures against its sanitized blockers, which is the same array its own
+  // attention_reason is built from. Reading result.blockers raw there would let a provider's UUID
+  // label through into a stored document ask.
+  assert.match(runner, /unansweredRequiredBlockerLabels\(sanitizedBlockers, mergedQuestions\)/);
 });
 
 test('a run that discovered nothing and a run that could not look are different admissions', () => {

@@ -10,6 +10,7 @@ import {
   generated_resumes,
   monitored_jobs,
   profiles,
+  user_documents,
   users,
 } from '../db/schema';
 import {
@@ -75,9 +76,11 @@ import {
   blockersRequireCoverLetter,
   fillPortal,
   hasCoverLetterUpload,
+  hasTranscriptUpload,
   managedResultFilledFields,
   managedAnswerLossReasons,
   managedResultHasCoverLetterUpload,
+  managedResultHasTranscriptUpload,
   managedAttendedAccountHold,
   managedAttendedAccountUrlIsSupported,
   navigateToApplicationForm,
@@ -111,6 +114,7 @@ import {
   type TerminalRunStatus,
 } from '../lib/submissionTerminalCause';
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
+import { documentAsksOpenToReuse, requiredDocumentAsks, type RequiredDocumentAsk } from '../lib/requiredDocuments';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { resolveBlobUrl } from '../lib/resumeAccess';
 import { currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
@@ -171,7 +175,14 @@ import {
   submissionBatchSize,
   withinDailyCap,
 } from '../lib/submissionQueue';
-import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
+import { coverLetterFileNameForRole, resumeFileNameForRole, transcriptFileNameForRole } from '../lib/resumeFileName';
+import {
+  claimReusableDocument,
+  documentBytesFromPointer,
+  ForeignDocumentPointerError,
+  storedDocuments,
+  MAX_USER_DOCUMENT_BYTES,
+} from '../lib/documentStore';
 import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import { duplicateApplicationVerdict } from '../lib/duplicateApplication';
 import {
@@ -502,6 +513,32 @@ export function coverLetterObjectKeyToAttach(spec: unknown): string | null {
   return key || null;
 }
 
+/**
+ * The blob key of the transcript this packet should carry, or null when there is nothing to carry.
+ *
+ * ONE TERM, AND IT IS THE FILE ITSELF. The condition above this one is the record of what a second
+ * term costs: requiring an approval that the fill has to happen before is a circle, and 111 of the
+ * 112 packets in the corpus that held a written cover letter were sitting inside it. Nothing here
+ * may grow into that shape. Not an approval stamp, not attached_at, not a review status - if the
+ * object key is on the spec, the file exists and she put it there, and that is the whole question.
+ *
+ * WHETHER to attach it is a different question with a different owner, exactly as it is for the
+ * letter: the form has to have somewhere to put it, which is transcript_supported, measured by the
+ * run and applied through omitTranscript by every caller. Splitting the two is what keeps this
+ * function unable to deadlock.
+ *
+ * A blank key is not a key: resolveBlobUrl would list the whole store on an empty prefix.
+ */
+export function transcriptObjectKeyToAttach(spec: unknown): string | null {
+  const stored = (spec && typeof spec === 'object' ? spec : {}) as Record<string, unknown>;
+  const documents = stored._documents;
+  if (!documents || typeof documents !== 'object' || Array.isArray(documents)) return null;
+  const entry = (documents as Record<string, unknown>).transcript;
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const key = (entry as Record<string, unknown>).object_key;
+  return (typeof key === 'string' ? key.trim() : '') || null;
+}
+
 function referralIdentity(value: unknown): string {
   return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').toLowerCase() : '';
 }
@@ -577,6 +614,76 @@ export async function resumeBytesForPacket(
   return Buffer.from(await response.arrayBuffer());
 }
 
+/**
+ * The plaintext bytes of a document the student attached herself, for the fill.
+ *
+ * THREE DEPARTURES FROM THE COVER LETTER'S BRANCH, each one measured rather than stylistic.
+ *
+ * IT KEEPS THE FIXTURE BRANCH. packetUsesControlledResumeFixture covers the resume only, so a
+ * controlled QA run carrying a transcript would go to Vercel Blob for a real object and fail on a
+ * portal that exists to have no dependencies. A controlled run gets fixture bytes for every file it
+ * carries or it is not a controlled run.
+ *
+ * IT READS blob_url BEFORE resolveBlobUrl. The resolver goes through list({ prefix }), which is
+ * eventually consistent with no stated bound: reproduced server-side still 404ing 54 seconds after
+ * the write, and R-040 was every Ashby fill of 2026-07-18 shipping without a resume because of it. A
+ * transcript uploaded and attached in one sitting is exactly that window, and the failure is silent
+ * in the worst direction - a file that is there reads as missing. The URL put() returned is a column
+ * on the row for this reason; the resolver stays as the fallback for a row written before it.
+ *
+ * IT UNSEALS. The bytes in the blob are AES-256-GCM ciphertext, not a PDF. That is what makes the
+ * privacy sentence true, and it means every read has to come through here rather than through a
+ * plain fetch, or the form gets an unreadable file named transcript.pdf.
+ *
+ * THE SCOPED ROW IS THE AUTHORISATION, AND A MISS IS A REFUSAL. That sentence is the correction of a
+ * real hole, not a restatement of an intention, and the shape of the hole is worth keeping because
+ * the same shape is available to any future reader of this store. The lookup was scoped by user from
+ * the first line it was written, and the miss then handed `blob_url: null` on to
+ * documentBytesFromPointer - which falls back to resolveBlobUrl, a resolver that takes an object key
+ * and NOTHING ELSE and resolves any key in the store. So a spec naming another account's key missed
+ * the scoped row and then fetched that account's file through the back door, while the comment here
+ * and the test in transcriptAttachment.test.ts both asserted the scoping and both stayed green,
+ * because what they checked was the query and what was wrong was the fall-through underneath it.
+ *
+ * Encryption is not a second line of defence here and should not be read as one: the key comes from
+ * one server secret and one fixed salt (lib/documentCrypto.ts), so any bytes that resolve are bytes
+ * that decrypt. The scope check is the whole of the control.
+ *
+ * So the miss throws, and the only object key that can now reach a resolver is one read back off a
+ * row this user owns. Throwing rather than returning nothing is what makes the failure legible:
+ * buildPacket's catch carries it as the packet's unavailable reason, both prepares log the message
+ * verbatim, and packetForTranscriptCapability owes the applicant a sentence. A silent empty
+ * attachment would be an application that claims a transcript and sends none, which is the exact
+ * failure this whole path exists to prevent.
+ *
+ * Tombstones are deliberately not filtered out: a removed document's row is the fastest way to a
+ * clear 404 on a dead pointer, where filtering it would turn a pointer that IS hers into the
+ * refusal above and name the wrong reason on the log line.
+ */
+export async function documentBytesForPacket(
+  userId: string,
+  objectKey: string,
+  controlledTest: boolean,
+  dependencies?: ResumePacketDependencies,
+): Promise<Buffer> {
+  if (controlledTest && process.env.LITOS_ENABLE_TEST_PORTAL === 'true') {
+    return Buffer.from('%PDF-1.4\n% Litos controlled attached-document fixture\n%%EOF\n');
+  }
+  const [row] = await db.select({
+    blob_url: user_documents.blob_url,
+    object_key: user_documents.object_key,
+  })
+    .from(user_documents)
+    .where(and(eq(user_documents.object_key, objectKey), eq(user_documents.user_id, userId)))
+    .limit(1);
+  if (!row) throw new ForeignDocumentPointerError();
+  // The row's own key, not the argument, even though the predicate makes them equal. It costs one
+  // selected column to make the fall-through structurally unable to resolve anything but a key that
+  // came back off an owned row, and equality by predicate is exactly the kind of reasoning the bug
+  // above was made of.
+  return documentBytesFromPointer({ blobUrl: row.blob_url, objectKey: row.object_key }, dependencies);
+}
+
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
@@ -592,6 +699,39 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const review = readApplicationReview(stored);
   if (!review) throw new Error('We could not find this application');
   const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest);
+  /* THE ATTACHED TRANSCRIPT, LOADED HERE AND NOT ALLOWED TO THROW.
+   *
+   * The cover letter below throws when its object cannot be resolved or fetched, and exactly one of
+   * this function's nine callers catches it. That is a known, named hazard for the letter; for this
+   * file it would be a live one on the ordinary path. `DELETE /documents/:id` deletes the blob and
+   * tombstones the row, and it deliberately does not rewrite the spec of every application that
+   * already carried the file - a sent application still has to be able to say what went out with it.
+   * So a student who tidies her library leaves live pointers at a file that is gone, and a throw
+   * here would turn that into an aborted prepare, or a failed send, on applications that are
+   * otherwise complete.
+   *
+   * The failure is carried on the packet instead, where packetForTranscriptCapability turns it into
+   * one fixed sentence and the run logs the detail. Silence is the one thing not on offer: an
+   * application that says it carries a transcript and does not is the failure this whole path exists
+   * to prevent.
+   *
+   * ABOVE THE COVER LETTER, and that position is load-bearing rather than incidental.
+   * submissionRunner.test.ts fences off everything from the letter's own declaration to the end of
+   * this function and asserts that no controlled-fixture decision appears inside it, so that a
+   * choice made for the resume can never reach the letter's resolution. The transcript genuinely
+   * needs that flag - a controlled run must not go to blob storage for any file it carries - so it
+   * is resolved above the fence rather than inside it.
+   */
+  let transcript: Buffer | undefined;
+  let transcriptUnavailableReason: string | undefined;
+  const transcriptKey = transcriptObjectKeyToAttach(stored);
+  if (transcriptKey) {
+    try {
+      transcript = await documentBytesForPacket(row.user_id, transcriptKey, controlledTest);
+    } catch (error) {
+      transcriptUnavailableReason = error instanceof Error ? error.message : String(error);
+    }
+  }
   let coverLetter: Buffer | undefined;
   const coverLetterKey = coverLetterObjectKeyToAttach(stored);
   if (coverLetterKey) {
@@ -781,6 +921,12 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     coverLetterName: coverLetter
       ? coverLetterFileNameForRole(fullName, roleTitle)
       : undefined,
+    transcript,
+    // The conditional name is what makes an application with no transcript a no-op rather than a
+    // half-populated packet: uploadFirst and managedUpload both return before doing anything unless
+    // the file and the name are both set, so the two must go missing together.
+    transcriptName: transcript ? transcriptFileNameForRole(fullName, roleTitle) : undefined,
+    transcriptUnavailableReason,
     eeoPrefs: sanitizeEeoPrefs(app.eeo_prefs),
     // Metadata, not a fill field: `email` above is what gets typed. Carried on the packet so the
     // prepare paths can write which address was used, and why, onto the review state.
@@ -826,6 +972,21 @@ function omitCoverLetter(packet: SubmissionPacket): SubmissionPacket {
   return { ...packet, coverLetter: undefined, coverLetterName: undefined };
 }
 
+/* The transcript's twin, and it clears the reason as well as the file.
+ *
+ * Both fields go, because both of them are read downstream and they disagree in different ways: the
+ * bytes decide whether an upload action is spent, and the reason decides whether the applicant is
+ * told something went wrong. On a form with nowhere to put a transcript there is nothing to spend
+ * and nothing to report, so a packet that has been stripped must not still be carrying either. */
+function omitTranscript(packet: SubmissionPacket): SubmissionPacket {
+  return {
+    ...packet,
+    transcript: undefined,
+    transcriptName: undefined,
+    transcriptUnavailableReason: undefined,
+  };
+}
+
 function normalizedFilledFields(fields: readonly string[] | undefined): Set<string> {
   return new Set((fields ?? []).map((field) => field.toLowerCase().replace(/[^a-z0-9]/g, '')));
 }
@@ -841,6 +1002,22 @@ function filledFieldBlockers(fields: readonly string[] | undefined, packet: Subm
   }
   if (packet.coverLetter && !has('cover')) {
     issues.push('The filled form did not record the cover letter attachment.');
+  }
+  /* THE ONLY SIGNAL THERE IS THAT THE TRANSCRIPT SELECTOR MATCHED NOTHING, and it is worth being
+   * exact about how much it proves.
+   *
+   * Both upload paths fail quietly by design. uploadFirst steps over a selector that resolves to a
+   * non-file element with a bare `continue` and swallows a failed setInputFiles with
+   * `catch { continue; }`; the managed runner reports a non-matching optional selector into
+   * `skipped` rather than `filledFields`. So a transcript that never reached the form leaves no
+   * error anywhere, and this sentence is what turns that into something she is told about.
+   *
+   * WHAT IT DOES NOT PROVE: that the employer's own uploader registered the file. A control can
+   * accept setInputFiles while the page's JavaScript never notices, and nothing on either path can
+   * see that. This says the run did not record the attachment; it does not say the attachment
+   * arrived, and it must not be read or described as if it did. */
+  if (packet.transcript && !has('transcript')) {
+    issues.push('The filled form did not record the transcript attachment.');
   }
   return issues;
 }
@@ -1171,6 +1348,79 @@ function strippedCoverLetterSpec(spec: unknown): Record<string, unknown> {
   const stored = { ...((spec && typeof spec === 'object' ? spec : {}) as Record<string, unknown>) };
   delete stored._cover_letter;
   return stored;
+}
+
+/* The largest transcript that can be carried on every path, which is the same number the upload
+ * route already refuses above and for the same reason.
+ *
+ * The managed sandbox transports an upload as base64 and rejects any file over 6,000,000 characters
+ * before a browser opens, which is about 4.29 MiB decoded, per file, with no aggregate cap and no
+ * request-body limit in front of it - so a larger body is either a 400 with an INVALID_UPLOAD code
+ * or an opaque platform rejection with no run record at all, indistinguishable from an outage.
+ *
+ * The bytes it counts are packet.transcript, which is PLAINTEXT: documentBytesForPacket unseals
+ * before the packet carries anything, so the sealed object in Blob and its 28-byte envelope are
+ * invisible to every runner. At this cap that is 5,333,336 characters, comfortably under the
+ * ceiling. This paragraph used to do the sum on the sealed bytes and land on 5,333,372, which is
+ * near enough to pass a glance and wrong enough to mislead anyone deriving a different cap from it.
+ *
+ * Defence in depth rather than the enforcement point: putUserDocument refuses a larger file at the
+ * door, so this is unreachable through the shipped upload path. It is here because the packet is
+ * built from stored state that a future path could write by some other route, and because the check
+ * costs one comparison against the alternative of finding out from a runner error.
+ *
+ * Applied on every path and not only the managed one, deliberately. The ceiling belongs to the
+ * sandbox, but the packet does not know which runner will carry it: a prepare on direct Playwright
+ * can be sent through the ATS API channel, and the same bytes then travel a route the measurement
+ * was never taken on. One cap, applied where the file is decided rather than where it is delivered.
+ */
+export const MANAGED_TRANSCRIPT_MAX_BYTES = MAX_USER_DOCUMENT_BYTES;
+
+const TRANSCRIPT_UNAVAILABLE_ISSUE =
+  'You attached a transcript to this application and we could not load the file, so it is not on the form. Everything else is filled in. Attach it again from your dashboard, and nothing has been sent in the meantime.';
+const TRANSCRIPT_TOO_LARGE_ISSUE =
+  'Your transcript is larger than the 4 MB Litos can put on an application, so it is not attached. Everything else is filled in. Upload a smaller PDF and try again.';
+
+/**
+ * The transcript half of the capability decision, applied to a packet that has already been built.
+ *
+ * IT DOES NOT REBUILD, and that is the one place it departs from packetForCoverLetterCapability's
+ * shape. That function rebuilds because it WRITES: it generates a letter and then has to re-read the
+ * row to see it. Nothing here writes anything - the file either exists on the spec or it does not -
+ * so a rebuild would buy nothing and cost a second full packet, four queries and a resume fetch, on
+ * every prepare. It would also be wrong rather than merely expensive at the managed prepare, where
+ * the packet it would be handed came from a row this function never saw.
+ *
+ * IT CANNOT THROW, and neither can the load it reports on: see buildPacket. That is what stands in
+ * for the try/catch the cover letter needs, and it covers all nine of buildPacket's callers rather
+ * than the two that catch.
+ *
+ * WHAT IT DECIDES, in order:
+ *   - the form has nowhere to put a transcript: strip it, say nothing. There is no failure here, and
+ *     a sentence about a document the employer never asked for is noise on every packet that has one
+ *     stored.
+ *   - the file could not be loaded: strip it and owe her a sentence, because the application she
+ *     believes carries a transcript is about to go without one.
+ *   - the file is too large to carry: same, with the size named, because that one she can act on.
+ *
+ * Exported so the branches can be tested by calling them rather than by grepping for them. A test
+ * that greps a file cannot tell a correct branch from a deleted one, which is the argument written
+ * out at length above submissionFailureOutcome and it applies with more force here: three of these
+ * four exits decide whether a document reaches an employer.
+ */
+export function packetForTranscriptCapability(
+  packet: SubmissionPacket,
+  supported: boolean,
+): { packet: SubmissionPacket; transcriptIssue?: string } {
+  if (!supported) return { packet: omitTranscript(packet) };
+  if (packet.transcriptUnavailableReason) {
+    return { packet: omitTranscript(packet), transcriptIssue: TRANSCRIPT_UNAVAILABLE_ISSUE };
+  }
+  if (!packet.transcript) return { packet: omitTranscript(packet) };
+  if (packet.transcript.length > MANAGED_TRANSCRIPT_MAX_BYTES) {
+    return { packet: omitTranscript(packet), transcriptIssue: TRANSCRIPT_TOO_LARGE_ISSUE };
+  }
+  return { packet };
 }
 
 /** The employer this packet is for, from job_context. Empty when the packet has no company on it. */
@@ -1625,6 +1875,132 @@ export function unansweredRequiredBlockerLabels(
 }
 
 /**
+ * The documents this form asked for, off both measurements a prepare has, in one place.
+ *
+ * TWO SOURCES, AND ONLY ONE OF THEM CAN FIRE TODAY. Say which, because the difference decides what
+ * a screen built on this may promise.
+ *
+ * The blocker labels are the employer's own "is required and is still empty" sentences for fields
+ * no question record answers. That is the live source, on both runners, and at present it is the
+ * ONLY one.
+ *
+ * The required-file questions are the second, and NEITHER discovery pass produces one yet. The
+ * direct-Playwright walk enumerates text, email, tel, url, number, date, untyped inputs, textarea,
+ * select, radio and checkbox (lib/questionDiscovery.ts:4195) and no file input; stratus's managed
+ * discover scan builds its candidate list the same way. So this filter is empty on both paths as
+ * the code stands, and it is written anyway because it costs nothing, it is the half that will
+ * start working the day either walk is widened, and a row that appeared only after a run had
+ * already failed is the behaviour that widening fixes.
+ *
+ * The practical consequence, which no test here can catch: a required transcript control is visible
+ * to Litos only through a portal's own required-field complaint, after a run has stopped. If a
+ * portal marks the field required without emitting that sentence, this measures nothing and the
+ * dashboard shows nothing. That is unproven against a live form either way.
+ *
+ * Blockers go in first so the label that names the row is the employer's own sentence rather than
+ * whatever the discovery pass reconstructed. Everything else - the transcript vocabulary, the
+ * word boundaries, the dedupe, the one-row-per-kind collapse and the length clip - belongs to
+ * requiredDocumentAsks and is tested there.
+ */
+export function measuredRequiredDocuments(
+  unansweredRequired: readonly string[],
+  questions: readonly { question: string; required: boolean; portal_input_type?: string }[],
+): RequiredDocumentAsk[] {
+  return requiredDocumentAsks([
+    ...unansweredRequired,
+    ...questions
+      .filter((question) => question.required && question.portal_input_type === 'file')
+      .map((question) => question.question),
+  ]);
+}
+
+/**
+ * Attach the files she has already given Litos to the application that has just asked for them.
+ *
+ * THIS IS THE PROMISE, NOT A CONVENIENCE. The modal's checkbox says "Reuse this for future
+ * applications that ask" and its confirmation says the next employer that asks gets it
+ * automatically; /privacy publishes "so a later application can use the same file without us asking
+ * you for it again". Until this ran, `user_documents.reusable` was written on every upload and read
+ * as a filter by nothing, so all three sentences described behaviour the build did not have.
+ *
+ * SERVER-SIDE, AT PREPARE TIME, AND THAT IS THE DECISION. The client alternative is one call from
+ * the review screen when it notices an outstanding ask beside a matching library file, and it is
+ * simpler. It is also wrong here, three times over:
+ *
+ *   - It only reuses when she LOOKS. `preparedReviewPatch` sends straight to 'submitting' under
+ *     standing consent, so an account with automatic submission on never opens the screen that would
+ *     have done the attaching, and the promise is kept for exactly the users who never rely on it.
+ *   - It would run on a render, inside a component the 2.5s poll re-renders on every tick, which
+ *     makes "attach if missing" a write that fires repeatedly and races its own response.
+ *   - It would fight removal. "Remove this file" detaches and deletes in that order, and a screen
+ *     whose rule is "no mark plus a reusable file means attach" would put the mark straight back
+ *     between those two requests.
+ *
+ * The prepare run is where the ask is MEASURED, so it is the one moment that knows an ask exists,
+ * and it happens once per run whether or not anybody is watching.
+ *
+ * AFTER writeReview, NOT BEFORE, and inside a catch. This is additive: the application is already
+ * durably prepared by the time it runs, so a blob outage or a lost connection costs a reuse and
+ * never the run. Both writes are jsonb_set on different paths of the same column, so neither can
+ * clobber the other whichever lands first.
+ *
+ * WHAT THE APPLICANT SEES BEFORE ANYTHING IS SENT. Nothing is sent by this. The attachment lands in
+ * `spec._documents`, GET /applications/:id/submission serves it as `documents`, and the review screen
+ * lists it with a control that opens the modal and removes it. `automatic_submission_enabled` is a
+ * separate decision she made once; attaching a file she uploaded and marked reusable to an employer
+ * who asked for that exact file is the behaviour she was promised, and it is still visible and still
+ * removable at the approval gate.
+ */
+export async function reuseStoredDocuments(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  fastify: FastifyInstance,
+): Promise<void> {
+  try {
+    const open = documentAsksOpenToReuse(review, storedDocuments(row));
+    if (open.length === 0) return;
+    for (const ask of open) {
+      const document = await claimReusableDocument(row.user_id, ask.kind);
+      if (!document) continue;
+      const attached = await db.update(generated_resumes).set({
+        /* The same merge POST /applications/:id/documents uses, and for the same measured reason:
+           jsonb_set with create_missing only creates the LAST element of the path, so writing
+           '{_documents,transcript}' into a spec that has never held a document is a silent no-op
+           that reports one row updated. The `||` also keeps every other kind. */
+        spec: sql`jsonb_set(
+          coalesce(${generated_resumes.spec}, '{}'::jsonb),
+          '{_documents}',
+          coalesce(${generated_resumes.spec} -> '_documents', '{}'::jsonb) || ${JSON.stringify({
+          [ask.kind]: {
+            document_id: document.id,
+            file_name: document.file_name,
+            object_key: document.object_key,
+            attached_at: new Date().toISOString(),
+            ordered_at: null,
+            employer_label: ask.label,
+            official_requested: ask.official_requested,
+          },
+        })}::jsonb,
+          true
+        )`,
+      }).where(and(
+        eq(generated_resumes.id, row.id),
+        eq(generated_resumes.user_id, row.user_id),
+        /* Only into a kind that still has no record. She may have attached or ordered on another tab
+           between the measurement and this write, and reuse must never overwrite her own answer. */
+        sql`${generated_resumes.spec} -> '_documents' -> ${ask.kind} is null`,
+      )).returning({ id: generated_resumes.id });
+      if (attached.length === 0) continue;
+      fastify.log.info({ applicationId: row.id, kind: ask.kind }, 'Reused a stored document for a measured ask');
+    }
+  } catch (error) {
+    // Never fatal. The application is already prepared and she can still attach the file by hand;
+    // losing the run over a reuse would be the convenience costing the thing it was decorating.
+    fastify.log.error({ err: error, applicationId: row.id }, 'Could not reuse a stored document');
+  }
+}
+
+/**
  * A thrown value turned into a sentence that is never empty.
  *
  * `new Error()` carries `message === ''`, and both prepare paths feed this string to
@@ -1715,7 +2091,10 @@ async function prepareManaged(
     submission_run_id: runId,
     submission_error: undefined,
   }));
-  let packet = omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal)));
+  // Neither document goes on the discovery pass. It runs before anything is known about the form,
+  // and its whole job is to read the page; carrying a file there would spend an upload action on a
+  // control this run has not yet established exists.
+  let packet = omitTranscript(omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal))));
 
   // R-055 on the managed path: a cheap first call fills only the fixed fields and asks
   // stratus-browser-cloud's 'discover' action (PR #7) to scan the resulting page for custom
@@ -1847,7 +2226,20 @@ async function prepareManaged(
     fastify,
     packetUsesControlledResumeFixture(portal),
   );
-  packet = coverLetterOutcome.packet;
+  /* The same question about the second document, off the same discovery read, and applied to the
+   * packet the cover-letter step just produced rather than to a rebuild - see
+   * packetForTranscriptCapability for why a rebuild here would be handed the wrong row. */
+  const transcriptSupported = managedResultHasTranscriptUpload(discoveryResult, portal);
+  const transcriptOutcome = packetForTranscriptCapability(coverLetterOutcome.packet, transcriptSupported);
+  if (coverLetterOutcome.packet.transcriptUnavailableReason) {
+    // The raw reason to the log, the fixed sentence to the applicant, same split as the cover
+    // letter's two failures. Whoever has to fix a dead pointer reads logs.
+    fastify.log.warn(
+      { applicationId: row.id, reason: coverLetterOutcome.packet.transcriptUnavailableReason },
+      'Attached transcript could not be loaded, continuing without it',
+    );
+  }
+  packet = transcriptOutcome.packet;
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
   const applicationProfile = applicationProfileForPacket(
@@ -1991,6 +2383,16 @@ async function prepareManaged(
      attention_reason. This branch is only ever populated when the form HAS a cover-letter control,
      because packetForCoverLetterCapability returns no issue when `supported` is false. */
   const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
+  /* A transcript she attached that this run could not carry, and it gates `safe` below for a
+   * different reason than the cover letter does.
+   *
+   * The letter gates because /submission/approve refuses the packet outright, so calling it ready
+   * would offer a Send button the server will not honour. Nothing refuses a missing transcript: the
+   * application is sendable, and under standing consent `safe` turns straight into a click in this
+   * same call. That is exactly why this has to hold it back. An application she attached a
+   * transcript to, sent without it and without her being told, is the silent drop this file spends
+   * most of its length preventing in other forms. Not safe means she sees the sentence and decides. */
+  const transcriptAttention = transcriptOutcome.transcriptIssue ? [transcriptOutcome.transcriptIssue] : [];
   const filledFields = managedResultFilledFields(result);
   // Both passes count as evidence the form was reached. The discovery pass enumerates the live
   // inputs and probes the core fields, so a run whose fill pass came back empty can still have
@@ -2007,6 +2409,14 @@ async function prepareManaged(
   // not, and it is logged as an error because a non-zero count is a product defect first and the
   // applicant's problem second.
   const unansweredRequired = unansweredRequiredBlockerLabels(blockers, mergedQuestions);
+  /* The same labels again, read for WHICH DOCUMENT rather than HOW MANY.
+   *
+   * unansweredRequired above is a count and a sentence: it says the employer wants something there
+   * is nowhere to type. This says the employer wants a transcript, which is a thing the applicant
+   * can actually hand over, and it is the field the dashboard draws its upload row from. Same
+   * measurement, two readings, and they are separated because the count is honest about everything
+   * while only some of it is actionable. */
+  const requiredDocuments = measuredRequiredDocuments(unansweredRequired, mergedQuestions);
   if (unansweredRequired.length > 0 || discoveryFailures.length > 0) {
     fastify.log.error({
       applicationId: row.id,
@@ -2015,6 +2425,7 @@ async function prepareManaged(
       discoveredCount: discoveredFields.length,
       questionCount: mergedQuestions.length,
       unansweredRequired,
+      requiredDocuments: requiredDocuments.map((ask) => ask.kind),
     }, 'Required fields with no answerable question record');
   }
   const honestyReasons = discoveryHonestyReasons(discoveryFailures[0], unansweredRequired);
@@ -2072,6 +2483,7 @@ async function prepareManaged(
     ...discoveryAttention,
     ...evidenceBlockers,
     ...coverLetterAttention,
+    ...transcriptAttention,
     ...answerLossReasons,
     ...unexplainedAnswerReasons,
     ...budgetShortfallReasons,
@@ -2109,7 +2521,9 @@ async function prepareManaged(
     // submit path refuses outright rather than trade one away; this is the same refusal on the path
     // that has no submit button to withhold, and it is what makes the trim above safe to allow.
     && unattemptedQuestions.length === 0
-    && unansweredRequiredQuestions.length === 0;
+    && unansweredRequiredQuestions.length === 0
+    // See transcriptAttention: this one holds back a send nothing else would refuse.
+    && transcriptAttention.length === 0;
   /* A FILL RUN THAT FOUND A SECURITY-CODE SCREEN HAS SUBMITTED THIS APPLICATION.
    *
    * Measured 2026-08-08: three Greenhouse packets (Redwood Materials, Scale AI, Cresta) came out of
@@ -2224,6 +2638,10 @@ async function prepareManaged(
     extension_handoff_url: extensionHandoffUrl,
     extension_handoff_binding: extensionHandoffBinding,
     filled_fields: filledFields,
+    /* The documents the form asked for that this run could not supply. Written as an array on every
+     * prepare, empty included, so an unmeasured packet (undefined) stays distinguishable from a
+     * measured one that owes nothing. See ApplicationReviewState.required_documents. */
+    required_documents: requiredDocuments,
     // The other half of filled_fields, and it was always empty before: what the runner tried and
     // could not leave on the form. See managedAnswerLossReasons.
     skipped_reasons: answerLossReasons,
@@ -2256,6 +2674,24 @@ async function prepareManaged(
       }
       : {}),
     cover_letter_attached: Boolean(packet.coverLetter),
+    /* Whether this form has somewhere to put a transcript, measured by the discovery pass.
+     *
+     * Written including false, because the SUBMIT run re-derives its attach decision from this flag
+     * rather than probing the page again - it has no discovery pass of its own. A prepare that
+     * measured the capability and did not write it down produces the one failure with no symptom:
+     * the transcript attaches on the preview she approves and is missing from the application that
+     * is actually sent, with nothing recorded either way.
+     *
+     * But written ONLY when the discovery pass actually ran. `runManagedBrowser`'s catch above
+     * returns null for any failure, and managedResultHasTranscriptUpload(null) is false, so writing
+     * this unconditionally records "this employer's form has nowhere to put a transcript" whenever
+     * discovery merely errored. That is a measurement Litos never took, and the screen states it to
+     * her as fact: the ask is filed undeliverable, the Add control is withheld, and she is told to
+     * go and finish the application by hand on a form that may well have taken the file. Absent
+     * means never measured, which is the same tri-state cover_letter_required uses ten lines above
+     * and the same one the website reads. A discovery failure already holds the run back on its own
+     * evidence; it must not also invent a fact about the employer. */
+    ...(discoveryFailures.length === 0 ? { transcript_supported: transcriptSupported } : {}),
     // The security-code sentence LEADS when there is one, and it leads because it is the only line
     // here that says an application has already reached the employer. The blockers below it are
     // still worth reading - they describe the form that was sent - but a list of empty fields shown
@@ -2266,6 +2702,10 @@ async function prepareManaged(
     submission_error: undefined,
   });
   await writeReview(row, review);
+  /* The ask has just been measured, so this is the first moment anything knows this employer wants a
+     file she may already have given Litos. See reuseStoredDocuments for why it runs here and not on
+     the review screen, and why it runs after the write rather than before it. */
+  await reuseStoredDocuments(row, review, fastify);
   fastify.log.info({
     applicationId: row.id,
     portal,
@@ -2294,7 +2734,10 @@ async function prepareManagedAttendedAccountGate(
     submission_run_id: runId,
     submission_error: undefined,
   }));
-  const packet = omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal)));
+  // No document reaches an account gate. This probe sends no identity, file, answer, consent,
+  // CAPTCHA or submit action by design, and a transcript is the last thing that should be the
+  // exception: the packet is built here only to validate it before Chrome is offered the handoff.
+  const packet = omitTranscript(omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal))));
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
   const result = await runManagedBrowser(
     applicationUrl,
@@ -2534,13 +2977,27 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       applicationId: row.id,
     });
     const coverLetterSupported = await hasCoverLetterUpload(page, portal);
-    const { packet, coverLetterIssue } = await packetForCoverLetterCapability(
+    const builtOutcome = await packetForCoverLetterCapability(
       row,
       coverLetterSupported,
       fastify,
       packetUsesControlledResumeFixture(portal),
     );
-    const coverLetterAttention = coverLetterIssue ? [coverLetterIssue] : [];
+    // The direct path reads the capability off the live page it already has open, where the managed
+    // one has to ask the discovery run. Same question, same field written below, and it has to be
+    // asked on both or the transcript row fires on some portals and looks broken on the rest.
+    const transcriptSupported = await hasTranscriptUpload(page, portal);
+    const transcriptOutcome = packetForTranscriptCapability(builtOutcome.packet, transcriptSupported);
+    if (builtOutcome.packet.transcriptUnavailableReason) {
+      fastify.log.warn(
+        { applicationId: row.id, reason: builtOutcome.packet.transcriptUnavailableReason },
+        'Attached transcript could not be loaded, continuing without it',
+      );
+    }
+    const packet = transcriptOutcome.packet;
+    const coverLetterAttention = builtOutcome.coverLetterIssue ? [builtOutcome.coverLetterIssue] : [];
+    // See the managed path's transcriptAttention: this holds back a send that nothing else refuses.
+    const transcriptAttention = transcriptOutcome.transcriptIssue ? [transcriptOutcome.transcriptIssue] : [];
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
     // dashboard-only submission does not depend on the extension having run first.
@@ -2623,9 +3080,30 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       blockers: result.blockers,
       discovered,
     }, packet);
-    // What the scan owes her when it did not run. The second argument is empty because this path
-    // does not measure required-and-empty blockers against the question list the way prepareManaged
-    // does; the admission that matters here is the first one, and it is the one this run can make.
+    /* THE MEASUREMENT THIS PATH NEVER TOOK, AND THE REASON THE PROSE STILL DOES NOT USE IT.
+     *
+     * prepareManaged compares the portal's required-and-empty blockers against the question list
+     * and writes down which required fields the applicant was given nowhere to answer. This path
+     * did not compute it at all: the second argument to discoveryHonestyReasons below was a
+     * hard-coded empty array, and no other line here made the comparison either. So a required
+     * transcript on a Greenhouse posting produced a structured ask on the managed runner and
+     * nothing whatsoever on the direct one, on the same form. A dashboard row keyed on that field
+     * would have fired on some portals and looked broken on the rest, which is indistinguishable
+     * from the feature being broken.
+     *
+     * The labels are now measured here too, for required_documents on the patch below.
+     *
+     * They are deliberately NOT passed to discoveryHonestyReasons. That function renders prose into
+     * attention_reason, and turning it on here would add a sentence to every direct-path packet
+     * carrying an unanswerable required field - a user-visible change to what stopped runs say,
+     * on a path whose send decision (`safe`, below) does not read this count at all. Two different
+     * changes, and only one of them was asked for. Whoever takes the second should note that the
+     * two paths would then agree, which is an argument for it rather than against.
+     */
+    const unansweredRequired = unansweredRequiredBlockerLabels(sanitizedBlockers, mergedQuestions);
+    const requiredDocuments = measuredRequiredDocuments(unansweredRequired, mergedQuestions);
+    // What the scan owes her when it did not run. See the note directly above for why the second
+    // argument stays empty now that the measurement exists.
     const honestyReasons = discoveryHonestyReasons(discoveryFailures[0], []);
     /* Same reasoning as the managed path above: the required-answer check moved off the run and on
      * to the send, and this is the direct-Playwright path's send decision.
@@ -2649,7 +3127,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       // says the packet is missing something we owed it, the second says we never read the form
       // well enough to know what it owed. Either alone is enough; they are summed, not chosen
       // between, so a run carrying both is not counted as carrying one.
-      attentionCount: discoveryAttention.length + coverLetterAttention.length + discoveryFailures.length,
+      //
+      // transcriptAttention is the third, and the only one no server refusal backs up: nothing
+      // rejects a packet for a missing transcript, so standing consent would simply send it.
+      attentionCount: discoveryAttention.length + coverLetterAttention.length + discoveryFailures.length + transcriptAttention.length,
       unansweredRequiredCount: blankRequiredQuestionLabels(mergedQuestions).length,
       verificationStatus: verification.status,
     });
@@ -2659,6 +3140,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       browser_context_id: contextId,
       browser_session_id: session.id,
       filled_fields: result.filledFields,
+      /* Same field, same shape, same always-written array as the managed path. Writing it on both
+       * is the whole of G5: measured on one runner only, the dashboard row fires on some portals
+       * and is silently absent on the rest. See ApplicationReviewState.required_documents. */
+      required_documents: requiredDocuments,
       // Which address this form was filled with, and why. See ApplicationReviewState.applicant_email.
       ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
       preview_screenshot_url: preview.url,
@@ -2675,14 +3160,21 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         ? { cover_letter_required: blockersRequireCoverLetter(sanitizedBlockers) }
         : {}),
       cover_letter_attached: Boolean(packet.coverLetter),
+      // Written here for the same reason it is written on the managed patch: the submit run reads
+      // this flag instead of probing, so a prepare that measured the capability and did not record
+      // it sends an application missing a document the preview showed attached.
+      transcript_supported: transcriptSupported,
       // Already human on this path, but the BLOCKERS are sanitized anyway so both providers are
       // held to one guarantee and a future change to either cannot quietly reintroduce identifiers.
       // The other two arrays do not go through the sanitizer and do not need to: they are written
       // here, in this repo, in the product's own voice, and neither one interpolates provider or
       // model text. Sending them through it would not have caught the cover-letter leak either,
       // since that message was prose and prose passes straight through.
+      // The two document sentences sit together, and honestyReasons stays immediately after the
+      // cover letter's, because a test pins that pair by its exact text: the scan-failed admission
+      // being present at all is what the swallow fix bought.
       attention_reason:
-        [...sanitizedBlockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention, ...honestyReasons]
+        [...sanitizedBlockers, ...discoveryAttention, ...evidenceBlockers, ...transcriptAttention, ...coverLetterAttention, ...honestyReasons]
           .join('\n') || undefined,
       // The only path that OBSERVES a challenge on a board nobody had typed as gated, which makes it
       // the one that matters most. Without it the stall is written only for JazzHR and BambooHR,
@@ -2701,6 +3193,9 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       submission_error: undefined,
     });
     await writeReview(row, review);
+    /* Both prepare paths, for the reason both of them write required_documents: measured on one
+       runner only, the promise is kept on some portals and quietly broken on the rest. */
+    await reuseStoredDocuments(row, review, fastify);
     fastify.log.info({ applicationId: row.id, portal, status: review.status }, 'Application portal prepared');
   }
 }
@@ -2789,7 +3284,18 @@ async function submitControlled(row: ResumeRow, review: ApplicationReviewState, 
 }
 
 function packetForApiSubmission(review: ApplicationReviewState, builtPacket: SubmissionPacket): SubmissionPacket {
-  return review.cover_letter_supported === false ? omitCoverLetter(builtPacket) : builtPacket;
+  const withCoverLetter = review.cover_letter_supported === false ? omitCoverLetter(builtPacket) : builtPacket;
+  /* THE TRANSCRIPT READS THE FLAG THE OTHER WAY ROUND FROM THE LETTER, and the asymmetry is the
+   * point rather than an oversight.
+   *
+   * The letter is kept unless the prepared form explicitly rejected it, because an unmeasured packet
+   * predates the field and a letter she approved should still go. The transcript is dropped unless
+   * the form was explicitly measured as able to take one: every packet carrying a transcript was
+   * prepared on a build that writes transcript_supported on both prepare paths, so `undefined` here
+   * means the file was attached after the last prepare and no run has ever looked at this form for
+   * somewhere to put it. Attaching on a guess sends an unasked-for document, in her name, through a
+   * channel where nobody sees the form first. */
+  return review.transcript_supported === true ? withCoverLetter : omitTranscript(withCoverLetter);
 }
 
 async function submitViaAtsSubmissionChannel(
@@ -3128,7 +3634,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       throw new CaptchaUnresolvedError('before_fill', managedCaptchaProvider(captchaProbe, portal));
     }
     const builtPacket = await buildPacket(row, packetUsesControlledResumeFixture(portal));
-    const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    const withCoverLetter = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    // Re-derived from what the prepare measured, not probed again: this run has no discovery pass,
+    // and the form it is about to submit is the one the prepare read. See packetForApiSubmission for
+    // why the transcript needs an explicit true where the letter needs only "not explicitly false".
+    const packet = claimedReview.transcript_supported === true
+      ? withCoverLetter
+      : omitTranscript(withCoverLetter);
     const verificationRequestedAt = new Date();
     /* THE FIRST HALF IS THE SAME RUN WHETHER OR NOT A CODE IS IN HAND, and that is the fix.
      *
@@ -3706,7 +4218,12 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     }
     const portal = detectPortal(claimedReview.portal_url!);
     const builtPacket = await buildPacket(row);
-    const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    const withCoverLetter = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    // Same re-derivation as the managed submit above, on the path that reconnects to the session the
+    // prepare left open. Both submit sites and the ATS channel read this one flag.
+    const packet = claimedReview.transcript_supported === true
+      ? withCoverLetter
+      : omitTranscript(withCoverLetter);
     await fillPortal(page, portal, packet);
     await clickFinalSubmit(page);
     const receipt = await readReceipt(page);
