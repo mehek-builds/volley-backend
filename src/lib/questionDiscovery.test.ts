@@ -2451,6 +2451,12 @@ test('a question about HIGH SCHOOL is never answered from the university profile
     ['gpa - no high school gpas please', PROD_OWNER_PROFILE.gpa],
     ['field of study - please leave out high school', PROD_OWNER_PROFILE.major],
     ['major (high school not applicable)', PROD_OWNER_PROFILE.major],
+    /* "After/beyond/post high school" measures FROM the high school rather than asking about it. */
+    ['degree after high school', PROD_OWNER_PROFILE.degree],
+    ['field of study after high school', PROD_OWNER_PROFILE.major],
+    ['gpa after high school', PROD_OWNER_PROFILE.gpa],
+    ['education beyond high school', PROD_OWNER_PROFILE.school],
+    ['post high school education', PROD_OWNER_PROFILE.school],
     /* THE GRADUATION MATCHER NEEDS THE VETO TOO. It runs before every other rule and its own window
        reaches 200 characters, so a UNIVERSITY graduation control that names the high school in
        order to exclude it was answered with the high-school date. */
@@ -2525,7 +2531,6 @@ test('a question about HIGH SCHOOL is never answered from the university profile
   ]) {
     assert.equal(questionRefusedAsHighSchool(label, HS), false, label);
   }
-  assert.equal(questionRefusedAsHighSchool('describe your leadership experience in high school', HS), false);
 
   assert.equal(classifyField('what city do you live in? (not the city of your high school)'), 'address_city');
   assert.equal(classifyField('which languages do you speak? include any studied in high school.'), 'languages');

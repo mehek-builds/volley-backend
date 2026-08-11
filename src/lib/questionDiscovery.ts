@@ -2904,13 +2904,18 @@ function labelNamesAnotherInstitution(label: string): boolean {
  * rules that had to go were the ones that widened this into a proximity window or mirrored it onto
  * the college side; nothing was ever wrong with reading a negation's immediate object. */
 const HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT = new RegExp(
-  String.raw`(?:\b(?:not|no|never|exclud\w*|other\s+than|rather\s+than|instead\s+of|omit|leave\s+(?:out|off)|ignor\w*|skip|avoid|without|cannot|except|apart\s+from|aside\s+from)\b|\w+n['’]t)\s*`
+  String.raw`(?:\b(?:not|no|never|exclud\w*|other\s+than|rather\s+than|instead\s+of|omit|leave\s+(?:out|off)|ignor\w*|skip|avoid|without|cannot|except|apart\s+from|aside\s+from)\b|\w{1,12}n['’]t)\s*`
   + String.raw`(?:(?:list|enter|include|use|report|give|provide|write|put|name|state|specify|submit|mention|type|select|choose|repeat|fill|accept|count|consider|qualif|permit)\w*\s+)?`
   + String.raw`(?:your\s+|the\s+|a\s+|an\s+|any\s+)?${HIGH_SCHOOL_WORD}\b`
+  /* "Degree AFTER high school", "Education BEYOND high school". Not a negation, and it scopes the
+   * question to the current programme just as plainly as one: the high school is the thing being
+   * measured from, not the thing being asked for. Correct degree, major and GPA answers were
+   * blocked without it. */
+  + String.raw`|\b(?:after|since|beyond|post|following)\s+(?:your\s+|the\s+)?${HIGH_SCHOOL_WORD}\b`
   /* One passive form, kept deliberately narrow to a closed verb list rather than reopened into a
    * window: "high-school dates are not accepted" reads the exclusion backwards from every other
    * phrasing, and without it a university graduation control came back blank. */
-  + String.raw`|${HIGH_SCHOOL_WORD}\b[^.?!]{0,30}?(?:\b(?:is|are|will\s+be|would\s+be|do|does|did)\s+not\b|\w+n['’]t|\bnot\b)\s*(?:be\s+)?`
+  + String.raw`|${HIGH_SCHOOL_WORD}\b[^.?!]{0,30}?(?:\b(?:is|are|will\s+be|would\s+be|do|does|did)\s+not\b|\w{1,12}n['’]t|\bnot\b)\s*(?:be\s+)?`
   + String.raw`(?:accept\w*|requir\w*|need\w*|used|consider\w*|count\w*|qualif\w*|applicab\w*|permit\w*|relevant)`,
   'i',
 );
