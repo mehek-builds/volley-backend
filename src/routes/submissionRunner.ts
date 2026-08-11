@@ -137,6 +137,7 @@ import {
   frozenJobRelocationLocationContext,
   WORK_ELIGIBILITY_QUESTION,
   workEligibilitySkipReason,
+  discoveredFieldIsNotAQuestion,
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
@@ -1320,6 +1321,13 @@ export async function discoverAndResolveQuestions(
     const label = normalizeDiscoveredLabel(field.label);
     const reviewLabel = normalizeReviewQuestionLabel(field.label);
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
+    /* A radio's own option, or a composite widget's whole rendered subtree, is not a question, and
+     * recording one manufactures work the applicant cannot do: the Apply screen shows her "Yes" and
+     * asks her to answer it. The same test runs on the pre-script's ingest, so the two surfaces
+     * cannot disagree about what the form asked. Both the raw and the normalized label are tested;
+     * see the note at the matching call in postingQuestionsFromDiscovered for why. */
+    if (discoveredFieldIsNotAQuestion({ label: field.label, options: field.options })
+      || discoveredFieldIsNotAQuestion({ label: reviewLabel, options: field.options })) continue;
     // Read from the RAW label, so it has to happen before the normalized label is used anywhere:
     // normalizeDiscoveredLabel strips the employer's `*` required marker along with the handles.
     // Name and email are excluded: the fixed-field pass has already typed them into the page, and

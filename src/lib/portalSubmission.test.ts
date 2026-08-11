@@ -5568,3 +5568,71 @@ test('the label\'s "Other" escape hatch reaches a question that has a durable se
     false,
   );
 });
+
+/* ---------------------------------------------------------------------------------------------
+ * THE QUESTION, NOT ITS WORDING.
+ *
+ * Measured on the owner's 158 production packets, 2026-08-11. 22 packets were blocked with a GPA
+ * field required and empty while the packet already carried "3.89". Ten of them asked "What is your
+ * GPA?", which was in GREENHOUSE_REACT_SELECT_LITERALS and got a closed-list chain. Twelve asked
+ * "Overall GPA" (Virtu, 7) or "Please indicate your overall GPA." (Five Rings, 5), which were not,
+ * so their only attempt was a text fill into a control whose options read "3.5-3.9".
+ * --------------------------------------------------------------------------------------------- */
+
+function greenhouseQuestionActions(question: string, answer: string) {
+  return buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{ question, answer }],
+  });
+}
+
+const closedListChain = (question: string, answer: string) =>
+  greenhouseQuestionActions(question, answer).filter((action) => action.label?.startsWith('question_combo_label:'));
+
+test('a closed-list chain is built from what the question ASKS, not from a wording someone typed here', () => {
+  // The two labels that cost 12 packets, and the wording that always worked, all reach the chain.
+  for (const label of ['Overall GPA', 'Please indicate your overall GPA.', 'What is your GPA?']) {
+    assert.ok(closedListChain(label, '3.89').length > 0, `expected a closed-list chain for ${label}`);
+  }
+  // And the phrasings no employer in the corpus has used yet, which is the whole point of asking
+  // the classifier instead of extending a list of strings.
+  for (const label of ['Cumulative GPA', 'GPA (out of 4.0)', 'What was your undergraduate GPA?']) {
+    assert.ok(closedListChain(label, '3.89').length > 0, `expected a closed-list chain for ${label}`);
+  }
+  // "Graduation Year" was in the literals; "Year of Graduation" was not, and Palantir asks it that
+  // way on all 11 of the owner's packets. classifyField calls both graduation_year.
+  for (const label of ['Graduation Year', 'Year of Graduation', 'Anticipated Year of Graduation', 'Class Year']) {
+    assert.ok(closedListChain(label, '2028').length > 0, `expected a closed-list chain for ${label}`);
+  }
+});
+
+test('widening what may be a closed list never takes a text fill away from a text control', () => {
+  /* The strictly-additive property, and the reason there are two predicates rather than one.
+   * isGreenhouseReactSelectQuestion still decides whether to WITHHOLD the scoped text fill, and it
+   * is still literals-only; questionMayBeClosedList only ever decides to ALSO push a menu chain.
+   * Five Rings' GPA control reports inputType text, so losing this fill would trade twelve packets
+   * blocked on a menu for five blocked on a text box. */
+  const actions = greenhouseQuestionActions('Please indicate your overall GPA.', '3.89');
+  const textFill = actions.find((action) => action.label === 'question:Please indicate your overall GPA.');
+  assert.equal(textFill?.type, 'fillByLabelText');
+  assert.equal(textFill?.text, 'Please indicate your overall GPA.');
+  assert.equal(textFill?.value, '3.89');
+  assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:')));
+});
+
+test('a question that names no profile field gains no closed-list chain', () => {
+  // False-capture guards. A wrong entry here spends action budget on a control with no menu, and on
+  // a Greenhouse form under the Akuna budget that is spent instead of a required field's one shot.
+  for (const label of [
+    'What is the most impressive thing you have ever accomplished?',
+    'What is your phone number?',
+    'Desired salary',
+    'LinkedIn Profile',
+    'Please provide additional detail if appropriate.',
+  ]) {
+    assert.equal(closedListChain(label, 'something').length, 0, `did not expect a closed-list chain for ${label}`);
+  }
+});

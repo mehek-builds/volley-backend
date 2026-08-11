@@ -15,6 +15,7 @@ import {
   resolveKnownAnswer,
   ROUTINE_APPLICANT_CONSENT_QUESTION,
   type ApplicationProfileLike,
+  type ProfileKey,
 } from './questionDiscovery';
 import {
   chooseClosestOption,
@@ -2767,8 +2768,74 @@ function greenhouseComboboxValuesForQuestion(
   return uniqueDefined(values);
 }
 
+/**
+ * The wordings somebody has met and written down. Kept, and no longer the whole test.
+ *
+ * Every entry here is one employer's exact phrasing. That is what it is good at - "worked for
+ * databricks", "AI Policy for Interviewers", "majoring in STEM" are not a class of question, they
+ * are strings, and a pattern is the only honest way to hold them. What it is bad at is the ordinary
+ * case: an employer asking a question this codebase already understands, in words nobody happened
+ * to type here. See isGreenhouseReactSelectQuestion for the rung that covers that.
+ */
+const GREENHOUSE_REACT_SELECT_LITERALS =
+  /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bwhere\s+have\s+you\s+learned\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+(?:visa\s+)?sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bsponsor\b[^?]{0,80}\bwork\s+authorization\b|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bprocessing\s+of\s+personal\s+data\b|\bAI\s+Policy\s+for\s+Interviewers\b|\bmajoring\s+in\s+STEM\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:information|true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i;
+
+/**
+ * The closed-list profile fields a Greenhouse form renders as a react-select.
+ *
+ * Every key here was ALREADY reachable through GREENHOUSE_REACT_SELECT_LITERALS for at least one
+ * wording - "what is your gpa", "graduation year", "school", "degree", "major". Naming the field
+ * instead of the sentence is what stops the list from being one employer's phrasing wide. It adds
+ * no new CATEGORY of control, only the other ways of asking for the same thing.
+ *
+ * Deliberately not here: phone, the URL fields, city, state, salary, date of birth, the employer
+ * fields. Greenhouse renders those as text inputs, and pushing a combobox chain at a text input
+ * spends action budget on a control that will never open a menu.
+ */
+const GREENHOUSE_REACT_SELECT_PROFILE_KEYS: ReadonlySet<ProfileKey> = new Set<ProfileKey>([
+  'gpa', 'gpa_scale',
+  'graduation_date', 'graduation_month', 'graduation_year',
+  'education_start_date', 'education_end_date',
+  'school', 'degree', 'major', 'study_year', 'current_enrollment',
+]);
+
+/**
+ * A wording somebody has already met, and knows renders as a react-select.
+ *
+ * This is the STRONG claim: not just "a menu may be here" but "a plain text fill is the wrong
+ * thing for this control". It is what decides to WITHHOLD the scoped text fill, so it stays exactly
+ * as wide as the evidence behind it - one employer's measured phrasing - and no wider. Widening it
+ * would take the text fill away from controls nobody has ever looked at.
+ */
 function isGreenhouseReactSelectQuestion(question: string): boolean {
-  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bwhere\s+have\s+you\s+learned\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+(?:visa\s+)?sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bsponsor\b[^?]{0,80}\bwork\s+authorization\b|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bprocessing\s+of\s+personal\s+data\b|\bAI\s+Policy\s+for\s+Interviewers\b|\bmajoring\s+in\s+STEM\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:information|true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
+  return GREENHOUSE_REACT_SELECT_LITERALS.test(question);
+}
+
+/**
+ * MIGHT THIS CONTROL BE A CLOSED LIST? Answered from the QUESTION, not from its wording.
+ *
+ * The literals used to be the whole test, and the corpus says what that costs. Measured over the
+ * owner's 158 packets on 2026-08-11: 22 were blocked with a GPA field required and empty while the
+ * packet already carried "3.89". Ten asked "What is your GPA?", which is in the literals and was
+ * recognised. The other twelve asked "Overall GPA" (Virtu, 7) and "Please indicate your overall
+ * GPA." (Five Rings, 5), which are not, so no combobox chain was ever built for them and the only
+ * attempt they got was a text fill into a control whose options read "3.5-3.9".
+ *
+ * classifyField called all three of those labels `gpa`. The resolver has understood them the whole
+ * time - it is how "3.89" got into the packet - and only the fill pass had not. So the fix is not
+ * to add two more strings, which leaves the next employer's third phrasing exactly as broken; it is
+ * to ask the question-classifier the codebase already has, the same one resolveKnownAnswer asks,
+ * and stop keeping two disagreeing definitions of what a question means.
+ *
+ * THIS IS THE WEAK CLAIM AND IT IS ONLY EVER ADDITIVE. It gates whether a combobox chain is also
+ * pushed; it never withholds anything. A control that turns out to be a plain text box still gets
+ * its text fill, because isGreenhouseReactSelectQuestion above - not this - is what suppresses that.
+ * The cost of being wrong here is a few spent actions, not an unfilled field.
+ */
+function questionMayBeClosedList(question: string): boolean {
+  if (GREENHOUSE_REACT_SELECT_LITERALS.test(question)) return true;
+  const key = classifyField(question);
+  return key !== null && GREENHOUSE_REACT_SELECT_PROFILE_KEYS.has(key);
 }
 
 function isSamsaraLearnedAboutQuestion(question: string): boolean {
@@ -2810,7 +2877,7 @@ function pushGreenhouseQuestionComboboxActions(
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
 ) {
-  if (!isGreenhouseReactSelectQuestion(questionText)) return;
+  if (!questionMayBeClosedList(questionText)) return;
   const selectors = [selector];
   if (isSamsaraLearnedAboutQuestion(questionText)) {
     selectors.push(
@@ -2946,7 +3013,7 @@ function pushGreenhouseQuestionComboboxLabelActions(
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
 ) {
-  if (!isGreenhouseReactSelectQuestion(questionText)) return;
+  if (!questionMayBeClosedList(questionText)) return;
   let index = 0;
   const valueLimit = comboboxValueLimit(questionText, contextText);
   // The slice happens inside, before the hatch is appended. Running the pair through uniqueDefined
