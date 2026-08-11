@@ -50,9 +50,7 @@ describe('the gaps a seeded profile still has', () => {
     const seeded = academicSeedFrom({ gpa: '3.75', gpa_scale: '4.0', major: 'Psychology' }, undefined);
     assert.deepEqual(gapsFrom(seeded as Record<string, unknown>), [
       'languages',
-      // Nothing a resume parse can seed. coursework is the one gap judged against the `profiles`
-      // row rather than this one, so an omitted second argument reads as never asked.
-      'coursework',
+      // Nothing a resume parse can seed: a form asks for a test score and never offers one.
       'standardized_test_type',
       'sat_score',
       'act_score',
@@ -62,17 +60,8 @@ describe('the gaps a seeded profile still has', () => {
     ]);
   });
 
-  test('a resume that printed nothing leaves the full eleven', () => {
-    assert.equal(gapsFrom({}).length, 11);
-  });
-
-  /* coursework closes only when the profiles row carries a list. An empty array is a real answer
-     ("no coursework to list") and closes the question; a missing row never asked it. */
-  test('a declared coursework list closes that gap and nothing else', () => {
-    assert.ok(!gapsFrom({}, { coursework: ['Algorithms'] }).includes('coursework'));
-    assert.ok(!gapsFrom({}, { coursework: [] }).includes('coursework'));
-    assert.ok(gapsFrom({}, {}).includes('coursework'));
-    assert.ok(gapsFrom({}, { coursework: 'Algorithms' }).includes('coursework'));
+  test('a resume that printed nothing leaves the full ten', () => {
+    assert.equal(gapsFrom({}).length, 10);
   });
 });
 

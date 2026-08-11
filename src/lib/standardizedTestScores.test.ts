@@ -165,6 +165,69 @@ describe('standardized test scores: what must never match', () => {
   });
 });
 
+/* THE CASES REVIEW FOUND, pinned one by one. Every row below was a real defect in the version of
+ * this rule that shipped with a value-word gate and an eight-word length cap. */
+describe('standardized test scores: the gates fail in neither direction', () => {
+  const cases: Array<{ label: string; expect: string | undefined; why: string }> = [
+    // FALSE POSITIVES. "sat" is the past tense of "sit", and "act" names most legislation.
+    { label: 'Have you sat for the CPA exam? Score:', expect: undefined, why: 'sat is the verb, and Litos targets finance' },
+    { label: 'Equality Act score', expect: undefined, why: 'a statute, not a test' },
+    // FALSE NEGATIVES. Bare section labels are the commonest real ATS shape and asked for a number
+    // without ever saying "score", so the value-word gate returned null and the essay drafter got
+    // them instead of a skipReason.
+    { label: 'SAT Math', expect: '1520', why: 'a bare section label is the commonest real shape' },
+    { label: 'SAT Total (Evidence-Based Reading and Writing + Math)', expect: '1520', why: 'section label with punctuation' },
+    { label: 'ACT English', expect: '34', why: 'the ACT half of the same shape' },
+    { label: 'ACT Composite', expect: '34', why: 'composite is a value word' },
+    // Long instructional labels were refused by the eight-word cap and are unmistakably test fields.
+    { label: 'Please provide your ACT composite score if you have taken the exam', expect: '34', why: 'thirteen words and still an ACT field' },
+    // A criminal-record label from another user's corpus, correctly refused.
+    { label: '(clean slate) act?', expect: undefined, why: 'a statute with no value word' },
+  ];
+
+  for (const { label, expect, why } of cases) {
+    test(`${expect === undefined ? 'refuses' : `answers ${expect}`}: ${label.slice(0, 44)}`, () => {
+      assert.equal(typedValue(label, answered), expect, why);
+    });
+  }
+});
+
+/* FINDING 3: THE EEO ORDERING. standardizedTestAnswer is called BEFORE the EEO_QUESTION branch, so
+ * that a plain required test field is not swallowed by a "Decline to self-identify". The cost is
+ * that a label matching both arrives here first, and EEO_QUESTION folds disability, veteran and race
+ * into one alternation containing `disab`. "Section 503 Disability Act score" matches both and used
+ * to fill "34" end to end - verbatim the failure the comment on these matchers calls impossible.
+ *
+ * The refusal inside standardizedTestAnswer is what makes the ordering safe. These pin it end to
+ * end rather than on the matcher alone, because the matcher is not where the bug was. */
+describe('standardized test scores: a self-identification question is never a test score', () => {
+  const eeoLabels = [
+    'Section 503 Disability Act score',
+    'Did you receive a disability accommodation on a standardized test?',
+    'Are you a veteran or active member of the United States armed forces?',
+  ];
+
+  for (const label of eeoLabels) {
+    test(`no test value reaches: ${label.slice(0, 44)}`, () => {
+      const answer = typedValue(label, answered);
+      assert.ok(
+        answer === undefined || !['1520', '34', 'Both', 'SAT', 'ACT', 'None'].includes(answer),
+        `an EEO question must never receive a test value, got: ${String(answer)}`,
+      );
+    });
+  }
+
+  test('the EEO refusal is the first act of the matcher, not a side effect of a word list', () => {
+    const source = readFileSync('src/lib/questionDiscovery.ts', 'utf8');
+    const fn = source.slice(source.indexOf('function standardizedTestAnswer'));
+    const body = fn.slice(0, fn.indexOf('\n}'));
+    assert.ok(
+      body.indexOf('EEO_QUESTION.test(label)') < body.indexOf('isSatScoreQuestion'),
+      'the EEO refusal must run before any score matcher',
+    );
+  });
+});
+
 describe('standardized test scores: nothing is invented or derived', () => {
   test('a score is never invented: unanswered leaves the question for the student', () => {
     const empty: ApplicationProfileLike = {};
@@ -198,8 +261,19 @@ describe('standardized test scores: schema and migration agree', () => {
       assert.match(schema, new RegExp(`${column}: text\\('${column}'\\)`));
       assert.match(migration, new RegExp(`add column if not exists ${column} text`));
     }
-    assert.match(schema, /coursework: jsonb\('coursework'\)/);
-    assert.match(migration, /add column if not exists coursework jsonb/);
+  });
+
+  /* NO COLUMN ON `profiles`, and this assertion is the guard on that.
+   *
+   * A `coursework` column was added there on this branch and removed before merge: `profiles` has 27
+   * bare `db.select().from(profiles)` sites and no narrowed-projection helper, so a column declared
+   * there ahead of its migration 42703s resume generation, autofill answers, the submission runner,
+   * the account export and the INSERT that creates a profile row at all. This migration therefore
+   * touches exactly one table, and if that ever changes the change has to be deliberate. */
+  test('the migration touches application_profile only', () => {
+    const migration = readFileSync('scripts/apply-standardized-test-scores-schema.mjs', 'utf8');
+    assert.doesNotMatch(migration, /alter table profiles/i);
+    assert.doesNotMatch(migration, /coursework/i);
   });
 
   /* The columns must stay nullable, and the migration must verify it rather than assume it. Null is

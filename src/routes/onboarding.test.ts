@@ -27,9 +27,8 @@ describe('onboarding gaps: languages', () => {
       'gpa_scale',
       'major',
       'languages',
-      // Measured across 158 packets (2026-08-11): 9 distinct blocked packets each for the three
-      // test fields, and one four-item coursework list printed identically on all 158.
-      'coursework',
+      // Measured across 158 packets (2026-08-11): 8 distinct blocked packets each for the three
+      // test fields, which is 2 postings at one employer retried four times.
       'standardized_test_type',
       'sat_score',
       'act_score',
@@ -102,7 +101,6 @@ describe('onboarding gaps: languages', () => {
     });
     assert.deepEqual(g, [
       'gpa_scale',
-      'coursework',
       'standardized_test_type',
       'sat_score',
       'act_score',
@@ -216,11 +214,10 @@ describe('the setup gaps step', () => {
 
     /* The 2026-08-11 additions RENDER on the screen but must never OPEN it, which is the same
        distinction desired_salary draws above. Test scores are asked by trading and quant firms and
-       by almost nobody else, and a course history is not something every student has to hand; gating
-       on either would put a whole screen in front of every account forever, which is exactly the
-       pre-#116 defect. They are shown to someone already routed here for a missing GPA or major. */
+       by almost nobody else; gating on them would put a whole screen in front of every account
+       forever, which is exactly the pre-#116 defect. They are shown to someone already routed here
+       for a missing GPA or major. */
     test('the measured 2026-08-11 additions render but never gate', () => {
-      assert.equal(hasSetupGapsFrom(['coursework']), false);
       assert.equal(hasSetupGapsFrom(['standardized_test_type', 'sat_score', 'act_score']), false);
     });
 

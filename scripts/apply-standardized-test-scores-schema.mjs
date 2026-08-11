@@ -1,26 +1,29 @@
 #!/usr/bin/env node
 
-/* Standardized test scores, plus the authoritative coursework list.
+/* Standardized test scores.
+ *
+ * RUN THIS BEFORE THE DEPLOY THAT DECLARES THESE COLUMNS, not after. The columns are additive and
+ * nullable, so they are backward compatible with the code already in production: applying this
+ * migration first breaks nothing and closes the window in which a deploy would 42703. There is no
+ * write-path tolerance for an unmigrated database and there cannot be one, because Drizzle names
+ * every declared column in an INSERT regardless of payload; see the note in lib/applicationFacts.ts.
  *
  * MEASURED, NOT GUESSED. Counted over the owner account's full 158-packet corpus on 2026-08-11,
  * from attention_reason lines of the shape `"X" is required and is still empty`, as DISTINCT
  * packets blocked:
  *
- *   standardized test score type    9
- *   SAT score                       9
- *   ACT score                       9
+ *   standardized test score type    8
+ *   SAT score                       8
+ *   ACT score                       8
  *
- * The 2026-08-08 facts migration explicitly left these out, and its header records why: "Fields
- * that appeared on exactly one posting (SAT/ACT scores at IMC) were deliberately left out rather
- * than added speculatively." That was right at 25 packets. At 158 each of the three clears the
- * two-posting bar the rest of that group was chosen by, four times over.
+ * In postings, which is the unit the 2026-08-08 facts group counts in, those 8 packets are 2
+ * postings at ONE employer, retried four times each. That clears the letter of that group's
+ * two-posting bar and no more. The argument for the columns is not the count: nothing can harvest a
+ * test score because a form asks for one and never offers one, all 24 occurrences were required and
+ * blank, and the type question needs a closed list. See db/schema.ts, which records the honest
+ * counterpoint too.
  *
- * coursework is on `profiles`, not `application_profile`, and the split is deliberate: it belongs
- * with `skills` as a student-declared list the resume tailorer must be able to read, whereas
- * application_profile's contract is "sensitive, encrypted, never in a drafting-LLM prompt". See
- * the comments on both columns in src/db/schema.ts.
- *
- * ALL FOUR ARE NULLABLE AND NOTHING IS BACKFILLED. Null means "never asked" and the resolver
+ * ALL THREE ARE NULLABLE AND NOTHING IS BACKFILLED. Null means "never asked" and the resolver
  * refuses on it, so an existing account is ASKED rather than silently given a default. Inventing a
  * test score would be a checkable false claim about an academic record made to an employer, which
  * is the exact defect class this column group exists to remove.
@@ -50,10 +53,6 @@ async function main() {
       add column if not exists sat_score text,
       add column if not exists act_score text
     `);
-    await client.query(`
-      alter table profiles
-      add column if not exists coursework jsonb
-    `);
     await client.query('commit');
 
     const { rows } = await client.query(
@@ -61,10 +60,8 @@ async function main() {
       select table_name, column_name, data_type, is_nullable
       from information_schema.columns
       where table_schema = current_schema()
-        and (
-          (table_name = 'application_profile' and column_name = any($1))
-          or (table_name = 'profiles' and column_name = 'coursework')
-        )
+        and table_name = 'application_profile'
+        and column_name = any($1)
       `,
       [APPLICATION_PROFILE_COLUMNS],
     );
@@ -82,21 +79,13 @@ async function main() {
       }
     }
 
-    const coursework = found.get('profiles.coursework');
-    if (!coursework) throw new Error('profiles.coursework is missing');
-    if (coursework.data_type !== 'jsonb') {
-      throw new Error(`profiles.coursework is ${coursework.data_type}, expected jsonb`);
-    }
-    if (coursework.is_nullable !== 'YES') {
-      throw new Error('profiles.coursework must stay nullable; null means never asked and [] means none');
-    }
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
     throw error;
   } finally {
     await client.end();
   }
-  console.log('Ready: standardized test score columns and the coursework list are present.');
+  console.log('Ready: standardized test score columns are present.');
 }
 
 main().catch((error) => {

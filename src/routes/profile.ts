@@ -237,29 +237,6 @@ export function declaredSkillsForPatch(patch: ParsedProfilePatch, stored: unknow
   return normalizeEditableList(splitSpokenLanguages(patch.skills).skills);
 }
 
-/**
- * The value the DECLARED `profiles.coursework` column takes for a given patch.
- *
- * The same shape as declaredSkillsForPatch directly above, and here for the same reason: parsed_json
- * is rewritten wholesale by every resume upload, so a course history typed by hand would silently
- * vanish the next time the student swapped their resume. The declared column is what survives.
- *
- * WHAT THIS FIXES, measured 2026-08-11. GET /profile returned exactly four courses - two of them
- * business electives - and all 158 stored packets printed that same list unchanged, including a
- * Data Science internship and a quant trading internship. The parser is instructed that coursework
- * "may contain only courses explicitly printed on the resume", which is the correct rule and stays;
- * it just means a per-posting selection has a pool of four to choose from and nothing to select.
- * This column is the larger pool the student supplies herself.
- *
- * `stored` is returned untouched when the patch omits coursework: an omitted field is not an
- * instruction to clear a column. An EMPTY list is passed through, because "I have no coursework to
- * list" is a real answer and is not the same as never having been asked.
- */
-export function declaredCourseworkForPatch(patch: ParsedProfilePatch, stored: unknown): unknown {
-  if (patch.coursework === undefined) return stored;
-  return normalizeEditableList(patch.coursework as string[]);
-}
-
 export function applyParsedProfilePatch(
   current: Record<string, unknown>,
   patch: ParsedProfilePatch,
@@ -463,22 +440,12 @@ export function serveProfileJson(
   // The decrypted application_profile row, when the student has one. Undefined means "no row",
   // which leaves the parse's academic fields exactly as they were.
   applicationRow?: Record<string, unknown>,
-  /* The DECLARED profiles.coursework column. Undefined or non-array means never answered, and the
-   * parse's own list is served unchanged - which is the behaviour for every account until the
-   * onboarding question is answered, and must stay lossless. */
-  declaredCoursework?: unknown,
 ): Record<string, unknown> {
   const base = (parsedJson && typeof parsedJson === 'object' ? parsedJson : {}) as Record<string, unknown>;
   const declared = declaredSkillsList(declaredSkills);
-  /* The declared list WINS, including when it is empty, on the same rule profiles.skills follows:
-   * it is the student's own statement and the parse is an extraction from one document. An empty
-   * declared list is a real answer ("no coursework to list") and overrides the four courses the
-   * resume happened to print, which is the whole point of asking. */
-  const coursework = Array.isArray(declaredCoursework) ? { coursework: declaredCoursework } : {};
   return {
     ...base,
     ...(declared.length > 0 ? { skills: declared } : {}),
-    ...coursework,
     ...(email ? { email } : {}),
     ...academicsOfRecord(applicationRow),
   };
@@ -1112,7 +1079,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
       // types from - see the source-of-truth note on serveProfileJson.
       const applicationRow = await applicationRowForProfile(userId, fastify);
       return reply.status(200).send(
-        serveProfileJson(profile[0].parsed_json, profile[0].skills, request.jwtPayload!.email, applicationRow, profile[0].coursework),
+        serveProfileJson(profile[0].parsed_json, profile[0].skills, request.jwtPayload!.email, applicationRow),
       );
     } catch (err) {
       fastify.log.error(err);
@@ -1145,9 +1112,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
 
       await db.update(profiles).set({ parsed_json: next, updated_at: new Date() }).where(eq(profiles.user_id, userId));
       const applicationRow = await applicationRowForProfile(userId, fastify);
-      return reply
-        .status(200)
-        .send(serveProfileJson(next, rows[0].skills, request.jwtPayload!.email, applicationRow, rows[0].coursework));
+      return reply.status(200).send(serveProfileJson(next, rows[0].skills, request.jwtPayload!.email, applicationRow));
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to update education' });
@@ -1178,13 +1143,10 @@ export async function profileRoutes(fastify: FastifyInstance) {
         // the first place: profiles.skills is the write no re-upload can repair, so the decision
         // belongs in a function a test can reach rather than in an expression only prod exercises.
         const skills = declaredSkillsForPatch(patch, rows[0].skills);
-        // Promoted on the same path and for the same reason: parsed_json does not survive the next
-        // resume upload, and a hand-typed course history has to.
-        const coursework = declaredCourseworkForPatch(patch, rows[0].coursework);
 
         await tx
           .update(profiles)
-          .set({ parsed_json: next, skills, coursework, updated_at: new Date() })
+          .set({ parsed_json: next, skills, updated_at: new Date() })
           .where(eq(profiles.user_id, userId));
 
         if (patch.target_roles !== undefined) {
@@ -1198,7 +1160,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
             });
         }
 
-        return serveProfileJson(next, skills, request.jwtPayload!.email, applicationRow, coursework);
+        return serveProfileJson(next, skills, request.jwtPayload!.email, applicationRow);
       });
 
       if (!result) return reply.status(404).send({ error: 'Profile not found - upload a resume first' });

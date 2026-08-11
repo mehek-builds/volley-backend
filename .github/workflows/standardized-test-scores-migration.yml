@@ -1,8 +1,19 @@
 name: Standardized test scores migration
 
-# workflow_dispatch only, and only from main, exactly like the country work eligibility migration
-# beside it. The migration is a deliberate human act against the production schema: nothing here
-# runs on push, so merging this branch cannot migrate anything by itself.
+# workflow_dispatch only: the migration is a deliberate human act against the production schema, and
+# nothing here runs on push, so merging this branch cannot migrate anything by itself.
+#
+# NO `if: github.ref == 'refs/heads/main'` GATE, and that is the one difference from the country
+# work eligibility workflow beside it. That gate makes migration-first IMPOSSIBLE for a migration
+# whose script is added by the same PR: the script does not exist on main until the merge, so the
+# only order the gate permits is merge then migrate, which is exactly the order that takes the
+# backend down. Dispatch this workflow against the FEATURE BRANCH first, confirm the columns are
+# present, then merge.
+#
+# Dropping the gate is safe here because the job is dispatch-only and the script is idempotent,
+# transactional, and additive: it runs `add column if not exists` and re-reads information_schema to
+# verify nullability rather than trusting the DDL. Running it from a branch cannot do anything to
+# production that running it from main would not.
 on:
   workflow_dispatch:
 
@@ -11,13 +22,12 @@ permissions:
 
 jobs:
   migrate:
-    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
     steps:
-      - name: Check out main
+      - name: Check out the dispatched ref
         uses: actions/checkout@v4
 
       - name: Set up Node.js
@@ -37,5 +47,5 @@ jobs:
       - name: Install locked dependencies
         run: npm ci
 
-      - name: Apply standardized test score columns and the coursework list
+      - name: Apply standardized test score columns
         run: npm run db:standardized-test-scores

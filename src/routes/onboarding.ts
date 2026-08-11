@@ -181,10 +181,15 @@ export function hasWorkEligibilityDeclaration(input: {
 // authority (R-015, see schema.ts). ZURU asked about Spanish and Enpal about German with nothing
 // on file (2026-07-17); only the student can close that gap, so onboarding asks once.
 //
-// The three standardized test fields and `coursework` join it under the same structural test, and
-// they pass it for the same reason gpa and major do: a form ASKS for a test score and a course
-// list, it never offers one, so watching a hundred applications teaches Litos nothing about
-// either. Measured at 9 distinct blocked packets each across the 158-packet corpus (2026-08-11).
+// The three standardized test fields join it under the same structural test, and they pass it for
+// the same reason gpa and major do: a form ASKS for a test score, it never offers one, so watching
+// a hundred applications teaches Litos nothing about it. Measured at 8 distinct blocked packets
+// each across the 158-packet corpus (2026-08-11), which is 2 postings at one employer.
+//
+// A `coursework` gap was here on this branch and was removed before merge. It needs a column on
+// `profiles`, and that table has 27 bare selects and no narrowed-projection helper, so declaring a
+// column on it ahead of its migration takes the backend down rather than degrading one feature.
+// See the note where that column would have gone in db/schema.ts.
 //
 // address_city and address_state are deliberately still NOT here, though "current location" blocks
 // 9 packets and the resume header needs it. A form asks for a city on nearly every application, so
@@ -196,7 +201,6 @@ const GAP_FIELDS = [
   'gpa_scale',
   'major',
   'languages',
-  'coursework',
   'standardized_test_type',
   'sat_score',
   'act_score',
@@ -339,22 +343,11 @@ function readable(row: Record<string, unknown> | undefined, key: string): string
 // "answered" means a non-empty array. An empty array is still a gap, on purpose - [] is what a
 // student who skipped the screen saves, and skipped and never-asked are the same fact to the next
 // application: a language question it cannot answer.
-// coursework is the one gap field that does NOT live on application_profile. It is on `profiles`,
-// beside `skills`, because the resume tailorer has to read it and application_profile's contract is
-// "never included in a drafting-LLM prompt" (see schema.ts). So it is judged against a second row.
-// An ABSENT profiles row means never asked, which is a gap; an EMPTY array is a real answer ("I have
-// no coursework to list") and is not, on the same reasoning `prior_application_employers` uses.
-export function gapsFrom(
-  row: Record<string, unknown> | undefined,
-  profileRow?: Record<string, unknown> | undefined,
-) {
+export function gapsFrom(row: Record<string, unknown> | undefined) {
   return GAP_FIELDS.filter((f) => {
-    if (f === 'languages') {
-      const langs = row?.['languages'];
-      return !Array.isArray(langs) || langs.length === 0;
-    }
-    if (f === 'coursework') return !Array.isArray(profileRow?.['coursework']);
-    return readable(row, f) === null;
+    if (f !== 'languages') return readable(row, f) === null;
+    const langs = row?.['languages'];
+    return !Array.isArray(langs) || langs.length === 0;
   });
 }
 
@@ -444,7 +437,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const has_base_resume = !!profile?.base_resume_json;
 
     const learned = HARVEST_FIELDS.filter((f) => readable(appProfile, f) !== null);
-    const gaps = gapsFrom(appProfile, profile as Record<string, unknown> | undefined);
+    const gaps = gapsFrom(appProfile);
 
     // Targeting follows the upload. The parser now returns five ordered role suggestions based on
     // dated experience, past titles and skills, and the client derives an initial employment type

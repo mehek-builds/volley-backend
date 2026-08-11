@@ -269,38 +269,26 @@ export const profiles = pgTable('profiles', {
   // outside it are hard-rejected, which is only safe BECAUSE the list is the student's own
   // statement rather than something inferred from their bullets.
   skills: jsonb('skills'),
-  /* string[] of the courses the student has ACTUALLY taken, in their own words. The authoritative
-   * source for the EDUCATION block's coursework line, exactly as `skills` above is for SKILLS.
+  /* NO `coursework` COLUMN HERE, AND THE REASON IS WORTH KEEPING. One was added on this branch and
+   * taken back out before merge, because a column on THIS table cannot be shipped the way one on
+   * application_profile can.
    *
-   * THE DEFECT THIS CLOSES, measured 2026-08-11. GET /profile returns exactly four courses:
-   *   ["Data Structures & Algorithms", "Object-Oriented Programming", "Accounting", "Finance"]
-   * and all 158 stored packets print that same four-item list, unchanged, including a Data Science
-   * internship and a quant trading internship. Two of the four are business electives.
+   * application_profile has exactly one read path, selectApplicationProfileRow, which builds an
+   * explicit narrowed projection and so tolerates a database that has not run the migration yet.
+   * `profiles` has 27 bare `db.select().from(profiles)` sites and no such helper, and Drizzle names
+   * every declared column in every one of them. Declaring a column here before the migration runs
+   * therefore 42703s resume generation, the extension's autofill answers, the submission runner, job
+   * matching, base resume builds, the account export, and the INSERT in routes/profile.ts that
+   * creates a profile row at all - which means new signups. That is not a degraded feature, it is
+   * the backend.
    *
-   * THE CAUSE IS NOT THE SELECTOR, IT IS THE POOL. llm/parse.ts is instructed that "coursework may
-   * contain only courses explicitly printed on the resume", which is the correct rule and must
-   * stay: inventing a course is a checkable false claim about an academic record. But it means the
-   * only pool a per-posting selection can draw from is the handful of courses the resume already
-   * prints, so there is nothing to select. A JD-relevant subset cannot be chosen from a set of four
-   * that is already being printed in full.
-   *
-   * So the pool has to come from the student. This column is her real course history, asked once in
-   * onboarding, and it is what makes the per-posting subset a SELECTION rather than an invention:
-   * every course offered to a posting is one she typed here.
-   *
-   * NOT on application_profile, and the reason is that table's own contract - "sensitive,
-   * encrypted, and never included in a drafting-LLM prompt". Coursework is the opposite on both
-   * counts: it is career data printed on the face of a resume, and the resume tailorer MUST see it
-   * to pick a relevant subset. Filing it there would lock it out of its only consumer. Same
-   * reasoning that put `targeting` in its own table.
-   *
-   * NOT in parsed_json either, which routes/profile.ts overwrites wholesale on every resume upload:
-   * a hand-typed course history would silently vanish the next time she swapped her resume.
-   *
-   * NULL means never asked, and the tailorer falls back to the parsed four rather than failing. An
-   * EMPTY array is a different, real state: "I have no coursework to list."
+   * So the course history needs its own change: either a narrowed-projection helper for `profiles`
+   * matching the one its neighbour already has, or a migration confirmed present before the column
+   * is declared. The measurement behind it stands and is worth acting on - GET /profile returns four
+   * courses, two of them business electives, and all 158 packets print that same list unchanged
+   * including a Data Science and a quant trading internship - but it is a separate piece of work
+   * and it is not this one.
    */
-  coursework: jsonb('coursework'),
   // The BASE resume: one ResumeSpec, built once at onboarding from the bank with no job
   // description. It is what the student reviews and approves on /start, and the fallback every
   // later generation falls back TO when a JD is thin, unreadable, or absent.
@@ -795,18 +783,38 @@ export const application_profile = pgTable('application_profile', {
 
   /* ---- standardized test scores (2026-08-11) ----
    *
-   * THE BAR THESE NOW CLEAR, AND WHY THEY DID NOT BEFORE. The comment on the 2026-08-08 group
-   * above records the original decision verbatim: "Fields that appeared on exactly one posting
-   * (SAT/ACT scores at IMC) were deliberately left out rather than added speculatively". That was
-   * correct at 25 packets. Recounted across the full 158-packet corpus on 2026-08-11, each of the
-   * three blocks NINE distinct packets:
+   * WHAT THE MEASUREMENT ACTUALLY SAYS, stated in the unit the bar is written in.
    *
-   *   standardized test score type   9 packets
-   *   SAT score                      9 packets
-   *   ACT score                      9 packets
+   * Counted across the full 158-packet corpus on 2026-08-11, each of the three questions blocked
+   * EIGHT distinct packets. In postings, which is how the 2026-08-08 group above counts ("6
+   * postings", "5 postings, 5 companies"), those 8 packets are:
    *
-   * Nine is four times the two-posting bar the group above was chosen by, so the speculative-add
-   * objection no longer applies: this is a measurement, not a guess.
+   *   2 postings, 1 employer (IMC Trading), retried four times each.
+   *
+   * An earlier draft of this comment said nine packets and called that "four times the two-posting
+   * bar". That compared packets against postings and was wrong twice over: the count was 8, and a
+   * retry is not a posting. Restated honestly, this clears the letter of the two-posting bar and
+   * nothing more, at a SINGLE employer, which is weaker than every other member of the group above.
+   * The original exclusion note at the top of this file called it "exactly one posting"; it is now
+   * two. That is a real change and a small one, and it is not on its own a reason to add a column.
+   *
+   * SO THE ARGUMENT IS NOT THE COUNT. It is that no other mechanism can ever answer these:
+   *
+   *   Nothing can harvest them. A form ASKS for a test score and never offers one, which is the
+   *     same structural argument that put gpa and major on this table rather than in the harvest.
+   *   All 24 occurrences were blank and required. Not one was answered by any existing path.
+   *   The type question needs a CLOSED LIST. saved_application_answers stores free text keyed by
+   *     question wording, and cannot hold an enum the resolver is allowed to rely on.
+   *   Onboarding collects them UP FRONT, which is the whole point: the alternative learns a fact
+   *     only after it has already blocked an application, and then only for that exact wording.
+   *
+   * THE HONEST COUNTERPOINT, recorded because it is real. The comment on saved_application_answers
+   * below names "a standardized test score" as its own example of what belongs there rather than in
+   * a typed column, and lib/answerReuse.ts already scopes exact test scores 'reusable'. That path
+   * exists and these columns overlap it. Two things decided it anyway: that path cannot ask up
+   * front, and its STANDARDIZED_TEST_SCORE_QUESTION carries the identical defect these matchers
+   * were just repaired for, requiring the word "score" where the employer writes "result". Anyone
+   * revisiting this should weigh consolidating the two rather than assuming the split is settled.
    *
    * WHY THREE COLUMNS AND NOT ONE. The forms ask all three shapes and they are three different
    * questions. A quant-trading form asks "which standardized test did you take?" as a closed list
