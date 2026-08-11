@@ -12,6 +12,7 @@ import {
   readApplicationReview,
   type ApplicationReviewState,
 } from './applicationReview';
+import { refreshKnownQuestionAnswers } from './questionDiscovery';
 
 const bank: ExperienceBankEntry[] = [
   {
@@ -568,4 +569,177 @@ test('submit merge drops the option derivation whenever it replaces the answer',
   assert.equal(unchanged[0].answer, 'January 2028 - July 2028');
   assert.equal(unchanged[0].answer_option_source, 'May 2028',
     'an unchanged answer keeps the derivation that still describes it');
+});
+
+/* THE REVIEW SCREEN'S SAVE, END TO END, ON A PACKET THAT HAS NOT BEEN TOUCHED.
+ *
+ * The test above passes and proved less than it looked like it proved. It reaches the keep branch
+ * only through `answer_source: 'applicant_review'`, which is a record the applicant has ALREADY
+ * edited once. The ordinary record is the machine-resolved one, written by discovery and never
+ * hand-edited, and on 2026-08-12 that was every question record in production: 2790 of 2790 carried
+ * no answer_source at all. For all of them the merge fell to the strip branch even when the submit
+ * body echoed the stored answer back byte for byte.
+ *
+ * These two facts compose into silent data loss, which is why this is one test over both functions
+ * rather than two unit tests:
+ *
+ *   1. the merge drops answer_option_source because answer_source is not 'applicant_review', even
+ *      though the answer it describes is unchanged; then
+ *   2. refreshKnownQuestionAnswers, running on the merge's output at the same call site, sees a band
+ *      with nothing left to prove it current and replaces it with the raw profile fact.
+ *
+ * So opening "Review answers" and pressing Save, changing nothing, rewrites
+ * "January 2028 - July 2028" to "May 2028" and "3.81 - 3.9" to "3.89" - the exact values measured
+ * on the live IMC packet fc6eade3-90e5-4d17-af94-009f9a22beaa. "May 2028" is not on that control's
+ * option list and never could be, so the field it is filled into comes back required-and-still-empty.
+ * The screen invites the press: its own button says Save and its copy says these answers go on the
+ * company's form.
+ *
+ * The stored answers are the two real ones. The submit body is what the dashboard actually posts:
+ * questionSchema strips every provenance key, so a client echo carries the answer and nothing else,
+ * and the merge is the only thing that can carry the derivation across. */
+test('an untouched review save leaves the stored option answers exactly as they were', () => {
+  const reviewedAt = '2026-08-11T16:56:30.801Z';
+  const profile = { grad_date: 'May 2028', grad_year: 2028, gpa: '3.89' };
+  const stored = [
+    {
+      id: '7615a5c5-be2c-4f30-8008-50afdd4ee6ed',
+      question: 'when is your anticipated graduation date - please select a graduation date range',
+      answer: 'January 2028 - July 2028',
+      kind: 'required' as const,
+      required: true,
+      portal_selector: '#question_9170559101',
+      answer_option_source: 'May 2028',
+    },
+    {
+      id: 'f2852c3c-2b80-415a-b8ce-80bfe4260dd5',
+      question: 'what is your gpa?',
+      answer: '3.81 - 3.9',
+      kind: 'required' as const,
+      required: true,
+      portal_selector: '#question_9170560101',
+      answer_option_source: '3.89',
+    },
+  ];
+  const clientEcho = stored.map(({ answer_option_source: _derivation, ...question }) => question);
+
+  // The two calls POST /applications/:id/submit-request makes, in its order, on its own arguments.
+  const persisted = refreshKnownQuestionAnswers(
+    mergeSubmittedApplicationReviewQuestions(stored, clientEcho, reviewedAt),
+    profile,
+    undefined,
+    reviewedAt,
+  );
+
+  assert.equal(persisted[0].answer, 'January 2028 - July 2028',
+    'a save that changed nothing must not rewrite the graduation option the control offered');
+  assert.equal(persisted[1].answer, '3.81 - 3.9',
+    'a save that changed nothing must not rewrite the GPA band the control offered');
+});
+
+/* The derivation is not a second answer, so it cannot be preserved by being sticky. It survives
+ * exactly as long as the value it describes, and the round trip above is the only reason it needs to
+ * survive a merge at all. Both directions are asserted here because keeping it too eagerly rebuilds
+ * the hole PR 496 closed from the other side: answer_option_source is read as proof that the answer
+ * beside it is current, so one attached to an answer it was never derived for would make a stale
+ * band unfalsifiable. */
+test('an unedited save leaves no derivation describing a value it was not derived for', () => {
+  const reviewedAt = '2026-08-11T16:56:30.801Z';
+  const stored = [{
+    id: '7615a5c5-be2c-4f30-8008-50afdd4ee6ed',
+    question: 'when is your anticipated graduation date - please select a graduation date range',
+    answer: 'January 2028 - July 2028',
+    kind: 'required' as const,
+    required: true,
+    answer_option_source: 'May 2028',
+  }];
+
+  const untouched = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0], answer_option_source: undefined }],
+    reviewedAt,
+  );
+  assert.equal(untouched[0].answer, 'January 2028 - July 2028');
+  assert.equal(untouched[0].answer_option_source, 'May 2028',
+    'the derivation still describes the answer in the record, so it survives');
+
+  const edited = mergeSubmittedApplicationReviewQuestions(
+    stored,
+    [{ ...stored[0], answer: 'August 2028 - December 2028', answer_option_source: undefined }],
+    reviewedAt,
+  );
+  assert.equal(edited[0].answer, 'August 2028 - December 2028');
+  assert.equal(edited[0].answer_option_source, undefined,
+    'a replaced answer must not inherit the derivation of the one it replaced');
+
+  /* A derivation cannot arrive from outside either. questionSchema strips it before the route ever
+   * calls this, but this function is exported and the tail loop below copies a submitted question
+   * wholesale, so a caller with a looser schema could mint proof for an answer nothing resolved. */
+  const invented = mergeSubmittedApplicationReviewQuestions(
+    [],
+    [{
+      id: 'new',
+      question: 'expected graduation date',
+      answer: 'January 2020 - July 2020',
+      kind: 'required' as const,
+      required: true,
+      answer_option_source: 'May 2028',
+    }],
+    reviewedAt,
+  );
+  assert.equal(invented[0].answer_option_source, undefined,
+    'a submitted question cannot bring its own proof that it is current');
+});
+
+/* THE OTHER HALF OF THE ROUND TRIP, and the reason the fix above is a comparison and not a rule that
+ * the stored answer wins. The screen exists so the applicant can correct what Litos got wrong; a
+ * save that preserved the stored answer unconditionally would make every textarea on it decorative.
+ *
+ * Note which edit is asserted. On a question the resolver answers from the profile, hers is
+ * deliberately NOT the last word - refreshKnownQuestionAnswers re-resolves a graduation date on
+ * every send so a packet cannot replay one she has since corrected in her profile (R-118), and that
+ * is unchanged here and asserted so. The edit that must survive is the one on a question the
+ * resolver has no answer for, which is every essay and every posting-specific question on the
+ * screen. */
+test('a genuine edit on the review screen still wins', () => {
+  const reviewedAt = '2026-08-11T16:56:30.801Z';
+  const profile = { grad_date: 'May 2028', grad_year: 2028, gpa: '3.89' };
+  const stored = [
+    {
+      id: 'essay',
+      question: 'why do you want to work at IMC?',
+      answer: 'A drafted paragraph the applicant did not like.',
+      kind: 'essay' as const,
+      required: true,
+    },
+    {
+      id: 'grad',
+      question: 'when is your anticipated graduation date - please select a graduation date range',
+      answer: 'January 2028 - July 2028',
+      kind: 'required' as const,
+      required: true,
+      answer_option_source: 'May 2028',
+    },
+  ];
+
+  const persisted = refreshKnownQuestionAnswers(
+    mergeSubmittedApplicationReviewQuestions(
+      stored,
+      [
+        { ...stored[0], answer: 'Her own sentence, typed on the review screen.' },
+        { id: 'grad', question: stored[1].question, answer: 'August 2028 - December 2028', kind: 'required' as const, required: true },
+      ],
+      reviewedAt,
+    ),
+    profile,
+    undefined,
+    reviewedAt,
+  );
+
+  assert.equal(persisted[0].answer, 'Her own sentence, typed on the review screen.',
+    'an edit to a question the resolver cannot answer is the answer');
+  assert.equal(persisted[1].answer, 'May 2028',
+    'a graduation date still comes from the profile, and her edited band does not become sticky');
+  assert.equal(persisted[1].answer_option_source, undefined,
+    'and it carries no derivation, because nothing derived it');
 });
