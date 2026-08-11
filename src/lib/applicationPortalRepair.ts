@@ -4,6 +4,12 @@ import { career_page_sources, generated_resumes, monitored_jobs } from '../db/sc
 import type { ApplicationReviewState } from './applicationReview';
 import { monitoredJdAgrees } from './monitoredPortalRepair';
 import {
+  isTrustedSuccessFactorsWrapperUrl,
+  resolveSuccessFactorsWrapperApplicationUrl,
+  sameTrustedSuccessFactorsWrapperIdentity,
+  type SuccessFactorsWrapperFetch,
+} from './successFactorsWrapper';
+import {
   canonicalMonitoredPortalUrl,
   canonicalSupportedPortalUrl,
   detectPortal,
@@ -31,6 +37,21 @@ function jobContextText(row: ResumeRow, key: 'company' | 'role' | 'jd_hash'): st
 
 function normalizedIdentity(value: string | null): string {
   return (value ?? '').trim().toLowerCase();
+}
+
+export async function repairSuccessFactorsWrapperReview(
+  current: ApplicationReviewState,
+  fetchImpl: SuccessFactorsWrapperFetch = fetch,
+): Promise<ApplicationReviewState> {
+  if (!current.portal_url || !isTrustedSuccessFactorsWrapperUrl(current.portal_url)) return current;
+  const applicationUrl = await resolveSuccessFactorsWrapperApplicationUrl(current.portal_url, fetchImpl);
+  if (!applicationUrl) return { ...current, portal_supported: false };
+  return {
+    ...current,
+    portal_url: applicationUrl,
+    ats_name: 'sap_successfactors',
+    portal_supported: true,
+  };
 }
 
 export async function repairReviewPortalFromMonitoredJob(
@@ -74,11 +95,33 @@ export async function repairReviewPortalFromMonitoredJob(
     ))
     .limit(1);
   if (!job) return current;
-  const applyUrl = canonicalMonitoredPortalUrl(job.apply_url, job.ats_name, job.board_token);
-  if (!applyUrl) return current;
   if (normalizedIdentity(job.company_name) !== normalizedIdentity(expectedCompany)) return current;
   if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return current;
   if (!monitoredJdAgrees(expectedJdHash, current.jd_text, job.description)) return current;
+  const currentWrapperUrl = current.portal_url && isTrustedSuccessFactorsWrapperUrl(current.portal_url)
+    ? current.portal_url
+    : undefined;
+  const monitoredWrapperUrl = job.apply_url && isTrustedSuccessFactorsWrapperUrl(job.apply_url)
+    ? job.apply_url
+    : undefined;
+  if (currentWrapperUrl || monitoredWrapperUrl) {
+    // The wrapper exposes a tenant and requisition only in public Jobs2Web bindings. Its URL must
+    // first be the exact monitored posting whose company, role, and JD already agreed above. A
+    // failed or ambiguous read stays unsupported, so neither a request URL nor another monitored
+    // SAP posting can select the tenant form for this packet.
+    if (
+      !monitoredWrapperUrl
+      || (currentWrapperUrl
+        && !sameTrustedSuccessFactorsWrapperIdentity(currentWrapperUrl, monitoredWrapperUrl))
+    ) return { ...current, portal_supported: false };
+    return repairSuccessFactorsWrapperReview({
+      ...current,
+      portal_url: monitoredWrapperUrl,
+      ats_name: job.ats_name ?? current.ats_name,
+    });
+  }
+  const applyUrl = canonicalMonitoredPortalUrl(job.apply_url, job.ats_name, job.board_token);
+  if (!applyUrl) return current;
   return {
     ...current,
     portal_url: applyUrl,

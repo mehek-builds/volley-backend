@@ -77,7 +77,7 @@ export function browserApplicationCapability(family: string): BrowserApplication
 export const RESEARCHED_BROWSER_TENANTS = {
   zoho_recruit: ['genovice.zohorecruit.com', 'solution25.zohorecruit.eu'],
   bullhorn: ['www.serverlogic.com', 'www.staffingsolutionsenterprises.com'],
-  sap_successfactors: ['career2.successfactors.eu', 'career8.successfactors.com'],
+  sap_successfactors: ['career2.successfactors.eu', 'career5.successfactors.eu', 'career8.successfactors.com'],
   oracle_taleo: ['fa007.taleo.net', 'aa270.taleo.net'],
   adp_recruiting: ['myjobs.adp.com'],
   jazzhr: ['utilidata.applytojob.com', 'foundationai.applytojob.com'],

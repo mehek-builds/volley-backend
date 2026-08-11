@@ -35,6 +35,7 @@ import {
   type ReferralSourceEvidence,
 } from './referralSource';
 import { embeddedGreenhouseApplicationUrl, embeddedGreenhouseJobId } from './greenhouseEmbeddedBoards';
+import { isTrustedSuccessFactorsWrapperUrl } from './successFactorsWrapper';
 import {
   postingCountryCodeFromJobContext,
   postingCountryFromJobContext,
@@ -501,7 +502,7 @@ export const ORACLE_ATTENDED_GATE_REASON =
 export const UKG_CAPTURE_REQUIRED_REASON =
   'This UKG application did not expose a verified job or application form beyond its anonymous-session frame. Litos did not enter information or submit anything. A new live capture is required before this portal can be continued safely.';
 export const SAP_SUCCESSFACTORS_CAPTURE_REQUIRED_REASON =
-  'This SuccessFactors application stops at an account wall, and Litos has not captured a verified application form or receipt for this tenant. Litos did not sign in, create an account, accept anything, or submit. A new live capture is required before this portal can be continued safely.';
+  'This SAP SuccessFactors application first asks you to choose cookie and privacy settings, then continues through an account-backed flow. Litos has not captured a verified application form or receipt for this tenant. It did not choose, sign in, create an account, accept anything, or submit. A new live capture is required before this portal can be continued safely.';
 
 const ACCOUNT_WALLED_REASONS: Record<AccountWalledFamily, string> = {
   jobvite: JOBVITE_ATTENDED_GATE_REASON,
@@ -6002,6 +6003,7 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== 'https:') return undefined;
+    if (isTrustedSuccessFactorsWrapperUrl(rawUrl)) return undefined;
     const greenhouseJobId = databricksGreenhouseJobId(url);
     if (greenhouseJobId) return `https://boards.greenhouse.io/embed/job_app?token=${greenhouseJobId}`;
     const embeddedBoardUrl = embeddedGreenhouseApplicationUrl(url);

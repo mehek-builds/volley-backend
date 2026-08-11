@@ -7,6 +7,7 @@ import {
   canonicalSupportedPortalUrl,
   detectPortal,
   fillPortal,
+  isPortalSupported,
   portalApplicationUrl,
   portalCanAutoSubmit,
   portalHandoffReason,
@@ -97,6 +98,13 @@ test('SuccessFactors canonicalization preserves only proven tenant and job ident
   assert.equal(portalApplicationUrl('sap_successfactors', legacy), canonicalSupportedPortalUrl(legacy));
   assert.throws(() => detectPortal('https://career8.successfactors.com/career'));
   assert.throws(() => detectPortal('https://performancemanager.successfactors.eu/sf/career'));
+});
+
+test('keeps the measured SAP wrapper unsupported until its public bindings resolve a direct tenant form', () => {
+  const wrapper = 'https://jobs.sap.com/job/Walldorf-SAP-LOB-%26-Solution-Marketing-iXp-Intern-%28fmd%29-Marketing-Germany-69190/1403234233/';
+  assert.throws(() => detectPortal(wrapper));
+  assert.equal(isPortalSupported(wrapper), false);
+  assert.equal(canonicalSupportedPortalUrl(wrapper, 'sap_successfactors'), undefined);
 });
 
 test('all three families default-deny programmatic submit and polling', () => {
@@ -214,6 +222,7 @@ test('researched tenant allowlist is exact', () => {
   assert.equal(isResearchedBrowserTenant('zoho_recruit', 'genovice.zohorecruit.com'), true);
   assert.equal(isResearchedBrowserTenant('bullhorn', 'www.serverlogic.com'), true);
   assert.equal(isResearchedBrowserTenant('sap_successfactors', 'career8.successfactors.com'), true);
+  assert.equal(isResearchedBrowserTenant('sap_successfactors', 'career5.successfactors.eu'), true);
   assert.equal(isResearchedBrowserTenant('bullhorn', 'serverlogic.com'), false);
 });
 

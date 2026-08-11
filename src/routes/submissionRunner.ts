@@ -2888,8 +2888,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   row = packetAudit.row;
   const stored = row.spec as StoredSpec;
   const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
-  // Re-read: a retention restore rewrote _review with a fresh audit and acknowledgement.
-  current = readApplicationReview(stored) ?? current;
+  // Re-read: a retention restore rewrote _review with a fresh audit and acknowledgement. Reapply
+  // portal repair to that replacement review too, or the audit silently restores a company wrapper
+  // over the exact application form that the pre-audit repair just established.
+  current = await repairReviewPortalFromMonitoredJob(row, readApplicationReview(stored) ?? current);
   const portalUrl = current.portal_url;
   if (!portalUrl) throw new Error('We do not have a link to the company application page');
   const portal = detectPortal(portalUrl);

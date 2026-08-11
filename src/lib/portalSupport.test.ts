@@ -362,6 +362,12 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(repairSource, /monitored_jobs\.apply_url/);
   assert.match(repairSource, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
   assert.match(repairSource, /monitoredJdAgrees\(expectedJdHash, current\.jd_text, job\.description\)/);
+  const monitoredIdentityIndex = repairSource.indexOf('monitoredJdAgrees(expectedJdHash, current.jd_text, job.description)');
+  const wrapperIdentityIndex = repairSource.indexOf('sameTrustedSuccessFactorsWrapperIdentity(currentWrapperUrl, monitoredWrapperUrl)');
+  const wrapperRepairIndex = repairSource.indexOf('return repairSuccessFactorsWrapperReview({');
+  assert.ok(monitoredIdentityIndex > 0, 'the monitored JD identity gate is missing');
+  assert.ok(wrapperIdentityIndex > monitoredIdentityIndex, 'the wrapper URL identity must be checked after the monitored packet identity');
+  assert.ok(wrapperRepairIndex > wrapperIdentityIndex, 'the wrapper must not be fetched before both monitored identities agree');
   assert.match(applicationsRoute, /current = await repairReviewPortalFromMonitoredJob\(row, current\)/);
   assert.match(applicationsRoute, /review = await repairReviewPortalFromMonitoredJob\(row, review\)/);
   assert.match(applicationsRoute, /\/applications\/:id\/submission\/channels/);

@@ -160,6 +160,11 @@ test('ATS API channel runs after final claim and before browser submission', asy
   const prepareIndex = runner.indexOf('async function prepare(');
   const prepareMissingReviewGuardIndex = runner.indexOf("if (!current) throw new Error('We do not have a link to the company application page');", prepareIndex);
   const prepareRepairIndex = runner.indexOf('current = await repairReviewPortalFromMonitoredJob(row, current);', prepareIndex);
+  const prepareAuditRowIndex = runner.indexOf('row = packetAudit.row;', prepareIndex);
+  const preparePostAuditRepairIndex = runner.indexOf(
+    'current = await repairReviewPortalFromMonitoredJob(row, readApplicationReview(stored) ?? current);',
+    prepareAuditRowIndex,
+  );
   const prepareMissingUrlGuardIndex = runner.indexOf('if (!portalUrl) throw new Error', prepareIndex);
   const helperIndex = runner.indexOf('async function submitViaAtsSubmissionChannel');
   const enabledIndex = runner.indexOf('if (!atsApiSubmissionEnabled()) return false;', helperIndex);
@@ -175,6 +180,11 @@ test('ATS API channel runs after final claim and before browser submission', asy
   assert.ok(prepareIndex > 0, 'prepare helper is missing');
   assert.ok(prepareMissingReviewGuardIndex > prepareIndex && prepareMissingReviewGuardIndex < prepareRepairIndex, 'prepare must only require a review before monitored portal repair');
   assert.ok(prepareRepairIndex > prepareMissingReviewGuardIndex && prepareRepairIndex < prepareMissingUrlGuardIndex, 'prepare must repair monitored portal URLs before requiring portal_url');
+  assert.ok(prepareAuditRowIndex > prepareRepairIndex, 'prepare must adopt the audited packet row');
+  assert.ok(
+    preparePostAuditRepairIndex > prepareAuditRowIndex && preparePostAuditRepairIndex < prepareMissingUrlGuardIndex,
+    'prepare must reapply portal repair after packet audit replaces the review',
+  );
   assert.ok(helperIndex > 0, 'ATS API submission helper is missing');
   assert.ok(enabledIndex > helperIndex && enabledIndex < authCheckIndex, 'API submission must be disabled by default before any POST path');
   assert.ok(repairIndex > enabledIndex && repairIndex < authCheckIndex, 'API submission must repair monitored portal URLs before consent and POST');
