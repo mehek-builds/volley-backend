@@ -995,20 +995,52 @@ describe('prior government employment, answered from the experience bank', () =>
     }
   });
 
+  /* CHANGED, DELIBERATELY, and this is the one place this branch takes something away.
+   *
+   * The label still parses as ONE complete prior-application question, which is what this test is
+   * named for and what the assertions below still prove. What changed is the answer when her
+   * DECLARED list names IMC: it used to be "Yes", and it is now handed back.
+   *
+   * The reminder sentence is removed from the label before the shape grammar reads it (see
+   * withoutTrailingHelpText), and two rounds of review established that nothing in this codebase can
+   * tell a removed sentence that restates the question's scope from one that does not: a word list
+   * fails OPEN on the phrasing it has not seen, and the open direction is a false statement on a
+   * live application. So a removed sentence now withdraws every answer that rests on a positive
+   * record. A declared "IMC" proves she applied to IMC; it cannot prove that application falls
+   * inside whatever the sentence said.
+   *
+   * The "No" side is untouched, and it is untouched for a reason that needs no reading of the
+   * sentence at all: an empty declared list is her saying she has applied nowhere, and "No" is true
+   * under every narrowing, widening, window and group-entity rewording of a question about a set
+   * that is empty. That is the same property the default-No path rests on, which is why the rule
+   * this branch exists for survives here unchanged.
+   */
   test('the exact measured IMC reminder is one complete prior-application question', () => {
     const label = 'Have you applied to this role or another role @IMC within the last 12-18 months? As a reminder, if you have already applied you will not be reconsidered.';
     const context = frozenJobEmployerContext('IMC');
-    for (const [declared, expected] of [
-      [['IMC'], 'Yes'],
-      [[], 'No'],
-    ] as const) {
-      const profile: ApplicationProfileLike = { prior_application_employers: [...declared] };
-      assert.deepEqual(resolveKnownAnswer(label, 'text', profile, context), { value: expected });
-      assert.deepEqual(
-        refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], profile, context),
-        [{ question: label, answer: expected }],
-      );
-    }
+
+    const declaredImc: ApplicationProfileLike = { prior_application_employers: ['IMC'] };
+    const withheld = resolveKnownAnswer(label, 'text', declaredImc, context);
+    assert.ok(withheld && 'skipReason' in withheld, JSON.stringify(withheld));
+    // Held by the scope it cannot establish, NOT by the compound refusal: the label is still read
+    // as one complete question, which is the whole claim of this test.
+    assert.doesNotMatch(withheld.skipReason, /compound application question/);
+    assert.deepEqual(
+      refreshKnownQuestionAnswers([{ question: label, answer: 'Yes' }], declaredImc, context),
+      [{ question: label, answer: '' }],
+    );
+
+    const declaredNone: ApplicationProfileLike = { prior_application_employers: [] };
+    assert.deepEqual(resolveKnownAnswer(label, 'text', declaredNone, context), { value: 'No' });
+    assert.deepEqual(
+      refreshKnownQuestionAnswers([{ question: label, answer: 'stale' }], declaredNone, context),
+      [{ question: label, answer: 'No' }],
+    );
+    // And the rule this branch exists for: nothing declared, Litos has sent nothing, answer No.
+    assert.deepEqual(
+      resolveKnownAnswer(label, 'text', { submitted_application_companies: [] }, context),
+      { value: 'No' },
+    );
 
     const unsupportedTail = `${label} Please explain why.`;
     const held = resolveKnownAnswer(

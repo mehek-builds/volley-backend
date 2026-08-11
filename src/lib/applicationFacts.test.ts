@@ -237,84 +237,135 @@ describe('stored application facts reach the control on the real employer questi
 
     /* COMPANY IDENTITY IS EXACT, on the duplicate guard's own folding of job_context.company. A
      * submitted application to a similarly-named but different company withdraws nothing: if it
-     * did, the near-miss would answer a live employer's question out of another company's history. */
+     * did, the near-miss would answer a live employer's question out of another company's history.
+     *
+     * Asserted on a label with NO trailing sentence, deliberately. IMC's real label carries one, and
+     * a removed sentence withdraws every answer that rests on a positive record wherever it sits -
+     * so on that label these would hold for a reason that has nothing to do with company identity,
+     * and the assertion would prove nothing about the rule it is named for. */
+    const bare = 'Have you previously applied to this company?';
+    // The exception itself, with nothing else in play: a submitted IMC application holds it.
+    assert.match(heldFor(bare, sentToImc, 'text', imc), /prior application question left for you/);
     for (const other of ['IMC Trading', 'Imcorp', 'IMC Health']) {
       assert.deepEqual(
-        resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', { submitted_application_companies: [other] }, imc),
+        resolveKnownAnswer(bare, 'text', { submitted_application_companies: [other] }, imc),
         { value: 'No' },
         other,
       );
     }
   });
 
-  /* HELP TEXT THAT SAYS WHICH APPLICATIONS COUNT IS NOT HELP TEXT.
+  /* A REMOVED SENTENCE IS AN UNKNOWN SCOPE, AND NO VOCABULARY DECIDES OTHERWISE.
    *
-   * PR #500 blocked on exactly this. The opener test said where the sentence sat and nothing said
-   * whether it mattered, so both labels below answered "Yes" off a declared "IMC" while the only
-   * sentence saying what qualifies had just been discarded. A declared employer proves she applied;
-   * it does not prove the application was an internship, or that she was not terminated for cause.
-   * main held both, and it was right to.
+   * PR #500 blocked here twice. The first attempt read nothing about the sentence and answered "Yes"
+   * off a declared "IMC" to a label whose only restriction it had just discarded. The second sorted
+   * tails with five closed word classes, and failed both ways at once: a WIDENING tail was correctly
+   * detected and then ignored on the No path, and every phrasing outside the alternation - "we
+   * disregard applications made before 2024", "internship applications are a separate process" -
+   * went straight back to "Yes". A list over surface forms fails closed on false positives and OPEN
+   * on false negatives, and open is the direction that puts a false statement on an application.
    *
-   * The repair restricts the ANSWER, not the strip. Where nothing has been sent and nothing is
-   * declared, "No" is true under every restriction of a set that is empty to begin with, so the
-   * default-No path - the whole point of this change - is untouched by a scoping tail.
+   * So the rule reads the RECORDS instead of the words. A removed sentence means never Yes, and No
+   * only where there is no positive record of any application to any employer at all. With zero
+   * records there is nothing for a restatement to bring into or out of scope, so No is true under
+   * every narrowing, widening, window and group-entity rewording. The tails below are deliberately
+   * a mix of all four kinds, and not one of them is inspected by the code they exercise.
    */
-  const SCOPED_TAIL_LABELS = [
-    'Have you applied to a role at IMC? Note this refers only to internship applications.',
-    'Have you applied to a role at IMC? Please note that you must also confirm you were not terminated for cause.',
+  const NARROWING_TAILS = [
+    'Note this refers only to internship applications.',
+    'Please note that you must also confirm you were not terminated for cause.',
+    'Note we disregard applications made before 2024.',
+    'Note we ignore internship applications.',
+    'Note that for the purposes of this question, internships are separate.',
+    'Note this does not concern internship applications.',
+    'Note applications beyond 12 months ago are disregarded.',
+    'Note internship applications are a separate process.',
   ];
+  const WIDENING_TAILS = [
+    'Note that this refers to applications to any employer.',
+    'Please note that applications to any IMC group entity also count.',
+    'Note this includes our subsidiaries.',
+  ];
+  const SCOPE_RESTATING_TAILS = [...NARROWING_TAILS, ...WIDENING_TAILS];
+  const questionWith = (tail: string) => `Have you applied to a role at IMC? ${tail}`;
 
-  test('a help-text tail that scopes which applications count withdraws every positive answer', () => {
+  test('a stripped help-text tail never produces Yes, whatever the sentence said', () => {
     const imc = frozenJobEmployerContext('IMC');
-    for (const label of SCOPED_TAIL_LABELS) {
-      // The declared record says she applied to IMC. It does not say the application qualifies
-      // under the restriction, so the question is hers, with or without a history read.
+    for (const tail of SCOPE_RESTATING_TAILS) {
+      const label = questionWith(tail);
+      /* Her declared list names IMC. That proves she applied to IMC and cannot prove the
+       * application falls inside whatever the sentence said, so the question is hers. */
       for (const ap of [
         { prior_application_employers: ['IMC'] },
         { prior_application_employers: ['IMC'], submitted_application_companies: [] },
         { prior_application_employers: ['IMC'], submitted_application_companies: ['IMC'] },
       ] satisfies ApplicationProfileLike[]) {
         const resolved = resolveKnownAnswer(label, 'text', ap, imc);
-        assert.ok(resolved && 'skipReason' in resolved, `${label} -> ${JSON.stringify(resolved)}`);
-        assert.match(resolved.skipReason, /prior application question left for you/, label);
+        assert.ok(resolved && 'skipReason' in resolved, `${tail} -> ${JSON.stringify(resolved)}`);
+        assert.match(resolved.skipReason, /prior application question left for you/, tail);
       }
-      // Global scope is restricted by the same sentence for the same reason.
-      const global = `Have you ever applied for a job before? ${label.split('? ')[1]}`;
-      const globalResolved = resolveKnownAnswer(global, 'text', { prior_application_employers: ['IMC'] }, imc);
-      assert.ok(globalResolved && 'skipReason' in globalResolved, JSON.stringify(globalResolved));
+      // Global scope is restated by the same sentence and withdrawn for the same reason.
+      const global = resolveKnownAnswer(`Have you ever applied for a job before? ${tail}`, 'text',
+        { prior_application_employers: ['IMC'] }, imc);
+      assert.ok(global && 'skipReason' in global, `${tail} -> ${JSON.stringify(global)}`);
     }
   });
 
-  test('a scoping tail does not narrow the default No, because No survives every restriction', () => {
+  test('a stripped tail answers No only with no positive record anywhere, not merely none here', () => {
     const imc = frozenJobEmployerContext('IMC');
-    for (const label of SCOPED_TAIL_LABELS) {
-      // Nothing sent and nothing declared: there is no application for the restriction to qualify.
-      assert.deepEqual(
-        resolveKnownAnswer(label, 'text', { submitted_application_companies: [] }, imc),
-        { value: 'No' },
-        label,
-      );
-      // A declared list that names other employers is the same case: none of them is IMC.
-      assert.deepEqual(
-        resolveKnownAnswer(label, 'text', { prior_application_employers: ['Akuna'] }, imc),
-        { value: 'No' },
-        label,
-      );
-      // And the history exception still outranks the default.
-      const held = resolveKnownAnswer(label, 'text', { submitted_application_companies: ['IMC'] }, imc);
-      assert.ok(held && 'skipReason' in held, JSON.stringify(held));
-    }
+    for (const tail of SCOPE_RESTATING_TAILS) {
+      const label = questionWith(tail);
 
-    /* IMC'S REAL TAIL IS INERT and must stay strippable, or the blocker this branch exists for comes
-     * straight back. It talks about what happens NEXT ("you may reapply when the next recruitment
-     * season begins in 2027"), not about which past applications are being counted. */
+      /* THE FINDING THAT BLOCKED THE SECOND ATTEMPT. A record for a DIFFERENT employer is exactly
+       * what a widening tail brings into scope, so "none for IMC" is not enough to answer. Both
+       * records are read for their content, not for this company. */
+      for (const ap of [
+        { submitted_application_companies: ['Jane Street'] },
+        { submitted_application_companies: ['IMC Trading Services'] },
+        { prior_application_employers: ['Akuna'] },
+        { prior_application_employers: ['Akuna'], submitted_application_companies: [] },
+      ] satisfies ApplicationProfileLike[]) {
+        const resolved = resolveKnownAnswer(label, 'text', ap, imc);
+        assert.ok(resolved && 'skipReason' in resolved, `${tail} / ${JSON.stringify(ap)} -> ${JSON.stringify(resolved)}`);
+      }
+      // Neither record read is not the same as both records empty.
+      const unread = resolveKnownAnswer(label, 'text', {}, imc);
+      assert.ok(unread && 'skipReason' in unread, `${tail} -> ${JSON.stringify(unread)}`);
+    }
+  });
+
+  test('a scope-restating tail does not narrow the default No, because No survives every restatement', () => {
+    const imc = frozenJobEmployerContext('IMC');
+    /* THE REGRESSION GUARD FOR THE WRONG REPAIR. Refusing to strip a restating tail would put every
+     * one of these back in the compound refusal. With no application to any employer there is
+     * nothing for a narrowing or a widening to act on, so No is true either way, and the default-No
+     * rule this branch exists for holds under all four kinds of restatement. */
+    for (const tail of SCOPE_RESTATING_TAILS) {
+      for (const ap of [
+        { submitted_application_companies: [] },
+        { prior_application_employers: [] },
+        { prior_application_employers: [], submitted_application_companies: [] },
+      ] satisfies ApplicationProfileLike[]) {
+        assert.deepEqual(
+          resolveKnownAnswer(questionWith(tail), 'text', ap, imc),
+          { value: 'No' },
+          `${tail} / ${JSON.stringify(ap)}`,
+        );
+      }
+    }
+    // And with no tail at all nothing above applies: the ordinary rules answer as they always did.
+    assert.deepEqual(
+      resolveKnownAnswer('Have you applied to a role at IMC?', 'text', { prior_application_employers: ['IMC'] }, imc),
+      { value: 'Yes' },
+    );
+    assert.deepEqual(
+      resolveKnownAnswer('Have you applied to a role at IMC?', 'text', { prior_application_employers: ['Akuna'] }, imc),
+      { value: 'No' },
+    );
+    // IMC's real tail is removed like any other, and the blocker this branch exists for stays fixed.
     assert.deepEqual(
       resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', { submitted_application_companies: [] }, imc),
       { value: 'No' },
-    );
-    assert.deepEqual(
-      resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', { prior_application_employers: ['IMC'] }, imc),
-      { value: 'Yes' },
     );
   });
 
