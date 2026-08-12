@@ -1,5 +1,6 @@
 import type { Page } from 'playwright-core';
 import {
+  MANAGED_CAPTCHA_VISIBILITY_CAPABILITY,
   MANAGED_DISCOVERY_ROLE_CAPABILITY,
   MANAGED_SUBMIT_CHOOSER_POLICY,
   type ManagedBrowserAction,
@@ -7440,7 +7441,24 @@ const MANAGED_CAPTCHA_CHALLENGE_SELECTOR = '[data-sitekey]:not(.grecaptcha-badge
 // Read as an attribute, not a count, because the runner's extract contract returns attribute values
 // and `src` is present on every iframe it can match.
 const MANAGED_CAPTCHA_SIZE_SELECTOR = '[data-sitekey][data-size]:not(.grecaptcha-badge):not(.grecaptcha-badge *)';
-const MANAGED_CAPTCHA_ANCHOR_SELECTOR = 'iframe[src*="/recaptcha/"][src*="anchor"]';
+/*
+ * THE BADGE EXCLUSION IS STRUCTURAL, and it used to be missing here while every other selector in
+ * this block carried it.
+ *
+ * reCAPTCHA v3 and invisible v2 mount their anchor iframe INSIDE `.grecaptcha-badge`, so this
+ * selector matched it on essentially every Greenhouse and Ashby posting. Measured on 2026-08-12
+ * across 30 live postings: 24 of them carry exactly that badge and nothing else, and the only thing
+ * holding the managed predicate at "no challenge" on all 24 was ANCHOR_DECLARES_INVISIBLE_RE reading
+ * the literal `&size=invisible` out of Google's own query string.
+ *
+ * That is a formatting detail of a third party's URL, not a contract with anyone. Rename the
+ * parameter, drop it, or move the widget to a host that omits it, and 24 postings become "CAPTCHA
+ * requires your attention" in one step, with the applicant asked to finish by hand what nothing on
+ * the page was ever going to ask her. WHERE THE NODE SITS is the durable fact: an iframe inside the
+ * badge is the badge, whatever its src happens to spell today. The regex stays as the second line
+ * for an invisible anchor mounted outside a badge, where position cannot answer.
+ */
+const MANAGED_CAPTCHA_ANCHOR_SELECTOR = 'iframe[src*="/recaptcha/"][src*="anchor"]:not(.grecaptcha-badge *)';
 const MANAGED_CAPTCHA_BFRAME_SELECTOR = 'iframe[src*="/recaptcha/"][src*="bframe"]';
 
 // The read that makes the invisible finding belong to a WIDGET instead of to the page.
@@ -7496,6 +7514,7 @@ export function buildManagedCaptchaProbeActions(): ManagedBrowserAction[] {
       attribute: 'data-sitekey',
       label: 'captcha_challenge',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
     ...managedCaptchaEvidenceActions(),
@@ -7508,6 +7527,45 @@ export function buildManagedCaptchaProbeActions(): ManagedBrowserAction[] {
 // verdict off the REMOTE RUNNER's blocker list, which is a third-party judgement this repo cannot
 // see the reasoning behind. Carrying the same three attributes back on the fill result is what lets
 // corroboration happen at all. Five optional extracts, no screenshot, no token.
+//
+// EVERY ONE OF THEM CARRIES requireVisible, and that is the fix for the defect this block spent
+// three revisions circling. These reads exist to answer "is a person being shown something", and
+// until now the only thing they could see was attributes. So the rules underneath had to infer
+// layout from markup, and the inference they settled on - an absent `data-size` means rendered,
+// because reCAPTCHA's default is `normal` - is not a rule every provider obeys. Lever mounts
+// hCaptcha programmatically in invisible mode and writes no `data-size` at all: measured on
+// 2026-08-12, three live Palantir postings returned a site key from a container that is 1380x0 and
+// holds two visibility:hidden iframes, and all three were permanently blocked as "CAPTCHA requires
+// your attention". The runner's own predicate said no challenge. The direct-Playwright predicate
+// said no challenge. This path was the outlier, and it was the outlier because it was the one layer
+// with no layout read.
+//
+// requireVisible gives it one, answered by the SAME visibility rule the runner applies to its own
+// blocker predicate, so the three layers now agree by construction instead of by coincidence. It
+// also changes the cardinality: the runner returns one entry per visible node in DOM order rather
+// than locator.first(), which is what the multiset subtraction in unexplainedChallengeSitekeys has
+// always needed and never had.
+//
+// APPLIED TO ALL SIX rather than to the rendered channel alone, because the rules here compare one
+// list of site keys against another. If `captcha_challenge` enumerated visible widgets while
+// `captcha_invisible_sitekey` enumerated every widget, a HIDDEN invisible-declared widget could
+// cancel a visible one standing beside it on the same domain site key, which is the shared-key page
+// the subtraction was written for. The two lists have to be drawn from one node universe.
+//
+// ZERO ADDITIONAL ACTIONS. These are the same six extracts, and the fill run's budget against
+// MANAGED_ACTION_LIMIT is unchanged, which is why the fix is a field on the reads that already exist
+// rather than a second set of reads beside them.
+//
+// WHAT IT GIVES UP, stated rather than discovered later. These selectors match widget CONTAINERS and
+// reCAPTCHA frames, and the visibility question is now asked of the matched node itself. A widget
+// whose container is collapsed to no box while a positioned child frame is on screen would have been
+// reported before, on the strength of the attribute alone, and is not reported now. That shape was
+// not seen on any of the 30 postings measured and there is no reason to think reCAPTCHA or hCaptcha
+// mount that way, but it is a real narrowing rather than none. It is accepted for the reason the
+// direction of every rule in this file is chosen: the shape that WAS measured, three times, is a
+// finished application handed back to a person over a widget that shows nobody anything, and
+// covering an unmeasured shape by keeping a rule known to be wrong on a measured one is the trade
+// that produced this defect.
 export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
   return [
     {
@@ -7516,6 +7574,7 @@ export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
       attribute: 'data-size',
       label: 'captcha_size',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
     {
@@ -7524,6 +7583,7 @@ export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
       attribute: 'data-sitekey',
       label: 'captcha_invisible_sitekey',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
     {
@@ -7532,6 +7592,7 @@ export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
       attribute: 'data-sitekey',
       label: 'captcha_rendered_sitekey',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
     {
@@ -7540,6 +7601,7 @@ export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
       attribute: 'src',
       label: 'captcha_anchor',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
     {
@@ -7548,6 +7610,7 @@ export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
       attribute: 'src',
       label: 'captcha_bframe',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
   ];
@@ -7571,6 +7634,17 @@ export function managedExtractedValue(value: unknown): string | null {
 }
 
 export type ManagedCaptchaEvidence = {
+  /**
+   * Whether the runner filtered these reads through a real layout read, one entry per VISIBLE node.
+   *
+   * When true, every list below enumerates nodes a person could actually see, so an entry IS a
+   * rendered thing and the multiset subtraction over site keys is a comparison of nodes rather than
+   * a hope about the runner's echo semantics. When false the lists are the older attribute-only
+   * reading: a widget container with no box still reports its site key, which is the reading that
+   * blocked three live Lever postings on 2026-08-12. False is the pre-rollout state of a runner, not
+   * a statement about the page.
+   */
+  visibilityConfirmed: boolean;
   /** A data-sitekey outside the badge: a widget container is on the page. First one seen. */
   sitekey: string | null;
   /** EVERY sitekey seen outside the badge. One entry per widget container on the page. */
@@ -7585,11 +7659,11 @@ export type ManagedCaptchaEvidence = {
   renderedSitekeys: string[];
   /** The widget's declared size, when it declares one. `invisible` asks a human for nothing. */
   size: string | null;
-  /** The reCAPTCHA anchor iframe's src: the checkbox-or-badge frame. */
+  /** The reCAPTCHA anchor iframe's src: the checkbox-or-badge frame, never the badge's own. */
   anchorSrc: string | null;
-  /** Every reCAPTCHA anchor iframe src on the page. */
+  /** Every reCAPTCHA anchor iframe src on the page that is not inside the badge. */
   anchorSrcs: string[];
-  /** The reCAPTCHA bframe's src: the image-grid popup. Its presence IS a human being asked. */
+  /** The reCAPTCHA bframe's src: the image-grid popup, on screen rather than merely mounted. */
   bframeSrc: string | null;
 };
 
@@ -7611,11 +7685,27 @@ function managedExtractedAll(
   return values;
 }
 
+/**
+ * Did the runner that produced this result answer the evidence reads with a real layout read?
+ *
+ * NOT a decision this repo can infer from the payload. An older runner drops the `requireVisible`
+ * field it does not know and answers under the same labels with the same entry shape, so a site key
+ * reported by a 1380x0 container and a site key reported by a 304x78 checkbox are indistinguishable
+ * unless the runner says which question it answered. Absence therefore means "this evidence is the
+ * old attribute-only reading", never "there was nothing to see".
+ */
+export function managedResultSupportsCaptchaVisibility(
+  result: ManagedBrowserResult | null | undefined,
+): boolean {
+  return result?.capabilities?.includes(MANAGED_CAPTCHA_VISIBILITY_CAPABILITY) === true;
+}
+
 export function readManagedCaptchaEvidence(result: ManagedBrowserResult | null): ManagedCaptchaEvidence {
   const sitekeys = managedExtractedAll(result, 'captcha_challenge', MANAGED_CAPTCHA_CHALLENGE_SELECTOR);
   const anchorSrcs = managedExtractedAll(result, 'captcha_anchor', MANAGED_CAPTCHA_ANCHOR_SELECTOR);
   const sizes = managedExtractedAll(result, 'captcha_size', MANAGED_CAPTCHA_SIZE_SELECTOR);
   return {
+    visibilityConfirmed: managedResultSupportsCaptchaVisibility(result),
     sitekey: sitekeys[0] ?? null,
     sitekeys,
     invisibleSitekeys: managedExtractedAll(
@@ -7701,6 +7791,17 @@ export function isManagedCaptchaEvidenceExtract(
  * Absent `size` reads as rendered because that is what reCAPTCHA does with it: the default is
  * `normal`. Reading an absent size as invisible would hand the benefit of the doubt to the one
  * direction that ends in a submit under an unsolved challenge.
+ *
+ * THAT DEFAULT IS RECAPTCHA'S, AND IT IS NOT UNIVERSAL, which is the whole reason this rule is no
+ * longer alone. hCaptcha as Lever mounts it renders in invisible mode and writes no `data-size` at
+ * all, so "absent means rendered" is exactly wrong there and blocked three live postings. The
+ * evidence reads now carry `requireVisible`, so a widget with no box never reaches any rule here.
+ * This one keeps its job for the widget that IS on screen and merely declares a size.
+ *
+ * NO LONGER THE ONLY THING BETWEEN THE BADGE AND A FALSE BLOCK either: the anchor selector excludes
+ * badge descendants structurally, so this regex is a second line rather than the whole wall. It was
+ * the whole wall on 24 of the 30 postings measured on 2026-08-12, and a wall made of one substring
+ * of somebody else's query string is not a wall.
  */
 const ANCHOR_DECLARES_INVISIBLE_RE = /[?&]size=invisible\b/i;
 
@@ -7786,6 +7887,12 @@ export function unexplainedChallengeSitekeys(evidence: ManagedCaptchaEvidence): 
  * signal here that survives both a shared site key and an unknown extract cardinality. A page with
  * no readable sitekey and one `size=normal` anchor used to pass this and now does not.
  */
+// LAST LINE, AFTER THE BADGE EXCLUSION. `anchorSrcs` no longer contains the badge's own anchor, so
+// the badge-only page - the live Akuna shape, and 24 of the 30 postings measured on 2026-08-12 -
+// reaches this line with an empty list and is no longer NAMED an invisible reCAPTCHA. Every caller
+// lands in the same place it did before: managedCaptchaPageEvidence is empty on that page, so
+// corroboration is false either way, and managedCaptchaProvider only consults this behind a
+// non-empty anchorSrc. What changed is which sentence says so, not the answer.
 export function isInvisibleRecaptchaEvidence(evidence: ManagedCaptchaEvidence): boolean {
   if (evidence.bframeSrc) return false;
   if (renderedCaptchaEvidence(evidence).length > 0) return false;
@@ -7801,6 +7908,13 @@ export function isInvisibleRecaptchaEvidence(evidence: ManagedCaptchaEvidence): 
 // page where `[data-sitekey]` matched zero nodes, which is what stopped every managed submission.
 export function managedResultRequiresCaptchaAttention(result: ManagedBrowserResult | null): boolean {
   const evidence = readManagedCaptchaEvidence(result);
+  // The bframe read is visibility-filtered at the runner now, which changes what this line means
+  // and makes it agree with the two predicates that already read it that way. reCAPTCHA MOUNTS the
+  // popup iframe and leaves it mounted after it closes, so presence alone is true on pages nobody is
+  // being asked anything on - the runner's own predicate calls this out as regression D, and the
+  // direct-Playwright predicate only ever uses a bframe to switch the invisible exclusion off. A
+  // popup that is on screen is still the strongest signal there is; a popup that is merely in the
+  // document is not a signal at all.
   if (evidence.bframeSrc) return true;
   // A widget container or an anchor iframe that does not declare size=invisible is a rendered
   // challenge, and saying so needs no sitekey comparison and no assumption about how many entries

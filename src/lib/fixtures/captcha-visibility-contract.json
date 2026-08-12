@@ -1,0 +1,238 @@
+{
+  "_contract": {
+    "name": "managed captcha evidence, layout-filtered",
+    "purpose": [
+      "ONE FILE, TWO REPOS, BYTE IDENTICAL. student-outreach-backend emits the action list and consumes",
+      "the result; stratus-browser-cloud executes the actions and produces the result. Neither repo can",
+      "import the other, so the contract between them used to be a hand-written literal in each, which",
+      "is exactly how pass.scope.scopeKind diverged and blocked every submission in this product for a",
+      "day.",
+      "This file is the shared artifact instead. `actions` is what the backend really builds; `emitted`",
+      "is what the runner really returned for `html`; `expected` is what the backend's predicates really",
+      "conclude. The stratus test serves `html`, runs `actions` through the shipped runner and asserts",
+      "the emission matches. The backend test asserts its builder still produces `actions` and its",
+      "predicates still produce `expected` from `emitted`. Either side drifting fails its own suite in",
+      "its own repo, with the same file naming the disagreement.",
+      "Regenerate by running the stratus test with CAPTCHA_CONTRACT_WRITE=1, then copy the file into the",
+      "backend unchanged."
+    ],
+    "measured": "2026-08-12, read-only sweep of 30 live postings in real Chromium",
+    "backendBase": "aed9b5d026159e42a58eb5a4cca58d76e379af44",
+    "stratusBase": "47488714a682ab3938d38d713059a55639f76903",
+    "fixtureHosts": [
+      "Iframe srcs keep the production path and query and drop the scheme and host, so the fixture is",
+      "offline and deterministic. Every predicate on both sides reads the path and query only; the host",
+      "appears in none of them."
+    ]
+  },
+  "actions": [
+    {
+      "type": "extract",
+      "selector": "[data-sitekey]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+      "attribute": "data-sitekey",
+      "label": "captcha_challenge",
+      "optional": true,
+      "requireVisible": true,
+      "timeout": 10000
+    },
+    {
+      "type": "extract",
+      "selector": "[data-sitekey][data-size]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+      "attribute": "data-size",
+      "label": "captcha_size",
+      "optional": true,
+      "requireVisible": true,
+      "timeout": 10000
+    },
+    {
+      "type": "extract",
+      "selector": "[data-sitekey][data-size=\"invisible\" i]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+      "attribute": "data-sitekey",
+      "label": "captcha_invisible_sitekey",
+      "optional": true,
+      "requireVisible": true,
+      "timeout": 10000
+    },
+    {
+      "type": "extract",
+      "selector": "[data-sitekey]:not([data-size=\"invisible\" i]):not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+      "attribute": "data-sitekey",
+      "label": "captcha_rendered_sitekey",
+      "optional": true,
+      "requireVisible": true,
+      "timeout": 10000
+    },
+    {
+      "type": "extract",
+      "selector": "iframe[src*=\"/recaptcha/\"][src*=\"anchor\"]:not(.grecaptcha-badge *)",
+      "attribute": "src",
+      "label": "captcha_anchor",
+      "optional": true,
+      "requireVisible": true,
+      "timeout": 10000
+    },
+    {
+      "type": "extract",
+      "selector": "iframe[src*=\"/recaptcha/\"][src*=\"bframe\"]",
+      "attribute": "src",
+      "label": "captcha_bframe",
+      "optional": true,
+      "requireVisible": true,
+      "timeout": 10000
+    }
+  ],
+  "cases": [
+    {
+      "name": "lever_invisible_hcaptcha",
+      "source": "jobs.lever.co/palantir/* (3 postings), read 2026-08-12",
+      "note": "Lever renders hCaptcha programmatically in invisible mode and never writes data-size, so the attribute-only reading saw a bare [data-sitekey] and called it rendered. Measured on the live page: container 1380x0, clientHeight 0, two visibility:hidden iframes, h-captcha-response empty and display:none. Nothing is shown to anyone. The runner predicate and the direct Playwright predicate both said false; the managed predicate said true and blocked all three.",
+      "html": "\n  <form>\n    <label>Email<input type=\"text\" name=\"email\" /></label>\n    <label>Resume<input type=\"file\" name=\"resume\" /></label>\n    <button type=\"submit\">Submit application</button>\n  </form>\n  <div id=\"h-captcha\" class=\"h-captcha\" data-sitekey=\"e33f87f8-88ec-4e1a-9a13-df9bbb1d8120\"\n    style=\"width:1380px;height:0\">\n    <iframe src=\"/captcha/v1/9d2/static/hcaptcha.html#frame=checkbox\" style=\"visibility:hidden\" width=\"1\" height=\"1\"></iframe>\n    <iframe src=\"/captcha/v1/9d2/static/hcaptcha.html#frame=challenge\" style=\"visibility:hidden\" width=\"1\" height=\"1\"></iframe>\n  </div>\n  <input type=\"hidden\" id=\"hcaptchaResponseInput\" name=\"h-captcha-response\" value=\"\" style=\"display:none\">\n  <button type=\"button\" id=\"hcaptchaSubmitBtn\" class=\"hidden\" style=\"display:none\">submit</button>",
+      "emitted": {
+        "extracted": [],
+        "capabilities": [
+          "extract-require-visible-v1"
+        ],
+        "captchaSkipped": [
+          "captcha_challenge: nothing visible matched [data-sitekey]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_size: nothing matched [data-sitekey][data-size]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_invisible_sitekey: nothing matched [data-sitekey][data-size=\"invisible\" i]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_rendered_sitekey: nothing visible matched [data-sitekey]:not([data-size=\"invisible\" i]):not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_anchor: nothing matched iframe[src*=\"/recaptcha/\"][src*=\"anchor\"]:not(.grecaptcha-badge *)",
+          "captcha_bframe: nothing matched iframe[src*=\"/recaptcha/\"][src*=\"bframe\"]"
+        ],
+        "runnerBlockedOnCaptcha": false
+      },
+      "expected": {
+        "requiresAttention": false,
+        "corroborated": false,
+        "runnerBlocked": false
+      }
+    },
+    {
+      "name": "jazzhr_visible_recaptcha",
+      "source": "foundationai.applytojob.com/apply/jobs/details/QhIlJU3sYr, read 2026-08-12",
+      "note": "THE REAL ONE. A visible reCAPTCHA v2 checkbox outside any badge, an anchor iframe declaring size=normal and visible, an empty g-recaptcha-response, and a bframe that is MOUNTED BUT HIDDEN. All four predicates blocked this page before the change and all must block it after. The hidden bframe is why this fixture can be lost: with the bframe no longer answering on presence alone, the verdict has to come from the visible widget and the visible anchor.",
+      "html": "\n  <form>\n    <label>Email<input type=\"text\" name=\"email\" /></label>\n    <label>Resume<input type=\"file\" name=\"resume\" /></label>\n    <button type=\"submit\">Submit application</button>\n  </form>\n  <div class=\"resumator-field-wrapper resumator-resume-text\" id=\"resumator-recaptcha\">\n    <div class=\"resumator-label resumator-resume-text\" id=\"resumator-recaptcha-label\">Human check</div>\n    <div class=\"resumator-input\" id=\"resumator-recaptcha-field\">\n      <div class=\"g-recaptcha\" data-sitekey=\"6LeCbWYsAAAAALW1NxDRq4uvy3jv81sqB16i0gDm\" style=\"width:304px;height:78px\">\n        <iframe title=\"reCAPTCHA\" width=\"304\" height=\"78\"\n          src=\"/recaptcha/api2/anchor?ar=1&amp;k=6LeCbWYsAAAAALW1NxDRq4uvy3jv81sqB16i0gDm&amp;co=aHR0cHM6Ly9mb3VuZGF0aW9uYWkuYXBwbHl0b2pvYi5jb206NDQz&amp;hl=en&amp;v=w_Yb7dGGXaKesJ7BMiqFJqBG&amp;size=normal&amp;anchor-ms=20000&amp;execute-ms=30000&amp;cb=tt3wzoneei2i\"></iframe>\n      </div>\n    </div>\n  </div>\n  <textarea id=\"g-recaptcha-response\" name=\"g-recaptcha-response\" class=\"g-recaptcha-response\" style=\"display:none\"></textarea>\n  <div class=\"g-recaptcha-bubble-arrow\" style=\"display:none\"></div>\n  <div class=\"g-recaptcha-bubble-arrow\" style=\"display:none\"></div>\n  <iframe title=\"recaptcha challenge\" width=\"400\" height=\"580\" style=\"display:none\"\n    src=\"/recaptcha/api2/bframe?hl=en&amp;v=w_Yb7dGGXaKesJ7BMiqFJqBG&amp;k=6LeCbWYsAAAAALW1NxDRq4uvy3jv81sqB16i0gDm&amp;bft=0dAFcWeA5TP2Jl5DT1\"></iframe>",
+      "emitted": {
+        "extracted": [
+          {
+            "selector": "[data-sitekey]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+            "label": "captcha_challenge",
+            "value": "6LeCbWYsAAAAALW1NxDRq4uvy3jv81sqB16i0gDm"
+          },
+          {
+            "selector": "[data-sitekey]:not([data-size=\"invisible\" i]):not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+            "label": "captcha_rendered_sitekey",
+            "value": "6LeCbWYsAAAAALW1NxDRq4uvy3jv81sqB16i0gDm"
+          },
+          {
+            "selector": "iframe[src*=\"/recaptcha/\"][src*=\"anchor\"]:not(.grecaptcha-badge *)",
+            "label": "captcha_anchor",
+            "value": "/recaptcha/api2/anchor?ar=1&k=6LeCbWYsAAAAALW1NxDRq4uvy3jv81sqB16i0gDm&co=aHR0cHM6Ly9mb3VuZGF0aW9uYWkuYXBwbHl0b2pvYi5jb206NDQz&hl=en&v=w_Yb7dGGXaKesJ7BMiqFJqBG&size=normal&anchor-ms=20000&execute-ms=30000&cb=tt3wzoneei2i"
+          }
+        ],
+        "capabilities": [
+          "extract-require-visible-v1"
+        ],
+        "captchaSkipped": [
+          "captcha_size: nothing matched [data-sitekey][data-size]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_invisible_sitekey: nothing matched [data-sitekey][data-size=\"invisible\" i]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_bframe: nothing visible matched iframe[src*=\"/recaptcha/\"][src*=\"bframe\"]"
+        ],
+        "runnerBlockedOnCaptcha": true
+      },
+      "expected": {
+        "requiresAttention": true,
+        "corroborated": true,
+        "runnerBlocked": true
+      }
+    },
+    {
+      "name": "greenhouse_badge_only",
+      "source": "job-boards.greenhouse.io/embed/job_app?for=akunacapital (and 23 more), read 2026-08-12",
+      "note": "The shape 24 of the 30 postings carry: a visible reCAPTCHA badge, its anchor iframe inside it, no widget container anywhere, no bframe. A person filling this form by hand never sees a challenge. Before the badge exclusion, the ONLY thing keeping the managed predicate at false was a regex finding size=invisible in the anchor query string.",
+      "html": "\n  <form>\n    <label>Email<input type=\"text\" name=\"email\" /></label>\n    <label>Resume<input type=\"file\" name=\"resume\" /></label>\n    <button type=\"submit\">Submit application</button>\n  </form>\n  <div class=\"grecaptcha-badge\" style=\"width:256px;height:60px;position:fixed;bottom:14px;right:14px\">\n    <div class=\"grecaptcha-logo\">\n      <iframe title=\"reCAPTCHA\" width=\"256\" height=\"60\"\n        src=\"/recaptcha/enterprise/anchor?ar=1&amp;k=6LfmcbcpAAAAAChNTbhUShzUOAMj_wY9LQIvLFX0&amp;co=aHR0cHM6Ly9qb2ItYm9hcmRzLmdyZWVuaG91c2UuaW86NDQz&amp;hl=en&amp;v=w_Yb7dGGXaKesJ7BMiqFJqBG&amp;size=invisible&amp;anchor-ms=20000&amp;execute-ms=30000&amp;cb=alszz4hx51g4\"></iframe>\n    </div>\n    <div class=\"grecaptcha-error\"></div>\n    <textarea id=\"g-recaptcha-response-100000\" name=\"g-recaptcha-response\" class=\"g-recaptcha-response\" style=\"display:none\"></textarea>\n  </div>",
+      "emitted": {
+        "extracted": [],
+        "capabilities": [
+          "extract-require-visible-v1"
+        ],
+        "captchaSkipped": [
+          "captcha_challenge: nothing matched [data-sitekey]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_size: nothing matched [data-sitekey][data-size]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_invisible_sitekey: nothing matched [data-sitekey][data-size=\"invisible\" i]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_rendered_sitekey: nothing matched [data-sitekey]:not([data-size=\"invisible\" i]):not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_anchor: nothing matched iframe[src*=\"/recaptcha/\"][src*=\"anchor\"]:not(.grecaptcha-badge *)",
+          "captcha_bframe: nothing matched iframe[src*=\"/recaptcha/\"][src*=\"bframe\"]"
+        ],
+        "runnerBlockedOnCaptcha": false
+      },
+      "expected": {
+        "requiresAttention": false,
+        "corroborated": false,
+        "runnerBlocked": false
+      }
+    },
+    {
+      "name": "greenhouse_badge_only_without_size_parameter",
+      "source": "the Akuna page above, with Google\u2019s size=invisible parameter removed",
+      "note": "THE LATENT FRAGILITY, MADE TO FIRE. size=invisible is a convention of somebody else\u2019s query string, not a contract. Remove it and the rendered-anchor regex has nothing left to say no with, and all 24 postings become \"CAPTCHA requires your attention\" in one step. The badge exclusion is what has to hold here, on the strength of where the iframe sits.",
+      "html": "\n  <form>\n    <label>Email<input type=\"text\" name=\"email\" /></label>\n    <label>Resume<input type=\"file\" name=\"resume\" /></label>\n    <button type=\"submit\">Submit application</button>\n  </form>\n  <div class=\"grecaptcha-badge\" style=\"width:256px;height:60px;position:fixed;bottom:14px;right:14px\">\n    <div class=\"grecaptcha-logo\">\n      <iframe title=\"reCAPTCHA\" width=\"256\" height=\"60\"\n        src=\"/recaptcha/enterprise/anchor?ar=1&amp;k=6LfmcbcpAAAAAChNTbhUShzUOAMj_wY9LQIvLFX0&amp;co=aHR0cHM6Ly9qb2ItYm9hcmRzLmdyZWVuaG91c2UuaW86NDQz&amp;hl=en&amp;v=w_Yb7dGGXaKesJ7BMiqFJqBG&amp;anchor-ms=20000&amp;execute-ms=30000&amp;cb=alszz4hx51g4\"></iframe>\n    </div>\n    <div class=\"grecaptcha-error\"></div>\n    <textarea id=\"g-recaptcha-response-100000\" name=\"g-recaptcha-response\" class=\"g-recaptcha-response\" style=\"display:none\"></textarea>\n  </div>",
+      "emitted": {
+        "extracted": [],
+        "capabilities": [
+          "extract-require-visible-v1"
+        ],
+        "captchaSkipped": [
+          "captcha_challenge: nothing matched [data-sitekey]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_size: nothing matched [data-sitekey][data-size]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_invisible_sitekey: nothing matched [data-sitekey][data-size=\"invisible\" i]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_rendered_sitekey: nothing matched [data-sitekey]:not([data-size=\"invisible\" i]):not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_anchor: nothing matched iframe[src*=\"/recaptcha/\"][src*=\"anchor\"]:not(.grecaptcha-badge *)",
+          "captcha_bframe: nothing matched iframe[src*=\"/recaptcha/\"][src*=\"bframe\"]"
+        ],
+        "runnerBlockedOnCaptcha": false
+      },
+      "expected": {
+        "requiresAttention": false,
+        "corroborated": false,
+        "runnerBlocked": false
+      }
+    },
+    {
+      "name": "visible_hcaptcha_without_data_size",
+      "source": "constructed: the Lever markup above with the container laid out",
+      "note": "THE ADVERSARY THAT CAN WIN, and the reason the fix is a layout read rather than one more provider name in a selector. Identical attributes to the Lever case - class h-captcha, data-sitekey, no data-size, because hCaptcha never writes one - and the opposite correct answer, decided by 78 pixels of height. Appending :not(.h-captcha:not([data-size])) to the rendered-sitekey selector would return false here, which is a submit click under a live challenge. Any rule that reads only the attributes gets one of these two pages wrong.",
+      "html": "\n  <form>\n    <label>Email<input type=\"text\" name=\"email\" /></label>\n    <label>Resume<input type=\"file\" name=\"resume\" /></label>\n    <button type=\"submit\">Submit application</button>\n  </form>\n  <div id=\"h-captcha\" class=\"h-captcha\" data-sitekey=\"e33f87f8-88ec-4e1a-9a13-df9bbb1d8120\"\n    style=\"width:303px;height:78px\">\n    <iframe src=\"/captcha/v1/9d2/static/hcaptcha.html#frame=checkbox\" width=\"303\" height=\"78\"></iframe>\n  </div>\n  <input type=\"hidden\" id=\"hcaptchaResponseInput\" name=\"h-captcha-response\" value=\"\" style=\"display:none\">",
+      "emitted": {
+        "extracted": [
+          {
+            "selector": "[data-sitekey]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+            "label": "captcha_challenge",
+            "value": "e33f87f8-88ec-4e1a-9a13-df9bbb1d8120"
+          },
+          {
+            "selector": "[data-sitekey]:not([data-size=\"invisible\" i]):not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+            "label": "captcha_rendered_sitekey",
+            "value": "e33f87f8-88ec-4e1a-9a13-df9bbb1d8120"
+          }
+        ],
+        "capabilities": [
+          "extract-require-visible-v1"
+        ],
+        "captchaSkipped": [
+          "captcha_size: nothing matched [data-sitekey][data-size]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_invisible_sitekey: nothing matched [data-sitekey][data-size=\"invisible\" i]:not(.grecaptcha-badge):not(.grecaptcha-badge *)",
+          "captcha_anchor: nothing matched iframe[src*=\"/recaptcha/\"][src*=\"anchor\"]:not(.grecaptcha-badge *)",
+          "captcha_bframe: nothing matched iframe[src*=\"/recaptcha/\"][src*=\"bframe\"]"
+        ],
+        "runnerBlockedOnCaptcha": true
+      },
+      "expected": {
+        "requiresAttention": true,
+        "corroborated": true,
+        "runnerBlocked": true
+      }
+    }
+  ]
+}

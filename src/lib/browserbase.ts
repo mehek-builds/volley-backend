@@ -8,6 +8,19 @@ export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 export const MANAGED_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY;
 /** Stratus result capability that proves discovered controls include their live DOM role. */
 export const MANAGED_DISCOVERY_ROLE_CAPABILITY = 'discovery-control-role-v1';
+/**
+ * Stratus result capability that proves an `extract` carrying `requireVisible` was answered by a
+ * real layout read, one entry per VISIBLE match, rather than by the ordinary first-match attribute
+ * read.
+ *
+ * IT EXISTS BECAUSE THE TWO RESULTS ARE THE SAME SHAPE. A runner older than the field drops it
+ * during normalization and answers under the same label with the same `{selector,label,value}`
+ * entry, so nothing in the payload distinguishes "filtered by layout" from "this runner never heard
+ * of the question". The two answers differ on live employer pages - a 1380x0 hCaptcha container
+ * reports its site key under one and nothing under the other - and the two services deploy on their
+ * own schedules, so the difference has to be readable rather than assumed.
+ */
+export const MANAGED_CAPTCHA_VISIBILITY_CAPABILITY = 'extract-require-visible-v1';
 
 export type ManagedBrowserAction = {
   type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover' | 'confirmAndSubmit';
@@ -18,6 +31,18 @@ export type ManagedBrowserAction = {
   optional?: boolean;
   timeout?: number;
   attribute?: string;
+  /**
+   * Extract only. Asks the runner for the attribute of every match that a person could actually see,
+   * one entry per visible node in DOM order, instead of the first match's attribute whether or not
+   * it has a box.
+   *
+   * A FIELD RATHER THAN A NEW ACTION TYPE, deliberately: the runner rejects an unknown action type
+   * outright with a 400 that fails the entire run, and this repo cannot know which revision is
+   * answering before it calls. An unknown field is dropped and the run proceeds on the older
+   * reading, so the two services can deploy in either order without an outage. Whether the field was
+   * honoured is read back from MANAGED_CAPTCHA_VISIBILITY_CAPABILITY, never assumed.
+   */
+  requireVisible?: boolean;
   file?: { name: string; mimeType: string; base64: string };
   /**
    * Only used by confirmAndSubmit. In contract v2 this one action owns both confirmation and the
