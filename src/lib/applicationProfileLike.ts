@@ -19,6 +19,7 @@ import {
   consentAcceptanceGranted,
 } from './automationConsent';
 import { countryEligibilityForRead } from './workEligibility';
+import { acknowledgementPermissionsFor } from './grantedAnswerReplay';
 
 export function eligibilityFromLoadedApplicationProfile(
   app: Record<string, unknown>,
@@ -306,19 +307,24 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
 
     /* The standing permission, VERSION-CHECKED HERE so no resolver has to know the rule. Set only
      * when consentAcceptanceGranted is satisfied; left undefined for never-granted, revoked, a
-     * stale consent version, and a database whose migration has not run. All four hold. */
-    consent_acknowledgement_permission: consentAcceptanceGranted(userRow)
-      ? {
-        granted_at: userRow?.automatic_consent_acceptance_consented_at?.toISOString(),
-        version: AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
-      }
-      : undefined,
-    conduct_acknowledgement_permission: conductAcceptanceGranted(userRow)
-      ? {
-        granted_at: userRow?.automatic_conduct_acceptance_consented_at?.toISOString(),
-        version: AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
-      }
-      : undefined,
+     * stale consent version, and a database whose migration has not run. All four hold.
+     *
+     * AND A FIFTH STATE, which is why the gate stands in front of both: granted, current, and
+     * held anyway, because the runner cannot yet be trusted to put the acceptance on the control it
+     * was asked about rather than on a neighbouring one. See lib/grantedAnswerReplay.ts, which
+     * carries the measurement. Suppressed HERE, at the single point where a granted column becomes
+     * a licence, so that the resolver, the Apply screen's pre-script, the packet audit and the
+     * consent trail cannot disagree about it: with the licence absent they all behave exactly as
+     * they did before PR 502, which is the behaviour that was safe.
+     *
+     * The applicant's decision, its date and its version are untouched in the database and are
+     * still reported by /onboarding/state. Only the acting on it is held. */
+    ...acknowledgementPermissionsFor(userRow, {
+      consent: consentAcceptanceGranted,
+      conduct: conductAcceptanceGranted,
+      consentVersion: AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
+      conductVersion: AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
+    }),
     onsite_commitment: onsiteCommitment(factString(appRow, 'onsite_commitment')),
     onsite_locations: factStringList(appRow, 'onsite_locations'),
     relocation_willingness: yesNo(factString(appRow, 'relocation_willingness')),
