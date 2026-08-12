@@ -958,6 +958,65 @@ describe('the send path is wired to the reading, not to the scrape', () => {
       /Litos could not find the button that sends this application, so nothing has been sent/);
   });
 
+  /* THE 2026-08-11 PRODUCTION RUN, END TO END THROUGH THE REAL PAIR OF FUNCTIONS.
+   *
+   * The kos.ai send returned a complete result whose runner had pressed Submit, and the reporting
+   * barrier rejected the proof's shape (the runner's submit-scope repair had added `scopeKind`,
+   * unknown to the key-set check). Because that rejection was thrown as a NoSubmitControlError
+   * subclass, the row released its claim, erased the attempt residue, and read "Litos could not
+   * find the button that sends this application, so nothing has been sent" - a false no-send for
+   * an application the employer may be holding. The error below is the REAL one out of the real
+   * assertion, not a reconstruction, because a reconstruction is how this fixture family has
+   * repeatedly proved the wrong thing. */
+  test('a proof the barrier cannot read keeps the claim, states uncertainty, and opens the unverified exit', async () => {
+    const { submissionFailureReview } = await import('../routes/submissionRunner');
+    const { assertManagedRequiredFieldsConfirmed } = await import('./portalSubmission');
+    let thrown: unknown;
+    try {
+      assertManagedRequiredFieldsConfirmed({
+        requiredFieldConfirmation: {
+          version: 2,
+          status: 'confirmed',
+          passes: [{
+            submitKind: 'application',
+            scope: {
+              scopeKind: 'container',
+              anUnknownFutureKey: true,
+              formFingerprint: 'form_fingerprint_fixture_1234',
+              submitFingerprint: 'submit_fingerprint_fixture_1234',
+              formMatchCount: 1,
+              submitMatchCount: 1,
+              requiredControlCount: 0,
+              sameNode: true,
+            },
+            requiredControls: [],
+            attempts: [],
+            retries: 0,
+            unresolved: [],
+            submissionOutcome: 'clicked',
+          }],
+        },
+      }, 'application');
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown instanceof Error, 'the malformed proof must still be refused');
+    const persisted = submissionFailureReview(claimedRunningRow(), thrown);
+    assert.equal(persisted.status, 'needs_attention');
+    assert.equal(persisted.submission_stop?.reason, 'confirmation_unproven');
+    assert.equal(persisted.submission_stop?.before_click, false,
+      'a rejection thrown after the remote run finished cannot prove where the run stopped');
+    assert.notEqual(persisted.submission_claimed_at, undefined,
+      'the claim is the duplicate guard, and an unknown click state must keep it');
+    assert.doesNotMatch(persisted.attention_reason!, /nothing has been sent/,
+      'the exact false sentence the kos.ai row carried');
+    assert.match(persisted.attention_reason!, /does not know whether this application went through/);
+    assert.match(persisted.attention_reason!, /Do not submit it by hand in the meantime/,
+      'the duplicate warning is the half that protects the employer side');
+    assert.equal(typeof persisted.submission_attempted_at, 'string');
+    assert.equal(persisted.unverified_submission?.cause, 'no_confirmation_state');
+  });
+
   test('the resolution route exists and is the thing the refusal points at', async () => {
     const route = await readFile('src/routes/applications.ts', 'utf8');
     assert.match(route, /'\/applications\/:id\/submission\/unverified'/);

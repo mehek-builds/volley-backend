@@ -139,6 +139,10 @@ export type ManagedBrowserResult = {
     passes: Array<{
       submitKind: 'application' | 'verification';
       scope: {
+        /* Which resolved scope the runner bound the submit to. 'form' is a real <form> ancestor;
+         * 'container' is the nearest field-bearing ancestor on a formless page (Ashby's div#form).
+         * Emitted by every runner since the submit-scope repair; absent only from older runners. */
+        scopeKind?: 'form' | 'container';
         formFingerprint: string;
         submitFingerprint: string;
         formMatchCount: 1;

@@ -11,7 +11,9 @@ import {
   MANAGED_FINAL_SUBMIT_SELECTOR,
   managedApplicationProofIsRequired,
   ManagedActionBudgetError,
+  ManagedConfirmationUnprovenError,
   ManagedRequiredFieldConfirmationError,
+  NoSubmitControlError,
   type SubmissionPacket,
   type SupportedPortal,
 } from './portalSubmission';
@@ -343,12 +345,138 @@ test('Lever and Workable keep every fixed core field or block before confirmatio
   }
 });
 
-test('missing protocol proof fails closed for an older managed runner', () => {
+test('missing protocol proof fails closed for an older managed runner, as uncertainty and never as a no-send', () => {
   assert.throws(
     () => assertManagedRequiredFieldsConfirmed({}),
-    (error: unknown) => error instanceof ManagedRequiredFieldConfirmationError
-      && /does not support required-field confirmation/.test(error.message),
+    (error: unknown) => error instanceof ManagedConfirmationUnprovenError
+      && /returned none/.test((error as Error).message)
+      && /whether submit was pressed is unknown/.test((error as Error).message),
   );
+  /* The winning half of the adversary: the action list this result answers carried a final submit,
+     so an older runner may have pressed it. A NoSubmitControlError here classifies pre-click,
+     releases the claim and tells the applicant nothing was sent. */
+  assert.throws(
+    () => assertManagedRequiredFieldsConfirmed({}),
+    (error: unknown) => !(error instanceof NoSubmitControlError),
+  );
+});
+
+/* THE PROOF THE DEPLOYED RUNNER ACTUALLY EMITS, captured verbatim rather than reconstructed.
+ *
+ * Provenance: SANDBOX_RUNNER extracted from stratus-browser-cloud main 4748871 on 2026-08-12 and
+ * driven in real Chromium against served fixtures of the two scope shapes - the formless Ashby
+ * page (kos.ai's shape, container scope) and a plain Greenhouse form (form scope). In both runs
+ * the runner PRESSED SUBMIT and the page recorded the submission before this object was written.
+ *
+ * On 2026-08-11 production rejected exactly these objects at 'scope proof', because `scopeKind`
+ * (added by the runner's submit-scope repair) was an unknown key to the key-set check below, and
+ * the rejection was classed as a pre-click stop: the kos.ai row read "nothing has been sent" for a
+ * run whose runner had clicked. A reconstruction of this fixture is how that defect shipped, so
+ * these two objects must stay byte-shaped as captured. */
+const RUNNER_CONTAINER_SCOPE_PROOF = {
+  requiredFieldConfirmation: {
+    version: 2 as const,
+    status: 'confirmed' as const,
+    passes: [{
+      submitKind: 'application' as const,
+      scope: {
+        scopeKind: 'container' as const,
+        formFingerprint: '8aa80dbd8033841edd98e62edd5bdbbaa4ebec6312a990fffe202726db3c3f47',
+        submitFingerprint: '11084192c4838849708ee767588c5f4cceaded9ec0a250686f0bca352cb5123b',
+        formMatchCount: 1 as const,
+        submitMatchCount: 1 as const,
+        requiredControlCount: 3,
+        sameNode: true,
+      },
+      requiredControls: [
+        { selector: '#name', label: 'Full name *', fieldType: 'text' as const, matchCount: 1 as const },
+        { selector: '#email', label: 'Email *', fieldType: 'text' as const, matchCount: 1 as const },
+        { selector: '#resume', label: 'Resume *', fieldType: 'file' as const, matchCount: 1 as const },
+      ],
+      attempts: [
+        { selector: '#name', label: 'Full name *', fieldType: 'text' as const, outcome: 'already_committed' as const, attemptCount: 1 as const },
+        { selector: '#email', label: 'Email *', fieldType: 'text' as const, outcome: 'already_committed' as const, attemptCount: 1 as const },
+        { selector: '#resume', label: 'Resume *', fieldType: 'file' as const, outcome: 'already_committed' as const, attemptCount: 1 as const },
+      ],
+      retries: 0,
+      unresolved: [],
+      submissionOutcome: 'clicked' as const,
+    }],
+  },
+};
+
+test('the deployed runner\'s container-scope proof is accepted exactly as emitted', () => {
+  assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(RUNNER_CONTAINER_SCOPE_PROOF, 'application'));
+});
+
+test('the deployed runner\'s form-scope proof shape is accepted, scope captured verbatim', () => {
+  const formScope = JSON.parse(JSON.stringify(RUNNER_CONTAINER_SCOPE_PROOF)) as typeof RUNNER_CONTAINER_SCOPE_PROOF;
+  const pass = formScope.requiredFieldConfirmation.passes[0]! as { scope: Record<string, unknown> };
+  pass.scope = {
+    ...pass.scope,
+    scopeKind: 'form',
+    formFingerprint: '4f37eea4efeef07e039d081e9d8e19b6a240840329b4406c06f304d17677d6e3',
+    submitFingerprint: '807d8541e4911e4c6aad82fd63b786d4a8fc174261e8a33044a062977360f641',
+  };
+  assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(formScope, 'application'));
+});
+
+test('scopeKind admits only the two scopes the runner can bind, and any other new scope key still fails closed', () => {
+  const withScope = (patch: Record<string, unknown>) => {
+    const copy = JSON.parse(JSON.stringify(RUNNER_CONTAINER_SCOPE_PROOF)) as { requiredFieldConfirmation: { passes: Array<{ scope: Record<string, unknown> }> } };
+    copy.requiredFieldConfirmation.passes[0]!.scope = { ...copy.requiredFieldConfirmation.passes[0]!.scope, ...patch };
+    return copy;
+  };
+  assert.throws(() => assertManagedRequiredFieldsConfirmed(withScope({ scopeKind: 'body' })), /scope kind/);
+  assert.throws(() => assertManagedRequiredFieldsConfirmed(withScope({ scopeKind: 1 })), /scope kind/);
+  assert.throws(() => assertManagedRequiredFieldsConfirmed(withScope({ futureScopeEvidence: true })), /scope proof/);
+});
+
+test('a proof this service cannot read is classified as unproven, never as a pre-click stop', () => {
+  /* The adversary that won in production: the runner clicked, the page recorded the submission,
+     and the proof shape was rejected. If this error is a NoSubmitControlError the row releases the
+     claim and reads "nothing has been sent" - for an application the employer may be holding. */
+  const rejected = (value: unknown) => {
+    try {
+      assertManagedRequiredFieldsConfirmed(value, 'application');
+      return null;
+    } catch (error) {
+      return error;
+    }
+  };
+  const unknownScopeKey = (() => {
+    const copy = JSON.parse(JSON.stringify(RUNNER_CONTAINER_SCOPE_PROOF)) as { requiredFieldConfirmation: { passes: Array<{ scope: Record<string, unknown> }> } };
+    copy.requiredFieldConfirmation.passes[0]!.scope.futureScopeEvidence = true;
+    return copy;
+  })();
+  for (const malformed of [
+    unknownScopeKey,
+    { requiredFieldConfirmation: { version: 2, status: 'confirmed', passes: [{ bogus: true }] } },
+    { requiredFieldConfirmation: { version: 3, status: 'confirmed', passes: [] } },
+    {},
+  ]) {
+    const error = rejected(malformed);
+    assert.ok(error instanceof ManagedConfirmationUnprovenError, 'the unreadable proof must be unproven');
+    assert.ok(!(error instanceof NoSubmitControlError), 'an unreadable proof must never classify as a pre-click stop');
+    assert.ok(!(error instanceof ManagedRequiredFieldConfirmationError), 'unreadable and runner-blocked are opposite claims');
+  }
+  /* And the opposite stays the opposite: a proof that VALIDATES and says the runner blocked is the
+     runner's own pre-click statement, and keeps its release classification. */
+  const blocked = rejected(proof([{
+    selector: '[data-field-path="work-authorization"]',
+    label: 'Are you authorized to work?',
+    fieldType: 'radio',
+    outcome: 'failed',
+    attemptCount: 2,
+    reason: 'This requires an answer',
+  }], {
+    status: 'blocked',
+    submissionOutcome: 'blocked',
+    retries: 1,
+    unresolved: ['Are you authorized to work?'],
+  }));
+  assert.ok(blocked instanceof ManagedRequiredFieldConfirmationError);
+  assert.ok(blocked instanceof NoSubmitControlError, 'a validated blocked proof is a proven pre-click stop');
 });
 
 test('a visually filled field that still fails ATS validation blocks submission by name', () => {

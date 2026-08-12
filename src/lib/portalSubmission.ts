@@ -8361,6 +8361,25 @@ export class ManagedRequiredFieldConfirmationError extends NoSubmitControlError 
   }
 }
 
+/* A proof this service COULD NOT READ, as opposed to a proof that says the runner stopped.
+ *
+ * The two are opposites and were one class until 2026-08-12, when the difference reached
+ * production. The runner's submit-scope repair added `scopeKind` to `pass.scope`; the key-set
+ * check below rejected the unknown key on every family, form and container alike; and because the
+ * rejection was thrown as a NoSubmitControlError subclass, fail() classified it as a stop that
+ * provably preceded the click. Measured on the kos.ai row: the runner's own code, driven against
+ * a fixture of that exact page, presses Submit and the page records the submission - and the row
+ * said "nothing has been sent". A malformed or absent proof arrives AFTER the remote run finished,
+ * so the click may already have landed; the only honest classification is uncertainty, which keeps
+ * the claim and takes the unverified exit. deliberately extends Error, never NoSubmitControlError.
+ */
+export class ManagedConfirmationUnprovenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManagedConfirmationUnprovenError';
+  }
+}
+
 const REQUIRED_CONFIRMATION_FIELD_TYPES = new Set([
   'text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'file', 'custom',
 ]);
@@ -8424,7 +8443,7 @@ function parseRequiredControl(value: unknown, requireMatchCount = false): Requir
 }
 
 function confirmationContractError(message: string): never {
-  throw new ManagedRequiredFieldConfirmationError([], `Litos did not press submit: required-field confirmation proof is malformed (${message})`);
+  throw new ManagedConfirmationUnprovenError(`Litos could not read the send run's required-field confirmation proof (${message}), so whether submit was pressed is unknown`);
 }
 
 /* WHEN THE APPLICATION SEND MAY GO UNPROVEN, AND IT IS NARROWER THAN IT WAS WRITTEN.
@@ -8458,7 +8477,11 @@ export function assertManagedRequiredFieldsConfirmed(
   if (!isRecord(result)) confirmationContractError('result is not an object');
   const proof = result.requiredFieldConfirmation;
   if (proof === undefined || proof === null) {
-    throw new ManagedRequiredFieldConfirmationError([], 'Litos did not press submit: the managed browser does not support required-field confirmation');
+    /* No proof at all is the unknown-runner case, and unknown is what it must stay: the action
+     * list this result answers carried a final submit, so an older runner may have pressed it
+     * without knowing how to write the proof. Claiming "did not press" here is the same false
+     * release the malformed branch produced. */
+    throw new ManagedConfirmationUnprovenError("Litos could not read the send run's required-field confirmation proof (the managed browser returned none), so whether submit was pressed is unknown");
   }
   if (!isRecord(proof) || !hasOnlyKeys(proof, ['version', 'status', 'passes'])) {
     confirmationContractError('receipt shape');
@@ -8480,10 +8503,17 @@ export function assertManagedRequiredFieldsConfirmed(
       confirmationContractError('submit kind');
     }
     if (expectedSubmitKind && pass.submitKind !== expectedSubmitKind) confirmationContractError('unexpected submit kind');
+    /* scopeKind is optional because a proof without it (an older runner) was already complete;
+     * when present it must be one of the two scopes the runner can actually bind. It is exactly
+     * the key whose arrival as an UNKNOWN key rejected every production submission on 2026-08-11,
+     * so it is named here rather than tolerated generically: any other new key still fails closed. */
     if (!isRecord(pass.scope) || !hasOnlyKeys(pass.scope, [
       'formFingerprint', 'submitFingerprint', 'formMatchCount', 'submitMatchCount',
       'requiredControlCount', 'sameNode',
-    ])) confirmationContractError('scope proof');
+    ], ['scopeKind'])) confirmationContractError('scope proof');
+    if (pass.scope.scopeKind !== undefined && pass.scope.scopeKind !== 'form' && pass.scope.scopeKind !== 'container') {
+      confirmationContractError('scope kind');
+    }
     if (!opaqueFingerprint(pass.scope.formFingerprint)
       || !opaqueFingerprint(pass.scope.submitFingerprint)
       || pass.scope.formMatchCount !== 1 || pass.scope.submitMatchCount !== 1

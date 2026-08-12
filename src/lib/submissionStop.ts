@@ -39,6 +39,12 @@ export type SubmissionStopReason =
   | 'applicant_email_regeneration'
   /** No secure browser provider is configured, so no browser was ever opened. */
   | 'provider_unconfigured'
+  /** The run returned, but its required-field confirmation proof was malformed or absent, so
+   * whether the final click happened is unknown. This is the cross-repo contract break: the runner
+   * spoke a shape this service refused, AFTER the remote actions had already executed. Never
+   * pre-click: on 2026-08-11 the runner's own code pressed Submit and this arm was recorded as
+   * "nothing has been sent". */
+  | 'confirmation_unproven'
   /** The sandbox stream closed or stopped accepting commands. Where in the run is unknown. */
   | 'provider_session_failure'
   /** The managed run was cut off before it reported anything. Where in the run is unknown. */
@@ -108,6 +114,7 @@ export function classifySubmissionStop(input: {
   regenerationRequired: boolean;
   packetDocumentExpired: boolean;
   actionBudget: boolean;
+  confirmationUnproven: boolean;
   providerSessionFailure: boolean;
   runTimedOut: boolean;
   providerUnconfigured: boolean;
@@ -119,6 +126,7 @@ export function classifySubmissionStop(input: {
   if (input.packetDocumentExpired) return 'packet_document_expired';
   if (input.actionBudget) return 'action_budget';
   if (input.noSubmitControl) return 'no_submit_control';
+  if (input.confirmationUnproven) return 'confirmation_unproven';
   if (input.providerSessionFailure) return 'provider_session_failure';
   if (input.providerUnconfigured) return 'provider_unconfigured';
   return 'unclassified';
