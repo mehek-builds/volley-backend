@@ -98,6 +98,7 @@ import {
   type SubmissionPacket,
   type SupportedPortal,
   ManagedActionBudgetError,
+  ManagedConfirmationUnprovenError,
   assertManagedRequiredFieldsConfirmed,
   managedApplicationProofIsRequired,
   NoSubmitControlError,
@@ -4828,6 +4829,11 @@ export function submissionFailureReview(
   /* Only the resume. An expired cover letter never reaches here: packetForCoverLetterCapability
      degrades and the application still goes, with its own sentence. */
   const packetDocumentExpired = error instanceof PacketDocumentExpiredError && error.document === 'resume';
+  /* The reporting barrier could not read the run's proof, so the click state is UNKNOWN. This must
+     never join the pre-click family above: the remote actions had already executed when the read
+     failed, and on 2026-08-11 the runner had actually pressed Submit. It classifies as its own
+     typed stop, keeps the claim, and takes the unverified exit below. */
+  const confirmationUnproven = error instanceof ManagedConfirmationUnprovenError;
   const runTimedOut = isManagedRunTimeout(message);
 
   /* THE TYPED HALF, written on every arm including the ones that release outright.
@@ -4840,6 +4846,7 @@ export function submissionFailureReview(
       regenerationRequired,
       packetDocumentExpired,
       actionBudget: actionBudgetStop !== null,
+      confirmationUnproven,
       providerSessionFailure,
       runTimedOut,
       providerUnconfigured: externalGate,
