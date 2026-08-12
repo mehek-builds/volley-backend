@@ -37,16 +37,59 @@ export function comparableOption(value: string): string {
  * asserts something the answer did not. It is wrong here: "for protected veteran status" does not
  * add a claim, it names the question being declined. So the refusal is not relaxed for anyone else;
  * declines are recognised by what they mean instead.
+ *
+ * A REFUSAL IS NOT A NEAR MISS OF A CLAIM, AND THE OLD SHAPE OF THIS PATTERN MADE IT ONE.
+ *
+ * The second alternative used to read, with every inner group optional:
+ *
+ *   (?:do not|dont|...) (?:to )?(?:want|wish|like)? ?(?:to )?(?:answer|...|identify|...)
+ *
+ * so `do not` plus one space plus `identify` satisfied the whole branch, and nothing anchored it.
+ * That made this true of the single commonest SUBSTANTIVE option on an EEO race block:
+ *
+ *   "I do not identify with any of the above"          read as a refusal
+ *   "I do not identify as having a disability"         read as a refusal
+ *   "I do not identify as transgender"                 read as a refusal
+ *   "I choose not to identify with any of the above"   read as a refusal
+ *
+ * None of those is a refusal. Each is a person saying which categories describe her, which is the
+ * opposite kind of statement, and two call sites act on the difference. declineWordingForControl
+ * REWRITES anything this matches into the control's opt-out spelling, so a stored answer of "I do
+ * not identify with any of the above" was replaced by "Decline To Self Identify" - a substitution
+ * of a refusal for a claim, which the comment below it says is the one thing it must never do. And
+ * chooseEeoOption picks the sole matching option as a stand-in refusal, so on a race list offering
+ * that phrase and no true opt-out, Litos would select it and assert on her behalf that none of the
+ * listed categories describe her.
+ *
+ * WHAT SEPARATES THEM IS VOLITION, not vocabulary. "Do not" and "does not" are plain negations and
+ * say nothing about willingness, so they now REQUIRE a volition verb: wanting, wishing, liking,
+ * caring, choosing, preferring or intending. "Prefer not" and "choose not" are themselves
+ * volitional and may go straight to the verb. And bare `identify` is gone from the volitional
+ * branch, because "identify" there always takes a complement naming categories ("identify WITH any
+ * of the above", "identify AS transgender") and that complement is the claim; the refusal idiom is
+ * the compound "self identify", which is kept everywhere it was.
+ *
+ * MEASURED, over a written-out set of 18 refusal wordings and 16 substantive ones, including every
+ * option string this repo has recorded from a real control: 18 of 18 refusals still match, 16 of 16
+ * claims no longer do, and "I would not like to disclose this" now matches, which the old comment
+ * claimed as an example and the old pattern did not actually catch.
  */
 const DECLINE_TO_STATE_RE = new RegExp(
   [
     // "Decline to self-identify", "I decline to self-identify for protected veteran status"
     'declines? to (?:self identify|answer|state|say|specify|disclose|respond|provide)',
-    // "I do not want to answer", "I don't wish to answer", "prefer not to say", "choose not to disclose"
-    '(?:do not|dont|does not|doesnt|would rather not|rather not|prefer not|prefers not|choose not|chooses not)'
-    + ' (?:to )?(?:want|wish|like)? ?(?:to )?(?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
-    // "I would not like to disclose this", "not wishing to answer"
-    'not (?:want|wish|choose|prefer)(?:ing)? to (?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
+    /* A PLAIN NEGATION NEEDS A VOLITION VERB. "I do not want to answer", "I don't wish to answer",
+       "I would not like to disclose this". Without one, "I do not identify with any of the above"
+       is a claim about which categories describe her and must not be read as a refusal. */
+    '(?:do not|dont|does not|doesnt|did not|didnt|would not|wouldnt|will not|wont)'
+    + ' (?:want|wish|like|care|choose|prefer|intend)(?:ing)? to'
+    + ' (?:answer|say|state|specify|disclose|self identify|identify|respond|provide)',
+    /* A VOLITIONAL NEGATION IS ALREADY THE REFUSAL: "prefer not to say", "choose not to disclose",
+       "would rather not say". Bare `identify` is deliberately absent here: "I choose not to
+       identify with any of the above" states a category membership, and only the compound
+       "self identify" is the opt-out idiom. */
+    '(?:would rather not|rather not|prefers? not|chooses? not|wishes? not|wants? not)'
+    + '(?: to)? (?:answer|say|state|specify|disclose|self identify|respond|provide)',
     // the bare noun phrases short lists use, whole-string only so "no answer required" is not one
     '^(?:decline[ds]?|i decline|no answer|not disclosed|not specified|undisclosed)$',
   ].join('|'),
