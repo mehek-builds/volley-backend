@@ -587,6 +587,16 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // stale version from the branch that never merged must not read as consented here, and a
       // client re-deriving that rule is a client that will get it wrong.
       automatic_captcha_enabled: captchaResumeGranted(user),
+      // The RAW date, beside the verdict, exactly as the two acceptance permissions below send
+      // theirs. It was written on every grant since this shipped and then never sent, so a settings
+      // screen had no way to say when the permission was given.
+      //
+      // Raw and ungated is the right shape, and the stale accounts are why. Their rows carry a real
+      // date under a superseded version, so this pairs a false verdict with a present date; the
+      // client's rule is to print no date whenever the verdict is false, which is what keeps a
+      // superseded grant from being displayed as a live one. Gating the date here instead would
+      // hide from the client the one fact that makes the pairing legible.
+      automatic_captcha_consented_at: user.automatic_captcha_consented_at,
       // The same rule, for the same reason: the verdict, not the column. A client must never decide
       // for itself whether a stored consent version still means consent.
       automatic_consent_acceptance_enabled: consentAcceptanceGranted(user),
@@ -747,6 +757,10 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       automatic_submission_consent_version: users.automatic_submission_consent_version,
       automatic_verification_enabled: users.automatic_verification_enabled,
       automatic_captcha_enabled: users.automatic_captcha_enabled,
+      // Selected so the response can carry it, matching /onboarding/state. Without it a settings
+      // screen that hydrates from this write loses the date it had until the next state read, and
+      // the same field would then mean two different things on the two routes.
+      automatic_captcha_consented_at: users.automatic_captcha_consented_at,
       automatic_captcha_consent_version: users.automatic_captcha_consent_version,
       automatic_consent_acceptance_enabled: users.automatic_consent_acceptance_enabled,
       automatic_consent_acceptance_consented_at: users.automatic_consent_acceptance_consented_at,
