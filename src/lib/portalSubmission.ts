@@ -7556,16 +7556,28 @@ export function buildManagedCaptchaProbeActions(): ManagedBrowserAction[] {
 // MANAGED_ACTION_LIMIT is unchanged, which is why the fix is a field on the reads that already exist
 // rather than a second set of reads beside them.
 //
-// WHAT IT GIVES UP, stated rather than discovered later. These selectors match widget CONTAINERS and
-// reCAPTCHA frames, and the visibility question is now asked of the matched node itself. A widget
-// whose container is collapsed to no box while a positioned child frame is on screen would have been
-// reported before, on the strength of the attribute alone, and is not reported now. That shape was
-// not seen on any of the 30 postings measured and there is no reason to think reCAPTCHA or hCaptcha
-// mount that way, but it is a real narrowing rather than none. It is accepted for the reason the
-// direction of every rule in this file is chosen: the shape that WAS measured, three times, is a
-// finished application handed back to a person over a widget that shows nobody anything, and
-// covering an unmeasured shape by keeping a rule known to be wrong on a measured one is the trade
-// that produced this defect.
+// A BORDER BOX IS NOT WHAT A PERSON SEES, and the first version of this change got that wrong in the
+// one direction that costs an application outright rather than stranding one.
+//
+// These six selectors match widget CONTAINERS and reCAPTCHA frames. Nothing in them can match an
+// hCaptcha or a Turnstile frame, so on those two providers the container is this path's ONLY
+// channel. `height:0` under the default `overflow:visible` leaves that container's border box at
+// 1380x0 - the measured Lever geometry - while its 303x78 checkbox sits in flow, painted, and
+// waiting to be clicked. Asked of the matched node alone, the visibility read answered "nothing
+// here" about a page a person is looking at, and this path then DISCARDED a correct CAPTCHA blocker
+// the runner had raised from the same DOM. Reproduced on hCaptcha, on Turnstile, and on the
+// post-click escalated challenge; reCAPTCHA survived only because its anchor iframe matches a
+// selector of its own and happens to be the painted child.
+//
+// So `requireVisible` asks whether the node OR anything it paints is on screen. The distinction is
+// still real rather than a retreat to presence: on the measured Lever page every descendant is
+// visibility:hidden or 1x1, so the answer there is still no, which is the whole point of the change.
+//
+// The first version was believed because its fixture hand-wrote a visible hCaptcha container as
+// 303x78. No visible hCaptcha was measured anywhere in the sweep. The one thing that WAS measured is
+// that the container's height is 0 while it holds non-zero children, so the height is imposed rather
+// than derived from content, and assuming it would go away in the visible state was the entire
+// safety margin. The fixture now carries the geometry that was measured.
 export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
   return [
     {
@@ -7637,12 +7649,15 @@ export type ManagedCaptchaEvidence = {
   /**
    * Whether the runner filtered these reads through a real layout read, one entry per VISIBLE node.
    *
-   * When true, every list below enumerates nodes a person could actually see, so an entry IS a
+   * When true, every list below enumerates nodes that are painting something, so an entry IS a
    * rendered thing and the multiset subtraction over site keys is a comparison of nodes rather than
    * a hope about the runner's echo semantics. When false the lists are the older attribute-only
    * reading: a widget container with no box still reports its site key, which is the reading that
    * blocked three live Lever postings on 2026-08-12. False is the pre-rollout state of a runner, not
    * a statement about the page.
+   *
+   * READ BY corroborateManagedCaptchaBlockers, which refuses to overrule the runner's CAPTCHA claim
+   * with counter-evidence weaker than the claim. It is a decision, not a label.
    */
   visibilityConfirmed: boolean;
   /** A data-sitekey outside the badge: a widget container is on the page. First one seen. */
@@ -7693,6 +7708,10 @@ function managedExtractedAll(
  * reported by a 1380x0 container and a site key reported by a 304x78 checkbox are indistinguishable
  * unless the runner says which question it answered. Absence therefore means "this evidence is the
  * old attribute-only reading", never "there was nothing to see".
+ *
+ * It has one caller and that caller makes a decision with it: corroborateManagedCaptchaBlockers will
+ * not delete the runner's CAPTCHA blocker on the strength of evidence that was never asked a layout
+ * question. See the argument there for what that costs during a rollout.
  */
 export function managedResultSupportsCaptchaVisibility(
   result: ManagedBrowserResult | null | undefined,
@@ -7792,11 +7811,16 @@ export function isManagedCaptchaEvidenceExtract(
  * `normal`. Reading an absent size as invisible would hand the benefit of the doubt to the one
  * direction that ends in a submit under an unsolved challenge.
  *
- * THAT DEFAULT IS RECAPTCHA'S, AND IT IS NOT UNIVERSAL, which is the whole reason this rule is no
- * longer alone. hCaptcha as Lever mounts it renders in invisible mode and writes no `data-size` at
- * all, so "absent means rendered" is exactly wrong there and blocked three live postings. The
- * evidence reads now carry `requireVisible`, so a widget with no box never reaches any rule here.
- * This one keeps its job for the widget that IS on screen and merely declares a size.
+ * THAT DEFAULT IS RECAPTCHA'S, AND IT DOES NOT TRAVEL, which is the whole reason this rule is no
+ * longer alone. Stated precisely, because the loose version of it is wrong: `data-size` is
+ * documented hCaptcha markup and a site rendering the widget declaratively does write one. What was
+ * measured is narrower, and is all the design needs. Lever renders hCaptcha PROGRAMMATICALLY and
+ * writes no `data-size` at all, so on that code path "absent means rendered" is exactly wrong, and
+ * it blocked three live postings. The states reachable on that same code path differ in layout and
+ * in nothing else, which is why the answer is a layout read rather than another provider name in a
+ * selector. The evidence reads now carry `requireVisible`, so a widget painting nothing never
+ * reaches any rule here. This one keeps its job for the widget that IS on screen and declares a
+ * size.
  *
  * NO LONGER THE ONLY THING BETWEEN THE BADGE AND A FALSE BLOCK either: the anchor selector excludes
  * badge descendants structurally, so this regex is a second line rather than the whole wall. It was
@@ -8058,6 +8082,29 @@ export function corroborateManagedCaptchaBlockers(
 ): string[] {
   if (!blockersIncludeCaptcha(blockers)) return [...blockers];
   if (isCaptchaGatedFamily(portal)) return [...blockers];
+  /* A BLOCKER MAY ONLY BE OVERRULED BY A READ AT LEAST AS GOOD AS THE ONE THAT RAISED IT.
+   *
+   * The runner's claim comes from a predicate that walks real nodes and asks the browser what it is
+   * painting. This function's counter-evidence comes from six attribute extracts. When those extracts
+   * were NOT filtered by a layout read, the counter-evidence is strictly weaker than the claim it is
+   * being used to delete, and deleting a correct blocker sends an application into a challenge it
+   * cannot clear. That is not the theoretical version of this: it is the defect found in review on
+   * this very change, where a container of 1380x0 painting a 303x78 checkbox produced no evidence at
+   * all and this line dropped a correct blocker on hCaptcha, on Turnstile, and on an open image grid.
+   *
+   * The subtree read fixes those three shapes. This guards the CLASS, in the one dimension a fixture
+   * cannot cover: a runner that predates `requireVisible` returns the old attribute-only reading
+   * under the same labels, and nothing else in the payload distinguishes it.
+   *
+   * WHAT IT COSTS, honestly. During a rollout window, or a Stratus rollback, a CAPTCHA claim this
+   * repo would previously have dropped is kept, and a kept blocker strands an application. That is
+   * bounded by what the claim is worth: the runner's predicate was measured on 2026-08-12 across 30
+   * live postings and raised CAPTCHA on exactly one, the one real challenge. Keeping a claim that
+   * precise while we cannot check it is the correct direction. A rollback PAST that predicate fix
+   * would restore its false positives, and this line would then keep them; that is a deliberate act
+   * with a visible symptom, not a silent failure.
+   */
+  if (!managedResultSupportsCaptchaVisibility(result)) return [...blockers];
   if (managedCaptchaVerdictIsCorroborated(portal, result)) return [...blockers];
   return blockers.filter((blocker) => blocker !== CAPTCHA_BLOCKER);
 }

@@ -13,8 +13,8 @@
  * `expected` from that emission. The producer half is pinned in the stratus repo against the same
  * bytes, so either side drifting fails its own suite with the same file naming the disagreement.
  *
- * WHAT THE CASES ARE. Five pages from the read-only sweep of 30 live postings on 2026-08-12, and
- * each one is chosen so its adversary can win:
+ * WHAT THE CASES ARE. Eight pages built from the read-only sweep of 30 live postings on 2026-08-12,
+ * each one chosen so its adversary can win:
  *   - lever_invisible_hcaptcha must NOT block, and blocked permanently before this change.
  *   - jazzhr_visible_recaptcha must block, and is the one genuine CAPTCHA in the sweep. Its bframe is
  *     mounted but hidden, so under the corrected bframe reading the verdict has to be carried by the
@@ -22,13 +22,27 @@
  *   - greenhouse_badge_only must NOT block: the shape 24 of the 30 postings carry.
  *   - greenhouse_badge_only_without_size_parameter must NOT block with Google's size=invisible gone
  *     from the query string, which is the only thing that used to be holding those 24 back.
- *   - visible_hcaptcha_without_data_size must block. hCaptcha writes no data-size in either state, so
- *     this page and the Lever page are attribute-for-attribute identical and want opposite answers.
- *     Any rule that reads only attributes, including a :not(.h-captcha:not([data-size])) patch on the
- *     rendered-sitekey selector, gets one of the two wrong.
+ *   - hcaptcha_overflowing_zero_height_container must block. Same markup as the Lever page and the
+ *     same measured 1380x0 container, with the child in its painted state.
+ *   - hcaptcha_escalated_challenge_over_zero_height_container must block: the image grid is open.
+ *   - turnstile_overflowing_zero_height_container must block. Turnstile is the other provider whose
+ *     only channel here is the [data-sitekey] container.
+ *   - recaptcha_overflowing_zero_height_container must block, and is carried BECAUSE it passes
+ *     without the subtree read. reCAPTCHA has a second channel, so the collapsed container costs it
+ *     nothing; without it beside the two above the suite would read as though a node-only visibility
+ *     rule were fine on every provider.
+ *
+ * THE FIXTURE THAT WAS WRONG, kept in the record because it is this project's signature failure. The
+ * visible-hCaptcha case first hand-wrote its container as 303x78. No visible hCaptcha was measured
+ * anywhere in the sweep; the one thing measured about a Lever container is that its height is 0 while
+ * it holds non-zero children, so the height is imposed rather than derived from content. Assuming it
+ * would go away in the visible state was the entire safety margin, and on that assumption a
+ * node-only visibility read passed every case here while silently discarding correct CAPTCHA
+ * blockers on hCaptcha, on Turnstile, and on an open challenge grid.
  */
 
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { MANAGED_CAPTCHA_VISIBILITY_CAPABILITY, type ManagedBrowserResult } from './browserbase';
@@ -36,6 +50,7 @@ import {
   buildManagedCaptchaProbeActions,
   CAPTCHA_BLOCKER,
   corroborateManagedCaptchaBlockers,
+  isCaptchaGatedFamily,
   managedCaptchaVerdictIsCorroborated,
   managedResultRequiresCaptchaAttention,
   managedResultSupportsCaptchaVisibility,
@@ -56,9 +71,28 @@ type ContractCase = {
   expected: { requiresAttention: boolean; corroborated: boolean; runnerBlocked: boolean };
 };
 
-const contract = JSON.parse(
-  readFileSync('src/lib/fixtures/captcha-visibility-contract.json', 'utf8'),
-) as { actions: unknown[]; cases: ContractCase[] };
+const CONTRACT_PATH = 'src/lib/fixtures/captcha-visibility-contract.json';
+const CONTRACT_BYTES = readFileSync(CONTRACT_PATH);
+const contract = JSON.parse(CONTRACT_BYTES.toString('utf8')) as { actions: unknown[]; cases: ContractCase[] };
+
+/* THE DIGEST, PINNED HERE AND IN THE STRATUS REPLAY AS THE SAME 64 CHARACTERS.
+ *
+ * Everything else in this file proves that THIS repo agrees with the file. Nothing in either repo
+ * could previously prove the two COPIES of the file agree with each other, so a hand-edit of this
+ * copy alone passed both suites and the shared artifact silently stopped being shared. Pinning the
+ * bytes means editing either copy fails that copy's repo until its literal is updated, and the two
+ * literals sit in two pull requests where a reviewer can compare them without leaving the diff. It
+ * is not a cross-repo lock, which nothing without shared CI can be. It is what turns a silent
+ * divergence into a red suite and a visible constant. */
+const CONTRACT_SHA256 = '3561ff6813e9b655c5eb4a74cd3a3ec19545ee82b2aabc1963b3e090b280b4b6';
+
+test('the contract file is the bytes both repos are pinned to', () => {
+  assert.equal(
+    createHash('sha256').update(CONTRACT_BYTES).digest('hex'),
+    CONTRACT_SHA256,
+    'the contract changed: update CONTRACT_SHA256 here and in stratus, and copy the file across',
+  );
+});
 
 /** The emission as a result object, with nothing added that the runner did not send. */
 function resultOf(entry: ContractCase): ManagedBrowserResult {
@@ -79,7 +113,7 @@ test('the contract pins the action list this repo actually sends', () => {
 });
 
 test('every contract case carries a runner emission and a page it came from', () => {
-  assert.equal(contract.cases.length, 5);
+  assert.equal(contract.cases.length, 8);
   for (const entry of contract.cases) {
     assert.ok(entry.html.length > 0, entry.name + ' must carry the page it was measured on');
     assert.deepEqual(entry.emitted.capabilities, [MANAGED_CAPTCHA_VISIBILITY_CAPABILITY],
@@ -178,22 +212,79 @@ test('the measured pre-fix emission still reproduces the block, and says why it 
   assert.equal(managedResultRequiresCaptchaAttention(resultOf(fixed)), false);
 });
 
-test('the visible and invisible hCaptcha pages are indistinguishable by attribute alone', () => {
-  /* THE ARGUMENT AGAINST THE CHEAP FIX, made as an assertion instead of a paragraph.
+test('the two hCaptcha pages are identical in markup AND in container geometry', () => {
+  /* THE ARGUMENT AGAINST THE CHEAP FIX, made as an assertion instead of a paragraph, and now made
+   * against the geometry that was actually measured rather than one that was assumed.
    *
-   * Both pages mount div.h-captcha[data-sitekey] with the same key and no data-size, because
-   * hCaptcha never writes one. Their extract-visible emissions differ ONLY because one container has
-   * a box. Any rule that decides from the markup, including appending
-   * :not(.h-captcha:not([data-size])) to the rendered-sitekey selector, returns one answer for both
-   * of them, and one of the two answers is a submit click under a live challenge. */
+   * Both pages mount div.h-captcha[data-sitekey] with the same key and no data-size: Lever renders
+   * hCaptcha programmatically and writes none. Both containers are the measured 1380x0. Every
+   * attribute matches, the style attribute matches, and the correct answers are opposite. The only
+   * difference in the whole document is what the CHILDREN are doing, so:
+   *   - a rule reading attributes gets one of the two wrong. That includes appending
+   *     :not(.h-captcha:not([data-size])) to the rendered-sitekey selector, whose answer for both is
+   *     "not rendered", which on the second page is a submit click under a live challenge.
+   *   - a layout rule asked of the matched NODE ONLY also gets one of the two wrong, in the same
+   *     direction, because both containers have a 1380x0 border box. That was the defect found in
+   *     review on the first version of this change.
+   * Only a rule that looks at what the container paints can separate them. */
   const hidden = contract.cases.find((one) => one.name === 'lever_invisible_hcaptcha')!;
-  const shown = contract.cases.find((one) => one.name === 'visible_hcaptcha_without_data_size')!;
-  const attributesOf = (entry: ContractCase) => (entry.html.match(/<div[^>]*id="h-captcha"[^>]*>/) ?? [''])[0]
-    .replace(/\s*style="[^"]*"/, '');
-  assert.equal(attributesOf(hidden), attributesOf(shown));
-  assert.notEqual(attributesOf(hidden), '');
+  const shown = contract.cases.find((one) => one.name === 'hcaptcha_overflowing_zero_height_container')!;
+  const containerOf = (entry: ContractCase) => (entry.html.match(/<div[^>]*id="h-captcha"[\s\S]*?>/) ?? [''])[0]
+    .replace(/\s+/g, ' ');
+  assert.notEqual(containerOf(hidden), '');
+  assert.equal(containerOf(hidden), containerOf(shown));
+  assert.match(containerOf(hidden), /width:1380px;height:0/);
+  assert.ok(!containerOf(hidden).includes('data-size'), 'neither page declares a size');
   assert.equal(managedResultRequiresCaptchaAttention(resultOf(hidden)), false);
   assert.equal(managedResultRequiresCaptchaAttention(resultOf(shown)), true);
+});
+
+test('a correct runner blocker survives on every container-only provider', () => {
+  /* THE REVIEW FINDING, as the assertion it should always have been. On these three pages the runner
+   * raised a correct CAPTCHA blocker from the same DOM, and the managed evidence answered "nothing
+   * here" because the widget container's border box is 1380x0. corroborateManagedCaptchaBlockers
+   * then DELETED the blocker, which sends a run into a challenge it cannot clear: the direction that
+   * loses an application outright rather than stranding one.
+   *
+   * lever is autonomous and not captcha-gated, so nothing else in the chain would have kept it. */
+  assert.equal(isCaptchaGatedFamily('lever'), false);
+  for (const name of [
+    'hcaptcha_overflowing_zero_height_container',
+    'hcaptcha_escalated_challenge_over_zero_height_container',
+    'turnstile_overflowing_zero_height_container',
+    'recaptcha_overflowing_zero_height_container',
+  ]) {
+    const entry = contract.cases.find((one) => one.name === name)!;
+    assert.equal(entry.emitted.runnerBlockedOnCaptcha, true, name + ': the runner must have raised one');
+    assert.deepEqual(
+      corroborateManagedCaptchaBlockers('lever', [CAPTCHA_BLOCKER], resultOf(entry)),
+      [CAPTCHA_BLOCKER],
+      name + ': a correct blocker must not be discarded',
+    );
+  }
+});
+
+test('a blocker is never overruled by evidence that was not asked a layout question', () => {
+  /* The guard on the CLASS rather than on the three shapes above, and the one thing a page fixture
+   * cannot cover: a runner older than requireVisible answers under the same labels with the same
+   * entry shape, so its evidence is weaker than the claim it would be used to delete.
+   *
+   * Same page, same empty evidence, one difference: whether the runner said it performed a layout
+   * read. With the capability the blocker is dropped, which is the behaviour that recovered the
+   * fourteen prod stalls of 2026-08-08. Without it the blocker is kept. */
+  const badge = contract.cases.find((one) => one.name === 'greenhouse_badge_only')!;
+  const withCapability = resultOf(badge);
+  const withoutCapability: ManagedBrowserResult = { ...withCapability, capabilities: [] };
+  assert.deepEqual(readManagedCaptchaEvidence(withCapability).sitekeys, []);
+  assert.deepEqual(readManagedCaptchaEvidence(withoutCapability).sitekeys, []);
+  assert.deepEqual(corroborateManagedCaptchaBlockers('lever', [CAPTCHA_BLOCKER], withCapability), []);
+  assert.deepEqual(
+    corroborateManagedCaptchaBlockers('lever', [CAPTCHA_BLOCKER], withoutCapability),
+    [CAPTCHA_BLOCKER],
+  );
+  // And a result this repo never got at all is the same case: no read happened, so nothing may be
+  // deleted on the strength of one.
+  assert.deepEqual(corroborateManagedCaptchaBlockers('lever', [CAPTCHA_BLOCKER], null), [CAPTCHA_BLOCKER]);
 });
 
 test('the badge-only pages carry no anchor evidence at all, with or without size=invisible', () => {
