@@ -4,8 +4,20 @@ import { application_profile, profiles, users } from '../db/schema';
 import { decryptRow } from '../routes/applicationProfile';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import type { ApplicationProfileLike } from './questionDiscovery';
-import { selectApplicationProfileRow, factBoolean, factString, factStringList } from './applicationFacts';
+import {
+  selectApplicationProfileRow,
+  factBoolean,
+  factString,
+  factStringList,
+  isUndefinedColumnError,
+} from './applicationFacts';
 import { submittedApplicationCompanies } from './duplicateApplication';
+import {
+  AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
+  AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
+  conductAcceptanceGranted,
+  consentAcceptanceGranted,
+} from './automationConsent';
 import { countryEligibilityForRead } from './workEligibility';
 
 export function eligibilityFromLoadedApplicationProfile(
@@ -48,15 +60,54 @@ function experienceBankType(value: string): 'job' | 'project' | 'leadership' | u
   return value === 'job' || value === 'project' || value === 'leadership' ? value : undefined;
 }
 
+/* The user row this resolver reads: the sponsorship declaration, and the standing permission to
+ * accept employer consent acknowledgements.
+ *
+ * TOLERANT FOR THE SAME REASON selectApplicationProfileRow IS. Drizzle compiles a projection to an
+ * explicit column list, so naming a column the database has not got fails the WHOLE read with
+ * 42703, not just the new field - and this read is on the submission hot path. Merging this repo is
+ * a production deploy and the migration is run by hand, so the two can land in either order.
+ *
+ * The fallback is not a degraded mystery state: the permission reads as never granted, which is
+ * precisely main's behaviour, and every consent goes back to the applicant exactly as it does
+ * today. See scripts/apply-consent-acceptance-schema.mjs, which must still run before the merge.
+ */
+type ResolverUserRow = {
+  sponsorship_answer: typeof users.$inferSelect['sponsorship_answer'];
+  automatic_consent_acceptance_enabled?: boolean | null;
+  automatic_consent_acceptance_consented_at?: Date | null;
+  automatic_consent_acceptance_consent_version?: string | null;
+  automatic_conduct_acceptance_enabled?: boolean | null;
+  automatic_conduct_acceptance_consented_at?: Date | null;
+  automatic_conduct_acceptance_consent_version?: string | null;
+};
+
+async function selectResolverUserRow(userId: string): Promise<ResolverUserRow[]> {
+  try {
+    return await db.select({
+      sponsorship_answer: users.sponsorship_answer,
+      automatic_consent_acceptance_enabled: users.automatic_consent_acceptance_enabled,
+      automatic_consent_acceptance_consented_at: users.automatic_consent_acceptance_consented_at,
+      automatic_consent_acceptance_consent_version: users.automatic_consent_acceptance_consent_version,
+      automatic_conduct_acceptance_enabled: users.automatic_conduct_acceptance_enabled,
+      automatic_conduct_acceptance_consented_at: users.automatic_conduct_acceptance_consented_at,
+      automatic_conduct_acceptance_consent_version: users.automatic_conduct_acceptance_consent_version,
+    }).from(users).where(eq(users.id, userId)).limit(1);
+  } catch (error) {
+    if (!isUndefinedColumnError(error)) throw error;
+    return db.select({
+      sponsorship_answer: users.sponsorship_answer,
+    }).from(users).where(eq(users.id, userId)).limit(1);
+  }
+}
+
 export async function loadApplicationProfileLike(userId: string): Promise<ApplicationProfileLike> {
   const [appRow, [profileRow], [userRow], bankRows, submittedCompanies] = await Promise.all([
     // Tolerant read, see lib/applicationFacts.ts. This is the resolver's own profile read, so a
     // 42703 here would stall every in-flight submission, not just the new questions.
     selectApplicationProfileRow(userId),
     db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
-    db.select({
-      sponsorship_answer: users.sponsorship_answer,
-    }).from(users).where(eq(users.id, userId)).limit(1),
+    selectResolverUserRow(userId),
     /* The experience bank, read the one way it is allowed to be read (db/experienceBank.ts), the
      * same call coverLetterService and the submission runner already make. The resolver needs it
      * because a question about her employment history has to be answered by checking her
@@ -252,6 +303,22 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     advanced_study_plan: advancedStudyPlan(factString(appRow, 'advanced_study_plan')),
     attest_truthful_information: factBoolean(appRow, 'attest_truthful_information'),
     accept_privacy_notices: factBoolean(appRow, 'accept_privacy_notices'),
+
+    /* The standing permission, VERSION-CHECKED HERE so no resolver has to know the rule. Set only
+     * when consentAcceptanceGranted is satisfied; left undefined for never-granted, revoked, a
+     * stale consent version, and a database whose migration has not run. All four hold. */
+    consent_acknowledgement_permission: consentAcceptanceGranted(userRow)
+      ? {
+        granted_at: userRow?.automatic_consent_acceptance_consented_at?.toISOString(),
+        version: AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
+      }
+      : undefined,
+    conduct_acknowledgement_permission: conductAcceptanceGranted(userRow)
+      ? {
+        granted_at: userRow?.automatic_conduct_acceptance_consented_at?.toISOString(),
+        version: AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
+      }
+      : undefined,
     onsite_commitment: onsiteCommitment(factString(appRow, 'onsite_commitment')),
     onsite_locations: factStringList(appRow, 'onsite_locations'),
     relocation_willingness: yesNo(factString(appRow, 'relocation_willingness')),

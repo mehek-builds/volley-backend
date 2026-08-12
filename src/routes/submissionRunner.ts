@@ -140,6 +140,7 @@ import {
 import {
   discoverPageQuestions,
   discoveredFieldIsRequired,
+  consentAcknowledgementLicence,
   isCoreIdentityField,
   isOpenEndedQuestion,
   isRefusedQuestion,
@@ -1729,13 +1730,43 @@ export async function discoverAndResolveQuestions(
      * that is precisely what refreshKnownQuestionAnswers recomputes later. Equal means the profile
      * has not moved and the snapped answer may stand; different means she has corrected something
      * and the record is stale. It is the only fact that makes that decidable: the answer alone
-     * cannot say, and field options do not survive into the packet. */
+     * cannot say, and field options do not survive into the packet.
+     *
+     * A CONSENT ACCEPTANCE IS LEFT ON THIS PATH ON PURPOSE. A select-shaped consent records "Yes"
+     * here beside an answer of "I agree", and the recompute that follows is exactly the behaviour a
+     * REVOCABLE permission owes: once she turns the permission off, resolveKnownAnswer stops
+     * answering "Yes" for that label, the profile no longer says what it said, and the tick is
+     * recomputed out of any packet that has not been sent. */
     const answerOptionSource = resolvedField?.matchedOption
       && profileKnown && 'value' in profileKnown
       && profileKnown.value.trim()
       && resolvedField.value.trim().toLowerCase() !== profileKnown.value.trim().toLowerCase()
       ? profileKnown.value
       : undefined;
+    /* THE ACCEPTANCE, WRITTEN DOWN ON THE QUESTION IT WAS MADE ON.
+     *
+     * Litos may tick an employer's privacy statement, applicant terms or code of conduct only under
+     * the standing permission the applicant granted at onboarding. The packet must therefore be able
+     * to say so: without this the audit shows a required consent that is simply answered "Yes", which
+     * is indistinguishable from her having ticked it herself, and that is the one reading this
+     * feature must never produce.
+     *
+     * Keyed on the PROFILE resolution, never on a remembered answer. A remembered answer is her own
+     * words replayed, and labelling it as machine acceptance would misreport the opposite way.
+     *
+     * The licence comes from consentAcknowledgementLicence, the SAME call that decides whether the
+     * control may be accepted at all, so the trail cannot claim a grant the resolver did not use.
+     * For a label naming both a privacy notice and a code of conduct it names both grants. */
+    const consentLicence = profileKnown && 'value' in profileKnown
+      ? consentAcknowledgementLicence(label, ap, questionContext)
+      : null;
+    const consentTrail = consentLicence
+      ? {
+        answer_source: 'consent_permission' as const,
+        consent_permission_version: consentLicence.version,
+        ...(consentLicence.granted_at ? { consent_permission_granted_at: consentLicence.granted_at } : {}),
+      }
+      : {};
     // "I had an answer and deliberately did not pick anything off this list."
     //
     // resolveProfileField reports that as matchedOption: false, and this loop used to throw the
@@ -1815,6 +1846,9 @@ export async function discoverAndResolveQuestions(
           portal_selector: portalSelectorForField(field),
           portal_input_type: field.inputType,
           answer_option_source: answerOptionSource,
+          // Last, so a re-run over a packet whose provenance was stripped by a review merge stamps
+          // the acceptance back on rather than inheriting a blank.
+          ...consentTrail,
         });
       } else if (staleDraftedAnswer) {
         invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
@@ -1843,6 +1877,7 @@ export async function discoverAndResolveQuestions(
         portal_selector: portalSelectorForField(field),
         portal_input_type: field.inputType,
         answer_option_source: answerOptionSource,
+        ...consentTrail,
       });
       continue;
     }

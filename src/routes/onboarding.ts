@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { eq, sql } from 'drizzle-orm';
+import { eq, getTableColumns, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
 import {
@@ -13,7 +13,16 @@ import {
 import { requireAuth } from '../middleware/auth';
 import { decryptField } from '../lib/fieldCrypto';
 import { decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
-import { AUTOMATIC_CAPTCHA_CONSENT_VERSION, AUTOMATIC_SUBMISSION_CONSENT_VERSION, automationConsentValues, captchaResumeGranted } from '../lib/automationConsent';
+import {
+  AUTOMATIC_CAPTCHA_CONSENT_VERSION,
+  AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
+  AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
+  AUTOMATIC_SUBMISSION_CONSENT_VERSION,
+  automationConsentValues,
+  captchaResumeGranted,
+  conductAcceptanceGranted,
+  consentAcceptanceGranted,
+} from '../lib/automationConsent';
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
 import { generated_resumes } from '../db/schema';
 import { isComposioConfigured } from '../lib/composioConnections';
@@ -88,6 +97,49 @@ async function reviewedSubmitCount(userId: string): Promise<number> {
 //                                                on it is skippable, so "answered" and "asked" are
 //                                                different facts and only the second can end the step.
 //                                                See SETUP_GAP_FIELDS and gapsAskedFrom below.
+
+/* The three columns scripts/apply-consent-acceptance-schema.mjs adds, named here so the read below
+ * can drop them when the deploy has landed ahead of the migration. */
+const CONSENT_ACCEPTANCE_COLUMNS: ReadonlySet<string> = new Set([
+  'automatic_consent_acceptance_enabled',
+  'automatic_consent_acceptance_consented_at',
+  'automatic_consent_acceptance_consent_version',
+  'automatic_conduct_acceptance_enabled',
+  'automatic_conduct_acceptance_consented_at',
+  'automatic_conduct_acceptance_consent_version',
+]);
+
+/**
+ * The user row, tolerating a database that has not run the consent-acceptance migration.
+ *
+ * SAME REASON THE PROFILE READ BELOW IT IS TOLERANT, and the comment there states the stake:
+ * /onboarding/state is the first call /start makes, and a 500 here is a blank setup flow for every
+ * student in the window. `db.select().from(users)` compiles to an EXPLICIT column list built from
+ * schema.ts, so the moment schema.ts names a column the database has not got, the whole read fails
+ * with 42703 rather than just the new fields.
+ *
+ * The fallback returns the row with the three permission columns absent, which
+ * consentAcceptanceGranted reads as "not granted" - identical to a migrated database holding the
+ * default. So the window behaves as an account that has not turned the permission on, which is the
+ * state every account is in anyway until it does.
+ */
+async function selectOnboardingUserRow(userId: string) {
+  try {
+    return await db.select().from(users).where(eq(users.id, userId));
+  } catch (error) {
+    if (!isUndefinedColumnError(error)) throw error;
+    const all = getTableColumns(users);
+    const legacy: Record<string, unknown> = {};
+    for (const [name, column] of Object.entries(all)) {
+      if (!CONSENT_ACCEPTANCE_COLUMNS.has(name)) legacy[name] = column;
+    }
+    const rows = await db
+      .select(legacy as Partial<typeof users._.columns>)
+      .from(users)
+      .where(eq(users.id, userId));
+    return rows as (typeof users.$inferSelect)[];
+  }
+}
 
 type Step = 'focus' | 'sponsorship' | 'resume' | 'impact' | 'base' | 'gaps' | 'done';
 
@@ -277,15 +329,27 @@ const completeBodySchema = z.object({
   // update, so a default would make every /start finish silently revoke a permission granted in
   // settings. Undefined means "leave it alone".
   automatic_captcha_enabled: z.boolean().optional(),
+  /* Standing permission to accept an employer's privacy statement, applicant terms or code of
+   * conduct in her name. Optional for the same reason captcha resume is, and it rides the
+   * permissions block that already ends setup rather than becoming a Step of its own: see the note
+   * on `Step` above, and #116, which is why adding to that union is not a free act. Nothing about
+   * reachability changes here - the screen that already asks the other three asks this one. */
+  automatic_consent_acceptance_enabled: z.boolean().optional(),
+  // The code-of-conduct permission, asked and stored separately. See db/schema.ts.
+  automatic_conduct_acceptance_enabled: z.boolean().optional(),
 });
 const automationBodySchema = z.object({
   automatic_submission_enabled: z.boolean().optional(),
   automatic_verification_enabled: z.boolean().optional(),
   automatic_captcha_enabled: z.boolean().optional(),
+  automatic_consent_acceptance_enabled: z.boolean().optional(),
+  automatic_conduct_acceptance_enabled: z.boolean().optional(),
 }).refine((value) => (
   value.automatic_submission_enabled !== undefined
   || value.automatic_verification_enabled !== undefined
   || value.automatic_captcha_enabled !== undefined
+  || value.automatic_consent_acceptance_enabled !== undefined
+  || value.automatic_conduct_acceptance_enabled !== undefined
 ), {
   message: 'At least one automation permission is required',
 });
@@ -378,7 +442,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const userId = request.jwtPayload!.userId;
 
     const [[user], [profile], appProfile, [bankCount], [applyCount], [target]] = await Promise.all([
-      db.select().from(users).where(eq(users.id, userId)),
+      selectOnboardingUserRow(userId),
       db.select().from(profiles).where(eq(profiles.user_id, userId)),
       // Tolerant read, see lib/applicationFacts.ts: /onboarding/state is the first call /start
       // makes, and a 500 here is a blank setup flow for every student in the deploy window.
@@ -523,6 +587,17 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // stale version from the branch that never merged must not read as consented here, and a
       // client re-deriving that rule is a client that will get it wrong.
       automatic_captcha_enabled: captchaResumeGranted(user),
+      // The same rule, for the same reason: the verdict, not the column. A client must never decide
+      // for itself whether a stored consent version still means consent.
+      automatic_consent_acceptance_enabled: consentAcceptanceGranted(user),
+      // Sent alongside the verdict so a settings screen can say WHEN she granted it. The runner
+      // writes the same date onto every control it accepts, which is what makes the packet audit
+      // able to show a standing permission rather than an unexplained tick.
+      automatic_consent_acceptance_consented_at: user.automatic_consent_acceptance_consented_at,
+      automatic_consent_acceptance_consent_version: AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
+      automatic_conduct_acceptance_enabled: conductAcceptanceGranted(user),
+      automatic_conduct_acceptance_consented_at: user.automatic_conduct_acceptance_consented_at,
+      automatic_conduct_acceptance_consent_version: AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
     });
   });
 
@@ -646,18 +721,50 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
         ? AUTOMATIC_CAPTCHA_CONSENT_VERSION
         : null;
     }
+    /* Ungated, like captcha resume and unlike standing submission consent: accepting a privacy
+     * notice sends nothing to anybody. It ticks a box on a form that then stops at the submit
+     * button exactly where it stops today, and automatic_submission_enabled still decides whether
+     * anything is ever sent. Turning it off is always allowed, from any state, and clears the date
+     * and the version with it so a revocation leaves no record that could be read as a grant. */
+    if (parsed.data.automatic_consent_acceptance_enabled !== undefined) {
+      patch.automatic_consent_acceptance_enabled = parsed.data.automatic_consent_acceptance_enabled;
+      patch.automatic_consent_acceptance_consented_at = parsed.data.automatic_consent_acceptance_enabled ? now : null;
+      patch.automatic_consent_acceptance_consent_version = parsed.data.automatic_consent_acceptance_enabled
+        ? AUTOMATIC_CONSENT_ACCEPTANCE_VERSION
+        : null;
+    }
+    // Separate from the one above at every layer, including here: granting one must never write the
+    // other's columns, and revoking one must leave the other's date and version standing.
+    if (parsed.data.automatic_conduct_acceptance_enabled !== undefined) {
+      patch.automatic_conduct_acceptance_enabled = parsed.data.automatic_conduct_acceptance_enabled;
+      patch.automatic_conduct_acceptance_consented_at = parsed.data.automatic_conduct_acceptance_enabled ? now : null;
+      patch.automatic_conduct_acceptance_consent_version = parsed.data.automatic_conduct_acceptance_enabled
+        ? AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION
+        : null;
+    }
     const [updated] = await db.update(users).set(patch).where(eq(users.id, userId)).returning({
       automatic_submission_enabled: users.automatic_submission_enabled,
       automatic_submission_consent_version: users.automatic_submission_consent_version,
       automatic_verification_enabled: users.automatic_verification_enabled,
       automatic_captcha_enabled: users.automatic_captcha_enabled,
       automatic_captcha_consent_version: users.automatic_captcha_consent_version,
+      automatic_consent_acceptance_enabled: users.automatic_consent_acceptance_enabled,
+      automatic_consent_acceptance_consented_at: users.automatic_consent_acceptance_consented_at,
+      automatic_consent_acceptance_consent_version: users.automatic_consent_acceptance_consent_version,
+      automatic_conduct_acceptance_enabled: users.automatic_conduct_acceptance_enabled,
+      automatic_conduct_acceptance_consented_at: users.automatic_conduct_acceptance_consented_at,
+      automatic_conduct_acceptance_consent_version: users.automatic_conduct_acceptance_consent_version,
     });
     if (!updated) return reply.status(404).send({ error: 'No such user' });
     // The VERDICT, matching /onboarding/state exactly. Returning the raw column here would give the
     // same field name two meanings on two endpoints: for the accounts holding a stale consent
     // version this would echo true while the state route reported false, and a settings page
     // hydrating from this response would show a permission the backend does not honour.
-    return reply.send({ ...updated, automatic_captcha_enabled: captchaResumeGranted(updated) });
+    return reply.send({
+      ...updated,
+      automatic_captcha_enabled: captchaResumeGranted(updated),
+      automatic_consent_acceptance_enabled: consentAcceptanceGranted(updated),
+      automatic_conduct_acceptance_enabled: conductAcceptanceGranted(updated),
+    });
   });
 }
