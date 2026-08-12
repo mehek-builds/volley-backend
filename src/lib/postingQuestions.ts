@@ -262,6 +262,10 @@ export function resolvePrescript(
       context.jdText,
       context.postingCountry,
       context.postingCountryCode,
+      // Only standardizedTestAnswer reads this, and only to find the form's own wording for "I have
+      // no scores". Null lists arrive here for every text-shaped control and mean the same as
+      // omitting it: hold.
+      question.options ?? undefined,
     );
     if (known && 'value' in known) {
       out.push({ ...base, ask: false, answer: known.value, remembered: false });

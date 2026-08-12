@@ -693,11 +693,136 @@ export const STANDARDIZED_TEST_TYPE_QUESTION =
  * because it is exactly the family EEO_QUESTION misses: the word `disab` need never appear. */
 const TESTING_ACCOMMODATION_QUESTION = /\baccommodat/i;
 
+/* ---------------------------------------------------------------------------------------------
+ * A DECLARED ABSENCE IS A FACT, AND IT IS NOT THE SAME FACT AS AN UNSET COLUMN.
+ *
+ * `standardized_test_type` already carries three distinguishable states, and only two of them were
+ * ever read here:
+ *
+ *   'SAT' | 'ACT' | 'Both'   she took a test, and the score columns say which numbers
+ *   'None'                   SHE TOOK NEITHER. Her own declaration, made on the gaps screen.
+ *   undefined / null         never asked
+ *
+ * Before this, 'None' and undefined resolved identically on the two SCORE questions: both fell to
+ * `leaveIt`, so a student who had answered the question was held exactly as if she never had. That
+ * is the wrong failure for the one state where Litos does know the answer. "I have no SAT score" is
+ * a complete, true answer to "Provide your best result on SAT" whenever the control offers a way to
+ * say it.
+ *
+ * WHAT IT MAY DO WITH THAT FACT IS DELIBERATELY NARROW, and the narrowness is the whole design:
+ *
+ *   The control offers a way to say "none"     -> choose that option, in the employer's spelling.
+ *   The control offers options and none says   -> HOLD. Picking a score band she is not in is a
+ *   it                                            false claim, and "closest" is not a thing a
+ *                                                 score band has.
+ *   The control offers nothing (a free text    -> HOLD. This is the corpus's own shape: all three
+ *   or numeric box)                               real labels are required TEXT inputs. Typing
+ *                                                 "N/A" into a box the employer will read as a
+ *                                                 number is a guess about what that employer will
+ *                                                 accept, and the cost of guessing wrong on an
+ *                                                 academic record is not recoverable. Inventing a
+ *                                                 number is worse and is never on the table.
+ *
+ * So this UNBLOCKS the option-shaped controls and leaves the free-text ones blocked, on purpose,
+ * with a skipReason that says which of the two reasons it is. The held message names the declared
+ * absence rather than reusing "left for you", because those are different things to tell a student:
+ * one of them is a question she has not answered, and the other is a question she HAS answered that
+ * this particular employer gives her no room to answer.
+ */
+
+/* THE OPTION IS MATCHED WHOLE, AGAINST A CLOSED LITERAL SET. Anchored equality after normalization,
+ * with no substring rung anywhere, and that is what makes it capable of refusing: a list reading
+ * ["1400-1600", "1200-1399", "Below 1200"] matches nothing here and holds, where any containment
+ * rule would eventually find a word it liked. Every member is a phrase that means the applicant has
+ * no score to report and nothing else. "No" alone is deliberately absent: it is the answer to a
+ * different question, and a bare "No" on a list is far likelier to belong to one. */
+const NO_SCORE_OPTION_CLAIMS: ReadonlySet<string> = new Set([
+  'n a',
+  'na',
+  'none',
+  'neither',
+  'none of the above',
+  'none of these',
+  'not applicable',
+  'no score',
+  'no scores',
+  'no test score',
+  'no test scores',
+  'no standardized test scores',
+  'not taken',
+  'did not take',
+  'have not taken',
+  'i did not take',
+  'i have not taken',
+  'i have not taken a standardized test',
+  'i have no scores',
+  'i do not have a score',
+  'i do not have scores',
+]);
+
+/* WHAT IS NOT IN THAT SET, AND WHY IT IS THE MOST IMPORTANT PART OF IT.
+ *
+ * "Prefer not to say", "Decline to answer" and every neighbour of theirs are absent, and they were
+ * in the first draft. They are a DIFFERENT CLAIM. "I have no standardized test scores" says what is
+ * true of her record; "I prefer not to say" says she has something she is withholding, which is a
+ * statement about her intent that she never made and that an employer reads as exactly that.
+ *
+ * It is not academic. Option lists are iterated in the employer's order, so a control offering
+ * ["Prefer not to answer", "SAT", "ACT", "None"] would have answered a declared absence with a
+ * refusal she did not give, purely because the refusal was listed first. The two live in different
+ * sets so that a declared absence can only ever be spoken as an absence. */
+const OPTION_IS_A_REFUSAL_NOT_AN_ABSENCE: ReadonlySet<string> = new Set([
+  'prefer not to say',
+  'prefer not to answer',
+  'prefer not to disclose',
+  'decline to answer',
+  'decline to state',
+  'decline to respond',
+  'decline to self identify',
+  'i do not wish to answer',
+  'i do not wish to disclose',
+]);
+
+export function comparableOption(option: string): string {
+  return option.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** Exported so a test can assert the two sets are disjoint. See the note above the second one. */
+export const NO_SCORE_OPTION_TEXTS = NO_SCORE_OPTION_CLAIMS;
+export const REFUSAL_OPTION_TEXTS = OPTION_IS_A_REFUSAL_NOT_AN_ABSENCE;
+
+/**
+ * The employer's OWN wording for "I have none", or null when this control offers no such wording.
+ *
+ * Returns the option text verbatim rather than a normalized form, because the value is typed into
+ * the employer's control and has to be the string that control actually carries.
+ *
+ * A refusal option is stepped over rather than merely unmatched, so that a list carrying both a
+ * refusal and an absence answers with the absence whatever order they arrive in.
+ */
+export function noScoreOptionFor(options: readonly string[] | undefined): string | null {
+  if (!options) return null;
+  for (const option of options) {
+    const bare = comparableOption(option);
+    if (OPTION_IS_A_REFUSAL_NOT_AN_ABSENCE.has(bare)) continue;
+    if (NO_SCORE_OPTION_CLAIMS.has(bare)) return option;
+  }
+  return null;
+}
+
 function standardizedTestAnswer(
   label: string,
   ap: ApplicationProfileLike,
+  options?: readonly string[],
 ): { value: string } | { skipReason: string } | null {
   const leaveIt = (what: string) => ({ skipReason: `${what} left for you: "${label.slice(0, 60)}"` });
+  /* THE THIRD STATE'S OWN MESSAGE. Distinct from `leaveIt` in wording as well as in cause, so that
+   * a blocked row reports which of the two it is, and so that a test can tell them apart without
+   * reading the profile that produced them. */
+  const declaredNone = (what: string) => ({
+    skipReason: `${what}: you declared no standardized test scores and this field offers no way to say so: "${label.slice(0, 60)}"`,
+  });
+  const hasNoScores = ap.standardized_test_type === 'None';
 
   /* A SELF-IDENTIFICATION QUESTION IS NEVER A TEST SCORE, and this refusal is absolute.
    *
@@ -721,16 +846,39 @@ function standardizedTestAnswer(
 
   // A specific test named in the label wants that test's number, so these are matched before the
   // "which test" pattern, which also matches many of the same labels.
+  //
+  // A STORED SCORE STILL WINS OVER THE DECLARED ABSENCE, and the order says so rather than assuming
+  // the two can never both be present: routes/applicationProfile.ts refuses to store that
+  // combination, but this function is also reached with a row written before that check existed.
+  // Reporting the number she earned is the honest reading of a row that carries one.
   if (isSatScoreQuestion(label)) {
-    return ap.sat_score ? { value: ap.sat_score } : leaveIt('SAT score');
+    if (ap.sat_score) return { value: ap.sat_score };
+    if (!hasNoScores) return leaveIt('SAT score');
+    const none = noScoreOptionFor(options);
+    return none ? { value: none } : declaredNone('SAT result');
   }
   if (isActScoreQuestion(label)) {
-    return ap.act_score ? { value: ap.act_score } : leaveIt('ACT score');
+    if (ap.act_score) return { value: ap.act_score };
+    if (!hasNoScores) return leaveIt('ACT score');
+    const none = noScoreOptionFor(options);
+    return none ? { value: none } : declaredNone('ACT result');
   }
   if (STANDARDIZED_TEST_TYPE_QUESTION.test(label)) {
-    return ap.standardized_test_type
-      ? { value: ap.standardized_test_type }
-      : leaveIt('standardized test question');
+    if (!ap.standardized_test_type) return leaveIt('standardized test question');
+    /* THE EMPLOYER'S SPELLING OF "NONE", and only for 'None'.
+     *
+     * The stored word is Litos's, not the form's: a list reading ["SAT", "ACT", "Neither"] carries
+     * her answer under a name the enum does not use, and the closed-list matcher downstream would
+     * find nothing for the literal "None" and leave the control blank. Respelling is confined to
+     * this one value because it is the only one whose meaning survives translation: 'SAT' must
+     * never be re-spelled as anything, since every neighbouring option on such a list is a
+     * different claim about which exam she sat. Same shape as declineWordingForControl, which
+     * respells a refusal she already gave and never invents one. */
+    if (ap.standardized_test_type === 'None') {
+      const none = noScoreOptionFor(options);
+      if (none) return { value: none };
+    }
+    return { value: ap.standardized_test_type };
   }
   return null;
 }
@@ -4029,6 +4177,19 @@ export function resolveKnownAnswer(
   postingCountry?: JobCountry,
   /** Exact ISO country from the ATS country/location fields. Undefined is fail-closed. */
   postingCountryCode?: string,
+  /* THE CONTROL'S OWN OPTION LIST, as discovery reported it, and undefined is fail-closed here too.
+   *
+   * Read by exactly one rule, standardizedTestAnswer, and only to find the employer's own wording
+   * for "I have no scores" when the applicant has declared that she has none. It is NOT a general
+   * licence for this function to consult the option list: every other rule here decides its answer
+   * from the label and the stored profile, and lib/profileFieldResolution.ts owns the separate job
+   * of snapping a decided answer onto a real control. Threading a list in here is a narrow
+   * exception because a declared absence has no canonical spelling of its own: "None", "N/A" and
+   * "I have not taken it" are the same fact, and only the form knows which one it accepts.
+   *
+   * Callers that do not have a list omit it, and every one of them then behaves exactly as before:
+   * a declared absence with no list HOLDS. */
+  options?: readonly string[],
 ): { value: string } | { skipReason: string } | null {
   /* THE SELF-DECLARATIONS COME FIRST, before every classifier in this file.
    *
@@ -4262,7 +4423,7 @@ export function resolveKnownAnswer(
    * a disability question, which is measured and written up at the top of that function. Do not
    * move this line below the EEO branch and do not remove the refusal inside it: the two together
    * are what make both questions answerable. */
-  const standardizedTest = standardizedTestAnswer(label, ap);
+  const standardizedTest = standardizedTestAnswer(label, ap, options);
   if (standardizedTest) return standardizedTest;
 
   if (EEO_QUESTION.test(label)) {
