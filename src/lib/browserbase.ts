@@ -10,15 +10,25 @@ export const MANAGED_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY;
 export const MANAGED_DISCOVERY_ROLE_CAPABILITY = 'discovery-control-role-v1';
 /**
  * Stratus result capability that proves an `extract` carrying `requireVisible` was answered by a
- * real layout read, one entry per VISIBLE match, rather than by the ordinary first-match attribute
- * read.
+ * real layout read, one entry per match that is painting something, rather than by the ordinary
+ * first-match attribute read.
  *
- * IT EXISTS BECAUSE THE TWO RESULTS ARE THE SAME SHAPE. A runner older than the field drops it
- * during normalization and answers under the same label with the same `{selector,label,value}`
- * entry, so nothing in the payload distinguishes "filtered by layout" from "this runner never heard
- * of the question". The two answers differ on live employer pages - a 1380x0 hCaptcha container
- * reports its site key under one and nothing under the other - and the two services deploy on their
- * own schedules, so the difference has to be readable rather than assumed.
+ * WHAT IT IS FOR, and what it is deliberately NOT for. A runner older than the field drops it during
+ * normalization and answers under the same label with the same `{selector,label,value}` entry, so
+ * nothing else in the payload distinguishes "filtered by layout" from "this runner never heard of
+ * the question". This string is what makes the two legible, and the captcha contract test asserts
+ * every emission carries it, so the field silently ceasing to be honoured is a red suite rather than
+ * a quiet regression.
+ *
+ * NO PREDICATE BRANCHES ON IT, and that was tried and rejected rather than overlooked. The obvious
+ * use is to refuse to let corroborateManagedCaptchaBlockers overrule the runner's CAPTCHA claim when
+ * the evidence was never asked a layout question. It reads well and it is wrong: the only runners
+ * that lack the capability are OLDER runners, and the further back one is, the worse the predicate
+ * raising the claim. The guard would therefore be most active exactly where the claim it protects
+ * deserves the least trust, and it broke three tests that encode a policy bought with fourteen
+ * production stalls: an uncorroborated CAPTCHA verdict is dropped on an autonomous family, and a
+ * claim backed by nothing is not believed on any family. The fix for a blind channel is to stop the
+ * channel being blind, which is what `requireVisible` does.
  */
 export const MANAGED_CAPTCHA_VISIBILITY_CAPABILITY = 'extract-require-visible-v1';
 

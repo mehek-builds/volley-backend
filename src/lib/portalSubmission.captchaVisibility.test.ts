@@ -53,7 +53,6 @@ import {
   isCaptchaGatedFamily,
   managedCaptchaVerdictIsCorroborated,
   managedResultRequiresCaptchaAttention,
-  managedResultSupportsCaptchaVisibility,
   readManagedCaptchaEvidence,
 } from './portalSubmission';
 
@@ -142,8 +141,7 @@ for (const entry of contract.cases) {
       entry.expected.runnerBlocked,
       entry.name + ': the runner predicate is pinned to the same answer',
     );
-    assert.equal(managedResultSupportsCaptchaVisibility(result), true);
-    assert.equal(readManagedCaptchaEvidence(result).visibilityConfirmed, true);
+    assert.deepEqual(entry.emitted.capabilities, [MANAGED_CAPTCHA_VISIBILITY_CAPABILITY]);
   });
 }
 
@@ -201,8 +199,7 @@ const PRE_FIX_LEVER_EMISSION: ManagedBrowserResult = {
 };
 
 test('the measured pre-fix emission still reproduces the block, and says why it is trusted less', () => {
-  assert.equal(managedResultSupportsCaptchaVisibility(PRE_FIX_LEVER_EMISSION), false);
-  assert.equal(readManagedCaptchaEvidence(PRE_FIX_LEVER_EMISSION).visibilityConfirmed, false);
+  assert.equal(PRE_FIX_LEVER_EMISSION.capabilities, undefined);
   // The defect, reproduced. An attribute-only reading of this page cannot reach any other answer,
   // which is the argument for changing what the runner sends rather than how the rules read it.
   assert.equal(managedResultRequiresCaptchaAttention(PRE_FIX_LEVER_EMISSION), true);
@@ -264,27 +261,24 @@ test('a correct runner blocker survives on every container-only provider', () =>
   }
 });
 
-test('a blocker is never overruled by evidence that was not asked a layout question', () => {
-  /* The guard on the CLASS rather than on the three shapes above, and the one thing a page fixture
-   * cannot cover: a runner older than requireVisible answers under the same labels with the same
-   * entry shape, so its evidence is weaker than the claim it would be used to delete.
+test('the capability is asserted on the wire and branched on nowhere', () => {
+  /* WHAT WAS TRIED AND REJECTED, kept as a test so the next reader does not re-derive it.
    *
-   * Same page, same empty evidence, one difference: whether the runner said it performed a layout
-   * read. With the capability the blocker is dropped, which is the behaviour that recovered the
-   * fourteen prod stalls of 2026-08-08. Without it the blocker is kept. */
+   * The obvious use for the capability is to refuse to let corroborateManagedCaptchaBlockers delete
+   * the runner's CAPTCHA claim when this repo's counter-evidence was never asked a layout question.
+   * It reads well and it is backwards: the only runners lacking the capability are OLDER runners,
+   * and the older one is, the worse the predicate raising the claim, so the guard would be most
+   * active exactly where the claim deserves least trust. It also reversed a policy bought with
+   * fourteen production stalls.
+   *
+   * So the capability is a wire assertion, not a branch, and this pins both halves of that: the
+   * emission must carry it, and the corroboration answer must not depend on it. */
   const badge = contract.cases.find((one) => one.name === 'greenhouse_badge_only')!;
   const withCapability = resultOf(badge);
   const withoutCapability: ManagedBrowserResult = { ...withCapability, capabilities: [] };
-  assert.deepEqual(readManagedCaptchaEvidence(withCapability).sitekeys, []);
-  assert.deepEqual(readManagedCaptchaEvidence(withoutCapability).sitekeys, []);
+  assert.deepEqual(badge.emitted.capabilities, [MANAGED_CAPTCHA_VISIBILITY_CAPABILITY]);
   assert.deepEqual(corroborateManagedCaptchaBlockers('lever', [CAPTCHA_BLOCKER], withCapability), []);
-  assert.deepEqual(
-    corroborateManagedCaptchaBlockers('lever', [CAPTCHA_BLOCKER], withoutCapability),
-    [CAPTCHA_BLOCKER],
-  );
-  // And a result this repo never got at all is the same case: no read happened, so nothing may be
-  // deleted on the strength of one.
-  assert.deepEqual(corroborateManagedCaptchaBlockers('lever', [CAPTCHA_BLOCKER], null), [CAPTCHA_BLOCKER]);
+  assert.deepEqual(corroborateManagedCaptchaBlockers('lever', [CAPTCHA_BLOCKER], withoutCapability), []);
 });
 
 test('the badge-only pages carry no anchor evidence at all, with or without size=invisible', () => {

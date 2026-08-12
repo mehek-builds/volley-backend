@@ -1,6 +1,5 @@
 import type { Page } from 'playwright-core';
 import {
-  MANAGED_CAPTCHA_VISIBILITY_CAPABILITY,
   MANAGED_DISCOVERY_ROLE_CAPABILITY,
   MANAGED_SUBMIT_CHOOSER_POLICY,
   type ManagedBrowserAction,
@@ -7646,20 +7645,6 @@ export function managedExtractedValue(value: unknown): string | null {
 }
 
 export type ManagedCaptchaEvidence = {
-  /**
-   * Whether the runner filtered these reads through a real layout read, one entry per VISIBLE node.
-   *
-   * When true, every list below enumerates nodes that are painting something, so an entry IS a
-   * rendered thing and the multiset subtraction over site keys is a comparison of nodes rather than
-   * a hope about the runner's echo semantics. When false the lists are the older attribute-only
-   * reading: a widget container with no box still reports its site key, which is the reading that
-   * blocked three live Lever postings on 2026-08-12. False is the pre-rollout state of a runner, not
-   * a statement about the page.
-   *
-   * READ BY corroborateManagedCaptchaBlockers, which refuses to overrule the runner's CAPTCHA claim
-   * with counter-evidence weaker than the claim. It is a decision, not a label.
-   */
-  visibilityConfirmed: boolean;
   /** A data-sitekey outside the badge: a widget container is on the page. First one seen. */
   sitekey: string | null;
   /** EVERY sitekey seen outside the badge. One entry per widget container on the page. */
@@ -7700,31 +7685,11 @@ function managedExtractedAll(
   return values;
 }
 
-/**
- * Did the runner that produced this result answer the evidence reads with a real layout read?
- *
- * NOT a decision this repo can infer from the payload. An older runner drops the `requireVisible`
- * field it does not know and answers under the same labels with the same entry shape, so a site key
- * reported by a 1380x0 container and a site key reported by a 304x78 checkbox are indistinguishable
- * unless the runner says which question it answered. Absence therefore means "this evidence is the
- * old attribute-only reading", never "there was nothing to see".
- *
- * It has one caller and that caller makes a decision with it: corroborateManagedCaptchaBlockers will
- * not delete the runner's CAPTCHA blocker on the strength of evidence that was never asked a layout
- * question. See the argument there for what that costs during a rollout.
- */
-export function managedResultSupportsCaptchaVisibility(
-  result: ManagedBrowserResult | null | undefined,
-): boolean {
-  return result?.capabilities?.includes(MANAGED_CAPTCHA_VISIBILITY_CAPABILITY) === true;
-}
-
 export function readManagedCaptchaEvidence(result: ManagedBrowserResult | null): ManagedCaptchaEvidence {
   const sitekeys = managedExtractedAll(result, 'captcha_challenge', MANAGED_CAPTCHA_CHALLENGE_SELECTOR);
   const anchorSrcs = managedExtractedAll(result, 'captcha_anchor', MANAGED_CAPTCHA_ANCHOR_SELECTOR);
   const sizes = managedExtractedAll(result, 'captcha_size', MANAGED_CAPTCHA_SIZE_SELECTOR);
   return {
-    visibilityConfirmed: managedResultSupportsCaptchaVisibility(result),
     sitekey: sitekeys[0] ?? null,
     sitekeys,
     invisibleSitekeys: managedExtractedAll(
@@ -8082,29 +8047,6 @@ export function corroborateManagedCaptchaBlockers(
 ): string[] {
   if (!blockersIncludeCaptcha(blockers)) return [...blockers];
   if (isCaptchaGatedFamily(portal)) return [...blockers];
-  /* A BLOCKER MAY ONLY BE OVERRULED BY A READ AT LEAST AS GOOD AS THE ONE THAT RAISED IT.
-   *
-   * The runner's claim comes from a predicate that walks real nodes and asks the browser what it is
-   * painting. This function's counter-evidence comes from six attribute extracts. When those extracts
-   * were NOT filtered by a layout read, the counter-evidence is strictly weaker than the claim it is
-   * being used to delete, and deleting a correct blocker sends an application into a challenge it
-   * cannot clear. That is not the theoretical version of this: it is the defect found in review on
-   * this very change, where a container of 1380x0 painting a 303x78 checkbox produced no evidence at
-   * all and this line dropped a correct blocker on hCaptcha, on Turnstile, and on an open image grid.
-   *
-   * The subtree read fixes those three shapes. This guards the CLASS, in the one dimension a fixture
-   * cannot cover: a runner that predates `requireVisible` returns the old attribute-only reading
-   * under the same labels, and nothing else in the payload distinguishes it.
-   *
-   * WHAT IT COSTS, honestly. During a rollout window, or a Stratus rollback, a CAPTCHA claim this
-   * repo would previously have dropped is kept, and a kept blocker strands an application. That is
-   * bounded by what the claim is worth: the runner's predicate was measured on 2026-08-12 across 30
-   * live postings and raised CAPTCHA on exactly one, the one real challenge. Keeping a claim that
-   * precise while we cannot check it is the correct direction. A rollback PAST that predicate fix
-   * would restore its false positives, and this line would then keep them; that is a deliberate act
-   * with a visible symptom, not a silent failure.
-   */
-  if (!managedResultSupportsCaptchaVisibility(result)) return [...blockers];
   if (managedCaptchaVerdictIsCorroborated(portal, result)) return [...blockers];
   return blockers.filter((blocker) => blocker !== CAPTCHA_BLOCKER);
 }
