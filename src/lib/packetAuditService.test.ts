@@ -9,6 +9,7 @@ import {
   validStoredPdf,
 } from './packetAuditService';
 import { createPdfGenerationBinding, pdfGenerationBindingIsCurrent } from './pdfGenerationBinding';
+import { mergeSubmittedApplicationReviewQuestions } from './applicationReview';
 
 test('stored packet PDF requires an exact PDF signature', () => {
   assert.equal(validStoredPdf({ bytes: Buffer.from('%PDF-1.7\npacket') }), true);
@@ -746,4 +747,239 @@ test('current packet identities require the explicit profile resume email and ac
     loadCurrentResumeEmail: async () => 'mehekman@usc.edu',
     resolveCurrentApplicantEmail: async () => ({ ...choice, address: 'app-other@apply.trylitos.com' }),
   }), /does not match/i);
+});
+
+/* ---- packet_version binds what the employer receives, not who typed it ----
+ *
+ * THE LIVE DEADLOCK, application fc6eade3 on 2026-08-12, reproduced.
+ *
+ * She edited her answers on the review screen. applyApplicationReviewEdit stamps answer_source and
+ * answer_reviewed_at onto every answered question, the audit hashed them into packet_version, and
+ * she acknowledged that version. Then the send gate rebuilt the same questions through
+ * refreshKnownQuestionAnswers, which dropped that provenance from the two EEO questions whose values
+ * recomputed to exactly themselves - "Female" and "South Asian", byte for byte - and hashed the
+ * result. Two records that differed by nothing the employer would ever see produced a different
+ * packet_version, verifyCurrentPacketAudit answered packet_stale, and the dashboard printed it.
+ *
+ * The audit could not clear it. That route rebuilds from the stored questions WITH provenance while
+ * the send gate recomputes WITHOUT it, so re-auditing converged on the audit's own hash, forever.
+ * Audit, reload, re-audit, fill: same refusal every time, on a packet nothing had touched.
+ */
+const provenanceRow = (questions: unknown[], packetAudit: unknown, acknowledgement?: unknown) => {
+  const pdfBytes = Buffer.from('%PDF-1.7\npacket');
+  const spec = {
+    target_role: 'Engineer',
+    school: '', degree: '', grad_date: '', gpa: '', school_location: '', coursework: '',
+    experience: [], skills: [],
+    _contact: { email: 'student@example.com' },
+    _applicant_email: {
+      address: 'app-owner@apply.trylitos.com', source: 'litos_alias', reason: 'deliverable', tracked: true,
+      decided_at: '2026-08-11T00:00:00.000Z',
+    },
+    _application_email: {
+      alias: 'app-owner@apply.trylitos.com', forwards_to: 'student@example.com', mode: 'litos_application_alias',
+    },
+    _review: {
+      jd_text: 'Build reliable systems.',
+      questions,
+      questions_reviewed_at: '2026-08-12T13:45:27.969Z',
+      status: 'questions_ready',
+      applicant_email: {
+        address: 'app-owner@apply.trylitos.com', source: 'litos_alias', reason: 'deliverable', tracked: true,
+        decided_at: '2026-08-11T00:00:00.000Z',
+      },
+      applicant_snapshot: {
+        profile: { email: 'app-owner@apply.trylitos.com', experience: [], skills: [], school: '', grad_year: 0 },
+        application_profile: {},
+      },
+      packet_audit: packetAudit,
+      ...(acknowledgement ? { packet_audit_acknowledgement: acknowledgement } : {}),
+    },
+  };
+  return {
+    id: 'application-1',
+    user_id: 'owner-1',
+    resume_object_key: 'users/owner-1/resumes/application-1.pdf',
+    job_context: { company: 'Acme', role: 'Engineer' },
+    spec: {
+      ...spec,
+      _quality: {
+        pdfGenerationBinding: createPdfGenerationBinding(
+          spec, 'users/owner-1/resumes/application-1.pdf', pdfBytes, 'student@example.com',
+        ),
+      },
+    },
+  };
+};
+
+/** The answers exactly as the applicant left them, carrying the record of her having left them. */
+const reviewedQuestions = [
+  {
+    id: 'q-gender',
+    question: 'what is your gender/gender identity?',
+    answer: 'Female',
+    kind: 'required' as const,
+    required: false,
+    portal_selector: '#gender',
+    answer_source: 'applicant_review' as const,
+    answer_reviewed_at: '2026-08-12T13:45:27.969Z',
+  },
+  {
+    id: 'q-race',
+    question: 'what is your race/ethnicity?',
+    answer: 'South Asian',
+    kind: 'required' as const,
+    required: false,
+    portal_selector: '#race',
+    answer_source: 'applicant_review' as const,
+    answer_reviewed_at: '2026-08-12T13:45:27.969Z',
+  },
+];
+
+/** The same answers as the send gate rebuilds them: identical values, provenance dropped. */
+const sendGateQuestions = reviewedQuestions.map(
+  ({ answer_source: _source, answer_reviewed_at: _reviewedAt, ...rest }) => rest,
+);
+
+const packetPdfBytes = Buffer.from('%PDF-1.7\npacket');
+const loadPacketPdf = async () => ({ bytes: packetPdfBytes, contentType: 'application/pdf' });
+const skipEmailCheck = async () => {};
+
+const auditOverQuestions = (questions: unknown[]) => {
+  const row = provenanceRow(questions, undefined);
+  return createPacketAudit({
+    ownerId: row.user_id,
+    applicationId: row.id,
+    jdText: 'Build reliable systems.',
+    spec: row.spec,
+    jobContext: row.job_context,
+    questions,
+    applicantSnapshot: row.spec._review.applicant_snapshot,
+    resumeEmail: 'student@example.com',
+    applicantEmail: 'app-owner@apply.trylitos.com',
+    pdfObjectKey: row.resume_object_key,
+    pdfBytes: packetPdfBytes,
+    editedTerms: [],
+    rejected: [],
+    degraded: false,
+    clauses: [{ text: 'Build reliable systems.', start: 0, end: 23, verdict: 'missing' as const }],
+    terms: { covered: [], missing: [], edited: [] },
+  });
+};
+
+const acknowledgementOf = (audit: ReturnType<typeof createPacketAudit>) => ({
+  ownerSha256: audit.bindings.ownerSha256,
+  applicationId: audit.bindings.applicationId,
+  audit_digest: audit.audit_digest,
+  packet_version: audit.packet_version,
+  pdfSha256: audit.bindings.pdf.sha256,
+  pdfSizeBytes: audit.bindings.pdf.sizeBytes,
+  acknowledged_at: '2026-08-12T13:45:59.101Z',
+});
+
+test('a packet she reviewed still sends after the gate rebuilds its questions without provenance', async () => {
+  // Built from the questions AS STORED, provenance and all, exactly as createAndPersistPacketAudit
+  // builds it from review.questions. packetBindings is what narrows them.
+  const audit = auditOverQuestions(reviewedQuestions);
+  const row = provenanceRow(reviewedQuestions, audit, acknowledgementOf(audit));
+
+  const auditSide = await currentAcknowledgedPacketAudit(row as never, {
+    loadPdf: loadPacketPdf, validateApplicantEmail: skipEmailCheck,
+  });
+  assert.equal(
+    auditSide.valid ? 'valid' : auditSide.reason,
+    'valid',
+    'the audit route must find the packet she acknowledged current',
+  );
+
+  // The send gate substitutes its own rebuilt list, exactly as POST /submit-request does.
+  const sendSide = await currentAcknowledgedPacketAudit(row as never, {
+    questions: sendGateQuestions as never,
+    loadPdf: loadPacketPdf, validateApplicantEmail: skipEmailCheck,
+  });
+  assert.equal(
+    sendSide.valid ? 'valid' : sendSide.reason,
+    'valid',
+    'the send gate must agree: dropping answer_source changes nothing the employer receives',
+  );
+  assert.equal(
+    auditSide.valid && sendSide.valid && auditSide.audit.packet_version === sendSide.audit.packet_version,
+    true,
+    'both sides must resolve the same packet_version',
+  );
+});
+
+test('the send gate still refuses when an answer itself changed', async () => {
+  const audit = auditOverQuestions(reviewedQuestions);
+  const row = provenanceRow(reviewedQuestions, audit, acknowledgementOf(audit));
+
+  const edited = sendGateQuestions.map((question) => (question.id === 'q-gender'
+    ? { ...question, answer: 'Decline to self-identify' }
+    : question));
+  const verdict = await currentAcknowledgedPacketAudit(row as never, {
+    questions: edited as never,
+    loadPdf: loadPacketPdf, validateApplicantEmail: skipEmailCheck,
+  });
+
+  assert.equal(verdict.valid, false, 'a different value reaches the employer, so the approval is spent');
+  assert.deepEqual(verdict.valid ? null : verdict.code, 'PACKET_AUDIT_STALE');
+  assert.deepEqual(verdict.valid ? null : verdict.reason, 'packet_stale');
+});
+
+test('the acknowledgement is still spent by a question appearing, disappearing or being relabelled', async () => {
+  const audit = auditOverQuestions(reviewedQuestions);
+  const row = provenanceRow(reviewedQuestions, audit, acknowledgementOf(audit));
+  const run = async (questions: unknown[]) => currentAcknowledgedPacketAudit(row as never, {
+    questions: questions as never, loadPdf: loadPacketPdf, validateApplicantEmail: skipEmailCheck,
+  });
+
+  const added = await run([...sendGateQuestions, {
+    id: 'q-veteran', question: 'veteran status', answer: 'Decline', kind: 'required' as const, required: false,
+  }]);
+  assert.equal(added.valid, false, 'a question the employer asks that she never saw invalidates');
+
+  const removed = await run([sendGateQuestions[0]]);
+  assert.equal(removed.valid, false, 'a question dropped from the packet invalidates');
+
+  const relabelled = await run(sendGateQuestions.map((question) => (question.id === 'q-race'
+    ? { ...question, question: 'what is your ethnicity?' }
+    : question)));
+  assert.equal(relabelled.valid, false, 'the label the answer sits under is part of what she approved');
+
+  const rerouted = await run(sendGateQuestions.map((question) => (question.id === 'q-race'
+    ? { ...question, portal_selector: '#ethnicity' }
+    : question)));
+  assert.equal(rerouted.valid, false, 'the control an answer is typed into is part of the packet');
+});
+
+/* THE SECOND DOOR, and the reason the narrowed hash had to be the load-bearing fix.
+ *
+ * mergeSubmittedApplicationReviewQuestions strips answer_source and answer_reviewed_at whenever the
+ * submitted record is not identical to the stored one - including the no-match branch, which fires
+ * for any stored question the review screen did not post back. The review screen is separately known
+ * to serve raw values where the packet holds resolved ones, so this door opens without
+ * refreshKnownQuestionAnswers being involved at all. Keeping provenance out of packet_version closes
+ * it too, rather than closing one door and leaving the other for the next session to rediscover. */
+test('provenance stripped by the submitted-answer merge does not spend the acknowledgement', async () => {
+  const audit = auditOverQuestions(reviewedQuestions);
+  const row = provenanceRow(reviewedQuestions, audit, acknowledgementOf(audit));
+
+  const merged = mergeSubmittedApplicationReviewQuestions(
+    reviewedQuestions,
+    // Posted back under a re-issued id, so the exact-reviewed-identity test fails and provenance is
+    // dropped even though every answer is unchanged.
+    sendGateQuestions.map((question) => ({ ...question, id: `${question.id}-reissued` })),
+    '2026-08-12T13:45:27.969Z',
+  );
+  assert.equal(merged.some((question) => question.answer_source !== undefined), false,
+    'the merge did strip the provenance, which is the precondition this test exists for');
+
+  const verdict = await currentAcknowledgedPacketAudit(row as never, {
+    questions: merged as never, loadPdf: loadPacketPdf, validateApplicantEmail: skipEmailCheck,
+  });
+  assert.equal(
+    verdict.valid ? 'valid' : verdict.reason,
+    'valid',
+    'the merge door produces the same packet, so it must not produce packet_stale either',
+  );
 });

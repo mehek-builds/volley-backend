@@ -1586,6 +1586,42 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
         ? withProvenance.answer_option_source
         : undefined;
       if (storedOptionAnswerIsCurrent(question.answer, derivedFrom, known.value)) return question;
+      /* NOTHING IS BEING REPLACED, so the applicant-claim survives. See APPLICANT_CLAIM_FIELDS.
+       *
+       * Every strip in this file is licensed by one sentence: a record left beside a value it was
+       * not written for is a lie the next reader cannot detect. That sentence is about a value that
+       * CHANGED. When the resolver recomputes the answer already on the record, byte for byte, "she
+       * read this exact text and let it stand" is as true as it was a moment ago, and returning a
+       * stripped copy asserts a change that did not happen.
+       *
+       * It also cost a send. answer_source and answer_reviewed_at were inside packet_version, so
+       * stripping them from two EEO questions whose answers recomputed to themselves moved the hash
+       * and the send gate answered packet_stale on a packet nothing had touched. The hash is
+       * separately narrowed so provenance can no longer move it, and THAT is the load-bearing fix
+       * (see PACKET_VISIBLE_QUESTION_FIELDS); this one stops the record lying about itself, which is
+       * worth having on its own.
+       *
+       * THE ANSWER-CLAIMS STILL DROP, and that asymmetry is not a compromise with the tests. A
+       * consent that round-trips through the review screen comes back as the RESOLVED constant
+       * "Yes" rather than the "I agree" she was shown, and a grant record beside "Yes" claims an
+       * acceptance of a value no control ever offered. Dropping it is how that record recovers on
+       * the next pass; keying currency on the permission alone is what made a recoverable
+       * divergence permanent once before. Same for answer_option_source, whose whole job is to say
+       * what a band was snapped from. Only the applicant-claim is safe to carry here, so only the
+       * applicant-claim is carried.
+       *
+       * STRICT EQUALITY, deliberately. A case or spacing difference is a different string on the
+       * employer's form: "Decline To Self Identify" is not the option "Decline to self-identify",
+       * and one of them is what gets typed. Those keep falling through to be replaced. */
+      if (known.value === question.answer) {
+        const {
+          answer_option_source: _optionSource,
+          consent_permission_granted_at: _grantedAt,
+          consent_permission_version: _grantVersion,
+          ...withApplicantClaim
+        } = withProvenance;
+        return withApplicantClaim as T;
+      }
       return { ...withoutProvenance(), answer: known.value };
     }
     const currentResolverRefuses = Boolean(known && 'skipReason' in known)
