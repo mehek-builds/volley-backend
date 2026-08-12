@@ -28,7 +28,11 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { submissionFailureReview } from './submissionRunner';
-import { CaptchaUnresolvedError, ManagedActionBudgetError } from '../lib/portalSubmission';
+import {
+  assertManagedRequiredFieldsConfirmed,
+  CaptchaUnresolvedError,
+  ManagedActionBudgetError,
+} from '../lib/portalSubmission';
 import { isManagedNoSubmitControl, submissionProvablyNotSent, unwrapThrownErrorMessage } from '../lib/managedSubmitOutcome';
 import { submitRequestDisposition } from '../lib/submissionSafety';
 
@@ -301,5 +305,156 @@ describe('the pre-click reopen key matches the stored form and nothing looser', 
     assert.equal(isManagedNoSubmitControl(persisted.submission_error ?? ''), false,
       'the sentence is not the chooser sentence, so only the typed record can be doing this');
     assert.equal(submissionProvablyNotSent(persisted), true);
+  });
+});
+
+/* AN ORDINARY BLOCKED SUBMISSION IS NOT AN UNCERTAIN ONE, AND MUST NOT LOCK THE PACKET.
+ *
+ * The mirror image of everything above. That rule says a stop that cannot be proven pre-click keeps
+ * its claim and takes the unverified exit, which is right, and the cost of applying it to a stop
+ * that CAN be proven pre-click is a packet nobody can move.
+ *
+ * WHAT WAS MEASURED on origin/main @ 8b8efcd. A run against a form with one required field left
+ * blank: the runner withheld the click (submitOutcome.pressed false, submissionOutcome 'blocked')
+ * and named the field in pass.unresolved using its own sentence, stratus-browser-cloud@4748871
+ * managed-browser.js:2928. The backend's unresolved allowlist admits only selectors and labels, so
+ * that sentence made the whole proof unreadable, and since PR 506 an unreadable proof means "the
+ * click state is unknown". The row came out as:
+ *
+ *     attention_reason  "Litos pressed Send and the page never showed a confirmation it could read"
+ *     submission_attempted_at  set
+ *     unverified_submission    written, unresolved
+ *     claim                    kept
+ *
+ * Litos had not pressed Send. The applicant is sent to check an employer portal for an application
+ * that was never submitted, the claim locks the ordinary re-run path, and the unresolved unverified
+ * record blocks a fresh application to the same posting. This fires on any blocked submission.
+ */
+describe('a blocked submission releases, and is never dressed up as a possible send', () => {
+  function blockedRun(unresolved: string[]) {
+    return {
+      submitOutcome: {
+        pressed: false, state: 'not_attempted', source: null, evidence: null, message: null, formStillPresent: true,
+      },
+      requiredFieldConfirmation: {
+        version: 2,
+        status: 'blocked',
+        passes: [{
+          submitKind: 'application',
+          scope: {
+            scopeKind: 'form',
+            formFingerprint: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+            submitFingerprint: '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',
+            formMatchCount: 1,
+            submitMatchCount: 1,
+            requiredControlCount: 1,
+            sameNode: true,
+          },
+          requiredControls: [{
+            selector: 'input[name="start_date"]', label: 'Start date', fieldType: 'text', matchCount: 1,
+          }],
+          attempts: [{
+            selector: 'input[name="start_date"]',
+            label: 'Start date',
+            fieldType: 'text',
+            outcome: 'failed',
+            attemptCount: 2,
+            reason: 'This requires an answer',
+          }],
+          retries: 1,
+          unresolved,
+          submissionOutcome: 'blocked',
+        }],
+      },
+    };
+  }
+
+  /** The error the real validator throws. Nothing here hand-builds the error it asserts on. */
+  function refusalFor(result: unknown): unknown {
+    try {
+      assertManagedRequiredFieldsConfirmed(result, 'application');
+    } catch (error) {
+      return error;
+    }
+    return assert.fail('a blocked proof must never be accepted');
+  }
+
+  /* The exact claim that must not be made about a run that withheld the click. */
+  const CLAIMS_A_SEND = /Litos pressed Send/;
+
+  test('the runner naming a blank field in its own words releases the packet', () => {
+    const persisted = submissionFailureReview(
+      claimedRunning(),
+      refusalFor(blockedRun(['"Start date" is required and is still empty'])),
+    );
+
+    assert.doesNotMatch(persisted.attention_reason ?? '', CLAIMS_A_SEND,
+      'the runner reported withholding the click, so nothing reached the employer');
+    assert.equal(persisted.submission_attempted_at, undefined);
+    assert.equal(persisted.unverified_submission, undefined,
+      'there is no application to go and look for, so she must not be asked to look');
+    assert.equal(persisted.submission_stop?.before_click, true);
+    assert.ok(exitIsAnOrdinaryRerun(persisted),
+      'exit: POST /applications/:id/submit-request, once she answers the question');
+  });
+
+  test('it writes the same row the bare label already wrote, so runner wording cannot change it', () => {
+    const sentence = submissionFailureReview(
+      claimedRunning(), refusalFor(blockedRun(['"Start date" is required and is still empty'])),
+    );
+    const bare = submissionFailureReview(claimedRunning(), refusalFor(blockedRun(['Start date'])));
+
+    assert.equal(sentence.status, bare.status);
+    assert.equal(sentence.submission_stop?.reason, bare.submission_stop?.reason);
+    assert.equal(sentence.submission_stop?.before_click, bare.submission_stop?.before_click);
+    assert.equal(sentence.submission_claimed_at, bare.submission_claimed_at);
+    assert.equal(sentence.unverified_submission, bare.unverified_submission);
+    assert.equal(sentence.submission_error, bare.submission_error,
+      'the field is named either way, so the applicant is told the same thing');
+  });
+
+  test('every other sentence the runner can emit releases the same way', () => {
+    for (const sentence of [
+      'A required field on the form has no label Litos can read, and is still empty',
+      'Required-field readiness scan failed',
+      'Selectorless required field',
+      'Bound submit control or application form was replaced before submission',
+      'Bound application form or submit identity changed during confirmation',
+      'The bound application form still shows an unmatched validation error: Please complete this field. ',
+    ]) {
+      const persisted = submissionFailureReview(claimedRunning(), refusalFor(blockedRun([sentence])));
+      assert.doesNotMatch(persisted.attention_reason ?? '', CLAIMS_A_SEND, sentence);
+      assert.equal(persisted.unverified_submission, undefined, sentence);
+      assert.ok(exitIsAnOrdinaryRerun(persisted), sentence);
+    }
+  });
+
+  /* THE HALF THAT MUST NOT MOVE. PR 506 exists because a proof this service cannot read on a run
+     that DID press is a genuine unknown, and calling it "nothing was sent" costs a duplicate
+     application. That reading is untouched. */
+  test('an unreadable proof on a run that pressed submit is still an uncertain send', () => {
+    const pressed = blockedRun(['Start date']);
+    pressed.submitOutcome.pressed = true;
+    (pressed.requiredFieldConfirmation.passes[0]!.scope as Record<string, unknown>).somethingNew = true;
+    const persisted = submissionFailureReview(claimedRunning(), refusalFor(pressed));
+
+    assert.equal(persisted.submission_stop?.reason, 'confirmation_unproven');
+    assert.equal(persisted.submission_stop?.before_click, false);
+    assert.match(persisted.attention_reason ?? '', CLAIMS_A_SEND);
+    assert.ok(exitIsTheUnverifiedResolutionRoute(persisted),
+      'exit: POST /applications/:id/submission/unverified');
+    assert.equal(persisted.submission_claimed_at, CLAIMED_AT, 'and the lock stays on');
+  });
+
+  test('a runner that says nothing about the press is still an uncertain send', () => {
+    const silent = blockedRun(['Start date']) as Record<string, unknown>;
+    delete silent.submitOutcome;
+    ((silent.requiredFieldConfirmation as { passes: Array<{ scope: Record<string, unknown> }> })
+      .passes[0]!.scope).somethingNew = true;
+    const persisted = submissionFailureReview(claimedRunning(), refusalFor(silent));
+
+    assert.equal(persisted.submission_stop?.reason, 'confirmation_unproven');
+    assert.ok(exitIsTheUnverifiedResolutionRoute(persisted),
+      'exit: POST /applications/:id/submission/unverified');
   });
 });
