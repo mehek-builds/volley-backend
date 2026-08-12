@@ -299,6 +299,74 @@ function bindingIssues(input: PacketBindingInput): string[] {
   return issues;
 }
 
+/* ---- what a question CONTRIBUTES TO PACKET IDENTITY, as against what it merely records ----
+ *
+ * packet_version is a hash over the packet and the acknowledgement pins it, so the question this
+ * list answers is not "what is on the record" but "what would make this a DIFFERENT packet than the
+ * one she approved". The employer receives a label, a value, and the control the value is typed
+ * into. It never receives who typed the value or when she last looked at it.
+ *
+ * THIS IS THE FIX FOR A DEADLOCK, and the deadlock is what proves the distinction is real.
+ * Application fc6eade3, 2026-08-12: she edited her answers, applyApplicationReviewEdit stamped
+ * answer_source and answer_reviewed_at onto every one of them, the audit hashed those in, and she
+ * acknowledged the result. The send gate then rebuilt the same questions through
+ * refreshKnownQuestionAnswers, which dropped that provenance from the two EEO questions whose values
+ * recomputed to exactly themselves - "Female" and "South Asian", byte for byte - and hashed what
+ * came back. Two records differing by nothing the employer would ever see produced a different
+ * packet_version, verifyCurrentPacketAudit answered packet_stale, and no re-audit could clear it:
+ * the audit rebuilds WITH the provenance and the gate recomputes WITHOUT it, so the two converge on
+ * different hashes by construction, forever.
+ *
+ * Narrowing does not weaken the gate. A change to `answer`, to the label above it, or to the control
+ * it fills is a change to what the employer receives and still spends the acknowledgement, which is
+ * the property the gate exists for. What stops spending it is a change nobody outside the database
+ * can observe.
+ *
+ * IT LIVES IN packetBindings, NOT IN THE SERVICE THAT CALLS IT. createPacketAudit and
+ * verifyCurrentPacketAudit both come through here, so the constructor and the verifier cannot
+ * disagree about what a packet is. Narrowing one call site up in packetAuditService instead left the
+ * constructor hashing whatever it was handed, which is the same class of drift as the bug: a
+ * regression test could build an audit that bypassed the projection and pass while production
+ * deadlocked.
+ *
+ * AN ALLOW-LIST, NEVER A DENY-LIST. A deny-list re-widens itself the day someone adds a field: the
+ * new key is not denied, so it silently joins the hash and every stored acknowledgement dies with a
+ * message nobody can act on. Here a new key is simply not let in, and the compile-time partition in
+ * applicationReview.ts refuses to build until someone says which side it belongs on. */
+export const PACKET_VISIBLE_QUESTION_FIELDS = [
+  'id',
+  'question',
+  'answer',
+  'kind',
+  'required',
+  'portal_selector',
+  'portal_input_type',
+  'ats_api_field',
+] as const;
+
+/**
+ * The questions as the PACKET sees them: label, value, and the control each one fills.
+ *
+ * Anything that is not a list of plain objects is returned untouched, so malformed input still
+ * reaches bindingIssues' canonical-JSON check and is rejected there rather than being quietly
+ * reshaped into something that hashes.
+ *
+ * Absent optional keys are omitted rather than written as undefined, so a question that never had a
+ * portal_selector and one whose selector is explicitly undefined are the same packet.
+ */
+export function packetVisibleQuestions(questions: unknown): unknown {
+  if (!Array.isArray(questions)) return questions;
+  return questions.map((question) => {
+    if (!question || typeof question !== 'object' || Array.isArray(question)) return question;
+    const source = question as Record<string, unknown>;
+    const visible: Record<string, unknown> = {};
+    for (const field of PACKET_VISIBLE_QUESTION_FIELDS) {
+      if (source[field] !== undefined) visible[field] = source[field];
+    }
+    return visible;
+  });
+}
+
 function packetBindings(input: PacketBindingInput): PacketAuditBindings {
   const normalizedSpec = normalizeSpec(input.spec);
   return {
@@ -307,7 +375,7 @@ function packetBindings(input: PacketBindingInput): PacketAuditBindings {
     jdSha256: createHash('sha256').update(input.jdText).digest('hex'),
     specSha256: packetAuditSha256(normalizedSpec),
     jobContextSha256: packetAuditSha256(input.jobContext),
-    questionsSha256: packetAuditSha256(input.questions),
+    questionsSha256: packetAuditSha256(packetVisibleQuestions(input.questions)),
     applicantSnapshotSha256: packetAuditSha256(input.applicantSnapshot),
     resumeContactEmailSha256: packetAuditSha256(input.resumeEmail.trim().toLowerCase()),
     applicantEmailSha256: packetAuditSha256(input.applicantEmail.trim().toLowerCase()),

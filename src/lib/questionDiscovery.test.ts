@@ -3295,3 +3295,109 @@ test('the discovery walk falls through to a heading only for a handle, and only 
   // A control's own placeholder is not a question.
   assert.match(DISCOVER_QUESTIONS_SCRIPT, /if \(text && !genericControlText\(text\)\) return text;/);
 });
+
+/* ---- a resolver that agrees is not a resolver that replaced anything ----
+ *
+ * The strip below the `known.value` branch is licensed by one sentence: a derivation left beside a
+ * value it was not derived from is a lie the next reader cannot detect. That sentence is about a
+ * value that CHANGED. When the resolver recomputes the answer already on the record, byte for byte,
+ * the record still describes its own answer and returning a stripped copy asserts a change that did
+ * not happen. On application fc6eade3 that assertion cost a send: answer_source and
+ * answer_reviewed_at were inside packet_version, so stripping them from two questions whose answers
+ * recomputed to themselves moved the hash and the send gate answered packet_stale.
+ */
+test('a resolved answer equal to the stored one keeps the record of who answered', () => {
+  const profile = { eeo_prefs: { gender: 'Female', race: 'South Asian' } };
+  const reviewedAt = '2026-08-12T13:45:27.969Z';
+  const stored = [
+    {
+      question: 'what is your gender/gender identity? 4005628101',
+      answer: 'Female',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+    {
+      question: 'what is your race/ethnicity? 4005629101',
+      answer: 'South Asian',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+  ];
+
+  const refreshed = refreshKnownQuestionAnswers(stored, profile, undefined, reviewedAt);
+
+  assert.equal(refreshed[0].answer, 'Female', 'the resolver agrees, so the value is untouched');
+  assert.equal(refreshed[1].answer, 'South Asian');
+  assert.equal(refreshed[0].answer_source, 'applicant_review',
+    'and nothing was replaced, so nothing licenses dropping the record');
+  assert.equal(refreshed[0].answer_reviewed_at, reviewedAt);
+  assert.equal(refreshed[1].answer_source, 'applicant_review');
+  assert.equal(refreshed[1].answer_reviewed_at, reviewedAt);
+  assert.deepEqual(refreshed, stored, 'an agreeing refresh leaves these records exactly as they were');
+});
+
+/* The other half of the same rule. "She read this and let it stand" survives an answer that did not
+ * move; "this value was snapped from X" and "this value was accepted under a permission" do not,
+ * because a consent that round-trips the review screen comes back as the bare resolver constant and
+ * a grant record beside it claims an acceptance of a value no control offered. See the consent
+ * boundary suite, which measures that case directly. */
+test('an agreeing resolver carries the applicant claim forward but not the answer claims', () => {
+  const reviewedAt = '2026-08-12T13:45:27.969Z';
+  const [refreshed] = refreshKnownQuestionAnswers(
+    [{
+      question: 'what is your gender/gender identity? 4005628101',
+      answer: 'Female',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+      answer_option_source: 'Female',
+      consent_permission_version: 'privacy_and_terms@2026-08-12',
+      consent_permission_granted_at: '2026-08-12T09:15:00.000Z',
+    }],
+    { eeo_prefs: { gender: 'Female' } },
+    undefined,
+    reviewedAt,
+  );
+
+  assert.equal(refreshed.answer, 'Female');
+  assert.equal(refreshed.answer_source, 'applicant_review', 'the applicant claim is still true');
+  assert.equal(refreshed.answer_reviewed_at, reviewedAt);
+  assert.equal('answer_option_source' in refreshed, false, 'the derivation does not ride along');
+  assert.equal('consent_permission_version' in refreshed, false, 'nor does a grant record');
+  assert.equal('consent_permission_granted_at' in refreshed, false);
+});
+
+test('a resolved answer that differs still replaces the value and drops the record with it', () => {
+  const reviewedAt = '2026-08-12T13:45:27.969Z';
+  const stored = [{
+    question: 'what is your gender/gender identity? 4005628101',
+    // A stale value: the profile now says something else, and the employer must receive the profile.
+    answer: 'Prefer not to say',
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+  }];
+
+  const refreshed = refreshKnownQuestionAnswers(stored, { eeo_prefs: { gender: 'Female' } }, undefined, reviewedAt);
+
+  assert.equal(refreshed[0].answer, 'Female', 'the profile is still the source of truth');
+  assert.equal(refreshed[0].answer_source, undefined,
+    'the record described the answer that was just replaced, so it goes with it');
+  assert.equal(refreshed[0].answer_reviewed_at, undefined);
+});
+
+test('equality for keeping the record is exact, because casing is what gets typed on the form', () => {
+  const reviewedAt = '2026-08-12T13:45:27.969Z';
+  const stored = [{
+    question: 'what is your race/ethnicity? 4005629101',
+    answer: 'Decline To Self Identify',
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+  }];
+
+  const refreshed = refreshKnownQuestionAnswers(
+    stored, { eeo_prefs: { race: 'Decline to self-identify' } }, undefined, reviewedAt,
+  );
+
+  assert.equal(refreshed[0].answer, 'Decline to self-identify',
+    'a different string is a different option on the control, so it is replaced');
+  assert.equal(refreshed[0].answer_source, undefined, 'and its record drops with it');
+});

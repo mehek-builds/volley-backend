@@ -3,6 +3,8 @@ import { describe, test } from 'node:test';
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import {
+  ANSWER_CLAIM_FIELDS,
+  APPLICANT_CLAIM_FIELDS,
   applyApplicationReviewEdit,
   deriveEditedTerms,
   finalApprovalCoverLetterIssue,
@@ -10,8 +12,10 @@ import {
   mergeSubmittedApplicationReviewQuestions,
   normalizeApplicationReviewQuestions,
   readApplicationReview,
+  type ApplicationReviewQuestion,
   type ApplicationReviewState,
 } from './applicationReview';
+import { PACKET_VISIBLE_QUESTION_FIELDS, packetVisibleQuestions } from './packetAudit';
 import { refreshKnownQuestionAnswers } from './questionDiscovery';
 
 const bank: ExperienceBankEntry[] = [
@@ -742,4 +746,72 @@ test('a genuine edit on the review screen still wins', () => {
     'a graduation date still comes from the profile, and her edited band does not become sticky');
   assert.equal(persisted[1].answer_option_source, undefined,
     'and it carries no derivation, because nothing derived it');
+});
+
+/* EXHAUSTIVE BY CONSTRUCTION. `satisfies Required<ApplicationReviewQuestion>` is the compile-time
+ * half of the guard: adding any field to the question type, optional or not, stops this literal
+ * compiling until it is listed here. The runtime half below then refuses to let the new field
+ * through unclassified. Without the `satisfies`, a new optional field would simply be absent from
+ * the literal and every assertion would keep passing while the hash quietly re-widened. */
+const everyQuestionField = {
+  id: 'question-1',
+  question: 'What is your gender/gender identity?',
+  answer: 'Female',
+  kind: 'required',
+  required: true,
+  portal_selector: '#gender',
+  portal_input_type: 'select',
+  ats_api_field: 'gender',
+  answer_source: 'applicant_review',
+  answer_reviewed_at: '2026-08-12T13:45:27.969Z',
+  answer_option_source: 'May 2028',
+  consent_permission_granted_at: '2026-08-01T00:00:00.000Z',
+  consent_permission_version: 'v1',
+} satisfies Required<ApplicationReviewQuestion>;
+
+test('every question field is classified as packet-visible or provenance, exactly once', () => {
+  const provenance = new Set<string>([...APPLICANT_CLAIM_FIELDS, ...ANSWER_CLAIM_FIELDS]);
+  const classified = new Set<string>([...PACKET_VISIBLE_QUESTION_FIELDS, ...provenance]);
+
+  assert.deepEqual(
+    Object.keys(everyQuestionField).filter((field) => !classified.has(field)),
+    [],
+    'a question field belongs to packet identity or to provenance, and someone has to say which',
+  );
+  assert.deepEqual(
+    PACKET_VISIBLE_QUESTION_FIELDS.filter((field) => provenance.has(field)),
+    [],
+    'a field on both lists is hashed or not depending on which branch runs first',
+  );
+});
+
+test('the packet projection keeps employer-visible fields and drops the provenance record', () => {
+  const [visible] = packetVisibleQuestions([everyQuestionField]) as Record<string, unknown>[];
+
+  assert.deepEqual(
+    Object.keys(visible).sort(),
+    [...PACKET_VISIBLE_QUESTION_FIELDS].sort(),
+    'the projection is the allow-list, not the allow-list minus whatever happened to be undefined',
+  );
+  assert.equal(visible.answer, 'Female', 'the value the employer receives survives');
+  assert.equal('answer_source' in visible, false, 'who typed it does not reach the employer');
+  assert.equal('answer_reviewed_at' in visible, false, 'nor when she last looked at it');
+});
+
+test('an absent optional field and an explicitly undefined one project identically', () => {
+  const absent = { id: 'q', question: 'Q', answer: 'A', kind: 'required', required: true } as ApplicationReviewQuestion;
+  const explicit = { ...absent, portal_selector: undefined, ats_api_field: undefined };
+
+  assert.deepEqual(packetVisibleQuestions([absent]), packetVisibleQuestions([explicit]),
+    'a packet must not change identity because a key was written as undefined rather than omitted');
+});
+
+/* Malformed input must stay malformed rather than be reshaped into something that hashes cleanly.
+ * bindingIssues runs canonicalPacketJson over the raw questions and rejects them there; a projection
+ * that quietly turned a cycle or a class instance into a tidy object would hash a packet nobody
+ * could describe. */
+test('the projection passes non-question shapes straight through to the canonical-JSON check', () => {
+  assert.equal(packetVisibleQuestions(null), null);
+  assert.equal(packetVisibleQuestions('not a list'), 'not a list');
+  assert.deepEqual(packetVisibleQuestions([null, 'raw']), [null, 'raw']);
 });

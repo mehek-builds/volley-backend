@@ -1,6 +1,6 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import type { PacketAudit } from './packetAudit';
+import { PACKET_VISIBLE_QUESTION_FIELDS, type PacketAudit } from './packetAudit';
 import type { RequiredDocumentAsk } from './requiredDocuments';
 import type { SubmissionStopRecord } from './submissionStop';
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported, type AutofillApplicantSnapshot } from './portalSubmission';
@@ -117,6 +117,29 @@ function assertEveryProvenanceFieldIsClassifiedExactlyOnce(
   _classified: [Unclassified] extends [never] ? true : Unclassified,
 ): void { void _classified; }
 assertEveryProvenanceFieldIsClassifiedExactlyOnce(true);
+
+/* The second partition, enforced exactly like the one above and for the same reason.
+ *
+ * Every key of ApplicationReviewQuestion is either something the employer receives - which makes it
+ * part of packet identity, hashed into packet_version - or something the record remembers about how
+ * the answer got there, which does not. The list itself lives in packetAudit.ts beside the hash it
+ * governs; this is the half that has to be here, because this is where the question type is and
+ * `keyof` is what makes the check exhaustive.
+ *
+ * Adding `answer_translated_from` to the type without putting it on one of the two lists fails with
+ * `Argument of type 'true' is not assignable to parameter of type '"answer_translated_from"'`, which
+ * names the field and states the decision the next person has to make. Putting it on both lists is
+ * caught the same way from the other direction. */
+type PacketVisibleQuestionField = (typeof PACKET_VISIBLE_QUESTION_FIELDS)[number];
+type QuestionFieldClassification = PacketVisibleQuestionField | AnswerProvenanceField;
+type UnclassifiedQuestionField =
+  | Exclude<keyof ApplicationReviewQuestion, QuestionFieldClassification>
+  | Exclude<QuestionFieldClassification, keyof ApplicationReviewQuestion>
+  | (PacketVisibleQuestionField & AnswerProvenanceField);
+function assertEveryQuestionFieldIsPacketVisibleOrProvenance(
+  _classified: [UnclassifiedQuestionField] extends [never] ? true : UnclassifiedQuestionField,
+): void { void _classified; }
+assertEveryQuestionFieldIsPacketVisibleOrProvenance(true);
 
 export type ApplicationAttentionCategory =
   | 'captcha'
