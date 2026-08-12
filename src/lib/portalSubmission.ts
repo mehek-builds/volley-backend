@@ -8442,8 +8442,99 @@ function parseRequiredControl(value: unknown, requireMatchCount = false): Requir
   };
 }
 
-function confirmationContractError(message: string): never {
+/* "UNKNOWN" IS THE RIGHT ANSWER ONLY WHERE IT IS ACTUALLY UNKNOWN.
+ *
+ * PR 506 made every shape refusal an unproven-press, and against a run whose press state really is
+ * unreadable that is exactly right. Against a run that positively reported withholding the click it
+ * is a false uncertainty, and a false uncertainty is not free: it keeps the claim, writes an
+ * unresolved unverified_submission, and tells the applicant Litos pressed Send. That locks the
+ * packet out of the ordinary re-run path and out of a fresh application to the same posting.
+ *
+ * The escape needs TWO independent statements from the runner, agreeing, because one field on a
+ * payload whose shape is already suspect is not enough: submitOutcome.pressed === false, recorded
+ * where submitHandle.click() would have been called, AND every pass reporting submissionOutcome
+ * 'blocked'. A run that pressed says pressed:true and 'clicked', so neither half can be produced by
+ * the case this must never misread.
+ */
+function observedManagedSubmitWithheld(result: unknown): boolean {
+  if (!isRecord(result)) return false;
+  const outcome = result.submitOutcome;
+  if (!isRecord(outcome) || outcome.pressed !== false) return false;
+  const proof = result.requiredFieldConfirmation;
+  /* A missing or empty pass list leaves this false on purpose. That is PR 506's older-runner case,
+   * where nothing in the payload knows what a confirmation proof is, and it stays unknown. */
+  if (!isRecord(proof) || !Array.isArray(proof.passes) || proof.passes.length === 0) return false;
+  return proof.passes.every((pass) => isRecord(pass) && pass.submissionOutcome === 'blocked');
+}
+
+function confirmationContractError(message: string, submitWithheld = false): never {
+  if (submitWithheld) {
+    throw new ManagedRequiredFieldConfirmationError(
+      [],
+      `Litos did not press submit: the run withheld the click and its required-field confirmation proof could not be read (${message})`,
+    );
+  }
   throw new ManagedConfirmationUnprovenError(`Litos could not read the send run's required-field confirmation proof (${message}), so whether submit was pressed is unknown`);
+}
+
+/* WHAT `pass.unresolved` IS ALLOWED TO SAY, AND WHY REJECTING THE PROOF OVER IT WAS THE WRONG LEVER.
+ *
+ * The old rule was: every entry must be a selector or label of a control in requiredControls, or the
+ * whole proof is malformed. Measured against stratus-browser-cloud@4748871, FIVE of the runner's
+ * eight push sites emit strings that set can never contain:
+ *
+ *   managed-browser.js:2928  '"Start date" is required and is still empty'   (the readiness scan)
+ *   managed-browser.js:2929  'The bound application form still shows an unmatched validation error: …'
+ *   managed-browser.js:2942  'Bound submit control or application form was replaced before submission'
+ *   managed-browser.js:2964  'Bound application form or submit identity changed during confirmation'
+ *   managed-browser.js:2825  'Selectorless required field'
+ *
+ * 2928 fires on ANY still-empty required field, so it is not an edge case: it is what an ordinary
+ * blocked submission looks like. The backend's own fixtures only ever put bare labels in this array,
+ * which is why the whole path was green while nothing in production could use it.
+ *
+ * AND SINCE PR 506 THE COST OF THAT REJECTION IS NO LONGER A BAD MESSAGE, IT IS A LOCKED PACKET.
+ * A shape refusal now throws ManagedConfirmationUnprovenError, which correctly means "the click
+ * state is unknown". Applied to a run that reported pressed:false and submissionOutcome 'blocked',
+ * it wrote: attention_reason "Litos pressed Send and the page never showed a confirmation it could
+ * read", submission_attempted_at set, an unresolved unverified_submission record, and the claim
+ * kept. Every one of those is false, and together they send the applicant to check a portal for an
+ * application that was never sent and block her from re-running the packet or applying again.
+ *
+ * SO THE VOCABULARY IS NO LONGER A REJECTION SURFACE AT ALL. An entry this service does not
+ * recognise still BLOCKS - it is a failure, it keeps the pass blocked, and it keeps the proof
+ * honest - it simply does not get its text repeated to the applicant. That keeps the property the
+ * strictness existed for (employer-authored text must not reach Litos's own copy, and 2929 carries
+ * exactly that) while removing the failure mode where a wording change in the runner takes the
+ * product down. The runner is free to improve its sentences; this service reports the ones it can
+ * attribute to a control and counts the rest.
+ */
+const UNRESOLVED_ENTRY_MAX_LENGTH = 400;
+
+/** The runner's own fixed sentences. Constants in its source, carrying no employer text. */
+const RUNNER_AUTHORED_BLOCKERS: ReadonlySet<string> = new Set([
+  'A required field on the form has no label Litos can read, and is still empty',
+  'Required-field readiness scan failed',
+  'Selectorless required field',
+  'Bound submit control or application form was replaced before submission',
+  'Bound application form or submit identity changed during confirmation',
+  'Litos could not bind required-field validation to the selected application form',
+]);
+
+/** What the applicant is told when a blocker cannot be attributed to a control on this form. */
+export const UNATTRIBUTED_REQUIRED_BLOCKER = 'A required answer on this form is still missing';
+
+/* The readiness scan's template, managed-browser.js:2126. The quoted label is the useful half and is
+ * kept ONLY when it names a control this proof already enumerated, so the label reaching the
+ * applicant is one this service has independently seen rather than any text the page supplied. */
+const READINESS_REQUIRED_TEMPLATE = /^"(.+)" is required and is still empty$/;
+
+function readUnresolvedEntry(value: string, known: ReadonlySet<string>): string {
+  if (known.has(value)) return value;
+  const readiness = READINESS_REQUIRED_TEMPLATE.exec(value);
+  if (readiness && known.has(readiness[1]!)) return readiness[1]!;
+  if (RUNNER_AUTHORED_BLOCKERS.has(value)) return value;
+  return UNATTRIBUTED_REQUIRED_BLOCKER;
 }
 
 /* WHEN THE APPLICATION SEND MAY GO UNPROVEN, AND IT IS NARROWER THAN IT WAS WRITTEN.
@@ -8474,7 +8565,13 @@ export function assertManagedRequiredFieldsConfirmed(
   result: unknown,
   expectedSubmitKind?: 'application' | 'verification',
 ): void {
-  if (!isRecord(result)) confirmationContractError('result is not an object');
+  /* Read from the RAW result, before anything is validated, because the whole point is the case
+   * where validation fails. The annotation on the const is load-bearing: TypeScript only narrows
+   * past a never-returning arrow when the const carries an explicit type, and every guard below
+   * depends on that narrowing to keep reading `result` and `pass` as records. */
+  const submitWithheld = observedManagedSubmitWithheld(result);
+  const contractError: (detail: string) => never = (detail) => confirmationContractError(detail, submitWithheld);
+  if (!isRecord(result)) contractError('result is not an object');
   const proof = result.requiredFieldConfirmation;
   if (proof === undefined || proof === null) {
     /* No proof at all is the unknown-runner case, and unknown is what it must stay: the action
@@ -8484,12 +8581,12 @@ export function assertManagedRequiredFieldsConfirmed(
     throw new ManagedConfirmationUnprovenError("Litos could not read the send run's required-field confirmation proof (the managed browser returned none), so whether submit was pressed is unknown");
   }
   if (!isRecord(proof) || !hasOnlyKeys(proof, ['version', 'status', 'passes'])) {
-    confirmationContractError('receipt shape');
+    contractError('receipt shape');
   }
-  if (proof.version !== 2) confirmationContractError('unsupported version');
-  if (proof.status !== 'confirmed' && proof.status !== 'blocked') confirmationContractError('status');
+  if (proof.version !== 2) contractError('unsupported version');
+  if (proof.status !== 'confirmed' && proof.status !== 'blocked') contractError('status');
   if (!Array.isArray(proof.passes) || proof.passes.length !== 1) {
-    confirmationContractError('confirmation passes');
+    contractError('confirmation passes');
   }
   const opaqueFingerprint = (value: unknown) => typeof value === 'string'
     && /^[A-Za-z0-9_-]{16,200}$/.test(value);
@@ -8498,11 +8595,11 @@ export function assertManagedRequiredFieldsConfirmed(
   for (const pass of proof.passes) {
     if (!isRecord(pass) || !hasOnlyKeys(pass, [
       'submitKind', 'scope', 'requiredControls', 'attempts', 'retries', 'unresolved', 'submissionOutcome',
-    ], ['blockerReason'])) confirmationContractError('pass shape');
+    ], ['blockerReason'])) contractError('pass shape');
     if (pass.submitKind !== 'application' && pass.submitKind !== 'verification') {
-      confirmationContractError('submit kind');
+      contractError('submit kind');
     }
-    if (expectedSubmitKind && pass.submitKind !== expectedSubmitKind) confirmationContractError('unexpected submit kind');
+    if (expectedSubmitKind && pass.submitKind !== expectedSubmitKind) contractError('unexpected submit kind');
     /* scopeKind is optional because a proof without it (an older runner) was already complete;
      * when present it must be one of the two scopes the runner can actually bind. It is exactly
      * the key whose arrival as an UNKNOWN key rejected every production submission on 2026-08-11,
@@ -8510,61 +8607,61 @@ export function assertManagedRequiredFieldsConfirmed(
     if (!isRecord(pass.scope) || !hasOnlyKeys(pass.scope, [
       'formFingerprint', 'submitFingerprint', 'formMatchCount', 'submitMatchCount',
       'requiredControlCount', 'sameNode',
-    ], ['scopeKind'])) confirmationContractError('scope proof');
+    ], ['scopeKind'])) contractError('scope proof');
     if (pass.scope.scopeKind !== undefined && pass.scope.scopeKind !== 'form' && pass.scope.scopeKind !== 'container') {
-      confirmationContractError('scope kind');
+      contractError('scope kind');
     }
     if (!opaqueFingerprint(pass.scope.formFingerprint)
       || !opaqueFingerprint(pass.scope.submitFingerprint)
       || pass.scope.formMatchCount !== 1 || pass.scope.submitMatchCount !== 1
       || typeof pass.scope.sameNode !== 'boolean' || !Number.isInteger(pass.scope.requiredControlCount)
       || (pass.scope.requiredControlCount as number) < 0
-      || (pass.scope.requiredControlCount as number) > 500) confirmationContractError('scope identity');
+      || (pass.scope.requiredControlCount as number) > 500) contractError('scope identity');
     if (pass.submissionOutcome !== 'clicked' && pass.submissionOutcome !== 'blocked') {
-      confirmationContractError('submission outcome');
+      contractError('submission outcome');
     }
     const blockerReasons = new Set([
       'submit_node_replaced', 'ambiguous_submit', 'form_identity_changed', 'no_submit_control',
     ]);
     if (pass.blockerReason !== undefined
       && (typeof pass.blockerReason !== 'string' || !blockerReasons.has(pass.blockerReason))) {
-      confirmationContractError('blocker reason');
+      contractError('blocker reason');
     }
     if (typeof pass.blockerReason === 'string') blockerFailures.push(pass.blockerReason);
     if (pass.scope.sameNode === false && pass.blockerReason !== 'submit_node_replaced') {
-      confirmationContractError('detached node reason');
+      contractError('detached node reason');
     }
-    if (!Number.isInteger(pass.retries) || (pass.retries !== 0 && pass.retries !== 1)) confirmationContractError('retries');
+    if (!Number.isInteger(pass.retries) || (pass.retries !== 0 && pass.retries !== 1)) contractError('retries');
     if (!Array.isArray(pass.requiredControls) || !Array.isArray(pass.attempts) || !Array.isArray(pass.unresolved)) {
-      confirmationContractError('arrays');
+      contractError('arrays');
     }
     const controls = pass.requiredControls.map((control) => parseRequiredControl(control, true));
-    if (controls.some((control) => control === null)) confirmationContractError('required control');
+    if (controls.some((control) => control === null)) contractError('required control');
     const requiredControls = controls as RequiredControlProof[];
-    if (pass.scope.requiredControlCount !== requiredControls.length) confirmationContractError('scan control count');
+    if (pass.scope.requiredControlCount !== requiredControls.length) contractError('scan control count');
     const requiredBySelector = new Map<string, RequiredControlProof>();
     for (const control of requiredControls) {
-      if (requiredBySelector.has(control.selector)) confirmationContractError('duplicate required control');
+      if (requiredBySelector.has(control.selector)) contractError('duplicate required control');
       requiredBySelector.set(control.selector, control);
     }
     const attempts = pass.attempts.map((value) => {
     if (!isRecord(value) || !hasOnlyKeys(value, ['selector', 'label', 'fieldType', 'outcome', 'attemptCount'], ['reason'])) {
-      confirmationContractError('attempt shape');
+      contractError('attempt shape');
     }
     const control = parseRequiredControl({ selector: value.selector, label: value.label, fieldType: value.fieldType });
-    if (!control) confirmationContractError('attempt control');
+    if (!control) contractError('attempt control');
     if (typeof value.outcome !== 'string' || !REQUIRED_CONFIRMATION_OUTCOMES.has(value.outcome)) {
-      confirmationContractError('attempt outcome');
+      contractError('attempt outcome');
     }
-    if (value.attemptCount !== 1 && value.attemptCount !== 2) confirmationContractError('attempt count');
+    if (value.attemptCount !== 1 && value.attemptCount !== 2) contractError('attempt count');
     if (value.outcome === 'already_committed' && value.attemptCount !== 1) {
-      confirmationContractError('already committed retry');
+      contractError('already committed retry');
     }
     const reason = value.reason;
     if (value.outcome === 'failed') {
-      if (typeof reason !== 'string' || !reason.trim() || reason.length > 300) confirmationContractError('failed attempt reason');
+      if (typeof reason !== 'string' || !reason.trim() || reason.length > 300) contractError('failed attempt reason');
     } else if (reason !== undefined) {
-      confirmationContractError('successful attempt reason');
+      contractError('successful attempt reason');
     }
     return {
       ...control,
@@ -8573,23 +8670,23 @@ export function assertManagedRequiredFieldsConfirmed(
       reason: typeof reason === 'string' ? reason.trim() : undefined,
     };
     });
-    if (attempts.length !== requiredControls.length) confirmationContractError('attempt coverage count');
+    if (attempts.length !== requiredControls.length) contractError('attempt coverage count');
     const attempted = new Set<string>();
     for (const attempt of attempts) {
       const required = requiredBySelector.get(attempt.selector);
-      if (!required || attempted.has(attempt.selector)) confirmationContractError('attempt coverage');
-      if (attempt.fieldType !== required.fieldType || attempt.label !== required.label) confirmationContractError('attempt identity');
+      if (!required || attempted.has(attempt.selector)) contractError('attempt coverage');
+      if (attempt.fieldType !== required.fieldType || attempt.label !== required.label) contractError('attempt identity');
       attempted.add(attempt.selector);
     }
     const observedRetries = attempts.some((attempt) => attempt.attemptCount === 2) ? 1 : 0;
-    if (pass.retries !== observedRetries) confirmationContractError('retry evidence');
+    if (pass.retries !== observedRetries) contractError('retry evidence');
     const knownUnresolved = new Set(requiredControls.flatMap((control) => [control.selector, control.label].filter(Boolean) as string[]));
     const unresolved: string[] = [];
     for (const value of pass.unresolved) {
-      if (typeof value !== 'string' || !value.trim() || value.length > 200 || !knownUnresolved.has(value.trim())) {
-        confirmationContractError('unresolved field');
+      if (typeof value !== 'string' || !value.trim() || value.length > UNRESOLVED_ENTRY_MAX_LENGTH) {
+        contractError('unresolved field');
       }
-      unresolved.push(value.trim());
+      unresolved.push(readUnresolvedEntry(value.trim(), knownUnresolved));
     }
     const failedAttempts = attempts.filter((attempt) => attempt.outcome === 'failed')
       .map((attempt) => attempt.label || attempt.selector);
@@ -8597,14 +8694,14 @@ export function assertManagedRequiredFieldsConfirmed(
     allFailures.push(...failures);
     if (pass.submissionOutcome === 'clicked'
       && (failures.length > 0 || pass.blockerReason !== undefined || pass.scope.sameNode !== true)) {
-      confirmationContractError('invalid atomic click proof');
+      contractError('invalid atomic click proof');
     }
     if (pass.submissionOutcome === 'blocked' && failures.length === 0 && pass.blockerReason === undefined) {
-      confirmationContractError('blocked pass without reason');
+      contractError('blocked pass without reason');
     }
   }
-  if (proof.status === 'confirmed' && (allFailures.length > 0 || blockerFailures.length > 0)) confirmationContractError('confirmed with failures');
-  if (proof.status === 'blocked' && allFailures.length === 0 && blockerFailures.length === 0) confirmationContractError('blocked without failure');
+  if (proof.status === 'confirmed' && (allFailures.length > 0 || blockerFailures.length > 0)) contractError('confirmed with failures');
+  if (proof.status === 'blocked' && allFailures.length === 0 && blockerFailures.length === 0) contractError('blocked without failure');
   if (proof.status !== 'confirmed') {
     throw new ManagedRequiredFieldConfirmationError([...allFailures, ...blockerFailures]);
   }
