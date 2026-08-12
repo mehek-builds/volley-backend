@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { readFileSync } from 'node:fs';
-import { AUTOMATIC_CAPTCHA_CONSENT_VERSION, AUTOMATIC_SUBMISSION_CONSENT_VERSION, automationConsentValues, captchaResumeGranted } from './automationConsent';
+import { getTableColumns } from 'drizzle-orm';
+import { users } from '../db/schema';
+import {
+  AUTOMATIC_CAPTCHA_CONSENT_VERSION,
+  AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
+  AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
+  AUTOMATIC_SUBMISSION_CONSENT_VERSION,
+  automationConsentState,
+  automationConsentValues,
+  captchaResumeGranted,
+} from './automationConsent';
 
 test('records each granted permission separately with an auditable submission version', () => {
   const now = new Date('2026-07-25T12:00:00.000Z');
@@ -111,32 +120,75 @@ test('turning on automatic submission does not turn on captcha resume', () => {
  * automatic_captcha_consented_at was written on every grant from 2026-08-04 and sent by no route
  * until 2026-08-12. Nothing failed and no test went red: the settings screen simply had no date to
  * show, so a granted permission displayed as an undated tick, and the website shipped a "Granted
- * <date>." line that could never render. The gap is invisible precisely because writing and sending
- * live in different files.
+ * <date>." line that could never render. The gap was invisible precisely because writing and sending
+ * lived in different files.
  *
- * So the pairing is asserted rather than remembered. `user.` and not `users.` is what distinguishes
- * the state response from the update's returning clause, which reads the table object.
- *
- * KNOWN_UNSENT is an allowlist that may shrink and must never grow. Adding a name to it is a
- * decision to store a consent date the account holding it cannot see. */
-const KNOWN_UNSENT = new Set([
-  // Written by PUT /onboarding/automation and read by nothing. Same defect as the captcha column,
-  // found while fixing that one and deliberately left alone here: this permission has no date in
-  // any surface today, so exposing it is a product change rather than the repair of a broken one.
-  'automatic_verification_consented_at',
-]);
+ * The columns come from the users TABLE OBJECT rather than from the text of schema.ts, and the
+ * response comes from CALLING automationConsentState rather than from grepping the route. Both
+ * halves are deliberate: a source-text version of this test passes on a commented-out line and fails
+ * on an equivalent refactor, so it would police formatting while missing the defect it exists for. */
+const CONSENT_DATE_COLUMNS = Object.keys(getTableColumns(users))
+  .filter((name) => /^automatic_\w+_consented_at$/.test(name));
 
-test('every automation consent date that is stored is also sent by GET /onboarding/state', () => {
-  const schema = readFileSync('src/db/schema.ts', 'utf8');
-  const route = readFileSync('src/routes/onboarding.ts', 'utf8');
-  const stored = [...schema.matchAll(/^\s*(automatic_\w+_consented_at):/gm)].map((m) => m[1]);
-  // Guards the guard: a schema rename that matched nothing would make every assertion below vacuous.
-  assert.ok(stored.length >= 5, `expected the consent date columns, found ${stored.join(', ')}`);
-  for (const column of stored) {
-    if (KNOWN_UNSENT.has(column)) continue;
-    assert.ok(
-      route.includes(`${column}: user.${column}`),
-      `${column} is stored but GET /onboarding/state never sends it, so no screen can show when the permission was granted`,
+test('the users table still carries the consent dates this rule is about', () => {
+  // Guards the guard: a rename that matched nothing would make the assertions below vacuous.
+  assert.deepEqual(new Set(CONSENT_DATE_COLUMNS), new Set([
+    'automatic_submission_consented_at',
+    'automatic_verification_consented_at',
+    'automatic_captcha_consented_at',
+    'automatic_consent_acceptance_consented_at',
+    'automatic_conduct_acceptance_consented_at',
+  ]));
+});
+
+test('every stored consent date is sent by the state response, with no exemptions', () => {
+  const now = new Date('2026-08-12T09:14:00.000Z');
+  const row = Object.fromEntries(CONSENT_DATE_COLUMNS.map((name) => [name, now]));
+  const sent = automationConsentState({
+    automatic_submission_enabled: true,
+    automatic_submission_consent_version: AUTOMATIC_SUBMISSION_CONSENT_VERSION,
+    automatic_verification_enabled: true,
+    ...row,
+  } as Parameters<typeof automationConsentState>[0]);
+  for (const column of CONSENT_DATE_COLUMNS) {
+    assert.deepEqual(
+      (sent as Record<string, unknown>)[column],
+      now,
+      `${column} is stored but the state response never sends it, so no screen can show when the permission was granted`,
     );
   }
+});
+
+/* The pairing that makes a superseded grant legible: verdict false, date present. Asserting them
+ * together is the point - a date alone would look like a live permission, and a verdict alone leaves
+ * a settings screen unable to say anything about a grant that really was given. */
+test('a superseded grant sends a false verdict with its real date still attached', () => {
+  const granted = new Date('2026-08-04T11:02:00.000Z');
+  const sent = automationConsentState({
+    automatic_submission_enabled: false,
+    automatic_submission_consented_at: null,
+    automatic_submission_consent_version: null,
+    automatic_verification_enabled: false,
+    automatic_captcha_enabled: true,
+    automatic_captcha_consented_at: granted,
+    automatic_captcha_consent_version: 'not-the-live-version',
+  });
+  assert.equal(sent.automatic_captcha_enabled, false);
+  assert.deepEqual(sent.automatic_captcha_consented_at, granted);
+});
+
+/* What a client may know is which wording is LIVE, never which wording a given row carries: the
+ * second is the input to a verdict clients must never compute for themselves. */
+test('the state response sends the current version constants, never the row values', () => {
+  const sent = automationConsentState({
+    automatic_submission_enabled: false,
+    automatic_submission_consented_at: null,
+    automatic_submission_consent_version: null,
+    automatic_verification_enabled: false,
+    automatic_consent_acceptance_consent_version: 'stale',
+    automatic_conduct_acceptance_consent_version: 'stale',
+  });
+  assert.equal(sent.automatic_consent_acceptance_consent_version, AUTOMATIC_CONSENT_ACCEPTANCE_VERSION);
+  assert.equal(sent.automatic_conduct_acceptance_consent_version, AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION);
+  assert.equal('automatic_captcha_consent_version' in sent, false);
 });

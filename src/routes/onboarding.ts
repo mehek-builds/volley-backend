@@ -18,6 +18,7 @@ import {
   AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
   AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
   AUTOMATIC_SUBMISSION_CONSENT_VERSION,
+  automationConsentState,
   automationConsentValues,
   captchaResumeGranted,
   conductAcceptanceGranted,
@@ -579,35 +580,10 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // student can always see whether it is on, rather than having to trust that it stopped.
       harvest_active: !user.onboarding_completed_at,
       standing_consent_eligibility: standingConsentEligibility(await reviewedSubmitCount(userId)),
-      automatic_submission_enabled: user.automatic_submission_enabled,
-      automatic_submission_consented_at: user.automatic_submission_consented_at,
-      automatic_submission_consent_version: user.automatic_submission_consent_version,
-      automatic_verification_enabled: user.automatic_verification_enabled,
-      // Sent as the ALREADY-VERSION-CHECKED verdict, not the raw column. The 25 accounts carrying a
-      // stale version from the branch that never merged must not read as consented here, and a
-      // client re-deriving that rule is a client that will get it wrong.
-      automatic_captcha_enabled: captchaResumeGranted(user),
-      // The RAW date, beside the verdict, exactly as the two acceptance permissions below send
-      // theirs. It was written on every grant since this shipped and then never sent, so a settings
-      // screen had no way to say when the permission was given.
-      //
-      // Raw and ungated is the right shape, and the stale accounts are why. Their rows carry a real
-      // date under a superseded version, so this pairs a false verdict with a present date; the
-      // client's rule is to print no date whenever the verdict is false, which is what keeps a
-      // superseded grant from being displayed as a live one. Gating the date here instead would
-      // hide from the client the one fact that makes the pairing legible.
-      automatic_captcha_consented_at: user.automatic_captcha_consented_at,
-      // The same rule, for the same reason: the verdict, not the column. A client must never decide
-      // for itself whether a stored consent version still means consent.
-      automatic_consent_acceptance_enabled: consentAcceptanceGranted(user),
-      // Sent alongside the verdict so a settings screen can say WHEN she granted it. The runner
-      // writes the same date onto every control it accepts, which is what makes the packet audit
-      // able to show a standing permission rather than an unexplained tick.
-      automatic_consent_acceptance_consented_at: user.automatic_consent_acceptance_consented_at,
-      automatic_consent_acceptance_consent_version: AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
-      automatic_conduct_acceptance_enabled: conductAcceptanceGranted(user),
-      automatic_conduct_acceptance_consented_at: user.automatic_conduct_acceptance_consented_at,
-      automatic_conduct_acceptance_consent_version: AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
+      // Every automation permission, from one place. See automationConsentState: a verdict with no
+      // date beside it is the defect this route shipped for eight days, and it is now a property of
+      // a function a test can call rather than of a literal a reader has to audit by eye.
+      ...automationConsentState(user),
     });
   });
 
