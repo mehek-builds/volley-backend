@@ -6,9 +6,18 @@ import {
   isConsentAcknowledgementQuestion,
   isHeldDeclarationLabel,
   consentAcknowledgementAnswer,
+  isConsentAcceptingWording,
+  isConsentRefusingWording,
   type ApplicationProfileLike,
 } from './questionDiscovery';
-import { chooseConsentOption, consentAcceptanceValue } from './profileFieldResolution';
+import { comparableOption } from './selfIdentification';
+import {
+  chooseClosestOption,
+  chooseConsentOption,
+  consentAcceptanceValue,
+  graduationDateLadder,
+  optionCoversMonthYear,
+} from './profileFieldResolution';
 import {
   AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
   AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
@@ -266,5 +275,139 @@ describe('the value that goes into the control', () => {
     assert.equal(consentAcceptanceValue('Privacy Statement', {}, null), null);
     assert.equal(consentAcceptanceValue('Are you legally authorized to work in the United States?', GRANTED, ['Yes', 'No']), null);
     assert.equal(consentAcceptanceValue('I certify that the information provided is true and complete', GRANTED, ['Yes', 'No']), null);
+  });
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * THE COMPOUND CONSENT OPTION, measured 2026-08-13.
+ *
+ * Greenhouse renders consent checkboxes whose only option label is "Acknowledge/Confirm": one
+ * option, two accepting verbs, joined by a slash. CONSENT_ACCEPTING_OPTION is anchored end to end
+ * over SINGLE verbs, so that label is neither "acknowledge" nor "confirm" and matched no
+ * alternative at all. chooseConsentOption(["Acknowledge/Confirm"]) returned null,
+ * resolveProfileField reported matchedOption: false, and routes/submissionRunner.ts told the
+ * applicant a consent Litos held every permission to accept had been left for her to finish.
+ * Four packets.
+ *
+ * The anchoring is not the defect and is not relaxed. What changes is that an option made of
+ * NOTHING BUT accepting verbs is read as an acceptance, with every part held to the same closed
+ * vocabulary the whole option was held to before.
+ * ------------------------------------------------------------------------------------------- */
+
+describe('an option that joins two accepting verbs', () => {
+  test('the accepting compounds, each as the only option a Greenhouse consent offers', () => {
+    for (const label of [
+      'Acknowledge/Confirm',
+      'Acknowledge and Confirm',
+      'I Agree/Accept',
+      'I acknowledge and agree to the above',
+      'Acknowledge/Confirm/Accept',
+      'Confirm + Accept',
+      'I agree or accept',
+    ]) {
+      assert.equal(chooseConsentOption([label]), label, `${label} is an acceptance`);
+      assert.equal(consentAcceptanceValue('Privacy Statement', GRANTED, [label]), label);
+    }
+  });
+
+  test('an ampersand or a comma is erased before the split, so those spellings still fail closed', () => {
+    /* MEASURED WHILE THIS WAS BEING WRITTEN, and recorded rather than quietly worked around.
+     *
+     * The joiner class is [/&+,] plus the two coordinators, but comparableOption runs first and its
+     * class is [^a-z0-9.+/]: it keeps '/', '.' and '+', and turns EVERYTHING else into a space. So
+     * '&' and ',' never reach the split - "Acknowledge & Confirm" arrives as "acknowledge confirm",
+     * two accepting verbs with nothing between them but whitespace.
+     *
+     * Splitting on whitespace as well was considered and rejected. CONSENT_ACCEPTING_OPTION admits
+     * an optional "i " prefix, so "I Acknowledge & I Confirm" would split into a bare "i" that is
+     * not an accepting verb, and the rule would be no more complete while being much easier to
+     * widen by accident. These two spellings are handed back to the applicant, which is exactly
+     * what happened before this change, on a consent that is real work for her and not a wrong
+     * answer given in her name. */
+    assert.equal(comparableOption('Acknowledge & Confirm'), 'acknowledge confirm');
+    assert.equal(comparableOption('Agree, Accept'), 'agree accept');
+    assert.equal(chooseConsentOption(['Acknowledge & Confirm']), null);
+    assert.equal(chooseConsentOption(['Agree, Accept']), null);
+  });
+
+  test('a compound sits beside a refusal the same way a single verb does', () => {
+    assert.equal(chooseConsentOption(['Acknowledge/Confirm', 'Decline']), 'Acknowledge/Confirm');
+    assert.equal(chooseConsentOption(['I do not agree', 'Acknowledge and Confirm']), 'Acknowledge and Confirm');
+    // Two acceptances still cannot be ranked, compound or not.
+    assert.equal(chooseConsentOption(['Acknowledge/Confirm', 'I agree']), null);
+  });
+
+  test('EVERY part has to be an accepting verb, and a refusing token anywhere ends it', () => {
+    for (const label of [
+      // A refusing token in either part. isConsentRefusingWording is tested over the whole key
+      // before the split and over every part after it, so neither position can get through.
+      'Acknowledge/Decline',
+      'Decline/Acknowledge',
+      'Agree/Disagree',
+      'Confirm or Reject',
+      'Yes and No',
+      'I acknowledge but do not agree',
+      'Accept/Opt out',
+      // A part that is simply not an accepting verb. This is the line that keeps the rule from
+      // being a loosening: "continue", "submit" and "next" are what a compound usually joins.
+      'Accept and Continue',
+      'Acknowledge/Submit',
+      'Read/Confirm',
+      'Confirm and Send',
+      // And a compound of two things that are neither.
+      'Option A/Option B',
+    ]) {
+      assert.equal(chooseConsentOption([label]), null, `${label} must not be read as an acceptance`);
+    }
+  });
+
+  test('the single-verb wordings this vocabulary always read are untouched', () => {
+    // "read and agree" carries a coordinator and is a SINGLE accepting phrase the anchored regex
+    // already spells out. Split on "and" it would yield "read", which is not an accepting verb, so
+    // the whole key is asked before the compound rule ever runs. This is that ordering, pinned.
+    assert.equal(chooseConsentOption(['I have read and agree']), 'I have read and agree');
+    assert.equal(chooseConsentOption(['Read and accept']), 'Read and accept');
+    assert.equal(chooseConsentOption(['I have read and acknowledged']), 'I have read and acknowledged');
+    assert.equal(chooseConsentOption(['I agree to the above']), 'I agree to the above');
+    assert.equal(chooseConsentOption(['Yes I agree']), 'Yes I agree');
+  });
+
+  test('a stored compound acceptance is still recognised as one on the next run', () => {
+    /* THE HALF THAT MAKES THIS A REPAIR RATHER THAN A NEW DIVERGENCE.
+     *
+     * chooseConsentOption selecting "Acknowledge/Confirm" is worth nothing on its own:
+     * refreshKnownQuestionAnswers asks the SAME question of an answer already on a packet, and had
+     * the two disagreed, the next run would have recomputed this control to the bare "Yes" that is
+     * on no such control's list. That is the prepare-versus-submit divergence, reached from the
+     * other side. One vocabulary, two callers. */
+    assert.equal(isConsentAcceptingWording('Acknowledge/Confirm'), true);
+    assert.equal(isConsentAcceptingWording('Acknowledge and Confirm'), true);
+    assert.equal(isConsentAcceptingWording('I Agree/Accept'), true);
+    assert.equal(isConsentAcceptingWording('Acknowledge/Decline'), false);
+    assert.equal(isConsentAcceptingWording('Accept and Continue'), false);
+    // And the refusal predicate is unmoved by any of it.
+    assert.equal(isConsentRefusingWording('Acknowledge/Decline'), true);
+    assert.equal(isConsentRefusingWording('Acknowledge/Confirm'), false);
+  });
+
+  test('the slash survives comparableOption, and Spring/Summer 2028 still resolves', () => {
+    /* WHY THE SPLIT IS IN THE CONSENT RULE AND NOT IN comparableOption, pinned so that the easier
+     * edit cannot be made later without this failing.
+     *
+     * comparableOption's character class is [^a-z0-9.+/]: it deliberately KEEPS the slash. That is
+     * load-bearing a long way from consent. Greenhouse's standard graduation term list offers
+     * "Spring/Summer 2028", optionCoversMonthYear reaches that entry's year across the slash, and
+     * the applicant graduates in May 2028. Splitting on '/' globally would take the season run
+     * apart and put a May graduation into "Winter 2028", a term that ends six months before she
+     * finishes - which is the exact answer two live Jump Trading packets carried on 2026-08-13. */
+    assert.equal(comparableOption('Spring/Summer 2028'), 'spring/summer 2028');
+    assert.equal(comparableOption('Acknowledge/Confirm'), 'acknowledge/confirm');
+    assert.equal(optionCoversMonthYear('Spring/Summer 2028', 5, 2028), true);
+    assert.equal(
+      chooseClosestOption(graduationDateLadder('May 2028', 2028), [
+        'Winter 2028', 'Spring/Summer 2028', 'Fall 2028',
+      ]),
+      'Spring/Summer 2028',
+    );
   });
 });

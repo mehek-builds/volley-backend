@@ -1923,11 +1923,14 @@ test('Greenhouse replays Samsara required selects with exact live options', () =
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('processing of personal data') && label.endsWith('Acknowledge/Confirm')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('how did you hear about this opportunity') && label.endsWith('Samsara Careers Site')));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('where have you learned about samsara') && label.endsWith('Samsara blog or website')));
-  assert.ok(actions.some((action) => action.type === 'select' && action.selector === '[data-litos-discovered-23]' && action.value === 'Samsara blog or website'));
-  assert.ok(actions.some((action) => action.type === 'select' && action.selector === '[data-litos-discovered-25]' && action.value === 'Woman'));
-  assert.ok(actions.some((action) => action.type === 'select' && action.selector === '[data-litos-discovered-26]' && action.value === 'Decline To Self Identify'));
-  assert.ok(actions.some((action) => action.type === 'select' && action.selector === '[data-litos-discovered-27]' && action.value === 'I am not a protected veteran'));
-  assert.ok(actions.some((action) => action.type === 'select' && action.selector === '[data-litos-discovered-28]' && action.value === 'No, I do not have a disability and have not had one in the past'));
+  assert.equal(actions.some((action) => action.type === 'select'
+    && action.selector?.startsWith('[data-litos-discovered-')), false,
+  'temporary selectors from a stateless discovery run must never be replayed on the fresh fill page');
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('gender identity') && label.endsWith('Woman')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('race/ethnicity') && label.endsWith('Decline To Self Identify')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('veteran status') && label.endsWith('I am not a protected veteran')));
+  assert.ok(comboLabels.some((label) => label.toLowerCase().includes('physical or mental disability')
+    && label.endsWith('No, I do not have a disability and have not had one in the past')));
   assert.ok(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Preferred First Name' && action.value === 'Mehek'));
   assert.ok(actions.some((action) => action.type === 'fillByLabelText' && action.text === 'Preferred Last Name' && action.value === 'Mandal'));
   assert.ok(comboLabels.some((label) => label.toLowerCase().includes('expecting to graduate') && label.endsWith('2028')));
@@ -4170,6 +4173,64 @@ test('a reviewed combobox answer is selected rather than left as uncommitted tex
   assert.ok(group.some((action) => action.type === 'press' && action.value === 'Enter'));
   assert.equal(group.some((action) => action.type === 'fill' && action.label?.startsWith('question:')), false,
     'a dropdown must never use the plain text replay path');
+});
+
+test('a measured option answer stays a dropdown when an older runner stored text', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    questions: [
+      {
+        question: 'When is your anticipated graduation date - please select a Graduation Date range',
+        answer: 'January 2028 - July 2028',
+        answerOptionSource: 'May 2028',
+        portalSelector: '#question_9170559101',
+        portalInputType: 'text',
+      },
+      {
+        question: 'Privacy statement',
+        answer: 'I Agree',
+        answerOptionSource: 'Yes',
+        portalSelector: '#question_9170569101',
+        portalInputType: 'text',
+      },
+    ],
+  }));
+  const group = actions.filter((action) => /anticipated graduation date/i.test(action.label ?? ''));
+  assert.ok(group.some((action) => action.type === 'click' && action.label?.endsWith('_open')));
+  assert.ok(group.some((action) => action.type === 'press' && action.value === 'Enter'));
+  assert.equal(group.some((action) => action.type === 'fill' && action.label?.startsWith('question:')), false,
+    'measured option provenance must bypass the plain text replay path');
+  const privacyGroup = actions.filter((action) => /privacy statement/i.test(action.label ?? ''));
+  assert.ok(privacyGroup.some((action) => action.type === 'click' && action.label?.endsWith('_open')));
+  assert.ok(privacyGroup.some((action) => action.type === 'press' && action.value === 'Enter'));
+});
+
+test('Greenhouse demographics use durable label replay after stateless discovery', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    jdText: 'IMC Software Engineer Intern - Summer 2027',
+    questions: [
+      {
+        question: 'What is your gender/gender identity?',
+        answer: 'Female',
+        portalSelector: '[data-litos-discovered-24]',
+        portalInputType: 'text',
+      },
+      {
+        question: 'What is your race/ethnicity?',
+        answer: 'South Asian',
+        portalSelector: '[data-litos-discovered-25]',
+        portalInputType: 'text',
+      },
+    ],
+  }));
+  assert.equal(actions.some((action) => action.type === 'select'
+    && action.selector?.startsWith('[data-litos-discovered-')), false,
+  'the temporary discovery attribute does not exist on the separate managed fill page');
+  const durable = actions.filter((action) => action.type === 'fill'
+    && action.label?.startsWith('question_combo_label:'));
+  assert.ok(durable.some((action) => /gender\/gender identity/i.test(action.label ?? '')
+    && action.value === 'Female'));
+  assert.ok(durable.some((action) => /race\/ethnicity/i.test(action.label ?? '')
+    && action.value === 'South Asian'));
 });
 
 /* R-101. The discovery run fits inside the runner's ceiling, on every portal and every packet.
