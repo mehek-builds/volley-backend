@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { getTableColumns } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { application_profile } from '../db/schema';
@@ -868,5 +869,51 @@ describe('the reader survives the migration not having run', () => {
     assert.equal(factBoolean({ user_id: 'u', accept_privacy_notices: null } as never, 'accept_privacy_notices'), undefined);
     assert.equal(filled('privacy statement', { accept_privacy_notices: false }), null);
     assert.equal(filled('privacy statement', {}), null);
+  });
+});
+
+/* THE MOUNT, ASSERTED AGAINST THE SCHEMA RATHER THAN AGAINST A HAND-BUILT OBJECT.
+ *
+ * restrictive_agreements shipped in #515 with a column, a zod field, a resolver branch and four
+ * passing unit tests, and answered nothing in production. Every one of those tests called
+ * resolveKnownAnswer with a literal `{ restrictive_agreements: 'No' }`, so not one of them crossed
+ * the two places the value actually has to travel through: APPLICATION_FACT_COLUMNS, which is the
+ * projection selectApplicationProfileRow narrows to, and buildApplicationProfileLike, which maps
+ * the row onto the shape resolvers read. The column was absent from both, so the row never carried
+ * it and the resolver saw undefined forever.
+ *
+ * This is the composition-root defect the repo has now recorded three times: the module is
+ * correct, the suite is green, and nothing mounts it. A behavioural test of a resolver cannot
+ * catch it by construction, so this reads the wiring itself and fails when a declaration column
+ * exists in the schema but is not carried to the readers.
+ */
+describe('every declaration column is actually mounted on the read path', () => {
+  test('APPLICATION_FACT_COLUMNS carries restrictive_agreements', () => {
+    assert.ok(
+      APPLICATION_FACT_COLUMNS.includes('restrictive_agreements'),
+      'restrictive_agreements must be in the projection or the row never carries it',
+    );
+  });
+
+  test('a declared restrictive-agreement answer survives the row-to-resolver hop', () => {
+    const row = { user_id: 'u', restrictive_agreements: 'No' } as never;
+    assert.equal(factString(row, 'restrictive_agreements'), 'No');
+  });
+
+  test('the schema declares no fact column the projection has forgotten', () => {
+    /* The general form. Any column added to application_profile alongside the declaration set has
+     * to be named in APPLICATION_FACT_COLUMNS, or it reads as "never asked" no matter what is
+     * stored. Scoped to the declaration columns this list owns rather than to every column on the
+     * table, because the encrypted identity fields are read by a different path. */
+    for (const column of ['politically_exposed', 'politically_exposed_family', 'restrictive_agreements']) {
+      assert.ok(
+        Object.keys(getTableColumns(application_profile)).includes(column),
+        `${column} must exist on the schema`,
+      );
+      assert.ok(
+        APPLICATION_FACT_COLUMNS.includes(column as never),
+        `${column} exists on the schema but is not in APPLICATION_FACT_COLUMNS`,
+      );
+    }
   });
 });
