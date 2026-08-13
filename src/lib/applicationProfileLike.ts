@@ -19,6 +19,7 @@ import {
   consentAcceptanceGranted,
 } from './automationConsent';
 import { countryEligibilityForRead } from './workEligibility';
+import { resumeEmailOfRecord } from './resumeEmail';
 
 export function eligibilityFromLoadedApplicationProfile(
   app: Record<string, unknown>,
@@ -258,6 +259,11 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
         title: entry.title?.trim() || undefined,
       }))
       .filter((entry) => entry.org),
+    /* THE SAME FUNCTION THAT PRODUCES `_contact.email`, called on the same row, so the resolver and
+     * the packet cannot disagree about the applicant's address of record. resumeEmailOfRecord reads
+     * `profiles.parsed_json.resume_email` and validates the shape; it returns undefined when there
+     * is none, which academicEmailAnswer treats as "hold", not as "no university address". */
+    contact_email: resumeEmailOfRecord(profileRow?.parsed_json),
     school: academicStr('school'),
     degree: academicStr('degree'),
     education_start_date: educationStartDate(),

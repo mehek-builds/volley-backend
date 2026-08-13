@@ -315,6 +315,40 @@ export function mergeSubmittedApplicationReviewQuestions(
      * stale review round can falsify. This is a claim about the ANSWER ("it was snapped for profile
      * value X"), and only replacing the answer can falsify that. Different claims, different tests. */
     const answerUnchanged = submittedQuestion.answer === question.answer;
+    /* AN ANSWER THE APPLICANT TYPED IN THIS REQUEST, WHICH IS THE ONE THING A HELD QUESTION IS
+     * ASKING FOR.
+     *
+     * A submit body carrying a DIFFERENT answer from the stored one is her editing that control and
+     * pressing Send. It is the same act PUT /applications/:id/review records, arriving by the other
+     * door, and applyApplicationReviewEdit has always stamped it. This path did not, and the
+     * omission was load-bearing rather than cosmetic: refreshKnownQuestionAnswers runs on this
+     * function's OUTPUT at the same call site in routes/applications.ts, and its refusal branch
+     * blanks any answer to a question the resolver holds unless the record proves the applicant
+     * supplied it. So typing an answer into a held question and pressing Send deleted it, and the
+     * route then persisted the blank over her own words.
+     *
+     * Measured on 2026-08-12 on the IMC prior-application question: merged answer "No", refreshed
+     * answer "". That is the entire human-owned category - every question Litos deliberately hands
+     * back - unanswerable through the send path, which is the path that reaches the employer.
+     *
+     * NOTHING IS INVENTED HERE AND NOTHING CAN BE. The value is the caller's own bytes, already
+     * adopted verbatim on the line below whatever this decides; this only records where it came
+     * from, so that the refusal branch can tell "she answered it" from "an earlier run resolved it".
+     * Litos still declines to write an answer of its own for a held question, which is the property
+     * the hold exists for.
+     *
+     * ONLY A CHANGED, NON-EMPTY ANSWER. An unchanged one is whatever the last run resolved, replayed
+     * by a client that touched nothing, and stamping it would assert a review that did not happen -
+     * and would disarm the runner's stale-drafted-answer guard, which reads this exact field to tell
+     * a paragraph she wrote from one an earlier build drafted (routes/submissionRunner.ts). An empty
+     * one clears the control and is not an answer to record.
+     *
+     * AND ONLY AGAINST A REVIEW ROUND THAT EXISTS. `answer_reviewed_at` is only meaningful beside the
+     * `questions_reviewed_at` it equals; writing one without the other would leave a claim no reader
+     * can check, and the refusal branch would discard it anyway. */
+    const applicantSuppliedAnswer = Boolean(
+      questionsReviewedAt && !answerUnchanged && submittedQuestion.answer.trim(),
+    );
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
@@ -348,6 +382,10 @@ export function mergeSubmittedApplicationReviewQuestions(
       ...(portalSelector ? { portal_selector: portalSelector } : {}),
       ...(portalInputType ? { portal_input_type: portalInputType } : {}),
       ...(atsApiField ? { ats_api_field: atsApiField } : {}),
+      // Last, so it wins over anything carriedForward brought along. See applicantSuppliedAnswer.
+      ...(applicantSuppliedAnswer
+        ? { answer_source: 'applicant_review' as const, answer_reviewed_at: questionsReviewedAt }
+        : {}),
     };
   });
   const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));
