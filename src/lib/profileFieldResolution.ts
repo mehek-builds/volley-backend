@@ -60,6 +60,7 @@ import {
   resolveKnownAnswer,
   type ApplicationProfileLike,
   type ProfileKey,
+  controlCanAcceptADocument,
 } from './questionDiscovery';
 import {
   referralSourceForApplication,
@@ -1093,7 +1094,10 @@ export function resolveProfileField(
 ): ResolvedProfileField | null {
   const label = normalizeDiscoveredLabel(shape.label);
   if (!label) return null;
-  const known = resolveKnownAnswer(label, shape.inputType ?? 'text', ap, jdText, postingCountry, postingCountryCode);
+  const known = resolveKnownAnswer(
+    label, shape.inputType ?? 'text', ap, jdText, postingCountry, postingCountryCode,
+    controlCanAcceptADocument(shape.inputType, shape.options),
+  );
   if (!known || !('value' in known)) return null;
   const base = known.value.trim();
   if (!base) return null;

@@ -50,6 +50,7 @@ import {
   resolveKnownAnswer,
   type ApplicationProfileLike,
   type DiscoveredQuestion,
+  controlCanAcceptADocument,
 } from './questionDiscovery';
 import { consentAcceptanceValue } from './profileFieldResolution';
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from './selfDeclaration';
@@ -295,6 +296,7 @@ export function resolvePrescript(
       context.jdText,
       context.postingCountry,
       context.postingCountryCode,
+      controlCanAcceptADocument(question.input_type, question.options),
     );
     if (known && 'value' in known) {
       out.push({ ...base, ask: false, answer: known.value, remembered: false });
