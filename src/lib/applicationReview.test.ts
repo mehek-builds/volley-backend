@@ -16,7 +16,12 @@ import {
   type ApplicationReviewState,
 } from './applicationReview';
 import { PACKET_VISIBLE_QUESTION_FIELDS, packetVisibleQuestions } from './packetAudit';
-import { refreshKnownQuestionAnswers } from './questionDiscovery';
+import {
+  frozenJobEmployerContext,
+  refreshKnownQuestionAnswers,
+  resolveKnownAnswer,
+  type ApplicationProfileLike,
+} from './questionDiscovery';
 
 const bank: ExperienceBankEntry[] = [
   {
@@ -746,6 +751,72 @@ test('a genuine edit on the review screen still wins', () => {
     'a graduation date still comes from the profile, and her edited band does not become sticky');
   assert.equal(persisted[1].answer_option_source, undefined,
     'and it carries no derivation, because nothing derived it');
+});
+
+/* AN ANSWER TO A QUESTION LITOS DELIBERATELY HANDS BACK, TYPED ON THE SEND.
+ *
+ * Measured on 2026-08-12 on the live IMC packet. POST /submit-request runs
+ * mergeSubmittedApplicationReviewQuestions and then refreshKnownQuestionAnswers on its output at the
+ * SAME call site (routes/applications.ts), and persists the result. The merge adopted her typed
+ * answer and recorded nothing about where it came from, so the refresh's refusal branch could not
+ * tell it from an earlier run's stale value and blanked it - on the one request that reaches the
+ * employer, over her own words.
+ *
+ * The blast radius is the whole human-owned category, not this label: every question the resolver
+ * holds is one Litos is ASKING her to answer, and none of them could be answered on the send path.
+ *
+ * The label below is the live IMC prior-application question and the profile declares nothing, which
+ * is what holds it - deliberately not the empty-declaration shape, so this keeps proving the merge's
+ * behaviour after the resolver learned to answer that one.
+ */
+test('an applicant answer filling a held question survives the send-path refresh', () => {
+  const reviewedAt = '2026-08-12T17:08:37.791Z';
+  const held = 'have you applied to this role or another role @imc within the last 12-18 months? as a reminder, '
+    + 'if you have already applied for this position during the current recruitment season and were not '
+    + 'selected, you may reapply when the next recruitment season begins in 2027.';
+  const jdText = frozenJobEmployerContext('IMC');
+  // Nothing declared and no send history read: the resolver holds this question and must keep doing so.
+  const profile: ApplicationProfileLike = {};
+  const stored = [{ id: 'prior', question: held, answer: '', kind: 'required' as const, required: true }];
+
+  assert.ok(
+    'skipReason' in (resolveKnownAnswer(held, 'text', profile, jdText) ?? {}),
+    'precondition: the resolver still refuses to answer this question from this profile',
+  );
+
+  const sent = (answer: string) => refreshKnownQuestionAnswers(
+    mergeSubmittedApplicationReviewQuestions(stored, [{ ...stored[0], answer }], reviewedAt),
+    profile,
+    jdText,
+    reviewedAt,
+  )[0];
+
+  const answered = sent('No');
+  assert.equal(answered.answer, 'No', 'the answer she typed is what the employer receives');
+  assert.equal(answered.answer_source, 'applicant_review', 'and the record says who it came from');
+  assert.equal(answered.answer_reviewed_at, reviewedAt);
+
+  /* AND LITOS STILL DOES NOT INVENT ONE. With no answer supplied, the hold stands and the control is
+   * left blank for her - which is the property the refusal branch exists for and is untouched. */
+  const untouched = sent('');
+  assert.equal(untouched.answer, '', 'an unanswered hold stays unanswered');
+  assert.equal(untouched.answer_source, undefined, 'and claims no applicant behind it');
+
+  /* NOR IS A REPLAYED ANSWER PROMOTED INTO ONE. A client posting back what a previous run resolved
+   * has reviewed nothing, and stamping it would assert a review that did not happen - and would
+   * disarm the runner's stale-drafted-answer guard, which reads this exact field. */
+  const drafted = 'A paragraph an earlier build drafted.';
+  const replayed = refreshKnownQuestionAnswers(
+    mergeSubmittedApplicationReviewQuestions(
+      [{ ...stored[0], answer: drafted, kind: 'essay' as const }],
+      [{ ...stored[0], answer: drafted, kind: 'essay' as const }],
+      reviewedAt,
+    ),
+    profile,
+    jdText,
+    reviewedAt,
+  )[0];
+  assert.equal(replayed.answer_source, undefined, 'a replayed answer is not an applicant review');
 });
 
 /* EXHAUSTIVE BY CONSTRUCTION. `satisfies Required<ApplicationReviewQuestion>` is the compile-time

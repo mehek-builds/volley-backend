@@ -315,6 +315,40 @@ export function mergeSubmittedApplicationReviewQuestions(
      * stale review round can falsify. This is a claim about the ANSWER ("it was snapped for profile
      * value X"), and only replacing the answer can falsify that. Different claims, different tests. */
     const answerUnchanged = submittedQuestion.answer === question.answer;
+    /* FILLING A BLANK IS THE ONE THING A HELD QUESTION IS ASKING FOR, AND ONLY SHE CAN DO IT.
+     *
+     * refreshKnownQuestionAnswers blanks every answer to a question the resolver holds unless the
+     * record proves the applicant supplied it, and it runs on this function's OUTPUT at the same
+     * call site in routes/applications.ts, which then persists what comes back. So a submit body
+     * that fills one of those blanks had its value adopted here, stripped of any claim about where
+     * it came from, and deleted one line later - on the request that reaches the employer.
+     *
+     * Measured on 2026-08-12 on the IMC prior-application question: merged answer "No", refreshed
+     * answer "". That is the whole human-owned category - every question Litos deliberately hands
+     * back - unanswerable through the send path.
+     *
+     * NOTHING IS INVENTED HERE AND NOTHING CAN BE. The value is the caller's own bytes, adopted
+     * verbatim below whatever this decides; this only records that they came from her, so the
+     * refusal branch can tell "she answered it" from "an earlier run resolved it". Litos still
+     * writes no answer of its own for a held question, which is the property the hold exists for.
+     *
+     * A BLANK STORED ANSWER, DELIBERATELY, AND NOT MERELY A CHANGED ONE. answer_source is an
+     * APPLICANT-CLAIM keyed on the exact reviewed identity, and a REPLACED answer invalidates that
+     * identity by rule - see the classification in ANSWER_CLAIM_FIELDS and the tests in
+     * answerProvenanceClasses.test.ts, which pin "I agree" edited to "I do not agree" dropping the
+     * claim. Filling a blank is the one case that does not collide with it: there was no reviewed
+     * identity to invalidate, so recording who filled it asserts nothing the old rule denied.
+     *
+     * WHAT THAT LEAVES OPEN, STATED. Replacing an EXISTING answer to a held question still loses the
+     * claim and is still blanked. Closing that means reclassifying answer_source, which is a
+     * deliberate design decision with its own test suite behind it and is not this fix's to make.
+     *
+     * AND ONLY AGAINST A REVIEW ROUND THAT EXISTS. `answer_reviewed_at` is only meaningful beside the
+     * `questions_reviewed_at` it equals; writing one without the other would leave a claim no reader
+     * can check, and the refusal branch would discard it anyway. */
+    const applicantSuppliedAnswer = Boolean(
+      questionsReviewedAt && !question.answer.trim() && submittedQuestion.answer.trim(),
+    );
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
@@ -348,6 +382,10 @@ export function mergeSubmittedApplicationReviewQuestions(
       ...(portalSelector ? { portal_selector: portalSelector } : {}),
       ...(portalInputType ? { portal_input_type: portalInputType } : {}),
       ...(atsApiField ? { ats_api_field: atsApiField } : {}),
+      // Last, so it wins over anything carriedForward brought along. See applicantSuppliedAnswer.
+      ...(applicantSuppliedAnswer
+        ? { answer_source: 'applicant_review' as const, answer_reviewed_at: questionsReviewedAt }
+        : {}),
     };
   });
   const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));
