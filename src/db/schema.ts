@@ -296,6 +296,26 @@ export const profiles = pgTable('profiles', {
   // outside it are hard-rejected, which is only safe BECAUSE the list is the student's own
   // statement rather than something inferred from their bullets.
   skills: jsonb('skills'),
+  /* NO `coursework` COLUMN HERE, AND THE REASON IS WORTH KEEPING. One was added on this branch and
+   * taken back out before merge, because a column on THIS table cannot be shipped the way one on
+   * application_profile can.
+   *
+   * application_profile has exactly one read path, selectApplicationProfileRow, which builds an
+   * explicit narrowed projection and so tolerates a database that has not run the migration yet.
+   * `profiles` has 27 bare `db.select().from(profiles)` sites and no such helper, and Drizzle names
+   * every declared column in every one of them. Declaring a column here before the migration runs
+   * therefore 42703s resume generation, the extension's autofill answers, the submission runner, job
+   * matching, base resume builds, the account export, and the INSERT in routes/profile.ts that
+   * creates a profile row at all - which means new signups. That is not a degraded feature, it is
+   * the backend.
+   *
+   * So the course history needs its own change: either a narrowed-projection helper for `profiles`
+   * matching the one its neighbour already has, or a migration confirmed present before the column
+   * is declared. The measurement behind it stands and is worth acting on - GET /profile returns four
+   * courses, two of them business electives, and all 158 packets print that same list unchanged
+   * including a Data Science and a quant trading internship - but it is a separate piece of work
+   * and it is not this one.
+   */
   // The BASE resume: one ResumeSpec, built once at onboarding from the bank with no job
   // description. It is what the student reviews and approves on /start, and the fallback every
   // later generation falls back TO when a JD is thin, unreadable, or absent.
@@ -787,6 +807,69 @@ export const application_profile = pgTable('application_profile', {
   availability_window_end: text('availability_window_end'),
   availability_cycle: text('availability_cycle'),
   availability_valid_through: text('availability_valid_through'),
+
+  /* ---- standardized test scores (2026-08-11) ----
+   *
+   * WHAT THE MEASUREMENT ACTUALLY SAYS, stated in the unit the bar is written in.
+   *
+   * Counted across the full 158-packet corpus on 2026-08-11, each of the three questions blocked
+   * EIGHT distinct packets. In postings, which is how the 2026-08-08 group above counts ("6
+   * postings", "5 postings, 5 companies"), those 8 packets are:
+   *
+   *   2 postings, 1 employer (IMC Trading), retried four times each.
+   *
+   * An earlier draft of this comment said nine packets and called that "four times the two-posting
+   * bar". That compared packets against postings and was wrong twice over: the count was 8, and a
+   * retry is not a posting. Restated honestly, this clears the letter of the two-posting bar and
+   * nothing more, at a SINGLE employer, which is weaker than every other member of the group above.
+   * The original exclusion note at the top of this file called it "exactly one posting"; it is now
+   * two. That is a real change and a small one, and it is not on its own a reason to add a column.
+   *
+   * SO THE ARGUMENT IS NOT THE COUNT. It is that no other mechanism can ever answer these:
+   *
+   *   Nothing can harvest them. A form ASKS for a test score and never offers one, which is the
+   *     same structural argument that put gpa and major on this table rather than in the harvest.
+   *   All 24 occurrences were blank and required. Not one was answered by any existing path.
+   *   The type question needs a CLOSED LIST. saved_application_answers stores free text keyed by
+   *     question wording, and cannot hold an enum the resolver is allowed to rely on.
+   *   Onboarding collects them UP FRONT, which is the whole point: the alternative learns a fact
+   *     only after it has already blocked an application, and then only for that exact wording.
+   *
+   * THE HONEST COUNTERPOINT, recorded because it is real. The comment on saved_application_answers
+   * below names "a standardized test score" as its own example of what belongs there rather than in
+   * a typed column, and lib/answerReuse.ts already scopes exact test scores 'reusable'. That path
+   * exists and these columns overlap it. Two things decided it anyway: that path cannot ask up
+   * front, and its STANDARDIZED_TEST_SCORE_QUESTION carries the identical defect these matchers
+   * were just repaired for, requiring the word "score" where the employer writes "result". Anyone
+   * revisiting this should weigh consolidating the two rather than assuming the split is settled.
+   *
+   * WHY THREE COLUMNS AND NOT ONE. The forms ask all three shapes and they are three different
+   * questions. A quant-trading form asks "which standardized test did you take?" as a closed list
+   * and then asks for the score of the one named; answering the type question with a number, or
+   * the SAT field with an ACT score, is a false claim about an academic record. The type is also
+   * the only one of the three that is answerable by a student who took neither ("None"), which no
+   * score field can express.
+   *
+   * SCORES ARE TEXT, NOT INTEGER. "1520", "1520 (superscored)" and "34" are all real answers, and
+   * an integer column would force a lossy read of the first. Same reasoning as gpa directly above,
+   * which is stored as earned rather than as a number.
+   *
+   * PLAINTEXT, not in ENCRYPTED_FIELDS, on the same precedent as gpa_scale, major and languages:
+   * the entire purpose of the value is to be typed into an employer form on every application, and
+   * lib/applicationFacts.ts reads these off the RAW row, so a decrypt step here would hand
+   * ciphertext to a form. gpa is encrypted and is read through a decrypt path for that reason;
+   * these are read on the raw path and so must not be.
+   *
+   * NULL means never asked on all three, and the resolver refuses rather than defaults. Inventing
+   * a test score is the single worst thing in this file's problem space: it is a checkable claim
+   * about an academic record made to an employer.
+   */
+  // One of 'SAT' | 'ACT' | 'Both' | 'None'. Her own declaration, never inferred from whether a
+  // score column happens to be populated: a student may have taken the SAT and not wish to report
+  // it, and "None" is a real answer that no score field can carry.
+  standardized_test_type: text('standardized_test_type'),
+  sat_score: text('sat_score'),
+  act_score: text('act_score'),
 
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow(),
 });

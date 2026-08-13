@@ -27,6 +27,11 @@ describe('onboarding gaps: languages', () => {
       'gpa_scale',
       'major',
       'languages',
+      // Measured across 158 packets (2026-08-11): 8 distinct blocked packets each for the three
+      // test fields, which is 2 postings at one employer retried four times.
+      'standardized_test_type',
+      'sat_score',
+      'act_score',
       'desired_salary',
       'desired_salary_currency',
       'referral_source_default',
@@ -96,6 +101,9 @@ describe('onboarding gaps: languages', () => {
     });
     assert.deepEqual(g, [
       'gpa_scale',
+      'standardized_test_type',
+      'sat_score',
+      'act_score',
       'desired_salary',
       'desired_salary_currency',
       'referral_source_default',
@@ -202,6 +210,15 @@ describe('the setup gaps step', () => {
       assert.equal(hasSetupGapsFrom(['desired_salary', 'desired_salary_currency']), false);
       assert.equal(hasSetupGapsFrom(['languages', 'referral_source_default']), false);
       assert.equal(hasSetupGapsFrom([]), false);
+    });
+
+    /* The 2026-08-11 additions RENDER on the screen but must never OPEN it, which is the same
+       distinction desired_salary draws above. Test scores are asked by trading and quant firms and
+       by almost nobody else; gating on them would put a whole screen in front of every account
+       forever, which is exactly the pre-#116 defect. They are shown to someone already routed here
+       for a missing GPA or major. */
+    test('the measured 2026-08-11 additions render but never gate', () => {
+      assert.equal(hasSetupGapsFrom(['standardized_test_type', 'sat_score', 'act_score']), false);
     });
 
     test('a full gap list still opens it, because the academic three are in it', () => {

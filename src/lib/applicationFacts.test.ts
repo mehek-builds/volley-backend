@@ -1,5 +1,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { PgDialect } from 'drizzle-orm/pg-core';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { application_profile } from '../db/schema';
 import {
   classifyField,
   frozenJobEmployerContext,
@@ -16,9 +20,11 @@ import {
   factString,
   factStringList,
   isUndefinedColumnError,
-  mayRetryWithoutFactColumns,
-  withoutFactColumns,
 } from './applicationFacts';
+
+/* A query builder with no connection behind it. Only ever used to RENDER SQL, never to run it, so
+ * these tests need no database. */
+const mockDb = drizzle.mock();
 
 /* Does a fact answered once in onboarding actually reach the control on a real employer form?
  *
@@ -786,19 +792,50 @@ describe('the reader survives the migration not having run', () => {
     );
   });
 
-  test('a write can shed the fact columns without losing the established ones', () => {
-    const values = { phone: '+971500000000', pronouns: 'she/her', accept_privacy_notices: true };
-    assert.deepEqual(withoutFactColumns(values), { phone: '+971500000000' });
+  /* THE GUARD THAT COULD NOT FIRE, pinned so nobody builds it again.
+   *
+   * A retry used to sit in upsertApplicationProfile that stripped the fact columns out of the
+   * payload object and wrote a second time, promising that an unmigrated database would still save
+   * the established fields. It could never work: Drizzle names EVERY declared column in the emitted
+   * INSERT and fills the omitted ones with `default`, so removing a key from the payload does not
+   * remove the column from the SQL. The retry raised the identical 42703 and threw.
+   *
+   * This test renders the SQL and asserts that property directly. If a future ORM upgrade ever makes
+   * an insert's column list follow its payload, this test fails and the retry becomes buildable
+   * again - which is the only condition under which it should be. Until then the migration is a
+   * hard prerequisite for writes, and that is stated rather than papered over.
+   */
+  test('an insert names every declared column, so a payload-stripping retry cannot help', () => {
+    const dialect = new PgDialect();
+    const sqlFor = (payload: Record<string, unknown>) => dialect.sqlToQuery(
+      mockDb
+        .insert(application_profile)
+        .values({ user_id: '00000000-0000-4000-8000-000000000001', ...payload })
+        .onConflictDoUpdate({ target: application_profile.user_id, set: payload })
+        .getSQL(),
+    ).sql;
+
+    const full = sqlFor({ address_city: 'Dubai', major: 'CS', standardized_test_type: 'SAT' });
+    assert.ok(full.includes('standardized_test_type'), 'the column is named when it is in the payload');
+
+    // The payload a stripping retry would have produced. The column is STILL in the SQL.
+    const stripped = sqlFor({ address_city: 'Dubai', major: 'CS' });
+    assert.ok(
+      stripped.includes('standardized_test_type'),
+      'removing the key does not remove the column, which is why the retry was deleted',
+    );
   });
 
-  test('a required scoped column prevents any compatibility projection retry', () => {
-    const values = {
-      work_eligibility_by_country: 'encrypted',
-      work_authorized: true,
-      needs_sponsorship: false,
-    };
-    assert.equal(mayRetryWithoutFactColumns(values, ['work_eligibility_by_country']), false);
-    assert.equal(mayRetryWithoutFactColumns(values), true);
+  test('the write path exposes no partial-save flag, because there is no partial save', async () => {
+    const source = await readFile('src/lib/applicationFacts.ts', 'utf8');
+    // Comments stripped: the removal is documented at length in this file, and the point of the
+    // assertion is that no CODE reaches for the helpers again, not that the history goes unwritten.
+    const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    assert.doesNotMatch(code, /droppedFactColumns/);
+    assert.doesNotMatch(code, /withoutFactColumns/);
+    assert.doesNotMatch(code, /mayRetryWithoutFactColumns/);
+    // The prerequisite itself must stay written down, in the comments this time.
+    assert.match(source, /MIGRATION FIRST, THEN MERGE/);
   });
 
   /* THE FALLBACK ONLY FIRES IF THE ERROR IS RECOGNISED, and for the whole life of this file it was

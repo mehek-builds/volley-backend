@@ -13,6 +13,12 @@ export interface ContactHeader {
   full_name: string;
   email?: string;
   phone?: string;
+  /* Where she is, e.g. "Los Angeles, CA". Measured 2026-08-11: `spec->'_contact'` carried neither
+   * a location nor a city on any of the 158 stored packets, so every resume Litos has ever
+   * generated has a header with no location on it, while "Current location" was separately a
+   * required-and-empty blocker on 9 of them. The fact was on file the whole time and simply had
+   * nowhere in this interface to go. */
+  location?: string;
   linkedin_url?: string;
   github_url?: string;
   portfolio_url?: string;
@@ -89,7 +95,11 @@ const RESUME_FONT_PATHS = {
   ),
 } as const;
 
-function contactLine(contact: ContactHeader): string {
+/* Exported for the header tests. This is the one function that decides what the contact line of a
+ * rendered resume says: renderResumePdf draws exactly this string, measureResumeLayout measures it,
+ * and resumeContactIssues validates it. Testing it is testing what the employer reads, without
+ * rasterising a PDF to find out. */
+export function contactLine(contact: ContactHeader): string {
   const seen = new Set<string>();
   const clean = (value: string | undefined) => {
     const shown = value?.trim().replace(/^https?:\/\/(www\.)?/i, '').replace(/\/+$/, '') ?? '';
@@ -98,7 +108,10 @@ function contactLine(contact: ContactHeader): string {
     seen.add(key);
     return shown;
   };
-  return [contact.email, contact.phone, contact.linkedin_url, contact.github_url, contact.portfolio_url]
+  // Location leads the line, which is where a reader looks for it and where every resume
+  // convention puts it. `clean` strips a URL scheme and a trailing slash; a city string has
+  // neither, so it passes through untouched and still takes part in the duplicate check.
+  return [contact.location, contact.email, contact.phone, contact.linkedin_url, contact.github_url, contact.portfolio_url]
     .map(clean)
     .filter(Boolean)
     .join(' | ');

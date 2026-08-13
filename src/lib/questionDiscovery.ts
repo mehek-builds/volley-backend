@@ -129,6 +129,14 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   has_outstanding_offers?: boolean;
   outstanding_offer_details?: string;
   military_service?: string;
+  /* Standardized tests, measured at 8 distinct blocked packets each (2 postings at one employer,
+   * retried four times; see db/schema.ts for why the count alone is not the argument). Three fields
+   * because the forms ask three questions: which test, and then the score of each. undefined is
+   * "never asked" on all three and the resolver refuses, because a test score is a checkable claim
+   * about an academic record and there is no safe default for one. */
+  standardized_test_type?: 'SAT' | 'ACT' | 'Both' | 'None';
+  sat_score?: string;
+  act_score?: string;
   politically_exposed?: string;
   politically_exposed_family?: string;
   advanced_study_plan?: 'no' | 'considering' | 'committed';
@@ -630,6 +638,162 @@ function militaryServiceAnswer(label: string, ap: ApplicationProfileLike): { val
     if (pref && pref.trim()) return null;
   }
   return ap.military_service ? { value: ap.military_service } : null;
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * STANDARDIZED TEST SCORES. 8 distinct blocked packets each for the type, the SAT and the ACT,
+ * counted over the 158-packet corpus on 2026-08-11. Those 8 packets are 2 postings at ONE employer,
+ * retried four times each; see the note on the columns in db/schema.ts, which states the bar
+ * honestly rather than inflating a packet count into a posting count.
+ *
+ * THE LABELS ARE MEASURED, NOT IMAGINED. The first version of this rule required the word "score"
+ * beside the test name, because "What is your SAT score?" is what the question sounds like. That
+ * label appears in the corpus zero times. The complete real set, all required, all text, all blank:
+ *
+ *   provide your best result on sat             8 packets
+ *   provide your best result on act             8 packets
+ *   select your standardized test score type    8 packets
+ *
+ * The employer says RESULT. A pattern keyed on "score" answers one of three.
+ *
+ * THE ORDER OF THE THREE PATTERNS IS LOAD-BEARING. The type label contains the word "score" and the
+ * score labels name a test, so the TYPE pattern is tested LAST: a label naming a specific test wants
+ * that test's number, and only a label naming no test is asking which test. Backwards, this types
+ * "Both" into a field expecting "1520", a malformed answer on a required field rather than a blank.
+ *
+ * NOTHING HERE IS DERIVED FROM ANOTHER FIELD. A stored SAT score is not evidence for the type
+ * ("Both" and "SAT" both fit it), and a type of "SAT" is not evidence of any particular number.
+ */
+
+/* Words that mean the field wants a FIGURE, or name the part of the test it wants one for. The
+ * section names are here because the commonest real ATS shape is a bare section label - "SAT Math",
+ * "ACT English", "SAT Total (Evidence-Based Reading and Writing + Math)" - which asks for a number
+ * without ever saying "score". A gate demanding a value word returned null on all of those, and null
+ * is the worst of the three outcomes: it falls through to the essay drafter instead of producing a
+ * skipReason that leaves the question for the student.
+ *
+ * `section` IS DELIBERATELY ABSENT, and it was here once. It is the single token by which every
+ * statute is cited - "Rehabilitation Act, Section 503" is the literal citation on the OFCCP
+ * disability self-identification form - so including it made a legal citation look exactly like a
+ * test subscore and put "34" into a disability question. No corpus label needs it. */
+const TEST_CONTEXT_WORD =
+  /^(?:results?|scores?|marks?|grades?|composite|superscored?|percentile|maths?|mathematics|reading|writing|english|science|verbal|subscores?|total|exam|test)$/i;
+
+/* WHAT MAY STAND IMMEDIATELY BEFORE A TEST NAME. An ALLOWLIST, and the inversion is the point.
+ *
+ * This replaced two denylists: one of prepositions that may follow "sat" (the verb, as in "sat FOR
+ * the exam") and one of nouns that may precede "act" (the statute, as in "Equality Act"). Both
+ * leaked, and they leaked in the way denylists always do - by omission rather than by error:
+ *
+ *   "Rehabilitation Act, Section 503"      not in the statute list -> filled "34"
+ *   "Investment Advisers Act score"        not in the statute list -> filled "34"
+ *   "Fair Credit Reporting Act - total"    not in the statute list -> filled "34"
+ *   "ADA Amendments Act score"             `amendment` was listed, `amendments` was not
+ *   "Date you sat the exam"                the verb here is FOLLOWED by "the", not a preposition
+ *   "Have you ever sat this exam?"         same, and the corpus already has a UK-English employer
+ *
+ * A list of every statute that could appear on an employer form cannot be completed, and neither
+ * can a list of every way English can phrase sitting an exam. The set of words that may introduce a
+ * TEST NAME, though, is tiny and closed: a determiner, a preposition, a qualifier, or nothing at
+ * all when the label opens with the test. Everything above is preceded by a noun or a pronoun and
+ * so is refused by default, which is the failure direction this belongs on. All three corpus labels
+ * pass, each preceded by "on". */
+const TEST_NAME_PRECEDER =
+  /^(?:your|the|a|an|on|in|best|highest|composite|superscored|total|and|or)$/i;
+
+function tokens(label: string): string[] {
+  return label.toLowerCase().split(/[^a-z0-9+#]+/i).filter(Boolean);
+}
+
+/* ADJACENCY, NOT LENGTH. An earlier gate capped the label at eight words, which refused
+ * "Please provide your ACT composite score if you have taken the exam" (13 words, unmistakably an
+ * ACT field) while still admitting any short sentence that happened to contain both "act" and
+ * "score". Requiring the context word to sit WITHIN TWO TOKENS of the test name is what actually
+ * separates the two: a form names the test right where it asks for the number, and a sentence that
+ * merely contains both words does not. */
+const TEST_CONTEXT_MAX_DISTANCE = 2;
+
+function namesTestValue(label: string, test: 'sat' | 'act'): boolean {
+  const parts = tokens(label);
+  for (let i = 0; i < parts.length; i += 1) {
+    if (parts[i] !== test && parts[i] !== `${test}s`) continue;
+    // Start of label is allowed: "SAT Math" is a field name. Anything else must be a determiner.
+    if (i > 0 && !TEST_NAME_PRECEDER.test(parts[i - 1])) continue;
+    for (let j = Math.max(0, i - TEST_CONTEXT_MAX_DISTANCE); j <= Math.min(parts.length - 1, i + TEST_CONTEXT_MAX_DISTANCE); j += 1) {
+      if (j !== i && TEST_CONTEXT_WORD.test(parts[j])) return true;
+    }
+  }
+  return false;
+}
+
+export function isSatScoreQuestion(label: string): boolean {
+  return namesTestValue(label, 'sat');
+}
+
+export function isActScoreQuestion(label: string): boolean {
+  return namesTestValue(label, 'act');
+}
+
+/* THE TYPE QUESTION NEEDS A TYPE CUE, not merely a mention of a standardized test.
+ *
+ * A bare `\bstandardi[sz]ed\s+tests?\b` alternative used to be the first branch here, on the theory
+ * that the phrase is unambiguous. It is not. TESTING-ACCOMMODATION questions are disability
+ * questions that name a standardized test without ever containing the string `disab`, so they slip
+ * EEO_QUESTION as well, and this pattern then typed "Both" into a yes/no control:
+ *
+ *   Did you receive an accommodation on a standardized test?
+ *   Do you require accommodations for a standardized test?
+ *
+ * So the pattern now requires wording that asks WHICH test or names the field as a TYPE. The one
+ * corpus label, "select your standardized test score type", matches on `test score type`. */
+export const STANDARDIZED_TEST_TYPE_QUESTION =
+  /\btests?\s+scores?\s+type\b|\bstandardi[sz]ed\s+tests?\s+(?:scores?\s+)?type\b|\b(?:which|what)\s+standardi[sz]ed\s+tests?\b|\b(?:which|what)\s+tests?\s+did\s+you\s+take\b/i;
+
+/* An accommodation question is a DISABILITY question wearing a test's vocabulary, and a request for
+ * accommodations is never a request for a score or a test name. Kept separate from EEO_QUESTION
+ * because it is exactly the family EEO_QUESTION misses: the word `disab` need never appear. */
+const TESTING_ACCOMMODATION_QUESTION = /\baccommodat/i;
+
+function standardizedTestAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  const leaveIt = (what: string) => ({ skipReason: `${what} left for you: "${label.slice(0, 60)}"` });
+
+  /* A SELF-IDENTIFICATION QUESTION IS NEVER A TEST SCORE, and this refusal is absolute.
+   *
+   * This function is called before the EEO_QUESTION branch in resolveKnownAnswer, deliberately, so
+   * that a plain required test field is not swallowed by a "Decline to self-identify". The cost of
+   * that ordering is that any label matching BOTH reaches here first, and EEO_QUESTION folds
+   * disability, veteran and race into one alternation containing `disab`. "Section 503 Disability
+   * Act score" matches both, and end to end it filled "34" - verbatim the failure the comment above
+   * these matchers says must never happen.
+   *
+   * The preceder allowlist refuses that particular label a second time, and no real EEO label in
+   * the corpus reaches this branch. Both facts are reasons to keep the guard, not to skip it: an
+   * absolute claim needs a check that does not depend on a word list staying complete. Returning
+   * null hands the label to the EEO branch, which is the rule that should own it.
+   *
+   * The accommodation check is the same refusal for the family EEO_QUESTION cannot see. "Do you
+   * require accommodations for the ACT exam?" contains a test name, a context word beside it and a
+   * determiner in front of it, so every gate above passes it; it is still a disability question and
+   * the answer to it is never a score. */
+  if (EEO_QUESTION.test(label) || TESTING_ACCOMMODATION_QUESTION.test(label)) return null;
+
+  // A specific test named in the label wants that test's number, so these are matched before the
+  // "which test" pattern, which also matches many of the same labels.
+  if (isSatScoreQuestion(label)) {
+    return ap.sat_score ? { value: ap.sat_score } : leaveIt('SAT score');
+  }
+  if (isActScoreQuestion(label)) {
+    return ap.act_score ? { value: ap.act_score } : leaveIt('ACT score');
+  }
+  if (STANDARDIZED_TEST_TYPE_QUESTION.test(label)) {
+    return ap.standardized_test_type
+      ? { value: ap.standardized_test_type }
+      : leaveIt('standardized test question');
+  }
+  return null;
 }
 
 function highSchoolGraduationAnswer(
@@ -5938,6 +6102,20 @@ export function resolveKnownAnswer(
   // field stayed empty. Falls through untouched when the question really is an EEO self-ID block.
   const militaryService = militaryServiceAnswer(label, ap);
   if (militaryService) return militaryService;
+
+  /* Before the EEO branch for the same reason militaryService is: a test-score field is a plain
+   * required input, and letting it fall through to the generic branches below is what left it
+   * empty on 8 packets. Answers only from the three stored columns, and returns a skipReason
+   * rather than null when they are unset, so an unanswered test question is reported as left for
+   * the student instead of silently reaching a keyword fallback that might type something else.
+   *
+   * Standing in front of EEO_QUESTION is only safe because standardizedTestAnswer refuses every
+   * EEO label outright as its first act. Without that refusal this ordering fills a test score into
+   * a disability question, which is measured and written up at the top of that function. Do not
+   * move this line below the EEO branch and do not remove the refusal inside it: the two together
+   * are what make both questions answerable. */
+  const standardizedTest = standardizedTestAnswer(label, ap);
+  if (standardizedTest) return standardizedTest;
 
   if (EEO_QUESTION.test(label)) {
     /* The refusal is written in the CONTROL'S spelling when the control names its vocabulary.

@@ -50,14 +50,18 @@ describe('the gaps a seeded profile still has', () => {
     const seeded = academicSeedFrom({ gpa: '3.75', gpa_scale: '4.0', major: 'Psychology' }, undefined);
     assert.deepEqual(gapsFrom(seeded as Record<string, unknown>), [
       'languages',
+      // Nothing a resume parse can seed: a form asks for a test score and never offers one.
+      'standardized_test_type',
+      'sat_score',
+      'act_score',
       'desired_salary',
       'desired_salary_currency',
       'referral_source_default',
     ]);
   });
 
-  test('a resume that printed nothing leaves the full seven', () => {
-    assert.equal(gapsFrom({}).length, 7);
+  test('a resume that printed nothing leaves the full ten', () => {
+    assert.equal(gapsFrom({}).length, 10);
   });
 });
 

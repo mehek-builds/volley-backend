@@ -81,6 +81,7 @@
     "db:country-work-eligibility": "node scripts/apply-country-work-eligibility-schema.mjs",
     "db:availability-window": "node scripts/apply-availability-window-schema.mjs",
     "db:setup-gaps-asked": "node scripts/apply-setup-gaps-asked-schema.mjs",
+    "db:standardized-test-scores": "node scripts/apply-standardized-test-scores-schema.mjs",
     "db:consent-acceptance": "node scripts/apply-consent-acceptance-schema.mjs",
     "logo:check": "node --import tsx scripts/check-logo-coverage.mjs",
     "logo:resolve": "node --import tsx scripts/resolve-company-domains.mjs",

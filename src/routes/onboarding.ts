@@ -233,11 +233,30 @@ export function hasWorkEligibilityDeclaration(input: {
 // yes/no about one language, never the student's own list - and the declared list is the
 // authority (R-015, see schema.ts). ZURU asked about Spanish and Enpal about German with nothing
 // on file (2026-07-17); only the student can close that gap, so onboarding asks once.
+//
+// The three standardized test fields join it under the same structural test, and they pass it for
+// the same reason gpa and major do: a form ASKS for a test score, it never offers one, so watching
+// a hundred applications teaches Litos nothing about it. Measured at 8 distinct blocked packets
+// each across the 158-packet corpus (2026-08-11), which is 2 postings at one employer.
+//
+// A `coursework` gap was here on this branch and was removed before merge. It needs a column on
+// `profiles`, and that table has 27 bare selects and no narrowed-projection helper, so declaring a
+// column on it ahead of its migration takes the backend down rather than degrading one feature.
+// See the note where that column would have gone in db/schema.ts.
+//
+// address_city and address_state are deliberately still NOT here, though "current location" blocks
+// 9 packets and the resume header needs it. A form asks for a city on nearly every application, so
+// it is exactly what the harvest is for, and it is populated on this account already. The header
+// was empty because nothing READ it, which is fixed in lib/resumeContactOfRecord.ts, not by asking
+// a question the harvest already answers.
 const GAP_FIELDS = [
   'gpa',
   'gpa_scale',
   'major',
   'languages',
+  'standardized_test_type',
+  'sat_score',
+  'act_score',
   'desired_salary',
   'desired_salary_currency',
   'referral_source_default',
