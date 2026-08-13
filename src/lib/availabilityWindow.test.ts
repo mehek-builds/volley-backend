@@ -84,6 +84,15 @@ describe('the availability window model', () => {
     assert.equal(readAvailabilityWindow(lapsed, new Date()), null);
   });
 
+  test('the reuse-through date is inclusive and expires the following day', () => {
+    const boundary = {
+      ...WINDOW,
+      availability_valid_through: `${YEAR}-05-20`,
+    };
+    assert.ok(readAvailabilityWindow(boundary, new Date(`${YEAR}-05-20T23:59:59Z`)));
+    assert.equal(readAvailabilityWindow(boundary, new Date(`${YEAR}-05-21T00:00:00Z`)), null);
+  });
+
   test('a window whose last day has already passed says nothing either', () => {
     const spent = {
       availability_window_start: `${YEAR - 4}-06-01`,
