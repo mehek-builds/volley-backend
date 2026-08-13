@@ -3,7 +3,7 @@ import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
 import { officeMetrosNamed } from './officeMetros';
-import { storedOptionAnswerIsCurrent } from './optionBand';
+import { reviewedOptionBandCoversCurrentValue, storedOptionAnswerIsCurrent } from './optionBand';
 import type { SupportedPortal } from './portalSubmission';
 import {
   resolveSalary,
@@ -2160,6 +2160,8 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
         ? withProvenance.answer_option_source
         : undefined;
       if (storedOptionAnswerIsCurrent(question.answer, derivedFrom, known.value)) return question;
+      if (applicantReviewedCurrentAnswer
+        && reviewedOptionBandCoversCurrentValue(question.answer, known.value)) return question;
       /* NOTHING IS BEING REPLACED, so the applicant-claim survives. See APPLICANT_CLAIM_FIELDS.
        *
        * Every strip in this file is licensed by one sentence: a record left beside a value it was
