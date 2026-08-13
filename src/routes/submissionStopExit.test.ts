@@ -32,6 +32,7 @@ import {
   assertManagedRequiredFieldsConfirmed,
   CaptchaUnresolvedError,
   ManagedActionBudgetError,
+  NoSubmitControlError,
 } from '../lib/portalSubmission';
 import { isManagedNoSubmitControl, submissionProvablyNotSent, unwrapThrownErrorMessage } from '../lib/managedSubmitOutcome';
 import { submitRequestDisposition } from '../lib/submissionSafety';
@@ -456,5 +457,59 @@ describe('a blocked submission releases, and is never dressed up as a possible s
     assert.equal(persisted.submission_stop?.reason, 'confirmation_unproven');
     assert.ok(exitIsTheUnverifiedResolutionRoute(persisted),
       'exit: POST /applications/:id/submission/unverified');
+  });
+
+  /* THE SENTENCE THE INHERITANCE WAS WRITING, AND WHY IT HAD TO STOP.
+   *
+   * ManagedRequiredFieldConfirmationError extends NoSubmitControlError so that fail() reads it as a
+   * stop that provably preceded the click. It does, and that half is right. What it also inherited
+   * was the applicant-facing sentence, which is about a page where no send control could be found -
+   * and the scope proof carried by the very run above says the opposite in its own fields:
+   * submitMatchCount 1, sameNode true. The button was found, bound, and deliberately not pressed.
+   *
+   * Told "Litos could not find the button that sends this application" about a form whose Submit
+   * button is plainly on screen, the honest reading is that the message is wrong, and the next one
+   * is believed a little less. This is the stop she can most often actually act on, so it is the
+   * worst one to spend that trust on.
+   */
+  test('a stop over a required answer says so, and does not blame a missing button', () => {
+    const persisted = submissionFailureReview(
+      claimedRunning(),
+      refusalFor(blockedRun(['"Start date" is required and is still empty'])),
+    );
+
+    assert.doesNotMatch(persisted.attention_reason ?? '', /could not find the button/i,
+      'the run bound the submit control uniquely and withheld the press, which is not the same event');
+    assert.match(persisted.attention_reason ?? '', /found the button that sends it/i);
+    assert.match(persisted.attention_reason ?? '', /could not confirm one of the required answers/i);
+    assert.match(persisted.attention_reason ?? '', /nothing has been sent/i);
+    assert.doesNotMatch(persisted.attention_reason ?? '', CLAIMS_A_SEND);
+  });
+
+  test('and everything else about the stop is exactly as it was', () => {
+    /* The wording is the only thing that moves. The pre-click classification, the release, and the
+       route out are what make this stop safe, and all three are inherited on purpose. */
+    const persisted = submissionFailureReview(claimedRunning(), refusalFor(blockedRun(['Start date'])));
+
+    assert.equal(persisted.status, 'needs_attention');
+    assert.equal(persisted.submission_stop?.reason, 'no_submit_control');
+    assert.equal(persisted.submission_stop?.before_click, true);
+    assert.equal(persisted.submission_claimed_at, undefined);
+    assert.equal(persisted.submission_attempted_at, undefined);
+    assert.equal(persisted.unverified_submission, undefined);
+    assert.ok(exitIsAnOrdinaryRerun(persisted));
+  });
+
+  /* A GENUINELY MISSING BUTTON KEEPS ITS OWN SENTENCE. The arm above outranks noSubmitControl, so
+     the one thing that must be checked is that it did not swallow it: a plain NoSubmitControlError
+     is the routine outcome on every multi-step first page and it is still described as one. */
+  test('a run that really found no submit control still says exactly that', () => {
+    const persisted = submissionFailureReview(
+      claimedRunning(),
+      new NoSubmitControlError('Atomic submit control was missing or ambiguous'),
+    );
+
+    assert.match(persisted.attention_reason ?? '', /could not find the button that sends this application/i);
+    assert.doesNotMatch(persisted.attention_reason ?? '', /required answers/i);
   });
 });
