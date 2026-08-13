@@ -969,7 +969,15 @@ export function eeoAnswerLadder(label: string, stored: string): string[] {
  */
 
 /* The two option wordings live in questionDiscovery.ts beside the rest of the consent grammar,
- * because refreshKnownQuestionAnswers needs them too and this module imports that one. */
+ * because refreshKnownQuestionAnswers needs them too and this module imports that one.
+ *
+ * AND THE COMPOUND RULE LIVES THERE FOR THE SAME REASON, rather than being unrolled here. A
+ * Greenhouse consent whose only option reads "Acknowledge/Confirm" has to be recognised as
+ * accepting in BOTH places or the repair is worse than the defect: this function would select it,
+ * refreshKnownQuestionAnswers would then fail to recognise the stored answer as an acceptance, and
+ * the next run would recompute the control to the bare "Yes" that is on no such control's list.
+ * That is the prepare-versus-submit divergence its own branch documents, arrived at from the other
+ * side. One vocabulary, two callers, and they cannot drift. */
 
 /**
  * The one option on a consent control that ACCEPTS it, or null.
