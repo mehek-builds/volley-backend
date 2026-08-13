@@ -56,12 +56,23 @@
  *   4. The question above it - the nearest PRECEDING discovered field that the packet has a
  *      question record for - carries a determinate answer of the opposite polarity.
  *
- * Fact 4 is the one the caller usually cannot supply, and that is honest rather than unfortunate:
- * on 6 of the 7 measured instances the gating question was itself left unanswered (a legal
+ * Fact 4 is the one the caller usually cannot supply, and that is honest rather than unfortunate.
+ * Over the 7 measured instances: 4 have a gating question that was itself left unanswered (a legal
  * declaration Litos refuses to answer for her), so the condition is UNDETERMINED and the follow-up
- * keeps blocking. Only Scale AI 9ddffb88, where the agreements question is answered "No", is
- * provably unmet. A wrongly-required field costs a question; a wrongly-skipped one costs an
- * application.
+ * keeps blocking; 2 answer the sponsorship gate "Yes", so the condition is MET and the follow-up
+ * genuinely applies; and exactly 1, Scale AI 9ddffb88, answers its gate "No" and is provably unmet.
+ * A wrongly-required field costs a question; a wrongly-skipped one costs an application.
+ *
+ * A KNOWN LIMIT, RECORDED RATHER THAN FIXED. "Nearest preceding question record" is a heuristic and
+ * it can pick the wrong gate: a sponsorship question answered "Yes", an unrelated question answered
+ * "No" rendered between the two, and an "If yes" follow-up after it, and this reads the unrelated
+ * "No" and drops a blocker it should have kept. No form in the measured corpus has that shape, and
+ * fact 2 bounds the damage in the only direction that matters: the field is one the employer's own
+ * markers say is optional, so the application cannot become incomplete by the employer's own
+ * reckoning. What is lost is the same thing already lost on every optional follow-up that keeps its
+ * blocker - a question she has no record to type into anyway. Closing it properly needs the
+ * employer's own conditional wiring (a `data-conditional-on` or the ATS's own show/hide rule),
+ * which neither discovery pass reports today.
  *
  * NO SENSITIVE GATE IS WEAKENED. A consent, an EEO self-identification, a work-authorization
  * question and a sponsorship question are never phrased as an anaphor, so fact 3 excludes all of

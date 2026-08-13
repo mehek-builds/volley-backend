@@ -263,16 +263,38 @@ test('a gating answer is read as negative only when the whole answer is one', ()
   assert.equal(gatingAnswerPolarity(undefined), null);
 });
 
+/**
+ * THE GUARD'S INTENT, NOT THE GUARD'S SPELLING.
+ *
+ * Deliberately not the skip line character for character. A pin that matches the whole statement
+ * goes red on the next rename of a local or reorder of a conjunct, and it goes red as a failing
+ * test on main rather than as a review comment - the trap that cost PR 522 a round-trip today by
+ * pinning `createAndPersistPacketAudit(row)` and breaking the moment an argument was added. This
+ * asks only what the fix actually claims: that somewhere in the error-text branch, a decision is
+ * made about a LABEL against the control that label names, and it SKIPS on it. Either conjunct
+ * order, any local names, any extra terms alongside, in the spirit of this repo's `\(row[,)]`
+ * convention.
+ *
+ * The two markers are unique inside the window - one occurrence each, and `'LABEL'` occurs once in
+ * the whole script - so the bounded gaps cannot join two unrelated statements together.
+ */
+const OWN_LABEL_SKIP =
+  /(?:'LABEL'[\s\S]{0,200}?getAttribute\('for'\)|getAttribute\('for'\)[\s\S]{0,200}?'LABEL')[\s\S]{0,200}?\bcontinue\b/;
+
 test('the readiness gate no longer reads a control’s own label as that control’s error', () => {
-  /* The manufacturing site, pinned on the script's source because there is no DOM in this test
-   * runner to drive it through. The sentences this whole module refuses were produced by the
-   * managed runner's copy of this loop; this repo's copy carries the same defect and the same fix,
-   * so the two cannot drift. */
-  assert.match(
-    READ_SUBMIT_READINESS_SCRIPT,
-    /if \(element\.tagName === 'LABEL' && control\.id && element\.getAttribute\('for'\) === control\.id\) continue;/,
-  );
-  // The vocabulary that made an employer's question look like an employer's complaint is unchanged:
-  // the fix is the structural test above, not a narrower word list.
-  assert.match(READ_SUBMIT_READINESS_SCRIPT, /please \(\?:select\|enter\|complete\|choose\|provide\)/);
+  /* The manufacturing site, asserted on the script's source because there is no DOM harness in this
+   * runner to drive it through: the script is serialized text evaluated in a page, and the
+   * `new Function` precedent elsewhere in this repo is DOM-free so it does not transfer. The
+   * sentences this whole module refuses were produced by the managed runner's copy of this loop;
+   * this repo's copy carries the same defect and the same fix, so the two cannot drift. */
+  const script = READ_SUBMIT_READINESS_SCRIPT;
+  // lastIndexOf, because the early "could not bind" return uses the same object shape at the top.
+  const branch = script.slice(script.indexOf('const ERROR_TEXT'), script.lastIndexOf('return { blocking:'));
+  assert.ok(branch.length > 0, 'the error-text branch is still where this test looks for it');
+  assert.match(branch, OWN_LABEL_SKIP);
+  /* The vocabulary that made an employer's question look like an employer's complaint is unchanged.
+   * Asserted loosely, on the one alternative the corpus exercises rather than the whole alternation,
+   * so adding a spelling to ERROR_TEXT does not turn this red: the point is that the fix is the
+   * structural test above and NOT a narrower word list. */
+  assert.match(branch, /please[^\n]*provide/);
 });
