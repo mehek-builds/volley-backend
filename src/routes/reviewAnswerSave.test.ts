@@ -63,6 +63,24 @@ const HELD_QUESTION: ApplicationReviewQuestion = {
   ats_api_field: 'answers[3]',
 };
 
+/* AN ANSWER NO HUMAN TYPED, sitting on the same packet as the blank one above.
+ *
+ * Resolved from the profile by an earlier run, so it carries no answer_source and no
+ * answer_reviewed_at: on 2026-08-12 that described 2790 of 2790 question records in production, and
+ * 14 answers in the whole database carried an applicant_review claim. This is the shape a save must
+ * not adopt. In production the 802 answers a blanket stamp would have claimed across 174 packets are
+ * this one: gender, disability status, veteran status, sponsorship, compensation expectations. */
+const MACHINE_ANSWERED_QUESTION: ApplicationReviewQuestion = {
+  id: 'gender',
+  question: 'Gender',
+  answer: 'Female',
+  kind: 'required',
+  required: false,
+  portal_selector: '#question_gender',
+  portal_input_type: 'select',
+  ats_api_field: 'demographics[gender]',
+};
+
 /** A packet stopped at needs_attention still wearing the claim its run took, owing one answer. */
 function stoppedRun(extra: Partial<ApplicationReviewState> = {}): ApplicationReviewState {
   return {
@@ -116,6 +134,36 @@ function saveAnswers(applicationId: string, answer: string) {
         required: HELD_QUESTION.required,
       }],
     },
+  });
+}
+
+/* THE SAME PACKET WITH A SECOND QUESTION ON IT, which is what every real one looks like.
+ *
+ * The single-question fixture above is what let a blanket claim through: with one blank question and
+ * one answer in the body, "stamp the blank she filled" and "stamp everything" are the same list.
+ * Production packets are not that shape. The 174 affected ones hold a resolver-held blank next to
+ * answers no human supplied, and only a fixture with both can tell the two rules apart. */
+function stoppedRunWithMachineAnswer(extra: Partial<ApplicationReviewState> = {}): ApplicationReviewState {
+  return stoppedRun({ questions: [HELD_QUESTION, MACHINE_ANSWERED_QUESTION], ...extra });
+}
+
+/** A stored question reduced to what the client can actually send. questionSchema strips the rest. */
+function asSent(question: ApplicationReviewQuestion, answer: string = question.answer) {
+  return {
+    id: question.id,
+    question: question.question,
+    answer,
+    kind: question.kind,
+    required: question.required,
+  };
+}
+
+function saveQuestions(applicationId: string, questions: readonly ReturnType<typeof asSent>[]) {
+  return app.inject({
+    method: 'PUT',
+    url: `/applications/${applicationId}/review/answers`,
+    headers: { authorization: `Bearer ${token}` },
+    payload: { questions },
   });
 }
 
@@ -362,4 +410,154 @@ test('another owner\'s application is not saveable', async () => {
 
   const persisted = await storedReview(row.id);
   assert.equal(persisted.questions[0].answer, '');
+});
+
+/* WHOSE ANSWER IS IT. One save must not sign the applicant's name to work she never did.
+ *
+ * A claim of 'applicant_review' is not decoration. refreshKnownQuestionAnswers blanks every answer
+ * to a resolver-held question that cannot be attributed to her, so the stamp is exactly what decides
+ * whether an answer reaches an employer's form. Stamping every non-empty answer in the merged list
+ * would have carried 802 machine-written answers across 174 live packets past that check as hers -
+ * gender, disability status, veteran status, sponsorship, compensation - which is the category
+ * Litos holds back BECAUSE only she may answer it. */
+
+test('a save stamps the blank she filled and leaves the machine-written answer beside it unclaimed', async () => {
+  const id = await applicationWith(stoppedRunWithMachineAnswer());
+
+  // The shipped client posts the whole list it is holding, so the machine answer comes back too.
+  const response = await saveQuestions(id, [
+    asSent(HELD_QUESTION, 'No'),
+    asSent(MACHINE_ANSWERED_QUESTION),
+  ]);
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  const [held, machine] = persisted.questions;
+
+  assert.equal(held.answer, 'No', 'the blank she typed into is saved');
+  assert.equal(held.answer_source, 'applicant_review', 'and is recorded as hers, which is the fix');
+  assert.equal(held.answer_reviewed_at, persisted.questions_reviewed_at);
+
+  assert.equal(machine.answer, 'Female', 'the answer she never touched is still there');
+  assert.equal(machine.answer_source, undefined,
+    'and is not signed with her name: she did not supply it, she only failed to delete it');
+  assert.equal(machine.answer_reviewed_at, undefined);
+});
+
+test('a stored question the request never mentioned has no claim minted for it', async () => {
+  const id = await applicationWith(stoppedRunWithMachineAnswer());
+
+  /* The shape that arrives from the shipped client whenever a run adds a question to the row after
+   * the client's last poll: she answers what is on her screen, and the row holds one more. */
+  const response = await saveQuestions(id, [asSent(HELD_QUESTION, 'No')]);
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions.length, 2, 'the unmentioned question is kept, not dropped');
+
+  const machine = persisted.questions[1];
+  assert.equal(machine.question, MACHINE_ANSWERED_QUESTION.question);
+  assert.equal(machine.answer, 'Female');
+  assert.equal(machine.answer_source, undefined,
+    'a question this request never carried cannot have been answered by this request');
+  assert.equal(machine.answer_reviewed_at, undefined);
+});
+
+/* WHAT THE STATUS CANNOT SEE. needs_attention is also what a run that may have pressed submit leaves
+ * behind: unverifiedSubmissionPatch writes submission_attempted_at, records an unresolved
+ * unverified_submission, and KEEPS the claim. Two of the 286 live needs_attention rows on 2026-08-13
+ * carried that evidence, and the dashboard offers "Check the answers" for both, so the route is
+ * reachable from the screen. A gate keyed on status alone let every one of them through.
+ *
+ * One case per stored fact, because each is independently sufficient. See
+ * employerMayHoldApplication, which is where submissionProvablyNotSent asks the same question. */
+
+const SEND_EVIDENCE: Array<[string, Partial<ApplicationReviewState>]> = [
+  ['a recorded submit attempt', { submission_attempted_at: STOPPED_AT }],
+  ['the employer\'s own confirmation', {
+    receipt: {
+      confirmation_text: 'Thanks for applying to kos.',
+      final_url: `${PORTAL_URL}/confirmation`,
+      captured_at: STOPPED_AT,
+    },
+  }],
+  ['an unresolved unverified submission', {
+    unverified_submission: { at: STOPPED_AT, cause: 'no_confirmation_state', portal_url: PORTAL_URL },
+  }],
+  ['a standing security code wall', {
+    security_code: { digits: 6, requested_at: STOPPED_AT, submit_was_authorized: true },
+  }],
+];
+
+for (const [name, evidence] of SEND_EVIDENCE) {
+  test(`a stopped run carrying ${name} refuses the save and is left untouched`, async () => {
+    const id = await applicationWith(stoppedRun(evidence));
+
+    const response = await saveAnswers(id, 'No');
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(response.json().code, 'REVIEW_ANSWERS_NOT_EDITABLE');
+
+    const persisted = await storedReview(id);
+    assert.equal(persisted.questions[0].answer, '',
+      'the answers on a row that may already be at an employer are the record of what was sent');
+    assert.equal(persisted.questions_reviewed_at, undefined, 'and no review round was minted');
+    assert.equal(persisted.status, 'needs_attention');
+  });
+}
+
+/* THE SAVE THAT LOST THE RACE, AND THE ONE BYTE THAT LETS THE SCREEN KNOW.
+ *
+ * The 202 body was shape-identical to the 200's, and the client resolves on any res.ok and returns
+ * the parsed body with the status discarded, so "Saved." was shown for a write that did not land and
+ * the applicant's typing was replaced with the stored review that does not contain it.
+ *
+ * STAGED WITH A TRIGGER, because the interleaving cannot be staged from outside the process: the
+ * route has no await between reading the row and its conditional write, and PGlite serializes whole
+ * connections, so a second connection cannot get a write in between. The trigger IS the run that got
+ * there first - it writes its own version of the row, then returns NULL so the applicant's UPDATE
+ * touches nothing and RETURNING yields no row, which is exactly what the conditional predicate
+ * failing does. */
+test('a save that lost the race answers 202, says so, and does not report a write that did not happen', async () => {
+  const id = await applicationWith(stoppedRun());
+  await pglite.exec(`
+    CREATE OR REPLACE FUNCTION litos_test_run_wins_race() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF pg_trigger_depth() > 1 THEN RETURN NEW; END IF;
+      UPDATE generated_resumes
+         SET spec = jsonb_set(OLD.spec, '{_review,attention_reason}', '"The run wrote here first."'::jsonb)
+       WHERE id = OLD.id;
+      RETURN NULL;
+    END $$;
+    DROP TRIGGER IF EXISTS litos_test_run_wins_race ON generated_resumes;
+    CREATE TRIGGER litos_test_run_wins_race BEFORE UPDATE ON generated_resumes
+      FOR EACH ROW EXECUTE FUNCTION litos_test_run_wins_race();
+  `);
+
+  let response;
+  try {
+    response = await saveAnswers(id, 'No');
+  } finally {
+    await pglite.exec('DROP TRIGGER IF EXISTS litos_test_run_wins_race ON generated_resumes');
+  }
+
+  assert.equal(response.statusCode, 202, response.body);
+  assert.equal(response.json().saved, false,
+    'the body must say the save did not land, or a client that only reads the body cannot tell');
+  assert.equal(response.json().review.attention_reason, 'The run wrote here first.',
+    'and it carries what is actually stored, not what this request wanted to store');
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, '', 'nothing of this save reached the row');
+  assert.equal(persisted.questions_reviewed_at, undefined);
+});
+
+/* AND THE 200 CARRIES NO SUCH KEY. The client reads `saved === false` rather than an absence, so a
+ * successful save must not answer with a discriminator at all. */
+test('a save that landed answers 200 with no saved flag on it', async () => {
+  const id = await applicationWith(stoppedRun());
+
+  const response = await saveAnswers(id, 'No');
+
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().saved, undefined);
 });

@@ -20,7 +20,6 @@ import { pruneUngroundedSkills, validatePdfLayout, validateResumeSpec } from '..
 import { resumeSafeTargetRole } from '../engine/resumePolicy';
 import { leadAlignmentIssues, selectJdAlignedLead } from '../engine/leadAlignment';
 import {
-  applyApplicantReviewedAnswers,
   applyApplicationReviewEdit,
   deriveEditedTerms,
   finalApprovalCoverLetterIssue,
@@ -1339,9 +1338,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
    *                          its gate is submitRequestDisposition, which answers 'reject' for a
    *                          claimed needs_attention row, which is what a stopped run leaves.
    *
-   * So: the same review-round stamping both of those rely on, applied through
-   * applyApplicantReviewedAnswers, with the status left alone and a gate that asks the question a
-   * save actually poses. See reviewAnswerSaveDisposition for what it refuses and why.
+   * So: the same review round both of those rely on, minted here and passed INTO the merge, with the
+   * status left alone and a gate that asks the question a save actually poses. See
+   * reviewAnswerSaveDisposition for what it refuses and why.
    *
    * MERGED ONTO THE STORED QUESTIONS, not substituted for them, which is where PUT /review's
    * treatment would also have been wrong. questionSchema strips every field a run wrote and a client
@@ -1359,18 +1358,57 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!parsed.success) return reply.status(400).send({ error: 'We could not read these answers', detail: parsed.error.issues });
       const current = readApplicationReview(row.spec as StoredSpec);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
-      if (reviewAnswerSaveDisposition(current.status, Boolean(current.submission_claimed_at)) !== 'save') {
+      // The row, not its status. needs_attention is also what a run that may have pressed submit
+      // leaves behind, and only the evidence fields on the row tell those two apart.
+      if (reviewAnswerSaveDisposition(current) !== 'save') {
         return reply.status(409).send({
           error: 'These answers can no longer be edited from this application’s current submission state',
           code: 'REVIEW_ANSWERS_NOT_EDITABLE',
         });
       }
+      /* THE MERGE'S OWN NARROW RULE IS THE ONLY THING THAT MAY MINT A CLAIM HERE, and the round is
+       * minted FIRST so that rule can actually run.
+       *
+       * WHAT THE OTHER COMPOSITION DID. Passing `current.questions_reviewed_at` into the merge and
+       * then stamping the result with applyApplicantReviewedAnswers is two mistakes that hide each
+       * other. The merge's applicantSuppliedAnswer is gated on a round existing, and a round is
+       * written only by a save through these routes - NULL on 272 of the 286 needs_attention rows in
+       * production on 2026-08-13 - so on those rows the narrow rule was dead and recorded nothing.
+       * applyApplicantReviewedAnswers then stamped 'applicant_review' and a fresh answer_reviewed_at
+       * on EVERY question in the merged list carrying any non-empty answer, which is a blanket claim
+       * about answers the applicant never touched.
+       *
+       * WHAT THAT LAUNDERED. Replaying both calls against all 272 live NULL-round rows: 802 answers
+       * across 174 packets would flip from blanked by refreshKnownQuestionAnswers to surviving it,
+       * as HER answers. Among them 'gender' -> 'Female', 'disability status' -> 'I do not want to
+       * answer', 'veteran status' -> 'Decline to self-identify', 'do you now or will you in the
+       * future require immigration sponsorship' -> 'Yes', and compensation expectations of
+       * 'USD 175,000 per year'. Those are EEO self-identifications and personal declarations, which
+       * is exactly the category Litos holds back BECAUSE only the applicant may answer them. Against
+       * 14 answers carrying applicant_review in all of production and 2531 non-empty unattributed
+       * ones, a save that mints 802 claims is not established behaviour, it is a new one.
+       *
+       * SO: mint the round, pass it in, and let the write set only the round. This is
+       * resolveSubmittedApplicationAnswers minus the refresh, which is the composition the send path
+       * already uses. An answer typed into a blank still gets its claim, keyed to a round that now
+       * exists, which is the whole of what the blocked packets need. An answer she never touched
+       * stays unclaimed, and a question the request never mentioned is not touched at all.
+       *
+       * applyApplicantReviewedAnswers stays where it is for applyApplicationReviewEdit. Its blanket
+       * stamp over an edit's own questions is shipped behaviour with its own tests, and narrowing it
+       * is not this route's to do. */
+      const reviewedAt = current.questions_reviewed_at ?? new Date().toISOString();
       const merged = mergeSubmittedApplicationReviewQuestions(
         current.questions,
         parsed.data.questions as ApplicationReviewQuestion[],
-        current.questions_reviewed_at,
+        reviewedAt,
       );
-      const next = applyApplicantReviewedAnswers(current, merged);
+      const next: ApplicationReviewState = {
+        ...current,
+        questions: merged,
+        questions_reviewed_at: reviewedAt,
+        updated_at: new Date().toISOString(),
+      };
       const saved = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
@@ -1381,13 +1419,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ))
         .returning({ id: generated_resumes.id });
       if (saved.length === 0) {
-        // The row moved under the save, which for this packet means a run wrote to it. Answer with
-        // what is actually stored rather than with what this request wanted to store, so the screen
-        // stops showing a save that did not land. Same shape as the edit route above.
+        /* The row moved under the save, which for this packet means a run wrote to it. Answer with
+         * what is actually stored rather than with what this request wanted to store, so the screen
+         * stops showing a save that did not land. Same shape as the edit route above.
+         *
+         * `saved: false` IS WHAT MAKES THAT CONTRACT REACHABLE, and without it the sentence above
+         * described an intention rather than a behaviour. The 202 body was shape-identical to the
+         * 200's, and the client's fetch wrapper resolves on any res.ok and returns the parsed body
+         * with the status discarded, so nothing downstream could tell the two apart. The screen
+         * showed "Saved.", replaced the applicant's typing with the stored review that does not
+         * contain it, and navigated away - which is the original defect happening again, on the one
+         * response that exists to say it happened. Present ONLY here: a 200 carries no `saved` key,
+         * so the client reads the discriminator rather than an absence. */
         const refreshed = await ownedResume(request, reply);
         if (!refreshed) return;
         const review = readApplicationReview(refreshed.spec);
-        return reply.status(202).send({ application_id: row.id, review: review ?? current });
+        return reply.status(202).send({ application_id: row.id, review: review ?? current, saved: false });
       }
       return reply.send({ application_id: row.id, review: next });
     },
