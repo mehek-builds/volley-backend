@@ -12,7 +12,11 @@ import {
 } from './salary';
 import { referralSourceForApplication, type ReferralSourceEvidence } from './referralSource';
 import { usStateScopeSkipReason } from './residenceScope';
-import { comparableOption, declineWordingForControl } from './selfIdentification';
+import {
+  comparableOption,
+  declineWordingForControl,
+  negativeWordingForControl,
+} from './selfIdentification';
 import {
   availabilityWindowForPosting,
   formatWindowDate,
@@ -6626,9 +6630,18 @@ export function resolveKnownAnswer(
      * Done here rather than in a fill builder because this is where the answer is made, so every
      * path - the managed fill, the combobox ladder, the direct-Playwright option snap and the
      * card Mehek reads - all say the same thing. declineWordingForControl never touches a stated
-     * answer and never invents a refusal; it only respells one she already gave. */
+     * answer and never invents a refusal; it only respells one she already gave.
+     *
+     * A STATED NEGATIVE GETS THE SAME TREATMENT, for the same reason and through the mirror
+     * function. "No" is what the profile surface stores, and the two controls that name their
+     * vocabulary offer it as "I am not a protected veteran" and as "No, I do not have a disability
+     * and have not had one in the past". Respelling it here rather than in a fill builder is what
+     * keeps the answer she gave from being reworded differently on each path.
+     *
+     * The two calls compose in either order and at most one of them can fire: an answer is a
+     * refusal or a statement, never both. */
     const answer = eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs));
-    return { value: declineWordingForControl(label, answer) };
+    return { value: declineWordingForControl(label, negativeWordingForControl(label, answer)) };
   }
 
   if (isLegalConsentQuestion(label)) {

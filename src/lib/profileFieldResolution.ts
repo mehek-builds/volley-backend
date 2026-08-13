@@ -70,7 +70,9 @@ import {
 import {
   comparableOption,
   isDeclineToState,
+  isStatedSelfIdentificationNegative,
   selfIdentificationDeclineWording,
+  selfIdentificationNegativeWording,
 } from './selfIdentification';
 
 export type ProfileFieldShape = {
@@ -118,7 +120,13 @@ export function isProfileBackedKey(key: ProfileKey | null | undefined): boolean 
 
 // comparableOption and isDeclineToState live in selfIdentification.ts, where questionDiscovery can
 // reach them too. Re-exported here because this module's public surface is what callers import.
-export { comparableOption, isDeclineToState, selfIdentificationDeclineWording };
+export {
+  comparableOption,
+  isDeclineToState,
+  isStatedSelfIdentificationNegative,
+  selfIdentificationDeclineWording,
+  selfIdentificationNegativeWording,
+};
 
 function optionTokens(value: string): string[] {
   return comparableOption(value).split(' ').filter(Boolean);
@@ -933,9 +941,30 @@ export function eeoAnswerLadder(label: string, stored: string): string[] {
   // spelling goes ahead of everything: it is the same refusal she gave, written the way the list
   // writes it, so it can only ever replace a decline with the same decline.
   const vocabulary = isDeclineToState(base) ? selfIdentificationDeclineWording(label) : undefined;
-  return vocabulary
-    ? ladder(vocabulary, base, coarser, ...DECLINE_WORDINGS)
-    : ladder(base, coarser, ...DECLINE_WORDINGS);
+  if (vocabulary) return ladder(vocabulary, base, coarser, ...DECLINE_WORDINGS);
+
+  /* A STATED NEGATIVE IS A STATEMENT, AND A STATEMENT NEVER FALLS THROUGH TO A REFUSAL.
+   *
+   * The opt-out is a legitimate LAST resort for an answer no option can hold, which is the case
+   * the tail of this ladder was written for and which is still right for a race value like
+   * "South Asian" against a list that names no Asian category. It is not right here, and the
+   * difference is that a negative has a counterpart on every one of these lists by law. Measured
+   * on the corpus before this branch existed: a stored "No" reached DECLINE_WORDINGS and resolved
+   * to "I decline to self-identify for protected veteran status" and to "I do not want to answer",
+   * because chooseClosestOption correctly refuses to read "No" as
+   * "I am not a protected veteran" and the refusals further down the ladder then matched. So the
+   * applicant states an answer and a refusal is submitted under her name.
+   *
+   * The vocabulary in front puts the control's own negative first, where it matches exactly. The
+   * truncated tail is what makes the failure honest when there is no vocabulary and no option can
+   * hold a plain "No": nothing matches, and the question is handed back to her, which is the same
+   * outcome she would get if she had never answered and strictly better than answering for her. */
+  if (isStatedSelfIdentificationNegative(base)) {
+    const negative = selfIdentificationNegativeWording(label);
+    return negative ? ladder(negative, base, coarser) : ladder(base, coarser);
+  }
+
+  return ladder(base, coarser, ...DECLINE_WORDINGS);
 }
 
 /**
@@ -1041,6 +1070,11 @@ export function chooseEeoOption(
   if (options.length === 0) return null;
   const stated = chooseClosestOption(eeoAnswerLadder(label, stored), options);
   if (stated) return stated;
+  /* The stand-in refusal is the second half of the same rule eeoAnswerLadder's negative branch
+   * states, and it has to be gated in both places or the gate is decorative: this stage would put
+   * the list's single opt-out on a control the moment a stated "No" failed to match, which is the
+   * exact substitution the ladder just refused to make. */
+  if (isStatedSelfIdentificationNegative(stored.trim())) return null;
   const declines = options.filter((option) => isDeclineToState(option));
   return declines.length === 1 ? declines[0] : null;
 }
