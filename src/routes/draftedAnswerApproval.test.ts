@@ -477,3 +477,123 @@ test('approving twice is one approval at one time', async () => {
     'the timestamp says when she read it, and she read it once',
   );
 });
+
+/* THE ANSWER ON THE SCREEN IS NOT ALWAYS THE ANSWER IN THE ROW, AND APPROVAL COMPARED THE WRONG PAIR.
+ *
+ * GET /applications/:id/submission serves refreshKnownQuestionAnswers OUTPUT. For any question the
+ * refresh rewrites, the string the applicant reads is not the string in `row.spec`, so an approval
+ * validated against the stored record disagreed with her every time. It could never come right on a
+ * retry either: the refresh is deterministic over the same profile and the GET never writes back, so
+ * the packet was permanently unapprovable and the sentence she was shown - "Litos rewrote this
+ * answer while you were reading it" - was false every time it appeared.
+ *
+ * Driven through the real GET rather than through a hand-built expectation, because the defect was
+ * precisely that the route and the screen disagreed about what the answer was. Anything this test
+ * asserted for itself could be wrong in the same direction as the bug. */
+test('an answer the refresh rewrites can be approved as the screen showed it', async () => {
+  const { eq } = await import('drizzle-orm');
+  await db.insert(schema.profiles).values({
+    user_id: userId,
+    parsed_json: { grad_date: 'May 2028', grad_year: 2028 },
+  });
+  try {
+    const graduation: ApplicationReviewQuestion = {
+      id: 'grad-year',
+      question: 'expected graduation year',
+      // What an earlier run stored. The profile now carries the month, so the refresh rewrites it.
+      answer: '2028',
+      kind: 'required',
+      required: true,
+    };
+    const id = await applicationWith(heldByDraft({
+      questions: [DRAFTED_QUESTION, graduation, MACHINE_ANSWERED_QUESTION],
+    }));
+
+    const served = await app.inject({
+      method: 'GET',
+      url: `/applications/${id}/submission`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(served.statusCode, 200, served.body);
+    const shown = served.json().review.questions
+      .find((question: ApplicationReviewQuestion) => question.id === graduation.id)!;
+    assert.equal(shown.answer, 'May 2028', 'the screen is served the refreshed answer, not the stored one');
+    assert.notEqual(shown.answer, graduation.answer, 'which is the whole premise of this test');
+
+    const response = await approve(id, graduation.id, shown.answer);
+    assert.equal(response.statusCode, 200, response.body);
+
+    const persisted = await storedReview(id);
+    const approved = persisted.questions.find((question) => question.id === graduation.id)!;
+    assert.ok(approved.answer_approved_at, 'the approval is recorded rather than permanently refused');
+    assert.equal(approved.answer, 'May 2028',
+      'and stored as the text she approved, so the stamp does not sit beside words she never read');
+
+    /* AND IT STAYS. The refresh recomputes this same value, so the answer is unchanged byte for byte
+     * and the keep-branch carries the applicant-claim forward. Persisting the stored '2028' instead
+     * would have this very read replace it and strip the approval with it. */
+    const reread = await app.inject({
+      method: 'GET',
+      url: `/applications/${id}/submission`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const afterRefresh = reread.json().review.questions
+      .find((question: ApplicationReviewQuestion) => question.id === graduation.id)!;
+    assert.equal(afterRefresh.answer_approved_at, approved.answer_approved_at,
+      'an approval that the next read erases is not an approval');
+
+    /* THE OTHER ROWS ARE NOT WRITTEN. An approval of one answer is not a save of all of them, which
+     * is this route's stated contract. */
+    const untouched = persisted.questions.find((question) => question.id === MACHINE_ANSWERED_QUESTION.id)!;
+    assert.deepEqual(untouched, MACHINE_ANSWERED_QUESTION, 'the machine-resolved row is exactly as it was');
+  } finally {
+    await db.delete(schema.profiles).where(eq(schema.profiles.user_id, userId));
+  }
+});
+
+/* A GENUINE REWRITE STILL REFUSES, which is what keeps the sentence above honest. The message is
+ * only accurate if something can actually make it appear, and the thing that makes it appear is the
+ * applicant approving text that is not what the packet holds now. */
+test('approving text that is not the current answer is still refused', async () => {
+  const id = await applicationWith(heldByDraft());
+
+  const response = await approve(id, DRAFTED_QUESTION.id, 'Words from a draft that has since been rewritten.');
+  assert.equal(response.statusCode, 409, response.body);
+  assert.equal(response.json().code, 'ANSWER_MOVED');
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer_approved_at, undefined, 'and nothing was signed off');
+});
+
+/* DUPLICATE STORED IDS ARE REPRESENTABLE, AND THE APPROVAL STAMPED EVERY ROW THAT SHARED ONE.
+ *
+ * questionSchema takes a fully client-chosen id (`z.string().min(1).max(200)`) and
+ * normalizeApplicationReviewQuestions dedupes on question TEXT, never on id, so two stored records
+ * can carry the same id with different questions and different answers. The approval located ONE
+ * record, validated the answer against that one, and then wrote the stamp with
+ * `questions.map(q => q.id === target.id ? ... : q)` - which is every one of them. A second
+ * machine-written answer, never read and never validated, came out of that carrying "she read this
+ * and let it stand". mergeSubmittedApplicationReviewQuestions already refuses to match on ambiguous
+ * duplicate ids for the same reason. */
+test('an approval stamps one record, not every record sharing its id', async () => {
+  const sibling: ApplicationReviewQuestion = {
+    id: DRAFTED_QUESTION.id,
+    question: 'Why are you a fit for this team?',
+    answer: 'A second machine-written draft, which nobody has read.',
+    kind: 'essay',
+    required: true,
+  };
+  const id = await applicationWith(heldByDraft({
+    questions: [DRAFTED_QUESTION, sibling, MACHINE_ANSWERED_QUESTION],
+  }));
+
+  const response = await approve(id, DRAFTED_QUESTION.id, DRAFT);
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  assert.ok(persisted.questions[0].answer_approved_at, 'the record whose answer was validated is approved');
+  assert.equal(persisted.questions[1].answer_approved_at, undefined,
+    'and the one that merely shares its id is not, because she never saw it');
+  assert.equal(persisted.questions[1].answer_reviewed_at, undefined);
+  assert.deepEqual(persisted.questions[1], sibling, 'that record is untouched');
+});

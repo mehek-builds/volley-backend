@@ -42,7 +42,18 @@ import type { ApplicationReviewQuestion, ApplicationReviewState } from './applic
 export type AnswerApprovalRefusal = 'question_not_found' | 'answer_moved' | 'nothing_to_approve';
 
 export type AnswerApprovalResult =
-  | { approved: true; questions: ApplicationReviewQuestion[]; questionsReviewedAt: string; alreadyApproved: boolean }
+  | {
+    approved: true;
+    questions: ApplicationReviewQuestion[];
+    questionsReviewedAt: string;
+    alreadyApproved: boolean;
+    /* WHICH RECORD WAS STAMPED, BY POSITION, so a caller that has to write the approval back into a
+     * DIFFERENT list than the one it passed in does not have to re-run the lookup and hope it
+     * agrees. The route does exactly that: it approves against the refreshed view the screen was
+     * served and persists into the stored row. Duplicate ids make "find it again" the wrong
+     * primitive, which is the whole of why this is an index. See targetIndex. */
+    approvedIndex: number;
+  }
   | { approved: false; reason: AnswerApprovalRefusal };
 
 /** The sentence each refusal is reported to the applicant with. Named here so the route has none. */
@@ -52,7 +63,21 @@ export const ANSWER_APPROVAL_REFUSALS: Record<AnswerApprovalRefusal, string> = {
   nothing_to_approve: 'There is no answer on this question yet, so there is nothing to approve',
 };
 
+/* APPROVE AGAINST THE LIST THE SCREEN WAS SERVED, NOT THE ONE IN THE ROW.
+ *
+ * GET /applications/:id/submission serves refreshKnownQuestionAnswers OUTPUT, so for any question
+ * the refresh rewrites, the text on the screen is not the text in `row.spec`. Comparing the client's
+ * answer against the stored record therefore disagreed for those questions permanently and by
+ * construction: the refresh is deterministic over the same profile and the GET never writes back, so
+ * every retry produced the same `answer_moved` and the applicant read "Litos rewrote this answer
+ * while you were reading it" about an answer nothing had touched. It fails closed, so nothing false
+ * was recorded, but it silently withheld the one action this feature exists to offer.
+ *
+ * The caller passes the refreshed view. `answer_moved` then means what it says: between the GET that
+ * drew the screen and this request, the answer actually moved.
+ */
 export function approveDraftedAnswer(options: {
+  /* THE REFRESHED VIEW, matching what GET /applications/:id/submission served. */
   current: Pick<ApplicationReviewState, 'questions' | 'questions_reviewed_at'>;
   questionId: string;
   /* THE EXACT TEXT THE SCREEN SHOWED. Not optional and not advisory: it is what makes this an
@@ -62,8 +87,21 @@ export function approveDraftedAnswer(options: {
 }): AnswerApprovalResult {
   const now = options.now ?? (() => new Date().toISOString());
   const questions = options.current.questions ?? [];
-  const target = questions.find((question) => question.id === options.questionId);
-  if (!target) return { approved: false, reason: 'question_not_found' };
+  /* THE POSITION, NOT THE ID, and the difference is a sibling getting stamped.
+   *
+   * Stored ids are representable in duplicate: questionSchema takes a fully client-chosen
+   * `z.string().min(1).max(200)`, and normalizeApplicationReviewQuestions dedupes on question TEXT
+   * and never on id. So `find` picks the FIRST record with this id, validates the answer against
+   * that one, and a map keyed on id equality would then write the approval onto every other record
+   * sharing it - answers that were never read, never validated, and possibly not even the same
+   * question. mergeSubmittedApplicationReviewQuestions guards against exactly this case already
+   * ("Ambiguous duplicate ids are intentionally not matched"); this function has to as well.
+   *
+   * Indexing on position makes the record that was VALIDATED and the record that is STAMPED the
+   * same object by construction, which no id comparison can promise. */
+  const targetIndex = questions.findIndex((question) => question.id === options.questionId);
+  if (targetIndex < 0) return { approved: false, reason: 'question_not_found' };
+  const target = questions[targetIndex]!;
   if (!target.answer.trim()) return { approved: false, reason: 'nothing_to_approve' };
   if (target.answer !== options.answer) return { approved: false, reason: 'answer_moved' };
 
@@ -82,10 +120,13 @@ export function approveDraftedAnswer(options: {
     approved: true,
     alreadyApproved,
     questionsReviewedAt,
+    approvedIndex: targetIndex,
     /* ONE ANSWER CHANGES AND EVERY OTHER RECORD IS RETURNED BY REFERENCE. Not a convenience: the
      * regression this fix exists beside was a write that touched answers it was not aimed at, and
-     * the cheapest way to be sure this one cannot is for it to construct exactly one new object. */
-    questions: questions.map((question) => (question.id === target.id
+     * the cheapest way to be sure this one cannot is for it to construct exactly one new object.
+     * Keyed on the index found above rather than on id equality, so "exactly one" is true even when
+     * two stored records share an id. See targetIndex. */
+    questions: questions.map((question, index) => (index === targetIndex
       ? { ...question, answer_approved_at: approvedAt, answer_reviewed_at: questionsReviewedAt }
       : question)),
   };

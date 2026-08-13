@@ -1486,16 +1486,59 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           code: 'REVIEW_ANSWERS_NOT_EDITABLE',
         });
       }
-      const outcome = approveDraftedAnswer({ current, questionId, answer: parsed.data.answer });
+      /* THE SAME REFRESH THE GET RUNS, BECAUSE THE GET IS WHAT DREW THE SCREEN.
+       *
+       * GET /applications/:id/submission serves refreshKnownQuestionAnswers output, so the answer
+       * the applicant read is the REFRESHED one, and for every question the refresh rewrites that is
+       * not the string in `row.spec`. Approving against the stored record compared two different
+       * things and refused permanently: the refresh is deterministic over the same profile and the
+       * GET does not write back, so the mismatch could never resolve and the applicant was told
+       * "Litos rewrote this answer while you were reading it" about an answer nothing had touched.
+       *
+       * Same arguments as the GET, deliberately, including the bare `review.jd_text`. The submission
+       * runner resolves with applicationContextForQuestionResolution and can therefore reach a
+       * different answer for the same question; that divergence is real and is not this route's to
+       * settle. What matters here is that the comparison basis is the list the applicant was shown,
+       * and the list the applicant was shown is this one. */
+      const approvalProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
+      const refreshedQuestions = refreshKnownQuestionAnswers(
+        current.questions,
+        approvalProfile,
+        current.jd_text,
+        current.questions_reviewed_at,
+        postingCountryFromJobContext(row.job_context),
+        postingCountryCodeFromJobContext(row.job_context),
+      );
+      const outcome = approveDraftedAnswer({
+        current: { questions: refreshedQuestions, questions_reviewed_at: current.questions_reviewed_at },
+        questionId,
+        answer: parsed.data.answer,
+      });
       if (!outcome.approved) {
         return reply.status(409).send({
           error: ANSWER_APPROVAL_REFUSALS[outcome.reason],
           code: outcome.reason.toUpperCase(),
         });
       }
+      /* ONE ROW IS WRITTEN, AND IT IS WRITTEN AS SHE READ IT.
+       *
+       * The approved row is persisted from the REFRESHED list, so the stored answer becomes the text
+       * she actually approved and the stamp sits beside it rather than beside a string she never saw.
+       * That is also what makes the approval survive: on the next refresh the resolver recomputes
+       * this same value, the answer is unchanged byte for byte, and the keep-branch carries the
+       * applicant-claim forward. Persisting the stored string instead would have the very next read
+       * replace it and strip the approval with it, which is no approval at all.
+       *
+       * EVERY OTHER ROW IS THE STORED ONE, UNTOUCHED. This route's contract is that it leaves
+       * everything else alone, and writing the whole refreshed list would quietly make an approval of
+       * one answer a save of all of them. The other rows lose nothing: the GET refreshes them for
+       * display and the send path refreshes them again before they go anywhere. */
+      const approvedQuestions = current.questions.map((question, index) => (
+        index === outcome.approvedIndex ? outcome.questions[index]! : question
+      ));
       const next: ApplicationReviewState = {
         ...current,
-        questions: outcome.questions,
+        questions: approvedQuestions,
         questions_reviewed_at: outcome.questionsReviewedAt,
         updated_at: new Date().toISOString(),
       };

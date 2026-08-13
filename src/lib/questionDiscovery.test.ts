@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { ANSWER_PROVENANCE_FIELDS } from './answerProvenanceFields';
 import {
   classifyField,
   DISCOVER_QUESTIONS_SCRIPT,
@@ -3518,6 +3519,67 @@ test('a resolved answer that differs still replaces the value and drops the reco
   assert.equal(refreshed[0].answer_source, undefined,
     'the record described the answer that was just replaced, so it goes with it');
   assert.equal(refreshed[0].answer_reviewed_at, undefined);
+});
+
+/* THE APPROVAL STAMP MUST NOT OUTLIVE THE ANSWER IT WAS GIVEN TO, AND ONE FIELD DID.
+ *
+ * `answer_approved_at` says "she read this machine-written draft and let it stand". The strip list
+ * inside refreshKnownQuestionAnswers was written out by hand and named five of the six provenance
+ * fields, omitting that one, so BOTH branches that replace the answer carried the approval onto text
+ * she had never seen - and carried it stripped of `answer_reviewed_at`, which is the anchor a reader
+ * would need to falsify it. The labels reachable this way are the confirm family this codebase holds
+ * back precisely because only she may speak to them: sponsorship, work authorization, compensation,
+ * privacy consent. applications.ts then persists the refreshed list verbatim on the extension
+ * handoff, so the packet reaching the employer carried the false claim.
+ *
+ * ASSERTED OVER ANSWER_PROVENANCE_FIELDS RATHER THAN OVER FIELD NAMES, and the stored record is
+ * BUILT from the same list, so renaming the field or adding a seventh cannot leave this test green
+ * while the hole reopens. That is the property the hand-written list did not have. */
+test('a replaced answer carries no provenance forward, whatever the provenance is called', () => {
+  const reviewedAt = '2026-08-13T16:41:02.104Z';
+  /* Every provenance field at once. answer_source is the one given a particular value: an approval
+   * writes none at all, and 'applicant_review' on the current round is a separate keep rule that
+   * would stop the replacement this test is about from ever happening. */
+  const stampedEveryWay = Object.fromEntries(ANSWER_PROVENANCE_FIELDS.map((field) => [
+    field,
+    field === 'answer_source' ? 'consent_permission' : reviewedAt,
+  ]));
+
+  /* She approved the drafted answer, then the profile moved underneath it. The resolver replaces
+   * the text, which is right, and the approval of the old text has to go with it. */
+  const [replaced] = refreshKnownQuestionAnswers(
+    [{
+      question: 'what is your gender/gender identity? 4005628101',
+      answer: 'Prefer not to say',
+      ...stampedEveryWay,
+    }],
+    { eeo_prefs: { gender: 'Female' } },
+    undefined,
+    reviewedAt,
+  );
+  assert.equal(replaced.answer, 'Female', 'the profile is the source of truth, so the answer is replaced');
+  for (const field of ANSWER_PROVENANCE_FIELDS) {
+    assert.equal(field in replaced, false,
+      `${field} described the answer that was just replaced, so it cannot ride along`);
+  }
+
+  /* The other branch that replaces. The current resolver refuses this label, so the stale answer is
+   * blanked - and an approval surviving onto a blank would claim she signed off on nothing. */
+  const [blanked] = refreshKnownQuestionAnswers(
+    [{
+      question: 'Please acknowledge the Candidate Privacy Notice.',
+      answer: 'I agree',
+      ...stampedEveryWay,
+    }],
+    {},
+    undefined,
+    reviewedAt,
+  );
+  assert.equal(blanked.answer, '', 'the resolver refuses this label, so the stale answer goes');
+  for (const field of ANSWER_PROVENANCE_FIELDS) {
+    assert.equal(field in blanked, false,
+      `${field} cannot survive onto an answer the applicant never saw`);
+  }
 });
 
 test('equality for keeping the record is exact, because casing is what gets typed on the form', () => {
