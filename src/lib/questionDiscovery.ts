@@ -3709,6 +3709,40 @@ const CONSENT_ACT = String.raw`agree(?:s|d|ing)?|consent(?:s|ed|ing)?|accept(?:s
   + String.raw`|confirm(?:s|ed|ing)?|(?:have\s+)?read|understood|understand|review(?:s|ed|ing)?`
   + String.raw`|(?:tick|check)(?:ing)?\s+this\s+box|by\s+submitting`;
 
+/* WHY THE DOCUMENT IS WORTH READING. Consent scaffolding, in the same sense as CONSENT_ACT above,
+ * and accounted for in exactly the same place and for exactly the same reason.
+ *
+ * An employer may write the control as an INSTRUCTION rather than as an assertion, and then say
+ * what the reader will find in the document. Jump Trading ships, verbatim and lowercased by the
+ * resolver:
+ *
+ *   "review our notice at collection to learn how we will process your personal data."
+ *
+ * MEASURED on main at 89e9f17, on that exact string. The accepting verb is NOT what refuses it, and
+ * the first diagnosis of this bug said it was: `review(?:s|ed|ing)?` is already in CONSENT_ACT,
+ * CONSENT_ACKNOWLEDGEMENT_SENTENCE returns true, HELD_DECLARATION_VOCABULARY does not fire, and
+ * "notice at collection" is already in PRIVACY_DOCUMENT. What refuses it is COVERAGE: once the
+ * document span and its qualifier are blanked, `learn` and `how` are left over, neither is
+ * structural filler, and one unexplained token is enough to hold. Truncate the label after
+ * "collection" and it is accepted; the purpose clause alone is the difference.
+ *
+ * ACCOUNTED FOR AS A SPAN, NOT AS TWO MORE FILLER WORDS, and that is the whole of the safety
+ * argument. `learn` and `how` are only scaffolding inside this construction - a comprehension verb
+ * governed by `to`/`for`, optionally leading into a wh-word. Added to CONSENT_STRUCTURAL_FILLER they
+ * would be absorbed anywhere in any label; matched here they are absorbed only where the label is
+ * explaining why to read the document it just named. A missing phrasing costs a HOLD, which is the
+ * direction this feature is allowed to fail in.
+ *
+ * IT CANNOT ABSORB A DOCUMENT. Every alternative is a closed-class function word or a comprehension
+ * verb; no conduct-family head noun, and no document head noun, can appear inside a match. A
+ * document name written after the clause survives as its own span and is still counted, so the
+ * two-grant split at consentAcknowledgementLicence is untouched. Nothing here is added to the
+ * classifying grammar: this string is used ONLY by consentLabelIsFullyAccountedFor, so it can widen
+ * no label into a consent that was not already one, and the veto still runs first regardless. */
+const CONSENT_PURPOSE_CLAUSE =
+  String.raw`(?:to|for)\s+(?:learn|understand|see|find\s+out|read|review)(?:\s+more)?(?:\s+about)?`
+  + String.raw`(?:\s+(?:how|what|why|when|whether|which))?`;
+
 /**
  * A label that IS a consent document and nothing else: "Privacy Statement", "Interview Code of
  * Conduct", "Privacy Policy Acknowledgement", "Processing of Personal Data".
@@ -4013,10 +4047,16 @@ function consentLabelIsFullyAccountedFor(
     for (let index = modifier.index; index < modifier.index + modifier[1].length; index += 1) chars[index] = ' ';
   }
   let residue = chars.join('');
-  /* The verbs that make it a consent, and the qualifiers a document name carries, are accounted for
-   * by the same grammar that matched the document. Removed as spans rather than as words, so a
-   * multi-word act ("by submitting", "checking this box") goes in one piece. */
-  for (const source of [CONSENT_ACT, CONSENT_DOCUMENT_QUALIFIER]) {
+  /* The verbs that make it a consent, the clause saying why to read the document, and the qualifiers
+   * a document name carries, are accounted for by the same grammar that matched the document.
+   * Removed as spans rather than as words, so a multi-word act ("by submitting", "checking this
+   * box") goes in one piece.
+   *
+   * CONSENT_PURPOSE_CLAUSE MUST COME BEFORE CONSENT_ACT, and the order is load-bearing rather than
+   * cosmetic. The clause's own verb list contains `read` and `review`, which CONSENT_ACT also
+   * matches; letting CONSENT_ACT run first would blank the verb out of "to read more about how" and
+   * leave the clause unmatchable, stranding `how` exactly as before. */
+  for (const source of [CONSENT_PURPOSE_CLAUSE, CONSENT_ACT, CONSENT_DOCUMENT_QUALIFIER]) {
     residue = residue.replace(new RegExp(String.raw`\b(?:${source})\b`, 'gi'), ' ');
   }
   /* A genitive is a determiner wearing a noun's clothes: "cloudflare's candidate privacy policy"
