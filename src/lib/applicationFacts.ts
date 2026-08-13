@@ -33,6 +33,7 @@ export const APPLICATION_FACT_COLUMNS = [
   'military_service',
   'politically_exposed',
   'politically_exposed_family',
+  'restrictive_agreements',
   'advanced_study_plan',
   'attest_truthful_information',
   'accept_privacy_notices',

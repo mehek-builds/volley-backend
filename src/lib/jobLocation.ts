@@ -318,12 +318,19 @@ export function countryFromPortal(portalCountry: string | null | undefined): Job
 
 const PORTAL_OFFICE_GROUP_SUFFIX = /\s+(?:LOCATIONS?|OFFICES?)$/;
 
-/** Exact country evidence from an ATS country field, including its closed office-group labels. */
-function exactPortalCountryCodePart(part: string): string | undefined {
+/**
+ * Exact country evidence from an ATS country field, including its closed office-group labels.
+ *
+ * `acceptsBareIsoCode` carries the premise stated at countryFromPortal - "this is a country field,
+ * so IN means India and cannot mean Indiana" - and is therefore true by default, which is every
+ * caller that reads the value AS a country field. portalCountryEvidence passes false for the parts
+ * of a place hierarchy, where that premise does not hold; see the comment there.
+ */
+function exactPortalCountryCodePart(part: string, acceptsBareIsoCode = true): string | undefined {
   const normalized = normalise(part).trim();
   const country = normalized.replace(PORTAL_OFFICE_GROUP_SUFFIX, '').trim();
   if (!country) return undefined;
-  return exactStructuredCountryCode(country, true);
+  return exactStructuredCountryCode(country, acceptsBareIsoCode);
 }
 
 /**
@@ -458,6 +465,13 @@ for (const code of ISO_COUNTRY_CODES) {
 }
 
 const PORTAL_COUNTRY_PART_SEPARATOR = /\s*[|,\/;&+•\n]\s*|\s+\b(?:and|or)\b\s+/i;
+/* THE SAME SEPARATORS, MINUS THE COMMA.
+ *
+ * A comma is the punctuation a portal writes INSIDE one office location ("Chicago, IL, United
+ * States"); every other separator here is what it writes BETWEEN offices. portalCountryEvidence
+ * needs both cuts - the coarse one to know where one office stops, the fine one to read its parts -
+ * so the two are named separately rather than one being derived from the other. */
+const PORTAL_OFFICE_ENTRY_SEPARATOR = /\s*[|\/;&+•\n]\s*|\s+\b(?:and|or)\b\s+/i;
 
 function isAuthoritativePortalScopePart(part: string): boolean {
   if (exactPortalCountryCodePart(part)) return true;
@@ -658,24 +672,80 @@ function structuredJobContextValues(context: Record<string, unknown>): Array<{
   return values;
 }
 
+/**
+ * The country an office entry names IN FULL: "United States", "Canada", "India", "USA".
+ *
+ * A BARE ISO CODE DOES NOT COUNT, and that exclusion is the one thing keeping the subdivision rule
+ * below from reading a two-country field as one country. "US, IN" is two countries written as two
+ * codes; if a bare "US" licensed the rule, "IN" would be demoted to Indiana and an American-and-
+ * Indian posting would read as American. Requiring a spelled-out name means the rule fires only on
+ * the shape it was written for - a place hierarchy that ends in a country's name - and "Chicago,
+ * IL, US" is simply held instead, which is the failure this file is allowed to have.
+ */
+function namedInFullPortalCountryCode(part: string): string | undefined {
+  const normalized = normalise(part).trim().replace(PORTAL_OFFICE_GROUP_SUFFIX, '').trim();
+  if (!normalized || isIsoCountryCode(normalized)) return undefined;
+  return exactPortalCountryCodePart(part, false);
+}
+
+/* AN OFFICE LIST IS NOT A COUNTRY FIELD, and reading it as one is how an American posting stopped
+ * being American.
+ *
+ * MEASURED on the two Jump Trading packets that could not be sent on 2026-08-13 (generated_resumes
+ * 928e0c9a and f4f278d2, account a18f774b). Greenhouse publishes `portal_country` as the posting's
+ * OFFICE LOCATIONS joined with " | " - normalizeGreenhouseJobs in jobMonitor.ts builds it from
+ * `officeLocations`, not from a country field - so the stored value was:
+ *
+ *   "Chicago, IL, United States | New York, NY, United States"
+ *
+ * portalCountryScopeParts splits on the comma as well as the pipe, every fragment was then offered
+ * to exactPortalCountryCodePart with bare ISO codes ACCEPTED, and "IL" is Israel. One American
+ * posting yielded {US, IL}, legalCountryEvidenceFromJobContext refused the conflict as it should,
+ * and selectedEligibilityCountry in questionDiscovery.ts got no country - so "will you require
+ * sponsorship for work authorization in the future?" was held on both packets and blocked the send.
+ * The SAME account's 2026-08-05 Jump packet, which predates the portal_country column being
+ * populated for this board, answered it "Yes" from the location field alone. Same label, same
+ * profile, opposite outcome, and the location string was the only difference.
+ *
+ * Twenty-two US state codes are also ISO country codes. "MA" (Morocco) and "DE" (Germany) do this
+ * to Boston and Wilmington; "NY" and "TX" are not ISO codes, which is the only reason New York and
+ * Austin ever worked.
+ *
+ * THE PREMISE, STATED AT countryFromPortal, IS "this is a country field, so IN means India and
+ * cannot mean Indiana". That is true of a country FIELD and false of a place HIERARCHY. So each
+ * office entry is asked FIRST for the countries it names UNAMBIGUOUSLY - a full name, or an ISO code
+ * that is not also a US state or Canadian province. If it names one, that is the entry's answer and
+ * the two-letter fragments beside it are subdivisions. If it names none, nothing changes at all and
+ * a bare code is still a country, which is what keeps "IN - Bengaluru" India and a bare "IL" Israel.
+ *
+ * WHAT THIS CANNOT DO, which is the safety argument rather than a hope: it can only REMOVE a code
+ * from an entry that already named a country another way, so it can never invent a country the
+ * value did not carry, and it can never turn two countries into one across entries. The comma is
+ * the boundary for exactly that reason - "US / IN" and "US | IN" are two ENTRIES, each keeps its
+ * bare code, and the posting is still refused as multi-country. "Chicago, IL, United States | Tel
+ * Aviv, IL" still yields {US, IL} and is still refused. */
 function portalCountryEvidence(value: string): StructuredCountryEvidence {
   const codes = new Set<string>();
   const regions = new Set<PortalRegion>();
-  for (const part of portalCountryScopeParts(value)) {
-    const code = exactPortalCountryCodePart(part);
-    if (code) {
-      codes.add(code);
-      continue;
+  for (const entry of value.split(PORTAL_OFFICE_ENTRY_SEPARATOR)) {
+    const parts = portalCountryScopeParts(entry ?? '');
+    const namesACountryOutright = parts.some((part) => namedInFullPortalCountryCode(part));
+    for (const part of parts) {
+      const code = exactPortalCountryCodePart(part, !namesACountryOutright);
+      if (code) {
+        codes.add(code);
+        continue;
+      }
+      const normalized = normalise(part).trim();
+      const namedRegion = (['EMEA', 'APAC', 'LATAM'] as const).find(
+        (region) => ` ${normalized} `.includes(` ${region} `),
+      );
+      if (namedRegion) {
+        regions.add(namedRegion);
+        continue;
+      }
+      if (countryFromPortal(part) === 'us') regions.add('US');
     }
-    const normalized = normalise(part).trim();
-    const namedRegion = (['EMEA', 'APAC', 'LATAM'] as const).find(
-      (region) => ` ${normalized} `.includes(` ${region} `),
-    );
-    if (namedRegion) {
-      regions.add(namedRegion);
-      continue;
-    }
-    if (countryFromPortal(part) === 'us') regions.add('US');
   }
   return {
     codes: [...codes],
