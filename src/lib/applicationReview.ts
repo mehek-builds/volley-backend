@@ -759,6 +759,12 @@ export type ApplicationReviewState = {
    * facts, and a gate built on the first refuses sends the employer would have taken. `undefined`
    * means unmeasured, never false. */
   transcript_supported?: boolean;
+  /** Latest managed-run preview shown while the form is still being filled. */
+  progress_screenshot_url?: string;
+  /** Short, applicant-facing description of the current fill stage. */
+  progress_stage?: string;
+  /** Time the progress preview or stage last changed. */
+  progress_updated_at?: string;
   preview_screenshot_url?: string;
   submission_authorization?: {
     source: 'standing_consent' | 'per_application_approval' | 'user_initiated_extension';

@@ -1691,7 +1691,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       };
       let handoff_url: string | undefined;
       let handoff_packet_valid = true;
-      if (review.status === 'needs_attention' && review.browser_session_id) {
+      if ((review.status === 'filling' || review.status === 'needs_attention') && review.browser_session_id) {
         const audit = await currentAcknowledgedPacketAudit(row);
         handoff_packet_valid = audit.valid;
         if (audit.valid) {

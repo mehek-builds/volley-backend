@@ -1784,6 +1784,64 @@ test('a remembered exact score does not survive changed closed-list options in d
   )[0]?.answer, '');
 });
 
+test('current applicant-reviewed test-score absence answers survive managed rediscovery', async () => {
+  const reviewedAt = '2026-08-13T12:00:00.000Z';
+  const stored = [
+    {
+      id: 'test-type',
+      question: 'select your standardized test score type',
+      answer: 'Other',
+      options: ['SAT', 'ACT', 'Other'],
+    },
+    {
+      id: 'sat-score',
+      question: 'provide your best result on sat',
+      answer: "I don't have SAT score",
+      options: ["I don't have SAT score", '1200 - 1399', '1400 - 1600'],
+    },
+    {
+      id: 'act-score',
+      question: 'provide your best result on act',
+      answer: "I don't have ACT score",
+      options: ["I don't have ACT score", '30 - 32', '33 - 36'],
+    },
+  ];
+  const current: ApplicationReviewState = {
+    ...ANDURIL_REVIEW,
+    questions_reviewed_at: reviewedAt,
+    questions: stored.map(({ id, question, answer }) => ({
+      id,
+      question,
+      answer,
+      kind: 'required' as const,
+      required: true,
+      answer_source: 'applicant_review' as const,
+      answer_reviewed_at: reviewedAt,
+    })),
+  };
+  const result = await discoverAndResolveQuestions(
+    stored.map(({ question, options }, index) => ({
+      label: `${question}* question_${index + 1}`,
+      selector: `#question_${index + 1}`,
+      inputType: 'select',
+      maxLength: null,
+      options,
+    })),
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    {},
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.questions.map((question) => question.answer), [
+    'Other',
+    "I don't have SAT score",
+    "I don't have ACT score",
+  ]);
+  assert.deepEqual(result.invalidatedQuestionKeys, []);
+});
+
 test('a failed live GPA selector cannot be restored from a stale stored question', () => {
   const failedId = 'question_37228964002';
   const merged = mergeDiscoveredPortalQuestions(
