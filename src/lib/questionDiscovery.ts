@@ -2,7 +2,12 @@ import type { Page } from 'playwright-core';
 /* The classification, from the leaf module rather than from applicationReview.ts, which re-exports
  * it but cannot be imported here for a value: it imports portalSubmission.ts, which imports this
  * file. See answerProvenanceFields.ts. */
-import { ANSWER_PROVENANCE_FIELDS, type AnswerProvenanceField } from './answerProvenanceFields';
+import {
+  ANSWER_CLAIM_FIELDS,
+  ANSWER_PROVENANCE_FIELDS,
+  withoutProvenanceFields,
+  type AnswerProvenanceField,
+} from './answerProvenanceFields';
 import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
@@ -2084,11 +2089,7 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      * compile-time partition guard governs the Classified/Unclassified type and never saw this copy.
      * Reading ANSWER_PROVENANCE_FIELDS means the next field added is stripped here the day it is
      * classified, without anyone remembering that this site exists. */
-    const withoutProvenance = (): T => {
-      const rest: Record<string, unknown> = { ...withProvenance };
-      for (const field of ANSWER_PROVENANCE_FIELDS) delete rest[field];
-      return rest as T;
-    };
+    const withoutProvenance = (): T => withoutProvenanceFields(withProvenance, ANSWER_PROVENANCE_FIELDS);
     /* AN ANSWER THIS FUNCTION CANNOT RECOMPUTE, AND CAN STILL PROVE IS CURRENT.
      *
      * The line below is right about almost everything and was silently wrong about one class of
@@ -2192,14 +2193,20 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
        * STRICT EQUALITY, deliberately. A case or spacing difference is a different string on the
        * employer's form: "Decline To Self Identify" is not the option "Decline to self-identify",
        * and one of them is what gets typed. Those keep falling through to be replaced. */
+      /* THE LAST HAND-MAINTAINED COPY IN THIS FUNCTION, NOW DERIVED LIKE THE OTHER.
+       *
+       * This branch named its three fields as destructured identifiers, which is the same
+       * arrangement that let `answer_approved_at` be added to the classification and missed at the
+       * strip site above. The risk here is mirrored rather than identical, and that is why it is
+       * worth closing: an omission in the branch above SURVIVES a claim that should drop, and an
+       * omission here CARRIES a new answer-claim forward that should drop. Both are a record
+       * quietly asserting something nobody checked.
+       *
+       * Behaviour is unchanged. The three names it spelled out were exactly ANSWER_CLAIM_FIELDS,
+       * member for member, so the set removed is the same set; what changes is that the set is now
+       * read from the classification instead of restated beside it. */
       if (known.value === question.answer) {
-        const {
-          answer_option_source: _optionSource,
-          consent_permission_granted_at: _grantedAt,
-          consent_permission_version: _grantVersion,
-          ...withApplicantClaim
-        } = withProvenance;
-        return withApplicantClaim as T;
+        return withoutProvenanceFields(withProvenance, ANSWER_CLAIM_FIELDS);
       }
       return { ...withoutProvenance(), answer: known.value };
     }

@@ -68,6 +68,23 @@ export const ANSWER_PROVENANCE_FIELDS = [
   ...ANSWER_CLAIM_FIELDS,
 ] as const satisfies readonly AnswerProvenanceField[];
 
+/* THE ONE WAY PROVENANCE IS DROPPED, so that no site spells out its own field names.
+ *
+ * Every strip in refreshKnownQuestionAnswers goes through this with one of the lists above: the
+ * union where the answer was replaced, ANSWER_CLAIM_FIELDS where it was not. The names come from the
+ * lists, so the compile-time partition below is what governs every strip site, and a field cannot be
+ * classified in one place and forgotten in another. That divergence is not hypothetical: it shipped
+ * `answer_approved_at` surviving onto an answer the refresh had just replaced.
+ *
+ * Deliberately NOT a destructure. A destructure has to name each field as an identifier, which is
+ * exactly the hand-maintained copy this exists to remove.
+ */
+export function withoutProvenanceFields<T>(source: T, fields: readonly AnswerProvenanceField[]): T {
+  const rest: Record<string, unknown> = { ...(source as unknown as Record<string, unknown>) };
+  for (const field of fields) delete rest[field];
+  return rest as T;
+}
+
 /* The partition, enforced by the compiler rather than by a reviewer.
  *
  * Written as a call rather than an assignment so the error NAMES the offending field: leaving
