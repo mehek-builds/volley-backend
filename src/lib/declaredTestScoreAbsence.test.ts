@@ -22,11 +22,13 @@ import test, { describe } from 'node:test';
 import {
   NO_SCORE_OPTION_TEXTS,
   REFUSAL_OPTION_TEXTS,
-  comparableOption,
+  comparableTestOption,
   noScoreOptionFor,
+  refreshKnownQuestionAnswers,
   resolveKnownAnswer,
   type ApplicationProfileLike,
 } from './questionDiscovery';
+import { prescriptAskExplanation, resolvePrescript, type PostingQuestion } from './postingQuestions';
 import { resolveProfileField } from './profileFieldResolution';
 import { testScoreConflict } from '../routes/applicationProfile';
 
@@ -216,7 +218,7 @@ describe('the option matcher is anchored, not fuzzy', () => {
   });
 
   test('punctuation and case are ignored, so the employer’s formatting does not decide it', () => {
-    assert.equal(comparableOption('N/A'), 'n a');
+    assert.equal(comparableTestOption('N/A'), 'n a');
     assert.equal(noScoreOptionFor(['N/A']), 'N/A');
     assert.equal(noScoreOptionFor(['n/a']), 'n/a');
     assert.equal(noScoreOptionFor(['  NONE  ']), '  NONE  ', 'the verbatim option text is returned');
@@ -226,5 +228,104 @@ describe('the option matcher is anchored, not fuzzy', () => {
   test('an empty or missing list is the same as no list: hold', () => {
     assert.equal(noScoreOptionFor(undefined), null);
     assert.equal(noScoreOptionFor([]), null);
+  });
+});
+
+
+/* THE OPTION TEXTS THE LIVE IMC TRADING GREENHOUSE POSTING ACTUALLY SERVES.
+ *
+ * The first version of this vocabulary was written from imagination. It held "None", "N/A" and
+ * "Not applicable", none of which this employer offers, and so it unblocked nothing: the two rows
+ * this feature exists for stayed exactly as blocked as before. Measured, and pinned here so the set
+ * can only ever be extended against something real. */
+const IMC_SAT_OPTIONS = ["I don't have SAT score", '1400-1600', '1200-1399'];
+const IMC_ACT_OPTIONS = ["I don't have ACT score", '30-36', '24-29'];
+const IMC_TYPE_OPTIONS = ['SAT', 'ACT', 'Other'];
+
+describe('the rows that are actually blocked', () => {
+  test('the live SAT and ACT controls are answered from the declared absence', () => {
+    assert.equal(valueOf(resolve(SAT, ABSENT, IMC_SAT_OPTIONS)), "I don't have SAT score");
+    assert.equal(valueOf(resolve(ACT, ABSENT, IMC_ACT_OPTIONS)), "I don't have ACT score");
+  });
+
+  test('the answer survives the packet refresh, which is where it used to be wiped', () => {
+    /* THE TWO-STEP PRODUCTION SEQUENCE. Step 1 resolves with the control's options; step 2 has
+     * none, and used to blank the answer step 1 had just chosen, leaving the row blocked, shipping
+     * "" in the packet and aborting the attended handoff on a spurious `changed`. */
+    for (const [label, options] of [[SAT, IMC_SAT_OPTIONS], [ACT, IMC_ACT_OPTIONS]] as Array<[string, string[]]>) {
+      const filled = valueOf(resolve(label, ABSENT, options));
+      assert.ok(filled, 'step 1 must produce an answer');
+      const refreshed = refreshKnownQuestionAnswers([{ question: label, answer: filled! }], ABSENT, undefined);
+      assert.equal(refreshed[0].answer, filled, `the refresh must not undo the fill: ${label}`);
+    }
+  });
+
+  test('the refresh still blanks an answer the profile no longer supports', () => {
+    // The other direction, so the fix cannot pass by making the refresh keep everything.
+    const refreshed = refreshKnownQuestionAnswers([{ question: SAT, answer: '1520' }], ABSENT, undefined);
+    assert.equal(refreshed[0].answer, '', 'a score under a declared absence must not survive');
+    const neverAsked = refreshKnownQuestionAnswers([{ question: SAT, answer: 'N/A' }], UNSET, undefined);
+    assert.equal(neverAsked[0].answer, '', 'an unset profile supports nothing');
+  });
+
+  test('"Other" is not an absence, so the type control stays blocked and that is correct', () => {
+    /* It means a DIFFERENT test: the IB, A-levels, a national exam. Selecting it for a student who
+     * sat no standardized test asserts she took one and declined to name it. */
+    assert.equal(noScoreOptionFor(IMC_TYPE_OPTIONS), null);
+    const resolved = resolveProfileField(
+      { label: TYPE, inputType: 'select', options: IMC_TYPE_OPTIONS },
+      ABSENT,
+    );
+    assert.notEqual(resolved?.value, 'Other');
+  });
+
+  test('a student who took only the SAT has no ACT score, and that is the same fact', () => {
+    const satOnly: ApplicationProfileLike = { standardized_test_type: 'SAT', sat_score: '1520' };
+    assert.equal(valueOf(resolve(ACT, satOnly, IMC_ACT_OPTIONS)), "I don't have ACT score");
+    // And her SAT score still wins on its own field.
+    assert.equal(valueOf(resolve(SAT, satOnly, IMC_SAT_OPTIONS)), '1520');
+    // Derived from the TYPE, never from an empty column: a blank score under type SAT means the
+    // number is missing, not that the exam was never sat.
+    const satNoNumber: ApplicationProfileLike = { standardized_test_type: 'SAT' };
+    assert.equal(valueOf(resolve(SAT, satNoNumber, IMC_SAT_OPTIONS)), undefined);
+  });
+
+  test('the vocabulary refuses everything that is not an absence', () => {
+    for (const option of ['1400-1600', '1200-1399', 'Below 1200', '30-36', 'Other', 'Yes', 'No', 'SAT', 'ACT', 'Both']) {
+      assert.equal(noScoreOptionFor([option]), null, `must not read as an absence: ${option}`);
+    }
+    // A bare "No" is the answer to a different question. "No SAT score" is an absence. The only
+    // difference is whether the field's own nouns were there to remove.
+    assert.equal(noScoreOptionFor(['No']), null);
+    assert.equal(noScoreOptionFor(['No SAT score']), 'No SAT score');
+  });
+});
+
+describe('the Apply screen tells the two states apart', () => {
+  const question = (label: string, options: string[] | null): PostingQuestion => ({
+    label, input_type: options ? 'select' : 'text', options, required: true, max_length: null,
+  });
+
+  test('a declared absence is not reported as "nothing on your profile answers it"', () => {
+    /* That sentence is FALSE for a declared absence: something IS on file and she put it there.
+     * Reporting it was the exact conflation this feature exists to remove, surviving on the one
+     * surface the resolver test could not see. */
+    const row = resolvePrescript([question(SAT, null)], ABSENT, {} as never).questions[0];
+    assert.equal(row.reason, 'declared_absence_unsupported');
+    const copy = prescriptAskExplanation(row.reason!, SAT);
+    assert.match(copy, /no standardized test scores/);
+    assert.doesNotMatch(copy, /nothing on your profile/);
+  });
+
+  test('and a never-asked question still is', () => {
+    const row = resolvePrescript([question(SAT, null)], UNSET, {} as never).questions[0];
+    assert.equal(row.reason, 'nothing_on_file');
+    assert.match(prescriptAskExplanation(row.reason!, SAT), /nothing on your profile/);
+  });
+
+  test('a control that CAN say it is not asked at all', () => {
+    const row = resolvePrescript([question(SAT, IMC_SAT_OPTIONS)], ABSENT, {} as never).questions[0];
+    assert.equal(row.ask, false);
+    assert.equal(row.answer, "I don't have SAT score");
   });
 });

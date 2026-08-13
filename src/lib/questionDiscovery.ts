@@ -783,13 +783,92 @@ const OPTION_IS_A_REFUSAL_NOT_AN_ABSENCE: ReadonlySet<string> = new Set([
   'i do not wish to disclose',
 ]);
 
-export function comparableOption(option: string): string {
-  return option.toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+/* RENAMED FROM `comparableOption`, which is what it was called and which was a name collision.
+ * lib/selfIdentification.ts:13 exports a DIFFERENTLY BEHAVING function of that name: it strips
+ * apostrophes and keeps `/`, so "N/A" reads "n/a" there and "n a" here. Two functions with one name
+ * and two normalizations is how the wrong one gets imported, so this one is named for the family it
+ * serves. Apostrophes are dropped rather than spaced, which is what makes "I don't have SAT score"
+ * reduce to a phrase at all. */
+export function comparableTestOption(option: string): string {
+  return option
+    .toLowerCase()
+    .replace(/[‘’ʼ']/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-/** Exported so a test can assert the two sets are disjoint. See the note above the second one. */
+/* THE TOKENS THAT ONLY NAME THE FIELD, not the answer. Removing them is what lets one closed set
+ * cover "I don't have SAT score", "I don't have ACT score" and "No test taken" without a member per
+ * employer. `a` and `an` are deliberately NOT here: "N/A" tokenizes to `n a` and stripping the `a`
+ * would leave a bare `n`, so a trailing article is trimmed separately below where it cannot do
+ * that. */
+const TEST_FIELD_NOUN =
+  /^(?:sat|act|gre|gmat|lsat|mcat|standardi[sz]ed|test|tests|exam|exams|score|scores|result|results|the|my|any)$/;
+
+/** The option with the field's own nouns removed, and whether removing them changed anything. */
+function reducedOptionClaim(option: string): { bare: string; stripped: boolean } {
+  const parts = comparableTestOption(option).split(' ').filter(Boolean);
+  let kept = parts.filter((part) => !TEST_FIELD_NOUN.test(part));
+  if (kept.length > 1 && /^(?:a|an)$/.test(kept[kept.length - 1])) kept = kept.slice(0, -1);
+  return { bare: kept.join(' '), stripped: kept.length !== parts.length };
+}
+
+/* Options that are already the whole claim, matched before anything is removed. */
+const NO_SCORE_OPTION_LITERALS: ReadonlySet<string> = new Set([
+  'n a',
+  'na',
+  'none',
+  'neither',
+  'not applicable',
+  'none of the above',
+  'none of these',
+  'nothing',
+  'not tested',
+]);
+
+/* THE BARE CLAIM THAT SURVIVES once the field's own nouns are gone. "I don't have SAT score" and
+ * "I don't have ACT score", both verbatim from the live IMC Trading Greenhouse posting, reduce to
+ * `i dont have`. */
+const NO_SCORE_REDUCED_CLAIMS: ReadonlySet<string> = new Set([
+  'not taken',
+  'taken',
+  'no taken',
+  'none taken',
+  'did not take',
+  'i did not take',
+  'have not taken',
+  'i have not taken',
+  'dont have',
+  'i dont have',
+  'do not have',
+  'i do not have',
+  'have no',
+  'i have no',
+  'never took',
+  'i never took',
+  'not tested',
+]);
+
+/* "NO" AND "NOT" COUNT ONLY IF SOMETHING WAS REMOVED, which is the whole safety of this rule.
+ * "No SAT score" reduces to `no` and is an absence. A bare option reading "No" reduces to `no` with
+ * nothing removed, and is the answer to a different question entirely. The `stripped` flag is what
+ * separates them, and without it this set would answer every Yes/No control in the corpus. */
+const NO_SCORE_ONLY_WHEN_STRIPPED: ReadonlySet<string> = new Set(['no', 'not']);
+
+/** Exported so a test can assert the sets are disjoint. See the note above the refusal set. */
 export const NO_SCORE_OPTION_TEXTS = NO_SCORE_OPTION_CLAIMS;
 export const REFUSAL_OPTION_TEXTS = OPTION_IS_A_REFUSAL_NOT_AN_ABSENCE;
+
+/** Whether one option text states that the applicant has no score to report. */
+export function optionStatesNoScore(option: string): boolean {
+  const literal = comparableTestOption(option);
+  if (OPTION_IS_A_REFUSAL_NOT_AN_ABSENCE.has(literal)) return false;
+  if (NO_SCORE_OPTION_LITERALS.has(literal) || NO_SCORE_OPTION_CLAIMS.has(literal)) return true;
+  const { bare, stripped } = reducedOptionClaim(option);
+  if (NO_SCORE_REDUCED_CLAIMS.has(bare)) return true;
+  return stripped && NO_SCORE_ONLY_WHEN_STRIPPED.has(bare);
+}
 
 /**
  * The employer's OWN wording for "I have none", or null when this control offers no such wording.
@@ -799,15 +878,31 @@ export const REFUSAL_OPTION_TEXTS = OPTION_IS_A_REFUSAL_NOT_AN_ABSENCE;
  *
  * A refusal option is stepped over rather than merely unmatched, so that a list carrying both a
  * refusal and an absence answers with the absence whatever order they arrive in.
+ *
+ * "OTHER" IS NOT AN ABSENCE AND IS DELIBERATELY ABSENT FROM EVERY SET ABOVE. It appears on the live
+ * type control as ["SAT", "ACT", "Other"], and it was proposed as the way to unblock that row. It
+ * means a DIFFERENT test: the IB, A-levels, a national exam. Selecting it for a student who sat no
+ * standardized test would assert she took one and declined to name it, which is a false statement
+ * of exactly the kind this whole feature exists to refuse. That control therefore stays blocked for
+ * a declared absence, and that is the correct outcome rather than a gap.
  */
 export function noScoreOptionFor(options: readonly string[] | undefined): string | null {
   if (!options) return null;
   for (const option of options) {
-    const bare = comparableOption(option);
-    if (OPTION_IS_A_REFUSAL_NOT_AN_ABSENCE.has(bare)) continue;
-    if (NO_SCORE_OPTION_CLAIMS.has(bare)) return option;
+    if (optionStatesNoScore(option)) return option;
   }
   return null;
+}
+
+/* THE PHRASE THAT IDENTIFIES THE THIRD STATE'S REFUSAL, shared by the message and the predicate
+ * that reads it back, so the two cannot drift into a silent string-match failure. The Apply screen
+ * needs to tell a declared absence apart from an unanswered question, and a skipReason is the only
+ * channel the resolver has for saying which it is. */
+export const DECLARED_ABSENCE_REFUSAL = 'you declared no standardized test scores';
+
+/** Whether a refusal is the declared-absence one rather than a never-asked one. */
+export function isDeclaredAbsenceRefusal(skipReason: string): boolean {
+  return skipReason.includes(DECLARED_ABSENCE_REFUSAL);
 }
 
 function standardizedTestAnswer(
@@ -820,9 +915,22 @@ function standardizedTestAnswer(
    * a blocked row reports which of the two it is, and so that a test can tell them apart without
    * reading the profile that produced them. */
   const declaredNone = (what: string) => ({
-    skipReason: `${what}: you declared no standardized test scores and this field offers no way to say so: "${label.slice(0, 60)}"`,
+    skipReason: `${what}: ${DECLARED_ABSENCE_REFUSAL} and this field offers no way to say so: "${label.slice(0, 60)}"`,
   });
-  const hasNoScores = ap.standardized_test_type === 'None';
+  /* WHICH TEST SHE HAS NO SCORE FOR, which is more than just the 'None' answer.
+   *
+   * A student who declared 'SAT' has told Litos, in the same breath, that she did not take the ACT.
+   * That is the same first-class negative fact as 'None', arrived at from the other side, and
+   * reading only 'None' left her held on every ACT field that offered "I don't have ACT score".
+   * Derived from the TYPE, never from an empty score column: a blank sat_score under a type of
+   * 'SAT' means the number is missing, not that the exam was never sat, and those are different
+   * things to tell an employer. */
+  const declaredType = ap.standardized_test_type;
+  const hasNoScoreFor = (test: 'sat' | 'act'): boolean => {
+    if (declaredType === 'None') return true;
+    if (test === 'sat') return declaredType === 'ACT';
+    return declaredType === 'SAT';
+  };
 
   /* A SELF-IDENTIFICATION QUESTION IS NEVER A TEST SCORE, and this refusal is absolute.
    *
@@ -853,13 +961,13 @@ function standardizedTestAnswer(
   // Reporting the number she earned is the honest reading of a row that carries one.
   if (isSatScoreQuestion(label)) {
     if (ap.sat_score) return { value: ap.sat_score };
-    if (!hasNoScores) return leaveIt('SAT score');
+    if (!hasNoScoreFor('sat')) return leaveIt('SAT score');
     const none = noScoreOptionFor(options);
     return none ? { value: none } : declaredNone('SAT result');
   }
   if (isActScoreQuestion(label)) {
     if (ap.act_score) return { value: ap.act_score };
-    if (!hasNoScores) return leaveIt('ACT score');
+    if (!hasNoScoreFor('act')) return leaveIt('ACT score');
     const none = noScoreOptionFor(options);
     return none ? { value: none } : declaredNone('ACT result');
   }
@@ -1548,7 +1656,41 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
 ): T[] {
   return questions.map((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
-    const known = label ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry, postingCountryCode) : null;
+    /* THE STORED ANSWER IS OFFERED BACK AS THE CANDIDATE LIST, and that is not a trick.
+     *
+     * THE DEFECT THIS CLOSES, measured on the real two-step production sequence:
+     *
+     *   STEP 1  discovery and fill, WITH the control's options   ->  stored answer "N/A"
+     *   STEP 2  packet build refresh, with no options at all     ->  answer ""
+     *   RESULT  the fill is undone, and the row stays blocked
+     *
+     * A declared absence is answerable only in the employer's OWN wording, so the resolver needs a
+     * list to say it. This path has none: ApplicationReviewQuestion carries portal_input_type and
+     * no options, so the refresh could not see what the control offered, produced the
+     * declared-absence skipReason, and blanked the very answer step 1 had just chosen. Three live
+     * consequences: blankRequiredQuestionLabels is `required && !answer.trim()`, so the row stays
+     * blocked, which is the symptom this feature exists to clear; buildPacket ships the empty
+     * string from twelve call sites; and applications.ts compares refreshed against stored, so
+     * "N/A" against "" reads as `changed` and aborts the attended handoff.
+     *
+     * PERSISTING OPTIONS ON THE REVIEW QUESTION WAS THE OTHER OPTION AND IS WORSE HERE. It widens a
+     * stored type that twelve call sites and every historical packet already share, to carry a
+     * snapshot of a control's list that is stale the moment the employer edits the form, purely so
+     * this one rule can re-derive an answer it already has.
+     *
+     * WHAT THIS ASKS INSTEAD IS THE QUESTION THE REFRESH IS ACTUALLY FOR: is the answer already
+     * stored still supported by the profile as it stands now? The stored answer IS the option the
+     * control offered, so handing it back as a one-element list is the exact candidate under test.
+     * It cannot invent anything: noScoreOptionFor returns a member of that list or null, so the
+     * only string it can produce is the one already in the packet, and only when that string is in
+     * the closed absence set. Anything else falls through to the identical behaviour as before.
+     *
+     * Read by standardizedTestAnswer and nothing else, so no other rule changes.
+     */
+    const storedAsCandidate = question.answer.trim() ? [question.answer.trim()] : undefined;
+    const known = label
+      ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry, postingCountryCode, storedAsCandidate)
+      : null;
     const withProvenance = question as T & {
       answer_source?: unknown;
       answer_reviewed_at?: unknown;
