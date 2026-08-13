@@ -549,8 +549,47 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           const allowed = await allowHourly(request.jwtPayload!.userId, 'packet-audit', LIMITS.perHour.packetAudit);
           if (!allowed) return rateLimitedReply(reply);
         }
+        /* A VALID CACHED AUDIT STILL HAS TO STORE THE QUESTIONS IT HASHED.
+         *
+         * currentPacketAudit can prove that an existing audit matches auditQuestions without
+         * changing the row. That is normally the fast path, but it left a split packet whenever
+         * refreshKnownQuestionAnswers changed a visible value: the audit and acknowledgement bound
+         * the refreshed set while review.questions retained the older set. The next submit request
+         * refreshed from that older record and could produce a different version, rejecting the
+         * audit the applicant had acknowledged seconds earlier as packet_stale.
+         *
+         * The uncached path already persists auditQuestions through createAndPersistPacketAudit.
+         * Make the cached path obey the same invariant. This exact CAS also protects a concurrent
+         * edit or fill from being overwritten. cached.row matters because review_only may have
+         * restored an expired PDF before returning the valid audit. */
+        let packetRow = cached.valid ? cached.row : row;
+        let cachedQuestionsPersisted = true;
+        if (cached.valid) {
+          const cachedReview = readApplicationReview(cached.row.spec);
+          if (!cachedReview) {
+            cachedQuestionsPersisted = false;
+          } else if (!isDeepStrictEqual(cachedReview.questions, auditQuestions)) {
+            const exactPacketReview = { ...cachedReview, questions: auditQuestions };
+            const updated = await db.update(generated_resumes)
+              .set({ spec: reviewSpec(exactPacketReview) })
+              .where(and(
+                eq(generated_resumes.id, cached.row.id),
+                eq(generated_resumes.user_id, request.jwtPayload!.userId),
+                sql`${generated_resumes.spec} = ${JSON.stringify(cached.row.spec)}::jsonb`,
+                sql`${generated_resumes.resume_object_key} = ${cached.row.resume_object_key}`,
+              ))
+              .returning({ id: generated_resumes.id });
+            cachedQuestionsPersisted = updated.length === 1;
+            if (cachedQuestionsPersisted) {
+              packetRow = {
+                ...cached.row,
+                spec: { ...(cached.row.spec as StoredSpec), _review: exactPacketReview },
+              };
+            }
+          }
+        }
         const result = cached.valid
-          ? { audit: cached.audit, persisted: true, pdfBytes: cached.pdfBytes }
+          ? { audit: cached.audit, persisted: cachedQuestionsPersisted, pdfBytes: cached.pdfBytes }
           : await createAndPersistPacketAudit(row, { questions: auditQuestions });
         if (!result.persisted) {
           return reply.status(409).send({
@@ -559,18 +598,18 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           });
         }
         const fileName = resumeFileNameForRole(
-          ((row.spec as StoredSpec)._contact as StoredContact | undefined)?.full_name,
-          (row.job_context as { role?: unknown } | null)?.role,
+          ((packetRow.spec as StoredSpec)._contact as StoredContact | undefined)?.full_name,
+          (packetRow.job_context as { role?: unknown } | null)?.role,
         );
         const downloadUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(
           request.jwtPayload!.userId,
-          row.resume_object_key,
+          packetRow.resume_object_key,
           { fileName },
         )}`;
         const response = {
           packet_audit: result.audit,
           pdf: {
-            object_key: row.resume_object_key,
+            object_key: packetRow.resume_object_key,
             sha256: result.audit.bindings.pdf.sha256,
             size_bytes: result.audit.bindings.pdf.sizeBytes,
             download_url: downloadUrl,

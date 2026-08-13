@@ -167,4 +167,24 @@ test('the packet-audit route audits the refreshed questions the send gate verifi
     /createAndPersistPacketAudit\(row,\s*\{\s*questions:\s*auditQuestions\s*\}\)/,
     'and must reach the constructor too, or a first-time audit persists the wrong version',
   );
+  assert.match(
+    route,
+    /!isDeepStrictEqual\(cachedReview\.questions, auditQuestions\)/,
+    'a cached audit must detect when its exact refreshed questions are not stored on the row',
+  );
+  assert.match(
+    route,
+    /const exactPacketReview = \{ \.\.\.cachedReview, questions: auditQuestions \}/,
+    'the cached path must store the same question set the audit hashed',
+  );
+  assert.match(
+    route,
+    /sql`\$\{generated_resumes\.spec\} = \$\{JSON\.stringify\(cached\.row\.spec\)\}::jsonb`/,
+    'the cached question sync must refuse to overwrite a concurrent application edit',
+  );
+  assert.match(
+    route,
+    /resume_object_key\} = \$\{cached\.row\.resume_object_key\}/,
+    'the cached question sync must stay bound to the exact audited PDF',
+  );
 });
