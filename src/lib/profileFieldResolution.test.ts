@@ -9,6 +9,7 @@ import {
   educationLevelLadder,
   eeoAnswerLadder,
   eeoFederalRaceCategory,
+  graduationDateLadder,
   isDeclineToState,
   optionCoversMonthYear,
   parseNumericRange,
@@ -1115,4 +1116,109 @@ test('the site option is only reached when the evidence says she came through th
     }),
     null,
   );
+});
+
+// ---------------------------------------------------------------------------
+// THE GRADUATION SEASON BUCKET.
+//
+// Measured on the owner's two live Jump Trading applications on 2026-08-13, generated_resumes
+// f4f278d2-edb8-482e-ae3d-403b45c7bc10 (#question_68002408) and
+// 928e0c9a-5a05-4aaf-8fe7-10dcb9a44950 (#question_68002518). Both stored
+// `answer: "Winter 2028"` beside `answer_option_source: "May 2028"` for "What is your expected
+// graduation date?". The applicant graduates in May 2028, which is on her resume, in her profile
+// and on every other packet she owns. Winter 2028 is a term that ends six months before she
+// finishes, and it is the answer the review screen showed her as her own.
+//
+// JUMP_GRADUATION_OPTIONS below is the option list both postings really serve, read from
+// job-boards.greenhouse.io on 2026-08-13 and pasted verbatim. It is Greenhouse's standard term
+// list, so this is not one employer's quirk: the correct entry is "Spring/Summer 2028", and
+// "Winter 2028" is listed one row above it.
+// ---------------------------------------------------------------------------
+
+const JUMP_GRADUATION_OPTIONS = [
+  'Spring 2025', 'Fall 2025', 'Winter 2026', 'Spring/Summer 2026', 'Fall 2026',
+  'Winter 2027', 'Spring/Summer 2027', 'Fall 2027', 'Winter 2028', 'Spring/Summer 2028',
+  'Fall 2028', 'Winter 2029', 'Spring/Summer 2029', 'Fall 2029', 'Winter 2030',
+  'Spring/Summer 2030', 'Fall 2030',
+];
+
+test('a May graduation reaches the Spring bucket and never the Winter one', () => {
+  // The exact call the packet builder makes: resolveProfileField hands chooseClosestOption the
+  // graduation ladder and the control's real options.
+  const chosen = chooseClosestOption(graduationDateLadder('May 2028', 2028), JUMP_GRADUATION_OPTIONS);
+  assert.equal(chosen, 'Spring/Summer 2028');
+  // Stated separately, because the equality above could be satisfied by a future list-ordering
+  // accident. This is the claim that matters: no season naming a term she is not in.
+  assert.ok(!/winter|fall/i.test(chosen ?? ''), `May 2028 selected ${chosen}`);
+});
+
+test('a compound season label is read as both of its seasons, not just the last one', () => {
+  // The root cause, isolated. "Spring/Summer 2028" reaches its year across "/Summer ", and a
+  // matcher that cannot bridge that reads the option as June through August and loses every
+  // spring month on the list. May is the month the applicant actually graduates in.
+  assert.equal(optionCoversMonthYear('Spring/Summer 2028', 5, 2028), true);
+  assert.equal(optionCoversMonthYear('Spring/Summer 2028', 3, 2028), true);
+  assert.equal(optionCoversMonthYear('Spring/Summer 2028', 7, 2028), true);
+  // And it stays a claim about 2028 only. The months either side belong to the neighbouring rows.
+  assert.equal(optionCoversMonthYear('Spring/Summer 2028', 2, 2028), false);
+  assert.equal(optionCoversMonthYear('Spring/Summer 2028', 9, 2028), false);
+  // A year written between two seasons still ends the run: this is two terms, not one span.
+  assert.equal(optionCoversMonthYear('Fall 2027 - Spring 2028', 10, 2027), true);
+  assert.equal(optionCoversMonthYear('Fall 2027 - Spring 2028', 4, 2028), true);
+  assert.equal(optionCoversMonthYear('Fall 2027 - Spring 2028', 7, 2028), false);
+});
+
+test('every season boundary on the real Greenhouse term list is pinned to one bucket', () => {
+  // One month from each quarter of the year, against the list that carries all three seasons of
+  // 2028. Each of these is a different factual claim about when a degree finishes, so each is
+  // asserted rather than left to whichever row the DOM happens to put first.
+  const pick = (date: string, year: number) =>
+    chooseClosestOption(graduationDateLadder(date, year), JUMP_GRADUATION_OPTIONS);
+  assert.equal(pick('January 2028', 2028), 'Winter 2028');
+  assert.equal(pick('April 2028', 2028), 'Spring/Summer 2028');
+  assert.equal(pick('July 2028', 2028), 'Spring/Summer 2028');
+  assert.equal(pick('October 2028', 2028), 'Fall 2028');
+  // February is the far edge of the winter row, which is the only term that straddles a year
+  // boundary and so is the one a min-to-max span silently widens to the whole year.
+  assert.equal(pick('February 2028', 2028), 'Winter 2028');
+  /* DECEMBER IS DELIBERATELY NOT ASSERTED HERE, and that is a finding rather than a gap.
+   *
+   * graduationDateLadder writes "Fall 2028" for a December graduation, and the exact-match stage
+   * takes it off this list before any calendar arithmetic runs. That is not the calendar reading -
+   * December is a winter month - but it IS the academic one: a degree conferred in December
+   * completes the fall semester, and the applicant would say Fall herself. The two readings
+   * genuinely disagree, so the honest thing is to leave the shipped behaviour alone and say so,
+   * rather than pin a claim about somebody's degree to whichever reading this file preferred.
+   *
+   * AND THE OUTCOME IS LIST-DEPENDENT, which is the stronger reason. Measured on this same option
+   * list, unchanged by this branch: the bare candidate ['December 2028'] selects "Winter 2028" off
+   * the calendar stage, the full ladder selects "Fall 2028" because its own Fall rung exact-matches
+   * a row this list happens to carry, and the same ladder against this list with the Fall row
+   * removed selects "Winter 2028" again. So a December graduate's answer turns on whether the
+   * employer wrote a Fall row at all. The codebase has not decided this anywhere; it falls out of
+   * the list. Pinning either answer here would settle that judgement by accident, in a test. */
+});
+
+test('a season list that cannot place the graduation holds instead of guessing', () => {
+  // The list offers 2028, but no row of it contains May. The bare-year rung of the ladder used to
+  // fall through to the numeric-band stage, which read "Winter 2028" as the number 2028, found the
+  // applicant's 2028 inside it, and returned the first 2028-shaped row in DOM order. That is not a
+  // measurement of anything. Refusing costs her one selection; answering costs her a false
+  // statement about her degree on a submitted application.
+  assert.equal(chooseClosestOption(graduationDateLadder('May 2028', 2028), ['Winter 2028', 'Fall 2028']), null);
+  // Same refusal when the year is all the profile has: a bare year cannot choose between the
+  // seasons of that year, and there is no honest tie-break.
+  assert.equal(chooseClosestOption(['2028'], JUMP_GRADUATION_OPTIONS), null);
+  // A season the list does not carry at all is not rounded to a neighbouring one.
+  assert.equal(chooseClosestOption(['Spring 2028'], ['Winter 2028', 'Fall 2028']), null);
+});
+
+test('the numeric band stage still answers the GPA lists it was written for', () => {
+  // The guard added above is scoped to options that name a calendar span. A GPA band names none,
+  // so this path is untouched, and the assertion is here so a wider guard cannot be added quietly.
+  assert.equal(
+    chooseClosestOption(['3.89'], ['2.4 or below', '2.5 - 2.7 (out of 4.0)', '3.6 or above (out of 4.0)']),
+    '3.6 or above (out of 4.0)',
+  );
+  assert.equal(chooseClosestOption(['3.89'], ['3.0 - 3.5', '3.5 - 4.0']), '3.5 - 4.0');
 });
