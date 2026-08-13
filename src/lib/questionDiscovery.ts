@@ -5475,6 +5475,12 @@ export type DiscoveredQuestion = {
    */
   durableSelector?: string | null;
   inputType: string;
+  /**
+   * The ARIA role when the DOM control's HTML input type is not its interaction type.
+   * Greenhouse React-selects are the important case: they are text inputs with role="combobox".
+   * Keeping both prevents a visible typed value from being mistaken for a committed selection.
+   */
+  role?: string | null;
   maxLength: number | null;
   /**
    * The control's real option texts, when it has a closed list (a select, a radio or checkbox

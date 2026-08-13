@@ -1566,6 +1566,13 @@ export function applicationContextForQuestionResolution(row: ResumeRow, current:
 // result (buildManagedDiscoveryActions / stratus-browser-cloud PR #7) - this function has no
 // browser dependency of its own, so both callers share one resolution path and can never drift on
 // what counts as an answerable question.
+export function discoveredControlInputType(field: Pick<DiscoveredQuestion, 'inputType' | 'role'>): string {
+  const inputType = field.inputType.trim().toLowerCase();
+  const role = field.role?.trim().toLowerCase();
+  if (role === 'combobox') return 'combobox';
+  return inputType;
+}
+
 export async function discoverAndResolveQuestions(
   discovered: DiscoveredQuestion[],
   row: ResumeRow,
@@ -1633,8 +1640,9 @@ export async function discoverAndResolveQuestions(
      */
     const durable = field.durableSelector?.trim();
     if (durable) return durable;
-    if (portal === 'greenhouse' && /^combobox$/i.test(field.inputType)) return field.selector;
-    return /^(?:text|email|tel|url|number|date|textarea)?$/i.test(field.inputType)
+    const controlType = discoveredControlInputType(field);
+    if (portal === 'greenhouse' && controlType === 'combobox') return field.selector;
+    return /^(?:text|email|tel|url|number|date|textarea)?$/i.test(controlType)
       ? field.selector
       : undefined;
   };
@@ -1668,7 +1676,7 @@ export async function discoverAndResolveQuestions(
     kind: 'required',
     required: true,
     portal_selector: portalSelectorForField(field),
-    portal_input_type: field.inputType,
+    portal_input_type: discoveredControlInputType(field),
   });
 
   for (const field of discovered) {
@@ -1690,7 +1698,8 @@ export async function discoverAndResolveQuestions(
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
     // field.options is passed for one rule only: a declared absence of test scores is spoken in the
     // employer's own wording or not at all. See the parameter's note in lib/questionDiscovery.ts.
-    const profileKnown = resolveKnownAnswer(label, field.inputType, ap, questionContext, postingCountry, postingCountryCode, field.options ?? undefined);
+    const controlType = discoveredControlInputType(field);
+    const profileKnown = resolveKnownAnswer(label, controlType, ap, questionContext, postingCountry, postingCountryCode, field.options ?? undefined);
     /* A REMEMBERED ANSWER, and where it sits in the order.
      *
      * It stands in only where Litos has nothing of its own. The structured profile wins over a copy
@@ -1717,7 +1726,7 @@ export async function discoverAndResolveQuestions(
     // declaration she made.
     const resolvedField = profileKnown && 'value' in profileKnown
       ? resolveProfileField(
-        { label, inputType: field.inputType, options: field.options },
+        { label, inputType: controlType, options: field.options },
         ap,
         questionContext,
         postingCountry,
@@ -1741,7 +1750,7 @@ export async function discoverAndResolveQuestions(
         answer: reviewedOption ?? existing.answer,
         required: existing.required || fieldIsRequired,
         portal_selector: portalSelectorForField(field),
-        portal_input_type: field.inputType,
+        portal_input_type: controlType,
       });
       continue;
     }
@@ -1844,7 +1853,7 @@ export async function discoverAndResolveQuestions(
      * reads: Virtu and Faire each came back "no option matched" with a drafted answer quoted back
      * at them. A required field the applicant can see and pick from is strictly better than a
      * wrong-shaped value nobody can use. */
-    const closedControl = /^(?:select|radio|checkbox|combobox)$/i.test(field.inputType)
+    const closedControl = /^(?:select|radio|checkbox|combobox)$/i.test(controlType)
       || usableOptions(field.options).length > 0;
     const wouldNotDraftNow = !isOpenEndedQuestion(label) || closedControl;
     /* A PARAGRAPH AN EARLIER BUILD DRAFTED, on a question this build would not draft at all.
@@ -1869,7 +1878,7 @@ export async function discoverAndResolveQuestions(
           kind: 'required',
           required: fieldIsRequired,
           portal_selector: portalSelectorForField(field),
-          portal_input_type: field.inputType,
+          portal_input_type: controlType,
           answer_option_source: answerOptionSource,
           // Last, so a re-run over a packet whose provenance was stripped by a review merge stamps
           // the acceptance back on rather than inheriting a blank.
@@ -1884,7 +1893,7 @@ export async function discoverAndResolveQuestions(
           question: reviewLabel,
           required: existing.required || fieldIsRequired,
           portal_selector: portalSelectorForField(field),
-          portal_input_type: field.inputType,
+          portal_input_type: controlType,
         });
       } else if (fieldIsRequired) {
         questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, true));
@@ -1900,7 +1909,7 @@ export async function discoverAndResolveQuestions(
         kind: 'required',
         required: fieldIsRequired,
         portal_selector: portalSelectorForField(field),
-        portal_input_type: field.inputType,
+        portal_input_type: controlType,
         answer_option_source: answerOptionSource,
         ...consentTrail,
       });
@@ -1955,7 +1964,7 @@ export async function discoverAndResolveQuestions(
         if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
         continue;
       }
-      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: fieldIsRequired, portal_selector: field.selector, portal_input_type: field.inputType });
+      questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: fieldIsRequired, portal_selector: field.selector, portal_input_type: controlType });
       if (warnings.length > 0) {
         attentionReasons.push(`drafted answer needs your review: ${warnings.join('; ').slice(0, 300)}`);
       }
@@ -2419,7 +2428,12 @@ async function prepareManaged(
   const failedFields = (discoveryResult?.discovered ?? []).flatMap((field) => {
     const controlId = managedOptionProbeControlId(field);
     if (!controlId || !optionProbe.failedIds.has(controlId)) return [];
-    return [{ controlId, label: field.label, selector: field.selector, inputType: field.inputType }];
+    return [{
+      controlId,
+      label: field.label,
+      selector: field.selector,
+      inputType: discoveredControlInputType(field),
+    }];
   });
   const optionProbeAttention = optionProbeAttentionReasons(optionProbe.failures, failedFields);
   const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
