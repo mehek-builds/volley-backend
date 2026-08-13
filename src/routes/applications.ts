@@ -45,7 +45,8 @@ import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type Jo
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
-import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
+import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
+import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, reviewAnswerSaveDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import { submissionClaimPatch } from '../lib/submissionStop';
 import {
   detectPortal,
@@ -108,6 +109,13 @@ const reviewBodySchema = z.object({
   portal_url: z.string().url().max(4000),
   questions: z.array(questionSchema).max(100),
   skipped_reasons: z.array(z.string().max(1000)).max(100).default([]),
+});
+/* ANSWERS AND NOTHING ELSE. The edit body above requires an ATS name and a portal URL because an
+ * edit is allowed to change them; a save from the Review-answers screen changes neither, and asking
+ * that screen to post them back would make a round trip of the portal identity every time somebody
+ * fixes a typo in an essay. Narrower body, narrower route, nothing to re-derive. */
+const reviewAnswersBodySchema = z.object({
+  questions: z.array(questionSchema).max(100),
 });
 const submitBodySchema = z.object({
   questions: z.array(questionSchema).max(100),
@@ -212,10 +220,17 @@ function approvedReviewSpec(review: unknown, approvedAt: string) {
 export function freshSubmitRequestReview(
   current: ApplicationReviewState,
   questions: ApplicationReviewQuestion[],
+  /* The review round the questions above were stamped against. Optional so every caller that has
+   * nothing new to record keeps the stored round, and required in spirit for the one that does: a
+   * question carrying answer_reviewed_at next to a review carrying a different (or no)
+   * questions_reviewed_at is a claim the next reader has to throw away. See submit-request's call
+   * site for the 130 packets that were in exactly that state. */
+  questionsReviewedAt?: string,
 ): ApplicationReviewState {
   return {
     ...current,
     questions,
+    ...(questionsReviewedAt ? { questions_reviewed_at: questionsReviewedAt } : {}),
     status: 'submit_requested',
     updated_at: new Date().toISOString(),
     submission_run_id: randomUUID(),
@@ -1302,6 +1317,129 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     },
   );
 
+  /* SAVE THE ANSWERS. START NOTHING. LEAVE THE STATUS WHERE IT IS.
+   *
+   * THE DEFECT THIS EXISTS FOR. The Review-answers screen's Save button persisted nothing at all,
+   * for packets stopped at needs_attention - the ones whose entire remaining ask is an answer only
+   * the applicant can give. It called a local-only handler, showed "Saved." synchronously, and
+   * issued no request. Through d0d71a0 that button went to POST /submit-request; 8240abe narrowed
+   * the local-only save to the Apply-time pre-script, which is correct for THAT screen because the
+   * answers there ride into the packet on the next step; and 5410ba8 then made the local-only
+   * version unconditional, so the stalled-run path fell into it too.
+   *
+   * WHY THIS IS A THIRD ROUTE RATHER THAN EITHER OF THE TWO THAT EXIST.
+   *
+   *   POST /submit-request   books a browser run. Not starting one is the whole reason the Save
+   *                          button stopped calling it, and a save that files an application is a
+   *                          worse defect than a save that files nothing.
+   *   PUT  /review           writes 'questions_ready' or 'ready_to_submit' over the status - see
+   *                          applyApplicationReviewEdit - so it would clear the needs_attention the
+   *                          applicant is answering FROM. It also refuses this packet outright:
+   *                          its gate is submitRequestDisposition, which answers 'reject' for a
+   *                          claimed needs_attention row, which is what a stopped run leaves.
+   *
+   * So: the same review round both of those rely on, minted here and passed INTO the merge, with the
+   * status left alone and a gate that asks the question a save actually poses. See
+   * reviewAnswerSaveDisposition for what it refuses and why.
+   *
+   * MERGED ONTO THE STORED QUESTIONS, not substituted for them, which is where PUT /review's
+   * treatment would also have been wrong. questionSchema strips every field a run wrote and a client
+   * cannot vouch for, so a wholesale replacement drops the ATS field binding the fill types into and
+   * the answer_option_source that says what a banded answer was snapped from.
+   * mergeSubmittedApplicationReviewQuestions keeps the stored record and adopts the answer, which is
+   * the only thing this route is being asked to change. */
+  fastify.put(
+    '/applications/:id/review/answers',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const parsed = reviewAnswersBodySchema.safeParse(request.body);
+      if (!parsed.success) return reply.status(400).send({ error: 'We could not read these answers', detail: parsed.error.issues });
+      const current = readApplicationReview(row.spec as StoredSpec);
+      if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      // The row, not its status. needs_attention is also what a run that may have pressed submit
+      // leaves behind, and only the evidence fields on the row tell those two apart.
+      if (reviewAnswerSaveDisposition(current) !== 'save') {
+        return reply.status(409).send({
+          error: 'These answers can no longer be edited from this application’s current submission state',
+          code: 'REVIEW_ANSWERS_NOT_EDITABLE',
+        });
+      }
+      /* THE MERGE'S OWN NARROW RULE IS THE ONLY THING THAT MAY MINT A CLAIM HERE, and the round is
+       * minted FIRST so that rule can actually run.
+       *
+       * WHAT THE OTHER COMPOSITION DID. Passing `current.questions_reviewed_at` into the merge and
+       * then stamping the result with applyApplicantReviewedAnswers is two mistakes that hide each
+       * other. The merge's applicantSuppliedAnswer is gated on a round existing, and a round is
+       * written only by a save through these routes - NULL on 272 of the 286 needs_attention rows in
+       * production on 2026-08-13 - so on those rows the narrow rule was dead and recorded nothing.
+       * applyApplicantReviewedAnswers then stamped 'applicant_review' and a fresh answer_reviewed_at
+       * on EVERY question in the merged list carrying any non-empty answer, which is a blanket claim
+       * about answers the applicant never touched.
+       *
+       * WHAT THAT LAUNDERED. Replaying both calls against all 272 live NULL-round rows: 802 answers
+       * across 174 packets would flip from blanked by refreshKnownQuestionAnswers to surviving it,
+       * as HER answers. Among them 'gender' -> 'Female', 'disability status' -> 'I do not want to
+       * answer', 'veteran status' -> 'Decline to self-identify', 'do you now or will you in the
+       * future require immigration sponsorship' -> 'Yes', and compensation expectations of
+       * 'USD 175,000 per year'. Those are EEO self-identifications and personal declarations, which
+       * is exactly the category Litos holds back BECAUSE only the applicant may answer them. Against
+       * 14 answers carrying applicant_review in all of production and 2531 non-empty unattributed
+       * ones, a save that mints 802 claims is not established behaviour, it is a new one.
+       *
+       * SO: mint the round, pass it in, and let the write set only the round. This is
+       * resolveSubmittedApplicationAnswers minus the refresh, which is the composition the send path
+       * already uses. An answer typed into a blank still gets its claim, keyed to a round that now
+       * exists, which is the whole of what the blocked packets need. An answer she never touched
+       * stays unclaimed, and a question the request never mentioned is not touched at all.
+       *
+       * applyApplicantReviewedAnswers stays where it is for applyApplicationReviewEdit. Its blanket
+       * stamp over an edit's own questions is shipped behaviour with its own tests, and narrowing it
+       * is not this route's to do. */
+      const reviewedAt = current.questions_reviewed_at ?? new Date().toISOString();
+      const merged = mergeSubmittedApplicationReviewQuestions(
+        current.questions,
+        parsed.data.questions as ApplicationReviewQuestion[],
+        reviewedAt,
+      );
+      const next: ApplicationReviewState = {
+        ...current,
+        questions: merged,
+        questions_reviewed_at: reviewedAt,
+        updated_at: new Date().toISOString(),
+      };
+      const saved = await db.update(generated_resumes)
+        .set({ spec: reviewSpec(next) })
+        .where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
+        ))
+        .returning({ id: generated_resumes.id });
+      if (saved.length === 0) {
+        /* The row moved under the save, which for this packet means a run wrote to it. Answer with
+         * what is actually stored rather than with what this request wanted to store, so the screen
+         * stops showing a save that did not land. Same shape as the edit route above.
+         *
+         * `saved: false` IS WHAT MAKES THAT CONTRACT REACHABLE, and without it the sentence above
+         * described an intention rather than a behaviour. The 202 body was shape-identical to the
+         * 200's, and the client's fetch wrapper resolves on any res.ok and returns the parsed body
+         * with the status discarded, so nothing downstream could tell the two apart. The screen
+         * showed "Saved.", replaced the applicant's typing with the stored review that does not
+         * contain it, and navigated away - which is the original defect happening again, on the one
+         * response that exists to say it happened. Present ONLY here: a 200 carries no `saved` key,
+         * so the client reads the discriminator rather than an absence. */
+        const refreshed = await ownedResume(request, reply);
+        if (!refreshed) return;
+        const review = readApplicationReview(refreshed.spec);
+        return reply.status(202).send({ application_id: row.id, review: review ?? current, saved: false });
+      }
+      return reply.send({ application_id: row.id, review: next });
+    },
+  );
+
   fastify.post(
     '/applications/:id/submit-request',
     { preHandler: requireAuth },
@@ -1414,19 +1552,19 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         loadSensitiveQuestionProfile(request.jwtPayload!.userId),
       ]);
       const submittedQuestions = parsed.data.questions as ApplicationReviewQuestion[];
-      const mergedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions(
-        current.questions,
-        submittedQuestions,
-        current.questions_reviewed_at,
-      );
-      const normalizedSubmittedQuestions = refreshKnownQuestionAnswers(
-        mergedSubmittedQuestions,
-        sensitiveProfile,
-        current.jd_text,
-        current.questions_reviewed_at,
-        postingCountryFromJobContext(row.job_context),
-        postingCountryCodeFromJobContext(row.job_context),
-      );
+      /* A REVIEW ROUND FOR THIS BODY, NOT ONLY FOR WHATEVER ROUND THE ROW ALREADY HAD. The merge,
+       * the refresh and the review this persists all have to be keyed to the same one, so they are
+       * one call. See resolveSubmittedApplicationAnswers for the 130 packets on which reusing an
+       * absent stored round erased the applicant's own answer on the request that reaches the
+       * employer. */
+      const { questions: normalizedSubmittedQuestions, questionsReviewedAt: submittedReviewedAt } =
+        resolveSubmittedApplicationAnswers({
+          current,
+          submitted: submittedQuestions,
+          profile: sensitiveProfile,
+          postingCountry: postingCountryFromJobContext(row.job_context),
+          postingCountryCode: postingCountryCodeFromJobContext(row.job_context),
+        });
       /* THE REQUIRED-ANSWER GATE, ON THE SEND AND NOT ON THE RUN.
        *
        * This route has two outcomes and they need opposite treatment. On a supported portal it
@@ -1514,7 +1652,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // portal_supported check is helpful UI, not an enforcement point.
       if (current.portal_url && !isPortalSupported(current.portal_url)) {
         const authorizedAt = new Date().toISOString();
-        const base = freshSubmitRequestReview(current, normalizedSubmittedQuestions);
+        const base = freshSubmitRequestReview(current, normalizedSubmittedQuestions, submittedReviewedAt);
         const pending: ApplicationReviewState = {
           ...base,
           status: 'submitting',
@@ -1621,7 +1759,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
         });
       }
-      const next = freshSubmitRequestReview(current, normalizedSubmittedQuestions);
+      const next = freshSubmitRequestReview(current, normalizedSubmittedQuestions, submittedReviewedAt);
       const claimed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(

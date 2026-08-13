@@ -420,6 +420,43 @@ export type PreClickNoSendEvidence = Pick<
   | 'submission_stop'
 > & MaybeOutcome;
 
+/** The subset of the row that answers "may something already be at the employer" on its own. */
+export type StoredSendEvidence = Pick<
+  ApplicationReviewState,
+  'submission_attempted_at' | 'receipt' | 'unverified_submission' | 'security_code'
+>;
+
+/* THE FOUR STORED FACTS THAT EACH MEAN SOMETHING MAY ALREADY BE AT THE EMPLOYER.
+ *
+ * ONE DEFINITION, BECAUSE A SECOND ONE IS HOW THIS CLASS OF BUG RECURS. These four lines opened
+ * submissionProvablyNotSent, where they were the send path's answer to the question. Then a save
+ * gate arrived that had to ask the SAME question and asked it of the status alone instead, so
+ * needs_attention fell through to 'save' unconditionally - including for the rows
+ * unverifiedSubmissionPatch writes, which is precisely the shape that means a run may have pressed
+ * submit: submission_attempted_at set, an unresolved unverified_submission recorded, the claim kept.
+ * Two of the 286 live needs_attention rows on 2026-08-13 were exactly that, one carrying a standing
+ * security_code as well, and both were saveable through the new route while the dashboard offered
+ * "Check the answers" for them. Named and exported so both gates read the same four facts.
+ *
+ * Deliberately NOT the whole of submissionProvablyNotSent, which demands a POSITIVE proof of a
+ * pre-click stop and answers false for a row that simply has no record either way. That strictness
+ * is right for reopening a SEND and wrong for a save, which would then refuse the ordinary stopped
+ * run whose only remaining ask is the answer the save exists to store.
+ *
+ * ANY unverified_submission counts, resolved or not. A resolution of 'not_sent' is the applicant's
+ * own "I looked and it is not there", and submitRequestDisposition already reopens the send path on
+ * it - but unverifiedSubmissionPatch writes submission_attempted_at beside every unverified record
+ * it creates, so the resolution never decides this on its own, and reading the narrower rule in here
+ * would be a distinction with no row behind it.
+ */
+export function employerMayHoldApplication(evidence: StoredSendEvidence): boolean {
+  if (evidence.submission_attempted_at) return true;
+  if (evidence.receipt) return true;
+  if (evidence.unverified_submission) return true;
+  if (evidence.security_code) return true;
+  return false;
+}
+
 /* NOTHING WAS SENT, AND THE ROW CAN PROVE IT.
  *
  * kos.ai, production, 2026-08-11. The managed run stopped inside the atomic chooser, which throws
@@ -439,16 +476,14 @@ export type PreClickNoSendEvidence = Pick<
  * click, which is what isManagedNoSubmitControl and managedSubmitVerdict's 'not_attempted' arm
  * already mean. This function adds no new classification of its own; it asks the two that exist.
  *
- * The five refusals below are each a case where something may have reached the employer, and the
+ * The refusals it opens with are each a case where something may have reached the employer, and the
  * security_code one is the least obvious and the most important: a retained code wall is the
  * employer's own record that an application arrived and is parked at verification, and it stays true
- * even when THIS run never pressed anything. See delayedSecurityCodeHandoffReview.
+ * even when THIS run never pressed anything. See delayedSecurityCodeHandoffReview. They live in
+ * employerMayHoldApplication above, because a second gate now asks the same question.
  */
 export function submissionProvablyNotSent(evidence: PreClickNoSendEvidence): boolean {
-  if (evidence.submission_attempted_at) return false;
-  if (evidence.receipt) return false;
-  if (evidence.unverified_submission) return false;
-  if (evidence.security_code) return false;
+  if (employerMayHoldApplication(evidence)) return false;
   // Checked ahead of the verdict rather than through it. managedSubmitVerdict believes a runner that
   // reports state 'not_attempted', and a result that says both 'not_attempted' and pressed:true is
   // contradicting itself about the one fact that matters here.

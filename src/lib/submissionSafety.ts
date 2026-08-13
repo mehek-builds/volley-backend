@@ -1,5 +1,5 @@
 import type { ApplicationReviewQuestion, ApplicationReviewState } from './applicationReview';
-import { submissionProvablyNotSent, type PreClickNoSendEvidence } from './managedSubmitOutcome';
+import { employerMayHoldApplication, submissionProvablyNotSent, type PreClickNoSendEvidence, type StoredSendEvidence } from './managedSubmitOutcome';
 
 /**
  * The required questions the employer will not accept blank, and Litos has no answer for.
@@ -164,6 +164,63 @@ export function submitRequestDisposition(
   if (status === 'needs_attention' && noSendEvidence && submissionProvablyNotSent(noSendEvidence)) return 'start';
   if (['resume_ready', 'questions_ready', 'ready_to_submit', 'failed'].includes(status)) return 'start';
   return 'reject';
+}
+
+/**
+ * Whether an ANSWER may be written to this packet. Not whether anything may be sent.
+ *
+ * DELIBERATELY NOT submitRequestDisposition, AND THAT IS THE WHOLE POINT OF IT EXISTING. That
+ * predicate answers "may a browser run start against the employer", and its refusals are all about
+ * one risk: a second application at a board that caps them. A save of answers books nothing, opens
+ * nothing and reaches nobody. Every one of its refusals is therefore about a different question, so
+ * borrowing it here would refuse for reasons that do not apply - and it did. A run that stops mid
+ * fill lands at needs_attention still wearing its claim, which submitRequestDisposition answers
+ * 'reject' for; that is exactly the packet whose whole remaining ask is "type the answer this form
+ * needs", and the screen that asks for it is the one this route serves.
+ *
+ * WHAT IS REFUSED, and each for its own reason rather than by inheritance:
+ *
+ *   submitted, awaiting_security_code   The answers on the row are the record of what the employer
+ *                                       was given. Rewriting them makes that record describe a form
+ *                                       nobody filled.
+ *   preparing, filling, submitting,     A run holds this row and writes the same `_review` blob when
+ *   claimed submit_requested            it finishes. The conditional update below would lose the
+ *                                       race; refusing says so instead of half-saving.
+ *   ready_for_final_approval            The form is already filled and there is a preview screenshot
+ *                                       of it on screen. New answers underneath it would leave the
+ *                                       picture the applicant approves describing something else.
+ *                                       Her way in is the resume edit, which resets the packet and
+ *                                       refills it - see resumeEditDisposition.
+ *   any status carrying send evidence   The row itself says a submit may have landed. See below.
+ *
+ * AND IT TAKES THE ROW, NOT THE STATUS, WHICH IS THE SECOND THING IT GETS WRONG BY ITSELF.
+ *
+ * The status list above reads as though needs_attention were one state. It is not: it is also what
+ * unverifiedSubmissionPatch writes when a run may have pressed submit, which sets
+ * submission_attempted_at, records an unresolved unverified_submission, and KEEPS the claim rather
+ * than clearing it. Keyed on status alone, every one of those rows fell through to 'save' - and the
+ * first refusal in this list, "the answers on a sent application are the record of what was sent",
+ * is the same argument for a row that may have been sent. On 2026-08-13, 2 of the 286 live
+ * needs_attention rows carried that evidence, one of them a standing security_code as well, and the
+ * dashboard renders "Check the answers" for both.
+ *
+ * PUT /review was patched for this exact class and names it in its own comment. The evidence check
+ * is employerMayHoldApplication, which is the same four facts submissionProvablyNotSent opens with,
+ * asked here rather than restated - a second definition of "may have been sent" is how this recurs.
+ * Deliberately not submissionProvablyNotSent whole: that demands a POSITIVE proof of a pre-click
+ * stop, which the ordinary stopped run does not have, and refusing it would refuse the save this
+ * route exists for.
+ */
+export function reviewAnswerSaveDisposition(
+  review: Pick<ApplicationReviewState, 'status' | 'submission_claimed_at'> & StoredSendEvidence,
+): 'save' | 'reject' {
+  const status = review.status;
+  if (status === 'submitted' || status === 'awaiting_security_code') return 'reject';
+  if (['preparing', 'filling', 'submitting'].includes(status)) return 'reject';
+  if (status === 'submit_requested' && Boolean(review.submission_claimed_at)) return 'reject';
+  if (status === 'ready_for_final_approval') return 'reject';
+  if (employerMayHoldApplication(review)) return 'reject';
+  return 'save';
 }
 
 export function resumeEditDisposition(
