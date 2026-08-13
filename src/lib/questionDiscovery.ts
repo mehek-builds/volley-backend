@@ -4523,6 +4523,56 @@ const CONSENT_ACCEPTING_OPTION = new RegExp(
   + String.raw`)$`,
 );
 
+/* WHAT JOINS TWO VERBS INTO ONE OPTION LABEL. A slash, an ampersand, a plus, a comma, or the two
+ * coordinators English writes them out with.
+ *
+ * The slash is the reason this list exists at all and the reason it is applied HERE rather than in
+ * comparableOption. comparableOption deliberately keeps '/' (its character class is
+ * [^a-z0-9.+/]), and that is load-bearing well outside consent: Greenhouse's standard graduation
+ * term list offers "Spring/Summer 2028", and optionCoversMonthYear reaches that entry's year
+ * across the slash. Splitting on it globally would take the season run apart. Splitting on it only
+ * while asking "is this option nothing but accepting verbs" costs nothing anywhere else.
+ *
+ * '&' AND ',' ARE IN THIS CLASS AND CANNOT FIRE, which is worth writing down rather than leaving
+ * for the next reader to discover. comparableOption runs first and turns every character outside
+ * [a-z0-9.+/] into a space, so "Acknowledge & Confirm" arrives here as "acknowledge confirm" with
+ * no joiner left in it and is handed back to the applicant. They are kept because they say what
+ * this rule means, and because a future comparableOption that preserves them would then be right
+ * by default rather than silently unhandled. Splitting on whitespace as well was rejected:
+ * CONSENT_ACCEPTING_OPTION admits an optional "i " prefix, so "i acknowledge i confirm" would
+ * split into a bare "i", and the rule would be no more complete while being far easier to widen by
+ * accident.
+ */
+const CONSENT_COMPOUND_JOINER = /[/&+,]|\band\b|\bor\b/;
+
+/**
+ * AN OPTION THAT IS TWO ACCEPTING VERBS IS STILL ONE ACCEPTANCE.
+ *
+ * CONSENT_ACCEPTING_OPTION is anchored end to end over SINGLE verbs, which is the property that
+ * stops "I do not agree" and "please read and agree before continuing" from reading as
+ * acceptances. Greenhouse renders consent checkboxes whose only option label is the compound
+ * "Acknowledge/Confirm", and that matches neither alternative: it is not "acknowledge" and it is
+ * not "confirm". Measured through the call the resolver makes,
+ * chooseConsentOption(["Acknowledge/Confirm"]) returned null, so resolveProfileField reported
+ * matchedOption: false and routes/submissionRunner.ts announced a consent Litos had every
+ * permission to accept as one handed back to the applicant to finish by hand.
+ *
+ * So an option also accepts when it is composed ENTIRELY of accepting verbs joined by punctuation
+ * or a coordinator. Every part must satisfy the same single-verb vocabulary, which is what keeps
+ * this from being a loosening: "Accept and Continue" still fails, because "continue" is not an
+ * accepting verb, and anything carrying a refusing token fails before it is ever split, because
+ * isConsentAcceptingWording tests CONSENT_REFUSING_OPTION over the whole key first and this tests
+ * it again over every part.
+ *
+ * TWO PARTS MINIMUM, so a key with no joiner in it cannot get a second, differently spelled attempt
+ * at the same regex it has already failed.
+ */
+function consentAcceptingCompound(key: string): boolean {
+  const parts = key.split(CONSENT_COMPOUND_JOINER).map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2) return false;
+  return parts.every((part) => !CONSENT_REFUSING_OPTION.test(part) && CONSENT_ACCEPTING_OPTION.test(part));
+}
+
 export function isConsentRefusingWording(value: string): boolean {
   return CONSENT_REFUSING_OPTION.test(comparableOption(value ?? ''));
 }
@@ -4530,7 +4580,12 @@ export function isConsentRefusingWording(value: string): boolean {
 export function isConsentAcceptingWording(value: string): boolean {
   const key = comparableOption(value ?? '');
   if (!key || CONSENT_REFUSING_OPTION.test(key)) return false;
-  return CONSENT_ACCEPTING_OPTION.test(key);
+  /* THE WHOLE KEY IS ASKED FIRST, and the order is not cosmetic. "read and agree" is a single
+   * accepting phrase that CONSENT_ACCEPTING_OPTION already spells out, and splitting it on "and"
+   * yields "read", which is not an accepting verb on its own. Asking the compound rule first would
+   * therefore stop recognising a wording this vocabulary has always recognised. */
+  if (CONSENT_ACCEPTING_OPTION.test(key)) return true;
+  return consentAcceptingCompound(key);
 }
 
 /** What Litos puts in a consent control when it accepts. Snapped onto the control's own option list
