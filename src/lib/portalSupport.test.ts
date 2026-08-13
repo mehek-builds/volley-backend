@@ -343,7 +343,14 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(resumeRoute, /monitored_jobs\.apply_url/);
   assert.match(resumeRoute, /canonicalMonitoredPortalUrl\(job\.apply_url, job\.ats_name, job\.board_token\)/);
   assert.match(resumeRoute, /monitoredDescriptionHash\(job\.description\)/);
-  assert.match(resumeRoute, /spec: refreshedHistorySpec\(repairedHistorySpec\(row, monitoredJobs\), profile, row\.job_context\)/);
+  // The composition is now wrapped by specWithoutDocumentPointers, which strips the Blob pointers a
+  // fifty-row spec payload was carrying (routes/documentResponseContract.test.ts owns that half).
+  // The pin here is unchanged in what it proves: the REPAIRED spec, and not row.spec, is what the
+  // response is built from, because a repair nothing serializes is a repair that did not happen.
+  assert.match(
+    resumeRoute,
+    /spec: specWithoutDocumentPointers\(\s*refreshedHistorySpec\(repairedHistorySpec\(row, monitoredJobs\), profile, row\.job_context\),\s*\)/,
+  );
   const applicationsRoute = routeSource('applications.ts');
   const repairSource = libSource('applicationPortalRepair.ts');
   // Packets created from monitored jobs can outlive a bad or stale review URL. Before declaring the
@@ -401,16 +408,23 @@ test('a cover letter failure degrades the run instead of aborting it', () => {
     runner,
     /try \{\s*await generateStoredCoverLetter\(row, false, true\);\s*\} catch \(error\) \{[\s\S]{0,400}coverLetterIssue:/,
   );
-  // And the reason reaches the applicant on both provider paths rather than being swallowed.
-  const attentionLines = runner.match(/attention_reason:[\s\S]{0,220}?(?:coverLetterAttention|attentionReasons)/g) ?? [];
-  assert.equal(attentionLines.length, 2, 'both the managed and direct paths must surface the reason');
+  // And the reason reaches the applicant on both provider paths rather than being swallowed. The
+  // managed path names its final reason before it signs the attended URL binding, while the direct
+  // path still writes the array inline.
+  assert.match(runner, /const attentionReasons = \[[\s\S]{0,300}\.\.\.coverLetterAttention/);
+  assert.match(runner, /const preparedAttentionReason = \[[\s\S]{0,220}\.\.\.attentionReasons/);
+  assert.match(runner, /attention_reason:[\s\S]{0,220}\.\.\.coverLetterAttention/);
 });
 
 test('preview evidence blocks broken pages and incomplete form fills before final approval', () => {
   const runner = routeSource('submissionRunner.ts');
   assert.match(runner, /function previewContentBlockers\(text: string \| undefined\): string\[\]/);
   assert.match(runner, /can\(\?:not\|\u0027t\)/);
-  assert.match(runner, /function filledFieldBlockers\(fields: readonly string\[\] \| undefined, packet: SubmissionPacket\): string\[\]/);
+  /* Loosened from the one-line signature, which broke when the run's own evidence was added as a
+     third argument so that a resume displaced by a later upload could be reported and not only a
+     missing one. The requirement is that the function still takes the filled fields and the packet
+     and returns sentences, not that it takes exactly two parameters. */
+  assert.match(runner, /function filledFieldBlockers\(\s*fields: readonly string\[\] \| undefined,\s*packet: SubmissionPacket,[\s\S]{0,200}?\): string\[\]/);
   assert.match(runner, /The filled form did not record an email field/);
   assert.match(runner, /The filled form did not record a resume upload/);
   assert.match(runner, /The filled form did not record the applicant name fields/);

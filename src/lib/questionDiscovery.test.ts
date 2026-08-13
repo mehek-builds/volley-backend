@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   classifyField,
+  DISCOVER_QUESTIONS_SCRIPT,
   discoveredFieldIsRequired,
   eeoAnswer,
   isCoreIdentityField,
@@ -13,10 +14,12 @@ import {
   graduationDateAnswer,
   isOpenEndedQuestion,
   isPolarQuestion,
+  isProviderHandleOnly,
   isRefusedQuestion,
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
   normalizeStoredPortalQuestions,
+  PROVIDER_HANDLE_ONLY_SCRIPT,
   questionRequiresHumanAttention,
   refreshKnownQuestionAnswers,
   REVIEW_QUESTION_TEXT_MAX_LENGTH,
@@ -25,6 +28,9 @@ import {
   WORK_ELIGIBILITY_QUESTION,
   type ApplicationProfileLike,
 } from './questionDiscovery';
+// The high-school test below asserts on the alias ladder as well as on the resolver: the wrong
+// graduation year came from the ladder, not from resolveKnownAnswer, and only this call sees it.
+import { resolveProfileField } from './profileFieldResolution';
 
 // R-004 originally refused every work-eligibility question after one false legal declaration
 // shipped. These are now answerable only from explicit stored booleans, never by inference.
@@ -2073,6 +2079,12 @@ function skipReasonOf(result: ReturnType<typeof resolveKnownAnswer>): string | n
   return result && 'skipReason' in result ? result.skipReason : null;
 }
 
+/** Whether the resolver blocked this label specifically as a question about the high school. */
+function questionRefusedAsHighSchool(label: string, profile: ApplicationProfileLike): boolean {
+  const reason = skipReasonOf(resolveKnownAnswer(label, 'text', profile, undefined)) ?? '';
+  return /high school question left for you/.test(reason);
+}
+
 function refuses(label: string, inputType = 'text', profile = PROD_OWNER_PROFILE): void {
   const result = resolveKnownAnswer(label, inputType, profile, undefined);
   assert.ok(
@@ -2202,6 +2214,83 @@ test('a yes/no question about a field is not a request for that field', () => {
  * Neither one needs it: the first has no question mark at all and is caught by the qualifier list,
  * the second is far past the word budget. Both are asserted in the test above this block as well;
  * repeated here so that deleting the gate a second time cannot pass unnoticed. */
+/* THE UNIVERSITY EMAIL ADDRESS, ANSWERED FROM THE ADDRESS AND NEVER FROM THE SCHOOL.
+ *
+ * IMC requires "Please provide your university email address." Litos holds the value - it is the
+ * address lib/resumeEmail.ts prints on the resume and freezes into the packet's `_contact` - and
+ * before this rule nothing resolved the label at all, so the required field stayed empty and the
+ * packet reported it as unanswerable.
+ *
+ * The negative below is the load-bearing half. This exact label was once answered with the
+ * UNIVERSITY'S NAME by the bare-keyword fallback, so the rule is deliberately not a keyword match on
+ * `university`: the noun has to sit beside `email`, and the only value it can return is
+ * `contact_email`. There is no path from it to school, degree or major.
+ */
+test('a university email question is answered from the address on file, never from the school', () => {
+  const withUsc = {
+    ...PROD_OWNER_PROFILE,
+    contact_email: 'mehekman@usc.edu',
+    school: 'University of Southern California, Viterbi School of Engineering',
+  };
+  for (const label of [
+    'please provide your university email address.',
+    'Please provide your university email address.',
+    'university email',
+    'school email address',
+    'college e-mail',
+    'academic email address',
+    'student email',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'text', withUsc, undefined), { value: 'mehekman@usc.edu' }, label);
+  }
+
+  /* THE SCHOOL NAME IS NEVER THE ANSWER, on any of those shapes, whatever is on file. Asserted as an
+   * identity rather than only as the happy path, because the defect this replaces produced a
+   * perfectly confident string that no "is it non-null" assertion would have caught. */
+  for (const label of ['please provide your university email address.', 'university email', 'school email address']) {
+    for (const profile of [withUsc, { ...withUsc, contact_email: undefined }, { school: 'Stanford University' }]) {
+      const resolved = resolveKnownAnswer(label, 'text', profile, undefined);
+      const answer = resolved && 'value' in resolved ? resolved.value : null;
+      assert.notEqual(answer, 'University of Southern California, Viterbi School of Engineering', label);
+      assert.notEqual(answer, 'Stanford University', label);
+      if (answer !== null) assert.match(answer, /@/, `${label} must resolve to an address, got ${answer}`);
+    }
+  }
+
+  /* GROUNDED ON THE VALUE. A consumer mailbox is not a university address, and offering it would be
+   * a confident wrong answer to an employer that is going to check it. Held, and she fills it. */
+  for (const stored of [undefined, 'mehekmandal05@gmail.com', 'not-an-address', '']) {
+    const resolved = resolveKnownAnswer(
+      'please provide your university email address.', 'text', { ...withUsc, contact_email: stored }, undefined,
+    );
+    assert.ok(resolved && 'skipReason' in resolved, `${String(stored)} -> ${JSON.stringify(resolved)}`);
+    assert.match(resolved.skipReason, /university email address left for you/);
+  }
+  // Institutional addresses outside the .edu convention are answered on the same test.
+  for (const stored of ['m.mandal@ox.ac.uk', 'm@iitb.ac.in', 'm@unam.edu.mx']) {
+    assert.deepEqual(
+      resolveKnownAnswer('university email address', 'text', { ...withUsc, contact_email: stored }, undefined),
+      { value: stored },
+    );
+  }
+
+  /* AND IT REACHES NOTHING ELSE. A polar question wants a yes or a no, a conditional's antecedent is
+   * not on file, and a plain "what university do you attend?" is still the school question it always
+   * was - answered with the school NAME by its own rule, which this must not have taken over. */
+  assert.equal(classifyField('please provide your university email address.'), null);
+  for (const label of [
+    'do you have a university email address?',
+    'if you applied using your personal email address, please provide your university email address',
+  ]) {
+    const resolved = resolveKnownAnswer(label, 'text', withUsc, undefined);
+    assert.ok(resolved === null || 'skipReason' in resolved, `${label} -> ${JSON.stringify(resolved)}`);
+  }
+  assert.deepEqual(
+    resolveKnownAnswer('what university do you attend?', 'text', withUsc, undefined),
+    { value: 'University of Southern California, Viterbi School of Engineering' },
+  );
+});
+
 test('the two labels the question-mark gate was added for are refused without it', () => {
   // Six words, no question mark, refused on `email` and `address` in the qualifier list.
   assert.equal(classifyField('please provide your university email address'), null);
@@ -2264,6 +2353,324 @@ test('a high school diploma question that asks for a month and year is not answe
     ),
     { value: 'June 2024' },
   );
+});
+
+test('a question about HIGH SCHOOL is never answered from the university profile (Palantir)', () => {
+  /* Measured against the owner's real stored profile on 2026-08-11, reading only the plaintext
+     profiles.parsed_json / base_resume_json. The label is Palantir's, from the live Lever posting's
+     "High School Name & Graduation Year" card:
+
+       resolveKnownAnswer('high school name', 'textarea', ap) -> { value:
+         'University of Southern California, Viterbi School of Engineering' }
+
+     A blank field stalls a run; this is a wrong answer typed onto an employer's form. It reached
+     the university profile through the `school name` arm of classifyField, and its neighbours
+     reached the same profile the same way. */
+  const HS = { ...PROD_OWNER_PROFILE, high_school_grad_date: 'May 2023' };
+  for (const label of [
+    'high school name',
+    'high school name & graduation year',   // Palantir's card, were it ever one control
+    'name of high school',
+    'high school',
+    'high school attended',
+    'which high school did you attend?',
+    'what high school did you go to?',
+    'secondary school name',
+    'high school city',
+    'high school gpa',                      // was "3.89", the UNIVERSITY GPA
+    'high school degree',                   // was "Bachelor of Science in Computer Science"
+    /* Spellings a form actually uses. Every one of these reached a university value before the
+       high-school noun was shared between the graduation matcher and this rule. */
+    'highschool name', 'highschool gpa', 'hs gpa',
+    '12th grade school name', 'grade 12 school name',
+    'prep school name', 'preparatory school name', 'senior secondary school name',
+    /* Punctuation between the noun and the fact. An adjacency rule was one draft of this and it
+       missed every one of these, which is most of how forms print the control. */
+    'gpa (high school)', 'what was your gpa during high school?',
+    'high school: name', 'high school (name)', 'high school (most recent)',
+    'high school, city, state', 'high school / secondary school',
+    'where did you attend high school?', 'enter your high school', 'please enter your high school below',
+    /* Instructions about the high school, not exclusions of it. */
+    'do not abbreviate your high school name',
+    'if you attended more than one high school, list the most recent high school name',
+  ]) {
+    refuses(label, 'textarea', HS);
+    refuses(label, 'textarea');             // and with no high-school fact stored at all
+    assert.equal(classifyField(label), null, label);
+    assert.match(
+      skipReasonOf(resolveKnownAnswer(label, 'textarea', HS, undefined)) ?? '',
+      /high school question left for you/,
+      label,
+    );
+  }
+
+  /* The ordering hole. One draft returned null for a combined name-and-year control instead of
+     refusing, and the label fell past the graduation handler into the classifier, which read
+     "graduation year" and answered "May 2028" - the UNIVERSITY year. A refusal cannot fall through.
+     These two carry an education-LEVEL phrase as well, so the classifier is left alone on them and
+     the resolver is what holds: resolveProfileField consults it before building any ladder, so no
+     value can escape behind the refusal. */
+  for (const label of [
+    'highest level of education high school name & graduation year',
+    'highest level of education, high school name and year of graduation',
+  ]) {
+    assert.equal(questionRefusedAsHighSchool(label, HS), true, label);
+    assert.equal(resolveProfileField({ label, inputType: 'text' }, HS), null, label);
+  }
+
+  /* The classifier is where this has to be fixed, not only the resolver. resolveKnownAnswer was
+     ALREADY right about the graduation year - it said "May 2023" - and the wrong value came from
+     classifyField handing `graduation_year` to profileFieldCandidates, which rebuilt the ladder
+     from grad_year and let chooseClosestOption match "2028" exactly off the option list. That is
+     the university year, selected on a high-school control, with no widened label walk needed. */
+  const years = ['2021', '2022', '2023', '2024', '2025', '2026', '2027', '2028'];
+  const picked = resolveProfileField(
+    { label: 'High School Graduation Year', inputType: 'text', options: years }, HS,
+  );
+  assert.equal(picked?.value, '2023');
+  assert.equal(picked?.candidates.includes('2028'), false);
+  assert.equal(resolveProfileField({ label: 'High School Name', inputType: 'text' }, HS), null);
+
+  // The one high-school fact on file still answers its own questions, and still refuses without it.
+  for (const label of [
+    'year of high school graduation',
+    'when did you graduate from high school?',
+    'high school graduation year',
+    /* The Akuna "month and year" wording. One draft tested the bare word `name` to catch Palantir's
+       two-part card, and matched "the NAME of the month" here - refusing a date that was on file. */
+    'when did you graduate from high school? please enter the name of the month and the year.',
+    'high school graduation date (name the month and year)',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: 'May 2023' }, label);
+    refuses(label);
+  }
+  /* "Highschool Graduation Year" gets a BLOCKER, not the date, and that is the deliberate side of
+     the trade. Widening this matcher's literal past main's exact `high\s+school` reached that
+     spelling, and cost three labels main had right - "expected graduation date (not highschool)"
+     came back with the high-school date, and "our high-school internship - when can you start?"
+     put a graduation date in an availability box. The literal stays narrow; the label still
+     improves on main's answer, which was the UNIVERSITY's May 2028. */
+  assert.equal(questionRefusedAsHighSchool('highschool graduation year', HS), true);
+  for (const label of [
+    'do you have a high school diploma or equivalent?',
+    // A wide spelling the narrow graduation matcher does not reach. The refusal above it used to
+    // shadow the diploma handler and block this, where main answered "Yes".
+    'have you obtained a secondary school diploma or ged?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'select', HS, undefined), { value: 'Yes' }, label);
+  }
+
+  /* THE VETO, and it is the load-bearing half. Employers name a high school most often in order to
+     EXCLUDE it, and refusing that gloss hands back the blank it was written to prevent. Three
+     attempts were made to read WHICH institution a negation governs - by proximity, then by
+     attachment - and each shipped a fresh regression in the other direction. So the rule now stands
+     down whenever the label names ANY other institution, whatever it is doing with it. Every
+     expected value below is what the code shipped before any of this, and has to keep shipping. */
+  for (const [label, expected] of [
+    ['which university do you attend? do not list your high school.', PROD_OWNER_PROFILE.school],
+    ['what is the name of the university you attend? (not high school)', PROD_OWNER_PROFILE.school],
+    ['name of institution (university, college or high school)', PROD_OWNER_PROFILE.school],
+    // POST-secondary is the university in North American usage, so the noun must not match inside it.
+    ['name of post-secondary institution', PROD_OWNER_PROFILE.school],
+    ['post-secondary school name', PROD_OWNER_PROFILE.school],
+    // Glosses written with the generic noun rather than "college".
+    ['school name - please do not type your high school here.', PROD_OWNER_PROFILE.school],
+    ['which institution? do not select your high school.', PROD_OWNER_PROFILE.school],
+    ['institution name (do not repeat your high school)', PROD_OWNER_PROFILE.school],
+    ['school attended (leave out your high school)', PROD_OWNER_PROFILE.school],
+    ['what is the name of your school? your high school should be excluded.', PROD_OWNER_PROFILE.school],
+    /* The commonest wording of all, and the one every negation-reading draft got backwards: a
+       university control that names the high school in order to exclude it. */
+    ['university gpa (do not enter high school gpa)', PROD_OWNER_PROFILE.gpa],
+    ['college gpa (not high school gpa)', PROD_OWNER_PROFILE.gpa],
+    ['undergraduate gpa - not your high school gpa', PROD_OWNER_PROFILE.gpa],
+    ['university attended - do not enter high school', PROD_OWNER_PROFILE.school],
+    ['name of the college you attend (not your high school)', PROD_OWNER_PROFILE.school],
+    ['which university are you enrolled at (not high school)?', PROD_OWNER_PROFILE.school],
+    ['university name (do not repeat your high school)', PROD_OWNER_PROFILE.school],
+    ['university name (high school is asked below)', PROD_OWNER_PROFILE.school],
+    ['college name below - high school not needed', PROD_OWNER_PROFILE.school],
+    /* The standard school-leaver fallback gloss. An attachment rule read "not attend college" as
+       excluding the college and blanked School, education-level and GPA across a whole section. */
+    ['school name (if you did not attend college, enter your high school)', PROD_OWNER_PROFILE.school],
+    ['gpa (if you did not attend college, use your high school gpa)', PROD_OWNER_PROFILE.gpa],
+    ['college gpa - do not include college credit earned while in high school', PROD_OWNER_PROFILE.gpa],
+    ['university attended (transcripts are uploaded separately; high school not needed)', PROD_OWNER_PROFILE.school],
+    /* A conditional that is not hers. */
+    ['what is your gpa? (high school gpa if you are a freshman)', PROD_OWNER_PROFILE.gpa],
+    /* "Secondary education" is also the name of a MAJOR, so it is deliberately not one of the
+       high-school spellings: this control was refused where main answered "Computer Science". */
+    ['major / field of study (e.g. nursing, secondary education, engineering)', PROD_OWNER_PROFILE.major],
+    ['what is your major? (for example: secondary education, computer science)', PROD_OWNER_PROFILE.major],
+    /* KNOWINGLY UNFIXED, and pinned so it stays a decision rather than a drift. The high school is
+       genuinely the subject here and the university value is wrong, but the label names two
+       institutions and every rule that tried to adjudicate that cost a commoner label. Unchanged
+       from main is the bar. */
+    ['school name (high school)', PROD_OWNER_PROFILE.school],
+    /* The education-LEVEL family, in full. An earlier revision made an exception when a fact looked
+       attached to the noun, which bought "level of education: high school GPA" and sold the
+       commonest dropdown in ATS - the fact test could not tell a level word ("high school diploma")
+       or an incidental one ("if you attended high school outside the U.S.") from a real one. Left
+       as main has them. */
+    ['highest education: high school name', PROD_OWNER_PROFILE.school],
+    ['level of education: high school gpa', PROD_OWNER_PROFILE.gpa],
+    ['high school gpa (not college gpa)', PROD_OWNER_PROFILE.gpa],
+    ['high school name (university name is entered separately)', PROD_OWNER_PROFILE.school],
+    // Not an education field at all. One draft's guard sat above the city, phone, language and
+    // availability arms of classifyField and took them with it.
+    ['what city do you live in? (not the city of your high school)', PROD_OWNER_PROFILE.address_city],
+    /* Exclusion glosses in the wordings forms actually use. The negation list recognised only a
+       closed set - and `n['’]t` on its own was dead, a word boundary can never hold inside "don't"
+       - so contracted and near-synonym glosses turned correct GPA, degree and major answers into
+       blockers. */
+    ["gpa (don't enter your high school gpa)", PROD_OWNER_PROFILE.gpa],
+    ['what is your gpa? we do not accept high school gpas.', PROD_OWNER_PROFILE.gpa],
+    ['gpa - no high school gpas please', PROD_OWNER_PROFILE.gpa],
+    ['field of study - please leave out high school', PROD_OWNER_PROFILE.major],
+    ['major (high school not applicable)', PROD_OWNER_PROFILE.major],
+    /* "After/beyond/post high school" measures FROM the high school rather than asking about it. */
+    ['degree after high school', PROD_OWNER_PROFILE.degree],
+    ['field of study after high school', PROD_OWNER_PROFILE.major],
+    ['gpa after high school', PROD_OWNER_PROFILE.gpa],
+    ['education beyond high school', PROD_OWNER_PROFILE.school],
+    ['post high school education', PROD_OWNER_PROFILE.school],
+    /* THE GRADUATION MATCHER NEEDS THE VETO TOO. It runs before every other rule and its own window
+       reaches 200 characters, so a UNIVERSITY graduation control that names the high school in
+       order to exclude it was answered with the high-school date. */
+    ['university graduation year (high-school year not required)', 'May 2028'],
+    ['expected graduation date (not highschool)', 'May 2028'],
+    ['college graduation date - high-school dates are not needed', 'May 2028'],
+    ['undergraduate graduation date (high-school graduation not required)', 'May 2028'],
+    ['what is your expected graduation date? high-school dates are not accepted', 'May 2028'],
+    /* The strip inside the veto is anchored. Unanchored it ate "secondary school" out of the MIDDLE
+       of "postsecondary school" and destroyed the only institution noun in the label. */
+    ['high school and postsecondary school names', PROD_OWNER_PROFILE.school],
+    ['high school / postsecondary school name', PROD_OWNER_PROFILE.school],
+    // ...and the lookbehind knows typographic dashes, not only the ASCII hyphen.
+    ['post\u2013secondary school name', PROD_OWNER_PROFILE.school],
+    ['post\u2014secondary school name', PROD_OWNER_PROFILE.school],
+  ] as const) {
+    assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: expected }, label);
+  }
+  /* A high school that OWNS the graduation word keeps its date, however many institutions the label
+     names. The veto added for university graduation controls returned null here instead of
+     refusing, which dropped the label into the classifier and answered it with the university's
+     NAME - this branch's headline defect, on a new label family. */
+  for (const label of [
+    'in what year did you graduate from high school? please also enter the school name.',
+    'when did you graduate from high school? school name:',
+    'graduation year (high school) - if you attended more than one school, enter the most recent.',
+    'graduation year (high school). school name is entered separately.',
+    'year of graduation from high school (school name below)',
+    'what year did you graduate from high school? if you attended more than one school, list the most recent.',
+    /* Forms say "finish", "complete" and "leave" as readily as "graduate". Reading only the last of
+       those left the others vetoed, and they fell through to the classifier and were answered with
+       the UNIVERSITY'S NAME - while the "graduate" spelling of the same sentence answered right. */
+    'in what year did you finish high school? please also enter the school name',
+    'in what year did you complete high school? please also enter the school name',
+    'what year did you leave high school? please also enter the school name',
+    'year of completion of high school and name of institution',
+    'month and year you finished high school, plus the school name',
+    'year you left high school (and the school’s name)',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'text', HS, undefined), { value: 'May 2023' }, label);
+  }
+
+  /* And when the veto DOES stand, it refuses rather than returning null. That is the structural
+     half of the fix and it is why a wider verb list alone was not enough: past this point
+     HIGH_SCHOOL_GRADUATION_QUESTION has matched, so the label names a high school, and letting it
+     fall through hands it to the classifier - which holds the university. Two labels reached the
+     essay drafter that way. This one asks for the year AND the name AND the city, and one part of
+     three is not an answer, the same rule Palantir's combined card gets. */
+  assert.equal(
+    questionRefusedAsHighSchool('in what year did you graduate? please name the high school and the city of the school.', HS),
+    true,
+  );
+
+  /* A fact request is not an essay prompt, however long the label. Standing down on length alone
+     let "What is the name of the high school you attended most recently?" reach the drafter, to
+     have a high school invented for it - the one outcome worse than a blank. */
+  for (const label of [
+    'what is the name of the high school you attended most recently?',
+    'what was your gpa in high school, on a 4.0 scale?',
+    'what is your high school name, city and state?',
+  ]) {
+    assert.equal(questionRefusedAsHighSchool(label, HS), true, label);
+  }
+  assert.equal(questionRefusedAsHighSchool('describe your leadership experience in high school', HS), false);
+
+  /* Families that own their own labels. Self-identification has its own ladder and its own stored
+     preference, and an open-ended prompt is the essay drafter's; neither classifies to a profile
+     key, so the refusal was shadowing both. */
+  for (const label of [
+    'what is your race/ethnicity? (as recorded in high school)',
+    'gender (optional) - high school records not used',
+  ]) {
+    assert.equal(questionRefusedAsHighSchool(label, HS), false, label);
+  }
+
+  assert.equal(classifyField('what city do you live in? (not the city of your high school)'), 'address_city');
+  assert.equal(classifyField('which languages do you speak? include any studied in high school.'), 'languages');
+
+  /* And the education-LEVEL family, where a high school is one option in a list rather than the
+     subject, and the answer is the current degree. */
+  for (const label of [
+    'highest level of education completed (e.g. high school, bachelor’s, master’s)',
+    'what is your highest level of education? high school, associate, bachelor',
+    'education level (high school)',
+    // "select below" points at the control being filled, not at a different one. A bare "below" in
+    // a deferral test refused this dropdown, which main answered.
+    'highest level of education completed (e.g. high school, bachelor’s, master’s) - select below',
+    'highest level of education (if you did not attend college, choose high school)',
+    /* Workday's wording. Every one of these was a blocker where main selected the right degree. */
+    'highest level of education. if you attended high school outside the u.s., select other.',
+    'highest level of education completed (high school names are not collected)',
+    'highest level of education - if you did not attend high school, select n/a',
+  ]) {
+    assert.equal(classifyField(label), 'degree', label);
+    assert.deepEqual(resolveKnownAnswer(label, 'select', HS, undefined), { value: "Bachelor's Degree" }, label);
+  }
+
+  /* Employment history in the education sector. The high-school noun is wide enough to catch "12th
+     grade" and "prep school", and feeding that width to the graduation matcher's proximity arms
+     answered these with her own graduation date - a date typed into an employment-history box,
+     where main left a blank. Both arms keep the narrow literal for exactly this reason. */
+  for (const label of [
+    'when did you last teach grade 12?',
+    'what year did you receive your hs certification?',
+    'grade 12 teaching - when did you stop?',
+    'prep school employment - when did you start?',
+    'senior secondary teaching: when did you begin?',
+    '12th grade tutoring: when did you last do it?',
+    'do you hold a grade 12 teaching diploma or equivalent?',
+  ]) {
+    const answered = resolveKnownAnswer(label, 'text', HS, undefined);
+    assert.notDeepEqual(answered, { value: 'May 2023' }, label);
+    assert.notDeepEqual(answered, { value: 'Yes' }, label);
+  }
+
+  /* "HS" is two letters, and two letters are not a high school on their own. Given its own rule
+     requiring an education fact beside it, because `\bhs\b` is also the customs tariff "HS code"
+     and an unterminated `\bhs` was HSA, HSBC, HSE, HSTS and HSpice - every one of which this branch
+     refused as a high-school question, the HSBC one displacing a correct prior-employer blocker
+     with a wrong one. */
+  assert.equal(questionRefusedAsHighSchool('hs gpa', HS), true);
+  for (const label of [
+    'hsa contribution', 'hsbc holdings employment history', 'do you have an hse certification?',
+    'hsts / hsts preload experience', 'have you used hspice?', 'hs code for exported goods',
+    'rate your proficiency in hsql', 'have you worked at hsbc?',
+    /* "Grade 12" gets the same treatment, and for the same reason: it is a federal pay grade as
+       well as a school year, so these were manufactured into high-school blockers. */
+    'highest federal grade held (e.g., grade 12)',
+    'are you currently at grade 12 or above on the gs scale?',
+    'grade 12 pay band',
+  ]) {
+    assert.equal(questionRefusedAsHighSchool(label, HS), false, label);
+  }
+  // ...while the same token with an education fact beside it is unambiguous and still refuses.
+  for (const label of ['grade 12 gpa', '12th grade school name', 'grade 12 school name']) {
+    assert.equal(questionRefusedAsHighSchool(label, HS), true, label);
+  }
 });
 
 test('politically-exposed-person declarations are left for the applicant (Tower)', () => {
@@ -2379,6 +2786,33 @@ test('name and email are never manufactured as the applicant\'s work, since the 
   // this guard R-096 would have made every application on every portal stall on its own name field.
   for (const label of ['First Name* First Name first_name', 'Last Name* Last Name last_name', 'Email* Email email']) {
     assert.equal(labelMarksRequired(label), true, label);
+    assert.equal(isCoreIdentityField(label), true, label);
+  }
+});
+
+/* A SECOND EMAIL CONTROL IS NOT THE ONE THE PACKET FILLS.
+ *
+ * The drop this predicate licenses is for the ONE control the fixed-field pass types from the
+ * packet. Keyed on the bare word `email`, it also claimed IMC's required "Please provide your
+ * university email address." - so postingQuestionsFromDiscovered dropped it from the stored
+ * inventory and the runner forced it non-required, while no per-portal selector fills anything but
+ * the identity field. Measured 2026-08-12: not one email-labelled row in the whole posting_questions
+ * table, and the packet reporting "1 required field has no question you can answer in Litos".
+ */
+test('an email that is not the applicant\'s own is a question, not a field the packet fills', () => {
+  for (const label of [
+    'Please provide your university email address.',
+    'please provide your university email address.',
+    'School email',
+    'Academic email address',
+    'Supervisor email',
+    'Reference email address',
+    'Parent/guardian email',
+  ]) {
+    assert.equal(isCoreIdentityField(label), false, label);
+  }
+  // And the control the fixed-field pass really does type is still never made into work for her.
+  for (const label of ['Email', 'Email*', 'Email Address', 'Email address *', 'Confirm email address', 'E-mail']) {
     assert.equal(isCoreIdentityField(label), true, label);
   }
 });
@@ -2849,4 +3283,225 @@ test('a yes/no question is never handed to the essay drafter, however long it ru
   ]) {
     assert.equal(isOpenEndedQuestion(label), true, label);
   }
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * THE LEVER CARD FIELD WHOSE ONLY LABEL IS ITS NAME.
+ *
+ * Measured on the live Palantir posting (jobs.lever.co/palantir/d5486403-.../apply) on 2026-08-11:
+ * nine controls carried NO label text, no aria-label and no placeholder, only
+ * name="cards[<uuid>][field0]". questionLabel returned that handle because it returned `own`
+ * whenever `own` was merely non-empty; normalizeDiscoveredLabel then dropped all nine as
+ * handle-only, and the run came back with '"University" is required and is still empty',
+ * '"Year of Graduation"...' and '"University Major"...' while the packet held USC Viterbi, 2028 and
+ * Computer Science.
+ * --------------------------------------------------------------------------------------------- */
+
+test('a string that is nothing but provider handles is recognised as one', () => {
+  // Lever's custom-question handle, in both the raw and the already-uuid-stripped spellings.
+  assert.equal(isProviderHandleOnly('cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]'), true);
+  assert.equal(isProviderHandleOnly('cards[026d7ce7-7ca4-44ed-9db6-1c7857707f0e][field12]'), true);
+  assert.equal(isProviderHandleOnly('cards [field0]'), true);
+  // Greenhouse's, which the same list already covered.
+  assert.equal(isProviderHandleOnly('question_37536799002[]'), true);
+  assert.equal(isProviderHandleOnly('degree--0'), true);
+  assert.equal(isProviderHandleOnly('5a326a1d-1a9e-42b1-a918-ca74022064dc'), true);
+  assert.equal(isProviderHandleOnly('[]'), true);
+});
+
+test('a name or id a person could read is still a label, and is kept', () => {
+  /* The narrowness IS the fix. Every one of these is a control whose name or id names the field,
+     and questionLabel must go on returning it rather than going looking for a heading. */
+  for (const meaningful of [
+    'firstName',
+    'school',
+    'gpa',
+    'urls[LinkedIn]',
+    'eeo[veteran]',
+    'Degree* degree--0',
+    'Yes cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]',
+    'how did you hear about us?* question_37536799002',
+    '姓名',
+  ]) {
+    assert.equal(isProviderHandleOnly(meaningful), false, meaningful);
+  }
+});
+
+test('handle-only is exactly the set of labels normalizeDiscoveredLabel already throws away', () => {
+  /* THE SAFETY ARGUMENT, as an assertion. The page script may fall through to a heading ONLY for a
+     string this returns true for, so if every such string already normalizes to '' then the
+     fall-through cannot rename a question that reads correctly today - it can only fill in one that
+     was being dropped. */
+  for (const handle of [
+    'cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]',
+    'cards [field1]',
+    'question_37536799002[]',
+    'degree--0',
+    'discipline--0 discipline--0',
+    '5a326a1d-1a9e-42b1-a918-ca74022064dc',
+    '[]',
+    '   ',
+  ]) {
+    assert.equal(isProviderHandleOnly(handle), true, handle);
+    assert.equal(normalizeDiscoveredLabel(handle), '', handle);
+  }
+});
+
+test('the page script and this module use ONE definition of a provider handle', () => {
+  /* The discovery walk runs in the browser and cannot import from here, so the regex list is
+     serialised into it. This executes the serialised copy and asserts it agrees with the twin above
+     on every shape, which is the only thing keeping the two from drifting apart. */
+  const compiled = new Function(`${PROVIDER_HANDLE_ONLY_SCRIPT} return isProviderHandleOnly;`)() as (value: string) => boolean;
+  for (const value of [
+    'cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]',
+    'cards [field0]',
+    'question_37536799002[]',
+    'degree--0',
+    '5a326a1d-1a9e-42b1-a918-ca74022064dc',
+    '[]',
+    '',
+    'firstName',
+    'school',
+    'urls[LinkedIn]',
+    'Degree* degree--0',
+    'Yes cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]',
+    '姓名',
+  ]) {
+    assert.equal(compiled(value), isProviderHandleOnly(value), value);
+  }
+});
+
+test('the discovery walk falls through to a heading only for a handle, and only when it is unambiguous', () => {
+  /* Source assertions, the same way portalSubmission.captcha.test.ts pins READ_SUBMIT_READINESS_SCRIPT:
+     the walk needs a live DOM. The behaviour itself was verified against the live Palantir, Match
+     Group, Shield AI, Ninja Van, Deepgram, ElevenLabs, Workable and Greenhouse forms on 2026-08-11 -
+     39 forms, 1017 controls, 12 labels changed, and every one of the 12 a field that had no stored
+     label at all. */
+
+  // BOTH conditions. Human text anywhere on the control keeps the control's own reading.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /if \(own && !written && isProviderHandleOnly\(own\)\) \{/);
+  // And when the walk finds nothing, own is returned unchanged: no heading is invented.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /if \(underHeading\) return underHeading;\s*\}\s*if \(own\) return own;/);
+
+  // A block holding more than one control ENDS the walk rather than borrowing a neighbour's label.
+  // This is what keeps Palantir's two-field "High School Name & Graduation Year" card honest.
+  assert.match(
+    DISCOVER_QUESTIONS_SCRIPT,
+    /function nearestQuestionText[\s\S]*querySelectorAll\('input:not\(\[type="hidden"\]\), textarea, select, \[role="combobox"\]'\)\.length > 1\) return '';/,
+  );
+  // Same six-level bound and same candidate list as the submit-readiness gate, so the Apply screen
+  // and the blocker line name a field the same way.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /depth < 6; depth \+= 1, node = node\.parentElement/);
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /function nearestQuestionText[\s\S]*querySelector\('label, legend, \.question, h3, h4'\)/);
+  // textContent, not innerText: Lever paints its card headings text-transform:uppercase and
+  // innerText reports the transformed glyphs ("YEAR OF GRADUATION").
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /var text = clean\(\(candidate && candidate\.textContent\) \|\| ''\);/);
+  // A control's own placeholder is not a question.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /if \(text && !genericControlText\(text\)\) return text;/);
+});
+
+/* ---- a resolver that agrees is not a resolver that replaced anything ----
+ *
+ * The strip below the `known.value` branch is licensed by one sentence: a derivation left beside a
+ * value it was not derived from is a lie the next reader cannot detect. That sentence is about a
+ * value that CHANGED. When the resolver recomputes the answer already on the record, byte for byte,
+ * the record still describes its own answer and returning a stripped copy asserts a change that did
+ * not happen. On application fc6eade3 that assertion cost a send: answer_source and
+ * answer_reviewed_at were inside packet_version, so stripping them from two questions whose answers
+ * recomputed to themselves moved the hash and the send gate answered packet_stale.
+ */
+test('a resolved answer equal to the stored one keeps the record of who answered', () => {
+  const profile = { eeo_prefs: { gender: 'Female', race: 'South Asian' } };
+  const reviewedAt = '2026-08-12T13:45:27.969Z';
+  const stored = [
+    {
+      question: 'what is your gender/gender identity? 4005628101',
+      answer: 'Female',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+    {
+      question: 'what is your race/ethnicity? 4005629101',
+      answer: 'South Asian',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+  ];
+
+  const refreshed = refreshKnownQuestionAnswers(stored, profile, undefined, reviewedAt);
+
+  assert.equal(refreshed[0].answer, 'Female', 'the resolver agrees, so the value is untouched');
+  assert.equal(refreshed[1].answer, 'South Asian');
+  assert.equal(refreshed[0].answer_source, 'applicant_review',
+    'and nothing was replaced, so nothing licenses dropping the record');
+  assert.equal(refreshed[0].answer_reviewed_at, reviewedAt);
+  assert.equal(refreshed[1].answer_source, 'applicant_review');
+  assert.equal(refreshed[1].answer_reviewed_at, reviewedAt);
+  assert.deepEqual(refreshed, stored, 'an agreeing refresh leaves these records exactly as they were');
+});
+
+/* The other half of the same rule. "She read this and let it stand" survives an answer that did not
+ * move; "this value was snapped from X" and "this value was accepted under a permission" do not,
+ * because a consent that round-trips the review screen comes back as the bare resolver constant and
+ * a grant record beside it claims an acceptance of a value no control offered. See the consent
+ * boundary suite, which measures that case directly. */
+test('an agreeing resolver carries the applicant claim forward but not the answer claims', () => {
+  const reviewedAt = '2026-08-12T13:45:27.969Z';
+  const [refreshed] = refreshKnownQuestionAnswers(
+    [{
+      question: 'what is your gender/gender identity? 4005628101',
+      answer: 'Female',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+      answer_option_source: 'Female',
+      consent_permission_version: 'privacy_and_terms@2026-08-12',
+      consent_permission_granted_at: '2026-08-12T09:15:00.000Z',
+    }],
+    { eeo_prefs: { gender: 'Female' } },
+    undefined,
+    reviewedAt,
+  );
+
+  assert.equal(refreshed.answer, 'Female');
+  assert.equal(refreshed.answer_source, 'applicant_review', 'the applicant claim is still true');
+  assert.equal(refreshed.answer_reviewed_at, reviewedAt);
+  assert.equal('answer_option_source' in refreshed, false, 'the derivation does not ride along');
+  assert.equal('consent_permission_version' in refreshed, false, 'nor does a grant record');
+  assert.equal('consent_permission_granted_at' in refreshed, false);
+});
+
+test('a resolved answer that differs still replaces the value and drops the record with it', () => {
+  const reviewedAt = '2026-08-12T13:45:27.969Z';
+  const stored = [{
+    question: 'what is your gender/gender identity? 4005628101',
+    // A stale value: the profile now says something else, and the employer must receive the profile.
+    answer: 'Prefer not to say',
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+  }];
+
+  const refreshed = refreshKnownQuestionAnswers(stored, { eeo_prefs: { gender: 'Female' } }, undefined, reviewedAt);
+
+  assert.equal(refreshed[0].answer, 'Female', 'the profile is still the source of truth');
+  assert.equal(refreshed[0].answer_source, undefined,
+    'the record described the answer that was just replaced, so it goes with it');
+  assert.equal(refreshed[0].answer_reviewed_at, undefined);
+});
+
+test('equality for keeping the record is exact, because casing is what gets typed on the form', () => {
+  const reviewedAt = '2026-08-12T13:45:27.969Z';
+  const stored = [{
+    question: 'what is your race/ethnicity? 4005629101',
+    answer: 'Decline To Self Identify',
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+  }];
+
+  const refreshed = refreshKnownQuestionAnswers(
+    stored, { eeo_prefs: { race: 'Decline to self-identify' } }, undefined, reviewedAt,
+  );
+
+  assert.equal(refreshed[0].answer, 'Decline to self-identify',
+    'a different string is a different option on the control, so it is replaced');
+  assert.equal(refreshed[0].answer_source, undefined, 'and its record drops with it');
 });

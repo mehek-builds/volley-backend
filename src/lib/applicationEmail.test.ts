@@ -500,7 +500,7 @@ test('a real contact address on the packet still wins over the account email', a
   });
 });
 
-test('a frozen real applicant email never changes when aliases later become healthy', async () => {
+test('a frozen personal applicant email is held for regeneration', async () => {
   const pinned = {
     address: 'mehek@usc.edu',
     source: 'contact_email' as const,
@@ -508,7 +508,7 @@ test('a frozen real applicant email never changes when aliases later become heal
     tracked: false,
     decided_at: '2026-08-09T00:00:00.000Z',
   };
-  const choice = await resolveFrozenApplicantEmail({
+  await assert.rejects(resolveFrozenApplicantEmail({
     userId: USER_ID,
     applicationId: APPLICATION_ID,
     accountEmail: 'mehekmandal05@gmail.com',
@@ -516,22 +516,23 @@ test('a frozen real applicant email never changes when aliases later become heal
   }, {
     deliverability: async () => deliverability(),
     aliasActive: async () => true,
-  });
-  assert.deepEqual(choice, pinned);
+  }), /not a tracked Litos alias/i);
   assert.deepEqual(readPinnedApplicantEmail({ _applicant_email: pinned }), pinned);
 });
 
 test('an unhealthy pinned alias holds for regeneration instead of switching the form email', async () => {
   await withAliasDomain(async () => {
+    const current = applicationAliasFor(USER_ID, APPLICATION_ID);
+    assert.ok(current);
     await assert.rejects(
       resolveFrozenApplicantEmail({
         userId: USER_ID,
         applicationId: APPLICATION_ID,
         accountEmail: 'mehekmandal05@gmail.com',
         spec: {
-          _contact: { email: ALIAS },
+          _contact: { email: 'mehek@usc.edu' },
           _applicant_email: {
-            address: ALIAS,
+            address: current,
             source: 'litos_alias',
             reason: 'deliverable',
             tracked: true,
@@ -565,7 +566,7 @@ test('a healthy new domain still rejects a pinned alias from the retired mailbox
         userId: USER_ID,
         applicationId: APPLICATION_ID,
         spec: {
-          _contact: { email: retired },
+          _contact: { email: 'mehek@usc.edu' },
           _applicant_email: {
             address: retired,
             source: 'litos_alias',
@@ -605,7 +606,7 @@ test('a pinned alias on the current healthy dedicated route passes', async () =>
       userId: USER_ID,
       applicationId: APPLICATION_ID,
       spec: {
-        _contact: { email: current },
+        _contact: { email: 'mehek@usc.edu' },
         _applicant_email: {
           address: current,
           source: 'litos_alias',
@@ -647,7 +648,13 @@ test('managed receiving rejects an alias frozen on the previous route', async ()
     await assert.rejects(resolveFrozenApplicantEmail({
       userId: USER_ID,
       applicationId: APPLICATION_ID,
-      spec: { _contact: { email: 'app-2222222222-abcdef012345@old-route.example' } },
+      spec: {
+        _contact: { email: 'mehek@usc.edu' },
+        _applicant_email: {
+          address: 'app-2222222222-abcdef012345@old-route.example', source: 'litos_alias', reason: 'deliverable',
+          tracked: true, decided_at: '2026-08-09T00:00:00.000Z',
+        },
+      },
     }, {
       deliverability: async () => deliverability({ domain: 'litos-inbound.resend.app' }),
       aliasActive: async () => true,
@@ -680,7 +687,13 @@ test('mailbox configuration takes precedence when validating the current pinned 
     const choice = await resolveFrozenApplicantEmail({
       userId: USER_ID,
       applicationId: APPLICATION_ID,
-      spec: { _contact: { email: mailboxAlias } },
+      spec: {
+        _contact: { email: 'mehek@usc.edu' },
+        _applicant_email: {
+          address: mailboxAlias, source: 'litos_alias', reason: 'deliverable', tracked: true,
+          decided_at: '2026-08-09T00:00:00.000Z',
+        },
+      },
     }, {
       deliverability: async () => deliverability({ domain: 'trylitos.com' }),
       aliasActive: async ({ alias }) => alias === mailboxAlias,
@@ -692,7 +705,13 @@ test('mailbox configuration takes precedence when validating the current pinned 
       resolveFrozenApplicantEmail({
         userId: USER_ID,
         applicationId: APPLICATION_ID,
-        spec: { _contact: { email: dedicatedAlias } },
+        spec: {
+          _contact: { email: 'mehek@usc.edu' },
+          _applicant_email: {
+            address: dedicatedAlias, source: 'litos_alias', reason: 'deliverable', tracked: true,
+            decided_at: '2026-08-09T00:00:00.000Z',
+          },
+        },
       }, {
         deliverability: async () => deliverability({ domain: 'trylitos.com' }),
         aliasActive: async () => true,
@@ -717,7 +736,13 @@ test('a healthy pinned alias must also be active for exactly this packet', async
       resolveFrozenApplicantEmail({
         userId: USER_ID,
         applicationId: APPLICATION_ID,
-        spec: { _contact: { email: current } },
+        spec: {
+          _contact: { email: 'mehek@usc.edu' },
+          _applicant_email: {
+            address: current, source: 'litos_alias', reason: 'deliverable', tracked: true,
+            decided_at: '2026-08-09T00:00:00.000Z',
+          },
+        },
       }, {
         deliverability: async () => deliverability(),
         aliasActive: async () => false,
@@ -727,16 +752,13 @@ test('a healthy pinned alias must also be active for exactly this packet', async
   });
 });
 
-test('legacy packets preserve the real email printed in their PDF', async () => {
-  const choice = await resolveFrozenApplicantEmail({
+test('legacy packets without a tracked alias must regenerate', async () => {
+  await assert.rejects(resolveFrozenApplicantEmail({
     userId: USER_ID,
     applicationId: APPLICATION_ID,
     accountEmail: 'account@example.com',
     spec: { _contact: { email: 'printed@example.com' } },
-  });
-  assert.equal(choice.address, 'printed@example.com');
-  assert.equal(choice.source, 'contact_email');
-  assert.equal(choice.tracked, false);
+  }), /no tracked Litos applicant email/i);
 });
 
 test('with nowhere to forward to, the alias is not minted', async () => {

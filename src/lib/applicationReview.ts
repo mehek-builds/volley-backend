@@ -1,5 +1,8 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
+import { PACKET_VISIBLE_QUESTION_FIELDS, type PacketAudit } from './packetAudit';
+import type { RequiredDocumentAsk } from './requiredDocuments';
+import type { SubmissionStopRecord } from './submissionStop';
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported, type AutofillApplicantSnapshot } from './portalSubmission';
 
 export type ApplicationReviewQuestion = {
@@ -11,9 +14,132 @@ export type ApplicationReviewQuestion = {
   portal_selector?: string;
   portal_input_type?: string;
   ats_api_field?: string;
-  answer_source?: 'applicant_review';
+  /* WHO PUT THIS ANSWER HERE, when it was not simply resolved from the profile.
+   *
+   * 'applicant_review' is her, typing on the review screen. 'consent_permission' is Litos accepting
+   * an employer's privacy statement, applicant terms or code of conduct under the permission she
+   * granted once at onboarding, and it exists so that the packet audit shows an acceptance made on
+   * her behalf rather than a tick that reads as if she had made it herself. */
+  answer_source?: 'applicant_review' | 'consent_permission';
   answer_reviewed_at?: string;
+  /**
+   * The PROFILE VALUE this answer was snapped from, when discovery could read the control's options
+   * and resolveProfileField picked one of them. "May 2028" beside an answer of
+   * "January 2028 - July 2028"; "3.89" beside "3.81 - 3.9".
+   *
+   * It exists to make staleness DECIDABLE rather than guessed. The answer itself cannot say whether
+   * it is current: "January 2027 - July 2027" is a perfectly well-formed option text long after the
+   * applicant corrects her graduation to May 2028. Recording what it was derived from lets every
+   * later pass ask the only question that settles it, "does the profile still say what it said when
+   * this was chosen", and recompute when it does not. See refreshKnownQuestionAnswers.
+   *
+   * Optional forever. Every record written before this field existed lacks it, and absence is read
+   * as "cannot prove current", which recomputes. jsonb, so no migration.
+   *
+   * A CONSENT ACCEPTANCE STILL RECORDS IT, and still does not use it to prove currency. A
+   * select-shaped consent records "Yes" here beside an answer of "I agree", which is honest and
+   * worth keeping, but the keep-branch this field feeds requires a date or number BAND and
+   * "I agree" is neither, so borrowing it for consents made the branch unreachable and replaced the
+   * employer's own option text with "Yes" on every refresh. What makes a consent current is whether
+   * the permission is still granted, which refreshKnownQuestionAnswers now asks directly. See the
+   * consent branch there.
+   */
+  answer_option_source?: string;
+  /* The grant behind a 'consent_permission' answer: when she gave the permission, and the version of
+   * the words she was shown when she gave it. Written per question rather than looked up later,
+   * because the audit has to say what was true at the moment of the acceptance - revoking the
+   * permission tomorrow must not make an application sent today unexplainable.
+   *
+   * ANSWER-CLAIMS, both of them, and the classification is the whole of how they are kept honest.
+   * They assert that THIS ANSWER was accepted under a permission, so they live and die with the
+   * answer: edit the control to "I do not agree" and they are gone, because the value they describe
+   * is gone. See ANSWER_CLAIM_FIELDS below. */
+  consent_permission_granted_at?: string;
+  consent_permission_version?: string;
 };
+
+/* ---- the two kinds of provenance, and the rule that keys each one ----
+ *
+ * PR 496 shipped `answer_option_source` dropped at one site of three. PR 503 root-caused why that
+ * kept happening and fixed it with the distinction below rather than with another list. This branch
+ * adds two fields and classifies them rather than re-deriving anything.
+ *
+ * AN APPLICANT-CLAIM asserts something about the RECORD and about what the applicant did with it:
+ * "she read this exact text and let it stand". A rename, a stale review round or a re-issued id can
+ * falsify that without the answer changing at all, so it is keyed on record identity
+ * (exactReviewedIdentityUnchanged) and drops the moment that identity moves.
+ *
+ * AN ANSWER-CLAIM asserts something about the ANSWER: "this value was snapped for profile value X",
+ * "this value was accepted under a standing permission granted at T". Only replacing the answer can
+ * falsify it, so it is keyed on `answerUnchanged` and survives exactly as long as the answer does,
+ * byte for byte. Keying one of these on record identity is the PR 503 defect: an untouched Save
+ * posts back a machine-resolved answer with no answer_source at all, record identity fails, and a
+ * claim that was still perfectly true is discarded.
+ *
+ * THE CONSENT FIELDS ARE ANSWER-CLAIMS, and that classification is what closes the hole they were
+ * blocked for: when the applicant edits a consent to "I do not agree" the answer changed, so the
+ * acceptance grant drops with it. No strip site had to remember them.
+ *
+ * The two lists partition AnswerProvenanceField exactly, checked at compile time below, so a field
+ * added without being classified does not build.
+ */
+type AnswerProvenanceField =
+  | 'answer_source'
+  | 'answer_reviewed_at'
+  | 'answer_option_source'
+  | 'consent_permission_granted_at'
+  | 'consent_permission_version';
+
+/** Keyed on RECORD IDENTITY. Falsified by a rename or a stale review round. */
+export const APPLICANT_CLAIM_FIELDS = ['answer_source', 'answer_reviewed_at'] as const;
+/** Keyed on THE ANSWER. Falsified only by replacing the answer. */
+export const ANSWER_CLAIM_FIELDS = [
+  'answer_option_source',
+  'consent_permission_granted_at',
+  'consent_permission_version',
+] as const;
+
+/* The partition, enforced by the compiler rather than by a reviewer.
+ *
+ * Written as a call rather than an assignment so the error NAMES the offending field: leaving
+ * `answer_translated_from` out of both lists fails with `Argument of type 'true' is not assignable
+ * to parameter of type '"answer_translated_from"'`, which tells the next person what to do. An
+ * assignment to `never` compiles to "Type 'true' is not assignable to type 'never'", which does not.
+ *
+ * Being in BOTH lists is caught the same way, from the other direction: a field keyed two ways is
+ * keyed by whichever branch runs first, which is not a decision anybody made. */
+type Classified = (typeof APPLICANT_CLAIM_FIELDS)[number] | (typeof ANSWER_CLAIM_FIELDS)[number];
+type Unclassified =
+  | Exclude<AnswerProvenanceField, Classified>
+  | Exclude<Classified, AnswerProvenanceField>
+  | ((typeof APPLICANT_CLAIM_FIELDS)[number] & (typeof ANSWER_CLAIM_FIELDS)[number]);
+function assertEveryProvenanceFieldIsClassifiedExactlyOnce(
+  _classified: [Unclassified] extends [never] ? true : Unclassified,
+): void { void _classified; }
+assertEveryProvenanceFieldIsClassifiedExactlyOnce(true);
+
+/* The second partition, enforced exactly like the one above and for the same reason.
+ *
+ * Every key of ApplicationReviewQuestion is either something the employer receives - which makes it
+ * part of packet identity, hashed into packet_version - or something the record remembers about how
+ * the answer got there, which does not. The list itself lives in packetAudit.ts beside the hash it
+ * governs; this is the half that has to be here, because this is where the question type is and
+ * `keyof` is what makes the check exhaustive.
+ *
+ * Adding `answer_translated_from` to the type without putting it on one of the two lists fails with
+ * `Argument of type 'true' is not assignable to parameter of type '"answer_translated_from"'`, which
+ * names the field and states the decision the next person has to make. Putting it on both lists is
+ * caught the same way from the other direction. */
+type PacketVisibleQuestionField = (typeof PACKET_VISIBLE_QUESTION_FIELDS)[number];
+type QuestionFieldClassification = PacketVisibleQuestionField | AnswerProvenanceField;
+type UnclassifiedQuestionField =
+  | Exclude<keyof ApplicationReviewQuestion, QuestionFieldClassification>
+  | Exclude<QuestionFieldClassification, keyof ApplicationReviewQuestion>
+  | (PacketVisibleQuestionField & AnswerProvenanceField);
+function assertEveryQuestionFieldIsPacketVisibleOrProvenance(
+  _classified: [UnclassifiedQuestionField] extends [never] ? true : UnclassifiedQuestionField,
+): void { void _classified; }
+assertEveryQuestionFieldIsPacketVisibleOrProvenance(true);
 
 export type ApplicationAttentionCategory =
   | 'captcha'
@@ -52,6 +178,13 @@ export type ApplicationAttentionCategory =
    * something rather than a person fixing something, and because a state this expensive to be in
    * has to be countable. */
   | 'unverified_submission'
+  /* The packet's generated resume passed its 30-day retention window and the file was deleted, so
+   * there was nothing to send and nothing was sent. Deliberately NOT 'required_document', which
+   * means an EMPLOYER is waiting on a document from the applicant, and deliberately not
+   * 'run_failed', which is the "Litos broke, try again" bucket: retrying changes nothing here and
+   * only regenerating does. It is also the one attention state that is a promise being kept rather
+   * than a defect, so it has to be countable separately from the defects. */
+  | 'packet_expired'
   | 'required_document'
   | 'sensitive_attestation'
   | 'required_field'
@@ -131,6 +264,11 @@ export function mergeSubmittedApplicationReviewQuestions(
     const submittedMatch = submittedByQuestion.get(questionKey(question.question))
       ?? submittedByUniqueId.get(question.id);
     if (!submittedMatch) {
+      /* APPLICANT-CLAIMS ONLY. This branch does not replace the answer, so every answer-claim on it
+       * is still true and survives, INCLUDING the consent grant - a stored consent that no submit
+       * body mentioned was not edited, and its acceptance record is as valid as it was. Stripping
+       * answer-claims here is the PR 496 defect that PR 503 root-caused; it must not be re-added
+       * for the consent fields by "being thorough". */
       const {
         answer_source: _answerSource,
         answer_reviewed_at: _answerReviewedAt,
@@ -151,13 +289,89 @@ export function mergeSubmittedApplicationReviewQuestions(
       && submittedQuestion.question === question.question
       && questionKey(submittedQuestion.question) === questionKey(question.question)
       && submittedQuestion.answer === question.answer;
+    /* answer_option_source goes with the answer it describes, and `answer` is replaced below.
+     *
+     * A derivation that outlives its value claims a snap that never happened for what the record now
+     * holds. Nothing downstream can detect that from the record alone, and storedOptionAnswerIsCurrent
+     * would read the inherited derivation as proof the answer is current. So the test is the only one
+     * that settles it: is the answer being written the answer it was derived for.
+     *
+     * THAT TEST IS `answerUnchanged`, AND IT IS NOT exactReviewedIdentityUnchanged. The two agree on
+     * every record the applicant has already hand-edited once and disagree on every other record,
+     * because exactReviewedIdentityUnchanged also demands answer_source 'applicant_review'. The
+     * ordinary question record is machine-resolved and has no answer_source at all - on 2026-08-12
+     * that was 2790 of 2790 in production - so keying the derivation on it dropped the derivation
+     * from a record whose answer had not moved by so much as a byte.
+     *
+     * Which is exactly what a save from the review screen looks like. questionSchema strips every
+     * provenance key, so an untouched screen posts back the answer alone; the merge stripped the
+     * derivation, and refreshKnownQuestionAnswers, called on this function's output at the same call
+     * site, then found a band with nothing to prove it current and replaced it with the raw profile
+     * fact. "January 2028 - July 2028" became "May 2028", which is not on that control's option list
+     * and never could be. Pressing Save and changing nothing undid the resolution.
+     *
+     * answer_source and answer_reviewed_at stay keyed on the stricter identity. They are a claim
+     * about the APPLICANT ("she read this exact text and let it stand"), which a rename or a
+     * stale review round can falsify. This is a claim about the ANSWER ("it was snapped for profile
+     * value X"), and only replacing the answer can falsify that. Different claims, different tests. */
+    const answerUnchanged = submittedQuestion.answer === question.answer;
+    /* FILLING A BLANK IS THE ONE THING A HELD QUESTION IS ASKING FOR, AND ONLY SHE CAN DO IT.
+     *
+     * refreshKnownQuestionAnswers blanks every answer to a question the resolver holds unless the
+     * record proves the applicant supplied it, and it runs on this function's OUTPUT at the same
+     * call site in routes/applications.ts, which then persists what comes back. So a submit body
+     * that fills one of those blanks had its value adopted here, stripped of any claim about where
+     * it came from, and deleted one line later - on the request that reaches the employer.
+     *
+     * Measured on 2026-08-12 on the IMC prior-application question: merged answer "No", refreshed
+     * answer "". That is the whole human-owned category - every question Litos deliberately hands
+     * back - unanswerable through the send path.
+     *
+     * NOTHING IS INVENTED HERE AND NOTHING CAN BE. The value is the caller's own bytes, adopted
+     * verbatim below whatever this decides; this only records that they came from her, so the
+     * refusal branch can tell "she answered it" from "an earlier run resolved it". Litos still
+     * writes no answer of its own for a held question, which is the property the hold exists for.
+     *
+     * A BLANK STORED ANSWER, DELIBERATELY, AND NOT MERELY A CHANGED ONE. answer_source is an
+     * APPLICANT-CLAIM keyed on the exact reviewed identity, and a REPLACED answer invalidates that
+     * identity by rule - see the classification in ANSWER_CLAIM_FIELDS and the tests in
+     * answerProvenanceClasses.test.ts, which pin "I agree" edited to "I do not agree" dropping the
+     * claim. Filling a blank is the one case that does not collide with it: there was no reviewed
+     * identity to invalidate, so recording who filled it asserts nothing the old rule denied.
+     *
+     * WHAT THAT LEAVES OPEN, STATED. Replacing an EXISTING answer to a held question still loses the
+     * claim and is still blanked. Closing that means reclassifying answer_source, which is a
+     * deliberate design decision with its own test suite behind it and is not this fix's to make.
+     *
+     * AND ONLY AGAINST A REVIEW ROUND THAT EXISTS. `answer_reviewed_at` is only meaningful beside the
+     * `questions_reviewed_at` it equals; writing one without the other would leave a claim no reader
+     * can check, and the refusal branch would discard it anyway. */
+    const applicantSuppliedAnswer = Boolean(
+      questionsReviewedAt && !question.answer.trim() && submittedQuestion.answer.trim(),
+    );
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
+      answer_option_source: _answerOptionSource,
+      consent_permission_granted_at: _consentGrantedAt,
+      consent_permission_version: _consentVersion,
       ...questionWithoutProvenance
     } = question;
+    /* Every ANSWER-CLAIM rides on `answerUnchanged`, by the rule above rather than field by field.
+     * The consent grant is one of them: an applicant who edits this control to "I do not agree" has
+     * changed the answer, so the record stops saying it was accepted under a machine permission. */
+    const carriedAnswerClaims: Partial<Pick<ApplicationReviewQuestion, (typeof ANSWER_CLAIM_FIELDS)[number]>> = {};
+    if (answerUnchanged) {
+      for (const field of ANSWER_CLAIM_FIELDS) {
+        const value = question[field];
+        if (value !== undefined) carriedAnswerClaims[field] = value;
+      }
+    }
+    const carriedForward = exactReviewedIdentityUnchanged
+      ? question
+      : { ...questionWithoutProvenance, ...carriedAnswerClaims };
     return {
-      ...(exactReviewedIdentityUnchanged ? question : questionWithoutProvenance),
+      ...carriedForward,
       answer: submittedQuestion.answer,
       kind: submittedQuestion.kind,
       required: question.required || submittedQuestion.required,
@@ -168,6 +382,10 @@ export function mergeSubmittedApplicationReviewQuestions(
       ...(portalSelector ? { portal_selector: portalSelector } : {}),
       ...(portalInputType ? { portal_input_type: portalInputType } : {}),
       ...(atsApiField ? { ats_api_field: atsApiField } : {}),
+      // Last, so it wins over anything carriedForward brought along. See applicantSuppliedAnswer.
+      ...(applicantSuppliedAnswer
+        ? { answer_source: 'applicant_review' as const, answer_reviewed_at: questionsReviewedAt }
+        : {}),
     };
   });
   const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));
@@ -175,9 +393,18 @@ export function mergeSubmittedApplicationReviewQuestions(
     if (consumedSubmittedIndexes.has(index)) continue;
     const key = questionKey(question.question);
     if (!key || storedKeys.has(key)) continue;
+    /* A question that exists only in the submit body brings no provenance with it, including the
+     * option derivation. The two above are stripped because a caller must not assert that the
+     * applicant reviewed something; this one because a derivation is a claim that resolution snapped
+     * this answer onto a control's own option list, and nothing here resolved anything. The route's
+     * questionSchema drops the key before this is ever called, but this function is exported and
+     * this is the one branch that copies a submitted question wholesale. */
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
+      answer_option_source: _answerOptionSource,
+      consent_permission_granted_at: _consentGrantedAt,
+      consent_permission_version: _consentVersion,
       ...submittedWithoutProvenance
     } = question;
     merged.push(submittedWithoutProvenance);
@@ -320,6 +547,11 @@ export type ApplicationReviewState = {
    * an opaque publication UUID that cannot be derived from its public posting URL, so an attended
    * refill may use this URL only when it exactly matches the form currently open in Chrome. */
   extension_handoff_url?: string;
+  /** Server-owned digest of the exact attended URL and typed cause observed for this application. */
+  extension_handoff_binding?: {
+    version: 'dashboard_handoff_v1';
+    sha256: string;
+  };
   attention_reason?: string;
   attention_categories?: ApplicationAttentionCategory[];
   /* The TYPED half of attention_reason, which is prose and always will be.
@@ -378,6 +610,26 @@ export type ApplicationReviewState = {
    * null, and all three had a Greenhouse security-code email timestamped to the minute of the run.
    * An application had reached an employer and no field in this object could say so. */
   submission_attempted_at?: string;
+  /* WHERE THE LAST RUN STOPPED, TYPED, and whether that stop provably preceded the final click.
+   *
+   * The companion to submission_attempted_at above and its exact opposite in intent: that field
+   * records that a submit MAY have landed, this one records a stop that is structurally ahead of the
+   * click. Written by the runner at failure time, which is the only moment the answer is known for
+   * certain, and read by submissionProvablyNotSent.
+   *
+   * IT EXISTS BECAUSE THE ONLY PRIOR PROOF WAS A SENTENCE. A row read back out of the database
+   * carried nothing about its stop except attention_reason, which is prose, and submission_error,
+   * which is whatever text the runner happened to throw - and a Stratus error crosses the HTTP
+   * boundary stringified, so `Error: ` on the front of it was enough to make the one predicate that
+   * read it answer false at the writer AND at the reader. A typed field cannot be reworded.
+   *
+   * ABSENT MEANS UNKNOWN, NEVER "nothing was sent". Every row written before this shipped has no
+   * record, and no reader may treat that as a pre-click stop. See lib/submissionStop.ts.
+   *
+   * Cleared, not carried, whenever a new send run takes the claim: a stop is evidence about ONE
+   * attempt, and a stale one read as current would be the same false certainty this whole field
+   * exists to remove. */
+  submission_stop?: SubmissionStopRecord;
   security_code?: SecurityCodeState;
   handoff_expires_at?: string;
   final_approved_at?: string;
@@ -434,6 +686,8 @@ export type ApplicationReviewState = {
   portal_supported?: boolean;
   submission_claimed_at?: string;
   submission_claim_id?: string;
+  /** Exact server-audited packet reserved by an extension submission claim. */
+  submission_packet_version?: string;
   /* WHICH ADDRESS THE EMPLOYER WAS GIVEN, and why that one.
    *
    * Litos prefers a per-application alias so replies come back through the product and can be
@@ -457,7 +711,54 @@ export type ApplicationReviewState = {
   };
   /** Immutable applicant facts captured by the same preparation that froze this handoff. */
   applicant_snapshot?: AutofillApplicantSnapshot;
+  /** Server-owned proof that the exact JD, saved resume, answers, and stored PDF were audited. */
+  packet_audit?: PacketAudit;
+  /** Applicant acknowledgement of the exact rendered packet audit and PDF bytes. */
+  packet_audit_acknowledgement?: {
+    ownerSha256: string;
+    applicationId: string;
+    audit_digest: string;
+    packet_version: string;
+    pdfSha256: string;
+    pdfSizeBytes: number;
+    acknowledged_at: string;
+    /* WHO LOOKED. Absent means the applicant did, which is what every acknowledgement written
+     * before this field meant, so old rows keep their meaning without a backfill.
+     *
+     * 'auto_restored' is written by restoreExpiredPacketResume when a packet's file had aged out of
+     * the 30-day window and was rebuilt from the frozen spec at send time. Nobody re-read that PDF.
+     * The content is identical by construction, since every render input is frozen on the row, but
+     * "a human confirmed these bytes" and "a machine rebuilt these bytes" are different facts and a
+     * corpus that cannot tell them apart can never answer which packets were actually reviewed. */
+    source?: 'applicant' | 'auto_restored';
+  };
   filled_fields?: string[];
+  /* THE DOCUMENTS THIS FORM DEMANDS AND THIS RUN LEFT HER NO WAY TO GIVE IT.
+   *
+   * Beside filled_fields on purpose: that field is what the run DID leave on the form, and this is
+   * the matching account of what it could not. Derived by requiredDocumentAsks off the employer's
+   * own labels, from two sources merged at the prepare sites - the portal's "is required and is
+   * still empty" blockers that no question record answers, and required file questions the
+   * discovery pass saw.
+   *
+   * A STRUCTURED FIELD RATHER THAN attention_categories, and that choice is the feature. Reading
+   * `attention_categories.includes('required_document')` is the obvious trigger and it is wrong
+   * twice over: the classifier matched `file` inside `profile` until this shipped, and
+   * withholdInvalidLeadAlignment writes that category for a resume alignment failure that involves
+   * no document at all. See lib/requiredDocuments.ts for both, measured.
+   *
+   * Tri-state, following cover_letter_required directly above. `undefined` means no prepare on this
+   * build has measured it, which is every packet older than this field, and it must never be read
+   * as "nothing is owed". An empty array is the measured answer.
+   */
+  required_documents?: RequiredDocumentAsk[];
+  /* Whether the live form has a control a transcript could be attached to, measured mid-run.
+   *
+   * The same distinction cover_letter_supported and cover_letter_required draw, and for the same
+   * reason: "this form has a slot" and "this form will not be accepted without one" are different
+   * facts, and a gate built on the first refuses sends the employer would have taken. `undefined`
+   * means unmeasured, never false. */
+  transcript_supported?: boolean;
   preview_screenshot_url?: string;
   submission_authorization?: {
     source: 'standing_consent' | 'per_application_approval' | 'user_initiated_extension';

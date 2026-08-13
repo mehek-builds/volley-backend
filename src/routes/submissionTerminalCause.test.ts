@@ -384,6 +384,43 @@ test('the not-reached sentence is categorized apart from an evidence gap', async
   );
 });
 
+/* ---- an expired packet is a promise being kept, and must be categorised as one ---- */
+
+test('an expired packet is categorised as packet_expired, not as a document the employer wants', () => {
+  /* The required_document arm fires on a bare /file/, and this sentence contains the word twice.
+     Falling through to it would tell the applicant an employer is waiting on an upload, for an
+     application no employer has ever seen. */
+  const out = submissionFailureOutcome({
+    captchaStop: null,
+    noSubmitControl: false,
+    packetDocumentExpired: true,
+    uncertainAfterClaim: true,
+    externalGate: false,
+    providerSessionFailure: false,
+    currentAttentionReason: undefined,
+  });
+  assert.deepEqual(out.attentionCategories, ['packet_expired']);
+  assert.ok(!out.attentionCategories.includes('required_document'));
+  assert.ok(!out.attentionCategories.includes('run_failed'),
+    'retrying cannot fix this, so it must not land in the bucket the applicant is told to retry');
+  assert.ok(!out.attentionCategories.includes('unknown'));
+});
+
+test('an employer field label named Resume is not read as a retention deletion', () => {
+  /* The mirror of the security-code branch's reasoning: the runner's required-field scan emits
+     '"Resume" is required and is still empty', and matching on /resume/ rather than on the clause
+     would file an unfilled form as an expired packet. */
+  const out = submissionFailureOutcome({
+    captchaStop: null,
+    noSubmitControl: false,
+    uncertainAfterClaim: false,
+    externalGate: false,
+    providerSessionFailure: false,
+    currentAttentionReason: '"Resume" is required and is still empty',
+  });
+  assert.ok(!out.attentionCategories.includes('packet_expired'));
+});
+
 /* ---- the invariant has to hold at the write, not only in the helpers ---- */
 
 test('the terminal-cause check sits inside the shared merge, not at the call sites', async () => {

@@ -23,18 +23,17 @@ import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/res
 import { apiBaseFor } from '../lib/apiBase';
 import { resumeGenerateBodySchema, type ResumeGenerateBody } from './resumeRequestSchema';
 import {
-  applicationAliasFor,
-  applicationForwardingAddress,
   ensureApplicationEmailAlias,
   type ApplicantEmailChoice,
   type ApplicationEmailIdentity,
 } from '../lib/applicationEmail';
-import { applicationAliasDeliverability } from '../lib/applicationEmailDeliverability';
+import { planPacketApplicantEmail } from '../lib/packetApplicantEmail';
 import {
   resumeGenerateSuccessResponseSchema,
   resumeQualityHoldResponseSchema,
 } from './resumeResponseSchema';
 import { extractPdfText } from '../lib/pdfText';
+import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
 import { PRODUCT_NAME } from '../lib/product';
 import { applyResumePolicy, educationFrom, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
 import { academicRecordRowFor } from './profile';
@@ -57,8 +56,10 @@ import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPor
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
 import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
+import { specWithoutDocumentPointers } from '../lib/documentStore';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
+import { resumeEmailOfRecord } from '../lib/resumeEmail';
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -445,9 +446,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     /* THE CONTACT BLOCK, RESOLVED AGAINST THE ACCOUNT, not taken from the caller as gospel.
        See lib/resumeContactOfRecord.ts for the 28 production packets that made this necessary. */
+    const resumeEmail = resumeEmailOfRecord(profileRows[0]?.parsed_json);
+    if (!resumeEmail) {
+      return reply.status(422).send({
+        error: 'Add a personal resume email to your profile before generating this resume.',
+        code: 'resume_email_required',
+      });
+    }
     const contactOfRecord = resumeContactOfRecord({
-      requested: body.contact,
-      accountEmail: request.jwtPayload!.email,
+      requested: { ...body.contact, email: resumeEmail },
+      accountEmail: resumeEmail,
       profile: applicationRecord,
     });
 
@@ -473,49 +481,41 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       }));
     }
 
-    /* THE ALIAS IS PRINTED ON THE PDF, which is why the deliverability check has to run here too
-     * and not only at submission time.
+    /* EVERY PACKET GETS THIS DECISION, not only the ones that arrive carrying a portal link.
      *
-     * applicationContact below is the contact block rendered into the resume file, and that file
-     * is frozen the moment it is generated. An alias on a domain that cannot receive mail is
-     * therefore not merely a bad form field, it is a bad address baked into the document the
-     * employer keeps. The check is cached per domain with a TTL, so this costs one lookup an hour
-     * across the whole deployment rather than one per generation, and it turns itself back on
-     * without a deploy once the MX record exists. */
-    const aliasDeliverability = body.application && contactOfRecord.email
-      ? await applicationAliasDeliverability()
-      : null;
-    const litosApplicationAlias = aliasDeliverability?.deliverable ? applicationAliasFor(userId, resumeId) : null;
-    // The stored preference, not whichever address this request happened to carry. Falls back to
-    // the contact address, which is what this line used unconditionally before.
-    const aliasForwardTo = litosApplicationAlias && contactOfRecord.email
-      ? await applicationForwardingAddress(userId, contactOfRecord.email)
-      : null;
-    const applicationEmail: ApplicationEmailIdentity | null = litosApplicationAlias && aliasForwardTo
-      ? {
-        alias: litosApplicationAlias,
-        forwards_to: aliasForwardTo,
-        mode: 'litos_application_alias',
-      }
-      : null;
-    if (body.application && contactOfRecord.email && !applicationEmail) {
-      fastify.log.warn(
-        { reason: aliasDeliverability?.reason ?? 'alias_not_configured', domain: aliasDeliverability?.domain ?? null },
-        'application email alias skipped: the alias domain cannot receive mail, using the real address',
-      );
+     * This block used to be gated on `body.application`, and that gate is what put the applicant's
+     * personal address on Flow Traders' Greenhouse form on 2026-08-11. `application` is optional in
+     * the request schema, so a packet generated before its apply URL is known got no alias row and
+     * no frozen decision. The URL is then recovered from the monitored posting afterwards
+     * (repairedHistorySpec below, repairReviewPortalFromMonitoredJob), the packet becomes a real
+     * application, and at submission resolveFrozenApplicantEmail has nothing pinned to read and
+     * falls back to the address in `_contact`. The employer emailed a security code to a mailbox
+     * Litos cannot read, and that run cannot finish itself.
+     *
+     * A missing portal link means the link has not been found YET. It never meant "this is not an
+     * application", so it must not decide the address the document is frozen to. See
+     * lib/packetApplicantEmail.ts, which now owns the whole decision. */
+    const applicantEmailPlan = await planPacketApplicantEmail({
+      userId,
+      applicationId: resumeId,
+      contactEmail: contactOfRecord.email,
+      accountEmail: request.jwtPayload!.email,
+      contactFromRequest: Boolean(body.contact.email),
+    });
+    const applicationEmail: ApplicationEmailIdentity | null = applicantEmailPlan.identity;
+    const pinnedApplicantEmail: ApplicantEmailChoice | null = applicantEmailPlan.choice;
+    if (!applicationEmail
+      || !pinnedApplicantEmail
+      || pinnedApplicantEmail.source !== 'litos_alias'
+      || pinnedApplicantEmail.tracked !== true
+      || pinnedApplicantEmail.address.toLowerCase() !== applicationEmail.alias.toLowerCase()
+      || pinnedApplicantEmail.address.toLowerCase() === resumeEmail.toLowerCase()) {
+      return reply.status(422).send({
+        error: 'Litos could not create the tracked application email for this packet. Try again before applying.',
+        code: 'applicant_email_regeneration_required',
+      });
     }
-    const applicationContact = applicationEmail
-      ? { ...contactOfRecord, email: applicationEmail.alias }
-      : contactOfRecord;
-    const pinnedApplicantEmail: ApplicantEmailChoice | null = body.application && applicationContact.email
-      ? {
-        address: applicationContact.email,
-        source: applicationEmail ? 'litos_alias' : body.contact.email ? 'contact_email' : 'account_email',
-        reason: applicationEmail ? 'deliverable' : aliasDeliverability?.reason ?? 'alias_unavailable',
-        tracked: Boolean(applicationEmail),
-        decided_at: new Date().toISOString(),
-      }
-      : null;
+    const applicationContact = contactOfRecord;
     if (bank.length === 0) {
       return reply.status(400).send({ error: 'Nothing saved about your work yet. Finish setting up first.' });
     }
@@ -857,6 +857,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       layoutIssues.push(...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues);
       layoutIssues.push(...findPdfSafeMarginIssues(parsedPdf.pages, visualLayout));
       layoutIssues.push(...findPdfTextFidelityIssues(parsedPdf.text, spec, applicationContact));
+      if (parsedPdf.text.toLowerCase().includes(pinnedApplicantEmail.address.toLowerCase())) {
+        layoutIssues.push('the tracked application routing email must not appear on the resume PDF');
+      }
     } catch (err) {
       // Fail closed when validation cannot run. Returning or storing an unverified PDF would
       // turn a parser failure into a false quality pass and repeat R-017's failure mode.
@@ -891,6 +894,18 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       resume_url: 'validated-before-storage',
       file_name: resumeFileName,
       spec,
+      /* Said out loud, not left in the stored packet. A student whose replies are going to her own
+       * inbox has to know while she is looking at the packet, because it is the difference between
+       * an application Litos can finish and one she has to finish herself. */
+      ...(pinnedApplicantEmail ? {
+        applicant_email: {
+          address: pinnedApplicantEmail.address,
+          source: pinnedApplicantEmail.source,
+          reason: pinnedApplicantEmail.reason,
+          tracked: pinnedApplicantEmail.tracked,
+          notice: applicantEmailPlan.notice,
+        },
+      } : {}),
       quality: {
         ready_to_attach: true,
         issues: [],
@@ -968,6 +983,29 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ? monitoredApplicationUrl ?? canonicalSupportedPortalUrl(body.application.portal_url, body.application.ats_name) ?? body.application.portal_url
       : undefined;
     const canonicalApplicationPortalSupported = isPortalSupported(canonicalApplicationPortalUrl);
+    const parsedProfile = (profileRows[0]?.parsed_json && typeof profileRows[0].parsed_json === 'object'
+      ? profileRows[0].parsed_json
+      : {}) as Record<string, unknown>;
+    const portalApplicationProfile = await loadApplicationProfileLike(userId);
+    const parsedExperience = Array.isArray(parsedProfile.experience)
+      ? parsedProfile.experience.flatMap((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+        const value = entry as Record<string, unknown>;
+        const company = typeof value.company === 'string' ? value.company.trim() : '';
+        const title = typeof value.title === 'string' ? value.title.trim() : '';
+        if (!company || !title) return [];
+        return [{
+          company,
+          title,
+          start: typeof value.start === 'string' ? value.start.trim() : '',
+          end: typeof value.end === 'string' ? value.end.trim() : '',
+          description: typeof value.description === 'string' ? value.description.trim() : '',
+        }];
+      })
+      : [];
+    const gradYear = typeof parsedProfile.grad_year === 'number'
+      ? parsedProfile.grad_year
+      : Number(String(education.grad_date ?? '').match(/(?:19|20)\d{2}/)?.[0] ?? 0);
     let applicationReview: ApplicationReviewState = {
       jd_text: jdText,
       role: body.role,
@@ -981,7 +1019,23 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         portal_supported: canonicalApplicationPortalSupported,
       } : {}),
       status: body.application ? 'ready_to_submit' as const : 'resume_ready' as const,
-      ...(pinnedApplicantEmail ? { applicant_email: pinnedApplicantEmail } : {}),
+      applicant_email: pinnedApplicantEmail,
+      applicant_snapshot: {
+        profile: {
+          full_name: applicationContact.full_name,
+          email: pinnedApplicantEmail.address,
+          experience: parsedExperience,
+          skills: declaredSkills,
+          school: education.school,
+          ...(education.degree ? { degree: education.degree } : {}),
+          ...(education.grad_date ? { grad_date: education.grad_date } : {}),
+          grad_year: gradYear,
+          ...(typeof parsedProfile.currently_enrolled === 'boolean'
+            ? { currently_enrolled: parsedProfile.currently_enrolled }
+            : {}),
+        },
+        application_profile: portalApplicationProfile,
+      },
       edited_terms: deriveEditedTerms(spec, bank),
       questions: [],
       skipped_reasons: [],
@@ -1000,6 +1054,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ...(applicationEmail ? { _application_email: applicationEmail } : {}),
       _review: applicationReview,
       _quality: {
+        pdfGenerationBinding: createPdfGenerationBinding(spec, objectKey, pdfBuffer, applicationContact.email ?? ''),
         specIssues: [],
         /* Its own key rather than folded into specIssues, which means "the model wrote something
            the validator rejected". This is a fact about the ACCOUNT, not about the generated
@@ -1039,17 +1094,14 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         spec: storedSpec,
         resume_object_key: objectKey,
       });
-      if (applicationEmail) {
-        await ensureApplicationEmailAlias({
-          userId,
-          applicationId: resumeId,
-          forwardTo: applicationEmail.forwards_to,
-        });
-      }
       persisted = true;
     } catch (err) {
       fastify.log.error(err);
-      if (body.application) {
+      /* `|| applicationEmail` is not decoration. The alias row is a foreign key onto this row, so a
+       * lost packet means the portal identity frozen beside the PDF can never exist and employer
+       * mail would route nowhere. Returning a document detached from its application identity would
+       * leave an unusable packet. */
+      if (body.application || applicationEmail) {
         return reply.status(500).send({
           error: 'Litos could not save one email across this application. Nothing was prepared for submission. Try again.',
           code: 'application_identity_persistence_failed',
@@ -1057,6 +1109,41 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       }
       // The file is already generated and returned below; failing to log it for audit
       // shouldn't block the student from getting their resume.
+    }
+
+    /* THE ALIAS ROW, AND A LOUD FAILURE IF IT DOES NOT LAND.
+     *
+     * It has to be written after the packet row: application_email_aliases.generated_resume_id is
+     * a foreign key onto generated_resumes.id, so there is nothing to point at until the row above
+     * exists.
+     *
+     * `applicationEmail` is non-null ONLY when the route was measured able to receive mail and a
+     * forwarding address was found, so a failure here is the second kind of failure, the one worth
+     * surfacing: the route is configured and the write went wrong. An unconfigured deployment and
+     * a guest with no confirmed mailbox never reach this branch at all; they took the recorded
+     * fallback in planPacketApplicantEmail and carry its reason.
+     *
+     * Refusing is not optional, because the packet is already frozen to the alias by this point.
+     * The PDF keeps the personal resume address while the employer form uses the routing alias. A
+     * missing route would leave that form address unreadable and hide that nothing can read replies.
+     * The packet row survives the refusal and is inert:
+     * resolveFrozenApplicantEmail refuses to submit a packet whose pinned alias has no active row,
+     * so it becomes a regeneration hold rather than a personal address on a form. */
+    if (persisted && applicationEmail) {
+      try {
+        const written = await ensureApplicationEmailAlias({
+          userId,
+          applicationId: resumeId,
+          forwardTo: applicationEmail.forwards_to,
+        });
+        if (!written) throw new Error('ensureApplicationEmailAlias wrote no alias row');
+      } catch (err) {
+        fastify.log.error({ err, application_id: resumeId }, 'application email alias could not be written for a generated packet');
+        return reply.status(500).send({
+          error: 'Litos could not set up the email address employers reply to, so it did not finish this application. Nothing was prepared for submission. Try again.',
+          code: 'application_identity_persistence_failed',
+        });
+      }
     }
 
     /* Warm the requirement breakdown for this posting while nobody is waiting on it.
@@ -1109,7 +1196,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       application: persisted ? {
         id: resumeId,
         job_context: jobContext,
-        spec: storedSpec,
+        /* Through the stripper even though this particular spec cannot hold a pointer: it was built
+         * a few lines above for an application id that has existed for milliseconds, so no document
+         * has ever been attached to it and the call returns its argument by identity.
+         *
+         * It is here so that "a stored spec on the wire goes through specWithoutDocumentPointers"
+         * is a rule with no exceptions to remember. The two leaks this replaced were both routes
+         * where the pointer was not visible in the line that shipped it - a whole-row spread, and a
+         * spec handed over under a key that says nothing about documents - and an exception list is
+         * the mechanism by which the third one gets written. */
+        spec: specWithoutDocumentPointers(storedSpec),
         download_url: resumeUrl,
         created_at: now,
       } : undefined,
@@ -1208,6 +1304,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
   // key, so nothing could actually retrieve a past resume; the token makes the list usable and
   // is minted per-request so the links expire with the response rather than being stored.
   // Files older than the retention window are gone, and their link 404s by design.
+  //
+  // THE SPEC GOES OUT WHOLE, WHICH IS WHY IT GOES OUT THROUGH specWithoutDocumentPointers. This
+  // route answers with fifty complete specs, so it began serving _documents.transcript.object_key
+  // the day attachments were added, without a line of this file ever mentioning documents and
+  // without the contract test that fences routes/documents.ts being able to see it. A Blob object
+  // is written `access: 'public'` because that is the only mode the SDK has, so that key plus the
+  // store's stable base URL is permanent unauthenticated access to a student's transcript. It is
+  // also fifty rows of bytes nobody reads: db/schema.ts:1122 records a board list query exhausting
+  // Neon's monthly transfer ceiling, and this is the payload the plan named next to it.
   fastify.get('/resume/history', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
     const rows = await db
@@ -1256,7 +1361,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const resumeFileName = resumeFileNameForRole(contact.full_name, job.role);
       return {
         ...row,
-        spec: refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context),
+        spec: specWithoutDocumentPointers(
+          refreshedHistorySpec(repairedHistorySpec(row, monitoredJobs), profile, row.job_context),
+        ),
         download_url: `${base}/resume/download?t=${mintDownloadToken(userId, row.resume_object_key, { fileName: resumeFileName })}`,
         cover_letter_download_url: typeof coverLetter.object_key === 'string'
           ? `${base}/resume/download?t=${mintDownloadToken(userId, coverLetter.object_key)}`

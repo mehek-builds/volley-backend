@@ -63,6 +63,29 @@ test('a discovery result becomes a form inventory with no applicant in it', () =
   assert.deepEqual(Object.keys(discipline).sort(), ['input_type', 'label', 'max_length', 'options', 'required']);
 });
 
+/* A REQUIRED FIELD NOTHING FILLED AND NOTHING ASKED ABOUT.
+ *
+ * The drop above is for the ONE email control the fixed-field pass types from the packet. It was
+ * keyed on the bare word `email`, so IMC's required "Please provide your university email address."
+ * was dropped here too - and no per-portal selector fills anything but the identity field, so the
+ * form was refused and the packet reported "1 required field has no question you can answer in
+ * Litos". Measured 2026-08-12: not one email-labelled row existed in the whole posting_questions
+ * table.
+ */
+test('a second email control on the same form is inventory, not the packet\'s own field', () => {
+  const stored = postingQuestionsFromDiscovered([
+    { label: 'Email*', selector: '#email', inputType: 'email', maxLength: null, required: true },
+    { label: 'Please provide your university email address.', selector: '#question_1', inputType: 'text', maxLength: null, required: true },
+    { label: 'Reference email address', selector: '#question_2', inputType: 'email', maxLength: null, required: false },
+  ]);
+  assert.deepEqual(
+    stored.map((item) => item.label),
+    ['Please provide your university email address.', 'Reference email address'],
+  );
+  // Required-ness still comes off the raw label, so the inventory says it must be answered.
+  assert.equal(stored[0].required, true);
+});
+
 test('one label discovered twice keeps the richer record', () => {
   const stored = postingQuestionsFromDiscovered([
     { label: 'How did you hear about us?', selector: '#a', inputType: 'radio', maxLength: null, options: null, required: false },
@@ -274,4 +297,110 @@ test('an account with no stored onsite commitment is asked at Apply, not answere
   }, new Map(), { company: 'Redwood Materials' });
   assert.equal(anywhere.ask.length, 0);
   assert.equal(anywhere.questions[0].answer, 'Yes');
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * OPTIONS ARRIVING AS QUESTIONS.
+ *
+ * Every fixture below is a real row from the owner's production packets of 2026-08-11, where 11
+ * Palantir packets each carried "Yes", "Yes, I consent" and "English (ENG)" as REQUIRED questions
+ * while the four questions the form actually asked had no record at all.
+ * --------------------------------------------------------------------------------------------- */
+
+test('a radio option standing where its question should be is not stored as a question', () => {
+  const stored = postingQuestionsFromDiscovered([
+    // The discriminator: the label case-folds equal to a member of its own option list.
+    { label: 'Yes', selector: '#a', inputType: 'radio', maxLength: null, options: ['Yes', 'No'], required: true },
+    { label: 'No', selector: '#b', inputType: 'radio', maxLength: null, options: ['Yes', 'No'], required: true },
+    { label: 'Yes, I consent', selector: '#c', inputType: 'checkbox', maxLength: null, options: ['Yes, I consent', 'No, I do not consent'], required: true },
+    // Punctuation and case carry no meaning in the comparison.
+    { label: 'DECLINE TO SELF-IDENTIFY', selector: '#d', inputType: 'radio', maxLength: null, options: ['Decline to self identify', 'Female', 'Male'], required: false },
+    // The real question on the same form survives untouched.
+    { label: 'Do you require visa sponsorship?', selector: '#e', inputType: 'radio', maxLength: null, options: ['Yes', 'No'], required: true },
+  ]);
+  assert.deepEqual(stored.map((item) => item.label), ['Do you require visa sponsorship?']);
+});
+
+test('an answer token is refused on the managed path, where no option list is reported', () => {
+  // stratus-browser-cloud reports no options, so the exact own-option test has nothing to compare
+  // against. This is the closed vocabulary that has to carry it instead.
+  const stored = postingQuestionsFromDiscovered([
+    { label: 'Yes', selector: '#a', inputType: 'radio', maxLength: null, options: null, required: true },
+    { label: 'Yes, I consent', selector: '#b', inputType: 'checkbox', maxLength: null, options: null, required: true },
+    { label: 'I agree', selector: '#c', inputType: 'checkbox', maxLength: null, options: null, required: true },
+    { label: 'I do not want to answer', selector: '#d', inputType: 'radio', maxLength: null, options: null, required: false },
+    // A language checkbox's own option: a name and its ISO-639 code, and nothing else.
+    { label: 'English (ENG)', selector: '#e', inputType: 'checkbox', maxLength: null, options: null, required: true },
+    { label: 'Espanol (SPA)', selector: '#f', inputType: 'checkbox', maxLength: null, options: null, required: true },
+    // What an employer actually writes when it wants to know about languages.
+    { label: 'Which languages do you speak?', selector: '#g', inputType: 'text', maxLength: null, options: null, required: true },
+  ]);
+  assert.deepEqual(stored.map((item) => item.label), ['Which languages do you speak?']);
+});
+
+test("Lever's card handle is stripped, and a row that was nothing but the handle is dropped", () => {
+  // Exactly the labels the 11 Palantir packets stored, name attribute and all.
+  const stored = postingQuestionsFromDiscovered([
+    { label: 'Yes cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]', selector: '#a', inputType: 'radio', maxLength: null, options: null, required: true },
+    { label: 'English (ENG) cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]', selector: '#b', inputType: 'checkbox', maxLength: null, options: null, required: true },
+    { label: 'cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field1]', selector: '#c', inputType: 'text', maxLength: null, options: null, required: true },
+    // A card whose question text survived keeps it, and loses only the handle.
+    { label: 'Year of Graduation cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]', selector: '#d', inputType: 'text', maxLength: null, options: null, required: true },
+  ]);
+  assert.deepEqual(stored.map((item) => item.label), ['Year of Graduation']);
+});
+
+test("a composite widget's rendered subtree is not a question", () => {
+  const stored = postingQuestionsFromDiscovered([
+    // textContent of a <label> wrapping a typeahead: heading, required glyph, empty state, loader.
+    { label: 'Current location No location found. Try entering a different locationLoading location location-input', selector: '#a', inputType: 'text', maxLength: null, options: null, required: true },
+    // A select whose label swallowed the placeholder, every option, the name and a tag name.
+    {
+      label: 'Disability statusSelect ...Yes, I have a disability, or have had one in the pastNo, I do not have a disability and have not had one in the pastI do not want to answer eeo[disability] disabilitySelectElement',
+      selector: '#b',
+      inputType: 'select',
+      maxLength: null,
+      options: ['Yes, I have a disability, or have had one in the past', 'No, I do not have a disability and have not had one in the past', 'I do not want to answer'],
+      required: true,
+    },
+    { label: 'Where do you currently live?', selector: '#c', inputType: 'text', maxLength: null, options: null, required: true },
+  ]);
+  assert.deepEqual(stored.map((item) => item.label), ['Where do you currently live?']);
+});
+
+test('the bare privacy labels are questions and are never filtered out', () => {
+  /* R-PROTECT. "Privacy" (8 packets, Point72) and "Privacy statement" (7, IMC) are the employer's
+   * real, bare labels for a consent checkbox. BARE_PRIVACY_ACKNOWLEDGEMENT answers both from
+   * accept_privacy_notices, and the owner has a saved answer for each. They are short, they are not
+   * sentences, and they sit next to a Yes/No control, so every plausible shape rule for "this looks
+   * like an option, not a question" is one edit away from deleting them. This test is here so that
+   * edit fails loudly instead of silently costing two answers Litos already has. */
+  const stored = postingQuestionsFromDiscovered([
+    { label: 'Privacy', selector: '#a', inputType: 'checkbox', maxLength: null, options: null, required: true },
+    { label: 'Privacy statement', selector: '#b', inputType: 'checkbox', maxLength: null, options: null, required: true },
+    { label: 'Privacy Policy Acknowledgement', selector: '#c', inputType: 'checkbox', maxLength: null, options: null, required: true },
+    // Even when the control does report a Yes/No list, the LABEL is not a member of it.
+    { label: 'Privacy notice', selector: '#d', inputType: 'radio', maxLength: null, options: ['Yes', 'No'], required: true },
+  ]);
+  assert.deepEqual(
+    stored.map((item) => item.label),
+    ['Privacy', 'Privacy statement', 'Privacy Policy Acknowledgement', 'Privacy notice'],
+  );
+});
+
+test('short and unusual employer labels are not mistaken for options', () => {
+  // No minimum length, and no "must contain a verb" rule: these are all real field names.
+  const stored = postingQuestionsFromDiscovered([
+    { label: 'GPA', selector: '#a', inputType: 'text', maxLength: null, options: null, required: true },
+    { label: 'School', selector: '#b', inputType: 'combobox', maxLength: null, options: null, required: true },
+    { label: 'Major', selector: '#c', inputType: 'combobox', maxLength: null, options: null, required: true },
+    { label: 'Race', selector: '#d', inputType: 'select', maxLength: null, options: ['Asian', 'White'], required: false },
+    { label: 'Veteran status', selector: '#e', inputType: 'select', maxLength: null, options: null, required: false },
+    { label: 'Other', selector: '#f', inputType: 'text', maxLength: null, options: null, required: false },
+    { label: 'Offer Deadlines', selector: '#g', inputType: 'text', maxLength: null, options: null, required: false },
+  ]);
+  assert.deepEqual(
+    stored.map((item) => item.label),
+    ['GPA', 'School', 'Major', 'Race', 'Veteran status', 'Other', 'Offer Deadlines'],
+  );
 });

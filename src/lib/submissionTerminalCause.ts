@@ -103,7 +103,36 @@ export function attentionCategoriesForReasons(reasons: readonly string[]): Appli
       categories.add('run_failed');
     } else if (/filled form did not record|preview did not include|preview looks like/.test(normalized)) {
       categories.add('evidence_gap');
-    } else if (/transcript|upload|attach|file|document/.test(normalized)) {
+    } else if (/resume file for this application is no longer stored/.test(normalized)) {
+      /* AHEAD OF required_document, and that ordering is the entire reason this branch is written
+         as its own arm rather than left to fall through. The arm below fires on a bare /file/, and
+         the expired-packet sentence contains the word twice, so without this it lands in the
+         category that means "the employer is waiting on a document from you". That is the opposite
+         of what happened: no employer has seen this application, and the applicant would go looking
+         for an upload control on a form nothing was ever sent to.
+
+         Matched on the clause, not on /resume/ or /expired/, for the same reason the security-code
+         branch above matches a clause: an employer's own field label reaching a blocker line
+         ("\"Resume\" is required and is still empty") must not be read as a retention deletion. */
+      categories.add('packet_expired');
+    } else if (/\b(?:transcripts?|uploads?|uploaded|uploading|attach(?:es|ed|ing|ment|ments)?|files?|documents?|documentation)\b/.test(normalized)) {
+      /* WORD BOUNDARIES, BECAUSE `file` LIVES INSIDE `profile`.
+       *
+       * Unbounded, this arm read `"linkedin profile" is required and is still empty` as a document
+       * the employer wants uploaded, and filed it here instead of one arm further down under
+       * required_field. Both the LinkedIn URL and the GitHub URL field are common enough on these
+       * forms that the miscount was routine rather than exotic.
+       *
+       * COUNTING ONLY. Nothing keys a control off this category, and nothing should: it stays a
+       * rough sort of what a run stopped on. The dashboard reads review.required_documents, a
+       * structured measurement of the employer's own labels, for the separate reason that no regex
+       * here can fix withholdInvalidLeadAlignment writing 'required_document' for a resume
+       * alignment failure involving no document at all. See lib/requiredDocuments.ts.
+       *
+       * The inflections are spelled out rather than left to a trailing \w* so the boundary is real
+       * on both ends. They are here so that adding the boundaries only ever REMOVES the substring
+       * false positives: every sentence the unbounded version matched on a whole word still
+       * matches, and a plural or a participle is a whole word. */
       categories.add('required_document');
     } else if (/export control|sanctions|legally authorized|sponsorship|visa|sensitive question|work authorization/.test(normalized)) {
       categories.add('sensitive_attestation');

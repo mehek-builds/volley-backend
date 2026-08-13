@@ -16,6 +16,7 @@ import { courseworkFromParsed } from '../engine/resumePolicy';
 import { extractPdfText } from '../lib/pdfText';
 import { MultipartFile } from '@fastify/multipart';
 import { z } from 'zod';
+import { resumeEmailOfRecord } from '../lib/resumeEmail';
 import {
   extractDocxText,
   inspectResumeUpload,
@@ -83,6 +84,7 @@ const MAX_EDITABLE_LANGUAGES = 30;
 export const parsedProfilePatchSchema = z
   .object({
     full_name: z.string().trim().min(1).max(120).optional(),
+    resume_email: z.string().trim().email().max(254).optional(),
     phone: z.string().trim().max(40).optional(),
     school: z.string().trim().min(1).max(200).optional(),
     degree: z.string().trim().max(200).optional(),
@@ -246,7 +248,7 @@ export function applyParsedProfilePatch(
    * stored shape - the transform above has already turned the screen's one line into a list - and
    * copying it through a loop named for plain strings is how it got stored as a string (ISSUE-044).
    * It is assigned below, with the other list-shaped fields, where it belongs. */
-  for (const key of ['full_name', 'phone', 'school', 'degree', 'grad_date', 'objective'] as const) {
+  for (const key of ['full_name', 'resume_email', 'phone', 'school', 'degree', 'grad_date', 'objective'] as const) {
     if (patch[key] !== undefined) next[key] = patch[key];
   }
   /* Spoken languages are pulled back out of `skills` HERE as well as in the parser (ISSUE-020).
@@ -447,6 +449,7 @@ export function serveProfileJson(
     ...base,
     ...(declared.length > 0 ? { skills: declared } : {}),
     ...(email ? { email } : {}),
+    ...(resumeEmailOfRecord(base) ? { resume_email: resumeEmailOfRecord(base) } : {}),
     ...academicsOfRecord(applicationRow),
   };
 }

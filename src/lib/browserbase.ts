@@ -8,6 +8,29 @@ export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 export const MANAGED_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY;
 /** Stratus result capability that proves discovered controls include their live DOM role. */
 export const MANAGED_DISCOVERY_ROLE_CAPABILITY = 'discovery-control-role-v1';
+/**
+ * Stratus result capability that proves an `extract` carrying `requireVisible` was answered by a
+ * real layout read, one entry per match that is painting something, rather than by the ordinary
+ * first-match attribute read.
+ *
+ * WHAT IT IS FOR, and what it is deliberately NOT for. A runner older than the field drops it during
+ * normalization and answers under the same label with the same `{selector,label,value}` entry, so
+ * nothing else in the payload distinguishes "filtered by layout" from "this runner never heard of
+ * the question". This string is what makes the two legible, and the captcha contract test asserts
+ * every emission carries it, so the field silently ceasing to be honoured is a red suite rather than
+ * a quiet regression.
+ *
+ * NO PREDICATE BRANCHES ON IT, and that was tried and rejected rather than overlooked. The obvious
+ * use is to refuse to let corroborateManagedCaptchaBlockers overrule the runner's CAPTCHA claim when
+ * the evidence was never asked a layout question. It reads well and it is wrong: the only runners
+ * that lack the capability are OLDER runners, and the further back one is, the worse the predicate
+ * raising the claim. The guard would therefore be most active exactly where the claim it protects
+ * deserves the least trust, and it broke three tests that encode a policy bought with fourteen
+ * production stalls: an uncorroborated CAPTCHA verdict is dropped on an autonomous family, and a
+ * claim backed by nothing is not believed on any family. The fix for a blind channel is to stop the
+ * channel being blind, which is what `requireVisible` does.
+ */
+export const MANAGED_CAPTCHA_VISIBILITY_CAPABILITY = 'extract-require-visible-v1';
 
 export type ManagedBrowserAction = {
   type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover' | 'confirmAndSubmit';
@@ -18,6 +41,18 @@ export type ManagedBrowserAction = {
   optional?: boolean;
   timeout?: number;
   attribute?: string;
+  /**
+   * Extract only. Asks the runner for the attribute of every match that a person could actually see,
+   * one entry per visible node in DOM order, instead of the first match's attribute whether or not
+   * it has a box.
+   *
+   * A FIELD RATHER THAN A NEW ACTION TYPE, deliberately: the runner rejects an unknown action type
+   * outright with a 400 that fails the entire run, and this repo cannot know which revision is
+   * answering before it calls. An unknown field is dropped and the run proceeds on the older
+   * reading, so the two services can deploy in either order without an outage. Whether the field was
+   * honoured is read back from MANAGED_CAPTCHA_VISIBILITY_CAPABILITY, never assumed.
+   */
+  requireVisible?: boolean;
   file?: { name: string; mimeType: string; base64: string };
   /**
    * Only used by confirmAndSubmit. In contract v2 this one action owns both confirmation and the
@@ -118,7 +153,7 @@ export type ManagedBrowserResult = {
   submitOutcome?: {
     pressed?: boolean;
     state?: 'confirmed' | 'rejected' | 'unknown' | 'not_attempted';
-    source?: 'ats_state' | 'live_region' | 'page_text' | null;
+    source?: 'ats_state' | 'ats_route' | 'ats_state_unconfirmed' | 'live_region' | 'page_text' | null;
     evidence?: string | null;
     message?: string | null;
     formStillPresent?: boolean | null;
@@ -139,6 +174,10 @@ export type ManagedBrowserResult = {
     passes: Array<{
       submitKind: 'application' | 'verification';
       scope: {
+        /* Which resolved scope the runner bound the submit to. 'form' is a real <form> ancestor;
+         * 'container' is the nearest field-bearing ancestor on a formless page (Ashby's div#form).
+         * Emitted by every runner since the submit-scope repair; absent only from older runners. */
+        scopeKind?: 'form' | 'container';
         formFingerprint: string;
         submitFingerprint: string;
         formMatchCount: 1;
@@ -346,6 +385,26 @@ export function isManagedStratusProvider(): boolean {
 export function managedContinuationFingerprint(token: string): string {
   if (!/^[A-Za-z0-9_-]{32,200}$/.test(token)) throw new Error('Managed Stratus continuation token is invalid');
   return createHash('sha256').update(`stratus-managed-continuation-v1:${token}`).digest('hex').slice(0, 24);
+}
+
+/* THE OPTIONS FOR A MANAGED APPLICATION SUBMIT, IN ONE PLACE THAT CAN BE ARGUED WITH.
+ *
+ * They used to be an object literal buried in the runner, and one field of it was wrong on a false
+ * premise for a whole deploy: continuationCheckpoint was set because "an ordinary unknown receipt
+ * does not offer a continuation", which merged Stratus contradicts - its own pressedUnknown term
+ * offers one already. Setting it anyway suppressed the 15 second receipt-observation cap AND made
+ * continuationOffered true on confirmed, rejected and not_attempted outcomes, so keepAlive held a
+ * sandbox open after every successful submission.
+ *
+ * Named and exported so the shape a real submit sends is a thing a test can hold, rather than a
+ * literal that can only be grepped for.
+ */
+export function managedApplicationSubmitOptions(continuationTtlSeconds: number): {
+  allowSubmit: true;
+  requestContinuation: true;
+  continuationTtlSeconds: number;
+} {
+  return { allowSubmit: true, requestContinuation: true, continuationTtlSeconds };
 }
 
 // `screenshot` defaults to true because every existing caller wants the receipt image. The CAPTCHA

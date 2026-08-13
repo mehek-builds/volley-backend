@@ -79,7 +79,10 @@ export function canStartExtensionSubmission(
   standingConsentEnabled: boolean,
 ): 'start' | 'in_flight' | 'submitted' | 'reject' | 'consent_required' {
   if (authorization === 'standing_consent' && !standingConsentEnabled) return 'consent_required';
-  return submitRequestDisposition(review.status, Boolean(review.submission_claimed_at));
+  /* The row is passed for its no-send evidence and NOT for its unverified resolution, which stays
+   * undefined here on purpose. An unverified submission is resolved by the applicant answering the
+   * dashboard's question, and that route is the one allowed to act on her answer. */
+  return submitRequestDisposition(review.status, Boolean(review.submission_claimed_at), undefined, review);
 }
 
 export function extensionOutcomePatch(

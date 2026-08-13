@@ -46,6 +46,7 @@ async function waitForCode(options: {
   requestedAt: Date;
   expectedRecipient?: string;
   applicationId?: string;
+  standingChallenge?: boolean;
   attempts?: number;
   delayMs?: number;
   findCode: typeof findComposioVerificationCode;
@@ -59,6 +60,7 @@ async function waitForCode(options: {
       requestedAt: options.requestedAt,
       expectedRecipient: options.expectedRecipient,
       applicationId: options.applicationId,
+      standingChallenge: options.standingChallenge,
     }).catch(() => null);
     if (match) return match;
     if (attempt < attempts - 1) await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -141,6 +143,7 @@ export async function prepareManagedEmailVerification(options: {
   permissionGranted: boolean;
   expectedRecipient?: string;
   applicationId?: string;
+  standingChallenge?: boolean;
   attempts?: number;
   delayMs?: number;
   findCode?: typeof findComposioVerificationCode;
@@ -156,6 +159,7 @@ export async function prepareManagedEmailVerification(options: {
     requestedAt: options.requestedAt,
     expectedRecipient: options.expectedRecipient,
     applicationId: options.applicationId,
+    standingChallenge: options.standingChallenge,
     attempts: options.attempts,
     delayMs: options.delayMs,
     findCode: options.findCode ?? findComposioVerificationCode,

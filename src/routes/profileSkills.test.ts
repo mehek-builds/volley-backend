@@ -1,8 +1,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { declaredSkillsList, parsedTargetRolesForSeed, serveProfileJson } from './profile';
+import { applyParsedProfilePatch, declaredSkillsList, parsedTargetRolesForSeed, serveProfileJson } from './profile';
 import { applyDeclaredSkills } from './draft';
 import { SYSTEM_PROMPT as DRAFT_SYSTEM_PROMPT } from '../llm/draft';
+import { resumePacketEmailIsCurrent } from '../lib/resumeEmail';
 
 // R-027 regression coverage. R-015 made profiles.skills the authoritative skills source, but the
 // shipped serving leg spread bare parsed_json, so everything downstream of GET /profile (outreach
@@ -70,6 +71,14 @@ describe('GET /profile serving (serveProfileJson)', () => {
   test('email always comes from the verified login, even when parsed_json carries one', () => {
     const served = serveProfileJson({ ...PARSED, email: 'stale@resume.pdf' }, null, EMAIL);
     assert.equal(served.email, EMAIL);
+    assert.equal(served.resume_email, undefined);
+  });
+
+  test('resume email is independently editable and never replaces login identity', () => {
+    const next = applyParsedProfilePatch(PARSED, { resume_email: 'MehekMan@USC.edu' });
+    const served = serveProfileJson(next, null, EMAIL);
+    assert.equal(served.email, EMAIL);
+    assert.equal(served.resume_email, 'mehekman@usc.edu');
   });
 
   test('survives a NULL parsed_json row', () => {
@@ -103,6 +112,13 @@ describe('draft input (applyDeclaredSkills)', () => {
     applyDeclaredSkills(bodyProfile, ['Python']);
     assert.deepEqual(bodyProfile.skills, ['gRPC', 'SDK design']);
   });
+});
+
+test('resume edit identity requires the exact current explicit personal email', () => {
+  assert.equal(resumePacketEmailIsCurrent('mehekman@usc.edu', 'mehekman@usc.edu'), true);
+  assert.equal(resumePacketEmailIsCurrent('mehekmandal05@gmail.com', 'mehekman@usc.edu'), false);
+  assert.equal(resumePacketEmailIsCurrent('mehekman@usc.edu', undefined), false);
+  assert.equal(resumePacketEmailIsCurrent(undefined, 'mehekman@usc.edu'), false);
 });
 
 describe('outreach drafting prompt (R-015 discipline, outreach half)', () => {

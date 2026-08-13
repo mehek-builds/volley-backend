@@ -10,6 +10,7 @@ import {
   generated_resumes,
   monitored_jobs,
   profiles,
+  user_documents,
   users,
 } from '../db/schema';
 import {
@@ -24,6 +25,7 @@ import {
   findSecurityCodeAttempt,
   normalizeSecurityCode,
   readManagedSecurityCodeChallenge,
+  securityCodeChallengeMatchesRecipient,
   securityCodeAttentionReason,
   securityCodeContinuationActions,
   securityCodeFingerprint,
@@ -40,6 +42,7 @@ import {
   HANDOFF_WINDOW_MS,
   isBrowserbaseConfigured,
   isManagedStratusProvider,
+  managedApplicationSubmitOptions,
   managedContinuationFingerprint,
   runManagedBrowser,
 } from '../lib/browserbase';
@@ -74,9 +77,12 @@ import {
   blockersRequireCoverLetter,
   fillPortal,
   hasCoverLetterUpload,
+  hasTranscriptUpload,
   managedResultFilledFields,
+  managedResumeUploadDisplacement,
   managedAnswerLossReasons,
   managedResultHasCoverLetterUpload,
+  managedResultHasTranscriptUpload,
   managedAttendedAccountHold,
   managedAttendedAccountUrlIsSupported,
   navigateToApplicationForm,
@@ -92,14 +98,21 @@ import {
   type SubmissionPacket,
   type SupportedPortal,
   ManagedActionBudgetError,
+  ManagedConfirmationUnprovenError,
   assertManagedRequiredFieldsConfirmed,
+  managedApplicationProofIsRequired,
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import {
+  isManagedNoSubmitControl,
   isManagedRunTimeout,
   managedSubmitVerdict,
+  observeManagedReceiptOnce,
+  readManagedSubmitOutcome,
+  submissionProvablyNotSent,
   unverifiedSubmissionReason,
 } from '../lib/managedSubmitOutcome';
+import { classifySubmissionStop, submissionClaimPatch, submissionStopRecord } from '../lib/submissionStop';
 import { applyReviewPatch, beginStall } from '../lib/applicationStall';
 import {
   attentionCategoriesForReasons,
@@ -107,8 +120,13 @@ import {
   type TerminalRunStatus,
 } from '../lib/submissionTerminalCause';
 import { sanitizeProviderBlockers } from '../lib/fieldLabel';
+import { documentAsksOpenToReuse, requiredDocumentAsks, type RequiredDocumentAsk } from '../lib/requiredDocuments';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
-import { resolveBlobUrl } from '../lib/resumeAccess';
+import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess';
+import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
+import { PACKET_EXPIRED_REASON } from '../lib/packetResumeRestore';
+import { currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
+import { createDashboardHandoffBinding } from '../lib/extensionHandoffPacket';
 import { decryptRow } from './applicationProfile';
 import { readExperienceBank } from '../db/experienceBank';
 import { declaredSkillsList } from './profile';
@@ -123,6 +141,7 @@ import {
 import {
   discoverPageQuestions,
   discoveredFieldIsRequired,
+  consentAcknowledgementLicence,
   isCoreIdentityField,
   isOpenEndedQuestion,
   isRefusedQuestion,
@@ -137,6 +156,7 @@ import {
   frozenJobRelocationLocationContext,
   WORK_ELIGIBILITY_QUESTION,
   workEligibilitySkipReason,
+  discoveredFieldIsNotAQuestion,
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
@@ -164,7 +184,14 @@ import {
   submissionBatchSize,
   withinDailyCap,
 } from '../lib/submissionQueue';
-import { coverLetterFileNameForRole, resumeFileNameForRole } from '../lib/resumeFileName';
+import { coverLetterFileNameForRole, resumeFileNameForRole, transcriptFileNameForRole } from '../lib/resumeFileName';
+import {
+  claimReusableDocument,
+  documentBytesFromPointer,
+  ForeignDocumentPointerError,
+  storedDocuments,
+  MAX_USER_DOCUMENT_BYTES,
+} from '../lib/documentStore';
 import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import { duplicateApplicationVerdict } from '../lib/duplicateApplication';
 import {
@@ -313,10 +340,7 @@ async function claimSubmission(row: ResumeRow, alreadyHeld = false): Promise<Res
   const current = readApplicationReview(row.spec);
   if (alreadyHeld) return submissionClaimIsHeld(current) ? row : null;
   if (!current || current.status !== 'submitting' || current.submission_claimed_at) return null;
-  const claimed = nextReview(current, {
-    submission_claimed_at: new Date().toISOString(),
-    submission_claim_id: randomUUID(),
-  });
+  const claimed = nextReview(current, submissionClaimPatch(new Date().toISOString(), randomUUID()));
   const rows = await db.update(generated_resumes)
     .set({
       spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(claimed)}::jsonb, true)`,
@@ -350,8 +374,7 @@ async function claimSecurityCodeSubmission(
       source: 'per_application_approval',
       authorized_at: new Date().toISOString(),
     },
-    submission_claimed_at: new Date().toISOString(),
-    submission_claim_id: randomUUID(),
+    ...submissionClaimPatch(new Date().toISOString(), randomUUID()),
     submission_error: undefined,
   });
   const rows = await db.update(generated_resumes)
@@ -495,6 +518,32 @@ export function coverLetterObjectKeyToAttach(spec: unknown): string | null {
   return key || null;
 }
 
+/**
+ * The blob key of the transcript this packet should carry, or null when there is nothing to carry.
+ *
+ * ONE TERM, AND IT IS THE FILE ITSELF. The condition above this one is the record of what a second
+ * term costs: requiring an approval that the fill has to happen before is a circle, and 111 of the
+ * 112 packets in the corpus that held a written cover letter were sitting inside it. Nothing here
+ * may grow into that shape. Not an approval stamp, not attached_at, not a review status - if the
+ * object key is on the spec, the file exists and she put it there, and that is the whole question.
+ *
+ * WHETHER to attach it is a different question with a different owner, exactly as it is for the
+ * letter: the form has to have somewhere to put it, which is transcript_supported, measured by the
+ * run and applied through omitTranscript by every caller. Splitting the two is what keeps this
+ * function unable to deadlock.
+ *
+ * A blank key is not a key: resolveBlobUrl would list the whole store on an empty prefix.
+ */
+export function transcriptObjectKeyToAttach(spec: unknown): string | null {
+  const stored = (spec && typeof spec === 'object' ? spec : {}) as Record<string, unknown>;
+  const documents = stored._documents;
+  if (!documents || typeof documents !== 'object' || Array.isArray(documents)) return null;
+  const entry = (documents as Record<string, unknown>).transcript;
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const key = (entry as Record<string, unknown>).object_key;
+  return (typeof key === 'string' ? key.trim() : '') || null;
+}
+
 function referralIdentity(value: unknown): string {
   return typeof value === 'string' ? value.trim().replace(/\s+/g, ' ').toLowerCase() : '';
 }
@@ -564,10 +613,114 @@ export async function resumeBytesForPacket(
     return Buffer.from('%PDF-1.4\n% Litos controlled submission fixture\n%%EOF\n');
   }
   const blobUrl = await dependencies.resolveObjectUrl(objectKey);
-  if (!blobUrl) throw new Error('Generated resume file is unavailable');
+  /* Typed, because this is the retention sweep arriving rather than a malfunction. See
+     PacketDocumentExpiredError for why an untyped throw here told the applicant to go and look for
+     a confirmation of an application that was never filled in. Only the resolve is typed: a key that
+     resolves to a URL which then fails to download is a live storage fault, not an expired packet,
+     and the two owe different sentences. */
+  if (!blobUrl) throw new PacketDocumentExpiredError('resume');
   const response = await dependencies.fetchObject(blobUrl);
   if (!response.ok) throw new Error('Generated resume file could not be downloaded');
   return Buffer.from(await response.arrayBuffer());
+}
+
+async function fetchStoredCoverLetter(url: string): Promise<Buffer> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error('Generated cover letter file could not be downloaded');
+  return Buffer.from(await response.arrayBuffer());
+}
+
+/**
+ * The letter rebuilt from the row, for a packet whose letter file has been swept.
+ *
+ * Reads through storedCoverLetter rather than the raw `_cover_letter` object so that a half-written
+ * artifact is treated as no letter at all, exactly as every other reader of it does. A letter that
+ * cannot be rebuilt raises the typed error, which packetForCoverLetterCapability degrades into
+ * "written but not attached" - the same outcome an unreachable file already produced, so nothing
+ * gets worse than it was when the rebuild is impossible.
+ */
+async function rerenderStoredCoverLetter(row: ResumeRow, stored: StoredSpec): Promise<Buffer> {
+  const artifact = storedCoverLetter(row);
+  const job = (row.job_context ?? {}) as { company?: unknown };
+  const contact = (stored._contact ?? {}) as Record<string, unknown>;
+  if (!artifact || typeof job.company !== 'string') throw new PacketDocumentExpiredError('cover_letter');
+  return rerenderFrozenCoverLetter({
+    fullName: String(contact.full_name ?? '').trim(),
+    email: typeof contact.email === 'string' ? contact.email : undefined,
+    company: job.company,
+    body: artifact.body,
+    generatedAt: artifact.generated_at,
+  });
+}
+
+/**
+ * The plaintext bytes of a document the student attached herself, for the fill.
+ *
+ * THREE DEPARTURES FROM THE COVER LETTER'S BRANCH, each one measured rather than stylistic.
+ *
+ * IT KEEPS THE FIXTURE BRANCH. packetUsesControlledResumeFixture covers the resume only, so a
+ * controlled QA run carrying a transcript would go to Vercel Blob for a real object and fail on a
+ * portal that exists to have no dependencies. A controlled run gets fixture bytes for every file it
+ * carries or it is not a controlled run.
+ *
+ * IT READS blob_url BEFORE resolveBlobUrl. The resolver goes through list({ prefix }), which is
+ * eventually consistent with no stated bound: reproduced server-side still 404ing 54 seconds after
+ * the write, and R-040 was every Ashby fill of 2026-07-18 shipping without a resume because of it. A
+ * transcript uploaded and attached in one sitting is exactly that window, and the failure is silent
+ * in the worst direction - a file that is there reads as missing. The URL put() returned is a column
+ * on the row for this reason; the resolver stays as the fallback for a row written before it.
+ *
+ * IT UNSEALS. The bytes in the blob are AES-256-GCM ciphertext, not a PDF. That is what makes the
+ * privacy sentence true, and it means every read has to come through here rather than through a
+ * plain fetch, or the form gets an unreadable file named transcript.pdf.
+ *
+ * THE SCOPED ROW IS THE AUTHORISATION, AND A MISS IS A REFUSAL. That sentence is the correction of a
+ * real hole, not a restatement of an intention, and the shape of the hole is worth keeping because
+ * the same shape is available to any future reader of this store. The lookup was scoped by user from
+ * the first line it was written, and the miss then handed `blob_url: null` on to
+ * documentBytesFromPointer - which falls back to resolveBlobUrl, a resolver that takes an object key
+ * and NOTHING ELSE and resolves any key in the store. So a spec naming another account's key missed
+ * the scoped row and then fetched that account's file through the back door, while the comment here
+ * and the test in transcriptAttachment.test.ts both asserted the scoping and both stayed green,
+ * because what they checked was the query and what was wrong was the fall-through underneath it.
+ *
+ * Encryption is not a second line of defence here and should not be read as one: the key comes from
+ * one server secret and one fixed salt (lib/documentCrypto.ts), so any bytes that resolve are bytes
+ * that decrypt. The scope check is the whole of the control.
+ *
+ * So the miss throws, and the only object key that can now reach a resolver is one read back off a
+ * row this user owns. Throwing rather than returning nothing is what makes the failure legible:
+ * buildPacket's catch carries it as the packet's unavailable reason, both prepares log the message
+ * verbatim, and packetForTranscriptCapability owes the applicant a sentence. A silent empty
+ * attachment would be an application that claims a transcript and sends none, which is the exact
+ * failure this whole path exists to prevent.
+ *
+ * Tombstones are deliberately not filtered out: a removed document's row is the fastest way to a
+ * clear 404 on a dead pointer, where filtering it would turn a pointer that IS hers into the
+ * refusal above and name the wrong reason on the log line.
+ */
+export async function documentBytesForPacket(
+  userId: string,
+  objectKey: string,
+  controlledTest: boolean,
+  dependencies?: ResumePacketDependencies,
+): Promise<Buffer> {
+  if (controlledTest && process.env.LITOS_ENABLE_TEST_PORTAL === 'true') {
+    return Buffer.from('%PDF-1.4\n% Litos controlled attached-document fixture\n%%EOF\n');
+  }
+  const [row] = await db.select({
+    blob_url: user_documents.blob_url,
+    object_key: user_documents.object_key,
+  })
+    .from(user_documents)
+    .where(and(eq(user_documents.object_key, objectKey), eq(user_documents.user_id, userId)))
+    .limit(1);
+  if (!row) throw new ForeignDocumentPointerError();
+  // The row's own key, not the argument, even though the predicate makes them equal. It costs one
+  // selected column to make the fall-through structurally unable to resolve anything but a key that
+  // came back off an owned row, and equality by predicate is exactly the kind of reasoning the bug
+  // above was made of.
+  return documentBytesFromPointer({ blobUrl: row.blob_url, objectKey: row.object_key }, dependencies);
 }
 
 export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
@@ -584,15 +737,62 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const parsed = (profileRow[0]?.parsed_json ?? {}) as Record<string, unknown>;
   const review = readApplicationReview(stored);
   if (!review) throw new Error('We could not find this application');
+  /* NO REBUILD HERE, DELIBERATELY, and this is the second design it has had.
+     It first rebuilt the resume in memory at this line. That could never run: every send path
+     passes a packet-audit gate that loads resume_object_key and refuses before buildPacket is
+     called. Worse, it would have been wrong if it had run. renderResumePdf is not byte-deterministic
+     (pdfkit stamps CreationDate; two renders of one spec differ in sha256 at identical length), and
+     three records bind the exact bytes: the generation binding, packet_audit.bindings.pdf.sha256,
+     and the acknowledgement. An in-memory rebuild here would have the audit verifying one document
+     and the employer receiving another.
+     The rebuild now happens once, before the gate, in restoreExpiredPacketResume, which writes the
+     file and re-issues all three records against it. By the time buildPacket runs the file exists,
+     so a throw here means the file went missing AFTER the audit passed, which is a real anomaly and
+     should stop the run rather than be papered over with unaudited bytes. */
   const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest);
+  /* THE ATTACHED TRANSCRIPT, LOADED HERE AND NOT ALLOWED TO THROW.
+   *
+   * The cover letter below throws when its object cannot be resolved or fetched, and exactly one of
+   * this function's nine callers catches it. That is a known, named hazard for the letter; for this
+   * file it would be a live one on the ordinary path. `DELETE /documents/:id` deletes the blob and
+   * tombstones the row, and it deliberately does not rewrite the spec of every application that
+   * already carried the file - a sent application still has to be able to say what went out with it.
+   * So a student who tidies her library leaves live pointers at a file that is gone, and a throw
+   * here would turn that into an aborted prepare, or a failed send, on applications that are
+   * otherwise complete.
+   *
+   * The failure is carried on the packet instead, where packetForTranscriptCapability turns it into
+   * one fixed sentence and the run logs the detail. Silence is the one thing not on offer: an
+   * application that says it carries a transcript and does not is the failure this whole path exists
+   * to prevent.
+   *
+   * ABOVE THE COVER LETTER, and that position is load-bearing rather than incidental.
+   * submissionRunner.test.ts fences off everything from the letter's own declaration to the end of
+   * this function and asserts that no controlled-fixture decision appears inside it, so that a
+   * choice made for the resume can never reach the letter's resolution. The transcript genuinely
+   * needs that flag - a controlled run must not go to blob storage for any file it carries - so it
+   * is resolved above the fence rather than inside it.
+   */
+  let transcript: Buffer | undefined;
+  let transcriptUnavailableReason: string | undefined;
+  const transcriptKey = transcriptObjectKeyToAttach(stored);
+  if (transcriptKey) {
+    try {
+      transcript = await documentBytesForPacket(row.user_id, transcriptKey, controlledTest);
+    } catch (error) {
+      transcriptUnavailableReason = error instanceof Error ? error.message : String(error);
+    }
+  }
   let coverLetter: Buffer | undefined;
   const coverLetterKey = coverLetterObjectKeyToAttach(stored);
   if (coverLetterKey) {
     const coverLetterUrl = await resolveBlobUrl(coverLetterKey);
-    if (!coverLetterUrl) throw new Error('Generated cover letter file is unavailable');
-    const coverLetterResponse = await fetch(coverLetterUrl);
-    if (!coverLetterResponse.ok) throw new Error('Generated cover letter file could not be downloaded');
-    coverLetter = Buffer.from(await coverLetterResponse.arrayBuffer());
+    coverLetter = coverLetterUrl
+      ? await fetchStoredCoverLetter(coverLetterUrl)
+      /* Same recovery, same frozen inputs, and it matters more here than it looks: the letter's own
+         degrade path sends the application WITHOUT the attachment, so before this an expired letter
+         quietly cost the applicant the one document she wrote by hand. */
+      : await rerenderStoredCoverLetter(row, stored);
   }
   const fullName = String(contact.full_name ?? parsed.full_name ?? '').trim();
   const accountEmail = String(userRow[0]?.email ?? '').trim();
@@ -774,6 +974,12 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     coverLetterName: coverLetter
       ? coverLetterFileNameForRole(fullName, roleTitle)
       : undefined,
+    transcript,
+    // The conditional name is what makes an application with no transcript a no-op rather than a
+    // half-populated packet: uploadFirst and managedUpload both return before doing anything unless
+    // the file and the name are both set, so the two must go missing together.
+    transcriptName: transcript ? transcriptFileNameForRole(fullName, roleTitle) : undefined,
+    transcriptUnavailableReason,
     eeoPrefs: sanitizeEeoPrefs(app.eeo_prefs),
     // Metadata, not a fill field: `email` above is what gets typed. Carried on the packet so the
     // prepare paths can write which address was used, and why, onto the review state.
@@ -785,6 +991,11 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
       portalSelector: item.portal_selector,
       portalInputType: item.portal_input_type,
       atsApiField: item.ats_api_field,
+      // Carried through so the fill can tell an option the resolver read off this control from a
+      // profile value that merely survived the refresh. Dropping it here would leave the fill
+      // unable to distinguish them and it would fall back to the computed bucket, which is exactly
+      // the state this packet was in before. See greenhouseReviewedAnswerIsResolved.
+      answerOptionSource: item.answer_option_source,
     })),
   };
 }
@@ -819,21 +1030,82 @@ function omitCoverLetter(packet: SubmissionPacket): SubmissionPacket {
   return { ...packet, coverLetter: undefined, coverLetterName: undefined };
 }
 
+/* The transcript's twin, and it clears the reason as well as the file.
+ *
+ * Both fields go, because both of them are read downstream and they disagree in different ways: the
+ * bytes decide whether an upload action is spent, and the reason decides whether the applicant is
+ * told something went wrong. On a form with nowhere to put a transcript there is nothing to spend
+ * and nothing to report, so a packet that has been stripped must not still be carrying either. */
+function omitTranscript(packet: SubmissionPacket): SubmissionPacket {
+  return {
+    ...packet,
+    transcript: undefined,
+    transcriptName: undefined,
+    transcriptUnavailableReason: undefined,
+  };
+}
+
 function normalizedFilledFields(fields: readonly string[] | undefined): Set<string> {
   return new Set((fields ?? []).map((field) => field.toLowerCase().replace(/[^a-z0-9]/g, '')));
 }
 
-function filledFieldBlockers(fields: readonly string[] | undefined, packet: SubmissionPacket): string[] {
+/* WHAT THE FILLED FIELDS PROVE, AND THE ONE THING THEY CANNOT.
+ *
+ * `fields` is a list of labels the run pushed after each control accepted what it was given. Every
+ * check below is therefore an absence check, and absence was the only failure this function knew how
+ * to describe. A resume that was uploaded correctly and then REPLACED by a later document leaves
+ * 'resume' in that list, because it really was recorded, at the moment it was true. The run then
+ * reports both documents attached and an application goes out with a transcript in the resume's slot
+ * and no resume at all, which is the worst outcome this file exists to prevent and the one it could
+ * not see.
+ *
+ * So the evidence argument. It carries the managed runner's read-back of the resume's own control,
+ * taken after the last upload that could have taken it, and managedResumeUploadDisplacement turns it
+ * into a named answer. The direct Playwright path has no such read and needs none: it holds the live
+ * page, claims each control by DOM node as it fills it, and refuses the second upload outright
+ * rather than replacing the first. Two paths, two mechanisms, one thing that must never happen.
+ *
+ * Optional so that the callers with no evidence to offer keep working unchanged; every one of them
+ * is a path where displacement is structurally impossible or already reported. */
+function filledFieldBlockers(
+  fields: readonly string[] | undefined,
+  packet: SubmissionPacket,
+  evidence?: ReadonlyArray<{ label?: string; selector?: string; value: string | null }>,
+): string[] {
   const normalized = normalizedFilledFields(fields);
   const has = (needle: string) => [...normalized].some((field) => field.includes(needle));
   const issues: string[] = [];
   if (!has('email')) issues.push('The filled form did not record an email field.');
   if (!has('resume')) issues.push('The filled form did not record a resume upload.');
+  const displacedBy = managedResumeUploadDisplacement(evidence, packet);
+  if (displacedBy) {
+    issues.push(
+      `The form's resume control is holding your ${displacedBy === 'transcript' ? 'transcript' : 'cover letter'} `
+      + 'instead of your resume, so this application would be sent without a resume. Nothing has been '
+      + 'sent. Please attach the documents yourself on the employer\'s form.',
+    );
+  }
   if (!has('name') && !(has('first') && has('last'))) {
     issues.push('The filled form did not record the applicant name fields.');
   }
   if (packet.coverLetter && !has('cover')) {
     issues.push('The filled form did not record the cover letter attachment.');
+  }
+  /* THE ONLY SIGNAL THERE IS THAT THE TRANSCRIPT SELECTOR MATCHED NOTHING, and it is worth being
+   * exact about how much it proves.
+   *
+   * Both upload paths fail quietly by design. uploadFirst steps over a selector that resolves to a
+   * non-file element with a bare `continue` and swallows a failed setInputFiles with
+   * `catch { continue; }`; the managed runner reports a non-matching optional selector into
+   * `skipped` rather than `filledFields`. So a transcript that never reached the form leaves no
+   * error anywhere, and this sentence is what turns that into something she is told about.
+   *
+   * WHAT IT DOES NOT PROVE: that the employer's own uploader registered the file. A control can
+   * accept setInputFiles while the page's JavaScript never notices, and nothing on either path can
+   * see that. This says the run did not record the attachment; it does not say the attachment
+   * arrived, and it must not be read or described as if it did. */
+  if (packet.transcript && !has('transcript')) {
+    issues.push('The filled form did not record the transcript attachment.');
   }
   return issues;
 }
@@ -1037,7 +1309,7 @@ export function preparationEvidenceBlockers(
   })) {
     return [FORM_NOT_REACHED_REASON];
   }
-  return filledFieldBlockers(result.filledFields, packet);
+  return filledFieldBlockers(result.filledFields, packet, result.extracted);
 }
 
 // Classification now lives in lib/submissionTerminalCause so that applyReviewPatch, which is in
@@ -1148,6 +1420,14 @@ async function packetForCoverLetterCapability(
   try {
     return { packet: await buildPacket(rows[0], controlledTest) };
   } catch (error) {
+    /* THE RESUME IS NOT THE COVER LETTER'S PROBLEM TO DEGRADE.
+       buildPacket loads both documents, so an expired RESUME lands in this catch too. Degrading it
+       here was wrong twice over: it logged a resume failure under 'Cover letter file could not be
+       attached', and the rebuild below re-enters buildPacket, which throws on the same missing
+       resume a second time. The rethrow costs nothing that was ever recoverable - a packet with no
+       resume has nothing to send either way - and it keeps the typed error intact for fail(), which
+       is the whole point of typing it. */
+    if (error instanceof PacketDocumentExpiredError && error.document === 'resume') throw error;
     fastify.log.warn({ error, applicationId: row.id }, 'Cover letter file could not be attached, continuing without it');
     return {
       packet: omitCoverLetter(await buildPacket(
@@ -1164,6 +1444,79 @@ function strippedCoverLetterSpec(spec: unknown): Record<string, unknown> {
   const stored = { ...((spec && typeof spec === 'object' ? spec : {}) as Record<string, unknown>) };
   delete stored._cover_letter;
   return stored;
+}
+
+/* The largest transcript that can be carried on every path, which is the same number the upload
+ * route already refuses above and for the same reason.
+ *
+ * The managed sandbox transports an upload as base64 and rejects any file over 6,000,000 characters
+ * before a browser opens, which is about 4.29 MiB decoded, per file, with no aggregate cap and no
+ * request-body limit in front of it - so a larger body is either a 400 with an INVALID_UPLOAD code
+ * or an opaque platform rejection with no run record at all, indistinguishable from an outage.
+ *
+ * The bytes it counts are packet.transcript, which is PLAINTEXT: documentBytesForPacket unseals
+ * before the packet carries anything, so the sealed object in Blob and its 28-byte envelope are
+ * invisible to every runner. At this cap that is 5,333,336 characters, comfortably under the
+ * ceiling. This paragraph used to do the sum on the sealed bytes and land on 5,333,372, which is
+ * near enough to pass a glance and wrong enough to mislead anyone deriving a different cap from it.
+ *
+ * Defence in depth rather than the enforcement point: putUserDocument refuses a larger file at the
+ * door, so this is unreachable through the shipped upload path. It is here because the packet is
+ * built from stored state that a future path could write by some other route, and because the check
+ * costs one comparison against the alternative of finding out from a runner error.
+ *
+ * Applied on every path and not only the managed one, deliberately. The ceiling belongs to the
+ * sandbox, but the packet does not know which runner will carry it: a prepare on direct Playwright
+ * can be sent through the ATS API channel, and the same bytes then travel a route the measurement
+ * was never taken on. One cap, applied where the file is decided rather than where it is delivered.
+ */
+export const MANAGED_TRANSCRIPT_MAX_BYTES = MAX_USER_DOCUMENT_BYTES;
+
+const TRANSCRIPT_UNAVAILABLE_ISSUE =
+  'You attached a transcript to this application and we could not load the file, so it is not on the form. Everything else is filled in. Attach it again from your dashboard, and nothing has been sent in the meantime.';
+const TRANSCRIPT_TOO_LARGE_ISSUE =
+  'Your transcript is larger than the 4 MB Litos can put on an application, so it is not attached. Everything else is filled in. Upload a smaller PDF and try again.';
+
+/**
+ * The transcript half of the capability decision, applied to a packet that has already been built.
+ *
+ * IT DOES NOT REBUILD, and that is the one place it departs from packetForCoverLetterCapability's
+ * shape. That function rebuilds because it WRITES: it generates a letter and then has to re-read the
+ * row to see it. Nothing here writes anything - the file either exists on the spec or it does not -
+ * so a rebuild would buy nothing and cost a second full packet, four queries and a resume fetch, on
+ * every prepare. It would also be wrong rather than merely expensive at the managed prepare, where
+ * the packet it would be handed came from a row this function never saw.
+ *
+ * IT CANNOT THROW, and neither can the load it reports on: see buildPacket. That is what stands in
+ * for the try/catch the cover letter needs, and it covers all nine of buildPacket's callers rather
+ * than the two that catch.
+ *
+ * WHAT IT DECIDES, in order:
+ *   - the form has nowhere to put a transcript: strip it, say nothing. There is no failure here, and
+ *     a sentence about a document the employer never asked for is noise on every packet that has one
+ *     stored.
+ *   - the file could not be loaded: strip it and owe her a sentence, because the application she
+ *     believes carries a transcript is about to go without one.
+ *   - the file is too large to carry: same, with the size named, because that one she can act on.
+ *
+ * Exported so the branches can be tested by calling them rather than by grepping for them. A test
+ * that greps a file cannot tell a correct branch from a deleted one, which is the argument written
+ * out at length above submissionFailureOutcome and it applies with more force here: three of these
+ * four exits decide whether a document reaches an employer.
+ */
+export function packetForTranscriptCapability(
+  packet: SubmissionPacket,
+  supported: boolean,
+): { packet: SubmissionPacket; transcriptIssue?: string } {
+  if (!supported) return { packet: omitTranscript(packet) };
+  if (packet.transcriptUnavailableReason) {
+    return { packet: omitTranscript(packet), transcriptIssue: TRANSCRIPT_UNAVAILABLE_ISSUE };
+  }
+  if (!packet.transcript) return { packet: omitTranscript(packet) };
+  if (packet.transcript.length > MANAGED_TRANSCRIPT_MAX_BYTES) {
+    return { packet: omitTranscript(packet), transcriptIssue: TRANSCRIPT_TOO_LARGE_ISSUE };
+  }
+  return { packet };
 }
 
 /** The employer this packet is for, from job_context. Empty when the packet has no company on it. */
@@ -1320,6 +1673,13 @@ export async function discoverAndResolveQuestions(
     const label = normalizeDiscoveredLabel(field.label);
     const reviewLabel = normalizeReviewQuestionLabel(field.label);
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
+    /* A radio's own option, or a composite widget's whole rendered subtree, is not a question, and
+     * recording one manufactures work the applicant cannot do: the Apply screen shows her "Yes" and
+     * asks her to answer it. The same test runs on the pre-script's ingest, so the two surfaces
+     * cannot disagree about what the form asked. Both the raw and the normalized label are tested;
+     * see the note at the matching call in postingQuestionsFromDiscovered for why. */
+    if (discoveredFieldIsNotAQuestion({ label: field.label, options: field.options })
+      || discoveredFieldIsNotAQuestion({ label: reviewLabel, options: field.options })) continue;
     // Read from the RAW label, so it has to happen before the normalized label is used anywhere:
     // normalizeDiscoveredLabel strips the employer's `*` required marker along with the handles.
     // Name and email are excluded: the fixed-field pass has already typed them into the page, and
@@ -1361,6 +1721,53 @@ export async function discoverAndResolveQuestions(
       )
       : null;
     const knownValue = resolvedField?.value ?? (known && 'value' in known ? known.value : '');
+    /* WHAT THAT SNAPPED VALUE WAS SNAPPED FROM, recorded so a later pass can tell current from stale.
+     *
+     * Only when resolveProfileField really picked off the control's list. matchedOption is false for
+     * every free-text field and for a stored answer that matched nothing, and in both of those the
+     * stored answer IS the profile value, so there is nothing to preserve and nothing to record.
+     *
+     * The value recorded is profileKnown.value, the profile's own answer for this label, because
+     * that is precisely what refreshKnownQuestionAnswers recomputes later. Equal means the profile
+     * has not moved and the snapped answer may stand; different means she has corrected something
+     * and the record is stale. It is the only fact that makes that decidable: the answer alone
+     * cannot say, and field options do not survive into the packet.
+     *
+     * A CONSENT ACCEPTANCE IS LEFT ON THIS PATH ON PURPOSE. A select-shaped consent records "Yes"
+     * here beside an answer of "I agree", and the recompute that follows is exactly the behaviour a
+     * REVOCABLE permission owes: once she turns the permission off, resolveKnownAnswer stops
+     * answering "Yes" for that label, the profile no longer says what it said, and the tick is
+     * recomputed out of any packet that has not been sent. */
+    const answerOptionSource = resolvedField?.matchedOption
+      && profileKnown && 'value' in profileKnown
+      && profileKnown.value.trim()
+      && resolvedField.value.trim().toLowerCase() !== profileKnown.value.trim().toLowerCase()
+      ? profileKnown.value
+      : undefined;
+    /* THE ACCEPTANCE, WRITTEN DOWN ON THE QUESTION IT WAS MADE ON.
+     *
+     * Litos may tick an employer's privacy statement, applicant terms or code of conduct only under
+     * the standing permission the applicant granted at onboarding. The packet must therefore be able
+     * to say so: without this the audit shows a required consent that is simply answered "Yes", which
+     * is indistinguishable from her having ticked it herself, and that is the one reading this
+     * feature must never produce.
+     *
+     * Keyed on the PROFILE resolution, never on a remembered answer. A remembered answer is her own
+     * words replayed, and labelling it as machine acceptance would misreport the opposite way.
+     *
+     * The licence comes from consentAcknowledgementLicence, the SAME call that decides whether the
+     * control may be accepted at all, so the trail cannot claim a grant the resolver did not use.
+     * For a label naming both a privacy notice and a code of conduct it names both grants. */
+    const consentLicence = profileKnown && 'value' in profileKnown
+      ? consentAcknowledgementLicence(label, ap, questionContext)
+      : null;
+    const consentTrail = consentLicence
+      ? {
+        answer_source: 'consent_permission' as const,
+        consent_permission_version: consentLicence.version,
+        ...(consentLicence.granted_at ? { consent_permission_granted_at: consentLicence.granted_at } : {}),
+      }
+      : {};
     // "I had an answer and deliberately did not pick anything off this list."
     //
     // resolveProfileField reports that as matchedOption: false, and this loop used to throw the
@@ -1439,6 +1846,10 @@ export async function discoverAndResolveQuestions(
           required: fieldIsRequired,
           portal_selector: portalSelectorForField(field),
           portal_input_type: field.inputType,
+          answer_option_source: answerOptionSource,
+          // Last, so a re-run over a packet whose provenance was stripped by a review merge stamps
+          // the acceptance back on rather than inheriting a blank.
+          ...consentTrail,
         });
       } else if (staleDraftedAnswer) {
         invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
@@ -1466,6 +1877,8 @@ export async function discoverAndResolveQuestions(
         required: fieldIsRequired,
         portal_selector: portalSelectorForField(field),
         portal_input_type: field.inputType,
+        answer_option_source: answerOptionSource,
+        ...consentTrail,
       });
       continue;
     }
@@ -1611,6 +2024,132 @@ export function unansweredRequiredBlockerLabels(
 }
 
 /**
+ * The documents this form asked for, off both measurements a prepare has, in one place.
+ *
+ * TWO SOURCES, AND ONLY ONE OF THEM CAN FIRE TODAY. Say which, because the difference decides what
+ * a screen built on this may promise.
+ *
+ * The blocker labels are the employer's own "is required and is still empty" sentences for fields
+ * no question record answers. That is the live source, on both runners, and at present it is the
+ * ONLY one.
+ *
+ * The required-file questions are the second, and NEITHER discovery pass produces one yet. The
+ * direct-Playwright walk enumerates text, email, tel, url, number, date, untyped inputs, textarea,
+ * select, radio and checkbox (lib/questionDiscovery.ts:4195) and no file input; stratus's managed
+ * discover scan builds its candidate list the same way. So this filter is empty on both paths as
+ * the code stands, and it is written anyway because it costs nothing, it is the half that will
+ * start working the day either walk is widened, and a row that appeared only after a run had
+ * already failed is the behaviour that widening fixes.
+ *
+ * The practical consequence, which no test here can catch: a required transcript control is visible
+ * to Litos only through a portal's own required-field complaint, after a run has stopped. If a
+ * portal marks the field required without emitting that sentence, this measures nothing and the
+ * dashboard shows nothing. That is unproven against a live form either way.
+ *
+ * Blockers go in first so the label that names the row is the employer's own sentence rather than
+ * whatever the discovery pass reconstructed. Everything else - the transcript vocabulary, the
+ * word boundaries, the dedupe, the one-row-per-kind collapse and the length clip - belongs to
+ * requiredDocumentAsks and is tested there.
+ */
+export function measuredRequiredDocuments(
+  unansweredRequired: readonly string[],
+  questions: readonly { question: string; required: boolean; portal_input_type?: string }[],
+): RequiredDocumentAsk[] {
+  return requiredDocumentAsks([
+    ...unansweredRequired,
+    ...questions
+      .filter((question) => question.required && question.portal_input_type === 'file')
+      .map((question) => question.question),
+  ]);
+}
+
+/**
+ * Attach the files she has already given Litos to the application that has just asked for them.
+ *
+ * THIS IS THE PROMISE, NOT A CONVENIENCE. The modal's checkbox says "Reuse this for future
+ * applications that ask" and its confirmation says the next employer that asks gets it
+ * automatically; /privacy publishes "so a later application can use the same file without us asking
+ * you for it again". Until this ran, `user_documents.reusable` was written on every upload and read
+ * as a filter by nothing, so all three sentences described behaviour the build did not have.
+ *
+ * SERVER-SIDE, AT PREPARE TIME, AND THAT IS THE DECISION. The client alternative is one call from
+ * the review screen when it notices an outstanding ask beside a matching library file, and it is
+ * simpler. It is also wrong here, three times over:
+ *
+ *   - It only reuses when she LOOKS. `preparedReviewPatch` sends straight to 'submitting' under
+ *     standing consent, so an account with automatic submission on never opens the screen that would
+ *     have done the attaching, and the promise is kept for exactly the users who never rely on it.
+ *   - It would run on a render, inside a component the 2.5s poll re-renders on every tick, which
+ *     makes "attach if missing" a write that fires repeatedly and races its own response.
+ *   - It would fight removal. "Remove this file" detaches and deletes in that order, and a screen
+ *     whose rule is "no mark plus a reusable file means attach" would put the mark straight back
+ *     between those two requests.
+ *
+ * The prepare run is where the ask is MEASURED, so it is the one moment that knows an ask exists,
+ * and it happens once per run whether or not anybody is watching.
+ *
+ * AFTER writeReview, NOT BEFORE, and inside a catch. This is additive: the application is already
+ * durably prepared by the time it runs, so a blob outage or a lost connection costs a reuse and
+ * never the run. Both writes are jsonb_set on different paths of the same column, so neither can
+ * clobber the other whichever lands first.
+ *
+ * WHAT THE APPLICANT SEES BEFORE ANYTHING IS SENT. Nothing is sent by this. The attachment lands in
+ * `spec._documents`, GET /applications/:id/submission serves it as `documents`, and the review screen
+ * lists it with a control that opens the modal and removes it. `automatic_submission_enabled` is a
+ * separate decision she made once; attaching a file she uploaded and marked reusable to an employer
+ * who asked for that exact file is the behaviour she was promised, and it is still visible and still
+ * removable at the approval gate.
+ */
+export async function reuseStoredDocuments(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  fastify: FastifyInstance,
+): Promise<void> {
+  try {
+    const open = documentAsksOpenToReuse(review, storedDocuments(row));
+    if (open.length === 0) return;
+    for (const ask of open) {
+      const document = await claimReusableDocument(row.user_id, ask.kind);
+      if (!document) continue;
+      const attached = await db.update(generated_resumes).set({
+        /* The same merge POST /applications/:id/documents uses, and for the same measured reason:
+           jsonb_set with create_missing only creates the LAST element of the path, so writing
+           '{_documents,transcript}' into a spec that has never held a document is a silent no-op
+           that reports one row updated. The `||` also keeps every other kind. */
+        spec: sql`jsonb_set(
+          coalesce(${generated_resumes.spec}, '{}'::jsonb),
+          '{_documents}',
+          coalesce(${generated_resumes.spec} -> '_documents', '{}'::jsonb) || ${JSON.stringify({
+          [ask.kind]: {
+            document_id: document.id,
+            file_name: document.file_name,
+            object_key: document.object_key,
+            attached_at: new Date().toISOString(),
+            ordered_at: null,
+            employer_label: ask.label,
+            official_requested: ask.official_requested,
+          },
+        })}::jsonb,
+          true
+        )`,
+      }).where(and(
+        eq(generated_resumes.id, row.id),
+        eq(generated_resumes.user_id, row.user_id),
+        /* Only into a kind that still has no record. She may have attached or ordered on another tab
+           between the measurement and this write, and reuse must never overwrite her own answer. */
+        sql`${generated_resumes.spec} -> '_documents' -> ${ask.kind} is null`,
+      )).returning({ id: generated_resumes.id });
+      if (attached.length === 0) continue;
+      fastify.log.info({ applicationId: row.id, kind: ask.kind }, 'Reused a stored document for a measured ask');
+    }
+  } catch (error) {
+    // Never fatal. The application is already prepared and she can still attach the file by hand;
+    // losing the run over a reuse would be the convenience costing the thing it was decorating.
+    fastify.log.error({ err: error, applicationId: row.id }, 'Could not reuse a stored document');
+  }
+}
+
+/**
  * A thrown value turned into a sentence that is never empty.
  *
  * `new Error()` carries `message === ''`, and both prepare paths feed this string to
@@ -1622,6 +2161,50 @@ export function unansweredRequiredBlockerLabels(
 export function describeDiscoveryFailure(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error);
   return raw.trim() || 'the scan failed without reporting a reason';
+}
+
+/**
+ * ONE CONTROL LITOS COULD NOT READ, NAMED ON ITS OWN.
+ *
+ * THIS CHANGES WHAT THE PACKET SAYS, NOT WHAT REACHES THE FORM. Read that sentence before trusting
+ * anything else here, because the first version of this comment claimed the opposite and was wrong.
+ *
+ * A control whose option list came back unreadable used to be pushed into `discoveryFailures`. That
+ * array is the run-level honesty gate, so a single windowed control made the packet tell her "we
+ * could not read the questions this form asks", about a form whose other questions had been read
+ * perfectly. That sentence is the defect, and a per-control sentence is the fix.
+ *
+ * What it did NOT do is change any answer. `discoveryFailures` is read in exactly five places in
+ * prepareManaged, all of them after `discoverAndResolveQuestions` and `mergeDiscoveredPortalQuestions`
+ * have already run, and neither takes it as an argument. Resolution and the merge cannot see it.
+ * Verified by running the chain at unmodified main: the merged answer is the same either way.
+ *
+ * Measured on IMC packet 920a6751, 2026-08-11: `question_9177934101` legitimately failed its option
+ * read because its list was windowed at the render cap, and `question_9176667101` beside it read
+ * fine and resolved to "January 2028 - July 2028". The applicant was told the form was unreadable.
+ * She was told that about a form Litos had read. Separately, and NOT caused by this, the graduation
+ * control was still sent a bucket rather than its resolved answer; see the open defect noted on the
+ * test fixture for where that actually comes from.
+ *
+ * The honesty the old code was protecting is kept, at the scope it belongs to: the failed control is
+ * still removed from `discoveredFields` before any alias resolution, still carried in
+ * `packet.failedFields` so no action can target it, still never silently answered, and it still
+ * holds the send. What it no longer does is speak for controls it knows nothing about.
+ *
+ * The label is preferred over the durable id because it is the only half of the pair she can find on
+ * the page; the id is the fallback for a control discovery reported without one.
+ */
+export function optionProbeAttentionReasons(
+  failures: readonly { controlId: string; reason: string }[],
+  failedFields: readonly { controlId: string; label?: string }[],
+): string[] {
+  const labelById = new Map(failedFields.map((field) => [field.controlId, field.label?.trim()]));
+  return failures.map(({ controlId, reason }) => {
+    const label = labelById.get(controlId);
+    const named = label ? `"${label.slice(0, 80)}"` : `the control ${controlId.slice(0, 80)}`;
+    return `Litos could not read the choices ${named} offers, so it was left for you rather than `
+      + `answered with a guess (${reason.slice(0, 160)}). The other questions on this form are unaffected.`;
+  });
 }
 
 /**
@@ -1665,7 +2248,10 @@ async function prepareManaged(
     submission_run_id: runId,
     submission_error: undefined,
   }));
-  let packet = omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal)));
+  // Neither document goes on the discovery pass. It runs before anything is known about the form,
+  // and its whole job is to read the page; carrying a file there would spend an upload action on a
+  // control this run has not yet established exists.
+  let packet = omitTranscript(omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal))));
 
   // R-055 on the managed path: a cheap first call fills only the fixed fields and asks
   // stratus-browser-cloud's 'discover' action (PR #7) to scan the resulting page for custom
@@ -1767,9 +2353,17 @@ async function prepareManaged(
     optionProbeBatchFailures,
     discoveryRoleCapability,
   );
+  /* NOT pushed into discoveryFailures. That array is the WHOLE-FORM honesty gate, and a per-control
+   * read failure promoted into it made Litos tell her it could not read any of this form's questions
+   * when it had read all but one of them. The failure is real and stays visible, and it still holds
+   * the send below; what changes is that it now speaks only for the control it happened to.
+   *
+   * This is a change to the packet's account of itself, not to any answer. See
+   * optionProbeAttentionReasons for why resolution cannot see this array at all. */
   if (optionProbe.failures.length > 0) {
-    discoveryFailures.push(
-      `closed-control option discovery failed: ${optionProbe.failures.map(({ controlId, reason }) => `${controlId}: ${reason}`).join('; ').slice(0, 800)}`,
+    fastify.log.error(
+      { applicationId: row.id, portal, controls: optionProbe.failures },
+      'Closed controls whose option list could not be read, so each one alone is left for the applicant',
     );
   }
   const fieldOptions = optionProbe.options;
@@ -1778,6 +2372,7 @@ async function prepareManaged(
     if (!controlId || !optionProbe.failedIds.has(controlId)) return [];
     return [{ controlId, label: field.label, selector: field.selector, inputType: field.inputType }];
   });
+  const optionProbeAttention = optionProbeAttentionReasons(optionProbe.failures, failedFields);
   const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
     .filter((field) => {
       const controlId = managedOptionProbeControlId(field);
@@ -1790,7 +2385,20 @@ async function prepareManaged(
     fastify,
     packetUsesControlledResumeFixture(portal),
   );
-  packet = coverLetterOutcome.packet;
+  /* The same question about the second document, off the same discovery read, and applied to the
+   * packet the cover-letter step just produced rather than to a rebuild - see
+   * packetForTranscriptCapability for why a rebuild here would be handed the wrong row. */
+  const transcriptSupported = managedResultHasTranscriptUpload(discoveryResult, portal);
+  const transcriptOutcome = packetForTranscriptCapability(coverLetterOutcome.packet, transcriptSupported);
+  if (coverLetterOutcome.packet.transcriptUnavailableReason) {
+    // The raw reason to the log, the fixed sentence to the applicant, same split as the cover
+    // letter's two failures. Whoever has to fix a dead pointer reads logs.
+    fastify.log.warn(
+      { applicationId: row.id, reason: coverLetterOutcome.packet.transcriptUnavailableReason },
+      'Attached transcript could not be loaded, continuing without it',
+    );
+  }
+  packet = transcriptOutcome.packet;
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
   const applicationProfile = applicationProfileForPacket(
@@ -1934,6 +2542,16 @@ async function prepareManaged(
      attention_reason. This branch is only ever populated when the form HAS a cover-letter control,
      because packetForCoverLetterCapability returns no issue when `supported` is false. */
   const coverLetterAttention = coverLetterOutcome.coverLetterIssue ? [coverLetterOutcome.coverLetterIssue] : [];
+  /* A transcript she attached that this run could not carry, and it gates `safe` below for a
+   * different reason than the cover letter does.
+   *
+   * The letter gates because /submission/approve refuses the packet outright, so calling it ready
+   * would offer a Send button the server will not honour. Nothing refuses a missing transcript: the
+   * application is sendable, and under standing consent `safe` turns straight into a click in this
+   * same call. That is exactly why this has to hold it back. An application she attached a
+   * transcript to, sent without it and without her being told, is the silent drop this file spends
+   * most of its length preventing in other forms. Not safe means she sees the sentence and decides. */
+  const transcriptAttention = transcriptOutcome.transcriptIssue ? [transcriptOutcome.transcriptIssue] : [];
   const filledFields = managedResultFilledFields(result);
   // Both passes count as evidence the form was reached. The discovery pass enumerates the live
   // inputs and probes the core fields, so a run whose fill pass came back empty can still have
@@ -1950,6 +2568,14 @@ async function prepareManaged(
   // not, and it is logged as an error because a non-zero count is a product defect first and the
   // applicant's problem second.
   const unansweredRequired = unansweredRequiredBlockerLabels(blockers, mergedQuestions);
+  /* The same labels again, read for WHICH DOCUMENT rather than HOW MANY.
+   *
+   * unansweredRequired above is a count and a sentence: it says the employer wants something there
+   * is nowhere to type. This says the employer wants a transcript, which is a thing the applicant
+   * can actually hand over, and it is the field the dashboard draws its upload row from. Same
+   * measurement, two readings, and they are separated because the count is honest about everything
+   * while only some of it is actionable. */
+  const requiredDocuments = measuredRequiredDocuments(unansweredRequired, mergedQuestions);
   if (unansweredRequired.length > 0 || discoveryFailures.length > 0) {
     fastify.log.error({
       applicationId: row.id,
@@ -1958,6 +2584,7 @@ async function prepareManaged(
       discoveredCount: discoveredFields.length,
       questionCount: mergedQuestions.length,
       unansweredRequired,
+      requiredDocuments: requiredDocuments.map((ask) => ask.kind),
     }, 'Required fields with no answerable question record');
   }
   const honestyReasons = discoveryHonestyReasons(discoveryFailures[0], unansweredRequired);
@@ -2015,9 +2642,11 @@ async function prepareManaged(
     ...discoveryAttention,
     ...evidenceBlockers,
     ...coverLetterAttention,
+    ...transcriptAttention,
     ...answerLossReasons,
     ...unexplainedAnswerReasons,
     ...budgetShortfallReasons,
+    ...optionProbeAttention,
     ...honestyReasons,
   ];
   const attentionCategories = attentionCategoriesForReasons(attentionReasons);
@@ -2034,17 +2663,26 @@ async function prepareManaged(
   // call, so this is the only thing between an unanswered required question and a click on this
   // path. Not safe means ready_for_final_approval, where she is shown the blank question and can
   // answer it - which is exactly the loop the run gate had no exit from.
+  //
+  // The optionProbe term holds the send for exactly as long as it did while a per-control read
+  // failure was promoted to the run level. Narrowing the blast radius of the MESSAGE is not
+  // permission to send a form carrying a question Litos knowingly left blank. It reads the failure
+  // ARRAY rather than the rendered prose, for the reason the direct path's comment below gives: a
+  // sentence that renders to nothing must never be able to restore `safe`.
   const unansweredRequiredQuestions = blankRequiredQuestionLabels(mergedQuestions);
   const safe = blockers.length === 0
     && discoveryAttention.length === 0
     && evidenceBlockers.length === 0
     && discoveryFailures.length === 0
+    && optionProbe.failures.length === 0
     && coverLetterAttention.length === 0
     // A question the run never attempted is an answer she gave Litos and Litos did not use. The
     // submit path refuses outright rather than trade one away; this is the same refusal on the path
     // that has no submit button to withhold, and it is what makes the trim above safe to allow.
     && unattemptedQuestions.length === 0
-    && unansweredRequiredQuestions.length === 0;
+    && unansweredRequiredQuestions.length === 0
+    // See transcriptAttention: this one holds back a send nothing else would refuse.
+    && transcriptAttention.length === 0;
   /* A FILL RUN THAT FOUND A SECURITY-CODE SCREEN HAS SUBMITTED THIS APPLICATION.
    *
    * Measured 2026-08-08: three Greenhouse packets (Redwood Materials, Scale AI, Cresta) came out of
@@ -2083,6 +2721,30 @@ async function prepareManaged(
       'A fill run reached an emailed security-code screen, so this application was submitted without authorization',
     );
   }
+  const extensionHandoffUrl = managedExtensionHandoffUrl(
+    portal,
+    result.url,
+    networkAccessRestriction,
+    captchaAttention,
+  );
+  const preparedAttentionReason = [
+    ...(securityCode ? [securityCodeAttentionReason(securityCode)] : []),
+    ...attentionReasons,
+  ].join('\n') || undefined;
+  const preparedAttentionCategories = securityCode
+    ? ['security_code' as const, ...attentionCategories.filter((category) => category !== 'security_code')]
+    : attentionCategories.length > 0 ? attentionCategories : undefined;
+  const extensionHandoffBinding = extensionHandoffUrl
+    ? createDashboardHandoffBinding({
+      applicationId: row.id,
+      userId: row.user_id,
+      frozenUrl: current.portal_url,
+      frozenHandoffUrl: extensionHandoffUrl,
+      frozenAtsName: current.ats_name,
+      attentionReason: preparedAttentionReason,
+      attentionCategories: preparedAttentionCategories,
+    })
+    : undefined;
   const review = nextReview(current, {
     ...preparedReviewPatch(authorization, safe),
     ...(securityCode
@@ -2092,7 +2754,21 @@ async function prepareManaged(
         submission_attempted_at: securityCode.requested_at,
       }
       : {}),
-    ...(captchaAttention
+    /* A SECURITY-CODE SCREEN OUTRANKS THE CAPTCHA STALL, and until now the two branches simply both
+     * applied to this same patch.
+     *
+     * A stall is the record of a HUMAN-VERIFICATION wait: it is what the "waiting on you" queue is
+     * ordered by and what the time-to-resolution measurement is computed from. A run that reached an
+     * emailed security-code screen is not waiting on a human verification, it is waiting on eight
+     * characters out of her mailbox, and it already carries that state in `security_code` plus its
+     * own attention category. Writing a human_verification stall beside it puts a row in the CAPTCHA
+     * queue that no CAPTCHA is holding, and counts it in the stall metrics as one, which is the
+     * metric confirming a challenge nobody saw.
+     *
+     * The captcha ATTENTION CATEGORY is untouched: the page really may have carried a widget, and
+     * the categories list is allowed to name more than one thing. It is the stall - the queue's
+     * entry and the clock - that must belong to exactly one wait. */
+    ...(captchaAttention && !securityCode
       ? beginStall(current, {
         surface: 'server_run',
         // Read off the page's own markup rather than hard-coded. `unknown` was written on every one
@@ -2118,13 +2794,13 @@ async function prepareManaged(
       })
       : {}),
     submission_run_id: runId,
-    extension_handoff_url: managedExtensionHandoffUrl(
-      portal,
-      result.url,
-      networkAccessRestriction,
-      captchaAttention,
-    ),
+    extension_handoff_url: extensionHandoffUrl,
+    extension_handoff_binding: extensionHandoffBinding,
     filled_fields: filledFields,
+    /* The documents the form asked for that this run could not supply. Written as an array on every
+     * prepare, empty included, so an unmeasured packet (undefined) stays distinguishable from a
+     * measured one that owes nothing. See ApplicationReviewState.required_documents. */
+    required_documents: requiredDocuments,
     // The other half of filled_fields, and it was always empty before: what the runner tried and
     // could not leave on the form. See managedAnswerLossReasons.
     skipped_reasons: answerLossReasons,
@@ -2157,21 +2833,38 @@ async function prepareManaged(
       }
       : {}),
     cover_letter_attached: Boolean(packet.coverLetter),
+    /* Whether this form has somewhere to put a transcript, measured by the discovery pass.
+     *
+     * Written including false, because the SUBMIT run re-derives its attach decision from this flag
+     * rather than probing the page again - it has no discovery pass of its own. A prepare that
+     * measured the capability and did not write it down produces the one failure with no symptom:
+     * the transcript attaches on the preview she approves and is missing from the application that
+     * is actually sent, with nothing recorded either way.
+     *
+     * But written ONLY when the discovery pass actually ran. `runManagedBrowser`'s catch above
+     * returns null for any failure, and managedResultHasTranscriptUpload(null) is false, so writing
+     * this unconditionally records "this employer's form has nowhere to put a transcript" whenever
+     * discovery merely errored. That is a measurement Litos never took, and the screen states it to
+     * her as fact: the ask is filed undeliverable, the Add control is withheld, and she is told to
+     * go and finish the application by hand on a form that may well have taken the file. Absent
+     * means never measured, which is the same tri-state cover_letter_required uses ten lines above
+     * and the same one the website reads. A discovery failure already holds the run back on its own
+     * evidence; it must not also invent a fact about the employer. */
+    ...(discoveryFailures.length === 0 ? { transcript_supported: transcriptSupported } : {}),
     // The security-code sentence LEADS when there is one, and it leads because it is the only line
     // here that says an application has already reached the employer. The blockers below it are
     // still worth reading - they describe the form that was sent - but a list of empty fields shown
     // above "this was submitted" reads as a form that was not.
-    attention_reason: [
-      ...(securityCode ? [securityCodeAttentionReason(securityCode)] : []),
-      ...attentionReasons,
-    ].join('\n') || undefined,
-    attention_categories: securityCode
-      ? ['security_code' as const, ...attentionCategories.filter((category) => category !== 'security_code')]
-      : attentionCategories.length > 0 ? attentionCategories : undefined,
+    attention_reason: preparedAttentionReason,
+    attention_categories: preparedAttentionCategories,
     handoff_expires_at: new Date(Date.now() + HANDOFF_WINDOW_MS).toISOString(),
     submission_error: undefined,
   });
   await writeReview(row, review);
+  /* The ask has just been measured, so this is the first moment anything knows this employer wants a
+     file she may already have given Litos. See reuseStoredDocuments for why it runs here and not on
+     the review screen, and why it runs after the write rather than before it. */
+  await reuseStoredDocuments(row, review, fastify);
   fastify.log.info({
     applicationId: row.id,
     portal,
@@ -2200,7 +2893,10 @@ async function prepareManagedAttendedAccountGate(
     submission_run_id: runId,
     submission_error: undefined,
   }));
-  const packet = omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal)));
+  // No document reaches an account gate. This probe sends no identity, file, answer, consent,
+  // CAPTCHA or submit action by design, and a transcript is the last thing that should be the
+  // exception: the packet is built here only to validate it before Chrome is offered the handoff.
+  const packet = omitTranscript(omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal))));
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
   const result = await runManagedBrowser(
     applicationUrl,
@@ -2211,11 +2907,24 @@ async function prepareManagedAttendedAccountGate(
   const attentionReason = hold?.reason
     ?? 'Litos could not verify the exact account gate for this application, so it did not enter any information or send anything. Open the saved company page in Chrome to continue.';
   const attentionCategories = hold?.categories ?? ['form_not_reached' as const];
+  const extensionHandoffUrl = hold ? canonicalSupportedPortalUrl(result.url, portal) : undefined;
+  const extensionHandoffBinding = extensionHandoffUrl
+    ? createDashboardHandoffBinding({
+      applicationId: row.id,
+      userId: row.user_id,
+      frozenUrl: current.portal_url,
+      frozenHandoffUrl: extensionHandoffUrl,
+      frozenAtsName: current.ats_name,
+      attentionReason,
+      attentionCategories,
+    })
+    : undefined;
   const review = nextReview(current, {
     status: 'needs_attention',
     submission_run_id: runId,
     filled_fields: [],
-    extension_handoff_url: hold ? canonicalSupportedPortalUrl(result.url, portal) : undefined,
+    extension_handoff_url: extensionHandoffUrl,
+    extension_handoff_binding: extensionHandoffBinding,
     ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
     ...(packet.applicantSnapshot ? { applicant_snapshot: packet.applicantSnapshot } : {}),
     verification: { status: hold?.kind === 'security_code' ? 'handoff' : 'not_needed' },
@@ -2241,11 +2950,35 @@ async function prepareManagedAttendedAccountGate(
 }
 
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
-  const stored = row.spec as StoredSpec;
-  const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
-  let current = readApplicationReview(stored);
+  let current = readApplicationReview(row.spec);
   if (!current) throw new Error('We do not have a link to the company application page');
   current = await repairReviewPortalFromMonitoredJob(row, current);
+  /* The audit is also where a packet past its retention window gets its file rebuilt, so the row it
+     returns can carry a NEW resume_object_key. Everything below reads from that row, never from
+     inputRow, or the run assembles a packet from the key the sweep deleted. */
+  const packetAudit = await currentPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
+  if (!packetAudit.valid) {
+    fastify.log.warn(
+      { applicationId: row.id, code: packetAudit.code },
+      'Application preparation withheld because the exact packet audit is missing or stale',
+    );
+    await writeReview(row, nextReview(current, {
+      status: 'needs_attention',
+      attention_reason: packetAudit.reason,
+      /* An expired packet is not an evidence gap. It gets the category whose next step is the one
+         that works, a regenerate, rather than the bucket that reads as "Litos broke, try again". */
+      attention_categories: packetAudit.code === 'PACKET_RESUME_EXPIRED' ? ['packet_expired'] : ['evidence_gap'],
+      submission_authorization: undefined,
+      submission_claimed_at: undefined,
+      submission_claim_id: undefined,
+    }));
+    return;
+  }
+  row = packetAudit.row;
+  const stored = row.spec as StoredSpec;
+  const verificationRecipient = readPinnedApplicantEmail(stored)?.address;
+  // Re-read: a retention restore rewrote _review with a fresh audit and acknowledgement.
+  current = readApplicationReview(stored) ?? current;
   const portalUrl = current.portal_url;
   if (!portalUrl) throw new Error('We do not have a link to the company application page');
   const portal = detectPortal(portalUrl);
@@ -2389,7 +3122,9 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       submission_error: undefined,
     }));
     await page.goto(portalUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    await navigateToApplicationForm(page, portal); // no-op except SmartRecruiters's JD-page/form-page split
+    // SmartRecruiters follows its captured link. Workable canonicalizes to /apply and clears its
+    // optional-cookie overlay. Every other portal is a no-op here.
+    await navigateToApplicationForm(page, portal);
     const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
       .from(users).where(eq(users.id, row.user_id)).limit(1);
     const verificationRoute = await resolveVerificationEmailRoute({
@@ -2409,13 +3144,27 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       applicationId: row.id,
     });
     const coverLetterSupported = await hasCoverLetterUpload(page, portal);
-    const { packet, coverLetterIssue } = await packetForCoverLetterCapability(
+    const builtOutcome = await packetForCoverLetterCapability(
       row,
       coverLetterSupported,
       fastify,
       packetUsesControlledResumeFixture(portal),
     );
-    const coverLetterAttention = coverLetterIssue ? [coverLetterIssue] : [];
+    // The direct path reads the capability off the live page it already has open, where the managed
+    // one has to ask the discovery run. Same question, same field written below, and it has to be
+    // asked on both or the transcript row fires on some portals and looks broken on the rest.
+    const transcriptSupported = await hasTranscriptUpload(page, portal);
+    const transcriptOutcome = packetForTranscriptCapability(builtOutcome.packet, transcriptSupported);
+    if (builtOutcome.packet.transcriptUnavailableReason) {
+      fastify.log.warn(
+        { applicationId: row.id, reason: builtOutcome.packet.transcriptUnavailableReason },
+        'Attached transcript could not be loaded, continuing without it',
+      );
+    }
+    const packet = transcriptOutcome.packet;
+    const coverLetterAttention = builtOutcome.coverLetterIssue ? [builtOutcome.coverLetterIssue] : [];
+    // See the managed path's transcriptAttention: this holds back a send that nothing else refuses.
+    const transcriptAttention = transcriptOutcome.transcriptIssue ? [transcriptOutcome.transcriptIssue] : [];
 
     // R-055: discover and resolve the posting's own custom questions before filling, so a
     // dashboard-only submission does not depend on the extension having run first.
@@ -2498,9 +3247,30 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       blockers: result.blockers,
       discovered,
     }, packet);
-    // What the scan owes her when it did not run. The second argument is empty because this path
-    // does not measure required-and-empty blockers against the question list the way prepareManaged
-    // does; the admission that matters here is the first one, and it is the one this run can make.
+    /* THE MEASUREMENT THIS PATH NEVER TOOK, AND THE REASON THE PROSE STILL DOES NOT USE IT.
+     *
+     * prepareManaged compares the portal's required-and-empty blockers against the question list
+     * and writes down which required fields the applicant was given nowhere to answer. This path
+     * did not compute it at all: the second argument to discoveryHonestyReasons below was a
+     * hard-coded empty array, and no other line here made the comparison either. So a required
+     * transcript on a Greenhouse posting produced a structured ask on the managed runner and
+     * nothing whatsoever on the direct one, on the same form. A dashboard row keyed on that field
+     * would have fired on some portals and looked broken on the rest, which is indistinguishable
+     * from the feature being broken.
+     *
+     * The labels are now measured here too, for required_documents on the patch below.
+     *
+     * They are deliberately NOT passed to discoveryHonestyReasons. That function renders prose into
+     * attention_reason, and turning it on here would add a sentence to every direct-path packet
+     * carrying an unanswerable required field - a user-visible change to what stopped runs say,
+     * on a path whose send decision (`safe`, below) does not read this count at all. Two different
+     * changes, and only one of them was asked for. Whoever takes the second should note that the
+     * two paths would then agree, which is an argument for it rather than against.
+     */
+    const unansweredRequired = unansweredRequiredBlockerLabels(sanitizedBlockers, mergedQuestions);
+    const requiredDocuments = measuredRequiredDocuments(unansweredRequired, mergedQuestions);
+    // What the scan owes her when it did not run. See the note directly above for why the second
+    // argument stays empty now that the measurement exists.
     const honestyReasons = discoveryHonestyReasons(discoveryFailures[0], []);
     /* Same reasoning as the managed path above: the required-answer check moved off the run and on
      * to the send, and this is the direct-Playwright path's send decision.
@@ -2524,7 +3294,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       // says the packet is missing something we owed it, the second says we never read the form
       // well enough to know what it owed. Either alone is enough; they are summed, not chosen
       // between, so a run carrying both is not counted as carrying one.
-      attentionCount: discoveryAttention.length + coverLetterAttention.length + discoveryFailures.length,
+      //
+      // transcriptAttention is the third, and the only one no server refusal backs up: nothing
+      // rejects a packet for a missing transcript, so standing consent would simply send it.
+      attentionCount: discoveryAttention.length + coverLetterAttention.length + discoveryFailures.length + transcriptAttention.length,
       unansweredRequiredCount: blankRequiredQuestionLabels(mergedQuestions).length,
       verificationStatus: verification.status,
     });
@@ -2534,6 +3307,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       browser_context_id: contextId,
       browser_session_id: session.id,
       filled_fields: result.filledFields,
+      /* Same field, same shape, same always-written array as the managed path. Writing it on both
+       * is the whole of G5: measured on one runner only, the dashboard row fires on some portals
+       * and is silently absent on the rest. See ApplicationReviewState.required_documents. */
+      required_documents: requiredDocuments,
       // Which address this form was filled with, and why. See ApplicationReviewState.applicant_email.
       ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
       preview_screenshot_url: preview.url,
@@ -2550,14 +3327,21 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         ? { cover_letter_required: blockersRequireCoverLetter(sanitizedBlockers) }
         : {}),
       cover_letter_attached: Boolean(packet.coverLetter),
+      // Written here for the same reason it is written on the managed patch: the submit run reads
+      // this flag instead of probing, so a prepare that measured the capability and did not record
+      // it sends an application missing a document the preview showed attached.
+      transcript_supported: transcriptSupported,
       // Already human on this path, but the BLOCKERS are sanitized anyway so both providers are
       // held to one guarantee and a future change to either cannot quietly reintroduce identifiers.
       // The other two arrays do not go through the sanitizer and do not need to: they are written
       // here, in this repo, in the product's own voice, and neither one interpolates provider or
       // model text. Sending them through it would not have caught the cover-letter leak either,
       // since that message was prose and prose passes straight through.
+      // The two document sentences sit together, and honestyReasons stays immediately after the
+      // cover letter's, because a test pins that pair by its exact text: the scan-failed admission
+      // being present at all is what the swallow fix bought.
       attention_reason:
-        [...sanitizedBlockers, ...discoveryAttention, ...evidenceBlockers, ...coverLetterAttention, ...honestyReasons]
+        [...sanitizedBlockers, ...discoveryAttention, ...evidenceBlockers, ...transcriptAttention, ...coverLetterAttention, ...honestyReasons]
           .join('\n') || undefined,
       // The only path that OBSERVES a challenge on a board nobody had typed as gated, which makes it
       // the one that matters most. Without it the stall is written only for JazzHR and BambooHR,
@@ -2576,6 +3360,9 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       submission_error: undefined,
     });
     await writeReview(row, review);
+    /* Both prepare paths, for the reason both of them write required_documents: measured on one
+       runner only, the promise is kept on some portals and quietly broken on the rest. */
+    await reuseStoredDocuments(row, review, fastify);
     fastify.log.info({ applicationId: row.id, portal, status: review.status }, 'Application portal prepared');
   }
 }
@@ -2664,7 +3451,18 @@ async function submitControlled(row: ResumeRow, review: ApplicationReviewState, 
 }
 
 function packetForApiSubmission(review: ApplicationReviewState, builtPacket: SubmissionPacket): SubmissionPacket {
-  return review.cover_letter_supported === false ? omitCoverLetter(builtPacket) : builtPacket;
+  const withCoverLetter = review.cover_letter_supported === false ? omitCoverLetter(builtPacket) : builtPacket;
+  /* THE TRANSCRIPT READS THE FLAG THE OTHER WAY ROUND FROM THE LETTER, and the asymmetry is the
+   * point rather than an oversight.
+   *
+   * The letter is kept unless the prepared form explicitly rejected it, because an unmeasured packet
+   * predates the field and a letter she approved should still go. The transcript is dropped unless
+   * the form was explicitly measured as able to take one: every packet carrying a transcript was
+   * prepared on a build that writes transcript_supported on both prepare paths, so `undefined` here
+   * means the file was attached after the last prepare and no run has ever looked at this form for
+   * somewhere to put it. Attaching on a guess sends an unasked-for document, in her name, through a
+   * channel where nobody sees the form first. */
+  return review.transcript_supported === true ? withCoverLetter : omitTranscript(withCoverLetter);
 }
 
 async function submitViaAtsSubmissionChannel(
@@ -2746,6 +3544,27 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
 } = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
+  const packetAudit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
+  if (!packetAudit.valid) {
+    const finishingSecurityCode = Boolean(options.securityCode) && Boolean(current.security_code);
+    fastify.log.error(
+      { applicationId: row.id, code: packetAudit.code },
+      'Submission withheld because the exact packet audit is missing or stale',
+    );
+    await writeReview(row, nextReview(current, {
+      status: finishingSecurityCode ? 'awaiting_security_code' : 'needs_attention',
+      attention_reason: finishingSecurityCode
+        ? `${securityCodeAttentionReason(current.security_code!)}\n${packetAudit.reason}`
+        : packetAudit.reason,
+      attention_categories: packetAudit.code === 'PACKET_RESUME_EXPIRED'
+        ? (finishingSecurityCode ? ['security_code', 'packet_expired'] : ['packet_expired'])
+        : (finishingSecurityCode ? ['security_code', 'evidence_gap'] : ['evidence_gap']),
+      submission_authorization: undefined,
+      submission_claimed_at: undefined,
+      submission_claim_id: undefined,
+    }));
+    return;
+  }
   const leadIssues = runnerLeadAlignmentIssues(row);
   if (leadIssues.length > 0) {
     fastify.log.error(
@@ -2830,6 +3649,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     }));
     return;
   }
+  /* Adopted here, not earlier: a retention restore inside the audit gives the packet a new
+     resume_object_key, and claimSubmission and everything after it must work from that row. */
+  row = packetAudit.row;
   const claimedRow = await claimSubmission(row, options.claimAlreadyHeld);
   if (!claimedRow) return;
   row = claimedRow;
@@ -2984,7 +3806,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       throw new CaptchaUnresolvedError('before_fill', managedCaptchaProvider(captchaProbe, portal));
     }
     const builtPacket = await buildPacket(row, packetUsesControlledResumeFixture(portal));
-    const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    const withCoverLetter = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    // Re-derived from what the prepare measured, not probed again: this run has no discovery pass,
+    // and the form it is about to submit is the one the prepare read. See packetForApiSubmission for
+    // why the transcript needs an explicit true where the letter needs only "not explicitly false".
+    const packet = claimedReview.transcript_supported === true
+      ? withCoverLetter
+      : omitTranscript(withCoverLetter);
     const verificationRequestedAt = new Date();
     /* THE FIRST HALF IS THE SAME RUN WHETHER OR NOT A CODE IS IN HAND, and that is the fix.
      *
@@ -2993,18 +3821,62 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * renders one after a submit has been refused. So a code cannot be attached to this list. It is
      * attached to the CONTINUATION below, which runs on the very DOM this submit produced. */
     const initialActions = buildManagedPortalActions(portal, packet, true);
+    /* NO continuationCheckpoint, AND THE COMMENT THAT USED TO SIT HERE WAS SIMPLY WRONG.
+     *
+     * It said "an ordinary unknown receipt does not offer a continuation, so it needs an explicit
+     * checkpoint". Read against the merged runner, stratus-browser-cloud@48ea9b5:
+     *
+     *     const pressedUnknown = phase === 0 && submitOutcome.pressed === true
+     *       && submitOutcome.state === 'unknown';
+     *     const continuationOffered = input.requestContinuation === true
+     *       && (Boolean(humanVerification) || input.continuationCheckpoint === true || pressedUnknown);
+     *
+     * pressedUnknown alone already offers it. The flag bought nothing, and it cost two things.
+     *
+     * FIRST, the observation window. receiptObservationOnly requires continuationCheckpoint to be
+     * absent, and it is what caps the held employer page at 15 seconds. With the flag the cap became
+     * this caller's full clamped TTL, so a live sandbox sat on the employer's post-submit page for
+     * minutes rather than for the seconds the one read-only look needs.
+     *
+     * SECOND, and worse, continuationOffered became true for EVERY managed submit outcome, including
+     * confirmed, rejected and not_attempted. continuationEligible returns that value verbatim, so
+     * keepAlive stayed true and sandbox.stop() was skipped in the finally of every successful
+     * submission, leaking one sandbox per application while the runner waited on a continuation
+     * nothing was going to send. */
     const result = await runManagedBrowser(
       applicationUrl,
       initialActions,
-      { allowSubmit: true, requestContinuation: true, continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS },
+      managedApplicationSubmitOptions(SECURITY_CODE_CONTINUATION_TTL_SECONDS),
     );
+    const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);
+    const initialSubmitOutcome = readManagedSubmitOutcome(result);
+    const initialChallenge = securityCodeChallengeMatchesRecipient(initialChallengeCandidate, packet.email)
+      ? initialChallengeCandidate
+      : null;
+    if (initialChallengeCandidate && initialSubmitOutcome?.pressed === false && !initialChallenge) {
+      await writeReview(row, preClickSecurityRecipientMismatchReview(
+        claimedReview,
+        initialChallengeCandidate,
+        verificationRequestedAt.toISOString(),
+      ));
+      return;
+    }
     // Required-field confirmation is a barrier inside the same remote action list, immediately
     // before submit. Require its per-field proof as well: an older runner that ignores or does not
     // understand the protocol must not be allowed to turn a silent fill into a submitted state.
-    assertManagedRequiredFieldsConfirmed(result, 'application');
+    if (managedApplicationProofIsRequired(initialChallenge, initialSubmitOutcome)) {
+      assertManagedRequiredFieldsConfirmed(result, 'application');
+    }
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
-    const initialChallenge = readManagedSecurityCodeChallenge(result);
+    const initialSecurityCodeState = initialChallenge
+      ? beginSecurityCodeState({
+        challenge: initialChallenge,
+        attemptedAt: verificationRequestedAt.toISOString(),
+        authorized: true,
+        existing: claimedReview.security_code,
+      })
+      : claimedReview.security_code;
     /* THE SECOND HALF HAPPENS ON THE PAGE THE FIRST HALF PRODUCED, and there is now only one way in.
      *
      * WHAT WAS MEASURED, on a live Cresta application on 2026-08-09. Greenhouse emailed this
@@ -3022,10 +3894,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * stale, and the packet's own attention_reason told her, honestly and uselessly, to "use the
      * newest email".
      *
-     * So there is one branch, not two. The run that raises the challenge is the run that answers it:
-     * it holds its page open, reads the code its own submit caused out of the connected mailbox, and
-     * types it into the control that is still standing in front of it. No second send, and therefore
-     * nothing to go stale.
+     * So there is one continuation branch, not a resend branch. A newly raised challenge reads the
+     * code its own submit caused. A retained Greenhouse challenge may instead read the newest code
+     * already bound to this exact active application alias during the preceding 24 hours. In both
+     * cases the security-code control is already standing, so no second application send occurs.
      *
      * THE WAIT IS BOUNDED AND SHORT BECAUSE THE READER IS NOT A PERSON. A held browser session is a
      * bad place to wait for a human to open an email; it is a fine place to wait a minute for a
@@ -3045,9 +3917,23 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         outcome: 'superseded',
       });
     }
-    // The code this run actually typed, and the only kind there is: one read in-session, from the
-    // window opened by this run's own submit. Null until a mailbox read produces one.
+    // The code this run actually typed. It is either read just after this run raises the wall, or,
+    // for an already standing Greenhouse wall only, is the newest authenticated code for this exact
+    // active application alias. Null until a mailbox read produces one.
     let enteredCode: string | null = null;
+    let enteredSecurityCodeState = initialSecurityCodeState;
+    const recordEnteredCodeOutcome = (
+      outcome: SecurityCodeAttempt['outcome'],
+      at: string,
+    ): ApplicationReviewState['security_code'] => {
+      if (!enteredCode || !enteredSecurityCodeState) return enteredSecurityCodeState;
+      enteredSecurityCodeState = withSecurityCodeAttempt(enteredSecurityCodeState, {
+        at,
+        fingerprint: securityCodeFingerprint(row.id, enteredCode),
+        outcome,
+      });
+      return enteredSecurityCodeState;
+    };
     if (initialChallenge && managedResultNeedsEmailVerification(result)) {
       const requestedAt = verificationRequestedAt.toISOString();
       const continuationExpiresAt = result.continuationExpiresAt;
@@ -3092,10 +3978,48 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           permissionGranted: true,
           expectedRecipient: packet.email,
           applicationId: row.id,
+          standingChallenge: initialSubmitOutcome?.pressed === false,
           attempts: SECURITY_CODE_MAILBOX_ATTEMPTS,
           delayMs: SECURITY_CODE_MAILBOX_DELAY_MS,
         });
-        if (prepared.status === 'ready' && Date.parse(continuationExpiresAt) > Date.now()) {
+        const codeWasAlreadyAttempted = prepared.status === 'ready'
+          && Boolean(initialSecurityCodeState && findSecurityCodeAttempt(
+            initialSecurityCodeState,
+            securityCodeFingerprint(row.id, prepared.code),
+          ));
+        if (prepared.status === 'ready' && !codeWasAlreadyAttempted && Date.parse(continuationExpiresAt) > Date.now()) {
+          const actionAuthorizationValid = await authorizationValidAtClick(row, claimedReview);
+          const actionVerificationRoute = await resolveVerificationEmailRoute({
+            userId: row.user_id,
+            applicationId: row.id,
+            expectedRecipient: packet.email,
+          });
+          const actionPersonalVerificationEnabled = verificationRoute === 'personal_address'
+            ? (await db.select({ enabled: users.automatic_verification_enabled })
+              .from(users).where(eq(users.id, row.user_id)).limit(1))[0]?.enabled === true
+            : false;
+          const actionVerificationRouteValid = verificationRoute === 'application_alias'
+            ? actionVerificationRoute === 'application_alias'
+            : verificationRoute === 'personal_address'
+              && actionVerificationRoute === 'personal_address'
+              && actionPersonalVerificationEnabled;
+          if (!actionAuthorizationValid || !actionVerificationRouteValid) {
+            if (!initialSecurityCodeState) throw new Error('Managed security-code state was not initialized');
+            const actionBlockCause = !actionAuthorizationValid
+              ? 'authorization_revoked' as const
+              : verificationRoute === 'personal_address'
+                  && actionVerificationRoute === 'personal_address'
+                  && !actionPersonalVerificationEnabled
+                ? 'email_permission_revoked' as const
+                : 'email_route_changed' as const;
+            await writeReview(row, preClickVerificationContinuationBlockedReview(
+              claimedReview,
+              initialSecurityCodeState,
+              actionBlockCause,
+              initialSubmitOutcome?.pressed === true ? verificationRequestedAt.toISOString() : undefined,
+            ));
+            return;
+          }
           /* THE PACKET'S OWN SUBMIT ACTION, CARRYING THE CODE, and it is one action rather than ten.
            *
            * securityCodeContinuationActions derives the terminal atomic submit from the list this
@@ -3105,6 +4029,19 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
            * the fallback for a packet with no atomic submit to derive from, which is the same
            * upstream gate portalCanAutoSubmit already applies. */
           enteredCode = prepared.code;
+          const spentAt = new Date().toISOString();
+          if (!initialSecurityCodeState) throw new Error('Managed security-code state was not initialized');
+          enteredSecurityCodeState = withSecurityCodeAttempts(initialSecurityCodeState, [
+            ...codeAttempts,
+            {
+              at: spentAt,
+              fingerprint: securityCodeFingerprint(row.id, prepared.code),
+              outcome: 'error',
+            },
+          ]);
+          // Spend the exact code before the one-shot remote call. If the worker stops after this
+          // write, the same retained code cannot be selected and submitted on another run.
+          await writeReview(row, nextReview(claimedReview, { security_code: enteredSecurityCodeState }));
           const codeActions = securityCodeContinuationActions(initialActions, prepared.code) ?? prepared.actions;
           try {
             // Exactly one continuation call. An uncertain click is never retried.
@@ -3131,14 +4068,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
             const failedAt = new Date().toISOString();
             await writeReview(row, nextReview(claimedReview, {
               status: 'needs_attention',
-              ...(claimedReview.security_code
-                ? {
-                  security_code: withSecurityCodeAttempts(claimedReview.security_code, [
-                    ...codeAttempts,
-                    { at: failedAt, fingerprint: securityCodeFingerprint(row.id, prepared.code), outcome: 'error' },
-                  ]),
-                }
-                : {}),
+              security_code: recordEnteredCodeOutcome('error', failedAt),
               verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
               attention_reason: 'Litos entered the employer verification step, but could not prove the final result. Check the employer portal before trying anything again.',
               submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Managed verification continuation failed',
@@ -3170,12 +4100,81 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         verification = { status: 'verification_pending', requested_at: requestedAt, retry_count: 0, ...continuationEvidence };
       }
     }
-    if (!receiptResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
+    /* ONE READ-ONLY SECOND LOOK, ONLY WHEN THE CLICK LANDED AND THE FIRST VERDICT WAS UNKNOWN.
+     *
+     * Ashby and Greenhouse both replace their application UI after the request completes. The
+     * runner waits a bounded three seconds, but two production sends reached that deadline between
+     * the click and the ATS state transition. They were written as terminal unverified rows even
+     * though the exact browser page was still alive behind the continuation capability this request
+     * had already asked Stratus to create.
+     *
+     * The observer receives no URL and the continuation receives an empty action list. It cannot
+     * reopen, navigate, click, or submit. It only lets Stratus run its existing ATS readers on the
+     * same Page once more. The helper accepts only Ashby's published success/failure containers or
+     * Greenhouse's confirmation route; timeout, weak page text, and a second unknown keep the
+     * original unverified verdict. An uncertain submit is never retried. */
+    let receiptEvidenceResult = receiptResult;
+    let delayedObservedChallenge = false;
+    if (!initialChallenge) {
+      const observation = await observeManagedReceiptOnce({
+        initial: receiptResult,
+        expectedApplicationUrl: applicationUrl,
+        observe: (continuationToken) => continueManagedBrowser(continuationToken, [], { screenshot: true }),
+      });
+      receiptResult = observation.receiptResult;
+      receiptEvidenceResult = observation.evidenceResult;
+      const delayedChallengeCandidate = observation.observedResult
+        ? readManagedSecurityCodeChallenge(observation.observedResult)
+        : null;
+      const delayedChallenge = securityCodeChallengeMatchesRecipient(delayedChallengeCandidate, packet.email)
+        ? delayedChallengeCandidate
+        : null;
+      if (delayedChallenge && observation.observedResult) {
+        // The empty observation can land after the click but before a delayed Greenhouse code wall
+        // renders. Its one-shot token is already consumed, so this run cannot safely recurse into a
+        // second continuation. Carry the exact typed challenge into the ordinary handoff below,
+        // keep its latest screenshot, and release the claim without ever calling it unverified.
+        receiptResult = observation.observedResult;
+        delayedObservedChallenge = true;
+        verification = {
+          status: 'verification_pending',
+          requested_at: verificationRequestedAt.toISOString(),
+          retry_count: 0,
+        };
+      }
+      if (observation.error) {
+        const detail = String(observation.error instanceof Error ? observation.error.message : observation.error).slice(0, 200);
+        fastify.log.warn({ applicationId: row.id, detail }, 'Managed receipt observation failed closed');
+      }
+    }
+    if (!receiptEvidenceResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();
     const blob = await storeReceiptScreenshot(
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
-      Buffer.from(receiptResult.screenshot, 'base64'),
+      Buffer.from(receiptEvidenceResult.screenshot, 'base64'),
     );
+    if (delayedObservedChallenge) {
+      const delayedChallenge = readManagedSecurityCodeChallenge(receiptResult);
+      if (!delayedChallenge) throw new Error('Delayed security-code challenge disappeared before handoff');
+      const securityCode = beginSecurityCodeState({
+        challenge: delayedChallenge,
+        attemptedAt: capturedAt,
+        authorized: true,
+        existing: claimedReview.security_code,
+      });
+      await writeReview(row, delayedSecurityCodeHandoffReview(claimedReview, {
+        verification,
+        securityCode,
+        attemptedAt: capturedAt,
+        screenshotUrl: blob.url,
+      }));
+      fastify.log.warn({
+        applicationId: row.id,
+        sentTo: securityCode.sent_to,
+        digits: securityCode.digits,
+      }, 'Employer security-code challenge appeared after the receipt observation capability was consumed');
+      return;
+    }
     /* THE SUBMIT LANDED AND THE EMPLOYER ASKED FOR A CODE, so this is not 'submitted'.
      *
      * Read off the control the runner found, never off the page's text: readManagedReceipt scrapes
@@ -3186,13 +4185,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      *
      * The screenshot is kept either way. It is the evidence of what was actually on screen, and it
      * is what makes the next state debuggable rather than a claim. */
-    const challenge = readManagedSecurityCodeChallenge(receiptResult);
+    const challengeCandidate = readManagedSecurityCodeChallenge(receiptResult);
+    const challenge = securityCodeChallengeMatchesRecipient(challengeCandidate, packet.email)
+      ? challengeCandidate
+      : null;
     if (challenge) {
       const securityCode = beginSecurityCodeState({
         challenge,
         attemptedAt: capturedAt,
         authorized: true,
-        existing: claimedReview.security_code,
+        existing: enteredSecurityCodeState,
       });
       const attempted = withSecurityCodeAttempts(securityCode, [
         ...codeAttempts,
@@ -3252,8 +4254,12 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      */
     const verdict = managedSubmitVerdict(receiptResult);
     if (verdict.kind === 'refused') {
+      const refusedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'rejected'
+        ? 'rejected' as const
+        : 'error' as const;
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
+        ...(enteredCode ? { security_code: recordEnteredCodeOutcome(refusedCodeOutcome, capturedAt) } : {}),
         submission_attempted_at: capturedAt,
         preview_screenshot_url: blob.url,
         submission_error: undefined,
@@ -3273,8 +4279,14 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * that blocks every later application to this posting. The claim is released because the packet
      * is safe to run again the moment the missing answer exists. */
     if (verdict.kind === 'not_attempted') {
+      const notAttemptedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'no_control'
+        ? 'no_control' as const
+        : receiptResult.securityCodeAttempt?.outcome === 'not_entered'
+          ? 'not_entered' as const
+          : 'error' as const;
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
+        ...(enteredCode ? { security_code: recordEnteredCodeOutcome(notAttemptedCodeOutcome, capturedAt) } : {}),
         submission_attempted_at: capturedAt,
         preview_screenshot_url: blob.url,
         submission_error: undefined,
@@ -3288,11 +4300,21 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       return;
     }
     if (verdict.kind === 'unverified') {
-      await writeReview(row, nextReview(claimedReview, unverifiedSubmissionPatch(claimedReview, {
-        at: capturedAt,
-        cause: 'no_confirmation_state',
-        previewUrl: blob.url,
-      })));
+      const unverifiedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'rejected'
+        ? 'rejected' as const
+        : receiptResult.securityCodeAttempt?.outcome === 'no_control'
+          ? 'no_control' as const
+          : receiptResult.securityCodeAttempt?.outcome === 'not_entered'
+            ? 'not_entered' as const
+            : 'error' as const;
+      await writeReview(row, nextReview(claimedReview, {
+        ...unverifiedSubmissionPatch(claimedReview, {
+          at: capturedAt,
+          cause: 'no_confirmation_state',
+          previewUrl: blob.url,
+        }),
+        ...(enteredCode ? { security_code: recordEnteredCodeOutcome(unverifiedCodeOutcome, capturedAt) } : {}),
+      }));
       return;
     }
     /* A CODE RUN OWES TWO PROOFS, AND "NO ERROR VISIBLE" IS NEITHER OF THEM.
@@ -3320,21 +4342,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
             cause: 'no_confirmation_state',
             previewUrl: blob.url,
           }),
-          ...(claimedReview.security_code
-            ? {
-              security_code: withSecurityCodeAttempts(claimedReview.security_code, [
-                ...codeAttempts,
-                {
-                  at: capturedAt,
-                  fingerprint: securityCodeFingerprint(row.id, enteredCode),
-                  outcome: codeOutcome === 'rejected' ? 'rejected'
-                    : codeOutcome === 'no_control' ? 'no_control'
-                      : codeOutcome === 'accepted' ? 'error'
-                        : 'not_entered',
-                },
-              ]),
-            }
-            : {}),
+          security_code: recordEnteredCodeOutcome(
+            codeOutcome === 'rejected' ? 'rejected'
+              : codeOutcome === 'no_control' ? 'no_control'
+                : codeOutcome === 'not_entered' ? 'not_entered'
+                  : 'error',
+            capturedAt,
+          ),
         }));
         return;
       }
@@ -3358,18 +4372,11 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       // Present only when a code finished this one, and it is the fact that makes the receipt
       // legible: this application was sent, refused, and completed with the code the same run read
       // out of the mailbox while holding the challenged page open.
-      ...(claimedReview.security_code && (enteredCode || codeAttempts.length > 0)
-        ? {
-          security_code: withSecurityCodeAttempts(claimedReview.security_code, [
-            ...codeAttempts,
-            ...(enteredCode ? [{
-              at: capturedAt,
-              fingerprint: securityCodeFingerprint(row.id, enteredCode),
-              outcome: 'accepted' as const,
-            }] : []),
-          ]),
-        }
-        : {}),
+      ...(enteredCode
+        ? { security_code: recordEnteredCodeOutcome('accepted', capturedAt) }
+        : enteredSecurityCodeState && codeAttempts.length > 0
+          ? { security_code: withSecurityCodeAttempts(enteredSecurityCodeState, codeAttempts) }
+          : {}),
       receipt: {
         confirmation_text: receipt.confirmationText,
         final_url: receipt.finalUrl,
@@ -3395,7 +4402,12 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     }
     const portal = detectPortal(claimedReview.portal_url!);
     const builtPacket = await buildPacket(row);
-    const packet = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    const withCoverLetter = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
+    // Same re-derivation as the managed submit above, on the path that reconnects to the session the
+    // prepare left open. Both submit sites and the ATS channel read this one flag.
+    const packet = claimedReview.transcript_supported === true
+      ? withCoverLetter
+      : omitTranscript(withCoverLetter);
     await fillPortal(page, portal, packet);
     await clickFinalSubmit(page);
     const receipt = await readReceipt(page);
@@ -3450,6 +4462,8 @@ export function submissionFailureOutcome(input: {
   captchaStop: 'before_fill' | 'at_submit' | null;
   noSubmitControl: boolean;
   regenerationRequired?: boolean;
+  /* The packet's own resume file is gone from storage, so no packet could be assembled at all. */
+  packetDocumentExpired?: boolean;
   /* The applicant-facing sentence from a ManagedActionBudgetError, or null. A string rather than a
      boolean because the error composes its own reason from the portal and the question count, and
      re-deriving it here would be a second place to keep that wording correct. */
@@ -3459,8 +4473,8 @@ export function submissionFailureOutcome(input: {
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || actionBudgetStop || uncertainAfterClaim || providerSessionFailure
+  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -3469,6 +4483,24 @@ export function submissionFailureOutcome(input: {
       ? 'This company asks you to prove you are human before it will take an application, so Litos cannot send this one while you are away. Open it when you have a minute and Litos will fill it in for you.'
       : regenerationRequired
         ? 'This application must be regenerated before submission because its stored Litos email no longer matches the active inbound email route. Nothing was sent to the employer.'
+      : packetDocumentExpired
+        /* Ranked here for the same reason as its neighbours, and it is the earliest stop of the
+           whole family: buildPacket throws before a browser session is opened, so nothing was
+           filled and nothing was sent. Without this arm it inherited uncertainAfterClaim, because
+           the submit() call site runs after the claim.
+
+           THE RETENTION IS NAMED, not hidden behind "something went wrong". This is the privacy
+           promise working exactly as published (RESUME_RETENTION_DAYS, and app/privacy on the site
+           says the file is gone after 30 days), so the honest thing is to say so. An apology for a
+           malfunction would be a lie about a feature, and it would leave the applicant expecting a
+           retry to fix it when only a regenerate will.
+
+           "normally what has happened here" rather than a flat assertion: the throw fires whenever
+           the object key resolves to nothing, and retention is the overwhelmingly likely cause but
+           not a proven one on any given row. Same discipline as the cause-neutral wording on
+           noSubmitControl below. The recovery is identical either way, so nothing is lost by not
+           claiming more than is known. */
+        ? PACKET_EXPIRED_REASON
       : actionBudgetStop
         /* Ranked above uncertainAfterClaim for the same reason as its two neighbours: the throw
            happens before the browser is driven, so nothing was sent and there is no confirmation to
@@ -3506,6 +4538,173 @@ export function submissionFailureOutcome(input: {
     attentionReason: reason,
     attentionCategories: attentionCategories.length > 0 ? attentionCategories : ['unknown'],
   };
+}
+
+/** Fields a managed atomic chooser failure must remove because it occurs before any submit click. */
+export function preClickNoSubmitReleasePatch(): Partial<ApplicationReviewState> {
+  return {
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_authorization: undefined,
+    submission_attempted_at: undefined,
+    unverified_submission: undefined,
+    submitted_at: undefined,
+    receipt: undefined,
+  };
+}
+
+/** The exact persisted review for an atomic chooser stop that occurs before submitHandle.click. */
+export function preClickNoSubmitReview(
+  current: ApplicationReviewState,
+  message: string,
+  now: () => string = () => new Date().toISOString(),
+): ApplicationReviewState {
+  const outcome = submissionFailureOutcome({
+    captchaStop: null,
+    noSubmitControl: true,
+    uncertainAfterClaim: true,
+    externalGate: false,
+    providerSessionFailure: false,
+    currentAttentionReason: current.attention_reason,
+  });
+  return nextReview(current, {
+    status: outcome.status,
+    ...preClickNoSubmitReleasePatch(),
+    /* Written even though this branch releases the claim outright, because the release is not the
+     * only reader. A row that lands here and is later moved by another path still carries the typed
+     * proof, so nothing downstream has to re-derive it from the sentence in submission_error. */
+    submission_stop: submissionStopRecord('no_submit_control', now(), current.submission_run_id),
+    ...(current.verification?.status === 'searching'
+      ? { verification: { ...current.verification, status: 'verification_pending' as const } }
+      : {}),
+    submission_error: message,
+    attention_reason: outcome.attentionReason,
+    attention_categories: outcome.attentionCategories,
+  });
+}
+
+/** A standing code wall for another recipient is pre-click and must never enter mailbox handling. */
+export function preClickSecurityRecipientMismatchReview(
+  current: ApplicationReviewState,
+  challenge: NonNullable<ReturnType<typeof readManagedSecurityCodeChallenge>>,
+  observedAt: string,
+): ApplicationReviewState {
+  const matchingExistingState = current.security_code?.sent_to
+    && securityCodeChallengeMatchesRecipient(challenge, current.security_code.sent_to)
+    ? current.security_code
+    : undefined;
+  const securityCode = beginSecurityCodeState({
+    challenge,
+    attemptedAt: observedAt,
+    authorized: matchingExistingState?.submit_was_authorized ?? false,
+    existing: matchingExistingState,
+  });
+  const attentionReason = 'This application is already waiting at the employer security-code step, but that step names a different application email than this packet. Litos did not click the verification button. Open the employer portal and resolve the email mismatch before regenerating or retrying this application.';
+  return nextReview(current, {
+    status: 'awaiting_security_code',
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_authorization: undefined,
+    unverified_submission: undefined,
+    submitted_at: undefined,
+    receipt: undefined,
+    security_code: securityCode,
+    verification: { status: 'verification_pending', requested_at: observedAt, retry_count: 0 },
+    submission_error: 'Managed security-code recipient did not match the packet email',
+    attention_reason: attentionReason,
+    attention_categories: ['security_code', 'evidence_gap'],
+  });
+}
+
+/** A code match grants no click if consent or the exact email route changed during mailbox polling. */
+export function preClickVerificationContinuationBlockedReview(
+  current: ApplicationReviewState,
+  securityCode: NonNullable<ApplicationReviewState['security_code']>,
+  cause: 'authorization_revoked' | 'email_route_changed' | 'email_permission_revoked',
+  attemptedAt?: string,
+): ApplicationReviewState {
+  const attentionReason = cause === 'authorization_revoked'
+    ? 'This application is already waiting at the employer security-code step. Automatic submission permission was revoked before Litos could finish verification, so Litos stopped without clicking the verification button. Review this application before authorizing another attempt.'
+    : cause === 'email_permission_revoked'
+      ? 'This application is already waiting at the employer security-code step. Automatic inbox verification was turned off before Litos could finish, so Litos stopped without clicking the verification button. Review this application before authorizing another attempt.'
+    : 'This application is already waiting at the employer security-code step. Its email route changed before Litos could finish verification, so Litos stopped without clicking the verification button. Regenerate this application before trying again.';
+  return nextReview(current, {
+    status: 'awaiting_security_code',
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_authorization: undefined,
+    submission_attempted_at: current.submission_attempted_at ?? attemptedAt,
+    unverified_submission: undefined,
+    submitted_at: undefined,
+    receipt: undefined,
+    security_code: securityCode,
+    verification: {
+      status: 'verification_pending',
+      requested_at: securityCode.requested_at,
+      retry_count: 0,
+    },
+    submission_error: cause === 'authorization_revoked'
+      ? 'Submission authorization was revoked before security-code continuation'
+      : cause === 'email_permission_revoked'
+        ? 'Automatic inbox verification was disabled before security-code continuation'
+        : 'Application email route changed before security-code continuation',
+    attention_reason: attentionReason,
+    attention_categories: ['security_code', 'evidence_gap'],
+  });
+}
+
+/* A DELAYED POST-CLICK CODE WALL IS STILL A CODE WALL, AND IT NEEDS THE SAME DOOR AS ITS SIBLINGS.
+ *
+ * This wrote status 'needs_attention' while keeping the claim, and that combination closed every
+ * exit the packet had:
+ *
+ *   submitRequestDisposition('needs_attention', claimed) is 'reject', and resumeEditDisposition
+ *   delegates to it, so neither another run nor a resume edit could move it.
+ *
+ *   POST /applications/:id/security-code answered 'not_awaiting', because finishSecurityCodeSubmission
+ *   requires status 'awaiting_security_code' - and claimSecurityCodeSubmission additionally requires
+ *   submission_claimed_at to be null, so the status alone would not have been enough.
+ *
+ *   POST /applications/:id/submission/unverified answered 409, because unverified_submission was
+ *   explicitly cleared and that route resolves nothing else.
+ *
+ * A packet in that state could not be finished, retried, edited or resolved by anybody. That is the
+ * exact trap submitRequestDisposition names in its own parameter docs, and the one the Skydio packet
+ * 13bccb2d work existed to remove.
+ *
+ * SO IT NOW WRITES WHAT ITS SIBLINGS WRITE. preClickSecurityRecipientMismatchReview and the ordinary
+ * post-click challenge branch both land on 'awaiting_security_code' with the claim released, and
+ * that pair is not a relaxation: submitRequestDisposition rejects 'awaiting_security_code' outright,
+ * claim or no claim, so the ordinary path still cannot re-run and re-send. What it opens is the ONE
+ * route that is safe from here, the applicant's own code, which re-enters on the standing wall the
+ * employer is already holding rather than on a fresh form.
+ */
+export function delayedSecurityCodeHandoffReview(
+  current: ApplicationReviewState,
+  input: {
+    securityCode: NonNullable<ApplicationReviewState['security_code']>;
+    verification: NonNullable<ApplicationReviewState['verification']>;
+    attemptedAt: string;
+    screenshotUrl: string;
+  },
+): ApplicationReviewState {
+  return nextReview(current, {
+    status: 'awaiting_security_code',
+    verification: input.verification,
+    security_code: input.securityCode,
+    submission_attempted_at: input.attemptedAt,
+    preview_screenshot_url: input.screenshotUrl,
+    submission_error: undefined,
+    attention_reason: 'The employer showed a verification-code step after Litos used its one safe receipt check. Litos will not open a fresh form or send this application again on its own. Enter the code the employer emailed you, or open the employer portal and finish the verification there.',
+    attention_categories: ['security_code', 'evidence_gap'],
+    unverified_submission: undefined,
+    // Released together with the status, because both are required for the code route to open:
+    // finishSecurityCodeSubmission checks the status and claimSecurityCodeSubmission checks that the
+    // claim is null. The lock that matters is kept by the status itself.
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+    submission_authorization: undefined,
+  });
 }
 
 /* THE PATCH FOR "LITOS DOES NOT KNOW", IN ONE PLACE.
@@ -3560,28 +4759,52 @@ async function fail(row: ResumeRow, error: unknown) {
   const latestRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
   const current = latestRows[0] ? readApplicationReview(latestRows[0].spec) : null;
   if (!current) return;
+  await writeReview(latestRows[0], submissionFailureReview(current, error));
+}
+
+/* WHAT A STOPPED RUN LEAVES ON THE ROW, AND WHETHER THE ROW CAN STILL BE MOVED AFTERWARDS.
+ *
+ * EXTRACTED FROM fail() SO IT CAN BE DRIVEN. Everything below used to sit inside a function that
+ * needs a database and a live runner to reach, so the only thing watching it was a pair of tests
+ * that read this file as text and matched regexes against it - which cannot tell a correct branch
+ * from a deleted one, and is how the defect this function now fixes survived two rounds of repair.
+ * fail() keeps the database read and the write; every decision is here, pure, and tested by calling
+ * it with real error instances.
+ *
+ * THE DEFECT. The claim is taken at the top of a send run, so ANY throw after that point leaves it
+ * on the row. Only two families ever took it off - regenerationRequired/packetDocumentExpired, and
+ * the noSubmitControl branch - so ManagedActionBudgetError, CaptchaUnresolvedError, a provider
+ * session failure and every generic throw landed at needs_attention wearing the claim and carrying
+ * no unverified_submission record. That combination closes all four exits at once:
+ * submitRequestDisposition refuses a claimed needs_attention row, resumeEditDisposition delegates to
+ * it, the security-code route wants a different status, and the unverified-resolution route wants a
+ * record nobody wrote. The comment that used to sit on actionBudgetStop described this trap as
+ * something that arm had dealt with. It had not; it fixed the SENTENCE the applicant reads and left
+ * the lock exactly where it was.
+ *
+ * THE RULE, and it is one rule rather than a list of arms:
+ *
+ *   A stop that PROVABLY preceded the click does not carry the claim forward.
+ *   A stop that cannot be proven pre-click keeps the claim AND is given an exit.
+ *
+ * "Provably" is two things and needs both. The typed stop reason must be one whose throw site is
+ * structurally ahead of the click, and the row's own evidence must agree - the same five refusals
+ * submissionProvablyNotSent already applies, because a CAPTCHA standing on a page can be there
+ * BECAUSE an earlier attempt submitted, and a stop record describes this run only. Where the proof
+ * fails, the lock is right and stays, and the row gets an unverified_submission record so POST
+ * /applications/:id/submission/unverified can reach it. A locked row with a route out is a safety
+ * property. A locked row with no route is the defect.
+ */
+export function submissionFailureReview(
+  current: ApplicationReviewState,
+  error: unknown,
+  now: () => string = () => new Date().toISOString(),
+): ApplicationReviewState {
   const message = error instanceof Error ? error.message : 'Submission runner failed';
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const providerSessionFailure = isProviderSessionFailureMessage(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
-
-  /* A RUN THAT WAS CUT OFF WHILE IT MAY HAVE BEEN SUBMITTING, which is the Skydio case exactly.
-   *
-   * Ranked above every other arm below, and above the generic uncertainAfterClaim sentence, because
-   * it is the only one that knows both halves: the claim was taken so a submit was authorized and
-   * in progress, AND the run died without reporting what it did. Everything else either knows
-   * nothing was sent or knows what stopped it.
-   *
-   * Written here rather than routed through submissionFailureOutcome because this arm writes STATE,
-   * not just a sentence - submission_attempted_at and the unverified_submission record are what
-   * make the state resolvable instead of terminal. */
-  if (uncertainAfterClaim && isManagedRunTimeout(message)) {
-    await writeReview(latestRows[0], nextReview(current, unverifiedSubmissionPatch(current, {
-      at: new Date().toISOString(),
-      cause: 'run_timed_out',
-    })));
-    return;
-  }
+  const stoppedAt = now();
 
   // Takes precedence over uncertainAfterClaim, and that precedence is the whole point. The claim is
   // taken at the top of the run, so by the time clickFinalSubmit refuses to press the button this is
@@ -3590,33 +4813,70 @@ async function fail(row: ResumeRow, error: unknown) {
   // was sent. Telling someone to go check their email for a confirmation of an application that was
   // never submitted sends them looking for a receipt that cannot exist, and costs the trust to
   // believe the next message. Same reasoning as portalHandoffReason vs unattendedHandoffReason.
-  //
-  // Derived rather than early-returned so there stays exactly ONE writeReview call here: a second
-  // one drifts the moment a field is added to the other.
   const captchaError = error instanceof CaptchaUnresolvedError ? error : null;
   const captchaStop = captchaError?.stage ?? null;
   /* Same precedence, same reason as the captcha branch above. When clickFinalSubmit finds no
      submit control the click PROVABLY did not happen, so uncertainAfterClaim's "check the portal
      or your email" is the one thing that must not be said: there is no receipt to find. This is
      the routine outcome on a multi-step first page, not an edge case. */
-  const noSubmitControl = error instanceof NoSubmitControlError;
+  const noSubmitControl = error instanceof NoSubmitControlError || isManagedNoSubmitControl(message);
   const regenerationRequired = error instanceof ApplicantEmailRegenerationRequiredError;
   /* The third member of the same family as the two branches above, and it arrives with proof.
      buildManagedPortalActions throws this while ASSEMBLING the action list, before runManagedBrowser
      is called at all, and it records submitActionAppended: false to say so. So the click provably
-     did not happen and nothing reached the employer - the one thing uncertainAfterClaim's "the
-     submission was attempted, check the portal or your email" must never be said about. The claim is
-     taken at the top of the run, so without this the budget stop inherits that sentence AND leaves
-     the packet at needs_attention-after-claim, which submitRequestDisposition refuses to re-run: an
-     application permanently stuck behind a receipt that cannot exist. */
+     did not happen and nothing reached the employer. */
   const actionBudgetStop = error instanceof ManagedActionBudgetError ? error.blocker : null;
+  /* Only the resume. An expired cover letter never reaches here: packetForCoverLetterCapability
+     degrades and the application still goes, with its own sentence. */
+  const packetDocumentExpired = error instanceof PacketDocumentExpiredError && error.document === 'resume';
+  /* The reporting barrier could not read the run's proof, so the click state is UNKNOWN. This must
+     never join the pre-click family above: the remote actions had already executed when the read
+     failed, and on 2026-08-11 the runner had actually pressed Submit. It classifies as its own
+     typed stop, keeps the claim, and takes the unverified exit below. */
+  const confirmationUnproven = error instanceof ManagedConfirmationUnprovenError;
+  const runTimedOut = isManagedRunTimeout(message);
+
+  /* THE TYPED HALF, written on every arm including the ones that release outright.
+     Deliberately derived from the SAME booleans the applicant's sentence is derived from, so the
+     prose and the record cannot disagree about what stopped this run. */
+  const stop = submissionStopRecord(
+    classifySubmissionStop({
+      captchaStop,
+      noSubmitControl,
+      regenerationRequired,
+      packetDocumentExpired,
+      actionBudget: actionBudgetStop !== null,
+      confirmationUnproven,
+      providerSessionFailure,
+      runTimedOut,
+      providerUnconfigured: externalGate,
+    }),
+    stoppedAt,
+    current.submission_run_id,
+  );
+
+  /* THE CHOOSER STOP KEEPS ITS OWN WRITER, because it clears more than the claim.
+     preClickNoSubmitReleasePatch also removes submission_attempted_at, submitted_at and the receipt,
+     which is PR 494's decision about a stop known to happen before submitHandle.click, and folding
+     it into the general rule below would quietly change what that branch erases. */
+  if (noSubmitControl) return preClickNoSubmitReview(current, message, now);
+
+  /* CAN THIS ROW PROVE NOTHING WAS SENT? The typed stop is offered to the row's own evidence rather
+     than trusted on its own. submissionProvablyNotSent still refuses a receipt, a standing code
+     wall, an unresolved unverified record, a recorded attempt and a pressed:true outcome, so a
+     pre-click stop on a row that already carries any of those does NOT release anything. */
+  const provablyNotSent = submissionProvablyNotSent({ ...current, submission_stop: stop });
+  const releasesClaim = uncertainAfterClaim && provablyNotSent;
+  /* A claim held with no proof behind it. Every such row must leave here with a door, and the only
+     door that fits a state nobody can classify is the applicant's own look at the employer page. */
+  const needsExit = uncertainAfterClaim && !releasesClaim && !current.unverified_submission;
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, regenerationRequired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure,
     currentAttentionReason: current.attention_reason,
   });
 
-  await writeReview(latestRows[0], nextReview(current, {
+  return nextReview(current, {
     ...(captchaError
       ? beginStall(current, {
         surface: 'server_run',
@@ -3626,13 +4886,7 @@ async function fail(row: ResumeRow, error: unknown) {
       })
       : {}),
     status: outcome.status,
-    ...(regenerationRequired
-      ? {
-        submission_claimed_at: undefined,
-        submission_claim_id: undefined,
-        submission_authorization: undefined,
-      }
-      : {}),
+    submission_stop: stop,
     ...(current.verification?.status === 'searching'
       ? {
         verification: {
@@ -3647,7 +4901,31 @@ async function fail(row: ResumeRow, error: unknown) {
     // without this a 'failed' row was unqueryable as well as unreadable, so "how often does the
     // runner break, and on what" had no answer at all.
     attention_categories: outcome.attentionCategories.length > 0 ? outcome.attentionCategories : undefined,
-  }));
+    /* THE RELEASE, ON THE WRITE PATH AND NOT ONLY ON A READ GATE.
+       regenerationRequired and packetDocumentExpired used to be listed here by name; both are now
+       covered by the rule, because both throw before a browser drives the form and both therefore
+       classify pre-click. What the rule adds is every other pre-click stop - the action-budget throw
+       above all - and what it takes away is the case those two names got wrong: a row that already
+       carries send evidence keeps its lock even when this run stopped early. */
+    ...(releasesClaim
+      ? {
+        submission_claimed_at: undefined,
+        submission_claim_id: undefined,
+        submission_authorization: undefined,
+      }
+      : {}),
+    /* THE EXIT, for the stops that keep their lock. Last in the object on purpose: it overrides the
+       status and the sentence above with the resolvable pair - submission_attempted_at and the
+       unverified_submission record - which is what POST /submission/unverified resolves and what
+       turns a terminal row into one the applicant can answer. The cause is the run's own, so
+       "Litos pressed Send and the secure browser failed" is only said where that is what happened. */
+    ...(needsExit
+      ? unverifiedSubmissionPatch(current, {
+        at: stoppedAt,
+        cause: runTimedOut ? 'run_timed_out' : providerSessionFailure ? 'provider_error' : 'no_confirmation_state',
+      })
+      : {}),
+  });
 }
 
 export type SecurityCodeSubmissionOutcome =

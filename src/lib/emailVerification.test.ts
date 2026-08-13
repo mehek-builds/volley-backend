@@ -108,6 +108,43 @@ test('an exact active alias miss never calls the connected-inbox executor', asyn
   assert.equal(executorCalls, 0);
 });
 
+test('only a standing Greenhouse wall opens the exact-alias 24-hour lookup', async () => {
+  const requestedAt = new Date('2026-08-11T12:10:00.000Z');
+  const seen: Array<{ requestedAt: Date; standingChallenge?: boolean }> = [];
+  const run = (portalUrl: string, standingChallenge: boolean) => findComposioVerificationCode({
+    userId: EXACT_USER_ID,
+    portalUrl,
+    requestedAt,
+    expectedRecipient: EXACT_ALIAS,
+    applicationId: EXACT_APPLICATION_ID,
+    standingChallenge,
+    resolveRoute: async () => 'application_alias',
+    findAliasCode: async (options) => {
+      seen.push({ requestedAt: options.requestedAt, standingChallenge: options.standingChallenge });
+      return null;
+    },
+  });
+  await run('https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008', true);
+  await run('https://job-boards.eu.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008', true);
+  await run('https://boards.eu.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008', true);
+  await run('https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008', false);
+  await run('https://jobs.ashbyhq.com/kos/job/application', true);
+  await run('https://attacker.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008', true);
+  await run('https://greenhouse.io/embed/job_app?for=haizelabs&token=4685944008', true);
+  assert.deepEqual(seen.map((value) => ({
+    requestedAt: value.requestedAt.toISOString(),
+    standingChallenge: value.standingChallenge,
+  })), [
+    { requestedAt: '2026-08-11T12:10:00.000Z', standingChallenge: true },
+    { requestedAt: '2026-08-11T12:10:00.000Z', standingChallenge: true },
+    { requestedAt: '2026-08-11T12:10:00.000Z', standingChallenge: true },
+    { requestedAt: '2026-08-11T12:10:00.000Z', standingChallenge: false },
+    { requestedAt: '2026-08-11T12:10:00.000Z', standingChallenge: false },
+    { requestedAt: '2026-08-11T12:10:00.000Z', standingChallenge: false },
+    { requestedAt: '2026-08-11T12:10:00.000Z', standingChallenge: false },
+  ]);
+});
+
 test('an invalid Litos alias never falls through to the connected-inbox executor', async () => {
   let executorCalls = 0;
   const match = await findComposioVerificationCode({
@@ -306,6 +343,92 @@ test('matches a mixed-case Greenhouse code only inside its authenticated applica
     if (previous === undefined) delete process.env.LITOS_ENABLE_TEST_PORTAL;
     else process.env.LITOS_ENABLE_TEST_PORTAL = previous;
   }
+});
+
+test('standing Greenhouse lookup chooses the newest authenticated code on the exact alias', () => {
+  const alias = 'app-405b84f7ae-target@litos-qa.resend.app';
+  const message = (code: string, receivedAt: string) => ({
+    from_email: 'no-reply@us.greenhouse-mail.io',
+    to_email: alias,
+    subject: 'Your Greenhouse application security code',
+    text: `Copy and paste this code into the security code field on your application: ${code}.`,
+    html: null,
+    received_at: new Date(receivedAt),
+    raw_json: { authentication: { spf: 'pass', dkim: 'pass', dmarc: 'pass' } },
+  });
+  const rows = [
+    message('OldeRcod', '2026-08-11T12:02:00.000Z'),
+    message('NeweRcod', '2026-08-11T12:08:00.000Z'),
+  ];
+  const portal = 'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008';
+  assert.equal(extractLitosVerificationCode(
+    rows,
+    portal,
+    new Date('2026-08-11T12:00:30.000Z'),
+    alias,
+  ), null,
+    'ordinary lookup remains fail closed across different codes');
+  assert.equal(extractLitosVerificationCode(
+    rows,
+    portal,
+    new Date('2026-08-11T12:10:00.000Z'),
+    alias,
+    true,
+  )?.code, 'NeweRcod');
+});
+
+test('standing Greenhouse lookup rejects different codes tied for the newest exact timestamp', () => {
+  const alias = 'app-405b84f7ae-target@litos-qa.resend.app';
+  const message = (code: string) => ({
+    from_email: 'no-reply@us.greenhouse-mail.io',
+    to_email: alias,
+    subject: 'Your Greenhouse application security code',
+    text: `Copy and paste this code into the security code field on your application: ${code}.`,
+    html: null,
+    received_at: new Date('2026-08-11T12:08:00.000Z'),
+    raw_json: { authentication: { spf: 'pass', dkim: 'pass', dmarc: 'pass' } },
+  });
+  assert.equal(extractLitosVerificationCode(
+    [message('OldeRcod'), message('NeweRcod')],
+    'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
+    new Date('2026-08-11T12:10:00.000Z'),
+    alias,
+    true,
+  ), null);
+});
+
+test('standing Greenhouse lookup is bounded to 24 hours and remains exact to alias, sender, and ATS', () => {
+  const alias = 'app-405b84f7ae-target@litos-qa.resend.app';
+  const requestedAt = new Date('2026-08-11T12:10:00.000Z');
+  const message = (over: Partial<{
+    code: string;
+    from: string;
+    to: string;
+    receivedAt: string;
+  }> = {}) => ({
+    from_email: over.from ?? 'no-reply@us.greenhouse-mail.io',
+    to_email: over.to ?? alias,
+    subject: 'Your Greenhouse application security code',
+    text: `Copy and paste this code into the security code field on your application: ${over.code ?? 'NeweRcod'}.`,
+    html: null,
+    received_at: new Date(over.receivedAt ?? '2026-08-10T12:10:00.001Z'),
+    raw_json: { authentication: { spf: 'pass', dkim: 'pass', dmarc: 'pass' } },
+  });
+  const greenhouse = 'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008';
+  assert.equal(extractLitosVerificationCode([
+    message({ code: 'OldeRcod', receivedAt: '2026-08-10T12:09:59.999Z' }),
+    message(),
+  ], greenhouse, requestedAt, alias, true)?.code, 'NeweRcod', 'a code older than 24 hours is excluded');
+  assert.equal(extractLitosVerificationCode([
+    message({ to: 'app-other-target@litos-qa.resend.app' }),
+  ], greenhouse, requestedAt, alias, true), null, 'another alias is excluded');
+  assert.equal(extractLitosVerificationCode([
+    message({ from: 'no-reply@attacker.example' }),
+  ], greenhouse, requestedAt, alias, true), null, 'another sender family is excluded');
+  assert.equal(extractLitosVerificationCode([
+    message(),
+  ], 'https://jobs.ashbyhq.com/kos/job/application', requestedAt, alias, true), null,
+  'the standing exception cannot cross ATS families');
 });
 
 test('letter-only code parsing is confined to Greenhouse portals', () => {

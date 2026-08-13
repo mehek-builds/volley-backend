@@ -44,6 +44,7 @@ export const LIMITS = {
        student reading a day's packets opens many and the cache makes most of them free; this is
        here to stop a loop, not to ration ordinary use. */
     jdRequirements: parseInt(process.env.RATE_JD_REQUIREMENTS_PER_HOUR || '60', 10),
+    packetAudit: parseInt(process.env.RATE_PACKET_AUDIT_PER_HOUR || '30', 10),
     requestCode: parseInt(process.env.RATE_CODE_PER_HOUR || '5', 10),
     session: parseInt(process.env.RATE_SESSION_PER_HOUR || '10', 10),
     requestCodePerIp: parseInt(process.env.RATE_CODE_IP_PER_HOUR || '50', 10),

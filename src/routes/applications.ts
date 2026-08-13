@@ -34,6 +34,8 @@ import { connectToSession, getBrowserSession, getLiveViewUrl, isBrowserbaseConfi
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
 import { storedCoverLetter } from '../lib/coverLetterService';
+import { specWithoutDocumentPointers, storedDocuments } from '../lib/documentStore';
+import { documentAsksLitosCannotResolve } from '../lib/requiredDocuments';
 import { mintDownloadToken } from '../lib/resumeAccess';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
@@ -44,6 +46,7 @@ import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type A
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
+import { submissionClaimPatch } from '../lib/submissionStop';
 import {
   detectPortal,
   isPortalSupported,
@@ -67,6 +70,7 @@ import {
   extensionHandoffPacketMatches,
   extensionHandoffVersion,
   extensionStartHandoffBinding,
+  verifiedDashboardHandoffUrl,
 } from '../lib/extensionHandoffPacket';
 import { assessAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import {
@@ -77,9 +81,19 @@ import {
 import { resolveFrozenApplicantEmail } from '../lib/applicationEmail';
 import { findComposioVerificationCode } from '../lib/emailVerification';
 import { registerWorkdayVerificationRoute } from './workdayVerification';
+import { createAndPersistPacketAudit, currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
+import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
+import { resumeEmailOfRecord, resumePacketEmailIsCurrent } from '../lib/resumeEmail';
+import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(4000) });
+const packetAuditAcknowledgementSchema = z.object({
+  audit_digest: z.string().regex(/^[a-f0-9]{64}$/),
+  packet_version: z.string().regex(/^[a-f0-9]{64}$/),
+  pdf_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  size_bytes: z.number().int().positive(),
+});
 const questionSchema = z.object({
   id: z.string().min(1).max(200),
   question: z.string().min(1).max(4000),
@@ -229,6 +243,12 @@ export function freshSubmitRequestReview(
      * The route's own comment says the packet is "re-runnable exactly once". This is the line that
      * makes that true. */
     unverified_submission: undefined,
+    /* AND THE TYPED STOP EXPIRES WITH IT, for the same reason and with more force. "This run stopped
+     * before the click" is a fact about the run that just ended; left on the row it would still be
+     * answering yes after the NEXT run pressed Send, so submissionProvablyNotSent would reopen a
+     * packet an employer really holds. Cleared here and again at every claim (see claimSubmission),
+     * because this route is not the only way a send starts. */
+    submission_stop: undefined,
   };
 }
 
@@ -261,6 +281,57 @@ function editableResumeSpec(value: unknown): ResumeSpec {
     throw new Error('Resume content is empty');
   }
   return spec;
+}
+
+/* Everything a resume edit must carry over from the packet it is editing.
+ *
+ * WHAT IS ABSENT FROM THIS LIST IS DELETED BY SAVING AN EDIT, silently. PATCH
+ * /applications/:id/resume rebuilds the whole packet out of `rendered.spec`, and rendered.spec is a
+ * ResumeSpec: normalizeSpec (llm/resumeSpec.ts:194) reconstructs it field by field from a fixed
+ * allowlist, so every underscore-prefixed key the stored packet carried is gone by the time it comes
+ * back. The rebuild is not adding to the spec; it is replacing it.
+ *
+ * _documents is on this list because it was left off the inline version of it. A student who
+ * attached a transcript and then fixed one bullet on the review screen lost the attachment: the
+ * PATCH answered 200, the spec came back without _documents, and the send gate then asked her for
+ * the same file again with nothing on screen to say why. Every other underscore key present in the
+ * codebase was carried; the one the newest feature added was not, because the allowlist lives at a
+ * call site nobody edits when they add a key.
+ *
+ * WHAT IS DELIBERATELY NOT HERE: _contact, _review and _quality. All three are recomputed by the
+ * edit, so carrying them forward would write the pre-edit values back over the new ones.
+ */
+const PRESERVED_APPLICATION_SPEC_KEYS = [
+  '_applicant_email',
+  '_application_email',
+  '_cover_letter',
+  '_documents',
+] as const;
+
+/**
+ * The keys above, as they stand on the stored packet, ready to spread into a rebuilt spec.
+ *
+ * A function rather than three conditional spreads inline, because the inline form cannot be
+ * tested: reaching the rebuild needs a database, a renderer and a PDF text extractor, so the one
+ * key it dropped was invisible to every test in the suite. This is callable, and
+ * resumeEditPacketCarryover.test.ts calls it with a transcript attached, with an acknowledgement
+ * that has no file, and with the whole stored packet to prove that what is missing from the list is
+ * missing on purpose. documentPacketScope.test.ts, which this comment used to name, is about a
+ * different thing entirely: whose object key a packet is allowed to spend.
+ *
+ * A key present but null is skipped rather than copied. All four are written as objects or not at
+ * all - resume.ts:1052 and :1053 spread their two in only when truthy, and the cover letter and the
+ * documents map are both written by jsonb_set with an object - so this matches the behaviour of the
+ * truthiness checks it replaces on every packet that exists, and refuses to introduce a null-valued
+ * key on any that does not.
+ */
+export function preservedApplicationSpecKeys(stored: StoredSpec): StoredSpec {
+  const preserved: StoredSpec = {};
+  for (const key of PRESERVED_APPLICATION_SPEC_KEYS) {
+    const value = stored[key];
+    if (value !== undefined && value !== null) preserved[key] = value;
+  }
+  return preserved;
 }
 
 export function applicationLeadAlignmentIssues(stored: StoredSpec, company?: string): string[] {
@@ -422,6 +493,190 @@ async function refuseDuplicateApplication(
 }
 
 export async function applicationRoutes(fastify: FastifyInstance) {
+  fastify.post(
+    '/applications/:id/packet-audit',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const review = readApplicationReview(row.spec);
+      if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      if (review.submission_claimed_at || review.status === 'submitting' || review.status === 'submission_claimed'
+        || review.status === 'submitted' || review.status === 'awaiting_security_code') {
+        return reply.status(409).send({ error: 'This application can no longer be audited before submission' });
+      }
+      try {
+        // review_only: this route RENDERS the packet for the applicant to look at. It may rebuild
+        // a file that aged out so she can see it; it authorizes nothing, and the acknowledgement
+        // she has to give is the separate POST below.
+        const cached = await currentPacketAudit(row, { restoreExpiredResume: 'review_only' });
+        if (!cached.valid) {
+          const allowed = await allowHourly(request.jwtPayload!.userId, 'packet-audit', LIMITS.perHour.packetAudit);
+          if (!allowed) return rateLimitedReply(reply);
+        }
+        const result = cached.valid
+          ? { audit: cached.audit, persisted: true, pdfBytes: cached.pdfBytes }
+          : await createAndPersistPacketAudit(row);
+        if (!result.persisted) {
+          return reply.status(409).send({
+            error: 'The saved application changed while it was being audited. Reload it and audit again.',
+            code: 'PACKET_AUDIT_STALE',
+          });
+        }
+        const fileName = resumeFileNameForRole(
+          ((row.spec as StoredSpec)._contact as StoredContact | undefined)?.full_name,
+          (row.job_context as { role?: unknown } | null)?.role,
+        );
+        const downloadUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(
+          request.jwtPayload!.userId,
+          row.resume_object_key,
+          { fileName },
+        )}`;
+        const response = {
+          packet_audit: result.audit,
+          pdf: {
+            object_key: row.resume_object_key,
+            sha256: result.audit.bindings.pdf.sha256,
+            size_bytes: result.audit.bindings.pdf.sizeBytes,
+            download_url: downloadUrl,
+          },
+        };
+        return reply.status(200).send(response);
+      } catch (error) {
+        request.log.warn({ error, applicationId: row.id }, 'Packet audit could not verify the saved application');
+        return reply.status(422).send({
+          error: error instanceof Error ? error.message : 'The saved application could not be audited',
+          code: 'PACKET_AUDIT_FAILED',
+        });
+      }
+    },
+  );
+
+  fastify.post(
+    '/applications/:id/packet-audit/acknowledge',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const parsed = packetAuditAcknowledgementSchema.safeParse(request.body);
+      if (!parsed.success) return reply.status(400).send({ error: 'Invalid packet audit acknowledgement' });
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const review = readApplicationReview(row.spec);
+      if (!review || review.submission_claimed_at || review.status === 'submitted') {
+        return reply.status(409).send({ error: 'This application cannot be acknowledged in its current state' });
+      }
+      /* review_only: this IS the human step, not a send. The acknowledgement it writes is the
+         applicant's own, checked against the digests she was shown, so it must never be preceded by
+         a machine-written one. A rebuild here therefore leaves the digests she submitted stale and
+         answers 409, which sends her back to re-audit the file that now exists. */
+      const verdict = await currentPacketAudit(row, { restoreExpiredResume: 'review_only' });
+      if (!verdict.valid) return reply.status(409).send({ error: verdict.reason, code: verdict.code });
+      const audit = verdict.audit;
+      if (parsed.data.audit_digest !== audit.audit_digest
+        || parsed.data.packet_version !== audit.packet_version
+        || parsed.data.pdf_sha256 !== audit.bindings.pdf.sha256
+        || parsed.data.size_bytes !== audit.bindings.pdf.sizeBytes) {
+        return reply.status(409).send({
+          error: 'The rendered packet no longer matches the saved application. Reload it before continuing.',
+          code: 'PACKET_AUDIT_STALE',
+        });
+      }
+      const acknowledgement = {
+        ownerSha256: audit.bindings.ownerSha256,
+        applicationId: audit.bindings.applicationId,
+        audit_digest: audit.audit_digest,
+        packet_version: audit.packet_version,
+        pdfSha256: audit.bindings.pdf.sha256,
+        pdfSizeBytes: audit.bindings.pdf.sizeBytes,
+        acknowledged_at: new Date().toISOString(),
+      };
+      const next: ApplicationReviewState = { ...review, packet_audit_acknowledgement: acknowledgement };
+      const updated = await db.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
+        eq(generated_resumes.id, row.id),
+        eq(generated_resumes.user_id, request.jwtPayload!.userId),
+        sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+        sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
+      )).returning({ id: generated_resumes.id });
+      if (!updated.length) {
+        return reply.status(409).send({
+          error: 'The saved application changed before the acknowledgement was recorded.',
+          code: 'PACKET_AUDIT_STALE',
+        });
+      }
+      return reply.send({ acknowledged: true });
+    },
+  );
+
+  fastify.post(
+    '/applications/:id/submission/manual-handoff',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const review = readApplicationReview(row.spec);
+      if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+
+      // This action-time read is the dashboard's sole authority to navigate. It deliberately
+      // repeats every live packet check instead of trusting the audit object or URL held in React:
+      // currentAcknowledgedPacketAudit revalidates the exact PDF/spec/JD/answers, current personal
+      // resume email, and active owner/application Litos alias before any company URL is disclosed.
+      const audit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
+      if (!audit.valid) return reply.status(409).send({ error: audit.reason, code: audit.code });
+
+      // PDF and alias verification perform external reads. Re-read the owner-scoped row after
+      // those awaits and reject unless the complete saved packet is still byte-for-byte the one
+      // that was audited. The URL below is derived only from this refreshed row, never the earlier
+      // snapshot, so a concurrent portal/job/status/claim mutation cannot release a stale URL.
+      const refreshed = await ownedResume(request, reply);
+      if (!refreshed) return;
+      if (refreshed.resume_object_key !== row.resume_object_key
+        || !isDeepStrictEqual(refreshed.spec, row.spec)) {
+        return reply.status(409).send({
+          error: 'This application changed while its company handoff was being verified. Reload it before continuing.',
+          code: 'MANUAL_HANDOFF_STALE',
+        });
+      }
+      const refreshedReview = readApplicationReview(refreshed.spec);
+      if (!refreshedReview) {
+        return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      }
+
+      const url = verifiedDashboardHandoffUrl({
+        applicationId: refreshed.id,
+        userId: refreshed.user_id,
+        frozenUrl: refreshedReview.portal_url,
+        frozenHandoffUrl: refreshedReview.extension_handoff_url,
+        frozenHandoffBinding: refreshedReview.extension_handoff_binding,
+        frozenAtsName: refreshedReview.ats_name,
+        status: refreshedReview.status,
+        attentionReason: refreshedReview.attention_reason,
+        attentionCategories: refreshedReview.attention_categories,
+        submissionClaimedAt: refreshedReview.submission_claimed_at,
+        submissionClaimId: refreshedReview.submission_claim_id,
+        submissionPacketVersion: refreshedReview.submission_packet_version,
+        submissionAttemptedAt: refreshedReview.submission_attempted_at,
+        submittedAt: refreshedReview.submitted_at,
+        receipt: refreshedReview.receipt,
+        unverifiedSubmission: refreshedReview.unverified_submission,
+      });
+      if (!url) {
+        return reply.status(409).send({
+          error: 'This application no longer has a verified company handoff. Reload it before continuing.',
+          code: 'MANUAL_HANDOFF_STALE',
+        });
+      }
+
+      return reply.send({
+        manual_handoff: {
+          url,
+          audit_digest: audit.audit.audit_digest,
+          packet_version: audit.audit.packet_version,
+          pdf_sha256: audit.audit.bindings.pdf.sha256,
+          size_bytes: audit.audit.bindings.pdf.sizeBytes,
+        },
+      });
+    },
+  );
+
   fastify.get(
     '/applications/:id/submission/extension-packet',
     { preHandler: requireAuth },
@@ -448,6 +703,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if ((review.ats_name === 'jobvite' || review.ats_name === 'icims' || review.ats_name === 'oraclecloud')
         && !review.applicant_snapshot) {
         return reply.status(409).send({ error: 'This application must be prepared again before Chrome can fill it' });
+      }
+      const auditVerdict = await currentAcknowledgedPacketAudit(row);
+      if (!auditVerdict.valid) {
+        return reply.status(409).send({ error: auditVerdict.reason, code: auditVerdict.code });
       }
 
       const contact = (stored._contact ?? {}) as StoredContact;
@@ -485,8 +744,26 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         )}`,
         file_name: fileName,
         spec: editableResumeSpec(stored),
-        application: { id: row.id, spec: stored },
+        /* THE WHOLE STORED SPEC, WHICH IS WHY IT LEAVES THROUGH THE STRIPPER.
+         *
+         * This is a second route that answers with a spec without a line of it mentioning
+         * documents, so it started serving _documents.transcript.object_key the day the first
+         * transcript was attached, exactly as GET /resume/history did. A Blob object is written
+         * `access: 'public'` because that is the only mode the SDK has, so that key plus the
+         * store's stable base URL is permanent unauthenticated access to a student's transcript -
+         * and this particular copy goes to a content script running in the employer's page origin.
+         *
+         * The extension has no use for the key either way: its only file channel is the resume
+         * capability token minted above, there is no cover-letter equivalent and there is no
+         * transcript one, so a document attached in the dashboard is not attached by the extension
+         * at all. Nothing downstream of here can spend the pointer; it could only escape.
+         *
+         * Note the RAW spec is still what extensionHandoffVersion hashes above, and has to be. That
+         * value binds the packet the extension is about to fill, and stripping a field out of the
+         * hash input would change every version string on an application that has an attachment. */
+        application: { id: row.id, spec: specWithoutDocumentPointers(stored) },
         applicant_snapshot: review.applicant_snapshot,
+        packet_audit: auditVerdict.audit,
         quality: {
           ready_to_attach: issues.length === 0,
           issues,
@@ -524,6 +801,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         eq(generated_resumes.user_id, userId),
       )).limit(1);
       const precheckReview = precheckRow ? readApplicationReview(precheckRow.spec) : null;
+      let precheckPacketVersion: string | null = null;
       if (precheckRow && precheckReview) {
         const binding = extensionStartHandoffBinding({
           handoffVersion: parsed.data.handoff_version,
@@ -546,6 +824,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         }
       }
       if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
+        const auditVerdict = await currentAcknowledgedPacketAudit(precheckRow, { restoreExpiredResume: 'authorizing_send' });
+        if (!auditVerdict.valid) {
+          return reply.status(409).send({ error: auditVerdict.reason, code: auditVerdict.code });
+        }
+        precheckPacketVersion = auditVerdict.audit.packet_version;
         const verdict = await refuseDuplicateApplication(precheckRow, precheckReview, userId, fastify.log);
         if (verdict.kind === 'duplicate') return reply.status(409).send(duplicateApplicationResponse(verdict));
         const resumeIssues = await preSendResumeVerificationIssues(
@@ -638,8 +921,17 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           ...current,
           questions: refreshedQuestions,
           status: 'submitting' as const,
-          submission_claimed_at: now,
-          submission_claim_id: claimId,
+          /* THE FOURTH CLAIM SITE, and the one an inline clear at the other three missed.
+           *
+           * This is a `...current` spread, so a stop record left by an earlier run survives into the
+           * claim unless it is cleared here. It matters most on exactly the path an applicant takes
+           * after a pre-click stop: the managed run finds no submit control, releases the claim and
+           * leaves before_click:true, she retries through the extension, presses Submit herself, and
+           * the confirmation cannot be read - and the 'unknown' outcome writes no evidence that
+           * contradicts the stale record. The packet would then read as provably-not-sent while its
+           * own attention_reason says Submit was clicked. */
+          ...submissionClaimPatch(now, claimId),
+          submission_packet_version: precheckPacketVersion!,
           submission_authorization: {
             source: parsed.data.authorization === 'standing_consent' ? 'standing_consent' as const : 'user_initiated_extension' as const,
             authorized_at: now,
@@ -699,6 +991,15 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.submission_claim_id !== parsed.data.claim_id || current.status !== 'submitting') {
         return reply.status(409).send({ error: 'This extension submission is no longer active' });
       }
+      const outcomeAudit = await currentAcknowledgedPacketAudit(row);
+      if (!outcomeAudit.valid || current.submission_packet_version !== outcomeAudit.audit.packet_version) {
+        return reply.status(409).send({
+          error: outcomeAudit.valid
+            ? 'The audited packet no longer matches the extension submission claim.'
+            : outcomeAudit.reason,
+          code: outcomeAudit.valid ? 'PACKET_AUDIT_STALE' : outcomeAudit.code,
+        });
+      }
       const now = new Date().toISOString();
       const outcome = parsed.data.outcome === 'confirmed' && !extensionEmployerReceiptIsSufficient({
         portalUrl: current.portal_url,
@@ -721,6 +1022,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }).where(and(
         eq(generated_resumes.id, row.id),
         eq(generated_resumes.user_id, request.jwtPayload!.userId),
+        sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+        sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
         sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${parsed.data.claim_id}`,
         sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
       )).returning({ id: generated_resumes.id });
@@ -773,6 +1076,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const userId = request.jwtPayload!.userId;
       const bank = await readExperienceBankOrSeedFromBaseResume(userId);
       const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
+      const currentResumeEmail = resumeEmailOfRecord(profileRows[0]?.parsed_json);
+      if (!resumePacketEmailIsCurrent(contact.email, currentResumeEmail)) {
+        return reply.status(409).send({
+          error: 'Your personal resume email changed or is missing. Regenerate this application before editing it.',
+          code: 'resume_email_regeneration_required',
+        });
+      }
       const parsed = profileRows[0]?.parsed_json as {
         school?: string;
         degree?: string;
@@ -824,6 +1134,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const rendered = await renderResumePdf(edited, { ...contact, full_name: contact.full_name }, review.jd_text);
       const visual = validateResumeVisualLayout(rendered.layout);
       const parsedPdf = await extractPdfText(rendered.buffer);
+      const applicantIdentity = stored._applicant_email && typeof stored._applicant_email === 'object'
+        ? stored._applicant_email as { address?: unknown; source?: unknown }
+        : null;
       const pdfIssues = [
         ...leadAlignmentIssues(rendered.spec, review.jd_text, {
           context: { company: applicationCompany(row), role: review.role },
@@ -832,6 +1145,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ...validatePdfLayout(parsedPdf.text, parsedPdf.numpages).issues,
         ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),
         ...findPdfTextFidelityIssues(parsedPdf.text, rendered.spec, { ...contact, full_name: contact.full_name }),
+        ...(applicantIdentity?.source === 'litos_alias'
+          && typeof applicantIdentity.address === 'string'
+          && parsedPdf.text.toLowerCase().includes(applicantIdentity.address.toLowerCase())
+          ? ['the tracked application routing email must not appear on the resume PDF']
+          : []),
       ];
       if (pdfIssues.length > 0) {
         return reply.status(422).send({ error: 'The edited resume does not fit the one-page layout.', issues: pdfIssues });
@@ -848,15 +1166,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const updatedSpec = {
         ...rendered.spec,
         _contact: contact,
-        ...('_applicant_email' in stored ? { _applicant_email: stored._applicant_email } : {}),
-        ...('_application_email' in stored ? { _application_email: stored._application_email } : {}),
+        // Every stored key the edit does not recompute, from the one list that names them. Spread
+        // before _review and _quality because those two ARE recomputed and have to win.
+        ...preservedApplicationSpecKeys(stored),
         // Through settleStall like every other writer: this route can run on an application that is
       // waiting on a challenge, and abandoning that wait has to close it rather than carry an open
       // stall into a status the queue no longer looks at.
       _review: settleStall(updatedReview as ApplicationReviewState),
-        ...(stored._cover_letter ? { _cover_letter: stored._cover_letter } : {}),
         _quality: {
           ...(stored._quality as Record<string, unknown> | undefined),
+          pdfGenerationBinding: createPdfGenerationBinding(rendered.spec, blob.pathname, rendered.buffer, contact.email ?? ''),
           atsCoverage: validation.ats_keyword_coverage_pct,
           visualWarnings: visual.warnings,
           groundingRemoved: grounded.removed,
@@ -869,6 +1188,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         .where(and(
           eq(generated_resumes.id, row.id),
           eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
           sql`${generated_resumes.spec}->'_review'->>'status' = ${review.status}`,
         ))
         .returning({ id: generated_resumes.id });
@@ -878,7 +1199,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
 
       return reply.send({
         id: row.id,
-        spec: updatedSpec,
+        /* The rebuilt spec is now carrying _documents, so it is now a Blob pointer on the wire and
+         * has to leave through the stripper like every other spec-serializing route. The fix that
+         * kept the attachment through an edit is what put the key in this payload: before it, the
+         * rebuild dropped _documents entirely and this response was accidentally safe. */
+        spec: specWithoutDocumentPointers(updatedSpec),
         download_url: `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, blob.pathname, {
           blobUrl: blob.url,
           fileName: resumeFileNameForRole(contact.full_name, ((row.job_context ?? {}) as { role?: unknown }).role),
@@ -898,7 +1223,26 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
-      if (submitRequestDisposition(current.status) !== 'start') {
+      /* THE CLAIM IS PART OF THE QUESTION, and leaving it out made this the shortest way past every
+       * submission gate in the product.
+       *
+       * submissionWasClaimed defaults to false, so a one-argument call asks "is this status
+       * re-runnable when nothing has been claimed", which is not the question a claimed row is
+       * posing. A needs_attention row wearing the claim its run took answered 'start' here, and
+       * applyApplicationReviewEdit writes status 'questions_ready' or 'ready_to_submit' over the
+       * top of a `...current` spread - so ONE request turned a packet holding a confirmed receipt,
+       * an unresolved unverified_submission or a standing security_code into a state
+       * submitRequestDisposition starts unconditionally, with all of that evidence still on the
+       * row. That is a duplicate application at an employer who caps them, and it cannot be taken
+       * back.
+       *
+       * DELIBERATELY THE TWO-ARGUMENT FORM, not the four-argument one submit-request uses. The
+       * third and fourth parameters are UNLOCK KEYS whose safety was argued for the send path
+       * specifically - the applicant's own "I looked and it is not there", and the row's own proof
+       * that a stop preceded the click - and widening a security fix to hand those keys to a
+       * different route is a change nobody has measured. Nothing is trapped by leaving them out:
+       * both keyed states keep their exit through POST /submit-request, which does pass them. */
+      if (submitRequestDisposition(current.status, Boolean(current.submission_claimed_at)) !== 'start') {
         return reply.status(409).send({ error: 'This application can no longer be edited from its current submission state' });
       }
       // Not a spread here: an edit that changes portal_url has to re-derive portal_supported with
@@ -939,6 +1283,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         current.status,
         Boolean(current.submission_claimed_at),
         current.unverified_submission?.resolution,
+        // The row itself, so a packet whose stored evidence proves nothing reached the employer can
+        // answer the retry question without the applicant being sent to look for an application that
+        // was never filed. See submissionProvablyNotSent.
+        current,
       );
       if (disposition === 'submitted') {
         return reply.status(200).send({ application_id: row.id, review: current, cover_letter: storedCoverLetter(row) });
@@ -1098,6 +1446,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // post-discovery gates.
       if (current.portal_url && !isPortalSupported(current.portal_url) && sensitive) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
+      }
+      const submitAudit = await currentAcknowledgedPacketAudit(row, {
+        questions: normalizedSubmittedQuestions,
+        restoreExpiredResume: 'authorizing_send',
+      });
+      if (!submitAudit.valid) {
+        return reply.status(409).send({ error: submitAudit.reason, code: submitAudit.code });
       }
       /* REMEMBER THE ANSWERS THAT TRAVEL, so she is asked for each of them exactly once.
        *
@@ -1300,18 +1655,28 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ),
       };
       let handoff_url: string | undefined;
+      let handoff_packet_valid = true;
       if (review.status === 'needs_attention' && review.browser_session_id) {
-        try {
-          handoff_url = await getLiveViewUrl(review.browser_session_id);
-        } catch {
-          handoff_url = undefined;
+        const audit = await currentAcknowledgedPacketAudit(row);
+        handoff_packet_valid = audit.valid;
+        if (audit.valid) {
+          try {
+            handoff_url = await getLiveViewUrl(review.browser_session_id);
+          } catch {
+            handoff_url = undefined;
+          }
         }
       }
       return reply.send({
         application_id: row.id,
         review,
         cover_letter: storedCoverLetter(row),
+        // Keyed by kind, and built by the one reader that strips object_key. The spec holds the
+        // Blob pointer because the packet builder needs it; this envelope must never carry it,
+        // since a Blob object is public-read forever to anyone holding its URL.
+        documents: storedDocuments(row),
         handoff_url,
+        handoff_packet_valid,
         configured: isBrowserbaseConfigured(),
       });
     },
@@ -1329,6 +1694,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const current = readApplicationReview(stored);
       if (!current || current.status !== 'needs_attention') {
         return reply.status(409).send({ error: 'This application is not waiting on you' });
+      }
+      const handoffAudit = await currentAcknowledgedPacketAudit(row);
+      if (!handoffAudit.valid) {
+        return reply.status(409).send({
+          error: handoffAudit.reason,
+          code: handoffAudit.code,
+        });
       }
       const now = new Date().toISOString();
       /* Unchanged in meaning, narrowed to the case it was always describing. This route's
@@ -1391,6 +1763,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .where(and(
             eq(generated_resumes.id, row.id),
             eq(generated_resumes.user_id, request.jwtPayload!.userId),
+            sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+            sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
             sql`${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'`,
           ))
           .returning({ id: generated_resumes.id });
@@ -1407,6 +1781,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         .set({ spec: reviewSpec(next) })
         .where(and(
           eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
           sql`${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'`,
         ))
         .returning({ id: generated_resumes.id });
@@ -1417,6 +1794,100 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(202).send({ application_id: row.id, review: review ?? current });
       }
       return reply.send({ application_id: row.id, review: next, cover_letter: storedCoverLetter(row) });
+    },
+  );
+
+  /* THE WAY OUT OF AN APPLICATION LITOS CANNOT FINISH AND CANNOT ABANDON.
+   *
+   * The stranding, exactly. A form asks for an official transcript, she presses "I've ordered it",
+   * and POST /applications/:id/documents/ordered writes `ordered_at` and nothing else - correctly,
+   * because Litos cannot make a registrar mail a sealed copy. The dashboard's send gate reads
+   * `attached_at`, so it stays closed; "Send it" is grey for the rest of that packet's life; and the
+   * modal that put her there says "This application then finishes with you rather than with Litos"
+   * while the screen it returns to has no control that finishes anything. The same dead end reaches
+   * ready_for_final_approval from the other direction when `transcript_supported` is false: the
+   * employer's form has no upload control Litos can fill, so no file she adds here changes the state.
+   *
+   * NO NEW STATE IS INVENTED. This lands on 'submitted' with a receipt whose source is
+   * 'attended_handoff' and whose text names HER as the witness, which is exactly what
+   * handoff-complete's 'submitted' arm and the unverified-submission route already write for the two
+   * other cases where a person, not Litos, saw the application land. Litos does not manufacture a
+   * confirmation it never saw, and the receipt says so in its own words.
+   *
+   * IT IS NOT A GENERAL "MARK ANYTHING SUBMITTED" DOOR, and the gate is what keeps it from becoming
+   * one. It answers only for a packet parked at ready_for_final_approval that is held on a measured
+   * document ask no upload can clear. An application she could still finish inside Litos has a
+   * working control already and gets a 409 here, so this cannot become the quiet way past a send
+   * gate that is doing its job.
+   */
+  fastify.post(
+    '/applications/:id/submission/self-submitted',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const current = readApplicationReview(row.spec);
+      if (!current || current.status !== 'ready_for_final_approval') {
+        return reply.status(409).send({ error: 'This application is not waiting for you to send it' });
+      }
+      const unresolvable = documentAsksLitosCannotResolve(current, storedDocuments(row));
+      if (unresolvable.length === 0) {
+        return reply.status(409).send({
+          error: 'Litos can still finish this one. Review the filled form and send it from here.',
+        });
+      }
+      const now = new Date().toISOString();
+      /* applyReviewPatch, not a spread, for the reason every other terminal write in this file gives:
+         the shared merge is where withTerminalCause enforces that a terminal state carries a cause,
+         and three production rows reached 'failed' with no stated reason when a route built its own
+         review object. */
+      const next = applyReviewPatch(current, {
+        status: 'submitted',
+        submitted_at: now,
+        attention_reason: undefined,
+        attention_categories: undefined,
+        submission_error: undefined,
+        receipt: {
+          /* Named for what it is. The document the employer required is one Litos had no way to put
+             on their form, so the application was completed by her; the receipt must not read as if
+             Litos watched it land. */
+          confirmation_text: 'Confirmed by you: this employer asked for a document Litos could not '
+            + 'attach, so you sent this application yourself.',
+          final_url: current.portal_url ?? '',
+          captured_at: now,
+          source: 'attended_handoff',
+        },
+      }, () => now);
+      const submitted = await db.update(generated_resumes)
+        .set({
+          spec: reviewSpec(next),
+          pipeline_stage: 'applied',
+          pipeline_stage_at: new Date(now),
+        })
+        .where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          // Conditional on the status this answered for, so a send that started somewhere else in
+          // the meantime is not overwritten by an answer about the screen before it.
+          sql`${generated_resumes.spec}->'_review'->>'status' = 'ready_for_final_approval'`,
+        ))
+        .returning({ id: generated_resumes.id });
+      if (submitted.length === 0) {
+        const refreshed = await ownedResume(request, reply);
+        if (!refreshed) return;
+        return reply.status(202).send({
+          application_id: row.id,
+          review: readApplicationReview(refreshed.spec) ?? current,
+        });
+      }
+      return reply.send({
+        application_id: row.id,
+        review: next,
+        cover_letter: storedCoverLetter(row),
+        // Carried so the screen this answers keeps the marks it was drawing. Built by the reader that
+        // strips object_key, like every other envelope in this file.
+        documents: storedDocuments(row),
+      });
     },
   );
 
@@ -1508,6 +1979,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         stored,
         applicationCompany(row),
       ));
+      const approvalAudit = await currentAcknowledgedPacketAudit(row, {
+        questions: approvalReview.questions,
+        restoreExpiredResume: 'authorizing_send',
+      });
+      if (!approvalAudit.valid) approvalIssues.push(approvalAudit.reason);
       if (approvalIssues.length > 0) {
         return reply.status(422).send({
           error: 'Verify the complete application before sending. The current packet is not ready for final approval.',
@@ -1532,6 +2008,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         .set({ spec: approvedReviewSpec(next, now) })
         .where(and(
           eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
           sql`${generated_resumes.spec}->'_review'->>'status' = 'ready_for_final_approval'`,
         ))
         .returning({ id: generated_resumes.id });
@@ -1582,6 +2061,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     async (request: FastifyRequest, reply: FastifyReply) => {
       const row = await ownedResume(request, reply);
       if (!row) return;
+      const securityCodeAudit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
+      if (!securityCodeAudit.valid) {
+        return reply.status(409).send({
+          error: securityCodeAudit.reason,
+          code: securityCodeAudit.code,
+        });
+      }
       const body = request.body as { code?: unknown } | undefined;
       const outcome = await finishSecurityCodeSubmission(row.id, body?.code, fastify);
       if (outcome.kind === 'not_found') {
@@ -1626,7 +2112,26 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
-      if (submitRequestDisposition(current.status) !== 'start') {
+      /* THE CLAIM IS PART OF THE QUESTION HERE TOO, and this route is where a missing second
+       * argument bought a second application at an employer.
+       *
+       * The one-argument call evaluated a CLAIMED needs_attention row as though it were unclaimed,
+       * hit the `!submissionWasClaimed` arm and answered 'start'. The write below is a `...current`
+       * spread, so the claim, the receipt, the security_code and an unresolved unverified_submission
+       * all survived it, and the destination status 'failed' is one submitRequestDisposition starts
+       * UNCONDITIONALLY. Two requests - this one, then POST /submit-request - and a packet the
+       * employer may already be holding was runnable again.
+       *
+       * THE GUARD IS THE WHOLE BOUNDARY, and the spread is deliberately left alone. With the claim
+       * counted, every source status this route still accepts is one whose disposition is already
+       * 'start', and the destination is 'start', so the route is disposition-PRESERVING: it can no
+       * longer manufacture re-runnability out of a state that did not have it. Stripping the
+       * receipt, the security_code or the unverified_submission record would not close a gate - it
+       * would delete the evidence the gates READ. submissionProvablyNotSent, duplicateApplicationVerdict
+       * and POST /submission/unverified all decide from exactly those three fields whether an
+       * application ever reached an employer, and a "the company turned this down" update is not a
+       * reason to forget that it did. A hole in a gate is fixed by fixing the gate. */
+      if (submitRequestDisposition(current.status, Boolean(current.submission_claimed_at)) !== 'start') {
         return reply.status(409).send({ error: 'An active or completed submission cannot be replaced by a delayed failure update' });
       }
       const now = new Date().toISOString();

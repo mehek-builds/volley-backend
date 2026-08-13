@@ -235,7 +235,12 @@ test('a cover letter Litos could not attach stops the packet being called ready'
   );
 
   // Direct path: same fact, folded into the attention count directPreparationIsSafe reads.
-  const directSafe = runner.match(/const safe = directPreparationIsSafe\(\{[\s\S]{0,1200}?\}\);/)?.[0] ?? '';
+  //
+  // The character bound is a slice, not a contract. The assertion below is the contract, and it is
+  // unchanged. The bound was 1200 and had 19 characters left when the transcript added its own
+  // hold-the-send term and the paragraph explaining it; every further document type will cost this
+  // block another one, so widen the slice rather than shortening the reasoning inside it.
+  const directSafe = runner.match(/const safe = directPreparationIsSafe\(\{[\s\S]{0,1600}?\}\);/)?.[0] ?? '';
   assert.ok(directSafe, 'the direct prepare must still compute a `safe`');
   assert.match(directSafe, /attentionCount: discoveryAttention\.length \+ coverLetterAttention\.length/);
 });
