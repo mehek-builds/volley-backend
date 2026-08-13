@@ -2089,14 +2089,24 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   // Both scans record what went wrong rather than returning an empty result that says nothing,
   // and both normalize the thrown value so an empty Error message cannot become an empty record.
   assert.equal(runner.match(/discoveryFailures\.push\(message\)/g)?.length, 2);
-  /* THREE normalizers. The option-probe normalizer can hold the send too, but its failure is
+  /* FOUR normalizers. The option-probe normalizer can hold the send too, but its failure is
    * aggregated separately so one failed batch names every affected durable control once.
    *
    * The third is the option-probe pass: a read-only third managed call that opens each closed
    * control the discovery pass found and reads its real option list. It normalizes its error for the
    * same reason the other two do. Unlike the old fallback, a missing option list is not permission
-   * to send a guessed alias into a closed employer control. */
-  assert.equal(runner.match(/describeDiscoveryFailure\(error\)/g)?.length, 3);
+   * to send a guessed alias into a closed employer control.
+   *
+   * THE FOURTH IS THE ONE THAT DELIBERATELY RECORDS NOTHING, and it is asserted here rather than
+   * left out so that the difference is a decision somebody made rather than an omission. The
+   * windowed-option search is a SECOND chance at controls that have already failed and already
+   * carry their sentence. Pushing its own failure into optionProbeBatchFailures would overwrite
+   * "the option list was windowed at the render cap" - which is true, and which the applicant can
+   * act on - with a message about a request she never knew was made. So it normalizes the error for
+   * the log and stops there, and its controls keep the failure they had. */
+  assert.equal(runner.match(/describeDiscoveryFailure\(error\)/g)?.length, 4);
+  assert.equal(runner.match(/optionProbeBatchFailures\.push\(/g)?.length, 1,
+    'only the read this run owed records a batch failure; the retry of an already-failed control does not');
   /* AND IT IS NOT A WHOLE-FORM FAILURE. A per-control option read that failed used to be pushed into
    * discoveryFailures, which is this run-level array, so one unreadable control made the packet say
    * Litos could not read ANY of the form's questions and sent every correctly read control on the
@@ -2131,6 +2141,36 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   // attention list, and it holds the send off the failure ARRAY rather than off the rendered prose.
   assert.match(runner, /\.\.\.optionProbeAttention,/);
   assert.match(runner, /&& optionProbe\.failures\.length === 0/);
+});
+
+/* THE WINDOWED-OPTION SEARCH IS WIRED WHERE IT CAN CHANGE A VERDICT, AND NOWHERE ELSE.
+ *
+ * Asserted against the source for the same reason the test above is: prepareManaged needs a remote
+ * runner, a database and blob storage, and the pure pieces in lib/portalSubmission.test.ts pass
+ * whether or not anything calls them. What is pinned here is the order, which is the whole of it: a
+ * search pass that ran before the first analysis would search controls that read perfectly well,
+ * and one whose results never reached a SECOND analysis would spend a browser call and change
+ * nothing. */
+test('a windowed control is searched after it fails, and the analysis is made again with the read', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+
+  // Gated on the windowed set, so a form with no windowed control makes no extra managed call.
+  assert.match(runner, /if \(optionProbe\.windowedIds\.size > 0\) \{/);
+  const firstAnalysis = runner.indexOf('let optionProbe = analyseOptionProbe();');
+  const searchBuild = runner.indexOf('buildManagedWindowedOptionSearchBatches(');
+  const reAnalysis = runner.indexOf('if (searchBatches.length > 0) optionProbe = analyseOptionProbe();');
+  assert.ok(firstAnalysis > 0 && searchBuild > firstAnalysis && reAnalysis > searchBuild,
+    'the search follows the failure it exists for, and its reads are analysed');
+
+  // The term is the profile's own answer with NO option list handed in: the list is the thing that
+  // could not be read, and what is wanted is a query rather than a snapped answer.
+  assert.match(runner, /managedOptionSearchTerm\(answer\)/);
+  assert.doesNotMatch(runner, /resolveProfileField\(\s*\n?\s*\{ label, inputType: field\.inputType, options/);
+
+  // And the whole pass is downstream of resolution: a search read joins fieldOptions through the
+  // same analysis every other read goes through, so nothing new reaches the fill.
+  const resolutionIndex = runner.indexOf('discoverAndResolveQuestions(', reAnalysis);
+  assert.ok(resolutionIndex > reAnalysis);
 });
 
 /* THE IMC FIXTURE. Packet 920a6751, read off the live form on 2026-08-11.

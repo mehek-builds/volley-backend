@@ -30,6 +30,11 @@ import {
   attachManagedFieldOptions,
   buildManagedDiscoveredOptionProbeActions,
   buildManagedDiscoveredOptionProbeBatches,
+  buildManagedWindowedOptionSearchBatches,
+  managedOptionSearchTerm,
+  managedOptionSearchKeys,
+  MANAGED_OPTION_SEARCH_MAX_CHARS,
+  MANAGED_OPTION_SEARCH_MAX_CONTROLS,
   escapeHatchOptionFor,
   managedOptionProbeControlId,
   managedOptionProbeTargets,
@@ -5793,4 +5798,221 @@ test('a question that names no profile field gains no closed-list chain', () => 
   ]) {
     assert.equal(closedListChain(label, 'something').length, 0, `did not expect a closed-list chain for ${label}`);
   }
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * A WINDOWED OPTION LIST IS SEARCHED, NOT GIVEN UP ON.
+ *
+ * A control that renders 100 rows and stops has said nothing about whether the stored answer is on
+ * it. managedOptionProbeAnalysis discards that read - correctly - and then discards the CONTROL
+ * with it: removed from resolution, an attention line to the applicant, and the send held. Measured
+ * on Jump Trading's school control (question_67594852), which offers a full international
+ * university taxonomy and trips the cap on every read. 9 packets.
+ *
+ * The list is not unreadable. It is searchable: typing "University of Southern" returns 8 entries
+ * that were nowhere in the first 100. So the control is asked the narrower question it can actually
+ * answer, and a filtered read under the cap is a real read of real rows.
+ * ------------------------------------------------------------------------------------------- */
+
+const JUMP_SCHOOL_ID = 'question_67594852';
+const JUMP_SCHOOL_SELECTOR = `[id="${JUMP_SCHOOL_ID}"]:is([role="combobox"],[aria-haspopup="listbox"])`;
+const JUMP_SCHOOL_FIELD = [{
+  label: 'What school do you attend? question_67594852',
+  selector: `#${JUMP_SCHOOL_ID}`,
+  inputType: 'text',
+  role: 'combobox',
+  required: true,
+  options: undefined as string[] | undefined,
+}];
+// The window. 100 rows, alphabetical, stopping long before the U's - which is the whole point: the
+// applicant's school is past the window, and a read of the window cannot say so.
+const SCHOOL_WINDOW_100 = Array.from({ length: 100 }, (_, index) => `Abbey College ${index}`).join('\n');
+// What the same control returns for "University of Southern", read off the live shape.
+const SOUTHERN_ROWS = [
+  'University of Southern California',
+  'University of Southern Denmark',
+  'University of Southern Indiana',
+  'University of Southern Maine',
+  'University of Southern Mississippi',
+  'University of Southern Queensland',
+  'University of Southern California - Marshall School of Business',
+  'University of Southern California - Viterbi School of Engineering',
+];
+
+const jumpSchoolResult = (listboxValues: string[]) => ({
+  title: '', url: '', text: '',
+  extracted: [
+    { selector: JUMP_SCHOOL_SELECTOR, value: JUMP_SCHOOL_ID },
+    ...listboxValues.map((value) => ({ selector: reactSelectListboxSelector(JUMP_SCHOOL_ID), value })),
+  ],
+});
+
+test('a windowed read is named as one a narrower question could still answer', () => {
+  const analysis = managedOptionProbeAnalysis(
+    'greenhouse', JUMP_SCHOOL_FIELD, {}, [jumpSchoolResult([SCHOOL_WINDOW_100, SCHOOL_WINDOW_100])], [], true,
+  );
+  assert.equal(analysis.failedIds.has(JUMP_SCHOOL_ID), true, 'still fails on the reads it has');
+  assert.match(analysis.failures[0]?.reason ?? '', /windowed at the render cap/);
+  assert.equal(analysis.windowedIds.has(JUMP_SCHOOL_ID), true);
+  // Only windowed reads. A control that was still loading, or that returned nothing at all, is not
+  // something a search query can rescue, and offering it one would spend a browser call on nothing.
+  const loading = managedOptionProbeAnalysis(
+    'greenhouse', JUMP_SCHOOL_FIELD, {}, [jumpSchoolResult(['Loading...', 'Loading...'])], [], true,
+  );
+  assert.equal(loading.failedIds.has(JUMP_SCHOOL_ID), true);
+  assert.equal(loading.windowedIds.has(JUMP_SCHOOL_ID), false);
+  // And a control that read fine is named nowhere, however long its list.
+  const read = managedOptionProbeAnalysis(
+    'greenhouse', JUMP_SCHOOL_FIELD, {}, [jumpSchoolResult([SOUTHERN_ROWS.join('\n')])], [], true,
+  );
+  assert.deepEqual(read.failures, []);
+  assert.equal(read.windowedIds.size, 0);
+});
+
+test('a windowed read retries with a filtered search and succeeds', () => {
+  /* THE REPAIR, end to end through the two calls the runner makes.
+   *
+   * The probe pass reads the window twice and fails the control. The search pass types the answer's
+   * leading tokens, reads the menu the control filters down to, and hands the SAME analysis a third
+   * read of the same id. A filtered read under the cap is a list, so the control resolves. */
+  const windowed = managedOptionProbeAnalysis(
+    'greenhouse', JUMP_SCHOOL_FIELD, {}, [jumpSchoolResult([SCHOOL_WINDOW_100, SCHOOL_WINDOW_100])], [], true,
+  );
+  const batches = buildManagedWindowedOptionSearchBatches(
+    'greenhouse', windowed.windowedIds, { [JUMP_SCHOOL_ID]: 'University of Southern California' },
+  );
+  assert.equal(batches.length, 1);
+  const [batch] = batches;
+
+  /* THE ACTION SHAPE IS THE SAFETY ARGUMENT, so it is asserted rather than described. Open, type,
+   * read, close. No fill, no select, no click on any row - because the probe passes run against an
+   * employer's live form on an application the applicant has not yet approved, and the runner's
+   * `fill` on a combobox does not type at all: it ranks the rows and CLICKS one. */
+  assert.deepEqual([...new Set(batch.map((action) => action.type))], ['click', 'press', 'extract']);
+  assert.equal(batch.filter((action) => action.type === 'click').length, 1);
+  assert.equal(batch.every((action) => action.optional === true), true);
+  assert.equal(batch.at(0)?.label, `option_search_open:${JUMP_SCHOOL_ID}`);
+  assert.equal(batch.at(-1)?.value, 'Escape', 'the control is left exactly as it was found');
+  // Every keystroke is aimed at the control, never at the form. An unaimed press is how a stale
+  // "is required" banner got rendered over a correctly filled Greenhouse form once already.
+  assert.equal(batch.every((action) => action.selector === JUMP_SCHOOL_SELECTOR
+    || action.selector === reactSelectListboxSelector(JUMP_SCHOOL_ID)), true);
+  // Cut to whole words at the cap, so the query is one a reader of the packet can recognise.
+  const typed = batch.filter((action) => action.label === `option_search_key:${JUMP_SCHOOL_ID}`)
+    .map((action) => (action.value === 'Space' ? ' ' : action.value)).join('');
+  assert.equal(typed, 'University of Southern');
+  // And the read carries the SAME label the probe rounds use, so the analysis needs no new arm.
+  assert.equal(
+    batch.find((action) => action.type === 'extract')?.label,
+    `${MANAGED_OPTION_EXTRACT_PREFIX}${JUMP_SCHOOL_ID}`,
+  );
+
+  const afterSearch = managedOptionProbeAnalysis(
+    'greenhouse',
+    JUMP_SCHOOL_FIELD,
+    {},
+    [jumpSchoolResult([SCHOOL_WINDOW_100, SCHOOL_WINDOW_100]), jumpSchoolResult([SOUTHERN_ROWS.join('\n')])],
+    [],
+    true,
+  );
+  assert.deepEqual(afterSearch.failures, [], 'the control no longer fails');
+  assert.equal(afterSearch.failedIds.has(JUMP_SCHOOL_ID), false);
+  assert.deepEqual(afterSearch.options[JUMP_SCHOOL_ID], SOUTHERN_ROWS);
+  // Which is what resolution needed: the employer's own spelling of the applicant's school, so the
+  // fill types an exact row instead of the profile's phrasing.
+  const attached = attachManagedFieldOptions(JUMP_SCHOOL_FIELD, afterSearch.options);
+  assert.equal(attached[0]?.options?.includes('University of Southern California'), true);
+});
+
+test('a filtered read that is still capped fails closed exactly as it did before', () => {
+  /* THE PROPERTY THAT MAKES THIS ADDITIVE. A search that narrowed nothing is not evidence of
+   * anything, and it must not become one: 100 rows out of a filtered menu parse as 'windowed'
+   * through the same predicate, with the same sentence, and the control stays failed. */
+  const stillCapped = managedOptionProbeAnalysis(
+    'greenhouse',
+    JUMP_SCHOOL_FIELD,
+    {},
+    [jumpSchoolResult([SCHOOL_WINDOW_100, SCHOOL_WINDOW_100]), jumpSchoolResult([SCHOOL_WINDOW_100])],
+    [],
+    true,
+  );
+  assert.equal(stillCapped.failedIds.has(JUMP_SCHOOL_ID), true);
+  assert.match(stillCapped.failures[0]?.reason ?? '', /windowed at the render cap/);
+  assert.equal(stillCapped.options[JUMP_SCHOOL_ID], undefined, 'no alias may be sent in its place');
+  // And it is still named as windowed, so a caller that retried once does not conclude it is done.
+  assert.equal(stillCapped.windowedIds.has(JUMP_SCHOOL_ID), true);
+  // A filtered read that came back empty, or still loading, fails closed the same way.
+  for (const value of ['', 'Loading...', 'No results found']) {
+    const barren = managedOptionProbeAnalysis(
+      'greenhouse',
+      JUMP_SCHOOL_FIELD,
+      {},
+      [jumpSchoolResult([SCHOOL_WINDOW_100, SCHOOL_WINDOW_100]), jumpSchoolResult([value])],
+      [],
+      true,
+    );
+    assert.equal(barren.failedIds.has(JUMP_SCHOOL_ID), true, `a filtered read of "${value}" is not a list`);
+    assert.equal(barren.options[JUMP_SCHOOL_ID], undefined);
+  }
+});
+
+test('a search is only built where there is something honest to type', () => {
+  const terms = { [JUMP_SCHOOL_ID]: 'University of Southern California' };
+  // Not a Greenhouse family. Every id and selector shape in this pass is Greenhouse's own.
+  assert.deepEqual(buildManagedWindowedOptionSearchBatches('lever', [JUMP_SCHOOL_ID], terms), []);
+  // No windowed control.
+  assert.deepEqual(buildManagedWindowedOptionSearchBatches('greenhouse', [], terms), []);
+  // No stored answer for the control, so no query. This is the ordinary case for an employer's own
+  // custom question that Litos has nothing of its own to say about, and it fails closed.
+  assert.deepEqual(buildManagedWindowedOptionSearchBatches('greenhouse', [JUMP_SCHOOL_ID], {}), []);
+  assert.deepEqual(buildManagedWindowedOptionSearchBatches('greenhouse', [JUMP_SCHOOL_ID], { [JUMP_SCHOOL_ID]: '  ' }), []);
+  // An answer whose leading tokens are too short to narrow anything.
+  assert.deepEqual(buildManagedWindowedOptionSearchBatches('greenhouse', [JUMP_SCHOOL_ID], { [JUMP_SCHOOL_ID]: 'MIT' }), []);
+  // An answer that starts with punctuation the runner cannot press as a key.
+  assert.deepEqual(buildManagedWindowedOptionSearchBatches('greenhouse', [JUMP_SCHOOL_ID], { [JUMP_SCHOOL_ID]: "St. John's University" }), []);
+});
+
+test('the search pass is bounded in both directions a form can grow', () => {
+  const ids = Array.from({ length: MANAGED_OPTION_SEARCH_MAX_CONTROLS + 3 }, (_, index) => `question_9${index}`);
+  const terms = Object.fromEntries(ids.map((id) => [id, 'University of Southern California']));
+  const batches = buildManagedWindowedOptionSearchBatches('greenhouse', ids, terms);
+  const searched = new Set(batches.flat().flatMap((action) => {
+    const id = action.label?.match(/^option_search_open:(.+)$/)?.[1];
+    return id ? [id] : [];
+  }));
+  assert.equal(searched.size, MANAGED_OPTION_SEARCH_MAX_CONTROLS, 'a form of windowed controls cannot spend the whole budget');
+  assert.equal(batches.every((batch) => batch.length <= MANAGED_ACTION_LIMIT), true);
+  // Whole controls only. Half a query typed in one browser session and half in the next is two
+  // different searches, and the menu of neither is what gets read.
+  for (const batch of batches) {
+    assert.equal(
+      batch.filter((action) => action.label?.startsWith('option_search_open:')).length,
+      batch.filter((action) => action.label?.startsWith('option_search_close:')).length,
+    );
+  }
+});
+
+test('the search term is the answer leading tokens, cut at a whole word and at typeable characters', () => {
+  assert.equal(managedOptionSearchTerm('University of Southern California'), 'University of Southern');
+  assert.ok(managedOptionSearchTerm('University of Southern California').length <= MANAGED_OPTION_SEARCH_MAX_CHARS);
+  // Short answers are typed whole.
+  assert.equal(managedOptionSearchTerm('Computer Science'), 'Computer Science');
+  assert.equal(managedOptionSearchTerm('  Economics  '), 'Economics');
+  /* TRUNCATED AT THE FIRST UNTYPEABLE CHARACTER RATHER THAN HAVING IT DROPPED. A react-select
+   * filter is a substring test, so deleting the apostrophe out of "St. John's" would produce a
+   * query that matches nothing while looking like it should. Stopping there gives a shorter query
+   * that is still a true prefix - or nothing at all, which fails closed. */
+  assert.equal(managedOptionSearchTerm("St. John's University"), '');
+  assert.equal(managedOptionSearchTerm('Universite Paris-Saclay'), 'Universite Paris');
+  assert.equal(managedOptionSearchTerm('Massachusetts Institute of Technology'), 'Massachusetts Institute of');
+  // Nothing to type is nothing to search with.
+  assert.equal(managedOptionSearchTerm(undefined), '');
+  assert.equal(managedOptionSearchTerm(null), '');
+  assert.equal(managedOptionSearchTerm('MIT'), '');
+  // A GPA band answer has one typeable character before the decimal point, so it produces no query
+  // at all. That is the right outcome and not a gap: a GPA control offers five rows and is never
+  // windowed, so it never reaches this pass.
+  assert.equal(managedOptionSearchTerm('3.89'), '');
+  // A space is sent as the named key, whose behaviour is written down, rather than as a bare ' '.
+  assert.deepEqual(managedOptionSearchKeys('Ab c'), ['A', 'b', 'Space', 'c']);
 });
