@@ -4764,6 +4764,19 @@ function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
   if (STUDIES_COMPLETION_QUESTION.test(l)) return 'education_end_date';
   // Explicit phrasings that unambiguously ask for the institution's NAME. Everything else has to
   // clear labelNamesProfileField further down: the bare keyword is not enough on its own.
+  /* "please select your current school from the list below" (Jump Trading, 2 postings, 2026-08-13).
+   *
+   * Nine words, so the bare-keyword path at the bottom of this function refuses it on the
+   * six-word field-name budget, and it says "select ... school" rather than any of the phrasings
+   * above, so nothing claimed it and the school never reached the form. The value was on the
+   * profile the whole time.
+   *
+   * Tight on purpose: the SELECT VERB has to sit beside the school noun. That is what keeps it off
+   * "which of these schools have you heard of", off ANOTHER_INSTITUTION_NOUN's transfer questions,
+   * and off anything asking the applicant to choose between schools rather than to name her own.
+   * "your" and "current" are optional because the corpus writes both "select your current school"
+   * and the bare "select school". */
+  if (/\bselect\s+(?:your\s+)?(?:current\s+)?(?:school|university|college|institution)\b/i.test(l)) return 'school';
   if (/\bwhich\s+(?:school|university|college|institution)\b|\b(?:school|university|college|institution)\s+(?:name|(?:you\s+|are\s+you\s+)?(?:currently\s+)?(?:attend(?:ing|ed)?|enrolled(?:\s+in)?))\b|\bname\s+of\s+(?:your\s+)?(?:school|university|college|institution)\b|^university\s*\/\s*institution\b/i.test(l)) return 'school';
   if (MAJOR_QUESTION.test(l)) return 'major';
   if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
