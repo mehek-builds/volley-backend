@@ -4943,8 +4943,22 @@ const NUMBER_TO_MONTH: Record<string, string> = {
  * that needs the month on its own (statedGraduationMonth) and the one that needs a whole ISO day
  * (graduationDateAnswer) cannot drift apart. Only ever used through matchAll, which clones the
  * regex, so the /g flag carries no lastIndex from one call to the next. */
-const GRADUATION_ISO_MONTH_RE = /\b((?:19|20)\d{2})-(\d{2})(?:-\d{2})?\b/g;
+const GRADUATION_ISO_MONTH_RE = /\b((?:19|20)\d{2})-(\d{2})(?:-(\d{2}))?\b/g;
+const GRADUATION_MONTH_DAY_YEAR_RE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b[^0-9]{0,4}(\d{1,2})(?:st|nd|rd|th)?[^0-9]{0,4}\b((?:19|20)\d{2})\b/gi;
 const GRADUATION_MONTH_YEAR_RE = /\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b[^0-9]{0,20}\b((?:19|20)\d{2})\b/gi;
+
+function canonicalGraduationDay(year: string, month: string, day = '01'): string | null {
+  const paddedMonth = month.padStart(2, '0');
+  const paddedDay = day.padStart(2, '0');
+  const candidate = `${year}-${paddedMonth}-${paddedDay}`;
+  const parsed = new Date(`${candidate}T00:00:00.000Z`);
+  if (!Number.isFinite(parsed.getTime())) return null;
+  return parsed.getUTCFullYear() === Number(year)
+    && parsed.getUTCMonth() + 1 === Number(paddedMonth)
+    && parsed.getUTCDate() === Number(paddedDay)
+    ? candidate
+    : null;
+}
 
 export function graduationDateAnswer(
   gradDate: string | undefined,
@@ -4957,15 +4971,21 @@ export function graduationDateAnswer(
   const preferredYear = gradYear && gradYear > 0 ? String(gradYear) : undefined;
   const isoMatches = [...text.matchAll(GRADUATION_ISO_MONTH_RE)];
   const iso = isoMatches.find((match) => match[1] === preferredYear) ?? isoMatches.at(-1);
-  if (iso) return `${iso[1]}-${iso[2]}-01`;
+  if (iso) return canonicalGraduationDay(iso[1], iso[2], iso[3] ?? '01');
+  const exactMatches = [...text.matchAll(GRADUATION_MONTH_DAY_YEAR_RE)];
+  const exact = exactMatches.find((match) => match[3] === preferredYear) ?? exactMatches.at(-1);
+  if (exact) {
+    const month = MONTH_TO_NUMBER[exact[1].toLowerCase()];
+    if (month) return canonicalGraduationDay(exact[3], month, exact[2]);
+  }
   const monthYearMatches = [...text.matchAll(GRADUATION_MONTH_YEAR_RE)];
   const monthYear = monthYearMatches.find((match) => match[2] === preferredYear) ?? monthYearMatches.at(-1);
-  if (monthYear) return `${monthYear[2]}-${MONTH_TO_NUMBER[monthYear[1].toLowerCase()]}-01`;
+  if (monthYear) return canonicalGraduationDay(monthYear[2], MONTH_TO_NUMBER[monthYear[1].toLowerCase()]);
   const year = preferredYear ?? text.match(/\b(?:19|20)\d{2}\b/g)?.at(-1) ?? '';
   if (!year) return null;
   const monthToken = text.match(/\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t|tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i)?.[0].toLowerCase();
   const month = monthToken ? MONTH_TO_NUMBER[monthToken] : '05';
-  return `${year}-${month}-01`;
+  return canonicalGraduationDay(year, month);
 }
 
 function graduationEvidenceIsFuture(gradDate: string | undefined, gradYear: number | undefined): boolean {
