@@ -292,7 +292,13 @@ Using Leading Since`.split(/\s+/),
 // the result as review WARNINGS, never a hard block - it can over-flag legitimate phrasing.
 export function ungroundedProperNouns(text: string, corpus: Set<string>): string[] {
   const found = new Set<string>();
-  const re = /\b([A-Z][a-zA-Z0-9&.]+(?:\s+[A-Z][a-zA-Z0-9&.]+){0,3})\b/g;
+  /* Do not begin a candidate phrase in the middle of a hyphenated word. The live Scale AI letter
+   * contains "Object-Oriented Programming". wordSet correctly keeps "object-oriented" as one
+   * grounded token, but the proper-noun matcher used to start after the hyphen and report
+   * "Oriented Programming" as an unknown name. That warning asks the applicant to review a person
+   * who does not exist. The same boundary applies to the two Unicode range separators an employer
+   * or model may use, written as escapes so the prohibited glyphs never enter the source. */
+  const re = /(?<![-\u2013\u2014])\b([A-Z][a-zA-Z0-9&.]+(?:\s+[A-Z][a-zA-Z0-9&.]+){0,3})\b/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const phrase = m[1];
