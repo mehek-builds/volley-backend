@@ -33,7 +33,40 @@ export function referralSourceOptionCandidates(
   if (!resolved) return [];
   if (isJobBoardReferralClaim(resolved)) {
     if (evidence?.kind !== 'litos_job_board' || evidence.value !== 'Job board') return [];
-    return ['Job board', 'Job Board', 'Online job board'];
+    /* THE SPELLINGS EMPLOYERS ACTUALLY USE, and nothing that changes the claim.
+     *
+     * MEASURED. "Job board" came back `no option matched` on Old Mission's form on 2026-08-13 with
+     * the stored answer sitting right there, because three spellings is not a ladder. Every entry
+     * below states the SAME acquisition fact - she found the posting on a job board - in the
+     * wording a different employer happens to print.
+     *
+     * WHAT IS DELIBERATELY ABSENT, and it is the more important half: no named third party.
+     * "LinkedIn", "Indeed", "Handshake", "Glassdoor" and "University career fair" are all sitting
+     * on these same option lists and would all clear a required field, and every one of them is a
+     * DIFFERENT statement about where she found the role. Naming a site she did not use is not a
+     * spelling variant of the truth, it is a new claim, and the note further down this file about
+     * third-party entries applies to this list exactly as it does to that one.
+     *
+     * Nothing here says "website" or "career" either, and that is enforced by an existing test:
+     * those words belong to the employer's-own-site claim, which is the neighbouring branch and a
+     * different fact. A bare "Online" is out for the same reason - it is not a spelling of "job
+     * board", it is a vaguer claim that happens to be easier to satisfy. */
+    return [
+      'Job board',
+      'Job Board',
+      'Job boards',
+      'Job Boards',
+      'Online job board',
+      'Online Job Board',
+      'Online job boards',
+      'Internet job board',
+      'Job site',
+      'Job Site',
+      'Job posting',
+      'Job Posting',
+      'Online job posting',
+      'Online job search',
+    ];
   }
   if (isCompanySiteReferralClaim(resolved)) {
     if (evidence?.kind !== 'employer_career_site' || evidence.value !== 'Company website') return [];
