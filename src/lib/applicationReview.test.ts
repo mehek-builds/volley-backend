@@ -914,6 +914,7 @@ const everyQuestionField = {
   ats_api_field: 'gender',
   answer_source: 'applicant_review',
   answer_reviewed_at: '2026-08-12T13:45:27.969Z',
+  answer_approved_at: '2026-08-13T16:41:02.104Z',
   answer_option_source: 'May 2028',
   consent_permission_granted_at: '2026-08-01T00:00:00.000Z',
   consent_permission_version: 'v1',

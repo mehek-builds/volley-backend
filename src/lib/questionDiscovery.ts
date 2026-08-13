@@ -1,4 +1,13 @@
 import type { Page } from 'playwright-core';
+/* The classification, from the leaf module rather than from applicationReview.ts, which re-exports
+ * it but cannot be imported here for a value: it imports portalSubmission.ts, which imports this
+ * file. See answerProvenanceFields.ts. */
+import {
+  ANSWER_CLAIM_FIELDS,
+  ANSWER_PROVENANCE_FIELDS,
+  withoutProvenanceFields,
+  type AnswerProvenanceField,
+} from './answerProvenanceFields';
 import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
@@ -2051,41 +2060,36 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
     const known = label
       ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry, postingCountryCode, storedAsCandidate)
       : null;
-    const withProvenance = question as T & {
-      answer_source?: unknown;
-      answer_reviewed_at?: unknown;
-      answer_option_source?: unknown;
-      consent_permission_version?: unknown;
-      consent_permission_granted_at?: unknown;
-    };
+    /* DECLARED FROM THE FIELD LISTS, not from whichever names this function happened to read.
+     *
+     * The hand-written version of this cast named five of the six provenance fields, and the one it
+     * omitted was `answer_approved_at`. That omission was invisible: the cast is what gives
+     * `withoutProvenance` below something to destructure, so a field missing here is a field that
+     * silently survives every branch that replaces the answer. Keyed off ANSWER_PROVENANCE_FIELDS,
+     * the set can no longer drift from the set the classification governs. */
+    const withProvenance = question as T & Partial<Record<AnswerProvenanceField, unknown>>;
     const applicantReviewedCurrentAnswer = Boolean(
       question.answer.trim()
       && withProvenance.answer_source === 'applicant_review'
       && typeof withProvenance.answer_reviewed_at === 'string'
       && withProvenance.answer_reviewed_at === questionsReviewedAt,
     );
-    /* answer_option_source goes with the answer it describes, and only ever with that answer.
+    /* EVERY PROVENANCE FIELD, BECAUSE EVERY CALLER OF THIS HAS ALREADY REPLACED THE ANSWER.
      *
-     * Every branch below that CHANGES the answer drops it, because a derivation left beside a value
-     * it was not derived from is a lie the next reader has no way to detect: a record reading
-     * answer "May 2028" with answer_option_source "May 2027" claims a snap that never happened. The
-     * one branch that keeps the answer keeps it, which is the whole point of recording it. */
-    /* answer_option_source goes with the answer it describes, and only ever with that answer.
+     * The two branches below that call it hand back a DIFFERENT answer: the freshly resolved value,
+     * or the empty string. That falsifies both classes at once. The answer-claims describe a value
+     * that is gone, and the record identity the applicant-claims are keyed to is gone with it, so
+     * there is no judgement to make here and no field this branch may keep.
      *
-     * Every branch below that CHANGES the answer drops it, because a derivation left beside a value
-     * it was not derived from is a lie the next reader has no way to detect. The consent grant is
-     * the same kind of claim and drops on the same rule. */
-    const withoutProvenance = (): T => {
-      const {
-        answer_source: _answerSource,
-        answer_reviewed_at: _answerReviewedAt,
-        answer_option_source: _answerOptionSource,
-        consent_permission_version: _consentPermissionVersion,
-        consent_permission_granted_at: _consentPermissionGrantedAt,
-        ...rest
-      } = withProvenance;
-      return rest as T;
-    };
+     * IT IS DERIVED RATHER THAN LISTED, and the reason is the bug this replaces. The hand-written
+     * list named five of the six fields, omitting `answer_approved_at`, so a refresh that replaced
+     * a confirm-family answer - sponsorship, work authorization, compensation, privacy consent -
+     * carried "she read this and let it stand" onto text she had never seen, and carried it stripped
+     * of the `answer_reviewed_at` a reader would need to falsify it. Nothing caught it: the
+     * compile-time partition guard governs the Classified/Unclassified type and never saw this copy.
+     * Reading ANSWER_PROVENANCE_FIELDS means the next field added is stripped here the day it is
+     * classified, without anyone remembering that this site exists. */
+    const withoutProvenance = (): T => withoutProvenanceFields(withProvenance, ANSWER_PROVENANCE_FIELDS);
     /* AN ANSWER THIS FUNCTION CANNOT RECOMPUTE, AND CAN STILL PROVE IS CURRENT.
      *
      * The line below is right about almost everything and was silently wrong about one class of
@@ -2189,14 +2193,20 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
        * STRICT EQUALITY, deliberately. A case or spacing difference is a different string on the
        * employer's form: "Decline To Self Identify" is not the option "Decline to self-identify",
        * and one of them is what gets typed. Those keep falling through to be replaced. */
+      /* THE LAST HAND-MAINTAINED COPY IN THIS FUNCTION, NOW DERIVED LIKE THE OTHER.
+       *
+       * This branch named its three fields as destructured identifiers, which is the same
+       * arrangement that let `answer_approved_at` be added to the classification and missed at the
+       * strip site above. The risk here is mirrored rather than identical, and that is why it is
+       * worth closing: an omission in the branch above SURVIVES a claim that should drop, and an
+       * omission here CARRIES a new answer-claim forward that should drop. Both are a record
+       * quietly asserting something nobody checked.
+       *
+       * Behaviour is unchanged. The three names it spelled out were exactly ANSWER_CLAIM_FIELDS,
+       * member for member, so the set removed is the same set; what changes is that the set is now
+       * read from the classification instead of restated beside it. */
       if (known.value === question.answer) {
-        const {
-          answer_option_source: _optionSource,
-          consent_permission_granted_at: _grantedAt,
-          consent_permission_version: _grantVersion,
-          ...withApplicantClaim
-        } = withProvenance;
-        return withApplicantClaim as T;
+        return withoutProvenanceFields(withProvenance, ANSWER_CLAIM_FIELDS);
       }
       return { ...withoutProvenance(), answer: known.value };
     }

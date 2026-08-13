@@ -45,6 +45,7 @@ import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type Jo
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
+import { ANSWER_APPROVAL_REFUSALS, approveDraftedAnswer } from '../lib/answerApproval';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, reviewAnswerSaveDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import { submissionClaimPatch } from '../lib/submissionStop';
@@ -116,6 +117,12 @@ const reviewBodySchema = z.object({
  * fixes a typo in an essay. Narrower body, narrower route, nothing to re-derive. */
 const reviewAnswersBodySchema = z.object({
   questions: z.array(questionSchema).max(100),
+});
+/* The exact text the screen showed, and nothing else. An approval names no id in its body because
+ * the id is in the path, and it carries no provenance because provenance is what it is asking the
+ * server to write. See approveDraftedAnswer for why the answer is required rather than advisory. */
+const answerApprovalBodySchema = z.object({
+  answer: z.string().max(20_000),
 });
 const submitBodySchema = z.object({
   questions: z.array(questionSchema).max(100),
@@ -1470,6 +1477,124 @@ export async function applicationRoutes(fastify: FastifyInstance) {
          * contain it, and navigated away - which is the original defect happening again, on the one
          * response that exists to say it happened. Present ONLY here: a 200 carries no `saved` key,
          * so the client reads the discriminator rather than an absence. */
+        const refreshed = await ownedResume(request, reply);
+        if (!refreshed) return;
+        const review = readApplicationReview(refreshed.spec);
+        return reply.status(202).send({ application_id: row.id, review: review ?? current, saved: false });
+      }
+      return reply.send({ application_id: row.id, review: next });
+    },
+  );
+
+  /* MARKING ONE DRAFTED ANSWER APPROVED, WHICH NO ROUTE COULD DO.
+   *
+   * WHAT THE PANEL OFFERED INSTEAD. The "Needs your input" list drew a checkbox per row with an
+   * aria-label of "Mark <label> done" and no handler behind it at all - not a disabled control, a
+   * bare <input> that had never been wired since it shipped. Pressing it issued no request. This is
+   * the route it should have been calling, and the reason it is a route rather than client state is
+   * that the hold it clears is on the row.
+   *
+   * WHY NOT PUT /review/answers, WHICH IS RIGHT NEXT TO IT. That route saves the ANSWERS the
+   * applicant typed and mints a claim only where she filled a blank - deliberately, because the
+   * blanket alternative would have attributed 802 machine-written answers to her. Approving a draft
+   * is not filling a blank, so a save cannot express it, and making the save express it is the
+   * widening that regression exists to forbid. Different act, different request, different field.
+   * See lib/answerApproval.ts.
+   *
+   * WHAT IT LEAVES ALONE, WHICH IS EVERYTHING ELSE. Same gate as the save
+   * (reviewAnswerSaveDisposition, which reads the row rather than the status, so a packet that may
+   * already be at the employer is refused). Same conditional update pinned to the stored status, so
+   * a run writing underneath it answers 202 rather than overwriting. `status` and `attention_reason`
+   * are not in the object it writes: the packet stays needs_attention wearing the reason its run
+   * recorded, and the row's own answers say which parts of that reason are now answered for. A route
+   * that cleared the prose would be relabelling the packet, which is PUT /review's defect. */
+  fastify.put(
+    '/applications/:id/review/answers/:questionId/approval',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const questionId = (request.params as { questionId?: string }).questionId ?? '';
+      const parsed = answerApprovalBodySchema.safeParse(request.body);
+      if (!parsed.success) return reply.status(400).send({ error: 'We could not read this approval', detail: parsed.error.issues });
+      const current = readApplicationReview(row.spec as StoredSpec);
+      if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      if (reviewAnswerSaveDisposition(current) !== 'save') {
+        return reply.status(409).send({
+          error: 'These answers can no longer be edited from this application’s current submission state',
+          code: 'REVIEW_ANSWERS_NOT_EDITABLE',
+        });
+      }
+      /* THE SAME REFRESH THE GET RUNS, BECAUSE THE GET IS WHAT DREW THE SCREEN.
+       *
+       * GET /applications/:id/submission serves refreshKnownQuestionAnswers output, so the answer
+       * the applicant read is the REFRESHED one, and for every question the refresh rewrites that is
+       * not the string in `row.spec`. Approving against the stored record compared two different
+       * things and refused permanently: the refresh is deterministic over the same profile and the
+       * GET does not write back, so the mismatch could never resolve and the applicant was told
+       * "Litos rewrote this answer while you were reading it" about an answer nothing had touched.
+       *
+       * Same arguments as the GET, deliberately, including the bare `review.jd_text`. The submission
+       * runner resolves with applicationContextForQuestionResolution and can therefore reach a
+       * different answer for the same question; that divergence is real and is not this route's to
+       * settle. What matters here is that the comparison basis is the list the applicant was shown,
+       * and the list the applicant was shown is this one. */
+      const approvalProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
+      const refreshedQuestions = refreshKnownQuestionAnswers(
+        current.questions,
+        approvalProfile,
+        current.jd_text,
+        current.questions_reviewed_at,
+        postingCountryFromJobContext(row.job_context),
+        postingCountryCodeFromJobContext(row.job_context),
+      );
+      const outcome = approveDraftedAnswer({
+        current: { questions: refreshedQuestions, questions_reviewed_at: current.questions_reviewed_at },
+        questionId,
+        answer: parsed.data.answer,
+      });
+      if (!outcome.approved) {
+        return reply.status(409).send({
+          error: ANSWER_APPROVAL_REFUSALS[outcome.reason],
+          code: outcome.reason.toUpperCase(),
+        });
+      }
+      /* ONE ROW IS WRITTEN, AND IT IS WRITTEN AS SHE READ IT.
+       *
+       * The approved row is persisted from the REFRESHED list, so the stored answer becomes the text
+       * she actually approved and the stamp sits beside it rather than beside a string she never saw.
+       * That is also what makes the approval survive: on the next refresh the resolver recomputes
+       * this same value, the answer is unchanged byte for byte, and the keep-branch carries the
+       * applicant-claim forward. Persisting the stored string instead would have the very next read
+       * replace it and strip the approval with it, which is no approval at all.
+       *
+       * EVERY OTHER ROW IS THE STORED ONE, UNTOUCHED. This route's contract is that it leaves
+       * everything else alone, and writing the whole refreshed list would quietly make an approval of
+       * one answer a save of all of them. The other rows lose nothing: the GET refreshes them for
+       * display and the send path refreshes them again before they go anywhere. */
+      const approvedQuestions = current.questions.map((question, index) => (
+        index === outcome.approvedIndex ? outcome.questions[index]! : question
+      ));
+      const next: ApplicationReviewState = {
+        ...current,
+        questions: approvedQuestions,
+        questions_reviewed_at: outcome.questionsReviewedAt,
+        updated_at: new Date().toISOString(),
+      };
+      const saved = await db.update(generated_resumes)
+        .set({ spec: reviewSpec(next) })
+        .where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
+        ))
+        .returning({ id: generated_resumes.id });
+      if (saved.length === 0) {
+        /* The row moved under the approval, so nothing was recorded. Answered with what is stored
+         * rather than with what this request wanted to store, and carrying the same `saved: false`
+         * discriminator the answers route ships, because both bodies are otherwise identical and a
+         * client reading `res.ok` alone cannot tell an approval from a lost race. */
         const refreshed = await ownedResume(request, reply);
         if (!refreshed) return;
         const review = readApplicationReview(refreshed.spec);

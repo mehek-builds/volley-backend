@@ -35,6 +35,11 @@ function storedQuestion(overrides: Partial<ApplicationReviewQuestion> = {}): App
     required: true,
     answer_source: 'applicant_review',
     answer_reviewed_at: REVIEWED_AT,
+    /* The approval claim is on the fixture so every loop below covers it without naming it, which is
+     * this file's whole method. It is an applicant-claim for the same reason the two above it are:
+     * it states what SHE did with this record, and a rename, a replaced answer or a stale round all
+     * falsify it. */
+    answer_approved_at: '2026-08-12T10:04:00.000Z',
     answer_option_source: 'Yes',
     consent_permission_version: 'privacy_and_terms@2026-08-12',
     consent_permission_granted_at: '2026-08-12T09:15:00.000Z',

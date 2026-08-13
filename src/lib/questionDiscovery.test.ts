@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { ANSWER_CLAIM_FIELDS, ANSWER_PROVENANCE_FIELDS, APPLICANT_CLAIM_FIELDS } from './answerProvenanceFields';
 import {
   classifyField,
   DISCOVER_QUESTIONS_SCRIPT,
@@ -3477,6 +3478,52 @@ test('a resolved answer equal to the stored one keeps the record of who answered
  * because a consent that round-trips the review screen comes back as the bare resolver constant and
  * a grant record beside it claims an acceptance of a value no control offered. See the consent
  * boundary suite, which measures that case directly. */
+/* THE SAME GUARANTEE AS THE TEST BELOW, ASSERTED SO THAT IT SURVIVES A SEVENTH FIELD.
+ *
+ * The test below names the three answer-claims as literals, which pins today's behaviour and cannot
+ * pin tomorrow's: add a fourth answer-claim to the classification and it stays green while the
+ * keep-branch carries the new field forward. That is the mirror image of the defect this branch
+ * fixed. An omission at the strip site lets a claim SURVIVE a replaced answer; an omission here lets
+ * a new claim RIDE ALONG on an answer whose derivation nobody re-checked. Both end as a record
+ * asserting something no reader can falsify.
+ *
+ * So the fixture is BUILT from the two lists and the assertions ITERATE them. A field added to
+ * ANSWER_CLAIM_FIELDS is automatically carried into this question and automatically required to
+ * drop; a field added to APPLICANT_CLAIM_FIELDS is automatically required to survive. */
+test('the keep-branch drops every answer-claim and keeps every applicant-claim, by the list', () => {
+  const reviewedAt = '2026-08-12T13:45:27.969Z';
+  /* answer_source carries a real member of its union. 'consent_permission' rather than
+   * 'applicant_review' so that applicantReviewedCurrentAnswer is false and this lands on the
+   * keep-branch under test rather than on the reviewed-band branch above it. */
+  const stamped = Object.fromEntries([
+    ...APPLICANT_CLAIM_FIELDS.map((field) => [
+      field,
+      field === 'answer_source' ? 'consent_permission' : reviewedAt,
+    ]),
+    ...ANSWER_CLAIM_FIELDS.map((field) => [field, `derived-from-${field}`]),
+  ]);
+
+  const [refreshed] = refreshKnownQuestionAnswers(
+    [{ question: 'what is your gender/gender identity? 4005628101', answer: 'Female', ...stamped }],
+    { eeo_prefs: { gender: 'Female' } },
+    undefined,
+    reviewedAt,
+  );
+
+  /* Nothing was replaced, which is the precondition for the branch and also the proof that this is
+   * the branch we reached: every other keep path returns the record untouched, answer-claims and
+   * all, so the drops asserted below could not happen on one of those. */
+  assert.equal(refreshed.answer, 'Female', 'the resolver agrees, so the answer is not replaced');
+  for (const field of APPLICANT_CLAIM_FIELDS) {
+    assert.equal(field in refreshed, true,
+      `${field} is a statement about a record that did not move, so it is still true`);
+  }
+  for (const field of ANSWER_CLAIM_FIELDS) {
+    assert.equal(field in refreshed, false,
+      `${field} describes how the answer was derived, and this pass did not re-derive it`);
+  }
+});
+
 test('an agreeing resolver carries the applicant claim forward but not the answer claims', () => {
   const reviewedAt = '2026-08-12T13:45:27.969Z';
   const [refreshed] = refreshKnownQuestionAnswers(
@@ -3518,6 +3565,67 @@ test('a resolved answer that differs still replaces the value and drops the reco
   assert.equal(refreshed[0].answer_source, undefined,
     'the record described the answer that was just replaced, so it goes with it');
   assert.equal(refreshed[0].answer_reviewed_at, undefined);
+});
+
+/* THE APPROVAL STAMP MUST NOT OUTLIVE THE ANSWER IT WAS GIVEN TO, AND ONE FIELD DID.
+ *
+ * `answer_approved_at` says "she read this machine-written draft and let it stand". The strip list
+ * inside refreshKnownQuestionAnswers was written out by hand and named five of the six provenance
+ * fields, omitting that one, so BOTH branches that replace the answer carried the approval onto text
+ * she had never seen - and carried it stripped of `answer_reviewed_at`, which is the anchor a reader
+ * would need to falsify it. The labels reachable this way are the confirm family this codebase holds
+ * back precisely because only she may speak to them: sponsorship, work authorization, compensation,
+ * privacy consent. applications.ts then persists the refreshed list verbatim on the extension
+ * handoff, so the packet reaching the employer carried the false claim.
+ *
+ * ASSERTED OVER ANSWER_PROVENANCE_FIELDS RATHER THAN OVER FIELD NAMES, and the stored record is
+ * BUILT from the same list, so renaming the field or adding a seventh cannot leave this test green
+ * while the hole reopens. That is the property the hand-written list did not have. */
+test('a replaced answer carries no provenance forward, whatever the provenance is called', () => {
+  const reviewedAt = '2026-08-13T16:41:02.104Z';
+  /* Every provenance field at once. answer_source is the one given a particular value: an approval
+   * writes none at all, and 'applicant_review' on the current round is a separate keep rule that
+   * would stop the replacement this test is about from ever happening. */
+  const stampedEveryWay = Object.fromEntries(ANSWER_PROVENANCE_FIELDS.map((field) => [
+    field,
+    field === 'answer_source' ? 'consent_permission' : reviewedAt,
+  ]));
+
+  /* She approved the drafted answer, then the profile moved underneath it. The resolver replaces
+   * the text, which is right, and the approval of the old text has to go with it. */
+  const [replaced] = refreshKnownQuestionAnswers(
+    [{
+      question: 'what is your gender/gender identity? 4005628101',
+      answer: 'Prefer not to say',
+      ...stampedEveryWay,
+    }],
+    { eeo_prefs: { gender: 'Female' } },
+    undefined,
+    reviewedAt,
+  );
+  assert.equal(replaced.answer, 'Female', 'the profile is the source of truth, so the answer is replaced');
+  for (const field of ANSWER_PROVENANCE_FIELDS) {
+    assert.equal(field in replaced, false,
+      `${field} described the answer that was just replaced, so it cannot ride along`);
+  }
+
+  /* The other branch that replaces. The current resolver refuses this label, so the stale answer is
+   * blanked - and an approval surviving onto a blank would claim she signed off on nothing. */
+  const [blanked] = refreshKnownQuestionAnswers(
+    [{
+      question: 'Please acknowledge the Candidate Privacy Notice.',
+      answer: 'I agree',
+      ...stampedEveryWay,
+    }],
+    {},
+    undefined,
+    reviewedAt,
+  );
+  assert.equal(blanked.answer, '', 'the resolver refuses this label, so the stale answer goes');
+  for (const field of ANSWER_PROVENANCE_FIELDS) {
+    assert.equal(field in blanked, false,
+      `${field} cannot survive onto an answer the applicant never saw`);
+  }
 });
 
 test('equality for keeping the record is exact, because casing is what gets typed on the form', () => {
