@@ -7,6 +7,8 @@ export type JobTargeting = {
   role_types: RoleType[];
   locations: string[];
   remote_only: boolean;
+  primary_period: string | null;
+  backup_period: string | null;
 };
 
 export type PreferenceJob = {
@@ -50,6 +52,8 @@ export function normalizeTargeting(row: Record<string, unknown> | null | undefin
     role_types: strings(row?.role_types).filter((value): value is RoleType => ROLE_TYPES.includes(value as RoleType)),
     locations: strings(row?.locations),
     remote_only: row?.remote_only === true,
+    primary_period: period(row?.primary_period),
+    backup_period: period(row?.backup_period),
   };
 }
 
@@ -58,7 +62,79 @@ export function hasTargeting(targeting: JobTargeting): boolean {
     || targeting.titles.length > 0
     || targeting.role_types.length > 0
     || targeting.locations.length > 0
-    || targeting.remote_only;
+    || targeting.remote_only
+    || targeting.primary_period !== null
+    || targeting.backup_period !== null;
+}
+
+type ExplicitTitleCategory = 'quant-trading' | 'hardware' | 'design' | 'research';
+
+/**
+ * A narrow hard gate for facts the title states explicitly.
+ *
+ * Targeting is not only a sort preference. If someone selected Summer 2027, a title that says
+ * Fall 2026 is about a different recruiting cycle. Likewise, "Quantitative Developer" is a quant
+ * role even though the generic word "developer" also appears in the software category, and a PhD
+ * internship is not suitable for a candidate whose current degree is a bachelor's.
+ *
+ * Unknown stays eligible. This function rejects only contradictions visible in the title, because
+ * a hidden false negative is harder for a job seeker to detect than an extra card.
+ */
+export function recommendationTargetingEligible(
+  job: Pick<PreferenceJob, 'title'>,
+  targeting: JobTargeting,
+  candidateDegree?: string | null,
+): boolean {
+  const allowedPeriods = unique([targeting.primary_period, targeting.backup_period].filter((value): value is string => Boolean(value)));
+  const postingPeriod = explicitPeriod(job.title);
+  if (allowedPeriods.length > 0 && postingPeriod && !allowedPeriods.includes(postingPeriod)) return false;
+
+  const specialist = explicitTitleCategory(job.title);
+  if (targeting.categories.length > 0 && specialist && !targeting.categories.includes(specialist)) return false;
+
+  const requiredDegree = minimumDegreeRank(job.title);
+  const heldDegree = degreeRank(candidateDegree ?? '');
+  if (requiredDegree !== null && heldDegree !== null && heldDegree < requiredDegree) return false;
+
+  return true;
+}
+
+function explicitPeriod(title: string): string | null {
+  const matches = [...title.matchAll(/\b(spring|summer|fall|autumn|winter)\s*(?:of\s*)?((?:19|20)\d{2})\b/gi)]
+    .map((match) => `${match[1].toLowerCase() === 'autumn' ? 'fall' : match[1].toLowerCase()}-${match[2]}`);
+  const distinct = unique(matches);
+  return distinct.length === 1 ? distinct[0] : null;
+}
+
+function explicitTitleCategory(title: string): ExplicitTitleCategory | null {
+  const value = fold(title);
+  if (/\b(?:quant|quantitative|trader|trading)\b/.test(value)) return 'quant-trading';
+  if (/\b(?:embedded|firmware|hardware|electrical|robotics|mechanical)\b/.test(value)) return 'hardware';
+  if (/\b(?:product |ux |ui |user experience )?designer\b/.test(value)) return 'design';
+  if (/\b(?:research|researcher|research scientist|research engineer|fellow)\b/.test(value)) return 'research';
+  return null;
+}
+
+function minimumDegreeRank(title: string): number | null {
+  const ranks = [
+    { rank: 1, pattern: /\b(?:bachelor(?:'s|s)?|undergrad(?:uate)?|b\.?s\.?|b\.?a\.?)\b/i },
+    { rank: 2, pattern: /\b(?:master(?:'s|s)?|m\.?s\.?|m\.?a\.?|mba)\b/i },
+    { rank: 3, pattern: /\b(?:ph\.?\s?d\.?|doctorate|doctoral)\b/i },
+  ].filter(({ pattern }) => pattern.test(title)).map(({ rank }) => rank);
+  return ranks.length > 0 ? Math.min(...ranks) : null;
+}
+
+function degreeRank(degree: string): number | null {
+  if (/\b(?:ph\.?\s?d\.?|doctorate|doctoral)\b/i.test(degree)) return 3;
+  if (/\b(?:master(?:'s|s)?|m\.?s\.?|m\.?a\.?|mba)\b/i.test(degree)) return 2;
+  if (/\b(?:bachelor(?:'s|s)?|undergrad(?:uate)?|b\.?s\.?|b\.?a\.?)\b/i.test(degree)) return 1;
+  return null;
+}
+
+function period(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  return /^(spring|summer|fall|winter)-20\d{2}$/.test(normalized) ? normalized : null;
 }
 
 export function targetTitleTerms(targeting: JobTargeting): string[] {
