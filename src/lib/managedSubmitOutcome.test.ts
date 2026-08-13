@@ -8,14 +8,31 @@ import { readFile } from 'node:fs/promises';
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import {
+  isManagedNoSubmitControl,
   isManagedRunTimeout,
   managedSubmitVerdict,
+  observeManagedReceiptOnce as observeManagedReceiptOnceWithBinding,
   readManagedSubmitOutcome,
   unverifiedSubmissionReason,
 } from './managedSubmitOutcome';
 import { submitRequestDisposition } from './submissionSafety';
 import { duplicateAmong, type SubmittedTwinRow } from './duplicateApplication';
 import { attentionCategoriesForReasons } from './submissionTerminalCause';
+
+type ManagedReceiptFixture = Parameters<typeof observeManagedReceiptOnceWithBinding>[0]['initial'];
+
+function observeManagedReceiptOnce<T extends ManagedReceiptFixture>(input: {
+  initial: T;
+  expectedApplicationUrl?: string;
+  observe: (continuationToken: string) => Promise<T>;
+  nowMs?: number;
+}) {
+  return observeManagedReceiptOnceWithBinding({
+    ...input,
+    expectedApplicationUrl: input.expectedApplicationUrl
+      ?? (typeof input.initial.url === 'string' ? input.initial.url : ''),
+  });
+}
 
 /* The exact shape the runner writes on a successful Ashby submit. The container class and the
    sentence are both real: read from jobs.ashbyhq.com/skydio/.../application and from the bundle
@@ -51,12 +68,71 @@ describe('the run reads the outcome off the page, and the caller keys off that',
         source: 'ats_state',
         evidence: '.ashby-application-form-failure-container',
         message: 'We couldn’t submit your application',
-        formStillPresent: true,
+        formStillPresent: false,
       },
     });
     assert.equal(verdict.kind, 'refused');
     if (verdict.kind !== 'refused') return;
     assert.match(verdict.message, /couldn’t submit/i);
+  });
+
+  /* A REFUSAL IS ALSO A DEFINITE ANSWER, AND IT IS THE ONE THAT RELEASES THE CLAIM.
+   *
+   * The runner writes "Nothing was filed, so there is no confirmation to look for" off this verdict
+   * and clears submission_claimed_at with it, so an unproven 'refused' is a wrong sentence and a
+   * duplicate application in the same write. Stratus's rejected arm returns the first VISIBLE
+   * failure container it finds without reading its text or asking whether the form is gone, so both
+   * of these arrive over the wire looking exactly like the real thing. */
+  for (const [name, over] of [
+    ['an empty failure container', { message: '', formStillPresent: false }],
+    ['a failure container over a live form', { message: 'We couldn’t submit your application', formStillPresent: true }],
+    ['both at once', { message: '   ', formStillPresent: true }],
+    ['a runner too old to say whether the form is gone', { message: 'We couldn’t submit your application', formStillPresent: null }],
+  ] as const) {
+    test(`${name} is unverified, never refused`, () => {
+      const verdict = managedSubmitVerdict({
+        submitOutcome: {
+          pressed: true,
+          state: 'rejected',
+          source: 'ats_state',
+          evidence: '.ashby-application-form-failure-container',
+          ...over,
+        },
+      });
+      assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' },
+        'an unproven refusal must keep the claim and ask her to look, never announce that nothing was filed');
+    });
+  }
+
+  test('an unproven refusal never falls through to a confirmation on the same page', () => {
+    // 'rejected' outranks 'confirmed' and has to keep outranking it when it fails its own gate:
+    // falling through would let a page that refused be read off its congratulatory prose instead.
+    const verdict = managedSubmitVerdict({
+      submitOutcome: {
+        pressed: true,
+        state: 'rejected',
+        source: 'ats_state',
+        evidence: '.ashby-application-form-failure-container',
+        message: 'Thank you for submitting your application.',
+        formStillPresent: true,
+      },
+    });
+    assert.equal(verdict.kind, 'unverified');
+  });
+
+  test('an unproven refusal from a run that never pressed is still not_attempted', () => {
+    const verdict = managedSubmitVerdict({
+      submitOutcome: {
+        pressed: false,
+        state: 'rejected',
+        source: 'ats_state',
+        evidence: '.ashby-application-form-failure-container',
+        message: '',
+        formStillPresent: true,
+      },
+    });
+    assert.deepEqual(verdict, { kind: 'not_attempted' },
+      'the runner is believed about its own click even when the page proved nothing');
   });
 
   test('a page that never said is unverified, not submitted and not failed', () => {
@@ -89,6 +165,617 @@ describe('the run reads the outcome off the page, and the caller keys off that',
     // a genuine continuation can still produce it.
     assert.equal(isManagedRunTimeout('Managed browser continuation timed out'), true);
     assert.equal(isManagedRunTimeout('page.goto: net::ERR_CONNECTION_REFUSED'), false);
+  });
+
+  test('the exact pre-click atomic chooser failure is not reported as an attempted submission', () => {
+    assert.equal(isManagedNoSubmitControl('Atomic submit control was missing or ambiguous'), true);
+    assert.equal(isManagedNoSubmitControl('Atomic submit control timed out after click'), false);
+    assert.equal(isManagedNoSubmitControl('Managed browser continuation timed out'), false);
+  });
+});
+
+describe('an unknown pressed result gets one bounded read-only receipt observation', () => {
+  const token = 'receipt_observation_token_abcdefghijklmnopqrstuvwxyz';
+  const expiresAt = '2026-08-11T12:00:15.000Z';
+  const unknown = {
+    title: 'Application',
+    url: 'https://jobs.ashbyhq.com/kos/software-engineer-intern/application',
+    text: 'Submit Application',
+    screenshot: 'initial-post-click-image',
+    continuationOffered: true,
+    continuationToken: token,
+    continuationExpiresAt: expiresAt,
+    humanVerification: null,
+    submitOutcome: {
+      pressed: true,
+      state: 'unknown',
+      source: null,
+      evidence: null,
+      message: null,
+      formStillPresent: true,
+    },
+  };
+
+  const atsResult = (over: Record<string, unknown>) => ({
+    ...unknown,
+    screenshot: 'observed-receipt-image',
+    ...over,
+  });
+
+  test('Haize Greenhouse promotes only its confirmation route from the exact held run', async () => {
+    const greenhouseInitial = {
+      ...unknown,
+      url: 'https://job-boards.greenhouse.io/haizelabs/jobs/4685944008',
+    };
+    const observed = atsResult({
+      title: 'Thank you for applying',
+      url: 'https://job-boards.greenhouse.io/haizelabs/jobs/4685944008/confirmation',
+      text: 'Thank you for applying. Your application has been received.',
+      submitOutcome: {
+        pressed: true,
+        state: 'confirmed',
+        source: 'ats_route',
+        evidence: 'greenhouse:/haizelabs/jobs/4685944008/confirmation',
+        message: 'Thank you for applying. Your application has been received.',
+        formStillPresent: false,
+      },
+    });
+    const tokens: string[] = [];
+    const result = await observeManagedReceiptOnce({
+      initial: greenhouseInitial,
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: async (exactToken) => { tokens.push(exactToken); return observed; },
+    });
+    assert.deepEqual(tokens, [token]);
+    assert.equal(result.attempted, true);
+    assert.equal(result.receiptResult, observed);
+    assert.equal(result.evidenceResult, observed);
+    assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'confirmed');
+  });
+
+  test('measured Greenhouse embed binds exact for and token through confirmation', async () => {
+    const initial = {
+      ...unknown,
+      url: 'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
+    };
+    const observed = atsResult({
+      url: 'https://job-boards.greenhouse.io/embed/job_app/confirmation?for=haizelabs&token=4685944008',
+      submitOutcome: {
+        pressed: true,
+        state: 'confirmed',
+        source: 'ats_route',
+        evidence: 'greenhouse:/embed/job_app/confirmation',
+        message: 'Thank you for applying. Your application has been received.',
+        formStillPresent: false,
+      },
+    });
+    const result = await observeManagedReceiptOnce({
+      initial,
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: async () => observed,
+    });
+    assert.equal(result.receiptResult, observed);
+    assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'confirmed');
+  });
+
+  test('kos.ai Ashby promotes only its published success container from the exact held run', async () => {
+    const observed = atsResult({
+      title: 'Application submitted',
+      url: 'https://jobs.ashbyhq.com/kos/software-engineer-intern/application',
+      text: 'Success. Thank you for submitting your application.',
+      submitOutcome: {
+        pressed: true,
+        state: 'confirmed',
+        source: 'ats_state',
+        evidence: '.ashby-application-form-success-container',
+        message: 'Success. Thank you for submitting your application.',
+        formStillPresent: false,
+      },
+    });
+    const result = await observeManagedReceiptOnce({
+      initial: unknown,
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: async (exactToken) => {
+        assert.equal(exactToken, token, 'a token from another run must never be substituted');
+        return observed;
+      },
+    });
+    assert.equal(result.receiptResult, observed);
+    assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'confirmed');
+  });
+
+  test('ATS refusal is accepted, while weak text, unknown, and timeout stay unverified', async () => {
+    const refused = atsResult({
+      url: 'https://jobs.ashbyhq.com/kos/software-engineer-intern/application',
+      submitOutcome: {
+        pressed: true,
+        state: 'rejected',
+        source: 'ats_state',
+        evidence: '.ashby-application-form-failure-container',
+        message: 'We could not submit your application.',
+        formStillPresent: false,
+      },
+    });
+    const refusedResult = await observeManagedReceiptOnce({
+      initial: unknown,
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: async () => refused,
+    });
+    assert.equal(managedSubmitVerdict(refusedResult.receiptResult).kind, 'refused');
+
+    /* THE OBSERVATION IS WHERE AN UNPROVEN REFUSAL DOES ITS DAMAGE, because this is the arm that
+     * turns a still-unknown receipt into a definite one. An empty failure container, or one sitting
+     * over a live form, must not become the receiptResult at all: the initial unknown stays, and the
+     * packet keeps its claim instead of being told nothing was filed and released for a re-run. */
+    for (const weakRefusal of [
+      { message: '', formStillPresent: false },
+      { message: 'We could not submit your application.', formStillPresent: true },
+    ] as const) {
+      const observed = atsResult({
+        url: 'https://jobs.ashbyhq.com/kos/software-engineer-intern/application',
+        submitOutcome: {
+          pressed: true,
+          state: 'rejected',
+          source: 'ats_state',
+          evidence: '.ashby-application-form-failure-container',
+          ...weakRefusal,
+        },
+      });
+      const weak = await observeManagedReceiptOnce({
+        initial: unknown,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => observed,
+      });
+      assert.equal(weak.receiptResult, unknown, 'an unproven refusal must not become the receipt');
+      assert.equal(managedSubmitVerdict(weak.receiptResult).kind, 'unverified');
+      assert.equal(weak.evidenceResult, observed, 'the latest post-click screenshot remains visible');
+    }
+
+    for (const observed of [
+      atsResult({
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'page_text',
+          evidence: 'body',
+          message: 'Thank you for your application.',
+          formStillPresent: false,
+        },
+      }),
+      atsResult({ submitOutcome: unknown.submitOutcome }),
+    ]) {
+      const result = await observeManagedReceiptOnce({
+        initial: unknown,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => observed,
+      });
+      assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'unverified');
+      assert.equal(result.evidenceResult, observed, 'the latest post-click screenshot remains visible');
+    }
+
+    const timedOut = await observeManagedReceiptOnce({
+      initial: unknown,
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: async () => { throw new Error('continuation timed out'); },
+    });
+    assert.equal(timedOut.attempted, true);
+    assert.equal(managedSubmitVerdict(timedOut.receiptResult).kind, 'unverified');
+    assert.equal(timedOut.evidenceResult, unknown);
+    assert.match(String(timedOut.error), /timed out/);
+  });
+
+  test('a delayed typed code wall is returned for challenge handoff, never promoted as a receipt', async () => {
+    const delayedChallenge = atsResult({
+      humanVerification: {
+        kind: 'security_code',
+        fieldCount: 8,
+        sentTo: 'application-alias@apply.trylitos.com',
+      },
+      submitOutcome: {
+        pressed: true,
+        state: 'unknown',
+        source: null,
+        evidence: null,
+        message: null,
+        formStillPresent: true,
+      },
+    });
+    const result = await observeManagedReceiptOnce({
+      initial: unknown,
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: async () => delayedChallenge,
+    });
+    assert.equal(result.attempted, true);
+    assert.equal(result.observedResult, delayedChallenge);
+    assert.equal(result.receiptResult, unknown, 'a challenge is not an employer receipt');
+    assert.equal(result.evidenceResult, delayedChallenge);
+    assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'unverified');
+  });
+
+  test('a delayed code wall from another exact job is neither exposed nor adopted', async () => {
+    const initial = {
+      ...unknown,
+      url: 'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
+    };
+    const crossed = atsResult({
+      url: 'https://job-boards.greenhouse.io/embed/job_app?for=other-tenant&token=9999999999',
+      humanVerification: {
+        kind: 'security_code',
+        fieldCount: 8,
+        sentTo: 'application-alias@apply.trylitos.com',
+      },
+      submitOutcome: {
+        pressed: true,
+        state: 'unknown',
+        source: null,
+        evidence: null,
+        message: null,
+        formStillPresent: true,
+      },
+    });
+    const result = await observeManagedReceiptOnce({
+      initial,
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: async () => crossed,
+    });
+    assert.equal(result.observedResult, undefined);
+    assert.equal(result.evidenceResult, initial);
+    assert.equal(result.receiptResult, initial);
+  });
+
+  test('spoofed ATS source labels, evidence, and host-family crossings cannot promote a receipt', async () => {
+    const shapes = [
+      atsResult({
+        url: 'https://careers.example.test/application_confirmation',
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'ats_route',
+          evidence: 'greenhouse:/application_confirmation',
+          message: 'Thank you for applying.',
+          formStillPresent: false,
+        },
+      }),
+      atsResult({
+        url: 'https://job-boards.greenhouse.io/application_confirmation',
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'ats_route',
+          evidence: 'greenhouse:/another_run',
+          message: 'Thank you for applying.',
+          formStillPresent: false,
+        },
+      }),
+      atsResult({
+        url: 'https://jobs.ashbyhq.com/kos/software-engineer-intern/application',
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'ats_state',
+          evidence: '.employer-made-success',
+          message: 'Thank you for applying.',
+          formStillPresent: false,
+        },
+      }),
+      atsResult({
+        url: 'https://job-boards.greenhouse.io/application_confirmation',
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'ats_route',
+          evidence: 'greenhouse:/application_confirmation',
+          message: 'Thank you for applying.',
+          formStillPresent: false,
+        },
+      }),
+      atsResult({
+        url: 'https://job-boards.greenhouse.io/application_confirmation',
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'ats_state',
+          evidence: '.ashby-application-form-success-container',
+          message: 'Thank you for applying.',
+          formStillPresent: false,
+        },
+      }),
+      atsResult({
+        url: 'https://observer:secret@jobs.ashbyhq.com/kos/software-engineer-intern/application',
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'ats_state',
+          evidence: '.ashby-application-form-success-container',
+          message: 'Thank you for applying.',
+          formStillPresent: false,
+        },
+      }),
+      atsResult({
+        url: 'https://jobs.ashbyhq.com:444/kos/software-engineer-intern/application',
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'ats_state',
+          evidence: '.ashby-application-form-success-container',
+          message: 'Thank you for applying.',
+          formStillPresent: false,
+        },
+      }),
+      atsResult({
+        url: 'http://jobs.ashbyhq.com/kos/software-engineer-intern/application',
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'ats_state',
+          evidence: '.ashby-application-form-success-container',
+          message: 'Thank you for applying.',
+          formStillPresent: false,
+        },
+      }),
+    ];
+    for (const observed of shapes) {
+      const result = await observeManagedReceiptOnce({
+        initial: unknown,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => observed,
+      });
+      assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'unverified');
+      assert.equal(
+        result.evidenceResult,
+        observed.url === unknown.url ? observed : unknown,
+        'same-job evidence may refresh the screenshot, while an identity crossing must stay on phase zero',
+      );
+    }
+  });
+
+  test('the initial ATS origin rejects credentials and non-default ports before observation', async () => {
+    for (const url of [
+      'https://runner:secret@jobs.ashbyhq.com/kos/software-engineer-intern/application',
+      'https://jobs.ashbyhq.com:444/kos/software-engineer-intern/application',
+      'http://jobs.ashbyhq.com/kos/software-engineer-intern/application',
+    ]) {
+      let calls = 0;
+      const result = await observeManagedReceiptOnce({
+        initial: { ...unknown, url },
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => { calls += 1; throw new Error('must not run'); },
+      });
+      assert.equal(calls, 0, `invalid ATS origin must not spend its token: ${url}`);
+      assert.equal(result.attempted, false);
+    }
+  });
+
+  test('the frozen Ashby application rejects a same-host crossed job before token use', async () => {
+    for (const url of [
+      'https://jobs.ashbyhq.com/kos/other-job/application',
+      'https://jobs.ashbyhq.com/other-org/software-engineer-intern/application',
+    ]) {
+      let calls = 0;
+      const result = await observeManagedReceiptOnce({
+        initial: { ...unknown, url },
+        expectedApplicationUrl: unknown.url,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => { calls += 1; throw new Error('must not run'); },
+      });
+      assert.equal(calls, 0, url);
+      assert.equal(result.attempted, false, url);
+      assert.equal(result.receiptResult.url, url);
+    }
+  });
+
+  test('the frozen Greenhouse application rejects a same-host crossed job before token use', async () => {
+    const expectedApplicationUrl = 'https://job-boards.greenhouse.io/haizelabs/jobs/4685944008';
+    for (const url of [
+      'https://job-boards.greenhouse.io/haizelabs/jobs/9999999999',
+      'https://job-boards.greenhouse.io/other-tenant/jobs/4685944008',
+      'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
+    ]) {
+      let calls = 0;
+      const result = await observeManagedReceiptOnce({
+        initial: { ...unknown, url },
+        expectedApplicationUrl,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => { calls += 1; throw new Error('must not run'); },
+      });
+      assert.equal(calls, 0, url);
+      assert.equal(result.attempted, false, url);
+      assert.equal(result.receiptResult.url, url);
+    }
+  });
+
+  test('the frozen binding rejects family, origin, and shape crossings before token use', async () => {
+    const expectedApplicationUrl = 'https://job-boards.greenhouse.io/haizelabs/jobs/4685944008';
+    for (const url of [
+      'https://jobs.ashbyhq.com/haizelabs/4685944008/application',
+      'https://job-boards.eu.greenhouse.io/haizelabs/jobs/4685944008',
+      'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
+    ]) {
+      let calls = 0;
+      const result = await observeManagedReceiptOnce({
+        initial: { ...unknown, url },
+        expectedApplicationUrl,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => { calls += 1; throw new Error('must not run'); },
+      });
+      assert.equal(calls, 0, url);
+      assert.equal(result.attempted, false, url);
+    }
+  });
+
+  test('Greenhouse observation stays on the exact regional origin from phase zero', async () => {
+    const initial = {
+      ...unknown,
+      url: 'https://job-boards.greenhouse.io/haizelabs/jobs/4685944008',
+    };
+    const observed = atsResult({
+      url: 'https://job-boards.eu.greenhouse.io/haizelabs/jobs/4685944008/confirmation',
+      submitOutcome: {
+        pressed: true,
+        state: 'confirmed',
+        source: 'ats_route',
+        evidence: 'greenhouse:/haizelabs/jobs/4685944008/confirmation',
+        message: 'Thank you for applying.',
+        formStillPresent: false,
+      },
+    });
+    const result = await observeManagedReceiptOnce({
+      initial,
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: async () => observed,
+    });
+    assert.equal(result.attempted, true);
+    assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'unverified');
+    assert.equal(result.evidenceResult, initial);
+  });
+
+  test('Ashby observation cannot cross org or job identity on the same host', async () => {
+    for (const url of [
+      'https://jobs.ashbyhq.com/other-org/software-engineer-intern/application',
+      'https://jobs.ashbyhq.com/kos/other-job/application',
+    ]) {
+      const observed = atsResult({
+        url,
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'ats_state',
+          evidence: '.ashby-application-form-success-container',
+          message: 'Thank you for applying.',
+          formStillPresent: false,
+        },
+      });
+      const result = await observeManagedReceiptOnce({
+        initial: unknown,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => observed,
+      });
+      assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'unverified', url);
+      assert.equal(result.evidenceResult, unknown);
+    }
+  });
+
+  test('Greenhouse observation cannot cross tenant or job token on the same origin', async () => {
+    const initial = {
+      ...unknown,
+      url: 'https://job-boards.greenhouse.io/haizelabs/jobs/4685944008',
+    };
+    for (const url of [
+      'https://job-boards.greenhouse.io/other-tenant/jobs/4685944008/confirmation',
+      'https://job-boards.greenhouse.io/haizelabs/jobs/other-token/confirmation',
+    ]) {
+      const pathname = new URL(url).pathname;
+      const observed = atsResult({
+        url,
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'ats_route',
+          evidence: `greenhouse:${pathname}`,
+          message: 'Thank you for applying.',
+          formStillPresent: false,
+        },
+      });
+      const result = await observeManagedReceiptOnce({
+        initial,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => observed,
+      });
+      assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'unverified', url);
+      assert.equal(result.evidenceResult, initial);
+    }
+  });
+
+  test('Greenhouse embed rejects cross-tenant, cross-job, and duplicate identity query values', async () => {
+    const initial = {
+      ...unknown,
+      url: 'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
+    };
+    for (const url of [
+      'https://job-boards.greenhouse.io/embed/job_app/confirmation?for=other-tenant&token=4685944008',
+      'https://job-boards.greenhouse.io/embed/job_app/confirmation?for=haizelabs&token=other-job',
+      'https://job-boards.greenhouse.io/embed/job_app/confirmation?for=haizelabs&for=other-tenant&token=4685944008',
+      'https://job-boards.greenhouse.io/embed/job_app/confirmation?for=haizelabs&token=4685944008&token=other-job',
+    ]) {
+      const observed = atsResult({
+        url,
+        submitOutcome: {
+          pressed: true,
+          state: 'confirmed',
+          source: 'ats_route',
+          evidence: 'greenhouse:/embed/job_app/confirmation',
+          message: 'Thank you for applying.',
+          formStillPresent: false,
+        },
+      });
+      const result = await observeManagedReceiptOnce({
+        initial,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => observed,
+      });
+      assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'unverified', url);
+    }
+
+    for (const url of [
+      'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&for=other-tenant&token=4685944008',
+      'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008&token=other-job',
+      'https://job-boards.greenhouse.io/embed/job_app?for=haize.labs&token=4685944008',
+      'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=not-numeric',
+    ]) {
+      let calls = 0;
+      const result = await observeManagedReceiptOnce({
+        initial: { ...unknown, url },
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => { calls += 1; throw new Error('must not run'); },
+      });
+      assert.equal(calls, 0, url);
+      assert.equal(result.attempted, false);
+    }
+  });
+
+  test('stale, missing, or unoffered capabilities are never called', async () => {
+    for (const initial of [
+      { ...unknown, continuationExpiresAt: '2026-08-11T11:59:59.000Z' },
+      { ...unknown, continuationToken: undefined },
+      { ...unknown, continuationOffered: false },
+      { ...unknown, humanVerification: { kind: 'security_code', fieldCount: 8, sentTo: null } },
+      { ...unknown, url: 'https://careers.example.test/application' },
+    ]) {
+      let calls = 0;
+      const result = await observeManagedReceiptOnce({
+        initial,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => { calls += 1; throw new Error('must not run'); },
+      });
+      assert.equal(calls, 0);
+      assert.equal(result.attempted, false);
+      assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'unverified');
+    }
+  });
+
+  test('a reused one-shot token fails closed on its second claim', async () => {
+    let used = false;
+    const observed = atsResult({
+      url: 'https://jobs.ashbyhq.com/kos/software-engineer-intern/application',
+      submitOutcome: {
+        pressed: true,
+        state: 'confirmed',
+        source: 'ats_state',
+        evidence: '.ashby-application-form-success-container',
+        message: 'Success. Thank you for submitting your application.',
+        formStillPresent: false,
+      },
+    });
+    const service = async () => {
+      if (used) throw new Error('continuation rejected');
+      used = true;
+      return observed;
+    };
+    const first = await observeManagedReceiptOnce({ initial: unknown, nowMs: Date.parse('2026-08-11T12:00:05.000Z'), observe: service });
+    const second = await observeManagedReceiptOnce({ initial: unknown, nowMs: Date.parse('2026-08-11T12:00:05.000Z'), observe: service });
+    assert.equal(managedSubmitVerdict(first.receiptResult).kind, 'confirmed');
+    assert.equal(managedSubmitVerdict(second.receiptResult).kind, 'unverified');
+    assert.match(String(second.error), /rejected/);
   });
 });
 
@@ -208,6 +895,23 @@ describe('the duplicate guard can see a submit it is not sure about', () => {
   });
 });
 
+/** A packet mid-send: status 'submitting' with the claim its run took at the top. */
+function claimedRunningRow(): import('./applicationReview').ApplicationReviewState {
+  return {
+    jd_text: 'jd',
+    status: 'submitting',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: '2026-08-11T12:00:00.000Z',
+    portal_url: 'https://jobs.ashbyhq.com/kos/job/application',
+    submission_run_id: 'run-1',
+    submission_claimed_at: '2026-08-11T12:00:00.000Z',
+    submission_claim_id: 'claim-1',
+    submission_authorization: { source: 'standing_consent', authorized_at: '2026-08-11T11:59:00.000Z' },
+  };
+}
+
 describe('the send path is wired to the reading, not to the scrape', () => {
   test('the verdict is consulted before any receipt is parsed', async () => {
     const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
@@ -217,13 +921,100 @@ describe('the send path is wired to the reading, not to the scrape', () => {
     assert.ok(scrape > verdict, 'the body scrape is enrichment now, not the proof');
   });
 
+  /* THESE TWO WERE SOURCE GREPS UNTIL THE DECISION THEY WATCH WAS EXTRACTED FROM fail().
+   *
+   * They matched regexes against routes/submissionRunner.ts, which cannot tell a correct branch from
+   * a deleted one and cannot see a branch that is present and wrong - and the second of them passed
+   * for the whole life of the defect it was supposedly guarding, because `if (noSubmitControl)` was
+   * right there in the text while the predicate feeding it rejected the format the message is
+   * actually stored in. Now that submissionFailureReview is a pure exported function, both ask the
+   * real thing with a real error instance. */
+
   test('a run cut off mid-submit records the fact, not just a sentence about it', async () => {
-    const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
+    const { submissionFailureReview } = await import('../routes/submissionRunner');
     // submission_attempted_at and the structured record are what make the state resolvable. Packet
     // 13bccb2d had neither, so nothing downstream could tell that a click had happened at all.
-    assert.match(source, /if \(uncertainAfterClaim && isManagedRunTimeout\(message\)\)/);
-    assert.match(source, /submission_attempted_at: input\.at/);
-    assert.match(source, /unverified_submission: \{/);
+    const persisted = submissionFailureReview(
+      claimedRunningRow(),
+      new Error('Managed browser run timed out before it produced a result'),
+    );
+    assert.equal(persisted.status, 'needs_attention');
+    assert.equal(typeof persisted.submission_attempted_at, 'string');
+    assert.equal(persisted.unverified_submission?.cause, 'run_timed_out');
+    assert.equal(persisted.submission_stop?.reason, 'run_timed_out');
+    assert.equal(persisted.submission_stop?.before_click, false,
+      'a run that died without reporting cannot prove where it stopped');
+  });
+
+  test('a managed chooser stop uses the no-submit copy and releases the stale claim', async () => {
+    const { submissionFailureReview } = await import('../routes/submissionRunner');
+    const persisted = submissionFailureReview(
+      claimedRunningRow(),
+      new Error('Atomic submit control was missing or ambiguous'),
+    );
+    assert.equal(persisted.submission_claimed_at, undefined);
+    assert.equal(persisted.submission_stop?.reason, 'no_submit_control');
+    assert.match(persisted.attention_reason!,
+      /Litos could not find the button that sends this application, so nothing has been sent/);
+  });
+
+  /* THE 2026-08-11 PRODUCTION RUN, END TO END THROUGH THE REAL PAIR OF FUNCTIONS.
+   *
+   * The kos.ai send returned a complete result whose runner had pressed Submit, and the reporting
+   * barrier rejected the proof's shape (the runner's submit-scope repair had added `scopeKind`,
+   * unknown to the key-set check). Because that rejection was thrown as a NoSubmitControlError
+   * subclass, the row released its claim, erased the attempt residue, and read "Litos could not
+   * find the button that sends this application, so nothing has been sent" - a false no-send for
+   * an application the employer may be holding. The error below is the REAL one out of the real
+   * assertion, not a reconstruction, because a reconstruction is how this fixture family has
+   * repeatedly proved the wrong thing. */
+  test('a proof the barrier cannot read keeps the claim, states uncertainty, and opens the unverified exit', async () => {
+    const { submissionFailureReview } = await import('../routes/submissionRunner');
+    const { assertManagedRequiredFieldsConfirmed } = await import('./portalSubmission');
+    let thrown: unknown;
+    try {
+      assertManagedRequiredFieldsConfirmed({
+        requiredFieldConfirmation: {
+          version: 2,
+          status: 'confirmed',
+          passes: [{
+            submitKind: 'application',
+            scope: {
+              scopeKind: 'container',
+              anUnknownFutureKey: true,
+              formFingerprint: 'form_fingerprint_fixture_1234',
+              submitFingerprint: 'submit_fingerprint_fixture_1234',
+              formMatchCount: 1,
+              submitMatchCount: 1,
+              requiredControlCount: 0,
+              sameNode: true,
+            },
+            requiredControls: [],
+            attempts: [],
+            retries: 0,
+            unresolved: [],
+            submissionOutcome: 'clicked',
+          }],
+        },
+      }, 'application');
+    } catch (error) {
+      thrown = error;
+    }
+    assert.ok(thrown instanceof Error, 'the malformed proof must still be refused');
+    const persisted = submissionFailureReview(claimedRunningRow(), thrown);
+    assert.equal(persisted.status, 'needs_attention');
+    assert.equal(persisted.submission_stop?.reason, 'confirmation_unproven');
+    assert.equal(persisted.submission_stop?.before_click, false,
+      'a rejection thrown after the remote run finished cannot prove where the run stopped');
+    assert.notEqual(persisted.submission_claimed_at, undefined,
+      'the claim is the duplicate guard, and an unknown click state must keep it');
+    assert.doesNotMatch(persisted.attention_reason!, /nothing has been sent/,
+      'the exact false sentence the kos.ai row carried');
+    assert.match(persisted.attention_reason!, /does not know whether this application went through/);
+    assert.match(persisted.attention_reason!, /Do not submit it by hand in the meantime/,
+      'the duplicate warning is the half that protects the employer side');
+    assert.equal(typeof persisted.submission_attempted_at, 'string');
+    assert.equal(persisted.unverified_submission?.cause, 'no_confirmation_state');
   });
 
   test('the resolution route exists and is the thing the refusal points at', async () => {

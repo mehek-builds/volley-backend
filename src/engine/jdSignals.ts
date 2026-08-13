@@ -173,7 +173,12 @@ export function extractJdSignals(jdText: string, context?: JdContext): JdSignalS
   const allFitClauses = [...hard, ...preferred, ...impact];
   const tools = [
     ...explicitToolsFrom(signalText),
-    ...extractJdTerms(jdText, context)
+    /* UNGROUPED. tools_and_skills is a list of NAMED TECHNOLOGIES: it is serialised into the
+       resume-generation prompt (llm/resumeSpec.ts) and read by leadAlignment, and a folded choice
+       would put the string "Python, SQL, Docker or Kubernetes" in front of both as though the
+       employer had named a tool by that name. The extractor's grouping answers a different
+       question, how many REQUIREMENTS a posting states, which is not what this list is. */
+    ...extractJdTerms(jdText, context, { groupChoices: false })
       .filter((term) => term.signal)
       .filter((term) => SIGNAL_KEEP_TERMS.has(term.term))
       .sort((a, b) => b.weight - a.weight || (b.mentions ?? 1) - (a.mentions ?? 1))

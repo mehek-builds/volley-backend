@@ -4,9 +4,11 @@ import {
   browserSessionBody,
   continueManagedBrowser,
   isBrowserbaseConfigured,
+  managedApplicationSubmitOptions,
   managedContinuationFingerprint,
   runManagedBrowser,
 } from './browserbase';
+import { observeManagedReceiptOnce } from './managedSubmitOutcome';
 import { buildManagedDiscoveryActions, buildManagedPortalActions } from './portalSubmission';
 
 function assertStratusSafeActions(actions: Array<Record<string, unknown>>) {
@@ -203,6 +205,143 @@ test('managed Stratus continuation sends an opaque token and actions without reo
   else process.env.STRATUS_API_KEY = previousKey;
   if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
   else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+/* THE RUNNER'S OWN RULE, COPIED RATHER THAN INVENTED.
+ *
+ * The fake server this test used to carry offered a continuation only when continuationCheckpoint
+ * was true, so it encoded the caller's assumption as the fixture and could never have contradicted
+ * it. These three lines are transcribed from merged Stratus, stratus-browser-cloud@48ea9b5
+ * src/managed-browser.js:3414-3443, and they are what makes the assertions below mean anything.
+ */
+function stratusContinuation(body: Record<string, unknown>, submitOutcome: { pressed: boolean; state: string }) {
+  const humanVerification = null;
+  const pressedUnknown = submitOutcome.pressed === true && submitOutcome.state === 'unknown';
+  const receiptObservationOnly = pressedUnknown && !humanVerification && body.continuationCheckpoint !== true;
+  const continuationOffered = body.requestContinuation === true
+    && (Boolean(humanVerification) || body.continuationCheckpoint === true || pressedUnknown);
+  const windowSeconds = receiptObservationOnly
+    ? 15
+    : Math.max(Number(body.continuationTtlSeconds) || 0, 15);
+  return { continuationOffered, windowSeconds };
+}
+
+test('a pressed-unknown receipt reaches its one read-only observer with no checkpoint flag', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  const applicationUrl = 'https://jobs.ashbyhq.com/kos/software-engineer-intern/application';
+  const token = 'receipt_checkpoint_token_abcdefghijklmnopqrstuvwxyz';
+  const startedAt = Date.parse('2026-08-11T12:00:00.000Z');
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+  try {
+    globalThis.fetch = (async (input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push({ url: String(input), body });
+      if (!('continuationToken' in body)) {
+        const submitOutcome = {
+          pressed: true,
+          state: 'unknown' as const,
+          source: null,
+          evidence: null,
+          message: null,
+          formStillPresent: true,
+        };
+        const { continuationOffered, windowSeconds } = stratusContinuation(body, submitOutcome);
+        return new Response(JSON.stringify({
+          run: {
+            title: 'Application',
+            url: applicationUrl,
+            text: 'Submit Application',
+            screenshot: 'initial-image',
+            continuationOffered,
+            ...(continuationOffered
+              ? {
+                continuationToken: token,
+                continuationExpiresAt: new Date(startedAt + windowSeconds * 1000).toISOString(),
+              }
+              : {}),
+            humanVerification: null,
+            submitOutcome,
+          },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        run: {
+          title: 'Application submitted',
+          url: applicationUrl,
+          text: 'Thank you for submitting your application.',
+          screenshot: 'observed-image',
+          humanVerification: null,
+          submitOutcome: {
+            pressed: true,
+            state: 'confirmed',
+            source: 'ats_state',
+            evidence: '.ashby-application-form-success-container',
+            message: 'Thank you for submitting your application.',
+            formStillPresent: false,
+          },
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    // The exact options a real managed application submit sends, not a hand-written approximation.
+    const initial = await runManagedBrowser(applicationUrl, [], managedApplicationSubmitOptions(120));
+    assert.equal(initial.humanVerification, null);
+    assert.equal(initial.continuationOffered, true,
+      'pressedUnknown alone offers the continuation, which is what the checkpoint flag was added for');
+    assert.equal(initial.continuationExpiresAt, '2026-08-11T12:00:15.000Z',
+      'and without the flag the held employer page keeps its deliberate 15 second observation cap');
+
+    const observation = await observeManagedReceiptOnce({
+      initial,
+      expectedApplicationUrl: applicationUrl,
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: (continuationToken) => continueManagedBrowser(continuationToken, [], { screenshot: true }),
+    });
+
+    assert.equal(observation.attempted, true);
+    assert.equal(observation.receiptResult.submitOutcome?.state, 'confirmed');
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].body.requestContinuation, true);
+    assert.equal(requests[0].body.continuationCheckpoint, false);
+    assert.equal(requests[1].body.continuationToken, token);
+    assert.deepEqual(requests[1].body.actions, []);
+    assert.equal('url' in requests[1].body, false);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+/* THE SANDBOX LEAK, STATED AS THE RULE IT BREAKS.
+ *
+ * continuationEligible returns continuationOffered verbatim, and an eligible result sets keepAlive,
+ * which skips sandbox.stop() in the finally. So a checkpoint on every managed submit meant a held
+ * sandbox after every CONFIRMED, REJECTED and NOT_ATTEMPTED one too, each idling out a continuation
+ * that was never going to be spent. Nothing about those outcomes needs a second look.
+ */
+test('a terminal managed submit outcome offers no continuation once the checkpoint flag is gone', () => {
+  const sent = managedApplicationSubmitOptions(120) as Record<string, unknown>;
+  assert.equal('continuationCheckpoint' in sent, false, 'the flag rested on a false premise');
+  assert.deepEqual(sent, { allowSubmit: true, requestContinuation: true, continuationTtlSeconds: 120 });
+  for (const state of ['confirmed', 'rejected', 'not_attempted'] as const) {
+    const pressed = state !== 'not_attempted';
+    const withoutFlag = stratusContinuation(sent, { pressed, state });
+    assert.equal(withoutFlag.continuationOffered, false, `${state} must let the sandbox stop`);
+    const withFlag = stratusContinuation(
+      { requestContinuation: true, continuationCheckpoint: true, continuationTtlSeconds: 120 },
+      { pressed, state },
+    );
+    assert.equal(withFlag.continuationOffered, true,
+      `${state} held a sandbox open for the full TTL while the flag was set`);
+  }
 });
 
 test('managed Stratus converts label fills into selector-backed fill actions', async () => {

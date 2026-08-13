@@ -342,9 +342,9 @@ How to use it:
   /* The closed list `lead_alignment.requirement` must be drawn from, rendered numbered so the
      posting's priority order is visible rather than implied. Built by the SAME function the
      validator calls with the same (jdText, company, role), which is what makes the list the model
-     is shown and the list it is judged against one list. Empty for a posting that states no
-     readable asks; leadAlignmentIssues falls back to the whole JD in that case, so an unparseable
-     posting relaxes the check instead of failing every packet against it. */
+     is shown and the list it is judged against one list. Empty means the posting supports no
+     evidence-bearing lead ordering. The selector and verifier preserve the saved experience order
+     and store null instead of fabricating a citation from boilerplate or form labels. */
   const primaryAsks = leadRequirementCandidates(jdText, { company, role });
   const asksBlock = primaryAsks.length
     ? `\n\nTHE POSTING'S PRIMARY ASKS, in the posting's own priority order. "lead_alignment.requirement" MUST be one of these lines, copied exactly:\n${primaryAsks.map((ask, i) => `${i + 1}. ${ask}`).join('\n')}`

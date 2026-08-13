@@ -51,7 +51,11 @@
 import type { JobCountry } from './jobLocation';
 import {
   classifyField,
+  consentAcknowledgementAnswer,
   EEO_QUESTION,
+  isConsentAcceptingWording,
+  isConsentRefusingWording,
+  isConsentAcknowledgementQuestion,
   normalizeDiscoveredLabel,
   resolveKnownAnswer,
   type ApplicationProfileLike,
@@ -892,6 +896,77 @@ export function eeoAnswerLadder(label: string, stored: string): string[] {
  * alternative is a required field left blank on a voluntary question, which blocks the whole
  * application over the one family where a correct answer is guaranteed to exist.
  */
+/* ---- accepting a consent control ----
+ *
+ * A consent is usually a checkbox, but discovery reports it as a select or a radio pair often
+ * enough that "assume checkbox" is not a plan: "I agree" / "I do not agree" is a real shape on real
+ * forms, and so is a bare Yes/No.
+ *
+ * chooseClosestOption must not be used for this family. Its inexact stages rank on how much an
+ * option adds to the answer, and against ["I agree", "I do not agree"] the answer "Yes" adds words
+ * to both of them; the stage is written to refuse an ambiguous list, but "refuses today" is not the
+ * guarantee this family needs. A verifier bug found in this repo on 2026-08-11 accepted the exact
+ * opposite of what a control held, and the cost of that here is an application on which the
+ * applicant appears to have REFUSED the employer's privacy notice, or agreed to something she did
+ * not. So the accepting option is identified by its own closed vocabulary, or not at all.
+ */
+
+/* The two option wordings live in questionDiscovery.ts beside the rest of the consent grammar,
+ * because refreshKnownQuestionAnswers needs them too and this module imports that one. */
+
+/**
+ * The one option on a consent control that ACCEPTS it, or null.
+ *
+ * Fails closed on every kind of doubt, and the third condition is the one that matters most: every
+ * option must be recognised as either accepting or refusing. A list carrying an entry this file
+ * cannot read is a list whose meaning is not established, and a required consent left empty is work
+ * for the applicant, while a wrongly-selected one is a legal answer given in her name that she
+ * never gave.
+ *
+ * An empty option list is not a failure. It is what a checkbox and a free-text control report, and
+ * the caller fills those with the plain acceptance value.
+ */
+export function chooseConsentOption(rawOptions: readonly string[] | null | undefined): string | null {
+  const options = usableOptions(rawOptions);
+  if (options.length === 0) return null;
+  const accepting: string[] = [];
+  let refusing = 0;
+  for (const option of options) {
+    const key = comparableOption(option);
+    // Tested for refusal FIRST. "I do not agree" contains "agree", so an accept-shaped read of it
+    // is exactly the inversion this function exists to make impossible.
+    if (isConsentRefusingWording(key)) {
+      refusing += 1;
+      continue;
+    }
+    if (isConsentAcceptingWording(key)) accepting.push(option);
+  }
+  if (accepting.length !== 1) return null;
+  if (accepting.length + refusing !== options.length) return null;
+  return accepting[0];
+}
+
+/**
+ * What goes into a consent control, or null when Litos may not or cannot accept it.
+ *
+ * Null covers three different things and every one of them ends the same way, held: the applicant
+ * has granted no standing permission, the label is not in the consent class, or the control's
+ * accepting value could not be identified. The caller never has to tell them apart.
+ */
+export function consentAcceptanceValue(
+  label: string,
+  ap: ApplicationProfileLike,
+  options: readonly string[] | null | undefined,
+  employerContext?: string,
+): string | null {
+  // No normalization here on purpose: consentLabelSpelling inside the predicate is the one place
+  // that decides how a label is spelled, so every caller may pass whatever form it holds.
+  const accepted = consentAcknowledgementAnswer(label, ap, employerContext);
+  if (!accepted) return null;
+  if (usableOptions(options).length === 0) return accepted.value;
+  return chooseConsentOption(options);
+}
+
 export function chooseEeoOption(
   label: string,
   stored: string,
@@ -1032,6 +1107,30 @@ export function resolveProfileField(
   // nothing else. See the EEO section above for why the opt-out is a legitimate second choice on
   // this family and on no other.
   const eeo = EEO_QUESTION.test(label);
+  /* A CONSENT CONTROL GETS ITS OWN MATCHER, for the reason chooseConsentOption's header gives: the
+   * generic one ranks options by how much they add to the answer, and "I agree" and "I do not
+   * agree" add the same words to "Yes".
+   *
+   * GATED ON THE PERMISSION, NOT ON THE GRAMMAR, and the difference is a real defect this branch
+   * had. It previously tested `isConsentAcknowledgementQuestion(label)` alone, on the reasoning that
+   * reaching here at all meant resolveKnownAnswer had produced a value and therefore the permission
+   * was on the row. That does not follow: resolveKnownAnswer can answer a consent-shaped label from
+   * some OTHER handler with no permission present, and this branch would then swap main's
+   * chooseClosestOption for chooseConsentOption underneath it. That is a behaviour change with the
+   * permission off, which is the one thing this feature promises never to do. So the gate is now
+   * the same call the resolver and the pre-script make, and there is one gate rather than three. */
+  if (consentAcknowledgementAnswer(label, ap, jdText)) {
+    const chosen = chooseConsentOption(shape.options);
+    return {
+      key,
+      // No option list is a checkbox or a free-text control: the plain acceptance value is right.
+      // A list Litos could not read leaves the base value with matchedOption false, which is the
+      // signal the runner turns into "left for you" rather than selecting something.
+      value: chosen ?? base,
+      candidates: [base],
+      matchedOption: usableOptions(shape.options).length === 0 ? false : chosen !== null,
+    };
+  }
   const candidates = eeo ? eeoAnswerLadder(label, base) : profileFieldCandidates(key, ap, base);
   let matched = eeo ? chooseEeoOption(label, base, shape.options) : chooseClosestOption(candidates, shape.options);
   if (key === 'referral_source_default' && matched === null) {

@@ -95,6 +95,28 @@ Responsibilities:
 
 Requirements:
 - Experience shipping tested production software`;
+const WORKABLE_FORM_ONLY_JD = `Sales Setter / Executive
+Remote Recruitment
+Personal details
+First name
+Last name
+Email
+Phone
+Photo
+Education
+School
+Field of study
+Degree
+Start date
+End date
+Experience
+Title
+Company
+Industry
+Summary
+Resume
+Do you live in South Africa?
+Submit application`;
 const sourceBullets = source.bullet_variants as string[];
 
 function storedWithCitation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -172,6 +194,27 @@ test('centralized runner gate rejects stale evidence before any submission chann
     experience: [{ ...resume.experience[0], bullets: [sourceBullets[1]] }],
   });
   assert.ok(runnerLeadAlignmentIssues(runnerRow(stale)).some((issue) => /evidence is not one of the bullets/.test(issue)));
+});
+
+test('form-only Workable packets remain eligible through both downstream lead gates', () => {
+  const stored = storedWithCitation({
+    lead_alignment: null,
+    _review: {
+      jd_text: WORKABLE_FORM_ONLY_JD,
+      role: 'Sales Setter / Executive',
+      status: 'ready_to_submit',
+      edited_terms: [],
+      questions: [],
+      skipped_reasons: [],
+      updated_at: '2026-08-11T00:00:00.000Z',
+    },
+  });
+  const row = {
+    spec: stored,
+    job_context: { company: 'Remote Recruitment', role: 'Sales Setter / Executive' },
+  } as Parameters<typeof runnerLeadAlignmentIssues>[0];
+  assert.deepEqual(applicationLeadAlignmentIssues(stored, 'Remote Recruitment'), []);
+  assert.deepEqual(runnerLeadAlignmentIssues(row), []);
 });
 
 test('packet version equality rejects either preclaim race window after validation', () => {

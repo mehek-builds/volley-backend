@@ -101,6 +101,33 @@ export const users = pgTable('users', {
   automatic_captcha_enabled: boolean('automatic_captcha_enabled').default(false).notNull(),
   automatic_captcha_consented_at: timestamp('automatic_captcha_consented_at', { withTimezone: true }),
   automatic_captcha_consent_version: text('automatic_captcha_consent_version'),
+  /* Standing permission to ACCEPT an employer's privacy statement, terms, or code of conduct on the
+     applicant's behalf, asked once instead of once per employer.
+     Its whole value is that the agreement stays hers: granted on a date, against a version of the
+     words she was shown, and revocable from settings. That is why it is a users.* consent triple
+     and not a behaviour Litos simply adopted, and why the runner records the grant on the question
+     it ticks rather than letting the tick look like hers.
+     IT LICENSES ONE CLASS AND CANNOT REACH ANOTHER. Consents and acknowledgements only: privacy
+     notices, data-processing consent, applicant terms, codes of conduct. Every FACTUAL declaration
+     - work authorization, age, degree, criminal history, health, veteran status, EEO, background
+     and reference authorizations, truth attestations, restrictive covenants - is held exactly as it
+     is today whatever this column says. See isConsentAcknowledgementQuestion in
+     lib/questionDiscovery.ts, whose veto is what makes that a structural property and not a promise.
+     Submission permission never implies it: sending a form and agreeing to a legal notice on it are
+     different acts, and the runner still stops at everything it stopped at before. */
+  automatic_consent_acceptance_enabled: boolean('automatic_consent_acceptance_enabled').default(false).notNull(),
+  automatic_consent_acceptance_consented_at: timestamp('automatic_consent_acceptance_consented_at', { withTimezone: true }),
+  automatic_consent_acceptance_consent_version: text('automatic_consent_acceptance_consent_version'),
+  /* THE SECOND PERMISSION, for codes of conduct, and it is separate from the one above on purpose.
+     The comment on CODE_OF_CONDUCT_ACKNOWLEDGEMENT in lib/questionDiscovery.ts records why: IMC's
+     "Interview Code of Conduct" was once auto-answered "Yes" with nothing stored behind it, that was
+     judged wrong, and it was corrected. A privacy notice is the routine condition of applying at
+     all; a code of conduct binds how she behaves in a live interview. One grant must not license
+     the other, or this is that same reversion arriving by a tidier route, so a label naming both
+     documents needs both permissions and either can be revoked alone. */
+  automatic_conduct_acceptance_enabled: boolean('automatic_conduct_acceptance_enabled').default(false).notNull(),
+  automatic_conduct_acceptance_consented_at: timestamp('automatic_conduct_acceptance_consented_at', { withTimezone: true }),
+  automatic_conduct_acceptance_consent_version: text('automatic_conduct_acceptance_consent_version'),
   // ---- visa sponsorship ----
   //
   // Answered ONCE, during onboarding, and then permanent. True means the job seeker said they need
@@ -1266,6 +1293,69 @@ export const saved_application_answers = pgTable('saved_application_answers', {
   pk: primaryKey({ columns: [t.user_id, t.question_key] }),
 }));
 
+// ---- user_documents ----
+/* The first user-uploaded FILE Litos keeps. The resume upload is still parsed and discarded
+ * (profiles.resume_object_key stays null; profileRetentionContract.test.ts:8 pins that). This table
+ * is for a document the student attaches to an application herself, kept so a later application can
+ * reuse it instead of asking her again. Removing a document is a tombstone, not a DELETE: a sent
+ * application still has to be able to name what went out after she has removed the file.
+ *
+ * A NEW TABLE RATHER THAN A COLUMN, and that is the whole point of it. Drizzle names every declared
+ * column in the INSERT column list and compiles `db.select().from(profiles)` to an explicit column
+ * list too, so a column declared here before the migration runs 42703s on all 29 unguarded
+ * `.from(profiles)` reads and on the single `.insert(profiles)` (routes/profile.ts:820) - none of
+ * which carries an isUndefinedColumnError guard, unlike application_profile. That is every signup,
+ * every resume upload, autofill, /account/export and the submission runner, simultaneously, for the
+ * length of the deploy window. No existing query references a table that did not exist before, so a
+ * new table cannot do that no matter which order the deploy and the migration land in.
+ *
+ * It is also the only shape that can be a LIBRARY. A per-application column on generated_resumes
+ * gives auto-reuse nothing to pick from, and a jsonb blob on profiles.parsed_json puts per-document
+ * metadata on /resume/history, which returns up to 50 full specs (routes/resume.ts:1304) - see the
+ * comment at the generated_resumes declaration for the month a board list query cost us Neon's
+ * whole 5 GB transfer allowance.
+ */
+export const user_documents = pgTable('user_documents', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  // 'transcript' today. Text, not an enum, so a second document type is a new value and not a
+  // migration.
+  kind: text('kind').notNull(),
+  file_name: text('file_name').notNull(),
+  content_type: text('content_type').notNull(),
+  byte_size: integer('byte_size').notNull(),      // plaintext length, the number she is shown
+  // Vercel Blob pathname under users/<id>/documents/. classifyUserBlob (lib/resumeAccess.ts) reads
+  // this shape as 'user-document' and retentionDaysForCategory exempts that category by name, so no
+  // sweep ages it out - the privacy page's "kept until you remove it" depends on those two lines and
+  // says so there. NOT under /resumes/ and NOT at the user root, so neither the 30-day generated
+  // rule nor the legacy-original rule reaches it. Still inside users/<id>/, so deleteBlobsForUser
+  // takes it on account deletion with no new code, which is what the header comment there says that
+  // prefix is for.
+  object_key: text('object_key').notNull(),
+  // The URL put() itself returned. list({ prefix }) behind resolveBlobUrl is EVENTUALLY consistent
+  // with no bound, and a fresh key has been measured 404ing for 54 seconds after the write (R-040
+  // took every Ashby fill of 2026-07-18). Read this first, resolve second. Never serialized to a
+  // client: a Blob object is public-read forever to anyone holding its URL.
+  blob_url: text('blob_url').notNull(),
+  // The bytes in the blob are ciphertext, not a PDF. A version string rather than a boolean, so a
+  // key rotation is a new value here rather than another migration.
+  encryption_scheme: text('encryption_scheme').notNull(),  // 'aes-256-gcm.v1'
+  // The default-ON checkbox on the attach modal. False means this file was for one application.
+  reusable: boolean('reusable').default(true).notNull(),
+  // Set when she removes the file. The blob is gone at that point; object_key and blob_url stay as
+  // dead pointers only so an old application can still name what it sent.
+  deleted_at: timestamp('deleted_at', { withTimezone: true }),
+  // Drives "last used" in Profile > Documents and the pick order for auto-reuse.
+  last_used_at: timestamp('last_used_at', { withTimezone: true }),
+  // The generated_resumes row it was first attached to. Audit only, and deliberately not a foreign
+  // key, matching saved_application_answers.first_answered_job_id above.
+  first_application_id: uuid('first_application_id'),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userKindIdx: index('user_documents_user_kind_idx').on(t.user_id, t.kind, t.created_at),
+}));
+
 // ---- ats_adapters ----
 // Health tracking for the per-ATS field-mapping adapters (Section 7 of PRD-v2). Populated
 // by a scheduled spot-check (src/routes/adapterHealth.ts), not written to by the extension
@@ -1341,6 +1431,8 @@ export type PostingQuestionsRow = typeof posting_questions.$inferSelect;
 export type NewPostingQuestionsRow = typeof posting_questions.$inferInsert;
 export type SavedApplicationAnswer = typeof saved_application_answers.$inferSelect;
 export type NewSavedApplicationAnswer = typeof saved_application_answers.$inferInsert;
+export type UserDocument = typeof user_documents.$inferSelect;
+export type NewUserDocument = typeof user_documents.$inferInsert;
 export type AtsAdapter = typeof ats_adapters.$inferSelect;
 export type AutofillEvent = typeof autofill_events.$inferSelect;
 export type NewAutofillEvent = typeof autofill_events.$inferInsert;

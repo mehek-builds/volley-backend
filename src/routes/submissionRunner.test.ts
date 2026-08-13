@@ -12,6 +12,8 @@ import {
   isProviderSessionFailureMessage,
   mergeDiscoveredPortalQuestions,
   managedExtensionHandoffUrl,
+  measuredRequiredDocuments,
+  optionProbeAttentionReasons,
   packetUsesControlledResumeFixture,
   preparationEvidenceBlockers,
   reconcileManagedProviderBlockers,
@@ -24,6 +26,7 @@ import {
   unansweredRequiredBlockerLabels,
   type ResumeRow,
 } from './submissionRunner';
+import { PacketDocumentExpiredError } from '../lib/resumeAccess';
 import { savedAnswerKey } from '../lib/answerReuse';
 import {
   refreshKnownQuestionAnswers,
@@ -33,7 +36,13 @@ import {
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { describeRequiredBlocker } from '../lib/fieldLabel';
-import { detectPortal } from '../lib/portalSubmission';
+import {
+  attachManagedFieldOptions,
+  buildManagedPortalActions,
+  detectPortal,
+  managedOptionProbeAnalysis,
+  reactSelectListboxSelector,
+} from '../lib/portalSubmission';
 import {
   CONTROLLED_PORTAL_BINDING_PARAM,
   controlledPortalBinding,
@@ -318,6 +327,31 @@ test('attention categories distinguish captcha from document and attestation blo
     ]),
     ['evidence_gap', 'required_field'],
   );
+});
+
+test('an empty LinkedIn field is a required field, not a document the employer wants uploaded', () => {
+  /* `file` lives inside `profile`, and the arm that classifies documents had no word boundaries, so
+     every packet stopped on an empty LinkedIn or GitHub URL was counted as a stopped-on-a-document
+     one. Counting only: nothing keys a control off this category, and the dashboard reads
+     review.required_documents instead. See lib/requiredDocuments.ts for why that is structural
+     rather than a second regex. */
+  for (const label of ['LinkedIn Profile', 'LinkedIn Profile URL', 'GitHub profile']) {
+    assert.deepEqual(
+      attentionCategoriesForReasons([`"${label}" is required and is still empty`]),
+      ['required_field'],
+      label,
+    );
+  }
+  // And the boundary must not cost the sentences that really are about a document.
+  for (const reason of [
+    '"Transcript" is required and is still empty',
+    '"Upload transcripts" is required and is still empty',
+    '"Supporting documents" is required and is still empty',
+    '"Attachments" is required and is still empty',
+    '"Additional files" is required and is still empty',
+  ]) {
+    assert.deepEqual(attentionCategoriesForReasons([reason]), ['required_document'], reason);
+  }
 });
 
 test('Greenhouse managed blockers are reconciled with selected React-select preview evidence', () => {
@@ -654,8 +688,9 @@ test('managed SmartRecruiters attended handoff persists only an exact form URL o
   );
   assert.match(
     prepareManagedSource,
-    /extension_handoff_url: managedExtensionHandoffUrl\([\s\S]*?portal,[\s\S]*?result\.url,[\s\S]*?networkAccessRestriction,[\s\S]*?captchaAttention,[\s\S]*?\)/,
+    /const extensionHandoffUrl = managedExtensionHandoffUrl\([\s\S]*?portal,[\s\S]*?result\.url,[\s\S]*?networkAccessRestriction,[\s\S]*?captchaAttention,[\s\S]*?\)/,
   );
+  assert.match(prepareManagedSource, /extension_handoff_binding: extensionHandoffBinding/);
   assert.doesNotMatch(
     prepareManagedSource,
     /extension_handoff_url:[^\n]*current\.portal_url/,
@@ -783,6 +818,57 @@ test('only a signed controlled portal can select fixture resume bytes; Greenhous
     if (previous.nodeEnv === undefined) delete process.env.NODE_ENV;
     else process.env.NODE_ENV = previous.nodeEnv;
   }
+});
+
+test('a resume whose object key resolves to nothing throws the typed expired error, not a bare Error', async () => {
+  /* The type is the entire mechanism. fail() reads it to rank the stop above uncertainAfterClaim,
+     so a bare Error here silently restores the "check the portal or your email" sentence on a
+     packet that was never filled in. Asserting instanceof rather than the message pins the half
+     that fail() actually reads. */
+  await assert.rejects(
+    () => resumeBytesForPacket('users/user-1/resumes/gone.pdf', false, {
+      resolveObjectUrl: async () => null,
+      fetchObject: async () => { throw new Error('must not be fetched once the key is gone'); },
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof PacketDocumentExpiredError);
+      assert.equal(error.document, 'resume');
+      assert.match(error.message, /Generated resume file is unavailable/,
+        'message kept verbatim so existing logs and operator greps still match');
+      return true;
+    },
+  );
+});
+
+test('a key that resolves but fails to download is NOT an expired packet', () => {
+  /* A live storage fault and a deleted file owe different sentences: one is worth retrying and the
+     other can only be regenerated. Typing both would collapse that distinction and tell someone to
+     regenerate a resume that is still sitting in the blob store. */
+  return assert.rejects(
+    () => resumeBytesForPacket('users/user-1/resumes/present.pdf', false, {
+      resolveObjectUrl: async () => 'https://blob.example.test/present.pdf',
+      fetchObject: async () => ({ ok: false, arrayBuffer: async () => new ArrayBuffer(0) }),
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok(!(error instanceof PacketDocumentExpiredError));
+      assert.match(error.message, /could not be downloaded/);
+      return true;
+    },
+  );
+});
+
+test('the cover-letter degrade never swallows an expired resume', () => {
+  /* buildPacket loads both documents, so an expired RESUME lands in the cover-letter catch too.
+     Degrading it there logged a resume failure as an attachment problem and then re-entered
+     buildPacket, which threw on the same missing file a second time. */
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const guard = /if \(error instanceof PacketDocumentExpiredError && error\.document === 'resume'\) throw error;/;
+  assert.match(source, guard);
+  const catchIndex = source.indexOf('Cover letter file could not be attached');
+  assert.ok(catchIndex > 0);
+  assert.ok(source.slice(0, catchIndex).search(guard) > 0,
+    'the rethrow has to come BEFORE the degrade, or the degrade is what runs');
 });
 
 test('managed prepare and final or security-code submit rebuild controlled packets with the exact portal predicate', () => {
@@ -1750,6 +1836,87 @@ test('a short stored question never swallows a long blocker by prefix', () => {
   );
 });
 
+/* THE SAME MEASUREMENT, READ FOR WHICH DOCUMENT RATHER THAN HOW MANY.
+ *
+ * unansweredRequiredBlockerLabels answers "how much of this form did we leave her no way to
+ * complete", which is honest and entirely unactionable. measuredRequiredDocuments answers "which of
+ * those is a file she can actually hand over", which is the one the dashboard can draw a control
+ * off. The DRW blocker above is the corpus example of a line that is both. */
+
+test('the DRW transcript blocker is read as a transcript ask, and its neighbours are not', () => {
+  const blockers = [
+    '"Discipline" is required and is still empty',
+    '"LinkedIn Profile" is required and is still empty',
+    '"Please provide a copy of your most recent transcript from your highest degree level." is required and is still empty',
+  ];
+  const unanswered = unansweredRequiredBlockerLabels(blockers, []);
+  assert.equal(unanswered.length, 3, 'all three are unanswerable; only one of them is a document');
+
+  assert.deepEqual(measuredRequiredDocuments(unanswered, []), [{
+    label: 'Please provide a copy of your most recent transcript from your highest degree level.',
+    kind: 'transcript',
+    official_requested: false,
+  }]);
+});
+
+test('a required file question is the second source, and the union is one row', () => {
+  /* NOTHING PRODUCES THIS INPUT TODAY, on either runner. The direct-Playwright walk enumerates
+     text, email, tel, url, number, date, untyped, textarea, select, radio and checkbox
+     (lib/questionDiscovery.ts:4195) and no file input, and stratus's managed discover scan is built
+     the same way. So the blocker sentence is currently the only live source, and this half is
+     forward-compatible rather than reachable. Tested anyway: it is the behaviour that has to be
+     right on the day either walk is widened, and until then nothing exercises it. */
+  const questions = [
+    { question: 'Unofficial transcript', required: true, portal_input_type: 'file' },
+    { question: 'Resume', required: true, portal_input_type: 'file' },
+    // Not required, and required but not a file. Neither is an ask.
+    { question: 'Optional transcript', required: false, portal_input_type: 'file' },
+    { question: 'Tell us about a transcript you enjoyed', required: true, portal_input_type: 'textarea' },
+  ];
+  assert.deepEqual(measuredRequiredDocuments([], questions), [
+    { label: 'Unofficial transcript', kind: 'transcript', official_requested: false },
+  ]);
+
+  // Union'd with the blocker source, and still one row: it is one file the employer wants.
+  assert.deepEqual(measuredRequiredDocuments(['Official transcript'], questions), [
+    { label: 'Official transcript', kind: 'transcript', official_requested: true },
+  ]);
+});
+
+test('a form that asks for no document measures an empty array, not an absent field', () => {
+  // The distinction the dashboard depends on: undefined means no prepare on this build has looked,
+  // and must not be read as "nothing is owed".
+  assert.deepEqual(measuredRequiredDocuments(['First Name', 'LinkedIn Profile'], []), []);
+});
+
+/* BOTH PREPARE PATHS WRITE IT, and that is the entire point of the change.
+ *
+ * The direct-Playwright path never computed this measurement at all: the second argument to
+ * discoveryHonestyReasons was a hard-coded empty array and nothing else there made the comparison.
+ * Measured on one runner only, the "your turn" row fires on managed portals and is silently absent
+ * on the rest of them, which from the dashboard is indistinguishable from the feature not working.
+ *
+ * Asserted against the source for the same reason as the budget gate above: both prepare functions
+ * need a remote runner, a database and blob storage, so the wiring is what can be pinned here. */
+test('required_documents is written by both prepare paths, off both blocker sources', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+
+  assert.equal(
+    [...runner.matchAll(/^\s+required_documents: requiredDocuments,$/gm)].length,
+    2,
+    'one write per prepare path: prepareManaged and the direct-Playwright prepare',
+  );
+  assert.equal(
+    [...runner.matchAll(/measuredRequiredDocuments\(unansweredRequired, mergedQuestions\)/g)].length,
+    2,
+    'and each one computes it from that path\'s own required-and-empty blockers',
+  );
+  // The direct path measures against its sanitized blockers, which is the same array its own
+  // attention_reason is built from. Reading result.blockers raw there would let a provider's UUID
+  // label through into a stored document ask.
+  assert.match(runner, /unansweredRequiredBlockerLabels\(sanitizedBlockers, mergedQuestions\)/);
+});
+
 test('a run that discovered nothing and a run that could not look are different admissions', () => {
   assert.deepEqual(discoveryHonestyReasons(undefined, []), []);
 
@@ -1860,7 +2027,13 @@ test('neither prepare path can call a form safe on the strength of a scan that f
    * same reason the other two do. Unlike the old fallback, a missing option list is not permission
    * to send a guessed alias into a closed employer control. */
   assert.equal(runner.match(/describeDiscoveryFailure\(error\)/g)?.length, 3);
-  assert.match(runner, /closed-control option discovery failed:/);
+  /* AND IT IS NOT A WHOLE-FORM FAILURE. A per-control option read that failed used to be pushed into
+   * discoveryFailures, which is this run-level array, so one unreadable control made the packet say
+   * Litos could not read ANY of the form's questions and sent every correctly read control on the
+   * same page back to a blind alias ladder. Measured on IMC packet 920a6751. The failure still holds
+   * the send and still reaches her; it now names only the control it happened to. */
+  assert.doesNotMatch(runner, /discoveryFailures\.push\(\s*\n?\s*`closed-control option discovery failed/);
+  assert.doesNotMatch(runner, /closed-control option discovery failed:/);
   assert.match(runner, /const discoveryRoleCapability = managedResultSupportsDiscoveryRole\(discoveryResult\)/);
   assert.match(runner, /buildManagedDiscoveredOptionProbeBatches\([\s\S]{0,300}discoveryRoleCapability/);
   assert.match(runner, /managedOptionProbeAnalysis\([\s\S]{0,500}discoveryRoleCapability/);
@@ -1884,4 +2057,565 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   // arithmetic around it.
   assert.match(runner, /&& discoveryFailures\.length === 0/);
   assert.match(runner, /attentionCount:[^\n]*\+ discoveryFailures\.length/);
+  // The per-control failure keeps both halves of that same contract at its own scope: it reaches her
+  // attention list, and it holds the send off the failure ARRAY rather than off the rendered prose.
+  assert.match(runner, /\.\.\.optionProbeAttention,/);
+  assert.match(runner, /&& optionProbe\.failures\.length === 0/);
+});
+
+/* THE IMC FIXTURE. Packet 920a6751, read off the live form on 2026-08-11.
+ *
+ * Two closed controls on one Greenhouse page. `question_9177934101` renders more choices than the
+ * option probe's window, so its list genuinely cannot be read. `question_9176667101` beside it reads
+ * perfectly, and resolves to the employer's own wording, "January 2028 - July 2028".
+ *
+ * WHAT THE CHANGE UNDER TEST DOES, STATED NARROWLY. The failed control used to be promoted into
+ * `discoveryFailures`, the run-level honesty gate, so the packet told her Litos could not read the
+ * questions this form asks AT ALL. It had read all but one of them. The fix scopes that sentence to
+ * the control it belongs to.
+ *
+ * WHAT IT DOES NOT DO, stated because the first version of this comment claimed otherwise: it does
+ * not change any answer. `discoveryFailures` is read only after resolution and the merge have run,
+ * and neither takes it as an argument, so the resolved answer below is identical on both branches.
+ * The assertions on the merged answer are fixture invariants, not evidence of a fix. The assertions
+ * that discriminate are the ones on the attention reasons, and the source-level pins above.
+ *
+ * This walks the real chain prepareManaged walks, minus the browser: probe analysis, option
+ * attachment, the failed-control filter, resolution, the question merge, and the action list. */
+const IMC_UNREADABLE_ID = 'question_9177934101';
+const IMC_GRADUATION_ID = 'question_9176667101';
+const IMC_GRADUATION_OPTIONS = [
+  'July 2027 - December 2027',
+  'January 2028 - July 2028',
+  'August 2028 - December 2028',
+];
+
+function imcOptionProbe() {
+  const discovered = [
+    {
+      label: 'Which of the following best describes you?*',
+      selector: `#${IMC_UNREADABLE_ID}`,
+      inputType: 'text',
+      role: 'combobox',
+      required: true,
+    },
+    {
+      label: 'Expected graduation date*',
+      selector: `#${IMC_GRADUATION_ID}`,
+      inputType: 'text',
+      role: 'combobox',
+      required: true,
+    },
+  ];
+  // 100 rows is the render cap the live control was windowed at. Both reads agree, so this is not a
+  // conflicting-list failure: the list is simply longer than the probe can prove it saw the end of.
+  const windowed = Array.from({ length: 100 }, (_, index) => `Choice ${index}`).join('\n');
+  const analysis = managedOptionProbeAnalysis('greenhouse', discovered, {}, [{
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: `[id="${IMC_UNREADABLE_ID}"]:is([role="combobox"],[aria-haspopup="listbox"])`, value: IMC_UNREADABLE_ID },
+      { selector: reactSelectListboxSelector(IMC_UNREADABLE_ID), value: windowed },
+      { selector: reactSelectListboxSelector(IMC_UNREADABLE_ID), value: windowed },
+      { selector: `[id="${IMC_GRADUATION_ID}"]:is([role="combobox"],[aria-haspopup="listbox"])`, value: IMC_GRADUATION_ID },
+      { selector: reactSelectListboxSelector(IMC_GRADUATION_ID), value: IMC_GRADUATION_OPTIONS.join('\n') },
+      { selector: reactSelectListboxSelector(IMC_GRADUATION_ID), value: IMC_GRADUATION_OPTIONS.join('\n') },
+    ],
+  }], [], true);
+  const failedFields = discovered.flatMap((field) => {
+    const controlId = field.selector.slice(1);
+    if (!analysis.failedIds.has(controlId)) return [];
+    return [{ controlId, label: field.label, selector: field.selector, inputType: field.inputType }];
+  });
+  const kept = attachManagedFieldOptions(discovered, analysis.options)
+    .filter((field) => !analysis.failedIds.has((field.selector ?? '').slice(1)));
+  return { discovered, analysis, failedFields, kept };
+}
+
+test('one control that could not be read does not silence the questions that read fine', async () => {
+  const { analysis, failedFields, kept } = imcOptionProbe();
+
+  // The read failure is real and belongs to exactly one control.
+  assert.deepEqual(analysis.failures.map((failure) => failure.controlId), [IMC_UNREADABLE_ID]);
+  assert.match(analysis.failures[0]!.reason, /windowed at the render cap/);
+  assert.deepEqual(analysis.options[IMC_GRADUATION_ID], IMC_GRADUATION_OPTIONS);
+
+  // It is NOT a whole-form discovery failure. The sentence that says the form could not be read at
+  // all is discoveryHonestyReasons' first reason, and nothing here may produce it.
+  const reasons = optionProbeAttentionReasons(analysis.failures, failedFields);
+  assert.equal(reasons.length, 1);
+  assert.doesNotMatch(reasons[0]!, /could not read the questions this form asks/);
+  assert.deepEqual(discoveryHonestyReasons(undefined, []), []);
+
+  // ...and it names the control it happened to, and only that one.
+  assert.match(reasons[0]!, /Which of the following best describes you\?\*/);
+  assert.doesNotMatch(reasons[0]!, /Expected graduation date/);
+  assert.match(reasons[0]!, /windowed at the render cap/);
+
+  // The control that read fine keeps its options and resolves against them. FIXTURE INVARIANT, not
+  // a result of this change: it holds identically at unmodified main, because resolution never sees
+  // discoveryFailures. It is here to pin the input the assertions below are read against.
+  assert.deepEqual(kept.map((field) => field.selector), [`#${IMC_GRADUATION_ID}`]);
+  const resolved = await discoverAndResolveQuestions(
+    kept.map((field) => ({ ...field, maxLength: null })),
+    { user_id: 'user-1' } as ResumeRow,
+    {
+      jd_text: 'IMC Trading quantitative trader internship.',
+      role: 'Quantitative Trader Intern',
+      portal_url: 'https://job-boards.greenhouse.io/imc/jobs/1',
+      ats_name: 'greenhouse',
+      status: 'ready_to_submit',
+      edited_terms: [],
+      questions: [],
+      skipped_reasons: [],
+      updated_at: new Date().toISOString(),
+    },
+    { grad_date: 'May 2028', grad_year: 2028 },
+    true,
+    'greenhouse',
+  );
+  const merged = mergeDiscoveredPortalQuestions(resolved.questions, [], [], analysis.failedIds);
+  const graduation = merged.find((question) => question.portal_selector === `#${IMC_GRADUATION_ID}`);
+  // Same again: true on both branches. The resolved answer is the employer's own wording.
+  assert.equal(graduation?.answer, 'January 2028 - July 2028');
+  /* And the record says WHAT IT WAS SNAPPED FROM, which is the fact that makes it usable later.
+   *
+   * Without this the answer above is a string with no provenance, and the submit run's refresh has
+   * no way to tell it from a record written a year ago. See refreshKnownQuestionAnswers. */
+  assert.equal(graduation?.answer_option_source, 'May 2028',
+    'the profile value the option was chosen for is recorded beside it');
+
+  // And it reaches the action list, while the unreadable control reaches nothing. The mapping below
+  // is buildPacket's, field for field, because a packet built any other way is not the packet the
+  // run fills from.
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    fieldOptions: analysis.options,
+    failedFields,
+    questions: merged.map((question) => ({
+      question: question.question,
+      answer: question.answer,
+      portalSelector: question.portal_selector,
+      portalInputType: 'combobox',
+      answerOptionSource: question.answer_option_source,
+    })),
+  } as Parameters<typeof buildManagedPortalActions>[1]);
+  assert.equal(actions.some((action) => action.selector?.includes(IMC_UNREADABLE_ID)), false);
+
+  /* THE VALUE, NOT JUST THE SELECTOR. THIS PIN USED TO RECORD AN OPEN DEFECT, AND NOW RECORDS ITS FIX.
+   *
+   * An earlier version of this test asserted only that SOME action reached this selector, which is
+   * true and useless: it passes while the fill carries anything at all. It was then pinned to the
+   * value that really landed, "Spring 2028", with a note that the pin SHOULD fail once the ordering
+   * defect was fixed. It did, and this is the flip.
+   *
+   * Two things produced the old value, both now repaired in portalSubmission.ts:
+   *
+   *   greenhouseReviewedQuestionAnswer   replaced a graduation-date question's resolved answer with
+   *                                      the raw profile value, "May 2028", unconditionally. It now
+   *                                      keeps an answer that came off the control's own option
+   *                                      list, and still overrides a stale record with the profile.
+   *   greenhouseComboboxValuesForQuestion unshifted greenhouseGraduationBucket ahead of everything.
+   *                                      A computed bucket now ranks BEHIND such an answer and still
+   *                                      ahead of everything else, so with comboboxValueLimit at 1
+   *                                      the one attempt is the option the resolver read off this
+   *                                      control.
+   *
+   * ONE fill, and it carries the resolved answer. The count matters as much as the value: the limit
+   * is still 1 on purpose (see comboboxValueLimit), because a second candidate would reopen a
+   * correctly committed react-select and click option-0 of whatever menu it found. */
+  const graduationFills = actions.filter((action) => action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill');
+  assert.deepEqual(graduationFills.map((action) => action.value), ['January 2028 - July 2028'],
+    'the control is attempted with its resolved answer');
+  assert.equal(graduationFills.every((action) => action.value === graduation?.answer), true,
+    'the resolved answer is the value that reaches the form');
+  assert.equal(graduationFills.some((action) => action.value === 'Spring 2028'), false,
+    'the computed bucket does not reach the form when a resolved answer exists');
+});
+
+/* WHAT THE EMPLOYER ACTUALLY RECEIVES, WHICH IS NOT WHAT THE PREVIEW WAS BUILT FROM.
+ *
+ * Every test above this point builds the packet the PREPARE run builds, straight off the merged
+ * questions. That is not the packet that fills the employer's form. The managed runner is stateless
+ * and one-shot: prepare produces the preview screenshot, and the SUBMIT run calls buildPacket again,
+ * which passes review.questions through refreshKnownQuestionAnswers before mapping them onto the
+ * packet. A fix that only survives the prepare path reaches nobody.
+ *
+ * It is worse than that. Before answer_option_source existed, refresh recomputed the answer from the
+ * profile and destroyed the band, so prepare showed "January 2028 - July 2028" and submit sent
+ * "Spring 2028". A preview that does not match what is sent is the one outcome this product cannot
+ * ship, and a prepare-only test is exactly what would let it through.
+ *
+ * submitRunFills therefore runs buildPacket's chain, refresh then map then build, and the mapping is
+ * buildPacket's own field for field. buildPacket itself reads the database and object storage and
+ * cannot be executed here; the source-level pin below holds this composition to it. */
+const GPA_ID = 'question_9176667102';
+
+const SUBMIT_RUN_PROFILE = {
+  fullName: 'Mehek Mandal',
+  email: 'mehekmandal05@gmail.com',
+  school: 'University of Southern California',
+  degree: 'Bachelor of Science in Computer Science',
+  graduationMonth: 'May',
+  graduationYear: '2028',
+  resume: Buffer.from('pdf'),
+  resumeName: 'resume.pdf',
+};
+
+function submitRunFills(input: {
+  label: string;
+  selector: string;
+  storedAnswer: string;
+  /** The question record's answer_option_source: the profile value the option was chosen for. */
+  derivedFrom?: string;
+  /** What the profile says NOW. Differs from derivedFrom exactly when the record is stale. */
+  graduationDate?: string;
+  gpa?: string;
+}): Array<string | undefined> {
+  const refreshed = refreshKnownQuestionAnswers(
+    [{
+      question: input.label,
+      answer: input.storedAnswer,
+      answer_option_source: input.derivedFrom,
+    } as Parameters<typeof refreshKnownQuestionAnswers>[0][number]],
+    { grad_date: input.graduationDate, grad_year: 2028, gpa: input.gpa } as ApplicationProfileLike,
+    undefined,
+  );
+  const actions = buildManagedPortalActions('greenhouse', {
+    ...SUBMIT_RUN_PROFILE,
+    graduationDate: input.graduationDate,
+    gpa: input.gpa,
+    questions: refreshed.map((question) => ({
+      question: question.question,
+      answer: question.answer,
+      portalSelector: input.selector,
+      portalInputType: 'combobox',
+      answerOptionSource: (question as { answer_option_source?: string }).answer_option_source,
+    })),
+  } as Parameters<typeof buildManagedPortalActions>[1]);
+  return actions
+    .filter((action) => action.selector === input.selector && action.type === 'fill')
+    .map((action) => action.value);
+}
+
+function graduationSubmitFills(storedAnswer: string, derivedFrom?: string): Array<string | undefined> {
+  return submitRunFills({
+    label: 'Expected graduation date',
+    selector: `#${IMC_GRADUATION_ID}`,
+    storedAnswer,
+    derivedFrom,
+    graduationDate: 'May 2028',
+  });
+}
+
+test('the resolved option survives the submit run\'s refresh and reaches the employer', () => {
+  // The IMC case, through the chain that actually fills the form.
+  assert.deepEqual(graduationSubmitFills('January 2028 - July 2028', 'May 2028'),
+    ['January 2028 - July 2028'],
+    'the option the resolver read off this control is what the submit run sends');
+
+  // The same for GPA, whose bucket is a different function reached by a different branch.
+  assert.deepEqual(submitRunFills({
+    label: 'What is your GPA?',
+    selector: `#${GPA_ID}`,
+    storedAnswer: '3.81 - 3.9',
+    derivedFrom: '3.89',
+    gpa: '3.89',
+  }), ['3.81 - 3.9'], 'the employer\'s own GPA band survives the refresh');
+});
+
+/* A STALE BAND IS STILL STALE, and shape alone cannot tell you that.
+ *
+ * "January 2027 - July 2027" is as well-formed an option text as "January 2028 - July 2028". It is
+ * also a graduation window a year early, and once the applicant corrects her graduation to May 2028
+ * nothing about the string itself says so. The profile has to win, and the only fact that makes that
+ * decidable is the derivation recorded when the option was chosen.
+ *
+ * This is the case that a band-shape test on its own gets wrong, and it is the reason
+ * answer_option_source exists rather than the shape being trusted by itself. */
+test('a band-shaped stale record loses to a profile that has moved', () => {
+  /* THE FILL LAYER FIRST, ON ITS OWN, because that is where this can actually be observed.
+   *
+   * Through the submit chain the refresh gets there first and overwrites a stale band before any
+   * fill is built, so a submit-only test cannot tell a fill layer that refuses stale bands from one
+   * that would happily send them. The PREPARE path takes no refresh at all: it builds actions
+   * straight off the merged questions, and it is what renders the preview the applicant approves.
+   * So the refusal has to hold here too, and be tested here. */
+  const prepareFills = (storedAnswer: string, answerOptionSource?: string) => buildManagedPortalActions(
+    'greenhouse',
+    {
+      ...SUBMIT_RUN_PROFILE,
+      graduationDate: 'May 2028',
+      questions: [{
+        question: 'Expected graduation date',
+        answer: storedAnswer,
+        portalSelector: `#${IMC_GRADUATION_ID}`,
+        portalInputType: 'combobox',
+        answerOptionSource,
+      }],
+    } as Parameters<typeof buildManagedPortalActions>[1],
+  )
+    .filter((action) => action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill')
+    .map((action) => action.value);
+
+  assert.deepEqual(prepareFills('January 2027 - July 2027', 'May 2027'), ['Spring 2028'],
+    'the preview must not show a graduation window a year early either');
+  assert.deepEqual(prepareFills('January 2027 - July 2027'), ['Spring 2028'],
+    'a stale band with no derivation is refused at the fill layer');
+  assert.deepEqual(prepareFills('January 2028 - July 2028', 'May 2028'), ['January 2028 - July 2028'],
+    'and a current one is still preferred, so this is a staleness test and not a blanket refusal');
+
+  // Recorded against "May 2027"; the profile now says "May 2028". The record is stale.
+  assert.deepEqual(graduationSubmitFills('January 2027 - July 2027', 'May 2027'), ['Spring 2028'],
+    'a window a year early must not reach the employer');
+
+  // No derivation recorded at all, which is every record written before this field existed, and
+  // every free-text answer that merely happens to be band-shaped. Unprovable means recompute.
+  assert.deepEqual(graduationSubmitFills('January 2027 - July 2027'), ['Spring 2028'],
+    'a band with no recorded derivation cannot prove it is current');
+  assert.deepEqual(graduationSubmitFills('Sept 2024 to May 2028'), ['Spring 2028'],
+    'free text that reads as a band is not an option the resolver chose');
+
+  // And the derivation is not a rubber stamp: it has to match the profile, not merely exist.
+  assert.deepEqual(graduationSubmitFills('January 2028 - July 2028', 'December 2029'), ['Spring 2028'],
+    'a derivation the profile no longer agrees with is stale too');
+});
+
+/* THE FALLBACK IS INTACT, which is the half of this that is easy to break while fixing the other.
+ *
+ * The bucket is not wrong, it is second. It maps a profile fact onto one employer's vocabulary, and
+ * that is still the best available guess when nothing has been read off the control to prefer over
+ * it. All of these must still send a bucket: the R-096 placeholder, where a required control the
+ * applicant has not answered carries a BLANK stored answer; the unprobed control, where the stored
+ * answer is the profile date itself; and the ordinary stale record.
+ *
+ * Same control, same profile, four stored answers. Nothing else varies. */
+test('a graduation combobox with no resolved answer still leads with the computed bucket', () => {
+  // Nothing stored at all: the profile date is substituted in and bucketed, exactly as before.
+  assert.deepEqual(graduationSubmitFills(''), ['Spring 2028'],
+    'the R-096 placeholder still reaches the form as a bucket');
+
+  // Stored, but only the profile fact itself, which is what an unprobed control leaves behind. No
+  // option list was ever consulted, so the bucket is still the better guess and still leads.
+  assert.deepEqual(graduationSubmitFills('May 2028'), ['Spring 2028'],
+    'a stored answer identical to the profile date is not evidence of snapping');
+
+  // A stale record from an earlier run, naming a year the profile has since corrected.
+  assert.deepEqual(graduationSubmitFills('May 2027'), ['Spring 2028'],
+    'a stale stored date is still overridden by the profile');
+
+  // And the resolved case, read against the three above rather than on its own.
+  assert.deepEqual(graduationSubmitFills('January 2028 - July 2028', 'May 2028'),
+    ['January 2028 - July 2028'], 'a current resolved option is the one value attempted');
+});
+
+/* THE SAME SET FOR GPA, because it is the same defect on a different control.
+ *
+ * The IMC run of 2026-08-11 carried a resolved "3.81 - 3.9" and sent "3.6 or above (out of 4.0)".
+ * greenhouseGpaBucket is a different function from greenhouseGraduationBucket and is unshifted by a
+ * different branch, so fixing one says nothing about the other. */
+test('a GPA combobox prefers its resolved answer and keeps the bucket as the fallback', () => {
+  const gpaFills = (storedAnswer: string, derivedFrom?: string) => submitRunFills({
+    label: 'What is your GPA?', selector: `#${GPA_ID}`, storedAnswer, derivedFrom, gpa: '3.89',
+  });
+
+  // The unprobed control: the stored answer is a bare GPA, which is what the profile holds and what
+  // the resolver stores when it has no option list to snap onto.
+  assert.deepEqual(gpaFills('3.89'), ['3.6 or above (out of 4.0)'], 'a bare stored GPA is still bucketed');
+
+  // A band recorded against a GPA she has since raised. The profile wins.
+  assert.deepEqual(gpaFills('3.4 - 3.5', '3.45'), ['3.6 or above (out of 4.0)'],
+    'a GPA band derived from a superseded GPA is stale');
+
+  // The probed and current control: "3.81 - 3.9" is one of the employer's own option texts, and it
+  // is what the live IMC application resolved to while "3.6 or above (out of 4.0)" went out.
+  const resolved = gpaFills('3.81 - 3.9', '3.89');
+  assert.deepEqual(resolved, ['3.81 - 3.9'],
+    'the bucket the employer really offers, not the one this codebase computes');
+  assert.equal(resolved.includes('3.6 or above (out of 4.0)'), false,
+    'the computed GPA bucket does not reach the form when a current resolved answer exists');
+});
+
+/* A DERIVATION NEVER OUTLIVES THE ANSWER IT DESCRIBES.
+ *
+ * The refresh has two outcomes, and only one of them keeps the stored answer. When it recomputes,
+ * the recorded derivation described a value that is no longer there, and leaving it attached would
+ * claim a snap that never happened for the value now in the record. The next reader has no way to
+ * detect that from the record alone, which is precisely the failure mode this field was added to
+ * remove, so it is dropped with the answer it belonged to. */
+test('the recorded option derivation is dropped whenever the answer is recomputed', () => {
+  const refresh = (answer: string, source: string) => refreshKnownQuestionAnswers(
+    [{ question: 'Expected graduation date', answer, answer_option_source: source } as
+      Parameters<typeof refreshKnownQuestionAnswers>[0][number]],
+    { grad_date: 'May 2028', grad_year: 2028 } as ApplicationProfileLike,
+    undefined,
+  )[0] as { answer: string; answer_option_source?: string };
+
+  const recomputed = refresh('January 2027 - July 2027', 'May 2027');
+  assert.equal(recomputed.answer, 'May 2028', 'the stale band is recomputed from the profile');
+  assert.equal(recomputed.answer_option_source, undefined,
+    'and its derivation does not survive to describe a value it never described');
+
+  const kept = refresh('January 2028 - July 2028', 'May 2028');
+  assert.equal(kept.answer, 'January 2028 - July 2028');
+  assert.equal(kept.answer_option_source, 'May 2028',
+    'the branch that keeps the answer keeps the derivation, or the next refresh cannot check it');
+});
+
+/* THE COMPOSITION ABOVE IS buildPacket'S, and this is what holds it there.
+ *
+ * submitRunFills cannot call buildPacket: it reads users, the application profile, the parsed resume
+ * and the resume object. So the test asserts the shape of the chain instead, against the real source.
+ * If buildPacket ever stops refreshing, or stops carrying the derivation onto the packet, the tests
+ * above would keep passing against a composition production no longer performs. */
+test('buildPacket refreshes stored answers and carries the option derivation onto the packet', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const buildStart = source.indexOf('export async function buildPacket(');
+  const buildEnd = source.indexOf('\nexport function readMostRecentRole', buildStart);
+  assert.ok(buildStart > 0 && buildEnd > buildStart);
+  const buildBody = source.slice(buildStart, buildEnd);
+  assert.match(buildBody, /const refreshedQuestions = refreshKnownQuestionAnswers\(/,
+    'the submit run resolves stored answers again before filling');
+  assert.match(
+    buildBody,
+    /questions: refreshedQuestions\.map\(\(item\) => \(\{[\s\S]{0,600}?answerOptionSource: item\.answer_option_source,/,
+    'the derivation has to reach the packet, or the fill cannot tell a read option from a profile value',
+  );
+});
+
+/* THE HONESTY THE OLD CODE WAS PROTECTING, kept at the scope it belongs to.
+ *
+ * Narrowing a run-level admission to a per-control one is only safe while the per-control refusal is
+ * absolute: a control whose choices Litos could not read must be left alone, not filled with the
+ * closest-looking guess, and she must be told. Without this the change would trade a lie about
+ * twelve controls for a silent wrong answer on one, which is the worse of the two. */
+test('a control whose options could not be read is never silently given an answer', () => {
+  const { analysis, failedFields } = imcOptionProbe();
+  assert.equal(analysis.options[IMC_UNREADABLE_ID], undefined, 'a windowed read is not an option list');
+
+  // A stale stored answer for the same control cannot resurrect a fill for it either.
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971501234567',
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science in Computer Science',
+    graduationDate: 'May 2028',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    failedFields,
+    questions: [{
+      question: 'Which of the following best describes you?',
+      answer: 'Undergraduate student',
+      portalSelector: `#${IMC_UNREADABLE_ID}`,
+      portalInputType: 'combobox',
+    }],
+  } as Parameters<typeof buildManagedPortalActions>[1]);
+  assert.equal(actions.some((action) => action.selector?.includes(IMC_UNREADABLE_ID)), false);
+  assert.equal(actions.some((action) => action.value === 'Undergraduate student'), false);
+
+  // Silence is not permitted either: the run owes her a sentence naming the control.
+  assert.equal(optionProbeAttentionReasons(analysis.failures, failedFields).length, 1);
+  // A control discovery reported without a usable label is still named, by its durable id, rather
+  // than producing a sentence about nothing.
+  const unlabelled = optionProbeAttentionReasons(analysis.failures, []);
+  assert.equal(unlabelled.length, 1);
+  assert.match(unlabelled[0]!, new RegExp(IMC_UNREADABLE_ID));
+});
+
+test('a radio option is not recorded as a question the applicant has to answer', async () => {
+  /* The packet side of the same gate the pre-script applies. Fixture is the Palantir Lever form as
+   * discovery really reported it on 2026-08-11, across 11 of the owner's packets: the radio and
+   * checkbox rows carry their own OPTION text plus the card's name attribute, and the questions the
+   * form actually asked are the plain cards beside them.
+   *
+   * R-096 records an unanswerable required field on purpose, so without this gate every one of
+   * these becomes a blocker reading '"Yes" is required and is still empty' and a row on the Apply
+   * screen asking her to answer the word "Yes". */
+  const current: ApplicationReviewState = {
+    jd_text: 'Palantir early talent internship.',
+    role: 'Software Engineer Intern',
+    portal_url: 'https://jobs.lever.co/palantir/123',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  // required: true throughout, as the live form marks them. That is what makes each of these a
+  // BLOCKER when it is recorded, and what makes this test fail if the gate is removed.
+  const card = (label: string, inputType: string, options?: string[]) => ({
+    label,
+    selector: '[data-litos-discovered-1]',
+    inputType,
+    maxLength: null,
+    required: true,
+    ...(options ? { options } : {}),
+  });
+
+  const result = await discoverAndResolveQuestions(
+    [
+      card('Yes cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]', 'radio'),
+      card('Yes, I consent cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]', 'checkbox'),
+      card('English (ENG) cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]', 'checkbox'),
+      card('cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field1]', 'text'),
+      // The composite typeahead whose <label> textContent swallowed its own empty state.
+      card('Current location No location found. Try entering a different locationLoading location location-input', 'text'),
+      // A real question on the same form, which has to survive all of it.
+      card('Year of Graduation cards[a69a985a-eae9-4c14-90fb-b5a4b891523e][field0]', 'text'),
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { grad_date: 'May 2028', grad_year: 2028 },
+    true,
+    'lever',
+  );
+
+  const labels = result.questions.map((question) => question.question.toLowerCase());
+  for (const rejected of ['yes', 'yes, i consent', 'english (eng)', 'cards [field0]', 'cards [field1]']) {
+    assert.equal(labels.includes(rejected), false, `${rejected} must not be recorded as a question`);
+  }
+  assert.equal(labels.some((label) => label.includes('no location found')), false);
+  assert.ok(labels.some((label) => label.includes('year of graduation')), 'the real question must survive');
+});
+
+test('a bare privacy label still reaches the packet as a question', async () => {
+  // The packet-side half of the R-PROTECT guard in postingQuestions.test.ts. Point72 and IMC label
+  // their consent checkbox exactly this way, and Litos answers it from accept_privacy_notices.
+  const current: ApplicationReviewState = {
+    jd_text: 'Point72 Academy.',
+    role: 'Investment Analyst Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/1',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions(
+    [
+      { label: 'Privacy', selector: '[data-litos-discovered-1]', inputType: 'checkbox', maxLength: null, required: true },
+      { label: 'Privacy statement', selector: '[data-litos-discovered-2]', inputType: 'checkbox', maxLength: null, required: true },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { accept_privacy_notices: true },
+    true,
+    'greenhouse',
+  );
+  const labels = result.questions.map((question) => question.question.toLowerCase());
+  assert.ok(labels.includes('privacy'), 'the bare "Privacy" label must stay a question');
+  assert.ok(labels.includes('privacy statement'), 'the bare "Privacy statement" label must stay a question');
 });

@@ -7,6 +7,7 @@ import {
   greenhousePostingFromUrl,
   leverPostingFromUrl,
 } from './atsSubmissionChannels';
+import { companyIdentity } from './companyIdentity';
 
 /**
  * WHAT "THE SAME POSTING" MEANS, and why it is three keys rather than one.
@@ -54,12 +55,6 @@ export type PostingIdentity = {
   companyRole: string | null;
 };
 
-function normalizeText(value: unknown): string {
-  return typeof value === 'string'
-    ? value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-    : '';
-}
-
 /** "<provider>:<tenant>:<postingId>" for a portal URL we can read, else null. */
 export function atsPostingKey(portalUrl: string | undefined | null): string | null {
   const url = portalUrl?.trim();
@@ -79,8 +74,12 @@ export function postingIdentity(jobContext: unknown, portalUrl: string | undefin
   const context = (jobContext && typeof jobContext === 'object' ? jobContext : {}) as Record<string, unknown>;
   const rawJobId = context.job_id;
   const jobId = typeof rawJobId === 'string' && rawJobId.trim() ? rawJobId.trim().toLowerCase() : null;
-  const company = normalizeText(context.company);
-  const role = normalizeText(context.role);
+  /* Both halves fold through lib/companyIdentity.ts, which is where this file's `normalizeText`
+     now lives. It is the one definition of "the same company" and it is shared with the
+     prior-application resolver, so the guard and the answer cannot come to disagree about which
+     employer a stored packet was for. */
+  const company = companyIdentity(context.company);
+  const role = companyIdentity(context.role);
   return {
     postingKey: atsPostingKey(portalUrl),
     jobId,
@@ -175,6 +174,23 @@ export type SubmittedTwinRow = {
 };
 
 /**
+ * THE PREDICATE FOR "THIS ROW ALREADY GOT TO AN EMPLOYER", written once.
+ *
+ * `status = 'submitted'` is the receipt; `pipeline_stage = 'applied'` is its twin, written in the
+ * same breath by every send path; an unresolved `unverified_submission` is the Send that was
+ * pressed and lost. Two callers read it: submittedApplications below, and
+ * submittedApplicationCompanies, which the prior-application resolver uses to decide whether it may
+ * answer "No" on the applicant's behalf. A second copy of this WHERE clause is how the two would
+ * come to disagree about what counts as having applied.
+ */
+function alreadyAtEmployer() {
+  return sql`(${generated_resumes.spec}->'_review'->>'status' = 'submitted'
+    or ${generated_resumes.pipeline_stage} = 'applied'
+    or (${generated_resumes.spec}->'_review'->'unverified_submission' is not null
+      and ${generated_resumes.spec}->'_review'->'unverified_submission'->>'resolution' is null))`;
+}
+
+/**
  * Every application this user has already got to an employer.
  *
  * `status = 'submitted'` OR `pipeline_stage = 'applied'`, because the two are written in the same
@@ -208,12 +224,36 @@ async function submittedApplications(userId: string, excludeId: string): Promise
     .where(and(
       eq(generated_resumes.user_id, userId),
       ne(generated_resumes.id, excludeId),
-      sql`(${generated_resumes.spec}->'_review'->>'status' = 'submitted'
-        or ${generated_resumes.pipeline_stage} = 'applied'
-        or (${generated_resumes.spec}->'_review'->'unverified_submission' is not null
-          and ${generated_resumes.spec}->'_review'->'unverified_submission'->>'resolution' is null))`,
+      alreadyAtEmployer(),
     ));
   return rows;
+}
+
+/**
+ * Every employer this user's own Litos history shows an application already at, as the employer's
+ * name was recorded on the packet (`job_context.company`).
+ *
+ * The ONE thing that may stand down the default "No" to "have you applied to us before?". Read the
+ * rule at previouslyAppliedAnswer in lib/questionDiscovery.ts: an employer named here does not
+ * produce a "Yes", it produces a hand-back, because these rows carry no window ("within the last
+ * 12-18 months") and no role scope that the question is actually asking about.
+ *
+ * IT USES THE FULL alreadyAtEmployer SET, INCLUDING THE UNVERIFIED ROWS, and that is the safe
+ * direction rather than a widening. An unverified row is a Send that was pressed and lost, so the
+ * employer may hold that application; answering "No" over the top of one would be the same
+ * confidently wrong answer as answering "No" over a receipt. `certainty` in this file exists to
+ * tell the applicant those two apart in a sentence. Here they have the same consequence - do not
+ * speak for her - so they are not told apart.
+ */
+export async function submittedApplicationCompanies(userId: string): Promise<string[]> {
+  const rows = await db
+    .select({ company: sql<string | null>`${generated_resumes.job_context}->>'company'` })
+    .from(generated_resumes)
+    .where(and(eq(generated_resumes.user_id, userId), alreadyAtEmployer()));
+  const companies = rows
+    .map((row) => row.company?.trim() ?? '')
+    .filter((company) => company.length > 0);
+  return [...new Set(companies)];
 }
 
 function companyRoleOf(jobContext: unknown): { company: string; role: string } {

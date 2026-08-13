@@ -6,14 +6,17 @@ import {
   type ManagedBrowserResult,
 } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
+import { optionBandAnswer, storedOptionAnswerIsCurrent } from './optionBand';
 import {
   classifyField,
   discoveredFieldIsRequired,
+  graduationYearFieldAnswer,
   isLegalConsentQuestion,
   normalizeReviewQuestionLabel,
   resolveKnownAnswer,
   ROUTINE_APPLICANT_CONSENT_QUESTION,
   type ApplicationProfileLike,
+  type ProfileKey,
 } from './questionDiscovery';
 import {
   chooseClosestOption,
@@ -23,8 +26,8 @@ import {
   resolveProfileField,
   selfIdentificationDeclineWording,
 } from './profileFieldResolution';
-import type { Locator } from 'playwright-core';
-import { browserApplicationCapability } from './browserApplicationCapabilities';
+import type { ElementHandle, Locator } from 'playwright-core';
+import { browserApplicationCapability, type BrowserApplicationFamily } from './browserApplicationCapabilities';
 import { isControlledTestPortalUrl } from './controlledTestPortal';
 import { chooseCanonicalFinalSubmit } from './finalSubmitChooserPolicy';
 import {
@@ -48,7 +51,10 @@ function quoteAttr(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
-type PortalFamily =
+/* Exported for one reason: portalSupportInvariants.test.ts enumerates it and asserts that
+ * portalCanAutoSubmit and isAutonomousPortalFamily agree on every member. That agreement is what
+ * makes the CAPTCHA corroboration rule safe, and it is not otherwise enforced anywhere. */
+export type PortalFamily =
   | 'greenhouse'
   | 'lever'
   | 'ashby'
@@ -423,18 +429,39 @@ export function managedPortalReceiptCapability(portal: SupportedPortal): Managed
   return portalCanAutoSubmit(portal) ? 'confirmation_possible' : 'unavailable_before_handoff';
 }
 
+/* The families whose submit capability is decided by the researched capability table rather than by
+ * the deny sets above. portalCanAutoSubmit branches to browserApplicationCapability for exactly
+ * these, and the table denies programmaticSubmit on every one of them today.
+ *
+ * They have to be subtracted here or the type disagrees with the function. zoho_recruit and bullhorn
+ * are in no deny set, so before this line AutonomousPortalFamily claimed both were autonomous while
+ * portalCanAutoSubmit answered false for both, and the array below could not be complete. If the
+ * table ever grants one of them programmaticSubmit, the two answers part company in the other
+ * direction and portalSupportInvariants.test.ts is what says so. */
+type CapabilityReviewedFamily = Extract<PortalFamily, BrowserApplicationFamily>;
+
 // The portal families Litos can carry all the way to a confirmation on its own.
 //
 // Subtracted from PortalFamily rather than hand-listed, so a portal that later turns out to be
-// multi-step or CAPTCHA-gated leaves this type the moment it is added to either set above. There is
-// no second list to remember to update, which is the only version of this that stays true.
+// multi-step or CAPTCHA-gated leaves this type the moment it is added to either set above.
+//
+// The TYPE is subtracted; the VALUE below is still hand-listed, and `satisfies` proves only that
+// every entry belongs, never that every member is present. The completeness half is asserted in
+// portalSupportInvariants.test.ts, which is what makes "no second list to remember to update" true
+// rather than merely intended: a family that lands in none of the sets above joins this type, and if
+// nobody adds it to the array that test stops compiling.
 //
 // This is what the jobs board is allowed to source from. Surfacing a posting Litos cannot finish is
 // worse than not surfacing it at all: the student picks it, tailors a resume to it, and only then
 // discovers the last step needs her anyway. Fewer jobs that all work beats more jobs that mostly do.
 export type AutonomousPortalFamily = Exclude<
   PortalFamily,
-  MultiStepFamily | CaptchaGatedFamily | ConsentGatedFamily | ManualFinalReviewFamily | AccountWalledFamily
+  MultiStepFamily
+  | CaptchaGatedFamily
+  | ConsentGatedFamily
+  | ManualFinalReviewFamily
+  | AccountWalledFamily
+  | CapabilityReviewedFamily
 >;
 
 export const AUTONOMOUS_PORTAL_FAMILIES = [
@@ -468,6 +495,8 @@ export const ICIMS_ATTENDED_GATE_REASON =
   'This company asks you to make an account and prove you are human before the application form opens. Litos cannot do either of those for you, so this one needs your hands.';
 export const ICIMS_SECURITY_CODE_GATE_REASON =
   'This iCIMS account page is waiting for a security code sent to the stored Litos application email. Litos did not enter the code or submit the application. Open the page and finish the account check in Chrome.';
+export const BAMBOOHR_ATTENDED_GATE_REASON =
+  'This company’s application page asks you to prove you are human. Litos filled everything in, so all that is left is that check and the send button.';
 export const ORACLE_ATTENDED_GATE_REASON =
   'This Oracle application asks for an emailed code and a legal terms choice before the application form opens. Litos did not request the code, accept the terms, or submit anything. Open the exact saved page in Chrome and complete those steps yourself.';
 export const UKG_CAPTURE_REQUIRED_REASON =
@@ -643,6 +672,26 @@ export type SubmissionPacket = {
   resumeName: string;
   coverLetter?: Buffer;
   coverLetterName?: string;
+  /* A file the student attached to this application herself, decrypted for the fill. One carrier
+   * for all three delivery paths - Playwright setInputFiles, the managed sandbox's base64 upload,
+   * and the ATS API multipart - so a document added here reaches every one of them at once rather
+   * than the one the author happened to be looking at.
+   *
+   * Both fields or neither. uploadFirst and managedUpload each return early unless the file AND the
+   * name are truthy, which is what makes an application with no transcript a no-op instead of a
+   * half-populated packet that spends an action on an empty upload. */
+  transcript?: Buffer;
+  transcriptName?: string;
+  /* Why the attached transcript is not on this packet, when the application says one is attached.
+   *
+   * Metadata, not a fill field, the same way applicantEmail above is. Removing a document deletes
+   * its blob and tombstones the row, and it deliberately does NOT rewrite the spec of every
+   * application that already carried it, so a student who tidies her library leaves live pointers at
+   * a file that is gone. buildPacket records that here instead of throwing, because it is called
+   * bare at nine sites and only two of them catch anything: a dead pointer must not be able to abort
+   * a fully filled application. The run turns this into one fixed sentence for her and logs the
+   * detail. */
+  transcriptUnavailableReason?: string;
   eeoPrefs?: Record<string, string> | null;
   // The single most recent role from the parsed resume, for portals that ask for work history as
   // structured fields rather than accepting the resume file alone (Paylocity's step one). Only one
@@ -664,6 +713,15 @@ export type SubmissionPacket = {
     portal_selector?: string;
     portal_input_type?: string;
     atsApiField?: string;
+    /**
+     * The profile value `answer` was snapped from, when discovery read this control's options and
+     * resolveProfileField picked one. Copied from the question record's answer_option_source.
+     *
+     * Absent means "cannot prove this answer is current", which is the reading a hand-built packet,
+     * a record written before the field existed, and a free-text answer all get. Every consumer
+     * treats absence as a reason to recompute rather than to trust.
+     */
+    answerOptionSource?: string;
   }>;
 };
 
@@ -1881,6 +1939,114 @@ function packetHasFailedReferralField(packet: SubmissionPacket): boolean {
   return packet.failedFields?.some((field) => isReferralSourceQuestion(field.label)) === true;
 }
 
+/**
+ * The families the speculative alias ladders guess at.
+ *
+ * Separate from managedClosedFieldFamily, which is the FAILED-control matcher: widening that one
+ * would change which fills a failed option read suppresses, and that is a different question with a
+ * different measurement behind it. This adds the single family the graduation-date ladder needs and
+ * otherwise defers to it. "graduation date" is required as a phrase so that "expected graduation
+ * year" keeps falling through to the year family rather than being claimed here.
+ */
+function managedSpeculativeAliasFamily(label: string): string | undefined {
+  const normalized = normalizedFailedFieldLabel(label);
+  if (!normalized) return undefined;
+  if (/\bgraduation date\b|\bdate of graduation\b/.test(normalized)) return 'education-graduation-date';
+  return managedClosedFieldFamily(label);
+}
+
+/** The option list the probe actually READ for the control a reviewed question was resolved against. */
+function packetReadOptionsForQuestion(
+  packet: SubmissionPacket,
+  item: SubmissionPacket['questions'][number],
+): string[] | undefined {
+  const selector = reviewQuestionPortalSelector(item);
+  const controlId = selector?.match(/^#([A-Za-z0-9][A-Za-z0-9_-]*)$/)?.[1]
+    ?? selector?.match(/^\[id=["']([A-Za-z0-9][A-Za-z0-9_-]*)["']\]$/)?.[1];
+  if (!controlId) return undefined;
+  const options = packet.fieldOptions?.[controlId];
+  return options && options.length > 0 ? options : undefined;
+}
+
+/**
+ * A GUESS FIRED AT A CONTROL THAT WAS ALREADY ANSWERED CORRECTLY, AND CANNOT BE RIGHT.
+ *
+ * The alias ladders below push the RAW profile value at a label: "3.89" at "GPA", "May 2028" at
+ * "Graduation Date". fillByLabelText resolves a label to its own container's input, so on a form
+ * whose GPA control is a list of bands this lands in the SAME react-select the resolver has just
+ * filled with the exact band, "3.81 - 3.9". The raw value is not on the employer's list, so it
+ * fails, and the failure is read back to her as `Litos could not leave an answer on the form: no
+ * option matched "3.89"` about a field that is filled correctly.
+ *
+ * Measured across the five prod packets carrying that exact sentence, 2026-08-11: all five have the
+ * GPA field present in filled_fields and none has a GPA required-and-empty blocker. Five false
+ * alarms, zero real ones.
+ *
+ * THE CONDITION IS DELIBERATELY THE PROVABLE ONE, not "some question mentions GPA". All four of
+ * these have to hold, and the fourth is what makes this safe:
+ *
+ *   1. a reviewed question names the same control, by exact label or shared closed-field family;
+ *   2. that question is not itself suppressed as a failed control, because then the ladder is the
+ *      control's ONLY remaining chance and must survive;
+ *   3. the option probe READ that control's list, so there is evidence rather than an assumption
+ *      about what shape the control is;
+ *   4. the resolver's answer is on that list and the guess is not.
+ *
+ * Without 3 and 4 this suppressed a plain fillByLabelText at a control the resolver only ever
+ * attempts as a react-select - Databricks' graduation date is the measured example - which would
+ * trade a false alarm for an actually empty field. A value the employer does not offer is the one
+ * thing that can be dropped with no loss, because it could never have been accepted.
+ */
+function packetAnswerOutranksAliasGuess(
+  packet: SubmissionPacket,
+  label: string,
+  guesses: readonly (string | undefined)[],
+): boolean {
+  const candidates = guesses.flatMap((value) => {
+    const trimmed = value?.trim().toLowerCase();
+    return trimmed ? [trimmed] : [];
+  });
+  if (candidates.length === 0) return false;
+  const targetLabel = normalizedFailedFieldLabel(label);
+  if (!targetLabel) return false;
+  const targetFamily = managedSpeculativeAliasFamily(label);
+  return packet.questions.some((item) => {
+    if (packetQuestionFailed(packet, item)) return false;
+    const answer = item.answer?.trim();
+    if (!answer) return false;
+    const answeredLabel = normalizedFailedFieldLabel(item.question);
+    if (!answeredLabel) return false;
+    if (answeredLabel !== targetLabel) {
+      const answeredFamily = managedSpeculativeAliasFamily(item.question);
+      if (!targetFamily || !answeredFamily || targetFamily !== answeredFamily) return false;
+    }
+    const options = packetReadOptionsForQuestion(packet, item);
+    if (!options) return false;
+    const offered = new Set(options.map((option) => option.trim().toLowerCase()));
+    return offered.has(answer.toLowerCase()) && candidates.every((value) => !offered.has(value));
+  });
+}
+
+/**
+ * The one gate every speculative label-scoped alias fill passes through.
+ *
+ * Two independent refusals, and they are not the same fact. `packetLabelFailed` says Litos could not
+ * READ this control, so guessing at it is forbidden. `packetAnswerOutranksAliasGuess` says Litos has
+ * already answered it with an option the employer offers, and this guess is one it does not, so
+ * firing it can only fail and lie about a field that is filled.
+ *
+ * Scoped to LABEL-resolved fills only. An id-scoped fill (`#school--0`, `#end-year--0`) targets a
+ * fixed control the reviewed question may have nothing to do with, and suppressing one of those over
+ * a same-named custom question would leave a required fixed field empty.
+ */
+function managedSpeculativeLabelFillSuppressed(
+  packet: SubmissionPacket,
+  label: string,
+  ...guesses: Array<string | undefined>
+): boolean {
+  return packetLabelFailed(packet, label) || packetAnswerOutranksAliasGuess(packet, label, guesses);
+}
+
 function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: SubmissionPacket): boolean {
   if (!packet.failedFields?.length) return false;
   if (action.text && packetLabelFailed(packet, action.text)) return true;
@@ -1901,14 +2067,14 @@ function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: S
   });
 }
 
-function managedFillByLabelUnlessFailed(
+function managedFillByLabelUnlessHandled(
   actions: ManagedBrowserAction[],
   packet: SubmissionPacket,
   text: string,
   value: string | undefined,
   label: string,
 ) {
-  if (packetLabelFailed(packet, text)) return;
+  if (managedSpeculativeLabelFillSuppressed(packet, text, value)) return;
   managedFillByLabel(actions, text, value, label);
 }
 
@@ -2029,7 +2195,11 @@ function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserActi
   const selectorLimit = databricks ? 3 : QUESTION_COMBOBOX_SELECTOR_LIMIT;
   const labelPrefix = databricks ? 'databricks_graduation_date_combo' : 'education_graduation_date_combo';
   for (const label of labels) {
-    if (packetLabelFailed(packet, label)) continue;
+    // Suppressed when the resolver already answered this control with an option the employer offers:
+    // these selectors are derived from the label, so they land in the SAME react-select the reviewed
+    // answer is about to fill, and every value below is the stored date or a bucket of it rather
+    // than a read option. The whole set is passed, so one candidate that IS on the list keeps them.
+    if (managedSpeculativeLabelFillSuppressed(packet, label, ...values)) continue;
     for (const value of values) {
       for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, selectorLimit)) {
         managedGreenhouseScopedReactSelectFill(
@@ -2055,7 +2225,7 @@ function pushGreenhouseFixedQuestionComboboxActions(actions: ManagedBrowserActio
     { label: 'What is your GPA?', value: packet.gpa },
   ];
   for (const item of fixedQuestions) {
-    if (packetLabelFailed(packet, item.label)) continue;
+    if (managedSpeculativeLabelFillSuppressed(packet, item.label, item.value)) continue;
     pushGreenhouseQuestionComboboxLabelActions(actions, item.label, item.value ?? '', 'greenhouse_fixed_question', packet.jdText);
   }
 }
@@ -2082,7 +2252,7 @@ function pushGreenhousePreferredLocationFallbackActions(actions: ManagedBrowserA
   ];
   let index = 0;
   for (const label of labels) {
-    if (packetLabelFailed(packet, label)) continue;
+    if (managedSpeculativeLabelFillSuppressed(packet, label, value)) continue;
     for (const selector of greenhouseQuestionComboboxSelectors(label).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
       managedGreenhouseScopedReactSelectFill(
         actions,
@@ -2117,7 +2287,7 @@ function managedSelect(
 function managedUpload(
   actions: ManagedBrowserAction[],
   selector: string,
-  label: 'resume' | 'cover_letter',
+  label: 'resume' | 'cover_letter' | 'transcript',
   file: Buffer | undefined,
   fileName: string | undefined,
 ) {
@@ -2291,6 +2461,11 @@ const ASHBY_LOCATION_SELECTOR =
   '[data-field-path="_systemfield_location"] input[role="combobox"], [data-field-path="_systemfield_location"] input, input[name="_systemfield_location"]';
 const ASHBY_RESUME_SELECTOR = 'input#_systemfield_resume[type="file"], input[type="file"][name="_systemfield_resume"], input[type="file"][name*="resume" i]';
 const ASHBY_COVER_LETTER_SELECTOR = 'input#cover_letter[type="file"], input[type="file"][id*="cover" i], input[type="file"][name*="cover" i], input[type="file"][aria-label*="cover" i]';
+
+// Lever's resume control, named rather than written inline in the two fill paths. It was the last
+// family whose resume selector existed only as a literal inside its branch, which is precisely the
+// shape that left RESUME_UPLOAD_SELECTORS with nothing to point at.
+const LEVER_RESUME_SELECTOR = 'input[name="resume"][type="file"]';
 
 function cssString(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
@@ -2571,6 +2746,7 @@ function greenhouseComboboxValuesForQuestion(
   answer: string,
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
+  answerIsResolved = false,
 ): string[] {
   const normalizedQuestion = question.toLowerCase();
   const normalizedAnswer = answer.trim().toLowerCase();
@@ -2594,22 +2770,51 @@ function greenhouseComboboxValuesForQuestion(
   // wins the head of the list; these exist so the SECOND and THIRD attempts are useful instead of
   // absent. uniqueDefined at the end of this function dedupes against whatever they add.
   if (!referralQuestion) values.push(...profileAnswerAliases(question, answer));
+  /* WHERE A COMPUTED BUCKET GOES, and it is not unconditionally the head.
+   *
+   * greenhouseGpaBucket and greenhouseGraduationBucket map a profile fact onto ONE employer's
+   * vocabulary: "3.89" becomes "3.6 or above (out of 4.0)", "May 2028" becomes "Spring 2028". That
+   * is a guess, and it is the right guess to lead with when the value in hand is a profile fact,
+   * because a profile fact is rarely spelled the way a closed list spells it.
+   *
+   * It is the wrong guess to lead with when the value in hand was READ OFF THIS CONTROL. Measured on
+   * the live IMC application 2026-08-11: the resolved answer was "January 2028 - July 2028", one of
+   * the three options that control offers, and this unshift put "Spring 2028" in front of it.
+   * comboboxValueLimit is 1, so the bucket was the ONLY value the form ever saw, the resolved answer
+   * was never attempted, and the field came back required-and-empty. The same run turned a resolved
+   * "3.81 - 3.9" into "3.6 or above (out of 4.0)".
+   *
+   * So the bucket ranks BEHIND such an answer and AHEAD of everything else. Behind, not gone: a
+   * profile fact, a stale record and a term form the resolver wrote without seeing a list all still
+   * put the bucket first, which is the case it was written for and the case Cloudflare, Databricks
+   * and the Akuna fixed-question list all take. answerIsResolved is what draws that line, and it is
+   * narrow on purpose: see greenhouseOptionBandAnswer.
+   *
+   * Only the buckets move. Every other rule below keeps the head of the list, because each of those
+   * was measured to BEAT the stored answer on its own control - the self-identify wordings
+   * especially, see selfIdentificationDeclineWording. */
+  const pushComputedBucket = (...buckets: Array<string | undefined>) => {
+    const behindAnswer = answerIsResolved
+      ? values.findIndex((value) => value.trim().toLowerCase() === normalizedAnswer) + 1
+      : 0;
+    values.splice(Math.max(behindAnswer, 0), 0, ...buckets.map((bucket) => bucket ?? ''));
+  };
   const isGraduationPartQuestion = /\bgraduat(?:ion|e)\s+(?:month|year)\b|\bwhat\s+is\s+your\s+graduation\s+(?:month|year)\b/.test(normalizedQuestion);
   if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b|academic\s+performance|grade\s+average|grade\s+point/.test(normalizedQuestion)) {
-    values.unshift(greenhouseGpaBucket(answer) ?? '');
-    if (isAkunaContext) values.unshift(greenhouseExactGpaOption(answer) ?? '');
+    pushComputedBucket(greenhouseGpaBucket(answer));
+    if (isAkunaContext) pushComputedBucket(greenhouseExactGpaOption(answer));
   }
   if (/\bclosest\s+date\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
-    values.unshift(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? '');
+    pushComputedBucket(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer));
   }
   if (!isGraduationPartQuestion && /\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bwhat\s+is\s+your\s+graduation\s+(?:date|month|year)\b|\bexpected\s+graduat(?:ion|e)|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion)) {
     const closestDateQuestion = /\bclosest\s+date\b|\bgraduate\s+or\s+complete\s+your\s+program\b/.test(normalizedQuestion);
     if (closestDateQuestion) {
-      values.unshift(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer) ?? '');
+      pushComputedBucket(greenhouseClosestGraduationOption(answer) ?? greenhouseGraduationBucket(answer));
     } else {
-      values.unshift(greenhouseGraduationBucket(answer) ?? '', greenhouseClosestGraduationOption(answer) ?? '');
+      pushComputedBucket(greenhouseGraduationBucket(answer), greenhouseClosestGraduationOption(answer));
     }
-    if (/\bexpecting\s+to\s+graduat(?:e|ion)\b/.test(normalizedQuestion)) values.unshift(answer.match(/\b20\d{2}\b/)?.[0] ?? '');
+    if (/\bexpecting\s+to\s+graduat(?:e|ion)\b/.test(normalizedQuestion)) pushComputedBucket(answer.match(/\b20\d{2}\b/)?.[0]);
   }
   if (/\bdegree\b/.test(normalizedQuestion) && /\bbachelor/i.test(answer)) {
     const wantsCompactBachelor = /\b(?:currently\s+pursuing|pursuing|enrolled\s+in\s+university)\b/.test(normalizedQuestion)
@@ -2742,8 +2947,74 @@ function greenhouseComboboxValuesForQuestion(
   return uniqueDefined(values);
 }
 
+/**
+ * The wordings somebody has met and written down. Kept, and no longer the whole test.
+ *
+ * Every entry here is one employer's exact phrasing. That is what it is good at - "worked for
+ * databricks", "AI Policy for Interviewers", "majoring in STEM" are not a class of question, they
+ * are strings, and a pattern is the only honest way to hold them. What it is bad at is the ordinary
+ * case: an employer asking a question this codebase already understands, in words nobody happened
+ * to type here. See isGreenhouseReactSelectQuestion for the rung that covers that.
+ */
+const GREENHOUSE_REACT_SELECT_LITERALS =
+  /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bwhere\s+have\s+you\s+learned\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+(?:visa\s+)?sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bsponsor\b[^?]{0,80}\bwork\s+authorization\b|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bprocessing\s+of\s+personal\s+data\b|\bAI\s+Policy\s+for\s+Interviewers\b|\bmajoring\s+in\s+STEM\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:information|true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i;
+
+/**
+ * The closed-list profile fields a Greenhouse form renders as a react-select.
+ *
+ * Every key here was ALREADY reachable through GREENHOUSE_REACT_SELECT_LITERALS for at least one
+ * wording - "what is your gpa", "graduation year", "school", "degree", "major". Naming the field
+ * instead of the sentence is what stops the list from being one employer's phrasing wide. It adds
+ * no new CATEGORY of control, only the other ways of asking for the same thing.
+ *
+ * Deliberately not here: phone, the URL fields, city, state, salary, date of birth, the employer
+ * fields. Greenhouse renders those as text inputs, and pushing a combobox chain at a text input
+ * spends action budget on a control that will never open a menu.
+ */
+const GREENHOUSE_REACT_SELECT_PROFILE_KEYS: ReadonlySet<ProfileKey> = new Set<ProfileKey>([
+  'gpa', 'gpa_scale',
+  'graduation_date', 'graduation_month', 'graduation_year',
+  'education_start_date', 'education_end_date',
+  'school', 'degree', 'major', 'study_year', 'current_enrollment',
+]);
+
+/**
+ * A wording somebody has already met, and knows renders as a react-select.
+ *
+ * This is the STRONG claim: not just "a menu may be here" but "a plain text fill is the wrong
+ * thing for this control". It is what decides to WITHHOLD the scoped text fill, so it stays exactly
+ * as wide as the evidence behind it - one employer's measured phrasing - and no wider. Widening it
+ * would take the text fill away from controls nobody has ever looked at.
+ */
 function isGreenhouseReactSelectQuestion(question: string): boolean {
-  return /\b(?:single|top|preferred|preference|most interested)\b[^?]{0,120}\blocation\b|\btop\s+preference\b|\banswering\s+[“"]?yes[”"]?\s+below\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bgraduat(?:ion|e)\s+(?:date|semester|term|time\s*frame|timeframe|window|month|year)\b|\bexpected\s+graduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b|\bwhat\s+is\s+your\s+gpa\b|\bacademic\s+performance\b|\beducation\s+level\b|\blevel\s+of\s+education\b|\bdegree\b(?!\s+program)|\bdiscipline\b|\bfield\s+of\s+study\b|\bmajor\b|\bcourse\b|\bschool\b|\buniversity\b|\bcurrent\s+year\b|\byear\s+of\s+(?:your\s+)?stud(?:y|ies)\b|\bacademic\s+year\b|\bhow\s+did\s+you\s+hear\b|\breferral\s+source\b|\bhear\s+about\b|\bwhere\s+have\s+you\s+learned\s+about\b|\bsource\b|\bsource\s+of\b|\bcountry\b|\bcurrent\s+location\b|\bwhere\s+are\s+you\s+currently\s+(?:located|living|based)\b|\b(?:live|reside|located)\b[^?]{0,80}\b(?:new\s+york|california)\b|\bpreviously\s+worked\b|\bworked\s+for\s+databricks\b|\bapplied\b[^?]{0,120}\b(?:past|previously|before|role|position)\b|\boffer\s+deadlines?\b|\bprior\s+experience\b[^?]{0,120}\b(?:options\s+market\s+making|trading\s+firm)\b|\bcurrent\s+immigration\s+status\b|\bwork\s+authorization\/status\b|legally\s+authorized\s+to\s+work|(?:require|need)\s+(?:visa\s+)?sponsorship|sponsorship\s+for\s+(?:employment\s+visa|work\s+authorization)|\bsponsor\b[^?]{0,80}\bwork\s+authorization\b|\b(?:are|will)\s+you\s+available\b[^?]{0,160}\b(?:internship|full-time|40\s*hours|weeks?)\b|\b(?:internship|full-time|40\s*hours|weeks?)\b[^?]{0,160}\b(?:are|will)\s+you\s+available\b|\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,120}\bpreference\b|\bjob\s+applicant\s+privacy\s+notice\b|\b(?:candidate|applicant)\s+privacy\s+(?:policy|notice)\b|\bprocessing\s+of\s+personal\s+data\b|\bAI\s+Policy\s+for\s+Interviewers\b|\bmajoring\s+in\s+STEM\b|\bresume\b[^?]{0,80}\bPDF\s+format\b|\bcertify\b[^?]{0,120}\b(?:information|true|complete|accurate)\b|\barea\s+of\s+interest\b|\bteam\s+opening\b|\bopening\b[^?]{0,80}\binterested\b|\bLGBTQIA?\+?\b|sexual\s+orientation|\bgender(?:\s+identity)?\b|\bveteran\b|\bmilitary\b|\brace\b|\bethnicit|\bcategory\b/i.test(question);
+  return GREENHOUSE_REACT_SELECT_LITERALS.test(question);
+}
+
+/**
+ * MIGHT THIS CONTROL BE A CLOSED LIST? Answered from the QUESTION, not from its wording.
+ *
+ * The literals used to be the whole test, and the corpus says what that costs. Measured over the
+ * owner's 158 packets on 2026-08-11: 22 were blocked with a GPA field required and empty while the
+ * packet already carried "3.89". Ten asked "What is your GPA?", which is in the literals and was
+ * recognised. The other twelve asked "Overall GPA" (Virtu, 7) and "Please indicate your overall
+ * GPA." (Five Rings, 5), which are not, so no combobox chain was ever built for them and the only
+ * attempt they got was a text fill into a control whose options read "3.5-3.9".
+ *
+ * classifyField called all three of those labels `gpa`. The resolver has understood them the whole
+ * time - it is how "3.89" got into the packet - and only the fill pass had not. So the fix is not
+ * to add two more strings, which leaves the next employer's third phrasing exactly as broken; it is
+ * to ask the question-classifier the codebase already has, the same one resolveKnownAnswer asks,
+ * and stop keeping two disagreeing definitions of what a question means.
+ *
+ * THIS IS THE WEAK CLAIM AND IT IS ONLY EVER ADDITIVE. It gates whether a combobox chain is also
+ * pushed; it never withholds anything. A control that turns out to be a plain text box still gets
+ * its text fill, because isGreenhouseReactSelectQuestion above - not this - is what suppresses that.
+ * The cost of being wrong here is a few spent actions, not an unfilled field.
+ */
+function questionMayBeClosedList(question: string): boolean {
+  if (GREENHOUSE_REACT_SELECT_LITERALS.test(question)) return true;
+  const key = classifyField(question);
+  return key !== null && GREENHOUSE_REACT_SELECT_PROFILE_KEYS.has(key);
 }
 
 function isSamsaraLearnedAboutQuestion(question: string): boolean {
@@ -2784,8 +3055,9 @@ function pushGreenhouseQuestionComboboxActions(
   labelPrefix: string,
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
+  answerIsResolved = false,
 ) {
-  if (!isGreenhouseReactSelectQuestion(questionText)) return;
+  if (!questionMayBeClosedList(questionText)) return;
   const selectors = [selector];
   if (isSamsaraLearnedAboutQuestion(questionText)) {
     selectors.push(
@@ -2804,6 +3076,7 @@ function pushGreenhouseQuestionComboboxActions(
     contextText,
     valueLimit,
     referralEvidence,
+    answerIsResolved,
   );
   for (const [index, value] of candidates.entries()) {
     for (const [selectorIndex, inputSelector] of selectors.entries()) {
@@ -2826,6 +3099,26 @@ function pushGreenhouseQuestionComboboxActions(
  * trimming pass; widening this across the board pushed real fills out of the run. The ladder in
  * profileFieldResolution.ts is therefore spent where it is free: on the direct-Playwright path,
  * which reads the control's real options and snaps, and on any question this already widened.
+ *
+ * AND A SECOND REASON, WHICH IS THE STRONGER ONE. Raising this was considered while fixing the
+ * resolved-answer ordering above, so a bucket could be tried after the resolved answer rather than
+ * instead of it, and it was rejected on inspection of what a second attempt actually does.
+ *
+ * managedGreenhouseScopedReactSelectFill emits an unconditional five-action sequence per candidate:
+ * click the input open, fill the value, click the option whose text matches, click
+ * GREENHOUSE_VISIBLE_REACT_SELECT_OPTION_SELECTOR, press Enter. Every one is `optional: true`, and
+ * the action list is a flat script the remote runner executes start to finish - there is no
+ * verification helper anywhere that gates a later candidate on an earlier one having failed, and no
+ * way to express "stop here" in a ManagedBrowserAction.
+ *
+ * So a SECOND candidate after a successful first one reopens a control that is already correctly
+ * committed and clicks `[id^="react-select-"][id$="-option-0"]:visible` - option ZERO of whatever
+ * menu is now open, which is not the value being attempted and need not be related to it at all.
+ * That is exactly the "a failed attempt leaves a wrong selection behind" hazard, and it is not
+ * hypothetical: option-0 is a positional selector with no text match in it.
+ *
+ * Ordering the resolved answer first, with the limit left at 1, fixes the measured IMC symptom on
+ * its own. Widening this is a separate change that needs the runner to learn a conditional first.
  */
 function comboboxValueLimit(questionText: string, contextText: string): number {
   return /\bdatabricks\b/i.test(`${questionText}\n${contextText}`)
@@ -2842,12 +3135,14 @@ function pushGreenhouseQuestionSelectActions(
   labelPrefix: string,
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
+  answerIsResolved = false,
 ) {
   const values = greenhouseComboboxValuesForQuestion(
     questionText,
     answer,
     contextText,
     referralEvidence,
+    answerIsResolved,
   ).slice(0, 3);
   for (const [index, value] of values.entries()) {
     managedSelect(actions, selector, value, `${labelPrefix}_select_live:${index}:${questionText.slice(0, 80)}`);
@@ -2905,8 +3200,9 @@ function greenhouseComboboxCandidateValues(
   contextText: string,
   valueLimit: number,
   referralEvidence?: ReferralSourceEvidence,
+  answerIsResolved = false,
 ): string[] {
-  const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText, referralEvidence);
+  const values = greenhouseComboboxValuesForQuestion(questionText, answer, contextText, referralEvidence, answerIsResolved);
   const sliced = values.slice(0, valueLimit);
   const escapeHatch = escapeHatchOptionFor(questionText);
   if (!escapeHatch || sliced.some((value) => value.trim().toLowerCase() === escapeHatch.toLowerCase())) return sliced;
@@ -2920,8 +3216,9 @@ function pushGreenhouseQuestionComboboxLabelActions(
   labelPrefix: string,
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
+  answerIsResolved = false,
 ) {
-  if (!isGreenhouseReactSelectQuestion(questionText)) return;
+  if (!questionMayBeClosedList(questionText)) return;
   let index = 0;
   const valueLimit = comboboxValueLimit(questionText, contextText);
   // The slice happens inside, before the hatch is appended. Running the pair through uniqueDefined
@@ -2933,6 +3230,7 @@ function pushGreenhouseQuestionComboboxLabelActions(
     contextText,
     valueLimit,
     referralEvidence,
+    answerIsResolved,
   );
   for (const selector of greenhouseQuestionComboboxSelectors(questionText).slice(0, QUESTION_COMBOBOX_SELECTOR_LIMIT)) {
     for (const value of values) {
@@ -3341,19 +3639,71 @@ function packetLooksDatabricks(packet: SubmissionPacket): boolean {
     || packet.questions.some((item) => /\bdatabricks\b/i.test(`${item.question}\n${item.answer}`));
 }
 
+/* THE ONLY SHAPE THAT MAY BE HANDED MORE THAN A YEAR, and why the test is positive rather than a
+ * list of exclusions.
+ *
+ * An open text-entry control that discovery actually saw and reported. Everything else keeps the
+ * bare year, and each exclusion is a case where widening could only do harm:
+ *   - a closed list (select, radio, checkbox, combobox) is matched against the employer's own option
+ *     text, so a wider answer can only miss an option that "2028" matches exactly;
+ *   - a number or tel box cannot physically carry a month name;
+ *   - NO reported type at all means discovery never saw this control. Greenhouse's known-question
+ *     aliases reach here that way, and every one of them is answered against an option list.
+ * That last exclusion is not theoretical: without it Akuna's "Graduation Year" React-select was
+ * offered "May 2028" beside "2028". */
+const OPEN_GRADUATION_TEXT_CONTROL = /^(?:text|textarea)$/i;
+
+/**
+ * What goes into a control whose LABEL asks for a graduation year.
+ *
+ * WHY THIS IS NOT packet.graduationYear (measured on prod packets bbf0115a, 59fb48ae, cd066fee and
+ * 4bfd5827 - Deepgram on Ashby, 2026-08-08 to 2026-08-11). "Expected Graduation Year" there is a
+ * react-datepicker at day precision behind `[data-field-path="407cc864-..."]`. Handed a bare "2028"
+ * the managed runner deliberately writes nothing and says so, because tabbing off a typed year
+ * commits 01/01/2028 - four months before a May graduation, and a date the employer reads as fact.
+ * All four of those runs then reported "Expected Graduation Year" as required and still empty, on a
+ * packet that was otherwise complete.
+ *
+ * questionDiscovery already settled this: graduationYearFieldAnswer resolves the same label to
+ * "May 2028" and refuses to widen a year-only profile. That answer reached the packet, and this
+ * function overwrote it with the bare year one layer later, which is why the fix in discovery never
+ * showed up on the form. Calling the same helper here is what makes the two layers agree.
+ *
+ * The month is never invented. graduationYearFieldAnswer returns the bare year whenever the profile
+ * states no month, so a year-only profile still hands the runner "2028" and the runner still refuses
+ * the date control rather than picking a month - which is the correct outcome and stays correct.
+ */
+function graduationYearAnswerForControl(
+  item: SubmissionPacket['questions'][number],
+  packet: SubmissionPacket,
+): string {
+  const year = packet.graduationYear?.trim();
+  const inputType = reviewQuestionPortalInputType(item)?.trim() ?? '';
+  if (!OPEN_GRADUATION_TEXT_CONTROL.test(inputType)) return year || item.answer;
+  const yearNumber = year && /^\d{4}$/.test(year) ? Number(year) : undefined;
+  return graduationYearFieldAnswer(packet.graduationDate, yearNumber, inputType)
+    ?? year
+    ?? item.answer;
+}
+
 /**
  * The graduation value this particular control is asking for.
  *
  * THE NARROW TESTS RUN FIRST, and the order is the whole correctness argument. The date branch
  * matches on `expected graduat(ion|e)` with nothing after it, so it also matches "Expected
- * Graduation Year" and "Expected Graduation Month" - and it used to be first, so it won. Measured
- * on the Deepgram packet of 2026-08-08: discovery had resolved "Expected Graduation Year" to
- * "2028", correctly, and this function overwrote it with packet.graduationDate, "May 2028". A month
- * name in a year field is a wrong answer typed onto a real employer's form, and the field that
- * would have carried it is the one the run then reported as required-and-empty.
+ * Graduation Year" and "Expected Graduation Month" - and it used to be first, so it won, which is
+ * why "Graduation Month" once received a whole date.
  *
  * Month before year before date, because that is specific-to-general. "Graduation month" cannot be
  * a date question; "graduation date" can never be more specific than the other two.
+ *
+ * WHAT THE YEAR BRANCH IS NOT. Ordering the tests correctly says which QUESTION is being asked; it
+ * says nothing about what the CONTROL can hold. The first version of this ordering also replaced the
+ * answer with packet.graduationYear, on the reading that a field labelled "Expected Graduation Year"
+ * is a year field. On the live Deepgram Ashby form it is a react-datepicker, and the bare year is
+ * exactly the value it refuses - so that reading cost four consecutive runs the same required field.
+ * The year branch now asks graduationYearAnswerForControl, which narrows only where the control
+ * really is year-shaped.
  */
 function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][number], packet: SubmissionPacket): string {
   const questionText = normalizeReviewQuestionLabel(item.question);
@@ -3367,12 +3717,85 @@ function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][nu
     return packet.graduationMonth?.trim() || item.answer;
   }
   if (/\bgraduat(?:ion|e)\s+year\b|\bwhat\s+is\s+your\s+graduation\s+year\b|\byear\s+of\s+graduation\b/i.test(questionText)) {
-    return packet.graduationYear?.trim() || item.answer;
+    return graduationYearAnswerForControl(item, packet);
   }
+  /* THE DATE BRANCH STILL OUTRANKS A STALE ANSWER, AND NO LONGER OUTRANKS A SNAPPED ONE.
+   *
+   * The packet value has to keep winning in the ordinary case, and the reason is the STALE answer: a
+   * question record written on an earlier run says "May 2027" long after the profile says "May 2028",
+   * and replaying the record would submit a graduation date the applicant has since corrected. That
+   * is what this branch was built for and it is still right.
+   *
+   * What it could not tell apart is an answer that is not the applicant's phrasing at all. Measured
+   * on the live IMC application (generated_resumes fc6eade3-90e5-4d17-af94-009f9a22beaa,
+   * 2026-08-11): that control's real options read "July 2027 - December 2027", "January 2028 - July
+   * 2028", "August 2028 - December 2028". Discovery read the list, resolveProfileField snapped onto
+   * "January 2028 - July 2028", and this line threw it away for "May 2028", which is not on that
+   * list and never could be. The field came back required-and-still-empty.
+   *
+   * greenhouseCurrentOptionAnswer is the discriminator, and it takes TWO facts because one is not
+   * enough. Band shape says the answer could not have been computed from the profile, so it must
+   * have come off a list. answer_option_source says the profile still says what it said when that
+   * choice was made. A band alone would let a record written when she said "May 2027" send
+   * "January 2027 - July 2027" long after she corrected her graduation to May 2028, which is a
+   * window a year early on a real application. */
   if (/\bgraduat(?:ion|e)\s+date\b|\bwhat\s+is\s+your\s+graduation\s+date\b|\bexpected\s+graduat(?:ion|e)\b/i.test(questionText)) {
-    return packet.graduationDate?.trim() || item.answer;
+    return greenhouseCurrentOptionAnswer(item, packet) ?? (packet.graduationDate?.trim() || item.answer);
   }
   return item.answer;
+}
+
+/**
+ * The stored answer, when it was read off this control's own option list AND is still current.
+ *
+ * optionBandAnswer supplies the first half: a band is a string no profile holds and no bucket in
+ * this file computes, so the only thing that produces one is a real option list. The packet's own
+ * profile facts supply the second: answerOptionSource records the profile value the option was
+ * chosen for, and if the packet still carries that value, the applicant has not moved underneath it.
+ *
+ * WHY THE SOURCE IS CHECKED AGAINST A SET rather than the one fact for this question's family. The
+ * bucket ladders in this file are computed from exactly four profile values, and a graduation or GPA
+ * question can only have been snapped from one of them. Testing the set keeps this function from
+ * having to classify the question a second time, in a second place, with a second set of regexes
+ * that could disagree with greenhouseComboboxValuesForQuestion's. A source matching some other one
+ * of the four is not a false positive worth engineering against: it still proves the profile has not
+ * changed since the snap, which is the only thing this is asked.
+ *
+ * Absent answerOptionSource returns undefined, and that is the safe direction: the caller recomputes
+ * from the profile, which is what shipped.
+ */
+function greenhouseCurrentOptionAnswer(
+  item: SubmissionPacket['questions'][number],
+  packet: SubmissionPacket,
+): string | undefined {
+  const band = optionBandAnswer(item.answer);
+  if (!band) return undefined;
+  const bucketInputs = [packet.gpa, packet.graduationDate, packet.graduationMonth, packet.graduationYear];
+  return bucketInputs.some((fact) => storedOptionAnswerIsCurrent(band, item.answerOptionSource, fact))
+    ? band
+    : undefined;
+}
+
+/**
+ * Whether the value this control is about to be filled with carries evidence from the CONTROL,
+ * rather than being a profile fact that has never been near it.
+ *
+ * It decides where a locally computed bucket ranks against that value. See
+ * greenhouseComboboxValuesForQuestion: a bucket maps a profile fact onto one employer's vocabulary,
+ * which is the right thing to lead with when the value in hand IS a profile fact and the wrong thing
+ * to lead with when the value was read off this control's own list and is still current.
+ *
+ * TWO TESTS. The first is greenhouseCurrentOptionAnswer, which is where the evidence lives. The
+ * second is that greenhouseReviewedQuestionAnswer actually chose it, so this describes the value
+ * that will really be sent rather than one that was overruled a few lines up.
+ */
+function greenhouseReviewedAnswerIsResolved(
+  item: SubmissionPacket['questions'][number],
+  packet: SubmissionPacket,
+): boolean {
+  const stored = greenhouseCurrentOptionAnswer(item, packet);
+  if (!stored) return false;
+  return greenhouseReviewedQuestionAnswer(item, packet).trim() === stored;
 }
 
 function pushGreenhouseKnownQuestionAliases(
@@ -3647,7 +4070,21 @@ function isProtectedManagedAction(
   const base = managedActionLabelBase(action);
   if (base && protectedActionBases.has(base)) return true;
   if (GREENHOUSE_FIXED_EDUCATION_ACTION_RE.test(label)) return true;
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight)/
+  // transcript_capability joins cover_letter_capability here because it is the same kind of thing:
+  // a READ whose absence is indistinguishable from a no. If the trim takes it, transcript_supported
+  // is written false on a form that has the control, the submit run re-derives its attach decision
+  // from that flag, and a document she attached is silently left off. The `upload` action it decides
+  // about is deliberately NOT protected - a fill is what the budget is for giving up.
+  //
+  // The two workable_ entries arrived on main in PR #487 while this branch was open. Both sides of
+  // that merge were adding to this one list rather than disagreeing about it, so the resolution is
+  // the union: a Workable form that cannot report itself ready and a transcript control that cannot
+  // report itself present are two separate reads, and dropping either one loses a different fact.
+  // resume_upload_verify is protected for the same reason and one step further along: it is the read
+  // that says whether the transcript upload took the resume's control. A trim that dropped it would
+  // leave the run unable to tell a resume that is still attached from one that was replaced, which
+  // is the exact silence this read was added to break.
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_preflight$|workable_application_form_ready$)/
     .test(label);
 }
 
@@ -3945,6 +4382,26 @@ export function budgetDroppedReviewedQuestions(
 const WORKABLE_RESUME_SELECTOR = 'input[type="file"][data-ui="resume"]';
 const WORKABLE_COVER_LETTER_SELECTOR =
   'input[type="file"][data-ui="cover_letter"], input[type="file"][data-ui*="cover" i]';
+const WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR = 'button:has-text("Decline all")';
+const WORKABLE_APPLICATION_FORM_READY_SELECTOR =
+  `input[name="firstname"], input[name="email"], ${WORKABLE_RESUME_SELECTOR}`;
+
+function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
+  actions.push({
+    type: 'click',
+    selector: WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR,
+    label: 'workable_cookie_preflight',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  actions.push({
+    type: 'waitForSelector',
+    selector: WORKABLE_APPLICATION_FORM_READY_SELECTOR,
+    label: 'workable_application_form_ready',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+}
 
 // ─── JazzHR (*.applytojob.com) ────────────────────────────────────────────────
 // Read off a live TicketManager posting, 2026-07-28. The cleanest naming of any ATS Litos supports:
@@ -4120,6 +4577,108 @@ const BULLHORN_COVER_LETTER_SELECTOR = 'input[type="file"][name="bullhornCoverLe
 // the autonomous families is ambiguous here and could press Cancel. Moot while BambooHR is
 // CAPTCHA-gated and therefore never auto-submits, which is exactly why it is written down.
 
+/* WHERE THE RESUME GOES, WRITTEN DOWN ONCE SO THAT EVERY LATER UPLOAD CAN BE TOLD TO STAY OFF IT.
+ *
+ * Until this map existed, "which control is the resume" was knowledge that lived only inside each
+ * family branch of pushFixedFieldActions and fillPortal, and the transcript upload, which runs after
+ * all of them, had no way to ask. It guessed instead, with a name/id blocklist that spelled the word
+ * "resume" - and seven of the families identify their resume input by something else entirely
+ * (data-ui, data-testid, candidate.cv, documents.cv, an id-scoped wrapper, a bare cv). Against those
+ * the blocklist was inert, setInputFiles replaces rather than appends, and the transcript took the
+ * resume's slot on a form that was then submitted.
+ *
+ * A longer blocklist would have been the same mistake one family wider. This is the same fact stated
+ * positively and in one place: the family's own resume selector, the one its fill path really uses.
+ * uploadFirst reserves whatever it matches before any other document is offered a control, and
+ * transcriptUploadSelector subtracts it from every arm it hands the managed runner. A family added
+ * tomorrow gets both protections by having an entry here, which it needs anyway in order to upload a
+ * resume at all - there is nothing separate left to remember. resumeSelectorMatchesFillPath (see
+ * documentUploadIdentity.test.ts) measures that this map still names what the fill paths use.
+ *
+ * Keyed by family rather than by portal because the fill branches dispatch on family; the controlled
+ * QA portals and manual_recruitee resolve through portalFamily to the same answer their real
+ * counterpart gives. */
+const RESUME_UPLOAD_SELECTORS: Record<PortalFamily, string> = {
+  // Every arm the managed path pushes an upload action for, which is a superset of the direct
+  // path's GREENHOUSE_RESUME_SELECTOR. Read from the function rather than restated, so the two
+  // cannot drift.
+  greenhouse: greenhouseCoreFieldEvidenceSelectors('resume').join(', '),
+  lever: LEVER_RESUME_SELECTOR,
+  ashby: ASHBY_RESUME_SELECTOR,
+  smartrecruiters: SMARTRECRUITERS_RESUME_SELECTOR,
+  workable: WORKABLE_RESUME_SELECTOR,
+  jazzhr: JAZZHR_RESUME_SELECTOR,
+  paylocity: PAYLOCITY_RESUME_SELECTOR,
+  rippling: RIPPLING_RESUME_SELECTOR,
+  breezy: BREEZY_RESUME_SELECTOR,
+  bamboohr: BAMBOOHR_RESUME_SELECTOR,
+  recruitee: RECRUITEE_RESUME_SELECTOR,
+  teamtailor: TEAMTAILOR_RESUME_SELECTOR,
+  personio: PERSONIO_RESUME_SELECTOR,
+  pinpoint: PINPOINT_RESUME_SELECTOR,
+  comeet: COMEET_RESUME_SELECTOR,
+  zoho_recruit: ZOHO_RECRUIT_RESUME_SELECTOR,
+  bullhorn: BULLHORN_RESUME_SELECTOR,
+  // The account-walled families reach no application form, so no control on the page in front of a
+  // run is theirs to claim. A never-matching selector is the honest answer, and it keeps every
+  // caller from having to special-case the list.
+  sap_successfactors: 'input[type="file"][name="noResumeControlReachableWithoutSuccessFactorsAccount"]',
+  oracle_taleo: 'input[type="file"][name="noResumeControlReachableWithoutTaleoLegalAcceptance"]',
+  adp_recruiting: 'input[type="file"][name="noResumeControlReachableWithoutAdpAccount"]',
+  avature: 'input[type="file"][name="noResumeControlReachableWithoutAvatureAccount"]',
+  jobvite: 'input[type="file"][name="noResumeControlReachableWithoutConsent"]',
+  icims: 'input[type="file"][name="noResumeControlReachableWithoutAccount"]',
+  oraclecloud: 'input[type="file"][name="noResumeControlReachableWithoutAuthCode"]',
+  ultipro: 'input[type="file"][name="noResumeControlCaptured"]',
+};
+
+export function resumeUploadSelector(portal: SupportedPortal): string {
+  return RESUME_UPLOAD_SELECTORS[portalFamily(portal)];
+}
+
+/** The label on the managed read-back of the resume's control. See pushResumeUploadVerifyAction. */
+export const RESUME_UPLOAD_VERIFY_LABEL = 'resume_upload_verify';
+
+/** `C:\fakepath\Mehek Mandal Resume.pdf` is what a browser reports for a file input's value. */
+function uploadedFileName(value: string | null | undefined): string {
+  const raw = (value ?? '').trim();
+  if (!raw) return '';
+  return raw.split(/[\\/]/).pop()?.trim().toLowerCase() ?? '';
+}
+
+/* WHICH DOCUMENT IS SITTING IN THE RESUME'S CONTROL, READ OFF THE FORM ITSELF.
+ *
+ * The managed runner reports the read pushed by pushResumeUploadVerifyAction. This turns it into the
+ * only question worth asking of it: does the resume's own control now hold a DIFFERENT document of
+ * hers? That is the failure that reports itself as success, because both uploads returned cleanly
+ * and both labels reached filled_fields.
+ *
+ * Three readings and only one of them is a finding:
+ *   - the resume's own file name: the upload held, nothing to say;
+ *   - the transcript's or the cover letter's file name: displaced, and the resume is gone;
+ *   - anything else, including empty: NOT a finding. An uploader that consumes the file and resets
+ *     its own input reads back empty on a form where everything worked, and calling that a lost
+ *     resume would block correct runs. The missing-upload case is already covered by the filled
+ *     fields, so nothing is lost by being strict here.
+ * Ordering is deliberate: one arm reading back the resume settles it, whatever any other arm says. */
+export function managedResumeUploadDisplacement(
+  extracted: ReadonlyArray<{ label?: string; selector?: string; value: string | null }> | undefined,
+  packet: Pick<SubmissionPacket, 'resumeName' | 'transcriptName' | 'coverLetterName'>,
+): 'transcript' | 'cover_letter' | null {
+  const readings = (extracted ?? [])
+    .filter((item) => item.label === RESUME_UPLOAD_VERIFY_LABEL)
+    .map((item) => uploadedFileName(item.value))
+    .filter((name) => name.length > 0);
+  if (readings.length === 0) return null;
+  const resume = uploadedFileName(packet.resumeName);
+  if (resume && readings.includes(resume)) return null;
+  const transcript = uploadedFileName(packet.transcriptName);
+  if (transcript && readings.includes(transcript)) return 'transcript';
+  const coverLetter = uploadedFileName(packet.coverLetterName);
+  if (coverLetter && readings.includes(coverLetter)) return 'cover_letter';
+  return null;
+}
+
 const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   greenhouse: 'input#cover_letter[type="file"], input[type="file"][name*="cover_letter" i], input[type="file"][id*="cover_letter" i], label:has-text("Cover Letter") input[type="file"]',
   lever: 'input[type="file"][name*="cover" i], input[type="file"][id*="cover" i], label:has-text("Cover Letter") input[type="file"]',
@@ -4204,11 +4763,356 @@ export function blockersRequireCoverLetter(blockers: readonly string[] | undefin
   return (blockers ?? []).some((blocker) => COVER_LETTER_REQUIRED_BLOCKER.test(blocker ?? ''));
 }
 
+/* ELEMENT IDENTITY, AND WHY THE SECOND DOCUMENT IS EXCLUDED BY IT RATHER THAN BY A NAME.
+ *
+ * On the direct Playwright path the run holds the live page, so it does not have to reason about how
+ * a family spells its resume input: it can hold the node the resume actually went into and refuse to
+ * hand that same node to anything else. That is what this ledger is. It compares DOM nodes through
+ * the browser (`node === other`), so no naming convention, attribute, label text or document order
+ * can defeat it, and it needs no update when a new ATS arrives.
+ *
+ * Two things go into it. uploadFirst claims the exact control it uploaded to, which is the precise
+ * answer whenever an upload happened. reserveUploadControls claims the family's declared resume and
+ * cover-letter controls whether or not an upload happened, which covers the run that carried no
+ * resume or whose resume upload failed: the transcript must not be posted into the resume's slot
+ * even when the resume never made it there, because the employer reads that slot as the resume.
+ *
+ * DEGRADATION, stated rather than hidden: identity needs elementHandles/evaluate. A page object that
+ * does not offer them (a stub in a test, a future non-Playwright driver) yields no claims, and every
+ * caller here then falls back to the attribute exclusions derived in transcriptUploadSelector. That
+ * is weaker, and it is a fallback behind identity rather than the guard itself. */
+type DocumentUploadLabel = 'resume' | 'cover_letter' | 'transcript';
+
+const DOCUMENT_UPLOAD_WORDS: Record<DocumentUploadLabel, string> = {
+  resume: 'resume',
+  cover_letter: 'cover letter',
+  transcript: 'transcript',
+};
+
+export type UploadClaimLedger = {
+  /** The controls already spoken for, in the order they were claimed. */
+  claimed: { label: DocumentUploadLabel; handle: ElementHandle }[];
+  /** One sentence per document that had nowhere left to go. See uploadControlConflictBlocker. */
+  conflicts: string[];
+};
+
+export function newUploadClaimLedger(): UploadClaimLedger {
+  return { claimed: [], conflicts: [] };
+}
+
+/* THE SENTENCE FOR THE OUTCOME THIS WHOLE MECHANISM EXISTS TO CHOOSE INSTEAD.
+ *
+ * When the only control a second document can reach is one that already holds another, there are two
+ * available behaviours and one of them is unacceptable. Replacing it sends the employer a transcript
+ * where the resume should be, with no resume anywhere in the application, and the run reports both
+ * documents attached because setInputFiles succeeded. Not uploading loses the transcript, which is
+ * visible, recoverable and said out loud right here.
+ *
+ * Deliberately not phrased as "<field> is required": sanitizeProviderBlockers rewrites that shape
+ * into its own required-field wording and this is not a required field, it is a collision. */
+function uploadControlConflictBlocker(label: DocumentUploadLabel, holder: DocumentUploadLabel): string {
+  const document = DOCUMENT_UPLOAD_WORDS[label];
+  const held = DOCUMENT_UPLOAD_WORDS[holder];
+  return `Litos did not attach your ${document}: the only upload control it could find for it on this `
+    + `form is the one already holding your ${held}. Your ${held} was left in place rather than `
+    + `replaced, so please add the ${document} yourself before sending.`;
+}
+
+/** Can this page object answer "same element?" at all. See the degradation note above. */
+function pageSupportsElementIdentity(page: Page): boolean {
+  const probe = page.locator('input') as unknown as { elementHandles?: unknown };
+  return typeof probe.elementHandles === 'function';
+}
+
+/** Every element the selector resolves to, or null when this page object cannot answer by identity. */
+async function locatorElementHandles(locator: Locator): Promise<ElementHandle[] | null> {
+  const candidate = locator as unknown as { elementHandles?: () => Promise<ElementHandle[]> };
+  if (typeof candidate.elementHandles !== 'function') return null;
+  return await candidate.elementHandles().catch(() => null);
+}
+
+async function locatorElementHandle(locator: Locator): Promise<ElementHandle | null> {
+  const candidate = locator as unknown as { elementHandle?: () => Promise<ElementHandle | null> };
+  if (typeof candidate.elementHandle !== 'function') return null;
+  return await candidate.elementHandle().catch(() => null);
+}
+
+/** Same DOM node, asked of the browser rather than inferred. A failed comparison is never a match. */
+async function isSameElement(left: ElementHandle, right: ElementHandle): Promise<boolean> {
+  return await left.evaluate((node, other) => node === other, right).catch(() => false) === true;
+}
+
+async function uploadClaimHolder(
+  handle: ElementHandle,
+  ledger: UploadClaimLedger,
+): Promise<DocumentUploadLabel | null> {
+  for (const claim of ledger.claimed) {
+    if (await isSameElement(handle, claim.handle)) return claim.label;
+  }
+  return null;
+}
+
+/* Claim a family's declared controls without uploading to them.
+ *
+ * Only the element-identifying arms are reserved: a text-scoped arm names a region, and reserving
+ * every file input inside a label that mentions "Resume" would delete a transcript control that
+ * happens to share that label. The control a resume upload really used is claimed by uploadFirst
+ * itself, by identity, so nothing precise is lost by leaving the region arms out here. */
+async function reserveUploadControls(
+  page: Page,
+  selectors: string[],
+  label: DocumentUploadLabel,
+  ledger: UploadClaimLedger,
+): Promise<void> {
+  for (const selector of selectors) {
+    const handles = await locatorElementHandles(page.locator(selector));
+    if (!handles) continue;
+    for (const handle of handles) {
+      if (await uploadClaimHolder(handle, ledger)) continue;
+      ledger.claimed.push({ label, handle });
+    }
+  }
+}
+
+async function documentUploadControlCount(page: Page, portal: SupportedPortal): Promise<number> {
+  let total = 0;
+  for (const selector of [resumeUploadSelector(portal), coverLetterUploadSelector(portal)]) {
+    total += await page.locator(selector).count().catch(() => 0);
+  }
+  return total;
+}
+
 export async function hasCoverLetterUpload(page: Page, portal: SupportedPortal): Promise<boolean> {
   if ((await page.locator(coverLetterUploadSelector(portal)).count()) > 0) return true;
   const labelled = page.getByLabel(/cover\s*letter/i);
   for (let index = 0; index < await labelled.count(); index += 1) {
     if ((await labelled.nth(index).getAttribute('type'))?.toLowerCase() === 'file') return true;
+  }
+  return false;
+}
+
+/* THE TRANSCRIPT CONTROL, and the two facts that are true about it before any of this runs.
+ *
+ * FIRST: no portal in the corpus has ever been captured exposing one. Every other selector in this
+ * file was read off a live form; these were not, and pretending otherwise would be the worse
+ * mistake. A transcript field is never a platform control - it is an employer-configured extra
+ * question, present on some postings of a family and absent on the next tenant - so no capture of
+ * one form could answer for the family anyway. What IS knowable without a capture is the word the
+ * employer will have used, which is why every arm below is anchored on "transcript" and none of them
+ * is a positional or shape guess.
+ *
+ * SECOND, and this is the part that has to be right: a transcript selector must never reach the
+ * resume or the cover-letter control. uploadFirst takes the first selector that matches and accepts,
+ * setInputFiles REPLACES whatever the control was holding, and the resume upload runs first in every
+ * family - so a transcript selector broad enough to match the resume input does not merely miss, it
+ * overwrites her resume with her transcript on a form that is then submitted. GREENHOUSE_RESUME_
+ * SELECTOR and ASHBY_RESUME_SELECTOR both carry input[type="file"][name*="resume" i], so the two
+ * live one attribute apart. Requiring the literal token is most of the answer; the :not() arms cover
+ * the label-scoped case, where a "Transcript" heading can sit above a block that also holds the
+ * resume input and the label scope alone would not tell them apart.
+ */
+/* AND THE PART THAT WAS WRONG, WHICH IS THE SENTENCE DIRECTLY ABOVE THIS ONE.
+ *
+ * NOT_RESUME_OR_COVER_FILE below spells the words "resume" and "cover" and excludes any input whose
+ * name or id contains them. Greenhouse and Ashby do carry name*="resume", so the guard was true of
+ * the two families it was written against and read as though it were true of all of them. Seven do
+ * not identify their resume input that way at all: Workable by data-ui, Rippling by data-testid,
+ * Recruitee by candidate.cv, Teamtailor by an id-scoped wrapper, Personio by documents.cv, Pinpoint
+ * by application_form[application][cv], Comeet by a bare cv. Against every one of those the guard
+ * excluded nothing, the label-scoped arm reached the resume input, and setInputFiles replaced the
+ * resume with the transcript on a form the run then reported as complete with both attached.
+ *
+ * So the exclusion is no longer a spelling. transcriptUploadSelector subtracts the family's OWN
+ * resume and cover-letter selectors, the same strings its fill path uploads to, arm by arm. Nothing
+ * here has to know how a family spells its resume input, and a family added later is covered by the
+ * entry it must add to RESUME_UPLOAD_SELECTORS in order to upload a resume at all.
+ *
+ * NOT_RESUME_OR_COVER_FILE is kept behind that, not in front of it. It is the answer for a control
+ * that belongs to no family selector at all, such as an employer-added second resume field on a
+ * posting, and for the manual QA portals. It is a fallback, and it was never sufficient alone. */
+const NOT_RESUME_OR_COVER_FILE =
+  ':not([name*="resume" i]):not([id*="resume" i]):not([name*="cover" i]):not([id*="cover" i])';
+const TRANSCRIPT_UPLOAD_ARMS = [
+  'input[type="file"][name*="transcript" i]',
+  'input[type="file"][id*="transcript" i]',
+  'input[type="file"][aria-label*="transcript" i]',
+  'label:has-text("Transcript") input[type="file"]',
+] as const;
+const TRANSCRIPT_UPLOAD_SELECTOR = TRANSCRIPT_UPLOAD_ARMS
+  .map((arm) => `${arm}${NOT_RESUME_OR_COVER_FILE}`)
+  .join(', ');
+
+/* Which arms of a document selector name ONE ELEMENT, and are therefore safe to subtract.
+ *
+ * An arm carrying a text pseudo-class (`label:has-text("Resume") input[type="file"]`) names a
+ * REGION, not a control: it matches every file input inside any label whose text mentions the word.
+ * Subtracting that would delete the transcript control too on any form where one label covers a
+ * documents section, which is the exact shape this selector exists to serve. So arms with a
+ * parenthesised pseudo-class are left out of the exclusion, and the direct path's element-identity
+ * reservation is what covers them - it compares nodes, so text scoping cannot mislead it.
+ *
+ * Everything else, including id-scoped and tag-scoped descendants such as Teamtailor's
+ * `#upload_resume_field input[type="file"]` and SmartRecruiters' `spl-dropzone[...] input`, is
+ * element-identifying and is subtracted. Complex arguments to :not() were measured against the real
+ * engine before this shipped: Playwright resolves `:not(#upload_resume_field input[type="file"])`
+ * exactly as the CSS spec says, and the arms it produces are still one comma-free string each, which
+ * is what every caller that splits a selector on ', ' depends on. */
+function elementIdentifyingSelectorArms(selector: string): string[] {
+  return selector
+    .split(', ')
+    .map((arm) => arm.trim())
+    .filter((arm) => arm.length > 0 && !arm.includes('('));
+}
+
+/* Memoised because transcriptUploadSelector is called per action built and per capability read, and
+ * the answer is a pure function of two constant maps. Keyed by portal, not by family: the controlled
+ * QA portals carry their own cover-letter selectors. */
+const DERIVED_TRANSCRIPT_SELECTORS = new Map<SupportedPortal, string>();
+
+function derivedTranscriptUploadSelector(portal: SupportedPortal): string {
+  const cached = DERIVED_TRANSCRIPT_SELECTORS.get(portal);
+  if (cached) return cached;
+  const claimed = [
+    ...elementIdentifyingSelectorArms(resumeUploadSelector(portal)),
+    ...elementIdentifyingSelectorArms(coverLetterUploadSelector(portal)),
+  ];
+  const exclusions = [...new Set(claimed)].map((arm) => `:not(${arm})`).join('');
+  const derived = TRANSCRIPT_UPLOAD_ARMS
+    .map((arm) => `${arm}${NOT_RESUME_OR_COVER_FILE}${exclusions}`)
+    .join(', ');
+  DERIVED_TRANSCRIPT_SELECTORS.set(portal, derived);
+  return derived;
+}
+
+/* The honest answer for a family where a transcript could not be attached even if the employer did
+ * ask for one, and the rule that decides which families those are: a family gets a real selector
+ * exactly when its fill path already pushes a document upload that is not the resume.
+ *
+ * That is a mechanical test rather than a judgement, and it lands where it should. The
+ * account-walled families reach no form at all. SmartRecruiters and JazzHR stop after the exact
+ * captured first-page controls and return. Breezy, BambooHR, Zoho Recruit and Bullhorn each had
+ * exactly one file input on every form captured, and their adapters are deliberately locked to the
+ * controls that were captured - Breezy's form also ships a honeypot that defeats a visibility check,
+ * which is reason enough not to widen it on a guess. A never-matching selector keeps that answer in
+ * one place instead of making every caller special-case the list. */
+const NO_TRANSCRIPT_UPLOAD_SELECTOR = 'input[type="file"][name="noTranscriptControlCapturedOnThisPortal"]';
+
+const TRANSCRIPT_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
+  greenhouse: TRANSCRIPT_UPLOAD_SELECTOR,
+  lever: TRANSCRIPT_UPLOAD_SELECTOR,
+  ashby: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_test: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_lever: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_ashby: TRANSCRIPT_UPLOAD_SELECTOR,
+  workable: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_workable: TRANSCRIPT_UPLOAD_SELECTOR,
+  paylocity: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_paylocity: TRANSCRIPT_UPLOAD_SELECTOR,
+  rippling: TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_rippling: TRANSCRIPT_UPLOAD_SELECTOR,
+  recruitee: TRANSCRIPT_UPLOAD_SELECTOR,
+  manual_recruitee: TRANSCRIPT_UPLOAD_SELECTOR,
+  teamtailor: TRANSCRIPT_UPLOAD_SELECTOR,
+  personio: TRANSCRIPT_UPLOAD_SELECTOR,
+  pinpoint: TRANSCRIPT_UPLOAD_SELECTOR,
+  comeet: TRANSCRIPT_UPLOAD_SELECTOR,
+  // SmartRecruiters' capability ends at the captured first page, before any employer question can
+  // render, so there is nothing here to attach to even when the posting asks for a transcript later
+  // in its wizard.
+  smartrecruiters: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_smartrecruiters: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  jazzhr: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_jazzhr: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  breezy: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_breezy: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  bamboohr: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  controlled_bamboohr: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  zoho_recruit: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  bullhorn: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  sap_successfactors: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  oracle_taleo: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  adp_recruiting: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  avature: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  jobvite: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  icims: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  oraclecloud: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+  ultipro: NO_TRANSCRIPT_UPLOAD_SELECTOR,
+};
+
+export function transcriptUploadSelector(portal: SupportedPortal): string {
+  const base = TRANSCRIPT_UPLOAD_SELECTORS[portal];
+  // The sentinel families answer "no" and must keep answering it with the exact string
+  // portalMayAttachTranscript compares against.
+  if (base !== TRANSCRIPT_UPLOAD_SELECTOR) return base;
+  return derivedTranscriptUploadSelector(portal);
+}
+
+/**
+ * Whether this portal carries a real transcript selector rather than the never-match sentinel.
+ *
+ * Every caller that would spend an action, or claim a capability, asks this first. Spending one is
+ * the smaller cost and it still matters - Greenhouse already measures at exactly MANAGED_ACTION_
+ * LIMIT with a cover letter - but claiming one is the failure that has teeth: transcript_supported
+ * is what the submit run re-derives its attach decision from, so a portal that says yes and cannot
+ * attach produces an application recorded as carrying a document it never sent.
+ */
+export function portalMayAttachTranscript(portal: SupportedPortal): boolean {
+  return TRANSCRIPT_UPLOAD_SELECTORS[portal] !== NO_TRANSCRIPT_UPLOAD_SELECTOR;
+}
+
+export function managedResultHasTranscriptUpload(result: ManagedBrowserResult | null, portal: SupportedPortal): boolean {
+  if (!portalMayAttachTranscript(portal)) return false;
+  const selector = transcriptUploadSelector(portal);
+  return result?.extracted?.some((item) => (
+    (item.label === 'transcript_capability' || item.selector === selector)
+    && item.value?.trim().toLowerCase() === 'file'
+  )) === true;
+}
+
+/**
+ * Does this form have somewhere Litos can put a transcript?
+ *
+ * The sentinel check leads, and it is the one departure from hasCoverLetterUpload's shape. The
+ * label fallback below would happily find a file input labelled "Transcript" on a family whose fill
+ * path pushes no transcript upload at all, and the answer would then be recorded as
+ * transcript_supported: true on a run that can never attach one. "The page has such a control" and
+ * "this run can use it" are two different questions, and only the second one is worth writing down.
+ *
+ * THE SECOND DEPARTURE, and it is the one that made this function part of the same defect. The
+ * label fallback below carried no exclusion at all, not even the spelled one the selector had. So on
+ * a form where a single control is labelled in a way that mentions a transcript - the shared
+ * "Attach your documents" block that produced this bug in the first place - the RESUME's own input
+ * answered this question yes, transcript_supported was written as true, and the packet was then
+ * built to carry a transcript precisely on the forms where the upload would land on the resume. The
+ * capability read and the upload were failing in the same direction, which is why neither caught the
+ * other. A labelled control that IS the resume or the cover letter is now excluded by identity. */
+export async function hasTranscriptUpload(page: Page, portal: SupportedPortal): Promise<boolean> {
+  if (!portalMayAttachTranscript(portal)) return false;
+  if ((await page.locator(transcriptUploadSelector(portal)).count()) > 0) return true;
+  const ledger = newUploadClaimLedger();
+  await reserveUploadControls(page, elementIdentifyingSelectorArms(resumeUploadSelector(portal)), 'resume', ledger);
+  await reserveUploadControls(
+    page,
+    elementIdentifyingSelectorArms(coverLetterUploadSelector(portal)),
+    'cover_letter',
+    ledger,
+  );
+  // Nothing on this page belongs to another document, so a labelled file input cannot be one and
+  // the identity check has nothing to say. This is the ordinary case and it answers as it always did.
+  const documentControls = await documentUploadControlCount(page, portal);
+  const labelled = page.getByLabel(/transcript/i);
+  for (let index = 0; index < await labelled.count(); index += 1) {
+    const field = labelled.nth(index);
+    if ((await field.getAttribute('type'))?.toLowerCase() !== 'file') continue;
+    if (documentControls === 0) return true;
+    const handle = await locatorElementHandle(field);
+    // A document control is on the page and identity is unavailable, so this control cannot be
+    // shown to be anything other than the resume. Claiming the capability here is what wrote a
+    // transcript onto a packet that had nowhere to put it; not claiming it costs a transcript she
+    // is told about.
+    if (!handle) continue;
+    if (await uploadClaimHolder(handle, ledger)) continue;
+    return true;
   }
   return false;
 }
@@ -4494,37 +5398,34 @@ function pushFixedFieldActions(
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
     if (!packetLooksAkuna(packet)) {
       pushGreenhouseEducationComboboxActions(actions, packet);
-      managedFillByLabelUnlessFailed(actions, packet, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
-      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
-      managedFillByLabelUnlessFailed(actions, packet, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
+      managedFillByLabelUnlessHandled(actions, packet, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
+      managedFillByLabelUnlessHandled(actions, packet, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
     }
     if (packetLooksDatabricks(packet)) {
-      managedFillByLabelUnlessFailed(actions, packet, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
     }
     if (!packetLooksAkuna(packet)) {
-      managedFillByLabelUnlessFailed(actions, packet, 'End date month', packet.graduationMonth, 'education_end_month');
-      managedFillByLabelUnlessFailed(actions, packet, 'End date year', packet.graduationYear, 'education_end_year');
-      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
-      managedFillByLabelUnlessFailed(actions, packet, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
-      managedFillByLabelUnlessFailed(actions, packet, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
+      managedFillByLabelUnlessHandled(actions, packet, 'End date month', packet.graduationMonth, 'education_end_month');
+      managedFillByLabelUnlessHandled(actions, packet, 'End date year', packet.graduationYear, 'education_end_year');
+      managedFillByLabelUnlessHandled(actions, packet, 'Graduation Month', packet.graduationMonth, 'education_graduation_month');
+      managedFillByLabelUnlessHandled(actions, packet, 'Graduation Year', packet.graduationYear, 'education_graduation_year');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your expected graduation year?', packet.graduationYear, 'education_expected_graduation_year');
       // Same value the id-scoped fill uses, for the same reason: this lands in the SAME react-select
       // (fillByLabelText resolves the label's container to its one input), so handing it the stored
       // sentence leaves unmatched search text sitting in a control that was about to be filled
       // correctly.
-      if (!packetControlFailed(packet, 'discipline--0') && !packetLabelFailed(packet, 'Discipline')) {
-        managedFillByLabel(
-          actions,
-          'Discipline',
-          greenhouseReactSelectValue(packet, 'discipline--0', greenhouseDisciplineAliases(packet)),
-          'education_discipline_label',
-        );
+      const disciplineValue = greenhouseReactSelectValue(packet, 'discipline--0', greenhouseDisciplineAliases(packet));
+      if (!packetControlFailed(packet, 'discipline--0')
+        && !managedSpeculativeLabelFillSuppressed(packet, 'Discipline', disciplineValue)) {
+        managedFillByLabel(actions, 'Discipline', disciplineValue, 'education_discipline_label');
       }
     }
     pushGreenhouseFixedQuestionComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) pushGreenhouseGraduationDateComboboxActions(actions, packet);
     if (!packetLooksAkuna(packet)) {
-      managedFillByLabelUnlessFailed(actions, packet, 'GPA', packet.gpa, 'gpa');
-      managedFillByLabelUnlessFailed(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question');
+      managedFillByLabelUnlessHandled(actions, packet, 'GPA', packet.gpa, 'gpa');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your GPA?', packet.gpa, 'gpa_question');
     }
     pushGreenhousePreferredLocationFallbackActions(actions, packet);
     for (const selector of greenhouseCoreFieldEvidenceSelectors('resume')) {
@@ -4538,7 +5439,7 @@ function pushFixedFieldActions(
     managedFill(actions, 'input[name="urls[LinkedIn]"]', packet.linkedinUrl, 'linkedin');
     managedFill(actions, 'input[name="urls[GitHub]"]', packet.githubUrl, 'github');
     managedFill(actions, 'input[name="urls[Portfolio]"]', packet.portfolioUrl, 'portfolio');
-    managedUpload(actions, 'input[name="resume"][type="file"]', 'resume', packet.resume, packet.resumeName);
+    managedUpload(actions, LEVER_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, 'input[type="file"][name*="cover" i]', 'cover_letter', packet.coverLetter, packet.coverLetterName);
   } else if (family === 'smartrecruiters') {
     // See navigateToApplicationForm/SMARTRECRUITERS_APPLY_LINK_SELECTOR: the JD page and the
@@ -4565,6 +5466,7 @@ function pushFixedFieldActions(
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
     managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
   } else if (family === 'workable') {
+    pushWorkableManagedPreflightActions(actions);
     const parts = packet.fullName.trim().split(/\s+/);
     managedFill(actions, 'input[name="firstname"]', parts[0], 'first_name');
     managedFill(actions, 'input[name="lastname"]', parts.slice(1).join(' '), 'last_name');
@@ -4759,6 +5661,56 @@ function pushFixedFieldActions(
     managedUpload(actions, ASHBY_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, ASHBY_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
   }
+  /* THE TRANSCRIPT GOES LAST, AND IT IS OUTSIDE THE FAMILY CHAIN FOR THAT REASON.
+   *
+   * Written once here rather than repeated in eleven branches, because "after the resume and the
+   * cover letter, in every family" is the whole property and a per-branch copy is one branch away
+   * from losing it. The resume selectors are the broad ones (GREENHOUSE_RESUME_SELECTOR and
+   * ASHBY_RESUME_SELECTOR both carry name*="resume"), the runner takes the first selector that
+   * matches, and setInputFiles replaces rather than adds - so an upload ordered before the resume
+   * can end up holding the resume's slot.
+   *
+   * It is also after the account-walled return at the top of this function, deliberately. Those
+   * families reach no form, and an upload placed before that return would be an action fired at a
+   * login or consent gate. They get no transcript, and that is the correct answer rather than a gap.
+   *
+   * Zero cost when there is nothing to attach: managedUpload returns before pushing unless both the
+   * file and the name are set, and portalMayAttachTranscript keeps the action off the families whose
+   * selector cannot match anything. Greenhouse measures at exactly MANAGED_ACTION_LIMIT with a cover
+   * letter, so an action spent on a control that provably does not exist is not free there. */
+  if (portalMayAttachTranscript(portal)) {
+    const before = actions.length;
+    managedUpload(actions, transcriptUploadSelector(portal), 'transcript', packet.transcript, packet.transcriptName);
+    if (actions.length > before) pushResumeUploadVerifyAction(actions, portal);
+  }
+}
+
+/* READ THE RESUME'S CONTROL BACK, AFTER THE LAST THING THAT COULD HAVE TAKEN IT.
+ *
+ * The managed runner is a remote process handed a list of selectors, so nothing on this side can
+ * compare DOM nodes the way the direct path's ledger does. transcriptUploadSelector subtracts the
+ * family's own resume and cover-letter selectors from every arm, which is the structural half of the
+ * answer, and this is the measurement that says whether it held on the form actually in front of the
+ * run. A file input reads its value back as `C:\fakepath\<name>`, so a resume slot that comes back
+ * holding the transcript's file name is a displaced resume, stated by the form itself.
+ *
+ * Pushed only when a transcript upload was actually pushed, which is the only ordering that can
+ * displace anything and keeps the read off every run that carries no transcript. Greenhouse lives
+ * against MANAGED_ACTION_LIMIT and one action is not free there.
+ *
+ * What it does NOT prove: that the employer's uploader kept the file. A control that resets its own
+ * value after reading it comes back empty, and empty is not read as displacement here for exactly
+ * that reason. This catches the specific, silent, worst case: the slot now holds a different
+ * document of ours. */
+function pushResumeUploadVerifyAction(actions: ManagedBrowserAction[], portal: SupportedPortal) {
+  actions.push({
+    type: 'extract',
+    selector: resumeUploadSelector(portal),
+    attribute: 'value',
+    label: RESUME_UPLOAD_VERIFY_LABEL,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
 }
 
 // A cheap first pass: fill the fixed fields (idempotent - the real run below fills them again,
@@ -4789,6 +5741,22 @@ export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: Su
     optional: true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
   });
+  /* The same read for the transcript, and it is pushed ONLY where the answer can be anything other
+   * than no. On the sentinel families the selector cannot match, so the extract would spend one of
+   * the runner's 120 actions to learn a fact this repo already knows - and this is the builder that
+   * went from 120 to 145 once and had every managed Greenhouse discovery call answered with HTTP 400
+   * TOO_MANY_ACTIONS before a browser opened. managedResultHasTranscriptUpload returns false for
+   * those families without needing the read. */
+  if (portalMayAttachTranscript(portal)) {
+    actions.push({
+      type: 'extract',
+      selector: transcriptUploadSelector(portal),
+      attribute: 'type',
+      label: 'transcript_capability',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
   /* THE BUDGET, and its absence here is what made R-096 invisible on every real run.
    *
    * buildManagedPortalActions has trimmed itself to MANAGED_ACTION_LIMIT since Greenhouse first
@@ -4872,6 +5840,9 @@ export function buildManagedPortalActions(
     if (packetQuestionFailed(packet, item)) continue;
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
     if (!answer.trim()) continue;
+    // Whether that answer is the resolver's own, and therefore already snapped against this
+    // control's real option texts. It decides whether a computed bucket leads or follows it.
+    const answerIsResolved = greenhouseReviewedAnswerIsResolved(item, packet);
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
@@ -4893,6 +5864,7 @@ export function buildManagedPortalActions(
         'question',
         packet.jdText,
         packet.referralSourceEvidence,
+        answerIsResolved,
       );
       pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
     }
@@ -4906,6 +5878,7 @@ export function buildManagedPortalActions(
           'question',
           packet.jdText,
           packet.referralSourceEvidence,
+          answerIsResolved,
         );
         pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
         continue;
@@ -4954,6 +5927,7 @@ export function buildManagedPortalActions(
           'question',
           packet.jdText,
           packet.referralSourceEvidence,
+          answerIsResolved,
         );
         pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
       }
@@ -4970,6 +5944,7 @@ export function buildManagedPortalActions(
             'question',
             packet.jdText,
             packet.referralSourceEvidence,
+            answerIsResolved,
           );
         }
         continue;
@@ -4982,6 +5957,7 @@ export function buildManagedPortalActions(
           'question',
           packet.jdText,
           packet.referralSourceEvidence,
+          answerIsResolved,
         );
         continue;
       }
@@ -4996,6 +5972,7 @@ export function buildManagedPortalActions(
         'question',
         packet.jdText,
         packet.referralSourceEvidence,
+        answerIsResolved,
       );
       pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
     } else {
@@ -5716,6 +6693,9 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   if (family === 'recruitee' && !url.pathname.endsWith('/c/new')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/c/new`;
   }
+  if (family === 'workable' && /^\/(?:[^/]+\/)?j\/[^/]+\/?$/i.test(url.pathname)) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
+  }
   if (family === 'personio' && url.hostname.toLowerCase() !== 'arteus-energy.jobs.personio.de'
     && !url.pathname.endsWith('/apply')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
@@ -5743,6 +6723,22 @@ const SMARTRECRUITERS_APPLY_LINK_SELECTOR =
   'a[href^="/oneclick-ui/company/"][href*="/publication/"], a[href^="https://jobs.smartrecruiters.com/oneclick-ui/company/"][href*="/publication/"]';
 
 export async function navigateToApplicationForm(page: Page, portal: SupportedPortal): Promise<void> {
+  if (portalFamily(portal) === 'workable') {
+    const currentUrl = page.url();
+    const destination = portalApplicationUrl(portal, currentUrl);
+    if (destination !== currentUrl && detectPortal(destination) === 'workable') {
+      await page.goto(destination, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    }
+    const declineOptionalCookies = page.locator(WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR).first();
+    if ((await declineOptionalCookies.count()) > 0
+      && (await declineOptionalCookies.isVisible().catch(() => false))) {
+      await declineOptionalCookies.click().catch(() => undefined);
+    }
+    await page.locator(WORKABLE_APPLICATION_FORM_READY_SELECTOR).first()
+      .waitFor({ state: 'attached', timeout: MANAGED_FILL_TIMEOUT_MS })
+      .catch(() => undefined);
+    return;
+  }
   if (portal !== 'smartrecruiters') return;
   const link = page.locator(SMARTRECRUITERS_APPLY_LINK_SELECTOR).first();
   if ((await link.count()) === 0) return; // already on the form, or the link isn't there this time
@@ -5838,29 +6834,68 @@ async function fillGreenhouseDemographicAliases(page: Page, packet: SubmissionPa
   }
 }
 
+/* setInputFiles REPLACES. That one fact is the whole reason this function has a ledger.
+ *
+ * Every document after the first is offered controls that an earlier one may already be holding, and
+ * the old behaviour was to take the first match and overwrite it. On the seven families whose resume
+ * input is not spelled "resume", that is what happened: the transcript landed in the resume's slot,
+ * the resume was gone, out.push('transcript') recorded a success, and the application went to the
+ * employer with a transcript where the resume should have been and no resume at all.
+ *
+ * So a control that is already claimed is skipped by node identity, and if skipping leaves this
+ * document nowhere to go, it is NOT uploaded and a sentence naming the collision is recorded
+ * instead. Losing a transcript loudly beats losing a resume silently, and there is no third option
+ * available at this point in the run.
+ *
+ * Without a ledger this is exactly the function it was, including the first-match-per-selector rule
+ * and the two quiet `continue`s. Only claimed controls are stepped over. */
 async function uploadFirst(
   page: Page,
   selectors: string[],
   file: Buffer | undefined,
   fileName: string | undefined,
-  label: 'resume' | 'cover_letter',
+  label: DocumentUploadLabel,
   out: string[],
+  ledger?: UploadClaimLedger,
 ) {
   if (!file || !fileName) return;
+  let heldBy: DocumentUploadLabel | null = null;
   for (const selector of selectors) {
-    const field = page.locator(selector).first();
-    if ((await field.count()) > 0) {
-      const type = await field.getAttribute('type').catch(() => null);
-      if (type?.toLowerCase() !== 'file') continue;
-      try {
-        await field.setInputFiles({ name: fileName, mimeType: 'application/pdf', buffer: file });
-        out.push(label);
-        return;
-      } catch {
-        continue;
+    const locator = page.locator(selector);
+    const handles = ledger ? await locatorElementHandles(locator) : null;
+    let chosen: ElementHandle | null = null;
+    if (handles) {
+      for (const handle of handles) {
+        const holder = await uploadClaimHolder(handle, ledger!);
+        if (holder) {
+          heldBy ??= holder;
+          continue;
+        }
+        chosen = handle;
+        break;
       }
+      // Every control this selector reaches already holds another document. Fail closed.
+      if (!chosen) continue;
+    } else if ((await locator.count()) === 0) continue;
+    const field = (chosen ?? locator.first()) as {
+      getAttribute(name: string): Promise<string | null>;
+      setInputFiles(files: { name: string; mimeType: string; buffer: Buffer }): Promise<void>;
+    };
+    const type = await field.getAttribute('type').catch(() => null);
+    if (type?.toLowerCase() !== 'file') continue;
+    try {
+      await field.setInputFiles({ name: fileName, mimeType: 'application/pdf', buffer: file });
+      out.push(label);
+      if (ledger) {
+        const claimed = chosen ?? await locatorElementHandle(locator.first());
+        if (claimed) ledger.claimed.push({ label, handle: claimed });
+      }
+      return;
+    } catch {
+      continue;
     }
   }
+  if (heldBy) ledger?.conflicts.push(uploadControlConflictBlocker(label, heldBy));
 }
 
 async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet: SubmissionPacket, out: string[]) {
@@ -6009,6 +7044,9 @@ export function portalUnknownRequiredBlocker(
 
 export async function fillPortal(page: Page, portal: SupportedPortal, packet: SubmissionPacket): Promise<FillResult> {
   const filledFields: string[] = [];
+  // Which control is holding which document, by DOM node. Threaded through every upload below so
+  // that no second document can be given a control a first one already has. See UploadClaimLedger.
+  const claims = newUploadClaimLedger();
   const family = portalFamily(portal);
   // Same stop as pushFixedFieldActions, and it has to be repeated here rather than inherited: these
   // are two independent paths to the same portals (managed runner vs direct Playwright), and the
@@ -6025,8 +7063,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillComboboxFirst(page, ['#country'], countryForPhoneField(packet.phone, packet.country), 'phone_country', filledFields);
     await fillPhoneField(page, GREENHOUSE_PHONE_SELECTOR.split(', '), portal, packet.phone, 'phone', filledFields);
     await fillComboboxFirst(page, ['#candidate-location', 'input[autocomplete="address-level2"]'], greenhouseLocationSearch(packet), 'location', filledFields);
-    await uploadFirst(page, GREENHOUSE_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, GREENHOUSE_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, ['input#cover_letter[type="file"]', 'input[type="file"][name*="cover_letter" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
     await fillGreenhouseDemographicAliases(page, packet, filledFields);
   } else if (family === 'lever') {
     await fillFirst(page, ['input[name="name"]'], packet.fullName, 'name', filledFields);
@@ -6035,8 +7073,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="urls[LinkedIn]"]'], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ['input[name="urls[GitHub]"]'], packet.githubUrl, 'github', filledFields);
     await fillFirst(page, ['input[name="urls[Portfolio]"]'], packet.portfolioUrl, 'portfolio', filledFields);
-    await uploadFirst(page, ['input[name="resume"][type="file"]'], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, ['input[type="file"][name*="cover" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [LEVER_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, ['input[type="file"][name*="cover" i]'], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'smartrecruiters') {
     const parts = packet.fullName.trim().split(/\s+/);
     const controlled = portal === 'controlled_smartrecruiters';
@@ -6047,7 +7085,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillPhoneField(page, [controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR], portal, packet.phone, 'phone', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
-    await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
     // The direct Playwright path has its own reviewed-question and required-field writers below.
     // Stop before both. SmartRecruiters is proven only for these exact first-page selectors, and a
     // packet selector or generic required field must never expand that trust boundary.
@@ -6061,8 +7099,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="city"]'], packet.city, 'location', filledFields);
-    await uploadFirst(page, [WORKABLE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, WORKABLE_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [WORKABLE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, WORKABLE_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'jazzhr') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="resumator-firstname-value"]'], parts[0], 'first_name', filledFields);
@@ -6071,7 +7109,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="resumator-phone-value"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="resumator-city-value"]'], packet.city, 'location', filledFields);
     await fillFirst(page, ['input[name="resumator-linkedin-value"]'], packet.linkedinUrl, 'linkedin', filledFields);
-    await uploadFirst(page, [JAZZHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [JAZZHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
     const blockers = [portalHandoffReason(portal)!];
     if (await hasUnresolvedCaptcha(page)) blockers.push(CAPTCHA_BLOCKER);
     return { filledFields, blockers };
@@ -6083,22 +7121,22 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, [paylocityId('info.cellPhone')], packet.phone, 'phone', filledFields);
     await fillFirst(page, [paylocityId('info.linkedIn')], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ['#public-site-address-city'], packet.city, 'location', filledFields);
-    await uploadFirst(page, [PAYLOCITY_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [PAYLOCITY_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [PAYLOCITY_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [PAYLOCITY_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'rippling') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['[data-testid="input-first_name"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['[data-testid="input-last_name"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['[data-testid="input-email"]'], packet.email, 'email', filledFields);
     await fillPhoneField(page, ['[data-testid="input-phone_number"]'], portal, packet.phone, 'phone', filledFields);
-    await uploadFirst(page, [RIPPLING_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [RIPPLING_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [RIPPLING_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [RIPPLING_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'breezy') {
     await fillFirst(page, ['input[name="cName"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="cEmail"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="cPhoneNumber"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="cAddress"]'], packet.city, 'location', filledFields);
-    await uploadFirst(page, [BREEZY_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [BREEZY_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
   } else if (family === 'bamboohr') {
     // Unlike the managed path this one CAN branch, so the button is clicked only when it is there.
     const opener = page.locator(BAMBOOHR_OPEN_FORM_SELECTOR).first();
@@ -6120,21 +7158,21 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="city.value"]'], packet.city, 'location', filledFields);
     await fillFirst(page, ['input[name="linkedinUrl"]'], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
-    await uploadFirst(page, [BAMBOOHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, [BAMBOOHR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
   } else if (family === 'recruitee') {
     await fillFirst(page, ['input[name="candidate.name"]'], packet.fullName, 'name', filledFields);
     await fillFirst(page, ['input[name="candidate.email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="candidate.phone"]'], packet.phone, 'phone', filledFields);
-    await uploadFirst(page, [RECRUITEE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [RECRUITEE_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [RECRUITEE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [RECRUITEE_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'teamtailor') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="candidate[first_name]"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['input[name="candidate[last_name]"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['input[name="candidate[email]"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="candidate[phone]"]'], packet.phone, 'phone', filledFields);
-    await uploadFirst(page, [TEAMTAILOR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [TEAMTAILOR_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [TEAMTAILOR_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [TEAMTAILOR_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'personio') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="first_name"]'], parts[0], 'first_name', filledFields);
@@ -6143,8 +7181,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="location"]'], packet.city, 'location', filledFields);
     await fillFirst(page, ['input[name="public_profile"]'], packet.linkedinUrl ?? packet.portfolioUrl, 'public_profile', filledFields);
-    await uploadFirst(page, [PERSONIO_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [PERSONIO_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [PERSONIO_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [PERSONIO_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'pinpoint') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="application_form[application][first_name]"]'], parts[0], 'first_name', filledFields);
@@ -6153,8 +7191,8 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="application_form[application][phone]"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="application_form[application][town]"]'], packet.city, 'location', filledFields);
     await fillFirst(page, ['input[name="application_form[application][linkedin_url]"][type="text"]'], packet.linkedinUrl, 'linkedin', filledFields);
-    await uploadFirst(page, [PINPOINT_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [PINPOINT_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [PINPOINT_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [PINPOINT_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'comeet') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="firstName"]'], parts[0], 'first_name', filledFields);
@@ -6162,22 +7200,22 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
     await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.linkedinUrl ?? packet.githubUrl, 'portfolio', filledFields);
-    await uploadFirst(page, [COMEET_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, [COMEET_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, [COMEET_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, [COMEET_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'zoho_recruit') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="First_Name"]', 'input[name="firstName"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['input[name="Last_Name"]', 'input[name="lastName"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['input[name="Email"]', 'input[name="email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="Phone"]', 'input[name="phone"]'], packet.phone, 'phone', filledFields);
-    await uploadFirst(page, ZOHO_RECRUIT_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, ZOHO_RECRUIT_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields, claims);
   } else if (family === 'bullhorn') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[formcontrolname="firstName"]', 'input[name="firstName"]'], parts[0], 'first_name', filledFields);
     await fillFirst(page, ['input[formcontrolname="lastName"]', 'input[name="lastName"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['input[formcontrolname="email"]', 'input[name="email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[formcontrolname="phone"]', 'input[name="phone"]'], packet.phone, 'phone', filledFields);
-    await uploadFirst(page, BULLHORN_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
+    await uploadFirst(page, BULLHORN_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields, claims);
   } else if (family === 'sap_successfactors') {
     // The public job page transitions into an account wall. No identity or credential is entered.
   } else {
@@ -6190,14 +7228,64 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ASHBY_LINKEDIN_SELECTOR.split(', '), packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, ASHBY_GITHUB_SELECTOR.split(', '), packet.githubUrl, 'github', filledFields);
     await fillFirst(page, ASHBY_PORTFOLIO_SELECTOR.split(', '), packet.portfolioUrl, 'portfolio', filledFields);
-    await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields);
-    await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields);
+    await uploadFirst(page, ASHBY_RESUME_SELECTOR.split(', '), packet.resume, packet.resumeName, 'resume', filledFields, claims);
+    await uploadFirst(page, ASHBY_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
+  }
+  /* The direct-Playwright twin of the transcript upload in pushFixedFieldActions, and it sits here
+   * for the same two reasons: after every family's own uploads, because uploadFirst is
+   * first-match-wins and the resume selectors are the broad ones; and after the account-walled
+   * return at the top of this function, because those families reach no form to upload to.
+   *
+   * The families that return early inside the chain above - SmartRecruiters and JazzHR - never reach
+   * this line, and both carry the never-match sentinel anyway, so the two answers agree.
+   *
+   * ORDER IS NO LONGER THE PROTECTION, and that is the point of the reservation immediately below.
+   * Running last only helps if the last upload can tell which control the earlier ones took, and for
+   * seven families it could not. The reservation states it: the family's own resume and cover-letter
+   * controls are claimed by identity before the transcript is offered anything, whether or not those
+   * uploads happened or even had a file to place. uploadFirst has already claimed the exact controls
+   * it used; this covers the run that carried no resume, or whose resume upload failed, where the
+   * transcript would otherwise be free to occupy the slot the employer reads as the resume. */
+  if (portalMayAttachTranscript(portal) && packet.transcript && packet.transcriptName) {
+    await reserveUploadControls(page, elementIdentifyingSelectorArms(resumeUploadSelector(portal)), 'resume', claims);
+    await reserveUploadControls(
+      page,
+      elementIdentifyingSelectorArms(coverLetterUploadSelector(portal)),
+      'cover_letter',
+      claims,
+    );
+    /* IDENTITY FIRST, THE DERIVED SELECTOR ONLY WHEN THERE IS NO IDENTITY TO BE HAD.
+     *
+     * The two guards are not equal in strength. transcriptUploadSelector subtracts the family's
+     * element-identifying resume and cover-letter arms, which is everything the reservation above
+     * claims; the ledger claims that same set AND the exact control each upload really used, which
+     * a text-scoped arm can reach and a subtraction cannot express. So where identity works it is
+     * the whole answer, and running the base arms through it means a collision is SEEN rather than
+     * quietly selected away: the run can then say which document is in the way instead of reporting
+     * a transcript that matched nothing. Where identity is unavailable the derived selector is what
+     * is left, and it is still far stronger than the spelled exclusion it replaced. */
+    const transcriptSelectors = pageSupportsElementIdentity(page)
+      ? TRANSCRIPT_UPLOAD_SELECTOR.split(', ')
+      : transcriptUploadSelector(portal).split(', ');
+    await uploadFirst(
+      page,
+      transcriptSelectors,
+      packet.transcript,
+      packet.transcriptName,
+      'transcript',
+      filledFields,
+      claims,
+    );
   }
   if (family !== 'zoho_recruit' && family !== 'bullhorn' && family !== 'bamboohr') {
     await fillReviewedQuestions(page, portal, packet, filledFields);
   }
 
   const blockers: string[] = [];
+  /* A document that was NOT uploaded because its only control already held another one. First,
+   * because it is the sentence that explains an application she will otherwise read as complete,
+   * and because it is the whole justification for the upload having been skipped. */
+  blockers.push(...claims.conflicts);
   if (CONSENT_GATED_FAMILIES.has(family) || ACCOUNT_WALLED_FAMILIES.has(family) || family === 'zoho_recruit' || family === 'bullhorn') {
     blockers.push(portalHandoffReason(portal)!);
   }
@@ -6352,7 +7440,24 @@ const MANAGED_CAPTCHA_CHALLENGE_SELECTOR = '[data-sitekey]:not(.grecaptcha-badge
 // Read as an attribute, not a count, because the runner's extract contract returns attribute values
 // and `src` is present on every iframe it can match.
 const MANAGED_CAPTCHA_SIZE_SELECTOR = '[data-sitekey][data-size]:not(.grecaptcha-badge):not(.grecaptcha-badge *)';
-const MANAGED_CAPTCHA_ANCHOR_SELECTOR = 'iframe[src*="/recaptcha/"][src*="anchor"]';
+/*
+ * THE BADGE EXCLUSION IS STRUCTURAL, and it used to be missing here while every other selector in
+ * this block carried it.
+ *
+ * reCAPTCHA v3 and invisible v2 mount their anchor iframe INSIDE `.grecaptcha-badge`, so this
+ * selector matched it on essentially every Greenhouse and Ashby posting. Measured on 2026-08-12
+ * across 30 live postings: 24 of them carry exactly that badge and nothing else, and the only thing
+ * holding the managed predicate at "no challenge" on all 24 was ANCHOR_DECLARES_INVISIBLE_RE reading
+ * the literal `&size=invisible` out of Google's own query string.
+ *
+ * That is a formatting detail of a third party's URL, not a contract with anyone. Rename the
+ * parameter, drop it, or move the widget to a host that omits it, and 24 postings become "CAPTCHA
+ * requires your attention" in one step, with the applicant asked to finish by hand what nothing on
+ * the page was ever going to ask her. WHERE THE NODE SITS is the durable fact: an iframe inside the
+ * badge is the badge, whatever its src happens to spell today. The regex stays as the second line
+ * for an invisible anchor mounted outside a badge, where position cannot answer.
+ */
+const MANAGED_CAPTCHA_ANCHOR_SELECTOR = 'iframe[src*="/recaptcha/"][src*="anchor"]:not(.grecaptcha-badge *)';
 const MANAGED_CAPTCHA_BFRAME_SELECTOR = 'iframe[src*="/recaptcha/"][src*="bframe"]';
 
 // The read that makes the invisible finding belong to a WIDGET instead of to the page.
@@ -6408,6 +7513,7 @@ export function buildManagedCaptchaProbeActions(): ManagedBrowserAction[] {
       attribute: 'data-sitekey',
       label: 'captcha_challenge',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
     ...managedCaptchaEvidenceActions(),
@@ -6420,6 +7526,57 @@ export function buildManagedCaptchaProbeActions(): ManagedBrowserAction[] {
 // verdict off the REMOTE RUNNER's blocker list, which is a third-party judgement this repo cannot
 // see the reasoning behind. Carrying the same three attributes back on the fill result is what lets
 // corroboration happen at all. Five optional extracts, no screenshot, no token.
+//
+// EVERY ONE OF THEM CARRIES requireVisible, and that is the fix for the defect this block spent
+// three revisions circling. These reads exist to answer "is a person being shown something", and
+// until now the only thing they could see was attributes. So the rules underneath had to infer
+// layout from markup, and the inference they settled on - an absent `data-size` means rendered,
+// because reCAPTCHA's default is `normal` - is not a rule every provider obeys. Lever mounts
+// hCaptcha programmatically in invisible mode and writes no `data-size` at all: measured on
+// 2026-08-12, three live Palantir postings returned a site key from a container that is 1380x0 and
+// holds two visibility:hidden iframes, and all three were permanently blocked as "CAPTCHA requires
+// your attention". The runner's own predicate said no challenge. The direct-Playwright predicate
+// said no challenge. This path was the outlier, and it was the outlier because it was the one layer
+// with no layout read.
+//
+// requireVisible gives it one, answered by the SAME visibility rule the runner applies to its own
+// blocker predicate, so the three layers now agree by construction instead of by coincidence. It
+// also changes the cardinality: the runner returns one entry per visible node in DOM order rather
+// than locator.first(), which is what the multiset subtraction in unexplainedChallengeSitekeys has
+// always needed and never had.
+//
+// APPLIED TO ALL SIX rather than to the rendered channel alone, because the rules here compare one
+// list of site keys against another. If `captcha_challenge` enumerated visible widgets while
+// `captcha_invisible_sitekey` enumerated every widget, a HIDDEN invisible-declared widget could
+// cancel a visible one standing beside it on the same domain site key, which is the shared-key page
+// the subtraction was written for. The two lists have to be drawn from one node universe.
+//
+// ZERO ADDITIONAL ACTIONS. These are the same six extracts, and the fill run's budget against
+// MANAGED_ACTION_LIMIT is unchanged, which is why the fix is a field on the reads that already exist
+// rather than a second set of reads beside them.
+//
+// A BORDER BOX IS NOT WHAT A PERSON SEES, and the first version of this change got that wrong in the
+// one direction that costs an application outright rather than stranding one.
+//
+// These six selectors match widget CONTAINERS and reCAPTCHA frames. Nothing in them can match an
+// hCaptcha or a Turnstile frame, so on those two providers the container is this path's ONLY
+// channel. `height:0` under the default `overflow:visible` leaves that container's border box at
+// 1380x0 - the measured Lever geometry - while its 303x78 checkbox sits in flow, painted, and
+// waiting to be clicked. Asked of the matched node alone, the visibility read answered "nothing
+// here" about a page a person is looking at, and this path then DISCARDED a correct CAPTCHA blocker
+// the runner had raised from the same DOM. Reproduced on hCaptcha, on Turnstile, and on the
+// post-click escalated challenge; reCAPTCHA survived only because its anchor iframe matches a
+// selector of its own and happens to be the painted child.
+//
+// So `requireVisible` asks whether the node OR anything it paints is on screen. The distinction is
+// still real rather than a retreat to presence: on the measured Lever page every descendant is
+// visibility:hidden or 1x1, so the answer there is still no, which is the whole point of the change.
+//
+// The first version was believed because its fixture hand-wrote a visible hCaptcha container as
+// 303x78. No visible hCaptcha was measured anywhere in the sweep. The one thing that WAS measured is
+// that the container's height is 0 while it holds non-zero children, so the height is imposed rather
+// than derived from content, and assuming it would go away in the visible state was the entire
+// safety margin. The fixture now carries the geometry that was measured.
 export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
   return [
     {
@@ -6428,6 +7585,7 @@ export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
       attribute: 'data-size',
       label: 'captcha_size',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
     {
@@ -6436,6 +7594,7 @@ export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
       attribute: 'data-sitekey',
       label: 'captcha_invisible_sitekey',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
     {
@@ -6444,6 +7603,7 @@ export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
       attribute: 'data-sitekey',
       label: 'captcha_rendered_sitekey',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
     {
@@ -6452,6 +7612,7 @@ export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
       attribute: 'src',
       label: 'captcha_anchor',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
     {
@@ -6460,6 +7621,7 @@ export function managedCaptchaEvidenceActions(): ManagedBrowserAction[] {
       attribute: 'src',
       label: 'captcha_bframe',
       optional: true,
+      requireVisible: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
     },
   ];
@@ -6497,11 +7659,11 @@ export type ManagedCaptchaEvidence = {
   renderedSitekeys: string[];
   /** The widget's declared size, when it declares one. `invisible` asks a human for nothing. */
   size: string | null;
-  /** The reCAPTCHA anchor iframe's src: the checkbox-or-badge frame. */
+  /** The reCAPTCHA anchor iframe's src: the checkbox-or-badge frame, never the badge's own. */
   anchorSrc: string | null;
-  /** Every reCAPTCHA anchor iframe src on the page. */
+  /** Every reCAPTCHA anchor iframe src on the page that is not inside the badge. */
   anchorSrcs: string[];
-  /** The reCAPTCHA bframe's src: the image-grid popup. Its presence IS a human being asked. */
+  /** The reCAPTCHA bframe's src: the image-grid popup, on screen rather than merely mounted. */
   bframeSrc: string | null;
 };
 
@@ -6613,6 +7775,22 @@ export function isManagedCaptchaEvidenceExtract(
  * Absent `size` reads as rendered because that is what reCAPTCHA does with it: the default is
  * `normal`. Reading an absent size as invisible would hand the benefit of the doubt to the one
  * direction that ends in a submit under an unsolved challenge.
+ *
+ * THAT DEFAULT IS RECAPTCHA'S, AND IT DOES NOT TRAVEL, which is the whole reason this rule is no
+ * longer alone. Stated precisely, because the loose version of it is wrong: `data-size` is
+ * documented hCaptcha markup and a site rendering the widget declaratively does write one. What was
+ * measured is narrower, and is all the design needs. Lever renders hCaptcha PROGRAMMATICALLY and
+ * writes no `data-size` at all, so on that code path "absent means rendered" is exactly wrong, and
+ * it blocked three live postings. The states reachable on that same code path differ in layout and
+ * in nothing else, which is why the answer is a layout read rather than another provider name in a
+ * selector. The evidence reads now carry `requireVisible`, so a widget painting nothing never
+ * reaches any rule here. This one keeps its job for the widget that IS on screen and declares a
+ * size.
+ *
+ * NO LONGER THE ONLY THING BETWEEN THE BADGE AND A FALSE BLOCK either: the anchor selector excludes
+ * badge descendants structurally, so this regex is a second line rather than the whole wall. It was
+ * the whole wall on 24 of the 30 postings measured on 2026-08-12, and a wall made of one substring
+ * of somebody else's query string is not a wall.
  */
 const ANCHOR_DECLARES_INVISIBLE_RE = /[?&]size=invisible\b/i;
 
@@ -6698,6 +7876,12 @@ export function unexplainedChallengeSitekeys(evidence: ManagedCaptchaEvidence): 
  * signal here that survives both a shared site key and an unknown extract cardinality. A page with
  * no readable sitekey and one `size=normal` anchor used to pass this and now does not.
  */
+// LAST LINE, AFTER THE BADGE EXCLUSION. `anchorSrcs` no longer contains the badge's own anchor, so
+// the badge-only page - the live Akuna shape, and 24 of the 30 postings measured on 2026-08-12 -
+// reaches this line with an empty list and is no longer NAMED an invisible reCAPTCHA. Every caller
+// lands in the same place it did before: managedCaptchaPageEvidence is empty on that page, so
+// corroboration is false either way, and managedCaptchaProvider only consults this behind a
+// non-empty anchorSrc. What changed is which sentence says so, not the answer.
 export function isInvisibleRecaptchaEvidence(evidence: ManagedCaptchaEvidence): boolean {
   if (evidence.bframeSrc) return false;
   if (renderedCaptchaEvidence(evidence).length > 0) return false;
@@ -6713,6 +7897,13 @@ export function isInvisibleRecaptchaEvidence(evidence: ManagedCaptchaEvidence): 
 // page where `[data-sitekey]` matched zero nodes, which is what stopped every managed submission.
 export function managedResultRequiresCaptchaAttention(result: ManagedBrowserResult | null): boolean {
   const evidence = readManagedCaptchaEvidence(result);
+  // The bframe read is visibility-filtered at the runner now, which changes what this line means
+  // and makes it agree with the two predicates that already read it that way. reCAPTCHA MOUNTS the
+  // popup iframe and leaves it mounted after it closes, so presence alone is true on pages nobody is
+  // being asked anything on - the runner's own predicate calls this out as regression D, and the
+  // direct-Playwright predicate only ever uses a bframe to switch the invisible exclusion off. A
+  // popup that is on screen is still the strongest signal there is; a popup that is merely in the
+  // document is not a signal at all.
   if (evidence.bframeSrc) return true;
   // A widget container or an anchor iframe that does not declare size=invisible is a rendered
   // challenge, and saying so needs no sitekey comparison and no assumption about how many entries
@@ -6751,6 +7942,27 @@ export function managedCaptchaProvider(
 }
 
 /**
+ * EVERYTHING ON THIS PAGE THAT IS POSITIVE EVIDENCE A HUMAN IS BEING ASKED SOMETHING.
+ *
+ * Named once and shared, because "what counts as evidence" was previously spelled out inline in
+ * the corroboration check and therefore applied to some portals and not others. Each entry is a
+ * direct observation rather than an inference: an open bframe is the image grid a person is looking
+ * at, a rendered widget or anchor is a control that has not declared itself invisible, and an
+ * unexplained challenge sitekey is a widget nothing on the page accounted for.
+ *
+ * Empty means the page said nothing about a challenge. It does NOT mean there is no challenge - a
+ * page that returned no readable text at all produces an empty list too, and that is precisely the
+ * shape the caller has to be able to tell apart from a seen widget.
+ */
+export function managedCaptchaPageEvidence(evidence: ManagedCaptchaEvidence): string[] {
+  return [
+    ...(evidence.bframeSrc ? [evidence.bframeSrc] : []),
+    ...renderedCaptchaEvidence(evidence),
+    ...unexplainedChallengeSitekeys(evidence),
+  ];
+}
+
+/**
  * Does this repo's own read of the page back up the REMOTE RUNNER's claim that a human is needed?
  *
  * WHAT THIS IS, stated precisely, because it used to be described as something it is not. It is a
@@ -6767,33 +7979,74 @@ export function managedCaptchaProvider(
  * defence in depth, it is one check wearing two names, which is worse than one check because it
  * reads as two.
  *
- * Outside the autonomous families the provider's word stands unchallenged - JazzHR and BambooHR
- * really do gate every form, portalCanAutoSubmit already refuses to submit them, and there is
- * nothing to protect.
+ * THIS IS A PAGE QUESTION, so it is now answered the same way for every family. It used to return
+ * true for any portal outside AUTONOMOUS_PORTAL_FAMILIES before looking at a single extract.
+ *
+ * That carve-out was not only a mistake, and the honest version of this note has to say so. It was
+ * written when the exception meant JazzHR and BambooHR, two families measured by hand and known to
+ * gate every form, and for them it was correct. It was also, in effect, the belt for every family
+ * nobody had measured yet: an unmeasured portal kept the runner's CAPTCHA claim, and keeping a
+ * blocker is the cautious direction. What made it wrong was that it silently extended that trust to
+ * families added years after the reasoning was written, so the set it protected and the set it was
+ * argued for drifted apart with nothing to notice. Measured consequence: packet 1d1de862 (SEEKA,
+ * smartrecruiters) carries a CAPTCHA claim and an open human_verification stall on a page whose own
+ * preview recorded no readable text whatsoever, which is the signature of an interstitial rather
+ * than a widget.
+ *
+ * So the belt is kept where it was actually earned and dropped where it was merely inherited. The
+ * three families that CANNOT auto-submit on any path keep their blocker unconditionally, one layer
+ * up in corroborateManagedCaptchaBlockers, which is where a family ceiling belongs. Everything else
+ * has to show the page.
  *
  * Uncorroborating is safe at the point it is used. It drops a blocker off a PREPARE result, which
  * fills a form and screenshots it; it never presses submit. The submit path runs its own probe
  * afterwards, and portalCanAutoSubmit still stands in front of that. The cost of a false negative
  * here is a preview the applicant reviews anyway. The cost of the false positive was the product.
+ *
+ * `portal` is still taken, and still ignored on purpose: the caller passes the portal it is judging
+ * and the answer is deliberately independent of it. Removing the parameter would only hide that
+ * this is a page question rather than a family question.
  */
 export function managedCaptchaVerdictIsCorroborated(
   portal: SupportedPortal,
   result: ManagedBrowserResult | null,
 ): boolean {
+  void portal;
   const evidence = readManagedCaptchaEvidence(result);
   if (isInvisibleRecaptchaEvidence(evidence)) return false;
-  if (!isAutonomousPortalFamily(portalFamily(portal))) return true;
-  return evidence.bframeSrc !== null
-    || renderedCaptchaEvidence(evidence).length > 0
-    || unexplainedChallengeSitekeys(evidence).length > 0;
+  return managedCaptchaPageEvidence(evidence).length > 0;
 }
 
+/**
+ * WHETHER THE RUN STOPS, which is a different question from whether the page agrees.
+ *
+ * The verdict above is about markup. This is about the packet, and it has one more input: a family
+ * whose forms Litos can never finish on its own. On jazzhr, bamboohr and comeet, dropping the
+ * CAPTCHA blocker does not merely lose a warning, it makes `blockers.length === 0` in prepareManaged
+ * and therefore `safe`, which renders a green "Send it" button, or submits outright under standing
+ * consent. She presses it, the approve gate accepts, and the submit path immediately bounces her
+ * back to needs_attention because portalCanAutoSubmit is false for those three. A send button that
+ * cannot work is the failure this module already names as its worst: it is the same shape as the
+ * Cresta cover-letter refusal, pointed the other way.
+ *
+ * So a family ceiling keeps its blocker whatever the page read said, and it costs nothing to do so:
+ * these are exactly the families that cannot auto-submit anyway, so no application is delayed by a
+ * blocker that was going to stop at the handoff regardless. It also keeps the whole of the real fix,
+ * because smartrecruiters, jobvite, icims and oraclecloud are not on that list and still have to
+ * show the page.
+ *
+ * This is deliberately NOT inside managedCaptchaVerdictIsCorroborated. That function answers "does
+ * this repo's read of the markup back the runner up", and a family fact is not evidence about a
+ * page; folding it in would put a family carve-out back into the one place the carve-out did damage,
+ * and would make an assumed stop indistinguishable from an observed one.
+ */
 export function corroborateManagedCaptchaBlockers(
   portal: SupportedPortal,
   blockers: readonly string[],
   result: ManagedBrowserResult | null,
 ): string[] {
   if (!blockersIncludeCaptcha(blockers)) return [...blockers];
+  if (isCaptchaGatedFamily(portal)) return [...blockers];
   if (managedCaptchaVerdictIsCorroborated(portal, result)) return [...blockers];
   return blockers.filter((blocker) => blocker !== CAPTCHA_BLOCKER);
 }
@@ -7211,6 +8464,25 @@ export class ManagedRequiredFieldConfirmationError extends NoSubmitControlError 
   }
 }
 
+/* A proof this service COULD NOT READ, as opposed to a proof that says the runner stopped.
+ *
+ * The two are opposites and were one class until 2026-08-12, when the difference reached
+ * production. The runner's submit-scope repair added `scopeKind` to `pass.scope`; the key-set
+ * check below rejected the unknown key on every family, form and container alike; and because the
+ * rejection was thrown as a NoSubmitControlError subclass, fail() classified it as a stop that
+ * provably preceded the click. Measured on the kos.ai row: the runner's own code, driven against
+ * a fixture of that exact page, presses Submit and the page records the submission - and the row
+ * said "nothing has been sent". A malformed or absent proof arrives AFTER the remote run finished,
+ * so the click may already have landed; the only honest classification is uncertainty, which keeps
+ * the claim and takes the unverified exit. deliberately extends Error, never NoSubmitControlError.
+ */
+export class ManagedConfirmationUnprovenError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ManagedConfirmationUnprovenError';
+  }
+}
+
 const REQUIRED_CONFIRMATION_FIELD_TYPES = new Set([
   'text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'file', 'custom',
 ]);
@@ -7273,8 +8545,118 @@ function parseRequiredControl(value: unknown, requireMatchCount = false): Requir
   };
 }
 
-function confirmationContractError(message: string): never {
-  throw new ManagedRequiredFieldConfirmationError([], `Litos did not press submit: required-field confirmation proof is malformed (${message})`);
+/* "UNKNOWN" IS THE RIGHT ANSWER ONLY WHERE IT IS ACTUALLY UNKNOWN.
+ *
+ * PR 506 made every shape refusal an unproven-press, and against a run whose press state really is
+ * unreadable that is exactly right. Against a run that positively reported withholding the click it
+ * is a false uncertainty, and a false uncertainty is not free: it keeps the claim, writes an
+ * unresolved unverified_submission, and tells the applicant Litos pressed Send. That locks the
+ * packet out of the ordinary re-run path and out of a fresh application to the same posting.
+ *
+ * The escape needs TWO independent statements from the runner, agreeing, because one field on a
+ * payload whose shape is already suspect is not enough: submitOutcome.pressed === false, recorded
+ * where submitHandle.click() would have been called, AND every pass reporting submissionOutcome
+ * 'blocked'. A run that pressed says pressed:true and 'clicked', so neither half can be produced by
+ * the case this must never misread.
+ */
+function observedManagedSubmitWithheld(result: unknown): boolean {
+  if (!isRecord(result)) return false;
+  const outcome = result.submitOutcome;
+  if (!isRecord(outcome) || outcome.pressed !== false) return false;
+  const proof = result.requiredFieldConfirmation;
+  /* A missing or empty pass list leaves this false on purpose. That is PR 506's older-runner case,
+   * where nothing in the payload knows what a confirmation proof is, and it stays unknown. */
+  if (!isRecord(proof) || !Array.isArray(proof.passes) || proof.passes.length === 0) return false;
+  return proof.passes.every((pass) => isRecord(pass) && pass.submissionOutcome === 'blocked');
+}
+
+function confirmationContractError(message: string, submitWithheld = false): never {
+  if (submitWithheld) {
+    throw new ManagedRequiredFieldConfirmationError(
+      [],
+      `Litos did not press submit: the run withheld the click and its required-field confirmation proof could not be read (${message})`,
+    );
+  }
+  throw new ManagedConfirmationUnprovenError(`Litos could not read the send run's required-field confirmation proof (${message}), so whether submit was pressed is unknown`);
+}
+
+/* WHAT `pass.unresolved` IS ALLOWED TO SAY, AND WHY REJECTING THE PROOF OVER IT WAS THE WRONG LEVER.
+ *
+ * The old rule was: every entry must be a selector or label of a control in requiredControls, or the
+ * whole proof is malformed. Measured against stratus-browser-cloud@4748871, FIVE of the runner's
+ * eight push sites emit strings that set can never contain:
+ *
+ *   managed-browser.js:2928  '"Start date" is required and is still empty'   (the readiness scan)
+ *   managed-browser.js:2929  'The bound application form still shows an unmatched validation error: …'
+ *   managed-browser.js:2942  'Bound submit control or application form was replaced before submission'
+ *   managed-browser.js:2964  'Bound application form or submit identity changed during confirmation'
+ *   managed-browser.js:2825  'Selectorless required field'
+ *
+ * 2928 fires on ANY still-empty required field, so it is not an edge case: it is what an ordinary
+ * blocked submission looks like. The backend's own fixtures only ever put bare labels in this array,
+ * which is why the whole path was green while nothing in production could use it.
+ *
+ * AND SINCE PR 506 THE COST OF THAT REJECTION IS NO LONGER A BAD MESSAGE, IT IS A LOCKED PACKET.
+ * A shape refusal now throws ManagedConfirmationUnprovenError, which correctly means "the click
+ * state is unknown". Applied to a run that reported pressed:false and submissionOutcome 'blocked',
+ * it wrote: attention_reason "Litos pressed Send and the page never showed a confirmation it could
+ * read", submission_attempted_at set, an unresolved unverified_submission record, and the claim
+ * kept. Every one of those is false, and together they send the applicant to check a portal for an
+ * application that was never sent and block her from re-running the packet or applying again.
+ *
+ * SO THE VOCABULARY IS NO LONGER A REJECTION SURFACE AT ALL. An entry this service does not
+ * recognise still BLOCKS - it is a failure, it keeps the pass blocked, and it keeps the proof
+ * honest - it simply does not get its text repeated to the applicant. That keeps the property the
+ * strictness existed for (employer-authored text must not reach Litos's own copy, and 2929 carries
+ * exactly that) while removing the failure mode where a wording change in the runner takes the
+ * product down. The runner is free to improve its sentences; this service reports the ones it can
+ * attribute to a control and counts the rest.
+ */
+const UNRESOLVED_ENTRY_MAX_LENGTH = 400;
+
+/** The runner's own fixed sentences. Constants in its source, carrying no employer text. */
+const RUNNER_AUTHORED_BLOCKERS: ReadonlySet<string> = new Set([
+  'A required field on the form has no label Litos can read, and is still empty',
+  'Required-field readiness scan failed',
+  'Selectorless required field',
+  'Bound submit control or application form was replaced before submission',
+  'Bound application form or submit identity changed during confirmation',
+  'Litos could not bind required-field validation to the selected application form',
+]);
+
+/** What the applicant is told when a blocker cannot be attributed to a control on this form. */
+export const UNATTRIBUTED_REQUIRED_BLOCKER = 'A required answer on this form is still missing';
+
+/* The readiness scan's template, managed-browser.js:2126. The quoted label is the useful half and is
+ * kept ONLY when it names a control this proof already enumerated, so the label reaching the
+ * applicant is one this service has independently seen rather than any text the page supplied. */
+const READINESS_REQUIRED_TEMPLATE = /^"(.+)" is required and is still empty$/;
+
+function readUnresolvedEntry(value: string, known: ReadonlySet<string>): string {
+  if (known.has(value)) return value;
+  const readiness = READINESS_REQUIRED_TEMPLATE.exec(value);
+  if (readiness && known.has(readiness[1]!)) return readiness[1]!;
+  if (RUNNER_AUTHORED_BLOCKERS.has(value)) return value;
+  return UNATTRIBUTED_REQUIRED_BLOCKER;
+}
+
+/* WHEN THE APPLICATION SEND MAY GO UNPROVEN, AND IT IS NARROWER THAN IT WAS WRITTEN.
+ *
+ * There is exactly one state in which the initial managed run owes no application-submit proof: a
+ * security-code wall that was ALREADY STANDING when the page loaded. Stratus will not press the
+ * disabled application control from there, so no application pass exists to assert, and the only
+ * click that follows is the verification pass, which asserts its own proof.
+ *
+ * The skip used to be keyed on the challenge alone. That also excused a run that DID press Send and
+ * then landed on a code wall - which is the ordinary way a Greenhouse wall appears - so a runner
+ * that pressed with its required-field proof blocked, malformed or absent was no longer caught at
+ * the one place this service checks. The pressed half is the half that matters, so it is asked for.
+ */
+export function managedApplicationProofIsRequired(
+  standingChallenge: unknown,
+  initialSubmitOutcome: { pressed?: boolean } | null | undefined,
+): boolean {
+  return !(standingChallenge && initialSubmitOutcome?.pressed === false);
 }
 
 /**
@@ -7286,18 +8668,28 @@ export function assertManagedRequiredFieldsConfirmed(
   result: unknown,
   expectedSubmitKind?: 'application' | 'verification',
 ): void {
-  if (!isRecord(result)) confirmationContractError('result is not an object');
+  /* Read from the RAW result, before anything is validated, because the whole point is the case
+   * where validation fails. The annotation on the const is load-bearing: TypeScript only narrows
+   * past a never-returning arrow when the const carries an explicit type, and every guard below
+   * depends on that narrowing to keep reading `result` and `pass` as records. */
+  const submitWithheld = observedManagedSubmitWithheld(result);
+  const contractError: (detail: string) => never = (detail) => confirmationContractError(detail, submitWithheld);
+  if (!isRecord(result)) contractError('result is not an object');
   const proof = result.requiredFieldConfirmation;
   if (proof === undefined || proof === null) {
-    throw new ManagedRequiredFieldConfirmationError([], 'Litos did not press submit: the managed browser does not support required-field confirmation');
+    /* No proof at all is the unknown-runner case, and unknown is what it must stay: the action
+     * list this result answers carried a final submit, so an older runner may have pressed it
+     * without knowing how to write the proof. Claiming "did not press" here is the same false
+     * release the malformed branch produced. */
+    throw new ManagedConfirmationUnprovenError("Litos could not read the send run's required-field confirmation proof (the managed browser returned none), so whether submit was pressed is unknown");
   }
   if (!isRecord(proof) || !hasOnlyKeys(proof, ['version', 'status', 'passes'])) {
-    confirmationContractError('receipt shape');
+    contractError('receipt shape');
   }
-  if (proof.version !== 2) confirmationContractError('unsupported version');
-  if (proof.status !== 'confirmed' && proof.status !== 'blocked') confirmationContractError('status');
+  if (proof.version !== 2) contractError('unsupported version');
+  if (proof.status !== 'confirmed' && proof.status !== 'blocked') contractError('status');
   if (!Array.isArray(proof.passes) || proof.passes.length !== 1) {
-    confirmationContractError('confirmation passes');
+    contractError('confirmation passes');
   }
   const opaqueFingerprint = (value: unknown) => typeof value === 'string'
     && /^[A-Za-z0-9_-]{16,200}$/.test(value);
@@ -7306,66 +8698,73 @@ export function assertManagedRequiredFieldsConfirmed(
   for (const pass of proof.passes) {
     if (!isRecord(pass) || !hasOnlyKeys(pass, [
       'submitKind', 'scope', 'requiredControls', 'attempts', 'retries', 'unresolved', 'submissionOutcome',
-    ], ['blockerReason'])) confirmationContractError('pass shape');
+    ], ['blockerReason'])) contractError('pass shape');
     if (pass.submitKind !== 'application' && pass.submitKind !== 'verification') {
-      confirmationContractError('submit kind');
+      contractError('submit kind');
     }
-    if (expectedSubmitKind && pass.submitKind !== expectedSubmitKind) confirmationContractError('unexpected submit kind');
+    if (expectedSubmitKind && pass.submitKind !== expectedSubmitKind) contractError('unexpected submit kind');
+    /* scopeKind is optional because a proof without it (an older runner) was already complete;
+     * when present it must be one of the two scopes the runner can actually bind. It is exactly
+     * the key whose arrival as an UNKNOWN key rejected every production submission on 2026-08-11,
+     * so it is named here rather than tolerated generically: any other new key still fails closed. */
     if (!isRecord(pass.scope) || !hasOnlyKeys(pass.scope, [
       'formFingerprint', 'submitFingerprint', 'formMatchCount', 'submitMatchCount',
       'requiredControlCount', 'sameNode',
-    ])) confirmationContractError('scope proof');
+    ], ['scopeKind'])) contractError('scope proof');
+    if (pass.scope.scopeKind !== undefined && pass.scope.scopeKind !== 'form' && pass.scope.scopeKind !== 'container') {
+      contractError('scope kind');
+    }
     if (!opaqueFingerprint(pass.scope.formFingerprint)
       || !opaqueFingerprint(pass.scope.submitFingerprint)
       || pass.scope.formMatchCount !== 1 || pass.scope.submitMatchCount !== 1
       || typeof pass.scope.sameNode !== 'boolean' || !Number.isInteger(pass.scope.requiredControlCount)
       || (pass.scope.requiredControlCount as number) < 0
-      || (pass.scope.requiredControlCount as number) > 500) confirmationContractError('scope identity');
+      || (pass.scope.requiredControlCount as number) > 500) contractError('scope identity');
     if (pass.submissionOutcome !== 'clicked' && pass.submissionOutcome !== 'blocked') {
-      confirmationContractError('submission outcome');
+      contractError('submission outcome');
     }
     const blockerReasons = new Set([
       'submit_node_replaced', 'ambiguous_submit', 'form_identity_changed', 'no_submit_control',
     ]);
     if (pass.blockerReason !== undefined
       && (typeof pass.blockerReason !== 'string' || !blockerReasons.has(pass.blockerReason))) {
-      confirmationContractError('blocker reason');
+      contractError('blocker reason');
     }
     if (typeof pass.blockerReason === 'string') blockerFailures.push(pass.blockerReason);
     if (pass.scope.sameNode === false && pass.blockerReason !== 'submit_node_replaced') {
-      confirmationContractError('detached node reason');
+      contractError('detached node reason');
     }
-    if (!Number.isInteger(pass.retries) || (pass.retries !== 0 && pass.retries !== 1)) confirmationContractError('retries');
+    if (!Number.isInteger(pass.retries) || (pass.retries !== 0 && pass.retries !== 1)) contractError('retries');
     if (!Array.isArray(pass.requiredControls) || !Array.isArray(pass.attempts) || !Array.isArray(pass.unresolved)) {
-      confirmationContractError('arrays');
+      contractError('arrays');
     }
     const controls = pass.requiredControls.map((control) => parseRequiredControl(control, true));
-    if (controls.some((control) => control === null)) confirmationContractError('required control');
+    if (controls.some((control) => control === null)) contractError('required control');
     const requiredControls = controls as RequiredControlProof[];
-    if (pass.scope.requiredControlCount !== requiredControls.length) confirmationContractError('scan control count');
+    if (pass.scope.requiredControlCount !== requiredControls.length) contractError('scan control count');
     const requiredBySelector = new Map<string, RequiredControlProof>();
     for (const control of requiredControls) {
-      if (requiredBySelector.has(control.selector)) confirmationContractError('duplicate required control');
+      if (requiredBySelector.has(control.selector)) contractError('duplicate required control');
       requiredBySelector.set(control.selector, control);
     }
     const attempts = pass.attempts.map((value) => {
     if (!isRecord(value) || !hasOnlyKeys(value, ['selector', 'label', 'fieldType', 'outcome', 'attemptCount'], ['reason'])) {
-      confirmationContractError('attempt shape');
+      contractError('attempt shape');
     }
     const control = parseRequiredControl({ selector: value.selector, label: value.label, fieldType: value.fieldType });
-    if (!control) confirmationContractError('attempt control');
+    if (!control) contractError('attempt control');
     if (typeof value.outcome !== 'string' || !REQUIRED_CONFIRMATION_OUTCOMES.has(value.outcome)) {
-      confirmationContractError('attempt outcome');
+      contractError('attempt outcome');
     }
-    if (value.attemptCount !== 1 && value.attemptCount !== 2) confirmationContractError('attempt count');
+    if (value.attemptCount !== 1 && value.attemptCount !== 2) contractError('attempt count');
     if (value.outcome === 'already_committed' && value.attemptCount !== 1) {
-      confirmationContractError('already committed retry');
+      contractError('already committed retry');
     }
     const reason = value.reason;
     if (value.outcome === 'failed') {
-      if (typeof reason !== 'string' || !reason.trim() || reason.length > 300) confirmationContractError('failed attempt reason');
+      if (typeof reason !== 'string' || !reason.trim() || reason.length > 300) contractError('failed attempt reason');
     } else if (reason !== undefined) {
-      confirmationContractError('successful attempt reason');
+      contractError('successful attempt reason');
     }
     return {
       ...control,
@@ -7374,23 +8773,23 @@ export function assertManagedRequiredFieldsConfirmed(
       reason: typeof reason === 'string' ? reason.trim() : undefined,
     };
     });
-    if (attempts.length !== requiredControls.length) confirmationContractError('attempt coverage count');
+    if (attempts.length !== requiredControls.length) contractError('attempt coverage count');
     const attempted = new Set<string>();
     for (const attempt of attempts) {
       const required = requiredBySelector.get(attempt.selector);
-      if (!required || attempted.has(attempt.selector)) confirmationContractError('attempt coverage');
-      if (attempt.fieldType !== required.fieldType || attempt.label !== required.label) confirmationContractError('attempt identity');
+      if (!required || attempted.has(attempt.selector)) contractError('attempt coverage');
+      if (attempt.fieldType !== required.fieldType || attempt.label !== required.label) contractError('attempt identity');
       attempted.add(attempt.selector);
     }
     const observedRetries = attempts.some((attempt) => attempt.attemptCount === 2) ? 1 : 0;
-    if (pass.retries !== observedRetries) confirmationContractError('retry evidence');
+    if (pass.retries !== observedRetries) contractError('retry evidence');
     const knownUnresolved = new Set(requiredControls.flatMap((control) => [control.selector, control.label].filter(Boolean) as string[]));
     const unresolved: string[] = [];
     for (const value of pass.unresolved) {
-      if (typeof value !== 'string' || !value.trim() || value.length > 200 || !knownUnresolved.has(value.trim())) {
-        confirmationContractError('unresolved field');
+      if (typeof value !== 'string' || !value.trim() || value.length > UNRESOLVED_ENTRY_MAX_LENGTH) {
+        contractError('unresolved field');
       }
-      unresolved.push(value.trim());
+      unresolved.push(readUnresolvedEntry(value.trim(), knownUnresolved));
     }
     const failedAttempts = attempts.filter((attempt) => attempt.outcome === 'failed')
       .map((attempt) => attempt.label || attempt.selector);
@@ -7398,14 +8797,14 @@ export function assertManagedRequiredFieldsConfirmed(
     allFailures.push(...failures);
     if (pass.submissionOutcome === 'clicked'
       && (failures.length > 0 || pass.blockerReason !== undefined || pass.scope.sameNode !== true)) {
-      confirmationContractError('invalid atomic click proof');
+      contractError('invalid atomic click proof');
     }
     if (pass.submissionOutcome === 'blocked' && failures.length === 0 && pass.blockerReason === undefined) {
-      confirmationContractError('blocked pass without reason');
+      contractError('blocked pass without reason');
     }
   }
-  if (proof.status === 'confirmed' && (allFailures.length > 0 || blockerFailures.length > 0)) confirmationContractError('confirmed with failures');
-  if (proof.status === 'blocked' && allFailures.length === 0 && blockerFailures.length === 0) confirmationContractError('blocked without failure');
+  if (proof.status === 'confirmed' && (allFailures.length > 0 || blockerFailures.length > 0)) contractError('confirmed with failures');
+  if (proof.status === 'blocked' && allFailures.length === 0 && blockerFailures.length === 0) contractError('blocked without failure');
   if (proof.status !== 'confirmed') {
     throw new ManagedRequiredFieldConfirmationError([...allFailures, ...blockerFailures]);
   }

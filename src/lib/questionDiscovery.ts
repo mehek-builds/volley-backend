@@ -1,7 +1,9 @@
 import type { Page } from 'playwright-core';
+import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
 import { officeMetrosNamed } from './officeMetros';
+import { storedOptionAnswerIsCurrent } from './optionBand';
 import type { SupportedPortal } from './portalSubmission';
 import {
   resolveSalary,
@@ -10,7 +12,7 @@ import {
 } from './salary';
 import { referralSourceForApplication, type ReferralSourceEvidence } from './referralSource';
 import { usStateScopeSkipReason } from './residenceScope';
-import { declineWordingForControl } from './selfIdentification';
+import { comparableOption, declineWordingForControl } from './selfIdentification';
 import {
   availabilityWindowForPosting,
   formatWindowDate,
@@ -37,6 +39,15 @@ import { eligibilityForCountry, namedCountryCodes } from './workEligibility';
 
 export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFacts & {
   full_name?: string;
+  /**
+   * The ADDRESS OF RECORD: what lib/resumeEmail.ts prints on the resume and what gets frozen into a
+   * packet's `_contact.email`. Read by exactly one rule, academicEmailAnswer.
+   *
+   * NOT the address the form's identity field gets. That one is the tracked Litos alias produced by
+   * resolveFrozenApplicantEmail, which lib/packetAudit.ts refuses to let equal this value - the two
+   * are separate identities on purpose and this field does not go near that fill.
+   */
+  contact_email?: string;
   phone?: string;
   address_city?: string;
   address_state?: string;
@@ -105,6 +116,16 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   high_school_grad_date?: string;
   // [] is a real answer meaning "I have not applied anywhere before". undefined is "never asked".
   prior_application_employers?: string[];
+  /* LITOS' OWN HISTORY, not a declaration she made: every employer this user already has an
+   * application at, from `job_context.company` on the rows lib/duplicateApplication.ts counts as
+   * having reached an employer. Loaded by lib/applicationProfileLike.ts.
+   *
+   * IT IS NOT AN ANSWER TO "have you applied to us before?", in either direction. `[]` is "Litos
+   * looked and has never sent anything for you", which says nothing about the applications she made
+   * herself, made before Litos existed, or made through another channel, and `undefined` is
+   * "nobody looked". Absence here is not evidence of absence, so neither value may produce a "No";
+   * see previouslyAppliedAnswer, where a named employer only ever WITHDRAWS an answer. */
+  submitted_application_companies?: string[];
   has_outstanding_offers?: boolean;
   outstanding_offer_details?: string;
   military_service?: string;
@@ -121,6 +142,24 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   advanced_study_plan?: 'no' | 'considering' | 'committed';
   attest_truthful_information?: boolean;
   accept_privacy_notices?: boolean;
+
+  /* STANDING PERMISSION TO ACCEPT EMPLOYER CONSENT ACKNOWLEDGEMENTS, from users.* rather than from
+   * application_profile - the only field in this shape that is not an application fact, and named
+   * so that is obvious at every use.
+   *
+   * PRESENCE IS THE GRANT. The loader sets it only after consentAcceptanceGranted has checked both
+   * the boolean and the consent version, so undefined covers all three of "never asked", "revoked"
+   * and "agreed to a different version of the words", and every one of those holds. The two fields
+   * are carried rather than a bare boolean because the runner writes them onto the question it
+   * ticks: the packet audit has to be able to say WHEN she gave this permission, not just that
+   * something was ticked on her behalf. */
+  consent_acknowledgement_permission?: { granted_at?: string; version: string };
+  /* THE SECOND PERMISSION, and it is separate on purpose rather than for tidiness. A code of
+   * conduct binds how she behaves in a live interview; a privacy notice is the routine condition of
+   * applying at all. CODE_OF_CONDUCT_ACKNOWLEDGEMENT was written because the first was once ticked
+   * with nothing behind it, so licensing it off the privacy grant would be that reversion by a
+   * tidier route. Granted, revoked and versioned independently. */
+  conduct_acknowledgement_permission?: { granted_at?: string; version: string };
 
   /* Legacy location preferences. These are deliberately not sufficient authority for answering an
    * employer commitment. The stored model has no cadence, duration, office, employer or posting
@@ -329,8 +368,30 @@ const RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY =
  */
 const CURRENT_SPONSORSHIP_QUESTION = /\b(?:currently|now|right now|at present|before (?:you|the applicant) start)\b/i;
 const FUTURE_SPONSORSHIP_QUESTION = /\b(?:in the future|future sponsorship|later|will you (?:need|require))\b/i;
+/* "What is your visa status?" is a request for a value. "Will you require sponsorship for
+ * employment visa status?" is a yes/no question that happens to contain the same two words, and it
+ * is the commonest US sponsorship wording there is: 31 of the owner's stored questions carry it.
+ * A bare `visa status` alternative here read every one of them as a request for her authorization
+ * type, found none stored, and held a question two consented columns answer. So the phrase now
+ * only counts when something in front of it actually asks for the status.
+ *
+ * DATED IN PRODUCTION, because the regression is younger than the family it broke and a future
+ * reader will want to know which side of the line a packet fell on. One employer, one label
+ * ("will you now, or in the future, require sponsorship for employment visa status to work in the
+ * united states?"), three packets:
+ *
+ *   60df0c83  2026-08-09 13:30  answer "Yes"
+ *   8b5f3dd9  2026-08-09 19:40  answer "Yes"
+ *   df44f30   2026-08-10 14:42  PR 456 merges, adding the bare `visa status` alternative
+ *   cbebbfaa  2026-08-11 02:23  answer ""      <- 28 fields filled, one field short of submitting
+ *
+ * The blanking is not this function's doing on its own: refreshKnownQuestionAnswers below
+ * overwrites any stored answer with '' once the resolver refuses, so a refusal here erases an
+ * answer the applicant supplied by hand. Measured across every distinct label Litos has stored
+ * (509 on 2026-08-11), the narrowing moves exactly 5 label families from held to answered, all of
+ * them yes/no sponsorship questions, and moves nothing in the other direction. */
 const AUTHORIZATION_TYPE_QUESTION =
-  /\b(?:current immigration status|visa status|work permit type|authorization type|basis of (?:your )?(?:current )?work authorization)\b/i;
+  /\b(?:current immigration status|work permit type|authorization type|basis of (?:your )?(?:current )?work authorization)\b|\b(?:what\s+is|please\s+(?:provide|specify|state|indicate|describe|list|explain)|which)\b[^?]{0,40}\b(?:visa|immigration|work\s+permit|work\s+authorization)\s+status\b/i;
 const AUTHORIZATION_EXPIRY_QUESTION =
   /\b(?:when (?:does|will) (?:your )?(?:visa|work permit|work authorization|authorization) expire|(?:visa|work permit|work authorization|authorization) exp(?:iry|iration)(?: date)?)\b/i;
 
@@ -995,7 +1056,45 @@ function highSchoolGraduationAnswer(
   label: string,
   ap: ApplicationProfileLike,
 ): { value: string } | { skipReason: string } | null {
+  /* THE SAME VETO THE SUBJECT RULE HAS, and this function needs it just as badly. It runs before
+   * every other rule in resolveKnownAnswer and its own matcher has a 200-character window, so a
+   * UNIVERSITY graduation control that names the high school in order to exclude it was answered
+   * with the high-school date: "expected graduation date (not highschool)" and "university
+   * graduation year (high-school year not required)" both went from the correct "May 2028" to
+   * "May 2023". Applying the veto here restores the property the veto exists for - a label naming
+   * another institution is left exactly as it was - and it holds for the spaced spelling too,
+   * which main was already getting wrong. */
   if (!HIGH_SCHOOL_GRADUATION_QUESTION.test(label)) return null;
+  /* ORDER IS THE MEANING HERE TOO, and getting it wrong put the university's NAME into a
+   * high-school control - the branch's own headline defect, reintroduced on a new label family.
+   * The negation goes first: a high school named as its object means the university owns the box.
+   * Failing that, a high school sitting ON the graduation word owns it, however many institutions
+   * the label names - "In what year did you graduate from high school? Please also enter the school
+   * name" is a high-school control, and standing down there answered it "University of Southern
+   * California". Only a label that does neither falls through to the classifier. */
+  if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(label)) return null;
+  if (!HIGH_SCHOOL_OWNS_THE_GRADUATION.test(label)
+      && (CURRENT_PROGRAMME_NAMED.test(label) || labelNamesAnotherInstitution(label))) {
+    /* A REFUSAL, not a null, and this is the structural half of the fix rather than a wider verb
+     * list. HIGH_SCHOOL_GRADUATION_QUESTION has already matched by this point, so the label names a
+     * high school; letting it fall through hands it to the classifier, which holds the university.
+     * That is how "please also enter the school name" got answered with the university's full name,
+     * and how two labels reached the essay drafter. Only the exclusion test above may return null,
+     * because there the university genuinely owns the control. */
+    return { skipReason: `high school question left for you: "${label.slice(0, 60)}"` };
+  }
+  /* One control asking for the school's NAME as well as the year cannot be satisfied by the year.
+   * Palantir's card is "High School Name & Graduation Year", and typing "May 2023" into it answers
+   * half the question while reading as an answer to all of it. Same rule as educationStartAnswer's
+   * "a single control asking for the whole range needs both ends".
+   *
+   * REFUSES HERE rather than returning null. Null was the first draft and it opened a hole: the
+   * label fell past this function to the classifier, which read "graduation year" and answered
+   * "May 2028" - the UNIVERSITY year, on a high-school control, a wrong answer this branch did not
+   * have before. A refusal cannot fall through to anything. */
+  if (HIGH_SCHOOL_NAME_REQUEST.test(label)) {
+    return { skipReason: `high school question left for you: "${label.slice(0, 60)}"` };
+  }
   const stored = ap.high_school_grad_date;
   if (!stored) {
     return { skipReason: `high school graduation question left for you: "${label.slice(0, 60)}"` };
@@ -1004,6 +1103,52 @@ function highSchoolGraduationAnswer(
   // the evidence for. Without a date on file neither is answerable, which is the branch above.
   const asksWhen = /\bmonth\b|\byear\b|\bwhen\b|\bdate\b/i.test(label);
   return { value: asksWhen ? stored : 'Yes' };
+}
+
+/**
+ * Everything a form asks about high school that is not the graduation date.
+ *
+ * Checked immediately after highSchoolGraduationAnswer, so the one stored high-school fact still
+ * answers its own questions and this catches the rest. It never returns a value because there is
+ * nothing to return: the profile carries `high_school_grad_date` and no other high-school column -
+ * no name, no city, no GPA, no diploma title. See questionIsScopedToHighSchool for the four values
+ * the university profile was handing these labels instead.
+ *
+ * A skipReason rather than null on purpose. Null falls through to the essay drafter, and a drafted
+ * high school name is the same wrong answer arriving by a different route.
+ */
+function highSchoolRecordRefusal(label: string): { skipReason: string } | null {
+  if (!questionIsScopedToHighSchool(label)) return null;
+  /* The diploma confirmation has its own handler further down this function, answering "Yes" from
+   * the stored graduation date. This one sits above it and would otherwise shadow it whenever the
+   * label uses a spelling the narrow graduation matcher does not reach: "have you obtained a
+   * secondary school diploma or GED?" was blocked where main answered "Yes". */
+  if (HIGH_SCHOOL_DIPLOMA_CONFIRMATION_QUESTION.test(label)) return null;
+  /* Two more families that own their labels, for the same reason. Self-identification has its own
+   * ladder and its own stored preference; an open-ended prompt is the essay drafter's, and
+   * "describe your leadership experience in high school" is a question she can answer at length
+   * rather than a fact the profile was asked for. Both were being shadowed by this refusal because
+   * neither classifies to a profile key, and the stand-down below only reads the key. */
+  if (EEO_QUESTION.test(label)) return null;
+  /* GATED ON THE SAME KEY SET AS classifyField's WRAPPER, and for the same reason: a label can name
+   * her high school while asking for something that is not an education fact at all. "What city do
+   * you live in? (not the city of your high school)" is an address question, and refusing it hands
+   * back exactly the blank the gloss was written to prevent. Reading the intent keeps both sides of
+   * this rule - the classifier's and the resolver's - answering to one definition instead of two
+   * that can drift.
+   *
+   * Only a key that is NOT an education fact stands the refusal down. A label that classifies as
+   * nothing at all still refuses, and has to: "What high school did you go to?" matches no arm in
+   * this file, so leaving it null would drop it to the essay drafter, and a drafted high school
+   * name is the same wrong answer arriving by a different route. */
+  const intent = classifyFieldIntent(label);
+  if (intent && !CURRENT_PROGRAMME_KEYS.has(intent)) return null;
+  /* An open-ended prompt is the drafter's - but only when the label is not ALSO a fact request. A
+   * label that classifies as school, GPA or degree is asking for a fact however long it is, and
+   * standing down on length alone is how "What is the name of the high school you attended most
+   * recently?" reached the drafter to have a high school invented for it. */
+  if (!intent && isOpenEndedQuestion(label)) return null;
+  return { skipReason: `high school question left for you: "${label.slice(0, 60)}"` };
 }
 
 /**
@@ -1027,6 +1172,96 @@ function employerMatchesTarget(declared: string, target: string): boolean {
   return true;
 }
 
+/**
+ * Whether Litos' own history already shows an application at the employer THIS packet is for.
+ *
+ * Three answers, not two, and only `true` does anything. `undefined` is "the history was not read"
+ * and `false` is "Litos has sent nothing there", and NEITHER licenses an answer: the send log
+ * cannot see an application she made herself, made before Litos existed, or made anywhere else, so
+ * its silence is not a fact about her history. `true` withdraws an answer she would otherwise get,
+ * which is the one direction a partial record can be read in.
+ *
+ * The comparison is lib/companyIdentity.ts's, which is the duplicate guard's own rule for whether
+ * two packets are for the same employer, on the two strings it already compares: the packet's
+ * `job_context.company` on each side. Exact on the folded identity, so a submitted "IMC Trading"
+ * application does not stand down the answer for a posting at "IMC", and "Imcorp" stands down
+ * nothing at all.
+ */
+function applicationAlreadyAtPacketEmployer(
+  ap: ApplicationProfileLike,
+  jdText?: string,
+): boolean | undefined {
+  const history = ap.submitted_application_companies;
+  if (!history) return undefined;
+  const packetEmployer = frozenJobEmployerFromContext(jdText);
+  if (!packetEmployer) return undefined;
+  return history.some((company) => isSameCompany(company, packetEmployer));
+}
+
+/**
+ * "Have you applied to us before?", and why only SHE can answer No.
+ *
+ * A "No" here is a statement about the applicant's whole history, and Litos holds no record that
+ * covers it. `submitted_application_companies` is Litos' own send log: it knows nothing about
+ * applications she made herself, applications she made before Litos existed, or applications made
+ * through any other channel. An empty send log is therefore an absence of evidence and never
+ * evidence of absence, and answering "No" from it states a fact to an employer that nobody
+ * established. The measured IMC label makes the cost concrete: it says an applicant not selected
+ * this season may only reapply in 2027, so a wrong "No" both misstates her history and pushes
+ * through the exact duplicate the question exists to catch, with no attention flag on it.
+ *
+ * So "No" comes from a POSITIVE DECLARATION and nothing else - `prior_application_employers`
+ * recorded as `[]`, which is her saying she has not applied anywhere, or a declared list that does
+ * not name this employer. `undefined` on that column is "never asked" and holds the question,
+ * exactly as main did before the send log was wired in here.
+ *
+ * The send log still has one job, and it is the opposite one: it WITHDRAWS an answer, never grants
+ * it. An employer named in it is handed back rather than answered "Yes", because those rows carry
+ * no window ("within the last 12-18 months"), no role scope, and include unverified sends that may
+ * never have reached the employer at all (see submittedApplicationCompanies in
+ * lib/duplicateApplication.ts). A wrong Yes costs the applicant exactly what a wrong No costs her.
+ *
+ * The order below is the argument:
+ *   1. A declared employer is a statement she made herself, and it answers Yes. No history read can
+ *      contradict a Yes, so it is settled first.
+ *   2. Global history ("have you applied anywhere before?") is answered only from her declaration.
+ *   3. A company Litos' own send log already shows an application at is handed back, even against
+ *      her declaration: the declaration was made at onboarding and the send came after it.
+ *   4. A declared list that does not name this employer answers No.
+ *   5. Nothing declared holds, whatever the send log says.
+ *
+ * AND ONE MORE, WHICH RUNS BEFORE ALL FIVE. Where a trailing help-text sentence was removed from
+ * the label, the question's true scope is unknown, and this file will not guess at it: see
+ * withoutTrailingHelpText for why two rounds of trying to read the sentence were deleted rather
+ * than extended. A removed sentence may have narrowed the question ("only internship applications"),
+ * widened it ("applications to any IMC group entity also count", "our subsidiaries"), moved its
+ * window, or done nothing at all, and nothing here can tell those apart.
+ *
+ * So under a removed sentence the rule is about the RECORDS, not the words:
+ *   - never Yes, from any record. A Yes rests on an application whose membership in the restated
+ *     scope cannot be established.
+ *   - No only from her own declared `[]`, which is true under every restriction, every widening,
+ *     every time window and every group-entity rewording, because there is nothing for a
+ *     restatement to bring into scope. A declared list with anything in it holds, and so does an
+ *     unread column: an empty send log cannot stand in for that declaration here for the same
+ *     reason it cannot stand in for it anywhere else in this function.
+ *   - and the send log withdraws it on THIS EMPLOYER, exactly as it does below.
+ *   - otherwise hold.
+ *
+ * THAT LAST POINT IS A CORRECTION, and it is the whole of the 2026-08-12 defect. This branch used to
+ * withdraw the answer on a positive record at ANY employer, on the argument that a widening tail is
+ * where an application elsewhere is the one that counts. The cost was measured on the owner account:
+ * she had declared `[]`, Litos' send log held Cresta and kos.ai and nothing at IMC, and IMC's live
+ * label was handed back - so two applications to unrelated companies took away an answer that both
+ * records agree on. It is also strictly stricter than the very same label WITHOUT the reminder
+ * sentence, which answers No off that declaration through the ordinary rules below; one employer
+ * appending help text should not change what her records say. The scope that matters to a
+ * prior-application question is the employer it names, and that is the scope this reads.
+ *
+ * THE COST, STATED. An account that never filled the onboarding column gets this question handed
+ * back, which is one question she answers herself instead of a sentence Litos wrote for her out of
+ * a record that could not see it. applicationFacts.test.ts pins it.
+ */
 function previouslyAppliedAnswer(
   label: string,
   ap: ApplicationProfileLike,
@@ -1034,21 +1269,121 @@ function previouslyAppliedAnswer(
 ): { value: string } | { skipReason: string } | null {
   const parsed = parsePriorApplicationQuestion(label, jdText);
   if (!parsed) return null;
-  if (!parsed.valid || (!parsed.target && !parsed.globalPriorApplicationHistory)) {
-    return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
-  }
+  const held = { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
+  if (!parsed.valid || (!parsed.target && !parsed.globalPriorApplicationHistory)) return held;
+
   const declared = ap.prior_application_employers;
+
+  /* A REMOVED SENTENCE RESTATED THE SCOPE, AND ONLY HER OWN EMPTY DECLARATION SURVIVES THAT.
+   *
+   * Her declared `[]` is the statement that the set of applications is empty, and an empty set has
+   * nothing for a narrowing, a widening, a time window or a group-entity rewording to act on. That
+   * is why it is the only declaration this branch will answer from: a list with anything in it, and
+   * an unread column, both hold. An empty SEND LOG is not that statement either - it is Litos
+   * reporting on itself, and a widening tail is precisely where the applications it cannot see would
+   * count - so it cannot license the answer here any more than it can below. */
+  if (withoutTrailingHelpText(label).stripped) {
+    if (declared?.length !== 0) return held;
+    /* AND THE SEND LOG STILL WITHDRAWS IT, ON THIS EMPLOYER, which is the same job it has below and
+     * on the same test. A packet already sent to the employer the question names means the
+     * declaration was made before the send and is out of date. A packet sent to some OTHER employer
+     * says nothing about this question and no longer takes the answer away: see the correction in
+     * the block comment above for what that cost when it did. */
+    return applicationAlreadyAtPacketEmployer(ap, jdText) === true ? held : { value: 'No' };
+  }
+
+  if (declared && declared.length > 0) {
+    // Her own statement, and no history read can contradict it.
+    if (parsed.globalPriorApplicationHistory) return { value: 'Yes' };
+    if (declared.some((employer) =>
+      employerMatchesTarget(canonicalSiblingEmployerIdentity(employer), parsed.target!))) {
+      return { value: 'Yes' };
+    }
+  }
   // undefined is "never asked". An empty array is the student saying she has not applied anywhere
   // before, which answers No for every employer - the two must not be collapsed.
-  if (!declared) {
-    return { skipReason: `prior application question left for you: "${label.slice(0, 60)}"` };
-  }
-  if (declared.length === 0) return { value: 'No' };
-  if (parsed.globalPriorApplicationHistory) return { value: 'Yes' };
-  const matched = declared.some((employer) =>
-    employerMatchesTarget(canonicalSiblingEmployerIdentity(employer), parsed.target!),
-  );
-  return { value: matched ? 'Yes' : 'No' };
+  if (parsed.globalPriorApplicationHistory) return declared ? { value: 'No' } : held;
+
+  /* The send log is consulted for ONE purpose: to withdraw an answer she would otherwise get. A
+     packet already sent to this employer means her onboarding declaration is out of date, so even a
+     declared list that does not name this employer stops answering. It never adds an answer of its
+     own - not "Yes", which its rows cannot support, and not "No", which is the defect this ordering
+     exists to close. */
+  if (applicationAlreadyAtPacketEmployer(ap, jdText) === true) return held;
+  // Her declaration, or nothing. An unread column and an unnamed employer are not the same fact.
+  return declared ? { value: 'No' } : held;
+}
+
+/* THE ONE LABEL SHAPE THAT ASKS FOR AN ACADEMIC ADDRESS, and the noun has to be beside `email`.
+ *
+ * Windowed and unable to cross a `?`, so "What university do you attend? Email us your transcript"
+ * is two questions and matches neither arm. */
+const ACADEMIC_EMAIL_QUESTION = new RegExp(
+  String.raw`\b(?:universit(?:y|ies)|college|school|campus|academic|student|institution(?:al)?)\b[^?]{0,30}\be-?mail\b`
+  + String.raw`|\be-?mail\b[^?]{0,30}\b(?:universit(?:y|ies)|college|school|campus|academic|student|institution(?:al)?)\b`,
+  'i',
+);
+
+/* An antecedent this file cannot evaluate makes the whole label the applicant's. Kept beside the
+ * pattern it vetoes rather than borrowed from the school-leaver rule, which is about a different
+ * antecedent. */
+const ACADEMIC_EMAIL_CONDITIONAL = /\bif\s+(?:you|your|applicable|not)\b|\bwhere\s+applicable\b|\bonly\s+if\b/i;
+
+/**
+ * Is a stored address one an institution issued, rather than a consumer mailbox?
+ *
+ * `usc.edu`, `ox.ac.uk`, `iitb.ac.in`, `unam.edu.mx`. Not `gmail.com`, and that is the whole point:
+ * this is the test that decides whether the address ON FILE can honestly be offered as a university
+ * one, and it is applied to the value rather than to the question.
+ */
+function isAcademicEmailDomain(address: string): boolean {
+  const at = address.lastIndexOf('@');
+  if (at < 0) return false;
+  const domain = address.slice(at + 1);
+  return /(?:^|\.)edu$/.test(domain) || /(?:^|\.)(?:edu|ac)\.[a-z]{2,}$/.test(domain);
+}
+
+/**
+ * "Please provide your university email address." answered from the address of record, or held.
+ *
+ * IT IS ITS OWN ARM, and that is a correction of a specific past failure rather than tidiness. This
+ * exact label was once answered with the university's NAME, because the bare-keyword fallback at the
+ * bottom of classifyField saw `university` in a six-word label and returned the `school` key (see
+ * the block comment above FIELD_NAME_LABEL_MAX_WORDS, which is what closed that hole). So this rule
+ * is deliberately not a keyword match on `university`: it requires the academic noun to sit beside
+ * `email`, and the value it returns comes from ONE place, `contact_email` - the address
+ * lib/resumeEmail.ts already prints on the resume and freezes into the packet's `_contact`. There is
+ * no path from here to `ap.school`, `ap.degree` or `ap.major`, so the old wrong answer is not
+ * reachable however the label is phrased.
+ *
+ * GROUNDED ON THE VALUE, NOT ON THE QUESTION, which is the second half of the same discipline. The
+ * employer is asking for a university address because it is going to check one. An address of record
+ * that is a consumer mailbox is not a university address, and answering with it would be a confident
+ * wrong answer of exactly the kind a blank is preferable to - so the domain has to say so, or this
+ * holds and the applicant fills it in. Nothing is invented in either branch: the value is either an
+ * address already on file that reads as institutional, or it is not offered at all.
+ *
+ * A POLAR QUESTION IS NOT THIS QUESTION. "Do you have a university email address?" wants a yes or a
+ * no; typing the address into a yes/no control fills nothing and reports the field empty. It is
+ * refused here and left to the rules that already handle it.
+ *
+ * NEITHER IS A CONDITIONAL ONE. IMC's own other phrasing is "if you applied using your personal
+ * email address, please provide your university email address", and Akuna's "if you selected
+ * 'other', please list your university" is in this account's history as a conditional that was
+ * answered unconditionally. Whether the antecedent holds is not something on file, so the whole
+ * label is hers.
+ */
+function academicEmailAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  if (!ACADEMIC_EMAIL_QUESTION.test(label)) return null;
+  if (isPolarQuestion(label)) return null;
+  if (ACADEMIC_EMAIL_CONDITIONAL.test(label)) return null;
+  const held = { skipReason: `university email address left for you: "${label.slice(0, 60)}"` };
+  const stored = ap.contact_email?.trim().toLowerCase();
+  if (!stored || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(stored)) return held;
+  return isAcademicEmailDomain(stored) ? { value: stored } : held;
 }
 
 function referralAnswer(
@@ -1694,6 +2029,9 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
     const withProvenance = question as T & {
       answer_source?: unknown;
       answer_reviewed_at?: unknown;
+      answer_option_source?: unknown;
+      consent_permission_version?: unknown;
+      consent_permission_granted_at?: unknown;
     };
     const applicantReviewedCurrentAnswer = Boolean(
       question.answer.trim()
@@ -1701,15 +2039,140 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       && typeof withProvenance.answer_reviewed_at === 'string'
       && withProvenance.answer_reviewed_at === questionsReviewedAt,
     );
+    /* answer_option_source goes with the answer it describes, and only ever with that answer.
+     *
+     * Every branch below that CHANGES the answer drops it, because a derivation left beside a value
+     * it was not derived from is a lie the next reader has no way to detect: a record reading
+     * answer "May 2028" with answer_option_source "May 2027" claims a snap that never happened. The
+     * one branch that keeps the answer keeps it, which is the whole point of recording it. */
+    /* answer_option_source goes with the answer it describes, and only ever with that answer.
+     *
+     * Every branch below that CHANGES the answer drops it, because a derivation left beside a value
+     * it was not derived from is a lie the next reader has no way to detect. The consent grant is
+     * the same kind of claim and drops on the same rule. */
     const withoutProvenance = (): T => {
       const {
         answer_source: _answerSource,
         answer_reviewed_at: _answerReviewedAt,
+        answer_option_source: _answerOptionSource,
+        consent_permission_version: _consentPermissionVersion,
+        consent_permission_granted_at: _consentPermissionGrantedAt,
         ...rest
       } = withProvenance;
       return rest as T;
     };
-    if (known && 'value' in known) return { ...withoutProvenance(), answer: known.value };
+    /* AN ANSWER THIS FUNCTION CANNOT RECOMPUTE, AND CAN STILL PROVE IS CURRENT.
+     *
+     * The line below is right about almost everything and was silently wrong about one class of
+     * answer, in the one place it costs the most. It is what makes the profile the source of truth:
+     * a question record written on an earlier run must not replay a graduation date the applicant
+     * has since corrected, so a freshly resolved value overwrites the stored one.
+     *
+     * But the value it computes comes only from the profile. It cannot produce
+     * "January 2028 - July 2028", because that string does not exist anywhere except the option list
+     * of one employer's control, which this function has never seen and cannot see: field options
+     * are not persisted. So when discovery HAD read that list and resolveProfileField had snapped
+     * onto it, this line overwrote the employer's own wording with "May 2028" and the evidence was
+     * gone by the time the fill ran.
+     *
+     * Measured end to end on 2026-08-11, before this branch existed: the prepare run's packet
+     * carried "January 2028 - July 2028" and "3.81 - 3.9", and the SUBMIT run's packet, which is the
+     * one that actually fills and sends, carried "May 2028" and "3.89" for all nine graduation and
+     * GPA label shapes. That divergence is worse than no fix at all: the preview the applicant
+     * approves would show the resolved option while the employer receives the bucket.
+     *
+     * BOTH HALVES ARE REQUIRED. Band shape says the stored answer could not have been computed here.
+     * answer_option_source says the profile has not moved underneath it since it was chosen. A band
+     * whose derivation no longer matches the profile is exactly the stale record this function
+     * exists to overwrite, and it is overwritten. See storedOptionAnswerIsCurrent. */
+    if (known && 'value' in known) {
+      /* A CONSENT IS CURRENT WHILE THE PERMISSION IS GRANTED, and that is a different question from
+       * the one the band mechanism answers.
+       *
+       * The branch below needs a date or number band, because that is the shape of an answer this
+       * function provably could not have computed. "I agree" is neither, so for the consent family
+       * the keep-branch was unreachable and every refresh replaced the employer's own option text
+       * with "Yes" - a value that is not on the control's list at all. That is exactly the
+       * prepare-versus-submit divergence measured on 2026-08-11 and quoted above, reintroduced for
+       * a different family: the applicant approves "I agree" and the employer receives "Yes".
+       *
+       * So currency is keyed on the thing that actually makes a consent current. The profile value
+       * behind it is a constant, so "has the profile moved" can never be the question; "does she
+       * still permit this" always is. Revocation is unaffected and still does the work: once the
+       * permission is withdrawn resolveKnownAnswer stops returning a value for this label, control
+       * never reaches here, and the currentResolverRefuses branch below blanks the answer and strips
+       * its provenance.
+       *
+       * Deliberately NOT keyed on the stored provenance, tempting as that is. mergeReviewedQuestions
+       * strips answer_source whenever a stored question has no counterpart in a submitted review, so
+       * a record can lose its consent marker while remaining a perfectly good accepted consent, and
+       * keying on the marker would resurrect the divergence on exactly those records. */
+      if (label && question.answer.trim() && consentAcknowledgementLicence(label, ap, jdText)) {
+        /* AN EXPLICIT REFUSAL IS NEVER RE-ACCEPTED. She edited this control to "I do not agree",
+         * and the resolver would otherwise overwrite it with the acceptance value, turning her own
+         * refusal into a machine acceptance on a live application. Held exactly as she left it. */
+        if (isConsentRefusingWording(question.answer)) return question;
+        /* A GRANTED PERMISSION IS NECESSARY AND NOT SUFFICIENT, and getting that wrong made this
+         * branch worse than the bug it fixed.
+         *
+         * The dashboard "Review answers" round trip stores the RESOLVED value rather than the
+         * displayed one, so a consent showing "I agree" comes back as "Yes" after an unedited Save.
+         * Keying currency on the permission alone then PRESERVED that "Yes" - locking in a value
+         * that matches nothing on the control, where before it was at least recomputed each run.
+         * A recoverable divergence became a permanent one.
+         *
+         * So the answer must also still look like an option a control offered: an accepting wording
+         * that is not simply the constant this resolver produces. "I agree" qualifies and is kept,
+         * which is the whole point of the branch. A bare "Yes" does not, and falls through to be
+         * recomputed - to "Yes" again, harmlessly, and without freezing it.
+         *
+         * The round trip itself is fixed on fix/review-screen-shows-resolved-answer. This branch
+         * must land after it; see the PR body. */
+        if (isConsentAcceptingWording(question.answer)
+          && comparableOption(question.answer) !== comparableOption(known.value)) return question;
+      }
+      const derivedFrom = typeof withProvenance.answer_option_source === 'string'
+        ? withProvenance.answer_option_source
+        : undefined;
+      if (storedOptionAnswerIsCurrent(question.answer, derivedFrom, known.value)) return question;
+      /* NOTHING IS BEING REPLACED, so the applicant-claim survives. See APPLICANT_CLAIM_FIELDS.
+       *
+       * Every strip in this file is licensed by one sentence: a record left beside a value it was
+       * not written for is a lie the next reader cannot detect. That sentence is about a value that
+       * CHANGED. When the resolver recomputes the answer already on the record, byte for byte, "she
+       * read this exact text and let it stand" is as true as it was a moment ago, and returning a
+       * stripped copy asserts a change that did not happen.
+       *
+       * It also cost a send. answer_source and answer_reviewed_at were inside packet_version, so
+       * stripping them from two EEO questions whose answers recomputed to themselves moved the hash
+       * and the send gate answered packet_stale on a packet nothing had touched. The hash is
+       * separately narrowed so provenance can no longer move it, and THAT is the load-bearing fix
+       * (see PACKET_VISIBLE_QUESTION_FIELDS); this one stops the record lying about itself, which is
+       * worth having on its own.
+       *
+       * THE ANSWER-CLAIMS STILL DROP, and that asymmetry is not a compromise with the tests. A
+       * consent that round-trips through the review screen comes back as the RESOLVED constant
+       * "Yes" rather than the "I agree" she was shown, and a grant record beside "Yes" claims an
+       * acceptance of a value no control ever offered. Dropping it is how that record recovers on
+       * the next pass; keying currency on the permission alone is what made a recoverable
+       * divergence permanent once before. Same for answer_option_source, whose whole job is to say
+       * what a band was snapped from. Only the applicant-claim is safe to carry here, so only the
+       * applicant-claim is carried.
+       *
+       * STRICT EQUALITY, deliberately. A case or spacing difference is a different string on the
+       * employer's form: "Decline To Self Identify" is not the option "Decline to self-identify",
+       * and one of them is what gets typed. Those keep falling through to be replaced. */
+      if (known.value === question.answer) {
+        const {
+          answer_option_source: _optionSource,
+          consent_permission_granted_at: _grantedAt,
+          consent_permission_version: _grantVersion,
+          ...withApplicantClaim
+        } = withProvenance;
+        return withApplicantClaim as T;
+      }
+      return { ...withoutProvenance(), answer: known.value };
+    }
     const currentResolverRefuses = Boolean(known && 'skipReason' in known)
       || Boolean(label && isRefusedQuestion(label));
     if (currentResolverRefuses && !applicantReviewedCurrentAnswer) {
@@ -2438,11 +2901,75 @@ function validatedSiblingEmployerTarget(raw: string, packetEmployer: string | un
   return matched ? canonicalSiblingEmployerIdentity(packetEmployer) : null;
 }
 
+/* THE SENTENCE AFTER THE QUESTION MARK THAT IS NOT A SECOND QUESTION.
+ *
+ * IMC's live label reads "...within the last 12-18 months? As a reminder, if you have already
+ * applied for this position during the current recruitment season and were not selected, you may
+ * reapply when the next recruitment season begins in 2027." The trailing sentence is the employer
+ * telling the applicant what happens next. It asks her nothing. Read as part of the question it
+ * makes the label compound, and on 2026-08-10 that is exactly why the resolver handed it back with
+ * "because this is a compound application question" while the question itself was answerable.
+ *
+ * CLOSED ON THREE POINTS rather than a keyword strip, because the compound refusal is a real guard
+ * and this must not become a hole in it:
+ *   - the tail must begin after a question mark, so only text the employer put outside the question
+ *     is eligible;
+ *   - it must open with one of a fixed set of help-text markers;
+ *   - it must be exactly ONE sentence, and contain no question mark of its own.
+ * "Have you applied to this role...? As a reminder, ...reconsidered. Please explain why." keeps
+ * every word and stays compound, because the instruction is a second sentence. So does
+ * "...applied here? If yes, please explain.", because "if yes" is not a help-text marker.
+ */
+const QUESTION_HELP_TEXT_OPENER = /^(?:as a reminder|reminder|please note|note)\b/i;
+
+/* THERE IS NO VOCABULARY HERE, AND THAT IS THE POINT.
+ *
+ * An earlier version of this branch tried to sort tails into inert and scoping with five closed
+ * word classes - restrictive, exceptive, deontic, additive, set-membership. It failed twice on
+ * review and both failures were the same failure. It read `only` and `must` and held, and then
+ * answered "Yes" off a declared employer for "we disregard applications made before 2024", "we
+ * ignore internship applications", "for the purposes of this question, internships are separate".
+ * A list over surface forms cannot decide a semantic property: it fails closed on false positives
+ * and OPEN on false negatives, and the open direction is the one that makes a false statement to an
+ * employer. Lengthening the alternation makes it right about a seventh phrasing and wrong about an
+ * eighth.
+ *
+ * So nothing below reads the tail. `stripped` says only THAT a sentence was removed, and
+ * previouslyAppliedAnswer treats a removed sentence as an unknown restatement of scope: it never
+ * answers Yes, and it answers No only from the applicant's own declared `[]`. An empty declared set
+ * has nothing for any restatement to bring into or out of scope, so "No" is true under every
+ * restriction, every widening, every time window and every group-entity rewording. That is a
+ * property of the record, established without any judgement about what the words mean.
+ */
+type QuestionWithoutHelpText = {
+  /** The label with the trailing sentence removed, for the shape grammar to read. */
+  questionText: string;
+  /** Whether a trailing sentence was removed at all. Nothing reads what it said. */
+  stripped: boolean;
+};
+
+function withoutTrailingHelpText(label: string): QuestionWithoutHelpText {
+  const trimmed = label.trim();
+  const mark = trimmed.indexOf('?');
+  const unchanged = { questionText: label, stripped: false };
+  if (mark < 0) return unchanged;
+  const tail = trimmed.slice(mark + 1).trim();
+  if (!tail || tail.includes('?')) return unchanged;
+  if (!QUESTION_HELP_TEXT_OPENER.test(tail)) return unchanged;
+  if (/[.!]/.test(tail.replace(/[.!]+$/, ''))) return unchanged;
+  /* THE STRIP STILL HAPPENS, and only the ANSWER is restricted. Refusing to strip would put the
+   * label back in the compound refusal for every profile, which narrows the default-No path to fix
+   * a problem it does not have: where nothing has been sent and nothing is declared there is no
+   * application for any restatement to qualify, so the removed sentence cannot change the answer. */
+  return { questionText: trimmed.slice(0, mark + 1), stripped: true };
+}
+
 function parsePriorApplicationQuestion(
   label: string,
   jdText?: string,
 ): ParsedSiblingQuestion | null {
-  const value = normalizedSiblingQuestionLabel(label);
+  const { questionText } = withoutTrailingHelpText(label);
+  const value = normalizedSiblingQuestionLabel(questionText);
   if (/\bapplication (?:support|systems?|software|development|engineering|programming|security)\b/i.test(value)
     || (/\b(?:previous|prior) (?:applicant|application)\b/i.test(value)
       && /\b(?:experience|skills?|expertise|knowledge|architecture|analytics|tracking|systems?|software)\b/i.test(value))) {
@@ -2525,7 +3052,7 @@ function parsePriorApplicationQuestion(
   const previousApplicant = value.match(/^previous applicant\b(.*)$/i);
   if (previousApplicant) {
     const tail = previousApplicant[1]?.trim() ?? '';
-    if (tail && !siblingTailSignalsQuestionOrInstruction(label, tail)) return null;
+    if (tail && !siblingTailSignalsQuestionOrInstruction(questionText, tail)) return null;
     return {
       family: 'prior_application',
       valid: !previousApplicant[1]?.trim() && Boolean(packetEmployer),
@@ -2607,7 +3134,15 @@ function parsePriorApplicationQuestion(
       new RegExp(`^(?:at|for|to|with) ${escaped}(?: ${temporal})?$`),
       new RegExp(`^to work (?:at|for) ${escaped}(?: ${temporal})?$`),
       new RegExp(`^(?:to|for) (?:(?:a|an|the|this|any) )?(?:role|position|job) (?:at|with|for) ${escaped}(?: ${temporal})?$`),
-      new RegExp(`^to this role or another role ${escaped} within the last \\d+(?: \\d+)? months?(?: as a reminder if you have already applied you will not be reconsidered)?$`),
+      /* "this role or another role at <employer>" is fully covered by company-scoped evidence:
+         both halves of the disjunction are roles AT this employer, so the answer does not depend on
+         which one. The time window is not covered, and does not need to be - the default answer is
+         No, and "no application at all" is No in every window. Where the history does hold one, the
+         question is handed back precisely because the window cannot be settled.
+         The window itself is the shared priorTime grammar rather than a months-only literal, and the
+         employer's reminder sentence is removed by withoutTrailingHelpText before this runs, so the
+         one measured tail no longer has to be spelled out inside the shape. */
+      new RegExp(`^to (?:this|the) (?:role|position|job) or another (?:role|position|job) (?:(?:at|with|for) )?${escaped}(?: ${temporal})?$`),
     ];
     if (shapes.some((shape) => shape.test(remainder))) {
       return { family: 'prior_application', valid: true, target: canonicalSiblingEmployerIdentity(packetEmployer!) };
@@ -3079,8 +3614,247 @@ const PREFERRED_NAME_QUESTION =
 // Akuna's "please confirm the month and year" diploma question and IMC's "When did you graduate
 // from High School?". Distinct from every other graduation rule in this file, and checked before
 // them, so the UNIVERSITY graduation date can never be replayed as a high-school one.
-export const HIGH_SCHOOL_GRADUATION_QUESTION =
-  /\bhigh\s+school\b[\s\S]{0,200}\b(?:graduat\w*|diploma|ged|month\s+and\s+year|when)\b|\b(?:graduat\w*|when|month|year)\b[\s\S]{0,120}\bhigh\s+school\b/i;
+/* THE HIGH SCHOOL, IN THE SPELLINGS FORMS ACTUALLY USE FOR IT.
+ *
+ * One definition, shared by the graduation matcher below and by the subject rule under it, so a
+ * spelling recognised for answering is recognised for refusing. Before this was shared, the two
+ * disagreed and the gap was a wrong answer: `\bhigh\s+school\b` does not match "Highschool", so
+ * "Highschool Graduation Year" missed HIGH_SCHOOL_GRADUATION_QUESTION, fell through to the
+ * classifier's `graduation_year`, and came back "May 2028" - the UNIVERSITY year. Measured
+ * 2026-08-11, along with "HS GPA" -> "3.89" and "12th Grade School Name" -> the university.
+ */
+const HIGH_SCHOOL_WORD = String.raw`(?:high[\s-]?schools?|(?:sr\.?|senior)\s+secondary(?:\s+school)?|(?<!post[\s‐-―-])secondary\s+schools?|(?:12th|twelfth)\s+grade\s+school|grade\s+12\s+school|prep(?:aratory)?\s+schools?)`;
+/* "Secondary education" is deliberately NOT here, though it names the same institution. It is also
+ * the name of a MAJOR, and a field-of-study control that lists it as an example - "Major / field of
+ * study (e.g. Nursing, Secondary Education, Engineering)" - was refused where main answered
+ * "Computer Science". The lookbehind on `secondary school` is a related trap: POST-secondary is the
+ * university in North American usage, so "Name of post-secondary institution" must still answer
+ * with it. */
+/* "HS" is kept OUT of the list above and given its own rule, because two letters are not enough on
+ * their own. Even with both word boundaries, `\bhs\b` is the customs tariff "HS code", and without
+ * the trailing one it was also HSA, HSBC, HSE, HSTS and HSpice - all of which this branch refused
+ * as high-school questions before, one of them displacing a correct prior-employer blocker. The
+ * abbreviation counts only with an education fact beside it, which is how a form writes it: "HS
+ * GPA", "HS Diploma", "GPA (HS)". */
+const HS_FACT = String.raw`(?:gpa|names?|diplomas?|graduat\w*|schools?|transcripts?|cit(?:y|ies)|grades?|years?)`;
+/* "Grade 12" gets the same treatment as "HS" and for the same reason: it is a federal pay grade as
+ * well as a school year, so "Highest federal grade held (e.g., Grade 12)" and "Grade 12 pay band"
+ * were manufactured into high-school blockers. Bare, it means nothing here; with an education fact
+ * beside it, it is unambiguous. `<n>th grade school` stays in the noun list above, where the word
+ * school already disambiguates it. */
+const GRADE_TWELVE = String.raw`(?:(?:12th|twelfth)\s+grade|grade\s+12)`;
+const HIGH_SCHOOL_ABBREVIATED = new RegExp(
+  String.raw`\bh\.?\s?s\.?\s+${HS_FACT}\b|\b${HS_FACT}\s+h\.?\s?s\.?(?!\w)`
+  + String.raw`|\b${GRADE_TWELVE}\s+${HS_FACT}\b|\b${HS_FACT}\s+(?:of\s+|in\s+|at\s+)?${GRADE_TWELVE}\b`,
+  'i',
+);
+/* The lookbehind is not decoration. In North American usage POST-secondary education is the
+ * university, so `\bsecondary\s+education\b` matches inside "post-secondary education" and would
+ * refuse the current-programme question it names. "Name of post-secondary institution" is a real
+ * label shape, and it must still answer with the university. */
+
+/* THE GRADUATION MATCHER KEEPS THE NARROW LITERAL. BOTH ARMS.
+ *
+ * Both arms pair the noun with a graduation word across a wide window - 200 characters one way,
+ * 120 the other - and a window that wide is only safe while the noun cannot mean anything but the
+ * applicant's own school. "High school" cannot. "Grade 12", "secondary education" and "prep
+ * school" can: they are also the subject matter of a teaching job. Widening this matcher to the
+ * full spelling list answered ordinary education-sector employment and credential questions with
+ * her own graduation date, where main had answered nothing:
+ *
+ *   "grade 12 teaching - when did you stop?"               -> "May 2023"
+ *   "secondary education teaching - when did you start?"   -> "May 2023"
+ *   "do you have a secondary education teaching diploma?"  -> "Yes"
+ *
+ * A blank is recoverable; a date typed into an employment-history box is not. The wide spelling
+ * list serves the refusal side only, where the cost of being wrong is a blocker rather than an
+ * answer. The literal still covers "highschool" and "high-school", which is the spelling gap that
+ * made sharing a noun worth doing in the first place. */
+const HIGH_SCHOOL_LITERAL = String.raw`high\s+school`;
+/* MAIN'S EXACT LITERAL, and it stays that way. Widening it to `high[\s-]?schools?` was worth one
+ * label ("Highschool Graduation Year", which had been answering with the UNIVERSITY year) and cost
+ * three, because this matcher runs before every other rule and reaches 120-200 characters:
+ *
+ *   "expected graduation date (not highschool)"      May 2028 -> May 2023
+ *   "our high-school internship - when can you start?"  a refusal -> May 2023, in an availability box
+ *   "in what year did you last work with high schools?" blank -> May 2023
+ *
+ * The one label it bought is not lost, only downgraded: "Highschool Graduation Year" now reaches
+ * the refusal instead, which is a blocker rather than the university's May 2028. Better than main,
+ * without touching anything main got right. */
+
+export const HIGH_SCHOOL_GRADUATION_QUESTION = new RegExp(
+  String.raw`\b${HIGH_SCHOOL_LITERAL}\b[\s\S]{0,200}\b(?:graduat\w*|diploma|ged|month\s+and\s+year|when)\b`
+  + String.raw`|\b(?:graduat\w*|when|month|year)\b[\s\S]{0,120}\b${HIGH_SCHOOL_LITERAL}\b`,
+  'i',
+);
+
+/* A HIGH SCHOOL IS NOT THE SCHOOL THE PROFILE HOLDS.
+ *
+ * FUTURE_OR_OTHER_PROGRAMME_QUESTION already states the rule pointing forward in time: school,
+ * degree, major, gpa and every graduation key describe the programme the applicant is in NOW, so a
+ * question scoped to a different one is not answered by them. High school is that same defect
+ * pointing backward, and it was reachable on four separate paths. Measured against the owner's real
+ * stored profile on 2026-08-11:
+ *
+ *   "High School Name"              -> "University of Southern California, Viterbi School of
+ *                                       Engineering"   (the `school name` arm of classifyField)
+ *   "High School GPA"               -> "3.89"          (the university GPA)
+ *   "High School Degree"            -> "Bachelor of Science in Computer Science"
+ *   "High School Graduation Year"   -> resolveKnownAnswer said "May 2023", correctly, and then
+ *                                      profileFieldCandidates rebuilt the ladder from grad_year and
+ *                                      chooseClosestOption picked "2028" off the option list - the
+ *                                      UNIVERSITY year, selected as an exact match, on a
+ *                                      high-school control.
+ *
+ * That last one is why this is a rule in classifyField and not only in resolveKnownAnswer: the
+ * resolver was already right about it, and the wrong value came from the classifier's key being
+ * handed to the alias ladder in profileFieldResolution. The same key also drives
+ * portalSubmission's combobox chain. One label, three callers, one classification to fix.
+ *
+ * The one high-school fact on file is application_profile.high_school_grad_date, and
+ * highSchoolGraduationAnswer answers from it at the top of resolveKnownAnswer, before this
+ * function is ever consulted. Nothing on the profile holds a high school's NAME, city, GPA or
+ * degree - there is no column for any of them - so those are refused rather than answered from the
+ * university's.
+ *
+ * PRESENCE, AND THE CURRENT PROGRAMME IS AN ABSOLUTE VETO. The rule is two lines, and both were
+ * arrived at by deleting cleverer ones that measured worse.
+ *
+ * Not adjacency. Requiring the fact word to sit next to the noun missed every phrasing that
+ * separates them with punctuation, which is most of them: "GPA (high school)" -> "3.89", "High
+ * School: Name" -> the university, "High school, city, state" -> the university. Chasing
+ * separators is unbounded; presence is not.
+ *
+ * And not negation-attachment either, which is the harder lesson. Employers name a high school
+ * most often in order to EXCLUDE it - "which university do you attend? do not list your high
+ * school" - and refusing that gloss hands back the blank it was written to prevent. Three separate
+ * attempts were made to read WHICH institution a negation governs, by proximity and then by
+ * attachment, and every one of them shipped a fresh regression in the opposite direction:
+ *
+ *   proximity  -> "University GPA (do not enter high school GPA)" read the COLLEGE as excluded and
+ *                 refused a control main answered "3.89"
+ *   attachment -> "if you did not attend college, enter your high school" read the same way, and
+ *                 blanked School, education-level and GPA controls across a whole ATS section
+ *
+ * Natural-language negation scope is not a thing a regex decides reliably, and each attempt bought
+ * a handful of exotic labels at the price of a common one. So the veto is unconditional: if the
+ * label names the current programme AT ALL, this rule stands down and behaviour is exactly what it
+ * was before this change. That gives up "High School GPA (not college GPA)", which still answers
+ * "3.89" as it always has - not a regression, just not a fix - and buys a property worth far more
+ * than that label: the ONLY labels whose behaviour changes are those that name a high school and
+ * name no current programme anywhere, and for those the university profile was never the answer.
+ *
+ * One more case needs no rule at all. "What city do you live in? (not the city of your high
+ * school)" is not an education question, and classifyField's wrapper gates this on the KEY, so
+ * address_city, phone, languages and availability_date are out of reach by construction.
+ */
+const CURRENT_PROGRAMME_WORD = String.raw`(?:universit(?:y|ies)|colleges?|undergrad\w*|bachelors?)`;
+// Both boundaries. See HIGH_SCHOOL_ABBREVIATED for what an open-ended one cost.
+const HIGH_SCHOOL_SPELLED_OUT = new RegExp(String.raw`\b${HIGH_SCHOOL_WORD}\b`, 'i');
+function highSchoolPresent(label: string): boolean {
+  return HIGH_SCHOOL_SPELLED_OUT.test(label) || HIGH_SCHOOL_ABBREVIATED.test(label);
+}
+const CURRENT_PROGRAMME_NAMED = new RegExp(String.raw`\b${CURRENT_PROGRAMME_WORD}\b`, 'i');
+
+/* The veto is any OTHER institution noun, not only a college word, because the same glosses get
+ * written with the generic one: "School name: please do not type your high school here", "Which
+ * institution? Do not select your high school", "School attended (leave out your high school)".
+ * All three are the university's control and main answers them correctly.
+ *
+ * The noun has to survive with the high-school phrase removed, or "high school" would veto itself.
+ * The cost is the parenthetical clarifier - "School name (high school)" keeps answering with the
+ * university, as it does on main - and that is the trade this whole rule is built on: a label that
+ * names two institutions is one a regex should not adjudicate, and leaving it exactly as it was is
+ * the only move that cannot make things worse. */
+const ANOTHER_INSTITUTION_NOUN = /\b(?:schools?|institutions?|alma\s+mater)\b/i;
+/* ANCHORED, like every other use of the noun. Unanchored, the strip ate "secondary school" out of
+ * the MIDDLE of "postsecondary school" and destroyed the only institution noun in the label, so
+ * "high school and postsecondary school names" lost its veto and was refused. */
+const HIGH_SCHOOL_WORD_GLOBAL = new RegExp(String.raw`\b${HIGH_SCHOOL_WORD}\b`, 'gi');
+function labelNamesAnotherInstitution(label: string): boolean {
+  return ANOTHER_INSTITUTION_NOUN.test(label.replace(HIGH_SCHOOL_WORD_GLOBAL, ' '));
+}
+
+/* A condition that is not hers. "High school GPA if you are a freshman" asks a freshman for a
+ * high-school GPA and everyone else for the university one, and she is not a freshman. Deliberately
+ * narrow: a bare "if you" also opens "if you attended more than one high school, list the most
+ * recent", which IS a high-school question. */
+/* THE ONE EXCLUSION TEST THAT SURVIVED, and it survived because it never misfired. It reads only
+ * the tight forward shape - a negation, an optional instruction verb, an optional article, then the
+ * high-school noun - so it recognises "(not high school)" and "do not list your high school" while
+ * leaving "do not ABBREVIATE your high school name" alone, that verb not being on the list. The
+ * rules that had to go were the ones that widened this into a proximity window or mirrored it onto
+ * the college side; nothing was ever wrong with reading a negation's immediate object. */
+const HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT = new RegExp(
+  String.raw`(?:\b(?:not|no|never|exclud\w*|other\s+than|rather\s+than|instead\s+of|omit|leave\s+(?:out|off)|ignor\w*|skip|avoid|without|cannot|except|apart\s+from|aside\s+from)\b|\w{1,12}n['’]t)\s*`
+  + String.raw`(?:(?:list|enter|include|use|report|give|provide|write|put|name|state|specify|submit|mention|type|select|choose|repeat|fill|accept|count|consider|qualif|permit)\w*\s+)?`
+  + String.raw`(?:your\s+|the\s+|a\s+|an\s+|any\s+)?${HIGH_SCHOOL_WORD}\b`
+  /* "Degree AFTER high school", "Education BEYOND high school". Not a negation, and it scopes the
+   * question to the current programme just as plainly as one: the high school is the thing being
+   * measured from, not the thing being asked for. Correct degree, major and GPA answers were
+   * blocked without it. */
+  + String.raw`|\b(?:after|since|beyond|post|following)\s+(?:your\s+|the\s+)?${HIGH_SCHOOL_WORD}\b`
+  /* One passive form, kept deliberately narrow to a closed verb list rather than reopened into a
+   * window: "high-school dates are not accepted" reads the exclusion backwards from every other
+   * phrasing, and without it a university graduation control came back blank. */
+  + String.raw`|${HIGH_SCHOOL_WORD}\b[^.?!]{0,30}?(?:\b(?:is|are|will\s+be|would\s+be|do|does|did)\s+not\b|\w{1,12}n['’]t|\bnot\b)\s*(?:be\s+)?`
+  + String.raw`(?:accept\w*|requir\w*|need\w*|used|consider\w*|count\w*|qualif\w*|applicab\w*|permit\w*|relevant)`,
+  'i',
+);
+
+/* The veto above is right about a label that MENTIONS a high school somewhere near a graduation
+ * word, and wrong about one where the high school owns the graduation outright: "High school
+ * graduation date (university date not needed)" is a high-school control however many institutions
+ * it names, and standing down there returned a blank where main returned the stored date. Adjacency
+ * decides it, and only here - the noun sitting directly on the graduation word, not merely in the
+ * same sentence. */
+/* Forms say "finish", "complete" and "leave" as readily as "graduate", and reading only the last
+ * of those left the others vetoed: "In what year did you finish high school? Please also enter the
+ * school name" fell through to the classifier and was answered with the UNIVERSITY'S NAME, while
+ * the "graduate" spelling of the same sentence answered correctly. */
+const SCHOOL_LEAVING_WORD = String.raw`graduat\w*|diploma|ged|finish\w*|complet\w*|left|leav\w*`;
+const HIGH_SCHOOL_OWNS_THE_GRADUATION = new RegExp(
+  String.raw`\b${HIGH_SCHOOL_LITERAL}\b[^.?!]{0,20}?(?:${SCHOOL_LEAVING_WORD})`
+  + String.raw`|(?:${SCHOOL_LEAVING_WORD})[^.?!]{0,20}?\b${HIGH_SCHOOL_LITERAL}\b`,
+  'i',
+);
+
+const CONDITIONAL_ON_BEING_A_SCHOOL_LEAVER =
+  /\bif\s+you\s+(?:are|were)\b[^.?!]{0,40}?\b(?:freshman|first[\s-]year|high[\s-]?school\s+student|still\s+in\s+high[\s-]?school)\b|\bdoes\s+not\s+count\b|\bonly\s+if\s+you\s+(?:are|were)\b/i;
+
+const EDUCATION_LEVEL_QUESTION =
+  /\beducation\s+level\b|\blevel\s+of\s+education\b|\bhighest\s+(?:level|degree|qualification|education)\b/i;
+
+/** Whether the label's subject is the applicant's HIGH SCHOOL rather than her current programme. */
+export function questionIsScopedToHighSchool(label: string): boolean {
+  const l = label ?? '';
+  if (!highSchoolPresent(l)) return false;
+  // The veto. Whatever the label is doing with the other institution - asking for it, excluding it,
+  // listing it as an option - this rule does not touch it.
+  if (CURRENT_PROGRAMME_NAMED.test(l) || labelNamesAnotherInstitution(l)) return false;
+  // ...and the high school named as the negation's immediate object: "(not high school)".
+  if (HIGH_SCHOOL_NAMED_TO_EXCLUDE_IT.test(l)) return false;
+  if (CONDITIONAL_ON_BEING_A_SCHOOL_LEAVER.test(l)) return false;
+  /* An education-LEVEL control names a high school as one option in a list, and the answer is the
+   * current degree. This used to make an exception when a FACT looked attached to the noun, which
+   * bought "level of education: high school GPA" and sold the commonest dropdown in ATS: the fact
+   * test could not tell a level word ("high school diploma") or an incidental one ("if you attended
+   * high school outside the U.S.") from a real one, and a Workday "Highest Level of Education"
+   * became a blocker where main selected the right degree. The exception is gone; those labels are
+   * left exactly as main had them, which is this rule's whole discipline. */
+  return !EDUCATION_LEVEL_QUESTION.test(l);
+}
+
+/* Does the label ask for the high school's NAME? Distinct from the subject rule because the
+ * graduation handler needs exactly this question and no wider one: a control asking for the name
+ * as well as the year cannot be satisfied by the year. The first draft tested the bare word
+ * `name`, which matched "please enter the NAME of the month and the year" - the Akuna wording the
+ * graduation rule exists for - and refused a date that was on file. */
+const HIGH_SCHOOL_NAME_REQUEST = new RegExp(
+  String.raw`\b${HIGH_SCHOOL_WORD}(?:['’]s)?\s+names?\b|\bnames?\s+of\s+(?:your\s+|the\s+|my\s+)?${HIGH_SCHOOL_WORD}\b`,
+  'i',
+);
 
 // Further education AFTER the current degree. Checked before every graduation-date rule so that
 // "when is your potential master's graduation date?" cannot be handed the undergraduate date -
@@ -3099,10 +3873,31 @@ export const FURTHER_EDUCATION_DEGREE_TYPE_QUESTION =
 
 /* ---- attestations ----
  *
- * Two categories, and only two, may ever be ticked by an automated submission, and each only from
- * an explicit stored consent (application_profile.attest_truthful_information and
- * accept_privacy_notices). Everything else here is named so it can be REFUSED by name rather than
- * swept up by a general consent rule.
+ * CORRECTED. This header used to read:
+ *
+ *   "Two categories, and only two, may ever be ticked by an automated submission, and each only
+ *    from an explicit stored consent (application_profile.attest_truthful_information and
+ *    accept_privacy_notices)."
+ *
+ * That stopped being true on 2026-08-09 and the header was not updated. be1bccf ("Harden reviewed
+ * application answer safety", 10:06:38 +0400) deleted the `ap` parameter from
+ * applicationConsentAnswer, narrowed its return type so it was structurally incapable of returning
+ * a value, and removed privacyNoticesAccepted() with it. The function it describes lives 2,500
+ * lines below this comment, so the two sat contradicting each other for three days and cost a
+ * reviewer a full wrong diagnosis: reading this header, the live IMC refusal looks like a bug in
+ * the plumbing, when it was main passing its own suite (questionDiscovery.test.ts pins the hold
+ * with accept_privacy_notices set true).
+ *
+ * WHAT IS TRUE NOW. Nothing is ticked from those two application_profile booleans; they remain
+ * readable for migration compatibility only, exactly as be1bccf left them. What may be ticked is
+ * the CONSENT AND ACKNOWLEDGEMENT CLASS, from a standing permission on the users row
+ * (automatic_consent_acceptance_*), which is a deliberate product reversal of be1bccf for that one
+ * class and is argued where it is implemented, at isConsentAcknowledgementQuestion below.
+ *
+ * Everything else in this section is still named so it can be REFUSED by name rather than swept up
+ * by a general consent rule, and that has not changed: a truthfulness certification, an exclusivity
+ * commitment, a resume-format acknowledgement and every factual declaration are refused whatever
+ * any permission says.
  */
 // Bare-label privacy acknowledgements. Five Rings ships "Privacy Policy Acknowledgement", IMC
 // "Privacy Statement", Point72 just "Privacy": no verb, no sentence, nothing for the prose-shaped
@@ -3113,6 +3908,577 @@ export const BARE_PRIVACY_ACKNOWLEDGEMENT =
 // of Conduct" was previously auto-answered "Yes" with nothing stored behind it.
 export const CODE_OF_CONDUCT_ACKNOWLEDGEMENT =
   /\bcode\s+of\s+conduct\b|\bcode\s+of\s+ethics\b|\bacceptable\s+use\s+policy\b/i;
+
+/* ---- the consent and acknowledgement class ----
+ *
+ * The one class of employer agreement Litos may accept in the applicant's name, and only under the
+ * standing permission she grants once at onboarding (users.automatic_consent_acceptance_*). With no
+ * permission on the row, every label below is held exactly as it is above, which is main's
+ * behaviour and is the default for every account.
+ *
+ * WHAT THE LINE IS, and it is the whole of this feature. A CONSENT is the applicant granting
+ * permission or agreeing to terms the employer wrote: its truth value does not depend on any fact
+ * about her, so accepting one cannot make her say something false. A DECLARATION is a claim about
+ * her - her right to work, her age, her degree, her record, her health, her service - and an
+ * automatic "Yes" to one of those is R-004 again: a false legal statement sent to an employer under
+ * her name. The two look alike on a form (both are usually a required checkbox worded as "I
+ * confirm..."), which is why the separation here is structural rather than a list of phrases.
+ *
+ * THE GRAMMAR IS CLOSED, in the same shape as the sensitive-answer parsers above it, and it is
+ * closed in BOTH directions:
+ *
+ *   1. HELD_DECLARATION_VOCABULARY runs first and vetoes unconditionally. Nothing after it can
+ *      re-open a label it rejects, so no widening of the consent grammar can ever reach the held
+ *      class - that is a property of the order, not of how carefully the alternatives below are
+ *      written. It is deliberately over-broad: a consent it wrongly vetoes is held, which is what
+ *      main does anyway, and holding is the failure this codebase is allowed to have.
+ *   2. The consent side matches only a closed vocabulary of DOCUMENTS (privacy notice, data
+ *      protection notice, applicant terms, code of conduct) and of DATA-HANDLING acts (processing,
+ *      storing, transferring personal data; GDPR; retention for recruitment purposes). A label
+ *      naming no such document and no such act is not a consent, whatever verb it uses. That is why
+ *      "Do you consent to relocate?" is not merely vetoed, it never matches in the first place.
+ *
+ * Deliberately NOT here, and each is a decision rather than an omission:
+ *   - background-check, drug-test and reference-contact authorizations. They grant permission, so
+ *     they read like consents, but each licenses an act with factual and legal weight well past
+ *     data handling. Held, and `authori[sz]e` is vetoed outright to keep the whole family out.
+ *   - truth attestations ("I certify the information is true and complete"). Agreeing to a document
+ *     is not swearing to a fact.
+ *   - EEO and demographic self-identification, which has its own resolver and its own opt-out
+ *     wording and is not touched by anything in this block.
+ */
+
+/* The employer's qualifier on a document name: "Candidate Privacy Notice", "Interview Code of
+ * Conduct", "Job Applicant Privacy Policy". Closed, because the qualifier is the part a bare label
+ * varies and the document noun is the part that must not vary. */
+const CONSENT_DOCUMENT_QUALIFIER =
+  String.raw`(?:job\s+)?(?:applicant|candidate|recruit(?:ment|ing)|interview|employee|employment|data|website|site|user|company|global|general|our|your|the|this)`;
+/* The documents. A privacy or data-protection notice, in the spellings employers actually ship. */
+/* LONGEST SPELLING FIRST, and this ordering is load-bearing rather than cosmetic. Alternation
+ * returns the FIRST matching alternative, not the longest, and classifiedDocumentSpans matches
+ * sticky from each position - so with the bare `privacy` alternative first, "Privacy and Cookies
+ * Policy" matched only "privacy", left "Policy" uncovered, and held a spelling this pattern exists
+ * to support. Any alternative that is a prefix of another must come after it. */
+const PRIVACY_DOCUMENT =
+  String.raw`privacy\s+and\s+cookies?\s+(?:policy|notice)|data\s+protection(?:\s+(?:policy|statement|notice))?|data\s+privacy(?:\s+(?:policy|statement|notice))?|notice\s+at\s+collection|privacy(?:\s+(?:policy|statement|notice|terms))?`;
+const TERMS_DOCUMENT =
+  String.raw`terms\s+(?:and|&)\s+conditions|terms\s+of\s+(?:use|service|application)|applicant\s+terms`;
+const CONDUCT_DOCUMENT =
+  String.raw`code\s+of\s+conduct|code\s+of\s+ethics|acceptable\s+use\s+policy|conduct\s+(?:agreement|policy|guidelines)`;
+/* The acts, for the consents that name no document: what the employer proposes to do with her
+ * personal data, and the legal regime it names while doing it. */
+const DATA_HANDLING_SUBJECT = String.raw`process(?:ing)?\s+of\s+(?:my\s+|your\s+|the\s+)?personal\s+(?:data|information)`
+  + String.raw`|personal\s+(?:data|information)\s+process(?:ing|ed)?`
+  + String.raw`|(?:collect\w*|stor\w*|retain\w*|retention|transfer\w*|shar\w*|process\w*|us(?:e|ing))[\s\S]{0,80}\bpersonal\s+(?:data|information)\b`
+  + String.raw`|\bpersonal\s+(?:data|information)\b[\s\S]{0,80}(?:collect\w*|stor\w*|retain\w*|retention|transfer\w*|shar\w*|process\w*)`
+  + String.raw`|gdpr|general\s+data\s+protection\s+regulation`
+  + String.raw`|recruit(?:ment|ing)\s+purposes`;
+const CONSENT_SUBJECT = `${PRIVACY_DOCUMENT}|${TERMS_DOCUMENT}|${CONDUCT_DOCUMENT}|${DATA_HANDLING_SUBJECT}`;
+/* THE SAME DOCUMENTS, MINUS THE TWO WIDE ALTERNATIVES, for coverage accounting only.
+ *
+ * DATA_HANDLING_SUBJECT's third and fourth alternatives put [\s\S]{0,80} between a handling verb and
+ * "personal data", and eighty characters is room for a whole conduct document name. As a CLASSIFIER
+ * that is right: the label really is a data-processing consent. As COVERAGE it is a hole, because
+ * blanking the matched span also blanks whatever was smuggled inside it, which is exactly how
+ * "consent to storing under the code of business conduct my personal data" survived three previous
+ * rules. Every word those alternatives are built from - collecting, storing, personal, data - is
+ * structural filler in its own right, so dropping them here costs nothing and closes the hole. */
+const DOCUMENT_SPAN_SUBJECT = [
+  PRIVACY_DOCUMENT,
+  TERMS_DOCUMENT,
+  CONDUCT_DOCUMENT,
+  String.raw`process(?:ing)?\s+of\s+(?:my\s+|your\s+|the\s+)?personal\s+(?:data|information)`,
+  String.raw`personal\s+(?:data|information)\s+process(?:ing|ed)?`,
+  String.raw`gdpr|general\s+data\s+protection\s+regulation`,
+  String.raw`recruit(?:ment|ing)\s+purposes`,
+].join('|');
+const DOCUMENT_SPAN_RE = new RegExp(DOCUMENT_SPAN_SUBJECT, 'i');
+/* The act of accepting, closed. "authorize" is NOT on this list and never will be: see the block
+ * header. Nor is any verb that asserts something ("declare", "certify", "warrant"). */
+const CONSENT_ACT = String.raw`agree(?:s|d|ing)?|consent(?:s|ed|ing)?|accept(?:s|ed|ing)?|acknowledg\w*`
+  + String.raw`|confirm(?:s|ed|ing)?|(?:have\s+)?read|understood|understand|review(?:s|ed|ing)?`
+  + String.raw`|(?:tick|check)(?:ing)?\s+this\s+box|by\s+submitting`;
+
+/**
+ * A label that IS a consent document and nothing else: "Privacy Statement", "Interview Code of
+ * Conduct", "Privacy Policy Acknowledgement", "Processing of Personal Data".
+ *
+ * Anchored at both ends on purpose. These are the labels the prose rule cannot see (no verb, no
+ * sentence), and anchoring is what stops the same document noun inside a longer sentence from being
+ * read as a bare acknowledgement when that sentence is asking something else entirely.
+ */
+export const BARE_CONSENT_ACKNOWLEDGEMENT = new RegExp(
+  String.raw`^\s*(?:i\s+)?(?:${CONSENT_DOCUMENT_QUALIFIER}\s+){0,3}(?:${CONSENT_SUBJECT})`
+  + String.raw`(?:\s+(?:acknowledgement|acknowledgment|consent|agreement|acceptance))?\s*[*:.]?\s*$`,
+  'i',
+);
+
+/** A sentence whose act is one of the accepting verbs and whose object is one of the documents. */
+export const CONSENT_ACKNOWLEDGEMENT_SENTENCE = new RegExp(
+  String.raw`\b(?:${CONSENT_ACT})\b[\s\S]{0,200}\b(?:${CONSENT_SUBJECT})\b`
+  + String.raw`|\b(?:${CONSENT_SUBJECT})\b[\s\S]{0,200}\b(?:${CONSENT_ACT})\b`,
+  'i',
+);
+
+/**
+ * THE VETO. Every vocabulary whose presence makes a label a claim about the applicant rather than
+ * an agreement to a document, plus the families that are answered by their own resolver and must
+ * not be disturbed.
+ *
+ * Runs before the consent grammar and cannot be overridden by it. Grouped by the harm rather than
+ * alphabetically, and each group is here because answering it wrongly is a specific, named failure
+ * this repo has already had or has already written a rule to prevent.
+ */
+const HELD_DECLARATION_VOCABULARY = new RegExp([
+  // Legal status and the right to work. R-004's exact family.
+  String.raw`\b(?:visa|immigration|sponsor\w*|work\s+permit|citizen(?:ship)?|nationality|passport|green\s+card|residency|authori[sz]ed\s+to\s+work|right\s+to\s+work|work\s+authori[sz]ation|employment\s+eligibility)\b`,
+  /* ANY grant of authority. Litos accepts terms; it does not authorise an act. This is what holds
+   * background-check, drug-test, credit-check and reference-contact authorizations as a family
+   * rather than one phrasing at a time, and it is deliberately blunt: a data-processing consent
+   * that happens to be worded "I authorize the processing of my personal data" is held too. */
+  String.raw`\bauthori[sz](?:e|es|ed|ing|ation)\b`,
+  // Age, including the 18+ attestation that has its own inverted-polarity resolver.
+  String.raw`\b(?:18|eighteen|minor|date\s+of\s+birth|dob|age|how\s+old)\b`,
+  // Education, completion and timing.
+  String.raw`\b(?:degree|graduat\w*|enroll\w*|diploma|gpa|transcript|university|college|school|coursework|academic)\b`,
+  // Criminal record and background screening.
+  String.raw`\b(?:convict\w*|criminal|felony|misdemean\w*|guilty|arrest\w*|offen[cs]e|background|drug|screening|clearance|polygraph)\b|\bcredit\s+check\b`,
+  // References, and verification of anything she has claimed.
+  String.raw`\breferences?\b|\bverif(?:y|ies|ied|ication)\b|\bemployment\s+history\b`,
+  // Health, disability, accommodation.
+  String.raw`\b(?:health|medical|disab\w*|accommodat\w*|pregnan\w*|illness|injur\w*|vaccin\w*)\b`,
+  // Military and veteran status.
+  String.raw`\b(?:veteran|military|armed\s+forces|national\s+guard|reserv(?:e|ist))\b`,
+  // EEO and demographic self-identification, which has its own resolver and its own opt-out.
+  String.raw`\b(?:race|racial|ethnic\w*|hispanic|latino|gender|transgender|sexual\s+orientation|lgbtq\w*|sex|demographic|self[-\s]?identif\w*|religio\w*|marital|national\s+origin|genetic|caste|pronoun)\b`,
+  // Truth attestations. Agreeing to a document is not swearing to a fact.
+  String.raw`\b(?:certif\w*|attest\w*|swear|sworn|perjury|declare|declaration|warrant|true|truthful)\b|\bbest\s+of\s+my\s+knowledge\b`,
+  // Restrictive covenants and obligations owed to another employer.
+  String.raw`\bnon[-\s]?compet\w*|\bnon[-\s]?solicit\w*|\brestrictive\s+covenant|\bgarden\s+leave\b|\bconfidentiality\s+(?:agreement|obligation)`,
+  // Statements to a government or a regulator.
+  String.raw`\bexport\s+control\w*|\bitar\b|\bear99\b|\bsanction\w*|\bpolitically\s+exposed\b`,
+  /* A FACT WEARING CONSENT WORDING. "Do you consent to relocate?" is the shape this group exists
+   * for: an accepting verb over a subject that is a plan, a commitment or a preference. */
+  String.raw`\brelocat\w*|\bwilling\s+to\b|\bcommit\s+to\b|\btop\s+preference\b|\bstart\s+date\b|\bsalary\b|\bcompensation\b|\bnotice\s+period\b|\bavailab\w*|\btravel\b|\bovertime\b|\bshift\b|\bon[-\s]?call\b`,
+  // Never filled at all, here as well as in NEVER_FILL_PATTERNS.
+  String.raw`\bsocial\s+security\b|\bssn\b|\bdriver'?s?\s*licen[sc]e\b|\bcaptcha\b|\brecord(?:ing|ed)\b`,
+].join('|'), 'i');
+
+/**
+ * ONE SPELLING OF THE LABEL, decided here and nowhere else.
+ *
+ * The three callers hold the label in three different states: the pre-script has the stored
+ * question text, resolveProfileField has already run normalizeDiscoveredLabel over it, and the
+ * submission runner's consent trail has the raw discovered blob with the employer's `*` marker and
+ * Greenhouse's `--0` handles still attached. Three spellings reaching one predicate is how a
+ * control gets accepted on one path and held on another for no reason anybody can see.
+ *
+ * normalizeDiscoveredLabel is idempotent, so normalizing here is free for the caller that already
+ * did it, and the fallback keeps a label that normalizes to nothing testable as its trimmed self.
+ */
+function consentLabelSpelling(label: string): string {
+  return normalizeDiscoveredLabel(label ?? '') || (label ?? '').trim();
+}
+
+/** True when a label is a held factual declaration, whatever else it also looks like. */
+export function isHeldDeclarationLabel(label: string): boolean {
+  return HELD_DECLARATION_VOCABULARY.test(consentLabelSpelling(label));
+}
+
+/* WHICH DOCUMENT A CONSENT LABEL IS ABOUT, because the two are not one permission.
+ *
+ * A behavioural policy is not a privacy notice. CODE_OF_CONDUCT_ACKNOWLEDGEMENT's own comment says
+ * why in the voice of the incident that produced it: IMC's "Interview Code of Conduct" was once
+ * auto-answered "Yes" with nothing stored behind it, and that was judged wrong and corrected. A
+ * privacy notice is the routine condition of applying at all; a code of conduct binds how she
+ * behaves in a live interview. Licensing the second off a grant she gave for the first would be
+ * that same reversion arriving by a tidier route, so they are separate permissions, separately
+ * granted, separately revocable, and a label naming BOTH documents needs BOTH. */
+const CONDUCT_DOCUMENT_RE = new RegExp(CONDUCT_DOCUMENT, 'i');
+const PRIVACY_OR_TERMS_DOCUMENT_RE =
+  new RegExp(`${PRIVACY_DOCUMENT}|${TERMS_DOCUMENT}|${DATA_HANDLING_SUBJECT}`, 'i');
+
+export type ConsentAcknowledgementClass = 'privacy_and_terms' | 'conduct';
+
+/* ---- COVERAGE COMPLETENESS: account for the whole label, or hold it ----
+ *
+ * THREE FRAMINGS FAILED BEFORE THIS ONE, all the same way. A head-noun list missed "expectations".
+ * A coordination rule missed prepositional attachment ("in accordance with the conduct
+ * expectations"), reversed order ("the conduct expectations and the privacy policy"), an intervening
+ * word ("the privacy policy itself and the conduct expectations"), and a possessive determiner
+ * heading the second document ("and my conduct expectations"), which walked straight through the
+ * clause test. Every one of them tried to RECOGNISE the stray document, so every one of them was a
+ * list of things to look for, and the next employer wording walked past it. A closed word class
+ * guarantees the list will not need extending; it does not guarantee its members only appear in the
+ * construction you had in mind.
+ *
+ * SO THIS DOES NOT LOOK FOR ANYTHING. It removes what the label has ACCOUNTED FOR - the document
+ * spans the classifiers matched, any URL path they placed, the consent verbs, the qualifiers those
+ * documents take - and asks whether any substantive token is left. If one is, the label is talking
+ * about something this module cannot place, and it holds. It never has to know that "expectations",
+ * "guidelines", "handbook" or "standards" are documents, because it never asks what the leftovers
+ * are. Only whether there are any. That is fail-closed by construction rather than by enumeration:
+ * a new employer wording cannot slip past a check that has nothing to slip past.
+ *
+ * IT ALSO CLOSES THE BARE-LABEL SMUGGLERS, which two previous rules missed for a subtle reason.
+ * DATA_HANDLING_SUBJECT carries two [\s\S]{0,80} alternatives, so a single matched span can cover a
+ * conduct document name sitting between "storing" and "personal data". Every span-based rule that
+ * asked a question ABOUT the span therefore skipped them. This one blanks the span and reads what is
+ * left, so a document name inside a match is not hidden by the match.
+ *
+ * THE COST IS THE OPPOSITE RISK, AND IT WAS MEASURED RATHER THAN ARGUED. Too much filler and the
+ * check accounts for a stray document; too little and it holds ordinary consents. The corpus run and
+ * its two numbers are in the PR body, where they will not go stale.
+ *
+ * THE FILLER IS CLOSED-CLASS PLUS CONSENT SCAFFOLDING, and the second half is the honest weak point.
+ * Function words are closed by definition. The scaffolding is not: it is the vocabulary of consent
+ * SENTENCES ("by submitting this application", "the information i have provided"), and a missing
+ * entry costs a HOLD rather than an acceptance, which is the direction this feature is allowed to
+ * fail in.
+ *
+ * WHAT KEEPS A STRAY DOCUMENT FROM BEING ABSORBED, stated exactly, because the obvious version of
+ * this sentence is FALSE and was in this comment until review caught it. It is NOT true that no
+ * filler entry is a document name: `notice`, `policy`, `statement`, `terms`, `conditions`,
+ * `agreement`, `consent`, `receipt`, `copy` and `form` are all here, and every one of them names a
+ * document in isolation, so "the privacy policy and the notice" is absorbed. Believing the false
+ * version is how a maintainer talks themselves into adding one more head noun.
+ *
+ * The property that actually holds the boundary is narrower and is about ONE family:
+ *
+ *     NO CONDUCT-FAMILY HEAD NOUN IS IN THIS SET.
+ *
+ * code, codes, conduct, ethics, guidelines, handbook, standards, principles, expectations, rules,
+ * charter, protocol, covenant, pledge, undertaking, declaration, manual, directive - none of them is
+ * filler, so every conduct-shaped stray survives to be counted and holds the label. That is what
+ * makes the two-grant split safe, and it is the only thing that does. Absorbing a PRIVACY-family
+ * head is harmless by comparison: privacy and terms share one grant, so a stray absorbed there
+ * cannot cross a permission boundary.
+ *
+ * consentBoundary.test.ts asserts that disjointness directly. Adding `handbook` or `guidelines` here
+ * as scaffolding would open the conduct boundary silently, and that test is what stops it.
+ */
+/** Exported ONLY so consentBoundary.test.ts can assert the conduct-family disjointness above. */
+export const CONSENT_STRUCTURAL_FILLER: ReadonlySet<string> = new Set([
+  // Determiners and quantifiers.
+  'the', 'a', 'an', 'this', 'that', 'these', 'those', 'my', 'your', 'our', 'its', 'their', 'his',
+  'her', 'no', 'any', 'all', 'each', 'both', 'such', 'same', 'other', 'another', 'some',
+  // Prepositions and conjunctions.
+  'of', 'to', 'in', 'on', 'at', 'by', 'for', 'with', 'from', 'under', 'per', 'via', 'about', 'into',
+  'upon', 'within', 'during', 'as', 'through', 'across', 'between', 'after', 'before', 'against',
+  'and', 'or', 'plus', 'nor', 'but', 'if', 'when', 'while', 'so',
+  // Pronouns and wh-words.
+  'i', 'you', 'we', 'they', 'it', 'me', 'us', 'them', 'who', 'whom', 'whose', 'which', 'what',
+  // Auxiliaries and copulas.
+  'do', 'does', 'did', 'have', 'has', 'had', 'am', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'will', 'would', 'shall', 'should', 'can', 'could', 'may', 'might', 'must',
+  // Politeness and discourse scaffolding.
+  'please', 'hereby', 'herein', 'hereto', 'below', 'above', 'following', 'further', 'also', 'then',
+  'thereby', 'accordance', 'accordingly', 'here', 'yes',
+  /* The vocabulary of APPLYING and of the data itself. Not document names: every one of these
+   * describes the act the applicant is performing or the material she is handing over, which is
+   * what a consent sentence is made of once its document name has been removed. */
+  'application', 'applications', 'apply', 'applying', 'submitting', 'submission', 'submit',
+  'box', 'checkbox', 'checking', 'ticking', 'selecting', 'clicking', 'signing', 'form',
+  'information', 'info', 'data', 'details', 'personal', 'provided', 'provide', 'give', 'given',
+  'processed', 'processing', 'process', 'stored', 'storing', 'store', 'storage', 'retained',
+  'retaining', 'retention', 'collected', 'collecting', 'collection', 'used', 'using', 'use',
+  'shared', 'sharing', 'share', 'transferred', 'transfer', 'held', 'keep', 'kept',
+  'purposes', 'purpose', 'recruitment', 'recruiting', 'hiring', 'role', 'position',
+  'job', 'jobs', 'vacancy', 'vacancies', 'opportunity', 'opportunities', 'company', 'employer',
+  'candidate', 'candidates', 'applicant', 'applicants', 'receipt', 'copy', 'terms', 'conditions',
+  'law', 'laws', 'legal', 'rights', 'notice', 'notices', 'policy', 'policies',
+  /* DOCUMENT HEAD NOUNS, and putting them here is safe for a reason worth stating: a stray document
+   * is identified by its MODIFIER, never by its head. "the insider trading policy" leaves "insider"
+   * and "trading"; "the conduct expectations" leaves "conduct" and "expectations"; "the employee
+   * handbook" leaves "handbook". Accounting for the head noun costs nothing and stops
+   * "privacy policy agreement" from being held on its own suffix, which the bare grammar
+   * explicitly supports. */
+  'agreement', 'agreements', 'acknowledgement', 'acknowledgment', 'acknowledgements',
+  'acknowledgments', 'acceptance', 'consent', 'consents', 'statement', 'statements',
+  // The rest of the vocabulary of applying, added because real corpus labels needed it.
+  'assessing', 'assess', 'candidacy', 'consideration', 'considered', 'evaluate', 'evaluating',
+  'residents', 'resident', 'purposes',
+]);
+/* A token that carries meaning. Two letters or fewer cannot be a document name, and a bare number is
+ * a year or a clause reference. Everything else has to be accounted for by something above. */
+const SUBSTANTIVE_TOKEN = /^[a-z]{3,}$/;
+
+/**
+ * Every character range one of the classifying document patterns claims.
+ *
+ * STICKY, POSITION BY POSITION, rather than a global scan, because document names OVERLAP and a
+ * global scan consumes the overlap. "the applicant terms and conditions" contains two matches of one
+ * pattern that share the word "terms": a global scan matched `applicant terms`, resumed after it,
+ * and could no longer match `terms and conditions`, leaving "conditions" unaccounted for and holding
+ * a label that is a plain terms acknowledgement. Measured: it broke the terms positive on the first
+ * run of this rule.
+ *
+ * Trying every start index yields the overlapping spans too. Labels are one sentence, so the cost
+ * does not matter and the correctness does.
+ */
+function classifiedDocumentSpans(value: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  for (const source of [DOCUMENT_SPAN_RE]) {
+    const sticky = new RegExp(source.source, 'iy');
+    for (let index = 0; index < value.length; index += 1) {
+      sticky.lastIndex = index;
+      const match = sticky.exec(value);
+      if (match && match[0].length > 0) spans.push([index, index + match[0].length]);
+    }
+  }
+  return spans;
+}
+
+/**
+ * True when every substantive token in the label is accounted for.
+ *
+ * `spans` are the document ranges the classifiers matched, plus any URL path they placed. Those are
+ * blanked out along with the consent verbs and the qualifiers a document name takes; what is left is
+ * checked token by token against the structural filler. One unexplained token is enough to hold.
+ */
+function consentLabelIsFullyAccountedFor(
+  value: string,
+  spans: readonly [number, number][],
+  employerContext: string | undefined,
+): boolean {
+  const chars = [...value.toLowerCase()];
+  for (const [from, to] of spans) {
+    for (let index = Math.max(0, from); index < to && index < chars.length; index += 1) chars[index] = ' ';
+  }
+  /* THE MODIFIER A DOCUMENT NAME CARRIES, absorbed one token to the LEFT of each span.
+   *
+   * Employers qualify their documents: "the BUSINESS conduct guidelines", "the CALIFORNIA privacy
+   * notice", "the ACME privacy policy". The classifier matches the head of the name and leaves the
+   * modifier stranded, so coverage held documents it had actually placed. English puts modifiers
+   * before heads, which is why this is one token to the left and not to the right: absorbing to the
+   * right would swallow "expectations" in "the code of conduct expectations", a document nobody
+   * placed. Measured: this alone accounted for two of the three remaining false holds. */
+  for (const [from] of spans) {
+    const before = chars.slice(0, from).join('');
+    const modifier = before.match(/([a-z][a-z-]*)\s*$/i);
+    if (!modifier || typeof modifier.index !== 'number') continue;
+    for (let index = modifier.index; index < modifier.index + modifier[1].length; index += 1) chars[index] = ' ';
+  }
+  let residue = chars.join('');
+  /* The verbs that make it a consent, and the qualifiers a document name carries, are accounted for
+   * by the same grammar that matched the document. Removed as spans rather than as words, so a
+   * multi-word act ("by submitting", "checking this box") goes in one piece. */
+  for (const source of [CONSENT_ACT, CONSENT_DOCUMENT_QUALIFIER]) {
+    residue = residue.replace(new RegExp(String.raw`\b(?:${source})\b`, 'gi'), ' ');
+  }
+  /* A genitive is a determiner wearing a noun's clothes: "cloudflare's candidate privacy policy"
+   * names the employer, not a second document. */
+  residue = residue.replace(/\b[\w-]+['’]s\b/gi, ' ');
+  /* THE EMPLOYER'S OWN NAME, which was the single largest cause of false holds when this rule was
+   * measured: "i consent to acme collecting...", "do you consent to brex processing...", "faire
+   * candidate privacy policy acknowledgment". A company name is an arbitrary proper noun, and the
+   * labels arrive lowercased, so nothing in the text distinguishes "brex" from "expectations".
+   *
+   * It does not have to. The packet already knows who the employer is and already hands it to this
+   * resolver, on the frozen `[LITOS FROZEN JOB EMPLOYER]` line that jobs like the prior-application
+   * rule read for the same reason. Accounting for exactly that name is not a guess and not a list:
+   * it is the one proper noun the caller can prove belongs here. When the caller passes no context,
+   * nothing is accounted for and the label holds, which is the safe direction. */
+  const employer = frozenJobEmployerFromContext(employerContext);
+  if (employer) {
+    for (const part of employer.toLowerCase().split(/[^a-z0-9]+/).filter((word) => word.length >= 3)) {
+      residue = residue.replace(new RegExp(String.raw`\b${part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\b`, 'gi'), ' ');
+    }
+  }
+  for (const token of residue.split(/[^a-z]+/i)) {
+    const word = token.toLowerCase();
+    if (!word || !SUBSTANTIVE_TOKEN.test(word)) continue;
+    if (!CONSENT_STRUCTURAL_FILLER.has(word)) return false;
+  }
+  return true;
+}
+
+/* ---- the URL in a consent label ----
+ *
+ * A URL is USUALLY a pointer to the document the sentence already names, and blanking it is right:
+ * "cloudflare.com/candidate-privacy-policy" is the Candidate Privacy Policy, and its hyphens stop
+ * the privacy pattern from covering the "policy" inside it, so leaving it in place made a Cloudflare
+ * positive look like a second, unplaceable document.
+ *
+ * BUT THAT IS A PREMISE, AND IT WAS NEVER CHECKED. A URL can name a DIFFERENT document from the
+ * sentence, and blanking made it invisible: "I agree to the Privacy Policy at acme.com/code-of-conduct"
+ * accepted on the privacy grant alone, with the conduct document erased before anything looked at it.
+ *
+ * So the path is READ rather than discarded. Its separators become spaces in place, preserving every
+ * offset, and the scheme and host become spaces because they name no document. What is left is the
+ * path as words, and the ordinary machinery then sees it: "candidate privacy policy" classifies as
+ * privacy and changes nothing; "code of conduct" classifies as conduct and the label needs both
+ * grants; "code of business conduct" classifies as nothing and holds.
+ *
+ * A path carrying digits or a query string is not a document name - "/apply?src=123" is routing, not
+ * a policy - so those are blanked whole, which is what the old rule did to everything.
+ */
+/* Neither arm may swallow a closing parenthesis or trailing sentence punctuation. A label writes the
+ * link in brackets - "(cloudflare.com/candidate-privacy-policy)" - and with `\S+` the captured URL
+ * ended in ")", which fails the document-name shape test, so the path was blanked whole and the
+ * premise check below never saw it. */
+const CONSENT_LABEL_URL = /\bhttps?:\/\/[^\s,;)\]]+|\b[\w-]+\.(?:com|org|net|io|co|ai|gov|edu)\b[^\s,;)\]]*/gi;
+const URL_PATH_IS_A_DOCUMENT_NAME = /^[a-z][a-z-]*(?:[/_-][a-z-]+)+$/i;
+
+/**
+ * The same string, same length, with URLs replaced by the words of their path (or by spaces), plus
+ * the spans of the paths that were read.
+ *
+ * The spans are what makes the premise checkable. A linked document is not joined to the sentence by
+ * a coordinator - "the Privacy Policy at acme.com/code-of-business-conduct" hangs off a preposition -
+ * so the coordination rule cannot see it. Asking directly whether each path the label points at was
+ * placed by some classifier can.
+ */
+function readableUrlPaths(value: string): { scanned: string; pathSpans: Array<[number, number]> } {
+  const pathSpans: Array<[number, number]> = [];
+  const scanned = value.replace(CONSENT_LABEL_URL, (match, offset: number) => {
+    const blank = ' '.repeat(match.length);
+    const slash = match.indexOf('/', match.startsWith('http') ? match.indexOf('//') + 2 : 0);
+    if (slash === -1) return blank;
+    const path = match.slice(slash + 1).replace(/\.(?:pdf|html?|aspx)$/i, '');
+    if (!path || !URL_PATH_IS_A_DOCUMENT_NAME.test(path)) return blank;
+    const words = path.replace(/[/_-]+/g, ' ');
+    pathSpans.push([offset + slash + 1, offset + slash + 1 + words.length]);
+    // Same length: the host becomes spaces, the path keeps its characters with separators spaced.
+    return ' '.repeat(slash + 1) + words + ' '.repeat(match.length - slash - 1 - words.length);
+  });
+  return { scanned, pathSpans };
+}
+
+/**
+ * The consent classes a label belongs to, or an empty list when it is not a consent at all.
+ *
+ * PURE GRAMMAR. It does not read any permission and does not decide whether anything is filled;
+ * consentAcknowledgementLicence does that. Split so the boundary can be tested as the boundary,
+ * independently of any account's settings.
+ */
+export function consentAcknowledgementClasses(
+  label: string,
+  /* The frozen job context the resolver is already handed. Only the employer line is read from it;
+     omitting it accounts for no company name, which holds rather than accepts. */
+  employerContext?: string,
+): ConsentAcknowledgementClass[] {
+  const value = consentLabelSpelling(label);
+  if (!value) return [];
+  if (HELD_DECLARATION_VOCABULARY.test(value)) return [];
+  if (!BARE_CONSENT_ACKNOWLEDGEMENT.test(value) && !CONSENT_ACKNOWLEDGEMENT_SENTENCE.test(value)) return [];
+  /* NO BARE-LABEL EXEMPTION, and the one that used to be here rested on a property the grammar does
+   * not have. It claimed a BARE_CONSENT_ACKNOWLEDGEMENT label is "anchored end to end, so a second
+   * document cannot fit inside it" - but DATA_HANDLING_SUBJECT carries two [\s\S]{0,80} alternatives,
+   * and eighty characters comfortably holds a conduct document name inside a match that still
+   * reaches both anchors. The English is awkward and the reachability is low, and a structural
+   * argument resting on a false premise is exactly the kind of thing the next reader leans on. The
+   * coordination rule needs no exemption: a bare document name contains no coordinator joining two
+   * documents, so it simply does not fire. */
+  const { scanned, pathSpans } = readableUrlPaths(value);
+  const spans = classifiedDocumentSpans(scanned);
+  if (!consentLabelIsFullyAccountedFor(scanned, spans, employerContext)) return [];
+  /* A document-shaped link nothing could place. Same rule as the coordination one and a different
+   * syntax: "the Privacy Policy at acme.com/code-of-business-conduct" names a second document
+   * through a preposition, where no coordinator joins it to anything. */
+  const placed = (from: number, to: number) => spans.some(([start, end]) => start < to && end > from);
+  if (pathSpans.some(([from, to]) => !placed(from, to))) return [];
+  const classes: ConsentAcknowledgementClass[] = [];
+  if (PRIVACY_OR_TERMS_DOCUMENT_RE.test(scanned)) classes.push('privacy_and_terms');
+  if (CONDUCT_DOCUMENT_RE.test(scanned)) classes.push('conduct');
+  /* Reachable: a label whose only document name sat inside a routing URL matches the grammar and
+   * classifies as nothing. No permission covers a consent with no class, so returning nothing
+   * holds it. */
+  return classes;
+}
+
+/** True when a label is a consent or acknowledgement, in either class. */
+export function isConsentAcknowledgementQuestion(label: string, employerContext?: string): boolean {
+  return consentAcknowledgementClasses(label, employerContext).length > 0;
+}
+
+/* ---- what an option WORDING means ----
+ *
+ * Used twice, and the second use is why they live here rather than beside chooseConsentOption:
+ * picking the accepting option off a control's list, and deciding whether an answer already in a
+ * packet is still an acceptance. Tested against comparableOption output, so apostrophes are gone
+ * ("don't" reads "dont") and punctuation is spaces.
+ */
+/** An option that means "no". Tested FIRST everywhere, because "I do not agree" contains "agree". */
+const CONSENT_REFUSING_OPTION =
+  /\b(?:no|not|dont|doesnt|cant|cannot|wont|never|decline|declined|declining|disagree|disagreed|refuse|refused|deny|denied|reject|rejected|withhold|opt\s*out|unwilling|prefer\s+not)\b/;
+
+/** An option that means "yes", as a WHOLE option and not as a word inside a longer sentence. */
+const CONSENT_ACCEPTING_OPTION = new RegExp(
+  String.raw`^(?:yes|y|true|on|checked`
+  + String.raw`|(?:i\s+)?(?:agree|agreed|accept|accepted|consent|acknowledge|acknowledged|confirm|confirmed)`
+  + String.raw`|(?:i\s+)?(?:have\s+)?read\s+and\s+(?:agree|agreed|accept|accepted|understood|understand|acknowledge|acknowledged)`
+  + String.raw`|yes\s+i\s+(?:agree|accept|consent|acknowledge|confirm)`
+  + String.raw`|(?:i\s+)?(?:agree|accept|consent|acknowledge|confirm)\s+to\s+(?:the\s+)?(?:above|terms|policy|notice|statement|conditions)`
+  + String.raw`)$`,
+);
+
+export function isConsentRefusingWording(value: string): boolean {
+  return CONSENT_REFUSING_OPTION.test(comparableOption(value ?? ''));
+}
+
+export function isConsentAcceptingWording(value: string): boolean {
+  const key = comparableOption(value ?? '');
+  if (!key || CONSENT_REFUSING_OPTION.test(key)) return false;
+  return CONSENT_ACCEPTING_OPTION.test(key);
+}
+
+/** What Litos puts in a consent control when it accepts. Snapped onto the control's own option list
+ *  by chooseConsentOption (lib/profileFieldResolution.ts) whenever the control has one. */
+export const CONSENT_ACCEPTANCE_VALUE = 'Yes';
+
+/** The grant, or grants, that licensed one acceptance. What the packet records. */
+export type ConsentAcknowledgementLicence = { granted_at?: string; version: string };
+
+/**
+ * The permission covering every class this label belongs to, or null.
+ *
+ * ALL classes, not any: a label naming both a privacy notice and a code of conduct is licensed only
+ * by an applicant who granted both, and is held by one who granted either alone. The combined
+ * record is what the packet stores, so `granted_at` is the LATER of the grants, which is the moment
+ * the acceptance actually became licensed, and `version` names every set of words she was shown.
+ *
+ * Null for everything else - no permission, wrong class, vetoed label - so the caller falls through
+ * to the refusals that are already there and nothing about main's behaviour changes for an account
+ * that has not granted this.
+ */
+export function consentAcknowledgementLicence(
+  label: string,
+  ap: ApplicationProfileLike,
+  employerContext?: string,
+): ConsentAcknowledgementLicence | null {
+  const classes = consentAcknowledgementClasses(label, employerContext);
+  if (classes.length === 0) return null;
+  const grants = classes.map((klass) => (klass === 'conduct'
+    ? ap.conduct_acknowledgement_permission
+    : ap.consent_acknowledgement_permission));
+  if (grants.some((grant) => !grant)) return null;
+  const held = grants as ConsentAcknowledgementLicence[];
+  /* NAMED BY CLASS, NOT BY VERSION STRING ALONE. Both permissions currently carry the same date, so
+   * deduping on the version collapsed a two-grant acceptance to one indistinguishable string and the
+   * packet could not say which permissions were used. Pairing each version with the class it belongs
+   * to keeps both visible whether or not their wordings ever diverge. */
+  const versions = classes.map((klass, index) => `${klass}@${held[index].version}`);
+  const dates = held.map((grant) => grant.granted_at).filter((at): at is string => !!at);
+  return {
+    version: versions.join(' + '),
+    // Undefined only when no grant carried a timestamp, which the loader does not produce for a
+    // granted permission. Left optional rather than invented.
+    ...(dates.length === held.length && dates.length > 0
+      ? { granted_at: dates.reduce((latest, at) => (at > latest ? at : latest)) }
+      : {}),
+  };
+}
+
+/** The consent answer, or null. One gate, shared by the resolver, the option matcher and the
+ *  pre-script, so the three cannot disagree about whether a control may be accepted. */
+export function consentAcknowledgementAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+  employerContext?: string,
+): { value: string } | null {
+  return consentAcknowledgementLicence(label, ap, employerContext) ? { value: CONSENT_ACCEPTANCE_VALUE } : null;
+}
 
 const NATIONALITY_TO_COUNTRY: Record<string, string> = {
   indian: 'India', american: 'United States', emirati: 'United Arab Emirates',
@@ -3222,6 +4588,22 @@ const EXPLICIT_CITY_QUESTION =
 // ordering - refusals first, citizenship before residence, term before start date, state before
 // city). `label` must already be lowercased by the caller.
 export function classifyField(label: string, type?: string): ProfileKey | null {
+  const key = classifyFieldIntent(label, type);
+  /* THE CURRENT PROGRAMME CANNOT ANSWER A QUESTION ABOUT THE HIGH SCHOOL.
+   *
+   * Gated on the KEY, not on where the rule sits in the chain below. The first draft was an early
+   * `return null` partway down that chain, and it silently took the arms underneath it with it:
+   * "What city do you live in? (not the city of your high school)" stopped classifying as
+   * address_city, and languages, phone and availability_date sat below it too. Reading the key
+   * makes the blast radius exactly the education facts and nothing else, by construction rather
+   * than by placement - the same shape as the CURRENT_PROGRAMME_KEYS gate resolveKnownAnswer
+   * already applies to a FUTURE programme. See questionIsScopedToHighSchool for the measured wrong
+   * answers on both sides of this. */
+  if (key && CURRENT_PROGRAMME_KEYS.has(key) && questionIsScopedToHighSchool(label ?? '')) return null;
+  return key;
+}
+
+function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
   const l = label ?? '';
   if (isRefusedQuestion(l)) return null;
   /* Belt and braces on the "Dubai" defect. resolveKnownAnswer already short-circuits these labels,
@@ -3986,6 +5368,13 @@ export function discoveredFieldIsRequired(field: Pick<DiscoveredQuestion, 'label
   return field.required === true || labelMarksRequired(field.label);
 }
 
+/* The subjects that make an email control a DIFFERENT address from the one on the packet. Read only
+ * by isCoreIdentityField below; see the rationale there. Deliberately institutions and third parties
+ * rather than a general modifier test: "personal email" and "contact email" are still hers, still
+ * filled by the fixed-field pass, and must stay out of the applicant's question list. */
+const NON_APPLICANT_EMAIL_SUBJECT =
+  /\b(?:universit(?:y|ies)|college|school|campus|academic|student|institution(?:al)?|faculty|professor|advisor|adviser|supervisor|manager|employer|company|work|business|reference|referee|recommender|parent|guardian|emergency|spouse|colleague|friend)\b/i;
+
 /**
  * The applicant's name and email, which every family's fixed-field pass fills from the packet
  * before discovery ever runs.
@@ -4000,13 +5389,30 @@ export function discoveredFieldIsRequired(field: Pick<DiscoveredQuestion, 'label
  * "Legal first name" and "Preferred first name" are excluded deliberately. They are separate
  * questions an employer asks precisely because the answer may differ from the name on the resume,
  * and if one is required and unanswerable it is genuinely the applicant's to answer.
+ *
+ * AND SO IS AN EMAIL THAT IS NOT THAT ONE. The claim above is about a SINGLE control - the address
+ * the packet carries, typed by a hardcoded per-portal selector (lib/portalSubmission.ts) - and the
+ * bare `email` test claimed every email control on the form instead. IMC asks "Please provide your
+ * university email address." as a required field. It matched, so postingQuestionsFromDiscovered
+ * dropped it from the stored inventory before anything could ask about it
+ * (lib/postingQuestions.ts), and the runner's `discoveredFieldIsRequired(field) &&
+ * !isCoreIdentityField(label)` forced it non-required so no question record was manufactured either
+ * (routes/submissionRunner.ts) - while no fixed-field selector fills anything but the identity
+ * control. On 2026-08-12 that was measured end to end: zero email-labelled rows in the whole
+ * posting_questions table, the portal refusing the form, and the packet reporting "1 required field
+ * has no question you can answer in Litos". The predicate suppressed a question on the strength of a
+ * fill that structurally could not happen.
+ *
+ * A SUBJECT beside the noun is what says the address belongs to someone or something other than the
+ * applicant-as-account-holder. "Email", "Email address", "Confirm email address" carry none and are
+ * still core identity, which is the whole point of the predicate and is unchanged.
  */
 export function isCoreIdentityField(label: string): boolean {
   const l = (label ?? '').toLowerCase();
   if (!l) return false;
   if (/\b(?:legal|preferred|maiden|previous|former|nick)\b/.test(l)) return false;
   if (/\b(?:first|last|given|family|sur|full)\s*name\b|^name\b|\bname\s*\*/.test(l)) return true;
-  return /\be-?mail\b/.test(l);
+  return /\be-?mail\b/.test(l) && !NON_APPLICANT_EMAIL_SUBJECT.test(l);
 }
 
 const INLINE_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
@@ -4024,7 +5430,60 @@ const GREENHOUSE_SECTION_HANDLE_RE = /\b[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*--\d+\b/
 // What is left of an array-shaped question name (question_37536799002[]) once the handle above is
 // removed. A bare "[]" is not part of anyone's question.
 const EMPTY_BRACKET_HANDLE_RE = /\[\s*\]/g;
+/* Lever's custom-question handle: name="cards[<uuid>][field0]". Same family as the Greenhouse
+ * section handles above, same damage. Discovery concatenates `name` onto the visible label, the
+ * uuid strip turns the middle bracket into "[ ]" and EMPTY_BRACKET_HANDLE_RE clears it, and what
+ * survives into the stored question is "cards [field0]". Measured on the owner's 11 Palantir
+ * packets of 2026-08-11, which stored questions literally titled "cards [field0]",
+ * "yes cards [field0]" and "english (eng) cards [field0]".
+ *
+ * Stripping it does two things. A question that had real label text keeps only that text, so the
+ * `label:has-text(...)` scope can match the employer's own label. A row that had NO label text
+ * beyond the handle normalizes to the empty string and is dropped by the callers that already drop
+ * empty labels, which is right: "cards [field0]" names a field, tells the applicant nothing, and
+ * cannot be answered by anyone. */
+const LEVER_CARD_HANDLE_RE = /\bcards\s*\[\s*field\d+\s*\]/gi;
 const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?:answer\s+)?here(?:\.{3}|…)?\s*$/i;
+
+/* EVERY POSITIVELY IDENTIFIED PROVIDER HANDLE, in one list and in strip order.
+ *
+ * The list is the definition of "this string is a machine handle, not a question", and it is now
+ * read in two places: normalizeDiscoveredLabel below, and the page script's own handle test (see
+ * PROVIDER_HANDLE_ONLY_SCRIPT). Those two have to agree exactly - the whole safety argument for the
+ * page script's fall-through is that a string it calls handle-only is a string this module would
+ * have normalized to '' and dropped - so there is one array rather than two copies of six regexes.
+ *
+ * Order is load-bearing: INLINE_UUID_RE has to run before EMPTY_BRACKET_HANDLE_RE, because clearing
+ * the uuid out of `cards[<uuid>][field0]` is what leaves the bare `[ ]` for it to remove. */
+const PROVIDER_HANDLE_STRIPPERS: readonly RegExp[] = [
+  INLINE_UUID_RE,
+  GREENHOUSE_QUESTION_HANDLE_RE,
+  GREENHOUSE_SECTION_HANDLE_RE,
+  EMPTY_BRACKET_HANDLE_RE,
+  LEVER_CARD_HANDLE_RE,
+  GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE,
+];
+
+function stripProviderHandles(raw: string): string {
+  return PROVIDER_HANDLE_STRIPPERS.reduce((value, handle) => value.replace(handle, ' '), raw ?? '');
+}
+
+/**
+ * NOTHING BUT A PROVIDER HANDLE: every letter in this string belongs to a handle this module can
+ * name, so removing them all leaves no word a person wrote.
+ *
+ * The one test the page script's questionLabel is allowed to fall through on, and deliberately the
+ * same test as "normalizeDiscoveredLabel would return '' for this": a string with no letters left
+ * after the strip is empty or punctuation, tidyLabel cannot rescue it, and isOpaqueIdentifier
+ * rejects anything with no `\p{L}` outright. So a field this returns true for is a field whose
+ * label is discarded today, and recovering it can only add a question, never rename one.
+ *
+ * `\p{L}` and not `[a-z]`: a Japanese or Arabic label is a label. Empty is handle-only by the same
+ * reading (there is nothing a person wrote), and every caller guards for empty separately.
+ */
+export function isProviderHandleOnly(value: string): boolean {
+  return !/\p{L}/u.test(stripProviderHandles(value ?? ''));
+}
 
 function collapseRepeatedLabel(value: string): string {
   const words = value.trim().split(/\s+/).filter(Boolean);
@@ -4042,12 +5501,7 @@ function collapseRepeatedLabel(value: string): string {
  * leaving the employer's full question intact for both display and label-based filling.
  */
 export function normalizeDiscoveredLabel(raw: string): string {
-  const withoutHandles = raw
-    .replace(INLINE_UUID_RE, ' ')
-    .replace(GREENHOUSE_QUESTION_HANDLE_RE, ' ')
-    .replace(GREENHOUSE_SECTION_HANDLE_RE, ' ')
-    .replace(EMPTY_BRACKET_HANDLE_RE, ' ')
-    .replace(GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE, ' ')
+  const withoutHandles = stripProviderHandles(raw)
     .replace(/\s+/g, ' ')
     .trim();
   const withoutPlaceholder = withoutHandles.replace(TRAILING_ANSWER_PLACEHOLDER_RE, '').trim();
@@ -4065,6 +5519,169 @@ function truncateReviewQuestionLabel(label: string): string {
 export function normalizeReviewQuestionLabel(raw: string): string {
   const label = normalizeDiscoveredLabel(raw);
   return label ? truncateReviewQuestionLabel(label) : '';
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * WHEN A DISCOVERED FIELD IS NOT A QUESTION.
+ *
+ * The DOM walk sweeps `input[type="radio"], input[type="checkbox"]` as individual fields. For a
+ * radio with no fieldset/legend and no role=group[aria-label], questionLabel falls through to
+ * `el.labels[0]`, and for a radio that element is the OPTION's own label. So a stored row reads
+ * `{label: 'Yes', options: ['Yes', 'No']}` - the question is gone and one of its answers is
+ * standing where the question should be.
+ *
+ * Nothing downstream can recover from that. The Apply screen prints "Yes" as a question and asks
+ * her to answer it; the fill pass scopes `label:has-text("yes")`, which matches the first "Yes" on
+ * the page and may belong to a different control entirely. Measured on the owner's 158 packets on
+ * 2026-08-11: 11 Palantir packets each carried "Yes", "Yes, I consent" and "English (ENG)" as
+ * required questions, and the four questions the form actually asked - University, Year of
+ * Graduation, Major, "How did you hear about this internship opportunity?" - had no record at all.
+ *
+ * Three tests, in strength order. Each is narrow on purpose: a rejected required field becomes a
+ * blocker the applicant has to finish by hand, which is better than a wrong answer typed onto an
+ * employer's form and worse than a correct question. Recovery is tried first (see
+ * recoveredGroupQuestionLabel); rejection is what is left when there is nothing to recover.
+ *
+ * WHAT MUST SURVIVE ALL THREE. "Privacy" (8 packets) and "Privacy statement" (7) are Point72's and
+ * IMC's real bare labels for a consent checkbox. They are answered by BARE_PRIVACY_ACKNOWLEDGEMENT
+ * against the accept_privacy_notices column and she has a saved answer for both. They are short and
+ * they are not sentences, so any rule shaped like "reject short labels" or "reject labels that are
+ * not questions" deletes an answer Litos already has. There is no minimum length here for that
+ * reason, and postingQuestions.test.ts fails if either is ever dropped.
+ * --------------------------------------------------------------------------------------------- */
+
+/** Compare the way a human reads a control: case, punctuation and spacing carry no meaning here. */
+function comparableAnswerToken(value: string): string {
+  return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * THE EXACT TEST: the label is a member of its own option list.
+ *
+ * A question is never one of its own answers. When the provider reports options this needs no
+ * vocabulary, no length rule and no judgement, and it cannot be fooled by an employer whose
+ * question happens to be short.
+ */
+export function discoveredLabelIsOwnOption(label: string, options: readonly string[] | null | undefined): boolean {
+  const key = comparableAnswerToken(label);
+  if (!key || !options || options.length < 2) return false;
+  return options.some((option) => comparableAnswerToken(option) === key);
+}
+
+/**
+ * THE CLOSED VOCABULARY, for the managed path where `options` is undefined.
+ *
+ * stratus-browser-cloud reports no option list, so the exact test above has nothing to compare
+ * against and every radio option arrives looking like a question. This is the fallback and it is
+ * deliberately a CLOSED list of answer tokens rather than a shape rule: everything here is a thing
+ * an applicant says back to a form, and none of it is a thing an employer asks.
+ *
+ * Kept short on purpose. Every entry added here is a required field that may stop being asked, so
+ * the bar is "no employer would ever label a control this" - which is why "other", "none" and
+ * "please specify" are absent even though they are common option texts: they are also plausible
+ * bare labels for a free-text follow-up.
+ */
+const ANSWER_TOKEN_LABELS: ReadonlySet<string> = new Set([
+  'yes', 'no', 'yes i consent', 'no i do not consent', 'i consent', 'i do not consent',
+  'i agree', 'i do not agree', 'i accept', 'i decline', 'i acknowledge', 'i confirm',
+  'agree', 'disagree', 'accept', 'decline', 'acknowledge', 'confirm',
+  'true', 'false', 'n a', 'not applicable',
+  'prefer not to say', 'prefer not to answer', 'decline to self identify',
+  'i do not wish to answer', 'i do not want to answer', 'i don t wish to answer',
+]);
+
+/* A language checkbox's own option, "English (ENG)" / "Español (SPA)": a name followed by its
+ * ISO-639 code in brackets and nothing else. Observed on all 11 Palantir packets. An employer
+ * asking about languages writes a sentence ("Which languages do you speak?"), never this. */
+const LANGUAGE_OPTION_SHAPE = /^[\p{L}][\p{L}\s'’-]{1,30}\(\s*[A-Za-z]{2,3}\s*\)$/u;
+
+export function discoveredLabelIsAnswerToken(label: string): boolean {
+  const key = comparableAnswerToken(label);
+  if (!key) return false;
+  if (ANSWER_TOKEN_LABELS.has(key)) return true;
+  return LANGUAGE_OPTION_SHAPE.test((label ?? '').trim());
+}
+
+/**
+ * THE WIDGET-NOISE TEST: the label is a composite control's whole rendered subtree.
+ *
+ * questionLabel used to read `textContent`, not `innerText`, so a `<label>` wrapping a composite
+ * widget returned every text node under it - including the ones the user cannot see - concatenated
+ * with no separators. The DOM script now prefers innerText, which stops NEW captures having this
+ * shape; this test is what handles the captures that already exist and any port still on
+ * textContent (the extension and stratus-browser-cloud each hold their own copy of the walk).
+ *
+ * Matched on markers rather than on length or on fused case, because both of those catch real
+ * questions: employers write 200-character questions, and "LinkedIn" and "JavaScript" have a fused
+ * case boundary in the middle of an ordinary word.
+ *
+ * WHAT IS MEASURED AND WHAT IS REASONED, because the difference matters to whoever edits this next.
+ *
+ *   MEASURED. Over the owner's 158 packets and 1757 stored question rows on 2026-08-11, exactly one
+ *   marker fires: the typeahead empty state, on
+ *       "Current location ✱No location found. Try entering a different locationLoading location
+ *        location-input"
+ *   which is the heading, the required glyph, the empty state and the loading node fused. It is the
+ *   Palantir location blocker, on 11 packets, and it is the only row in the corpus any marker
+ *   rejects. The whole gate rejects 47 rows and every one of them is a Palantir option or handle.
+ *
+ *   REASONED, not observed firing anywhere. The four react-select markers below. They exist because
+ *   the same corpus holds a label that IS this shape and that none of them catch:
+ *       "Disability statusSelect ...Yes, I have a disability...I do not want to answer
+ *        eeo[disability] disabilitySelectElement"
+ *   The fusion is what defeats them: "statusSelect" leaves no word boundary before "select", so
+ *   \bselect never matches. That row is deliberately left alone rather than chased with a looser
+ *   pattern. It is an EEO question Litos already answers correctly from the profile, so rejecting it
+ *   would delete a working answer to tidy up a label, and dropping the \b to catch it would put
+ *   every question containing the word "select" at risk. The markers are kept for the spaced form
+ *   the innerText change now produces, where the boundary exists and the match is unambiguous.
+ *
+ * The general rule for this family is the option-swallowing test below, which needs no vocabulary
+ * at all. These markers are only what covers the managed path, where no options are reported.
+ */
+const WIDGET_SUBTREE_MARKERS: readonly RegExp[] = [
+  // Measured: the only marker the 2026-08-11 corpus exercises.
+  /\bno\s+\w[\w\s]{0,24}\s+found\b[\s\S]{0,60}\btry\s+(?:entering|again|a\s+different)\b/i,
+  // Reasoned: react-select's placeholder and DOM residue, in the spaced form innerText produces.
+  /\bselect\s*\.{3}/i,
+  /\bselect\s*…/,
+  /\bselect\s*element\b/i,
+  /\btype\s+to\s+search\b[\s\S]{0,40}\bloading\b/i,
+];
+
+export function discoveredLabelIsWidgetNoise(
+  label: string,
+  options?: readonly string[] | null,
+): boolean {
+  const raw = (label ?? '').trim();
+  if (!raw) return false;
+  if (WIDGET_SUBTREE_MARKERS.some((marker) => marker.test(raw))) return true;
+  /* The label has swallowed its own answers. Two is the threshold rather than one, because a
+   * legitimate question can quote a single option ("Select Other if not listed"). */
+  if (!options || options.length < 2) return false;
+  const key = comparableAnswerToken(raw);
+  const swallowed = options.filter((option) => {
+    const token = comparableAnswerToken(option);
+    return token.length >= 4 && key.includes(token);
+  });
+  return swallowed.length >= 2;
+}
+
+/**
+ * The one decision the ingest points share: is this row a question at all?
+ *
+ * Both callers - postingQuestionsFromDiscovered for the pre-script, and the submission runner's
+ * discoverAndResolveQuestions for the packet - ask this, so the Apply screen and the fill pass can
+ * never disagree about what the form asked.
+ */
+export function discoveredFieldIsNotAQuestion(
+  field: Pick<DiscoveredQuestion, 'label' | 'options'>,
+): boolean {
+  const label = field?.label ?? '';
+  if (!label.trim()) return false;
+  if (discoveredLabelIsWidgetNoise(label, field.options)) return true;
+  if (discoveredLabelIsOwnOption(label, field.options)) return true;
+  return discoveredLabelIsAnswerToken(label);
 }
 
 function isFixedPortalProfileField(portal: SupportedPortal, label: string): boolean {
@@ -4124,6 +5741,22 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
   return normalized;
 }
 
+/* isProviderHandleOnly, compiled for the page.
+ *
+ * The page script cannot import from this module, and a second hand-written copy of six regexes is
+ * exactly the drift that would break the safety argument, so the ONE list above is serialised into
+ * the script instead. The test itself is the same three lines as the TypeScript twin, and
+ * questionDiscovery.test.ts asserts the twin agrees with normalizeDiscoveredLabel on every shape
+ * this file knows about. */
+export const PROVIDER_HANDLE_ONLY_SCRIPT = `function isProviderHandleOnly(value) {
+    var strippers = ${JSON.stringify(PROVIDER_HANDLE_STRIPPERS.map((handle) => [handle.source, handle.flags]))};
+    var rest = value == null ? '' : String(value);
+    for (var s = 0; s < strippers.length; s += 1) {
+      rest = rest.replace(new RegExp(strippers[s][0], strippers[s][1]), ' ');
+    }
+    return !/\\p{L}/u.test(rest);
+  }`;
+
 // Passed to page.evaluate() as a source STRING rather than a typed function: this backend's
 // tsconfig has no "dom" lib (it is a Node project), so a typed function here would need
 // document/HTMLElement/getComputedStyle typed against a lib this project deliberately doesn't
@@ -4134,7 +5767,7 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
 // answer resolution, then filled later by label-scoped actions rather than direct selector typing.
 // Keep this in sync with the extension source by hand, the same as any other ported function in
 // this file.
-const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
+export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   function clean(s) {
     return (s == null ? '' : s).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
   }
@@ -4162,6 +5795,94 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     var rect = el.getBoundingClientRect();
     return style.opacity === '0' || (rect.width <= 1 && rect.height <= 1);
   }
+  /* THE QUESTION A CHOICE CONTROL BELONGS TO, when the DOM never said so in a standard way.
+   *
+   * For a radio or a checkbox, el.labels[0] is the OPTION's label - "Yes", "English (ENG)" - and
+   * returning it stores an answer where the question should be. The two standard sources are tried
+   * first by questionLabel (fieldset/legend, role=group[aria-label]); these are what is left when a
+   * board renders a group as plain divs, which Lever's custom-question cards do.
+   *
+   *   1. aria-labelledby on the control or on its group. An explicit pointer to the question, and
+   *      the only one of these three that the page author wrote on purpose.
+   *   2. The heading of the block the control sits in. Bounded to the nearest ancestor that holds
+   *      MORE THAN ONE choice control - that is what makes it a group rather than a single field -
+   *      and read from a heading element or the block's first label, never from the whole subtree.
+   *
+   * Returns '' when it finds nothing, and the caller falls through to its existing behaviour. This
+   * only ever adds a question that was previously lost; it cannot rename one that was already right,
+   * because questionLabel reaches it only after legend and aria-label have both come back empty. */
+  function recoveredGroupLabel(el) {
+    var byIds = function (node) {
+      var ids = node && node.getAttribute ? (node.getAttribute('aria-labelledby') || '') : '';
+      if (!ids) return '';
+      var out = [];
+      var list = ids.split(/\s+/);
+      for (var i = 0; i < list.length; i += 1) {
+        if (!list[i]) continue;
+        var ref = document.getElementById(list[i]);
+        var text = ref ? clean(ref.innerText || ref.textContent || '') : '';
+        if (text) out.push(text);
+      }
+      return clean(out.join(' '));
+    };
+    var own = byIds(el);
+    if (own) return own;
+    var group = el.closest('[role="group"], [role="radiogroup"], fieldset');
+    var viaGroup = group ? byIds(group) : '';
+    if (viaGroup) return viaGroup;
+    var node = el.parentElement;
+    for (var depth = 0; node && depth < 6; depth += 1) {
+      var controls = node.querySelectorAll('input[type="radio"], input[type="checkbox"]');
+      if (controls.length > 1) {
+        var heading = node.querySelector('h1, h2, h3, h4, h5, h6, legend, .application-label, .application-question');
+        var headingText = heading ? clean(heading.innerText || heading.textContent || '') : '';
+        if (headingText) return headingText;
+        return '';
+      }
+      node = node.parentElement;
+    }
+    return '';
+  }
+  ${PROVIDER_HANDLE_ONLY_SCRIPT}
+  /* Control text that names the CONTROL and not the question: an Ashby datepicker's own label
+   * reads "Pick date...". Verbatim from the submit-readiness gate's genericControlText in
+   * portalSubmission.ts, and kept identical on purpose - the two walks must not disagree about
+   * which strings are questions. */
+  function genericControlText(value) {
+    return /^(pick|select|choose)\s+(date|option)|^(type|enter|write)\s+(your\s+)?(answer\s+)?here/i.test(clean(value));
+  }
+  /* THE QUESTION A CONTROL SITS UNDER, when the control itself is labelled with nothing but a
+   * provider handle. A verbatim port of nearestQuestionText from READ_SUBMIT_READINESS_SCRIPT in
+   * portalSubmission.ts, which is the walk that already names these very fields in the blocker
+   * text the applicant sees - so recovering the question here makes the Apply screen and the
+   * blocker line say the same words about the same field.
+   *
+   * A BLOCK HOLDING MORE THAN ONE CONTROL ENDS THE WALK, and that bound is the whole safety of it.
+   * The first label inside a block with two controls belongs to one of them in particular, and
+   * borrowing it names the other field wrongly. Measured on the live Palantir Lever form on
+   * 2026-08-11: the "High School Name & Graduation Year" card holds two controls, so the walk stops
+   * and both stay honest "no label Litos can read" blockers, while the seven single-control cards
+   * recover their own headings. A wrong question is worse than a missing one - the resolver answers
+   * "High School Name" out of the education profile and would type her UNIVERSITY into it.
+   *
+   * Returns '' when it finds nothing, and the caller keeps whatever it had. */
+  function nearestQuestionText(el) {
+    var node = el.parentElement;
+    for (var depth = 0; node && depth < 6; depth += 1, node = node.parentElement) {
+      if (!node.matches || !node.matches('div, section, li, fieldset')) continue;
+      if (node.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
+      var candidate = node.querySelector('label, legend, .question, h3, h4');
+      /* textContent, NOT innerText, and this one is measured rather than inherited. Lever paints
+       * its card headings with text-transform:uppercase, and innerText reports the transformed
+       * glyphs: the same heading read as "UNIVERSITY", "YEAR OF GRADUATION", "UNIVERSITY MAJOR".
+       * That is the employer's styling, not the employer's words, and storing it would show the
+       * applicant a shouted question and disagree with the blocker line about the same field.
+       * textContent reads the markup, which is what the submit-readiness gate reads. */
+      var text = clean((candidate && candidate.textContent) || '');
+      if (text && !genericControlText(text)) return text;
+    }
+    return '';
+  }
   function questionLabel(el) {
     var fieldset = el.closest('fieldset');
     var legend = fieldset ? fieldset.querySelector('legend') : null;
@@ -4170,8 +5891,24 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     var group = el.closest('[role="group"], [role="radiogroup"]');
     var groupLabel = group ? group.getAttribute('aria-label') : null;
     if (groupLabel) return groupLabel;
+    var type = (el.getAttribute('type') || '').toLowerCase();
+    if (type === 'radio' || type === 'checkbox') {
+      var recovered = recoveredGroupLabel(el);
+      if (recovered) return recovered;
+    }
     var labelEl = (el.labels && el.labels[0]) || (el.id ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]') : null);
-    var labelText = labelEl && labelEl.textContent ? labelEl.textContent : '';
+    /* innerText, not textContent, with textContent kept as the fallback for a label that is not
+     * rendered. A <label> wrapping a composite widget contains every text node under it, including
+     * the hidden ones, and textContent concatenates them with no separators: the Palantir location
+     * field stored "Current location ✱No location found. Try entering a different locationLoading",
+     * which is the heading, the required glyph, a typeahead empty state and a loading node fused
+     * into one string. innerText reports what a person can actually see. */
+    var labelText = labelEl ? (clean(labelEl.innerText || '') || (labelEl.textContent || '')) : '';
+    var written = clean([
+      labelText || '',
+      el.getAttribute('aria-label') || '',
+      el.getAttribute('placeholder') || '',
+    ].join(' '));
     var parts = [
       labelText || '',
       el.getAttribute('aria-label') || '',
@@ -4180,6 +5917,33 @@ const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
       el.id || '',
     ];
     var own = clean(parts.join(' '));
+    /* THE HANDLE THAT IS NOT A LABEL.
+     *
+     * own is the visible label, the aria-label and the placeholder concatenated with the control's
+     * name and id, and returning it whenever it is merely non-empty means a field with NOTHING but
+     * a name returns that name. Lever's custom questions are built that way - the question text
+     * sits in a sibling div.application-label, never in a label element, and the control carries
+     * only name="cards[<uuid>][field0]". Measured against the live Palantir posting on 2026-08-11:
+     * nine controls came back as a bare cards handle, normalizeDiscoveredLabel dropped all nine as
+     * handle-only, and the form came back with "University" is required and is still empty, the
+     * same for "Year of Graduation" and "University Major", while the packet held USC Viterbi, 2028
+     * and Computer Science.
+     *
+     * BOTH CONDITIONS, and both are needed:
+     *   - nothing a person wrote (no label text, no aria-label, no placeholder), so a field that has
+     *     any human text keeps it and this branch cannot touch it; and
+     *   - what is left is nothing but handles this module can name (isProviderHandleOnly), so a
+     *     meaningful name or id - firstName, school, gpa - is still a label and is kept.
+     *
+     * That pair is exactly the set of fields whose label is thrown away today, which is why this
+     * cannot rename a question that already reads correctly: it only ever runs where the stored
+     * label would have been the empty string. And when the walk finds nothing either, own is
+     * returned unchanged and the field is dropped as before - no heading is invented for a field
+     * that has none. */
+    if (own && !written && isProviderHandleOnly(own)) {
+      var underHeading = nearestQuestionText(el);
+      if (underHeading) return underHeading;
+    }
     if (own) return own;
     var block = el.closest('div, section, li');
     var fallback = block ? block.querySelector('label, legend, .question, h3, h4') : null;
@@ -4377,6 +6141,20 @@ export function resolveKnownAnswer(
   const highSchool = highSchoolGraduationAnswer(label, ap);
   if (highSchool) return highSchool;
 
+  /* Directly after it, so the graduation date answers its own questions and nothing else about
+   * high school is answered from the university programme. Up here with the self-declarations for
+   * the reason the block header gives: this is a label a broad rule has already answered wrongly on
+   * a live form, and being up here is what stops any later rule reaching it. */
+  const highSchoolRecord = highSchoolRecordRefusal(label);
+  if (highSchoolRecord) return highSchoolRecord;
+
+  /* Up here with the self-declarations for the reason the block header gives, and this one has the
+   * receipt: "please provide your university email address" is a label a broad rule ALREADY answered
+   * wrongly on a live form, with the university's name. Being above every classifier is what stops
+   * any later rule reaching it again. See academicEmailAnswer. */
+  const academicEmail = academicEmailAnswer(label, ap);
+  if (academicEmail) return academicEmail;
+
   const previouslyApplied = previouslyAppliedAnswer(label, ap, jdText);
   if (previouslyApplied) return previouslyApplied;
 
@@ -4385,6 +6163,21 @@ export function resolveKnownAnswer(
 
   const outstandingOffer = outstandingOfferAnswer(label, inputType, ap);
   if (outstandingOffer) return outstandingOffer;
+
+  /* THE CONSENT CLASS, accepted under the applicant's standing permission and not otherwise.
+   *
+   * Placed immediately before the refusals it supersedes, so that with no permission on the row
+   * every label below reaches exactly the handler it reaches on main. It is ABOVE
+   * applicationConsentAnswer because that one holds "privacy statement" and "interview code of
+   * conduct" by name, which are the two labels this exists to accept.
+   *
+   * It is therefore also above workEligibilityAnswer, the EEO branch and isRefusedQuestion, and
+   * that is the reason isConsentAcknowledgementQuestion vetoes on its own held vocabulary before it
+   * matches anything: being early means it cannot rely on a later rule to catch a declaration for
+   * it. Every one of those families is in HELD_DECLARATION_VOCABULARY, and consentBoundary tests
+   * assert it against the same labels those handlers own. */
+  const consentAcknowledgement = consentAcknowledgementAnswer(label, ap, jdText);
+  if (consentAcknowledgement) return consentAcknowledgement;
 
   const applicationConsent = applicationConsentAnswer(label);
   if (applicationConsent) return applicationConsent;
@@ -4730,3 +6523,4 @@ export function resolveKnownAnswer(
       return null;
   }
 }
+

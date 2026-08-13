@@ -50,6 +50,7 @@ import {
   MANAGED_OPTION_EXTRACT_PREFIX,
   managedResultHasCoverLetterUpload,
   portalApplicationUrl,
+  navigateToApplicationForm,
   portalCanAutoSubmit,
   portalHandoffReason,
   readManagedReceipt,
@@ -3000,6 +3001,54 @@ test('Workable uploads the resume by data-ui, never by id or a bare file selecto
   assert.notEqual(upload!.selector, 'input[type="file"]');
 });
 
+test('Workable opens the exact application route and clears optional-cookie overlays before filling', () => {
+  const posting = 'https://apply.workable.com/mercari/j/EC5A1078C4/';
+  const application = 'https://apply.workable.com/mercari/j/EC5A1078C4/apply';
+  assert.equal(portalApplicationUrl('workable', posting), application);
+  assert.equal(portalApplicationUrl('workable', application), application);
+
+  const actions = buildManagedPortalActions('workable', capturePacket, true);
+  const declineIndex = actions.findIndex((action) => action.label === 'workable_cookie_preflight');
+  const readyIndex = actions.findIndex((action) => action.label === 'workable_application_form_ready');
+  const firstNameIndex = actions.findIndex((action) => action.label === 'first_name');
+  assert.ok(declineIndex >= 0, 'Workable must dismiss the cookie overlay without accepting optional cookies');
+  assert.equal(actions[declineIndex]?.selector, 'button:has-text("Decline all")');
+  assert.ok(readyIndex > declineIndex, 'Workable must wait for the candidate form after cookie preflight');
+  assert.ok(firstNameIndex > readyIndex, 'Workable form readiness must precede fixed-field filling');
+});
+
+test('direct Workable preparation reaches the same form and declines optional cookies', async () => {
+  let currentUrl = 'https://apply.workable.com/mercari/j/EC5A1078C4/';
+  const events: string[] = [];
+  const fakePage = {
+    url: () => currentUrl,
+    goto: async (destination: string) => {
+      currentUrl = destination;
+      events.push(`goto:${destination}`);
+    },
+    locator: (selector: string) => ({
+      first: () => selector === 'button:has-text("Decline all")'
+        ? {
+          count: async () => 1,
+          isVisible: async () => true,
+          click: async () => { events.push('decline'); },
+        }
+        : {
+          waitFor: async () => { events.push('ready'); },
+        },
+    }),
+  } as unknown as Page;
+
+  await navigateToApplicationForm(fakePage, 'workable');
+
+  assert.equal(currentUrl, 'https://apply.workable.com/mercari/j/EC5A1078C4/apply');
+  assert.deepEqual(events, [
+    'goto:https://apply.workable.com/mercari/j/EC5A1078C4/apply',
+    'decline',
+    'ready',
+  ]);
+});
+
 test('Workable never ticks the GDPR consent checkbox', () => {
   const actions = buildManagedPortalActions('workable', capturePacket, true);
   assert.equal(actions.some((action) => JSON.stringify(action).includes('gdpr')), false);
@@ -5260,6 +5309,99 @@ test('failed exact applicant GPA, degree, and university controls still suppress
   }
 });
 
+/* A SPECULATIVE ALIAS FIRED AT A CONTROL THAT WAS ALREADY ANSWERED CORRECTLY.
+ *
+ * The alias ladders push the RAW profile value at a label: "3.89" at "GPA", "May 2028" at
+ * "Graduation Date". fillByLabelText resolves a label to its own container's input, so on a form
+ * whose GPA control is a list of bands this lands in the SAME react-select the resolver has just
+ * filled with the exact band, "3.81 - 3.9". The raw value is not on the employer's list, so the fill
+ * fails, and the failure is then read back to her as `Litos could not leave an answer on the form:
+ * no option matched "3.89"` about a field that is filled correctly.
+ *
+ * Measured across the five prod packets carrying that exact sentence, 2026-08-11: all five have the
+ * GPA field present in filled_fields and none has a GPA required-and-empty blocker. Five false
+ * alarms, zero real ones.
+ *
+ * The action is suppressed rather than the message, because a react-select gets ONE attempt: a raw
+ * guess fired after the exact answer is a live risk to the answer, not only a lie about it. */
+const PROBED_GPA_BANDS = ['Below 3.0', '3.0 - 3.5', '3.51 - 3.8', '3.81 - 3.9', '3.91 - 4.0'];
+const PROBED_GRADUATION_WINDOWS = ['July 2027 - December 2027', 'January 2028 - July 2028'];
+
+test('a speculative alias never fires at a control the resolver has already answered', () => {
+  const answered = buildManagedPortalActions('greenhouse', andurilPacket({
+    // The probe read both lists off the live page. That is what makes "3.89" and "May 2028"
+    // provably unofferable here rather than merely redundant.
+    fieldOptions: {
+      question_5550001: PROBED_GPA_BANDS,
+      question_9176667101: PROBED_GRADUATION_WINDOWS,
+    },
+    questions: [
+      { question: 'What is your GPA?', answer: '3.81 - 3.9', portalSelector: '#question_5550001', portalInputType: 'combobox' },
+      { question: 'Expected graduation date', answer: 'January 2028 - July 2028', portalSelector: '#question_9176667101', portalInputType: 'combobox' },
+    ],
+  }));
+  assert.equal(answered.some((action) => action.value === '3.89'), false, 'raw GPA must not be guessed at an answered control');
+  assert.equal(answered.some((action) => action.value === 'May 2028'), false, 'raw graduation date must not be guessed at an answered control');
+  assert.deepEqual(answered.filter((action) => /^(?:gpa|gpa_question|graduation_date)/.test(action.label ?? '')), []);
+  assert.deepEqual(answered.filter((action) => action.label?.startsWith('education_graduation_date_combo')), []);
+  // The resolver's own attempts are untouched: suppressing the guess must not suppress the answer.
+  assert.ok(answered.some((action) => action.selector === '#question_9176667101'));
+  assert.ok(answered.some((action) => action.selector === '#question_5550001'));
+});
+
+test('the alias ladder still fires at a control the resolver did not answer', () => {
+  // The other half of the same rule, and the reason the predicate is narrow. On a form whose
+  // controls carry no label discovery can resolve, the ladder is the only thing that fills anything,
+  // so an empty question list must leave it working exactly as it did.
+  const unanswered = buildManagedPortalActions('greenhouse', andurilPacket({ questions: [] }));
+  assert.ok(unanswered.some((action) => action.label === 'gpa' && action.value === '3.89'));
+  assert.ok(unanswered.some((action) => action.label === 'gpa_question' && action.value === '3.89'));
+  assert.ok(unanswered.some((action) => action.label === 'graduation_date_label' && action.value === 'May 2028'));
+  assert.ok(unanswered.some((action) => action.label?.startsWith('education_graduation_date_combo')));
+
+  // An unrelated answered question does not suppress an unrelated ladder either: the match is an
+  // exact label or a shared closed-field family, never "this packet has some questions in it".
+  const unrelated = buildManagedPortalActions('greenhouse', andurilPacket({
+    fieldOptions: { question_5550003: ['Yes', 'No'] },
+    questions: [{ question: 'Are you able to work onsite three days a week?', answer: 'Yes', portalSelector: '#question_5550003', portalInputType: 'combobox' }],
+  }));
+  assert.ok(unrelated.some((action) => action.label === 'gpa' && action.value === '3.89'));
+  assert.ok(unrelated.some((action) => action.label === 'graduation_date_label' && action.value === 'May 2028'));
+
+  /* NO PROBED LIST, NO SUPPRESSION, and this is the case that decides whether the rule is safe.
+   *
+   * Databricks' graduation date is a reviewed question with no durable selector, so the resolver
+   * only ever attempts it as a scoped react-select. The plain fillByLabelText below is the only
+   * thing that would fill it were the control a text input, and there is no read option list saying
+   * otherwise. Dropping it would trade a false alarm for an actually empty field. */
+  const answeredWithoutProbe = buildManagedPortalActions('greenhouse', andurilPacket({
+    questions: [
+      { question: 'What is your GPA?', answer: '3.81 - 3.9' },
+      { question: 'What is your graduation date?', answer: 'January 2028 - July 2028' },
+    ],
+  }));
+  assert.ok(answeredWithoutProbe.some((action) => action.label === 'gpa' && action.value === '3.89'));
+  assert.ok(answeredWithoutProbe.some((action) => action.label === 'graduation_date' && action.value === 'May 2028'));
+
+  // A guess that IS on the employer's list is not a guess. It stays, because it can succeed.
+  const offeredGuess = buildManagedPortalActions('greenhouse', andurilPacket({
+    fieldOptions: { question_5550004: ['3.89', '3.81 - 3.9'] },
+    questions: [{ question: 'What is your GPA?', answer: '3.81 - 3.9', portalSelector: '#question_5550004', portalInputType: 'combobox' }],
+  }));
+  assert.ok(offeredGuess.some((action) => action.label === 'gpa' && action.value === '3.89'));
+
+  /* A question this run will NOT attempt is not an answer. The failed-control filter drops the
+   * resolver's fill, so the ladder would be the control's only remaining chance - which is why the
+   * refusal here has to come from packetLabelFailed, the rule that says a control Litos could not
+   * read must not be guessed at, rather than from the answered check. */
+  const failedAndAnswered = buildManagedPortalActions('greenhouse', andurilPacket({
+    failedFields: [{ controlId: 'question_5550002', label: 'Expected graduation date', selector: '#question_5550002', inputType: 'combobox' }],
+    questions: [{ question: 'Expected graduation date', answer: 'January 2028 - July 2028', portalSelector: '#question_5550002', portalInputType: 'combobox' }],
+  }));
+  assert.equal(failedAndAnswered.some((action) => action.selector?.includes('question_5550002')), false);
+  assert.equal(failedAndAnswered.some((action) => action.value === 'January 2028 - July 2028'), false);
+});
+
 test('two passes of reads become one map, and an empty read never overwrites a real list', () => {
   const merged = mergeManagedFieldOptions(
     { 'discipline--0': ['Computer Science'], 'degree--0': ["Bachelor's Degree"] },
@@ -5404,11 +5546,24 @@ test('a mention that explains nothing does not count as having reported the loss
  * counted on a real employer's form, not reasoned about.
  * ------------------------------------------------------------------------------------------- */
 
-test('"Expected Graduation Year" is answered with the year, not the whole date', () => {
-  // Deepgram, 2026-08-08. Discovery resolved this to "2028" and stored it on the packet; the
-  // date branch of greenhouseReviewedQuestionAnswer matched "expected graduat(ion)" first and
-  // overwrote it with packet.graduationDate, "May 2028". A month name in a year field is a wrong
-  // answer on a real application, so the narrow tests now run before the broad one.
+test('each graduation question is answered at the precision its own control can hold', () => {
+  /* Deepgram, 2026-08-08. The date branch of greenhouseReviewedQuestionAnswer matched
+   * "expected graduat(ion)" first and so answered "Expected Graduation Year" and
+   * "Graduation Month" with the whole date. Ordering the tests narrow-first fixed that, and the
+   * month and date assertions below are the ones that pin it.
+   *
+   * WHAT CHANGED ON 2026-08-11, and why the year line moved. The first fix also replaced the year
+   * answer with packet.graduationYear, on the reading that a control labelled "year" is a year
+   * control. On the live Ashby form that control is a react-datepicker, and a bare year is the one
+   * value it refuses: four consecutive production runs (bbf0115a, 59fb48ae, cd066fee, 4bfd5827)
+   * reported "Expected Graduation Year" as required and still empty. questionDiscovery had already
+   * settled the rule in graduationYearFieldAnswer - an open text control gets "May 2028", a closed
+   * list and a number box get "2028", and a profile stating no month gets the year either way - and
+   * this layer now defers to it instead of contradicting it one step later.
+   *
+   * These three controls are all reported as open text, which is why all three now carry the month
+   * the profile really holds. The closed-list and no-reported-type cases are pinned in
+   * portalSubmission.graduationYearControl.test.ts. */
   const packet = {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
@@ -5418,16 +5573,22 @@ test('"Expected Graduation Year" is answered with the year, not the whole date',
     graduationMonth: 'May',
     graduationYear: '2028',
     questions: [
-      { question: 'Expected Graduation Year', answer: '2028', portalSelector: '#grad_year', portalInputType: 'text' },
+      { question: 'Expected Graduation Year', answer: 'May 2028', portalSelector: '#grad_year', portalInputType: 'text' },
       { question: 'Graduation Month', answer: 'May', portalSelector: '#grad_month', portalInputType: 'text' },
       { question: 'What is your graduation date?', answer: 'May 2028', portalSelector: '#grad_date', portalInputType: 'text' },
     ],
   };
   const valueFor = (selector: string) => buildManagedPortalActions('greenhouse', packet)
     .find((action) => action.type === 'fill' && action.selector === selector)?.value;
-  assert.equal(valueFor('#grad_year'), '2028');
+  assert.equal(valueFor('#grad_year'), 'May 2028');
   assert.equal(valueFor('#grad_month'), 'May');
   assert.equal(valueFor('#grad_date'), 'May 2028');
+  // A profile that states no month still hands every one of them the year alone. No month is
+  // invented for a date control here or anywhere else; the run reports the empty field instead.
+  const yearOnly = { ...packet, graduationDate: undefined, graduationMonth: undefined };
+  const yearOnlyValueFor = (selector: string) => buildManagedPortalActions('greenhouse', yearOnly)
+    .find((action) => action.type === 'fill' && action.selector === selector)?.value;
+  assert.equal(yearOnlyValueFor('#grad_year'), '2028');
 });
 
 test('an Ashby field handle is descended into, because it names the wrapper', () => {
@@ -5548,4 +5709,72 @@ test('the label\'s "Other" escape hatch reaches a question that has a durable se
     plain.some((action) => action.type === 'fill' && action.label?.includes('which university') && action.value === 'Other'),
     false,
   );
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * THE QUESTION, NOT ITS WORDING.
+ *
+ * Measured on the owner's 158 production packets, 2026-08-11. 22 packets were blocked with a GPA
+ * field required and empty while the packet already carried "3.89". Ten of them asked "What is your
+ * GPA?", which was in GREENHOUSE_REACT_SELECT_LITERALS and got a closed-list chain. Twelve asked
+ * "Overall GPA" (Virtu, 7) or "Please indicate your overall GPA." (Five Rings, 5), which were not,
+ * so their only attempt was a text fill into a control whose options read "3.5-3.9".
+ * --------------------------------------------------------------------------------------------- */
+
+function greenhouseQuestionActions(question: string, answer: string) {
+  return buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{ question, answer }],
+  });
+}
+
+const closedListChain = (question: string, answer: string) =>
+  greenhouseQuestionActions(question, answer).filter((action) => action.label?.startsWith('question_combo_label:'));
+
+test('a closed-list chain is built from what the question ASKS, not from a wording someone typed here', () => {
+  // The two labels that cost 12 packets, and the wording that always worked, all reach the chain.
+  for (const label of ['Overall GPA', 'Please indicate your overall GPA.', 'What is your GPA?']) {
+    assert.ok(closedListChain(label, '3.89').length > 0, `expected a closed-list chain for ${label}`);
+  }
+  // And the phrasings no employer in the corpus has used yet, which is the whole point of asking
+  // the classifier instead of extending a list of strings.
+  for (const label of ['Cumulative GPA', 'GPA (out of 4.0)', 'What was your undergraduate GPA?']) {
+    assert.ok(closedListChain(label, '3.89').length > 0, `expected a closed-list chain for ${label}`);
+  }
+  // "Graduation Year" was in the literals; "Year of Graduation" was not, and Palantir asks it that
+  // way on all 11 of the owner's packets. classifyField calls both graduation_year.
+  for (const label of ['Graduation Year', 'Year of Graduation', 'Anticipated Year of Graduation', 'Class Year']) {
+    assert.ok(closedListChain(label, '2028').length > 0, `expected a closed-list chain for ${label}`);
+  }
+});
+
+test('widening what may be a closed list never takes a text fill away from a text control', () => {
+  /* The strictly-additive property, and the reason there are two predicates rather than one.
+   * isGreenhouseReactSelectQuestion still decides whether to WITHHOLD the scoped text fill, and it
+   * is still literals-only; questionMayBeClosedList only ever decides to ALSO push a menu chain.
+   * Five Rings' GPA control reports inputType text, so losing this fill would trade twelve packets
+   * blocked on a menu for five blocked on a text box. */
+  const actions = greenhouseQuestionActions('Please indicate your overall GPA.', '3.89');
+  const textFill = actions.find((action) => action.label === 'question:Please indicate your overall GPA.');
+  assert.equal(textFill?.type, 'fillByLabelText');
+  assert.equal(textFill?.text, 'Please indicate your overall GPA.');
+  assert.equal(textFill?.value, '3.89');
+  assert.ok(actions.some((action) => action.label?.startsWith('question_combo_label:')));
+});
+
+test('a question that names no profile field gains no closed-list chain', () => {
+  // False-capture guards. A wrong entry here spends action budget on a control with no menu, and on
+  // a Greenhouse form under the Akuna budget that is spent instead of a required field's one shot.
+  for (const label of [
+    'What is the most impressive thing you have ever accomplished?',
+    'What is your phone number?',
+    'Desired salary',
+    'LinkedIn Profile',
+    'Please provide additional detail if appropriate.',
+  ]) {
+    assert.equal(closedListChain(label, 'something').length, 0, `did not expect a closed-list chain for ${label}`);
+  }
 });

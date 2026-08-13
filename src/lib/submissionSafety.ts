@@ -1,4 +1,5 @@
 import type { ApplicationReviewQuestion, ApplicationReviewState } from './applicationReview';
+import { submissionProvablyNotSent, type PreClickNoSendEvidence } from './managedSubmitOutcome';
 
 /**
  * The required questions the employer will not accept blank, and Litos has no answer for.
@@ -111,6 +112,27 @@ export function submitRequestDisposition(
    * that answer moves the packet to submitted through its own path. An unresolved record does not
    * unlock it either, because "we do not know" is precisely the state the lock exists for. */
   unverifiedResolution?: 'sent' | 'not_sent',
+  /* THE SAME KEY, CUT FOR THE ROWS THAT WERE ALREADY LOCKED IN.
+   *
+   * The clause above needs the applicant to go and look, and that is the right price when the answer
+   * is genuinely unknown. It is the wrong price when the row can already prove the answer. kos.ai,
+   * production, 2026-08-11: the managed run stopped inside the atomic chooser, which throws before
+   * submitHandle.click, and the packet kept no submission_attempted_at, no receipt, no
+   * unverified_submission and no security_code. There is no employer-side application to go and look
+   * for, and asking someone to check for one is asking them to confirm a thing that cannot exist.
+   *
+   * PR 494 fixed the writer: preClickNoSubmitReview now releases the claim, so a run stopping this
+   * way today lands at needs_attention with no claim and is re-runnable. It could not fix the rows
+   * already on disk, and those rows are the whole defect. This parameter is what makes the gate
+   * self-healing rather than dependent on a one-time sweep: the row is re-read on every request, so
+   * it recovers the first time anyone presses Try again and cannot be run twice or half-run.
+   *
+   * NOTHING IS RELAXED BY IT. What a stuck row gets here is exactly the disposition PR 494 already
+   * gives a freshly written one, and strictly less: submissionProvablyNotSent demands a POSITIVE
+   * pre-click stop on the row before it says yes, so a run killed mid-submit - which leaves the same
+   * fields empty and is the case an employer may really hold - is refused as it was before. Optional
+   * so every caller that has no row to hand keeps its current meaning. */
+  noSendEvidence?: PreClickNoSendEvidence,
 ): 'start' | 'in_flight' | 'submitted' | 'reject' {
   if (status === 'submitted') return 'submitted';
   // A SECOND SUBMIT IS THE ONE THING THIS STATE MUST NOT ALLOW. The form has already been sent to
@@ -134,6 +156,12 @@ export function submitRequestDisposition(
   // The claimed half of needs_attention, opened only by the applicant's own "I looked and it is not
   // there". See the parameter's note: without this the state has no exit of any kind.
   if (status === 'needs_attention' && unverifiedResolution === 'not_sent') return 'start';
+  /* The other half of the same claimed state: the row answers the question itself, so nobody has to
+   * be sent to an employer page to confirm an application that provably was never filed. Deliberately
+   * BELOW the awaiting_security_code refusal above and gated again on security_code inside the
+   * predicate, because a standing code wall is an employer-side application at verification whatever
+   * the current run did or did not press. */
+  if (status === 'needs_attention' && noSendEvidence && submissionProvablyNotSent(noSendEvidence)) return 'start';
   if (['resume_ready', 'questions_ready', 'ready_to_submit', 'failed'].includes(status)) return 'start';
   return 'reject';
 }

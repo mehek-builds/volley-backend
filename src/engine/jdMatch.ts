@@ -318,7 +318,10 @@ const HEADING_PATTERNS: Array<{ kind: SectionKind; re: RegExp }> = [
   // `about SECOND_PERSON_SUBJECT` is the other half of the exclusion carved out of the noise rule
   // above, reading the same constant so the two cannot drift. It is reached only because noise
   // declines these forms first.
-  { kind: 'required', re: new RegExp(String.raw`\b(requirements?|qualifications?|what you'?ll need|what you should have|what we('?re)? look(ing)? for|what would make you a strong fit|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about\s+${SECOND_PERSON_SUBJECT})\b`, 'i') },
+  // kos.ai's measured Ashby posting uses the entire bare line `You` between `What you'll do` and
+  // its candidate requirements. The anchors are the safety boundary: ordinary prose containing
+  // the pronoun remains content, while the standalone candidate heading closes responsibilities.
+  { kind: 'required', re: new RegExp(String.raw`^you:?$|\b(requirements?|qualifications?|what you'?ll need|what you should have|what we('?re)? look(ing)? for|what would make you a strong fit|must[- ]have|minimum|basic qualifications|skills?|you have|your background|about\s+${SECOND_PERSON_SUBJECT})\b`, 'i') },
   { kind: 'responsibilities', re: /\b(responsibilities|what you'?ll do|what you will do|the role|(your|the) impact|make an impact|day[- ]to[- ]day|in this role|duties)\b/i },
 ];
 
@@ -761,6 +764,39 @@ const ELIGIBILITY_LINE =
 const LEGAL_NOTICE_LINE =
   /\b(privacy notice|equal pay act|(salary|pay) transparency (act|law)|in accordance with the [^.]{0,40}\b(act|law)s?\b|does not accept unsolicited)\b/i;
 
+/**
+ * WHERE AND HOW THE PERSON WILL WORK, which is a commitment they make and not a term on a resume.
+ *
+ * kos.ai's Ashby posting (Software Engineer Intern) writes "You're comfortable working in-person at
+ * our SF office for the whole internship". `SF` is an ACRONYM, so isHardSignal admits it, and it
+ * landed at kind `required` weight 1 alongside Python and TypeScript. The student was told the job
+ * asked for "SF" and her resume did not mention it. It is not a skill she could ever add: it is a
+ * question about whether she will show up at an office, the application form asks it directly, and
+ * clauseMatch already owns it under basis `onsite-commitment`, decided from her frozen declaration
+ * rather than from her resume. Scoring it twice, once as a commitment and once as a missing term,
+ * is the double-count this rule removes; the commitment verdict is untouched.
+ *
+ * WHOLE CLAUSES, on the standard this file sets for rules with no shape guard (see FOOTER_PROSE): a
+ * requirement bullet cannot contain "comfortable working in-person" or "willing to relocate to". A
+ * bare place name is NOT admissible here and none is listed, because "San Francisco" inside a real
+ * requirement is a different sentence and this rule must not reach it.
+ *
+ * The experience guard below still runs first, so "Experience working onsite with hardware teams"
+ * names a background and is kept whole.
+ */
+const WORKPLACE_MODE = String.raw`(?:in[- ]person|on[- ]?site|in[- ]office|relocat\w*|commut\w*)`;
+const WORKPLACE_COMMITMENT_LINE = new RegExp(
+  [
+    // The candidate undertaking to be somewhere: bullet-initial, or "you are ...".
+    String.raw`(?:^|[-*•·→]\s*|\byou(?:'re| are| will be| must be| should be)?\s+)`
+      + String.raw`(?:comfortable|willing|able|prepared|open|happy|expected|required|ready|must be)\b`
+      + String.raw`[^.]{0,60}?\b${WORKPLACE_MODE}`,
+    String.raw`\brelocat(?:e|ing|ion)\s+to\b`,
+    String.raw`\b(?:this|the)\s+(?:role|position|internship|program)\s+is\s+(?:fully\s+)?${WORKPLACE_MODE}`,
+  ].join('|'),
+  'i',
+);
+
 function isNonResumeRequirementLine(line: string): boolean {
   const t = headingCore(line);
   if (!t) return false;
@@ -771,7 +807,10 @@ function isNonResumeRequirementLine(line: string): boolean {
   ) {
     return false;
   }
-  return NON_RESUME_REQUIREMENT_LINE.test(t) || APPLICATION_PROCESS_LINE.test(t) || ELIGIBILITY_LINE.test(t);
+  return NON_RESUME_REQUIREMENT_LINE.test(t)
+    || APPLICATION_PROCESS_LINE.test(t)
+    || ELIGIBILITY_LINE.test(t)
+    || WORKPLACE_COMMITMENT_LINE.test(t);
 }
 
 export interface JdSection {
@@ -825,8 +864,37 @@ function isCompanySpecialFooterHeading(line: string, company: string | null | un
   return heading === `what makes ${companyName} special`;
 }
 
+function restoreFlattenedCandidateSection(jdText: string): string {
+  if (jdText.split(/\r?\n/).length > 3) return jdText;
+  const responsibility = /what you['’]ll do:/i.exec(jdText);
+  if (!responsibility) return jdText;
+  const afterResponsibility = responsibility.index + responsibility[0].length;
+  const candidateHeading = /\sYou\s+(?=(?:Current|Fluent|You've played with|You're hungry|You'd rather|You're comfortable)\b)/g;
+  candidateHeading.lastIndex = afterResponsibility;
+  const candidate = candidateHeading.exec(jdText);
+  if (!candidate) return jdText;
+  const footerHeading = /\sComp and Benefits\s+/gi;
+  footerHeading.lastIndex = candidate.index + candidate[0].length;
+  const footer = footerHeading.exec(jdText);
+  if (!footer) return jdText;
+
+  const candidateText = jdText
+    .slice(candidate.index + candidate[0].length, footer.index)
+    .trim()
+    .replace(/\s+(?=(?:Fluent|You've played with|You're hungry|You'd rather|You're comfortable)\b)/g, '\n');
+  return [
+    jdText.slice(0, responsibility.index).trimEnd(),
+    responsibility[0],
+    jdText.slice(afterResponsibility, candidate.index).trim(),
+    'You',
+    candidateText,
+    'Comp and Benefits',
+    jdText.slice(footer.index + footer[0].length).trimStart(),
+  ].filter(Boolean).join('\n');
+}
+
 export function segmentJd(jdText: string, context?: JdContext): JdSection[] {
-  const lines = jdText.split(/\r?\n/);
+  const lines = restoreFlattenedCandidateSection(jdText).split(/\r?\n/);
   const sections: JdSection[] = [];
   let current: JdSection = { kind: 'body', weight: SECTION_WEIGHT.body, text: '' };
 
@@ -1708,6 +1776,19 @@ export interface JdTerm {
    * strings name one product, never that a broader term satisfies a narrower one.
    */
   alternatives?: string[];
+  /**
+   * How many DISTINCT things the employer named inside this one requirement.
+   *
+   * 1 for an ordinary term, and 1 for a vendor's two spellings of one product, because "Excel" and
+   * "Microsoft Excel" are one thing written twice. It is the branch count for a stated CHOICE:
+   * "Python, TypeScript, or Go" is one requirement naming three concrete technologies.
+   *
+   * SCORING NEVER READS THIS. The denominator counts requirements, and a choice is one requirement.
+   * It exists for isScorable, which asks a different question - did the posting name enough
+   * concrete things to be honest about - and would otherwise have started refusing to score
+   * postings that name plenty of them inside a choice. See the note there.
+   */
+  stated?: number;
 }
 
 /** Normalize spelling variants that are the SAME term: node.js/nodejs/node js, ci-cd/ci/cd. */
@@ -2624,7 +2705,26 @@ function companyBrandTokens(company: string | null | undefined): Set<string> {
   return tokens;
 }
 
-export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
+export interface JdTermOptions {
+  /**
+   * Fold an inline "A or B" into ONE requirement carrying both branches. On by default, because a
+   * choice the employer stated once must be counted once wherever a requirement is counted.
+   *
+   * clauseMatch.ts turns it OFF, and that is the only caller that does. It owns its own, stricter
+   * reading of a choice - see termCoverageDecision, which refuses to decide a clause carrying more
+   * than one connector rather than guessing - and it uses this extractor purely to ask which named
+   * technologies a clause mentions. Handing it a pre-folded list put two different answers to the
+   * same question in one code path, and the one that won was the looser one: a clause the clause
+   * model had deliberately left UNSCOREABLE came back met.
+   */
+  groupChoices?: boolean;
+}
+
+export function extractJdTerms(
+  jdText: string,
+  context?: JdContext,
+  options?: JdTermOptions,
+): JdTerm[] {
   const self = selfReferenceTokens(context);
   const roleSelf = roleReferenceTokens(context?.role);
   const places = new Set(locationTokens(context?.location));
@@ -2646,14 +2746,19 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
 
   const casing = documentCasing(jdText);
   const sections = segmentJd(jdText, context);
+  const groupChoices = options?.groupChoices !== false;
   const hasPrimaryFitSection =
     sections.some((s) => PRIMARY_STATED_KINDS.has(s.kind)) || hasPrimaryFitHeading(jdText);
-  const rawTerms = strip(extractFrom(sections, casing, context?.company));
+  const rawTerms = strip(extractFrom(sections, casing, context?.company, groupChoices));
   if (hasPrimaryFitSection) {
-    return capToEmphasis(strip(extractFrom(sections.filter(isPrimaryFitSection), casing, context?.company)));
+    return capToEmphasis(strip(extractFrom(sections.filter(isPrimaryFitSection), casing, context?.company, groupChoices)));
   }
   const terms = preferStatedRequirements(rawTerms);
-  if (terms.length >= MIN_SCORABLE_TERMS) return capToEmphasis(terms);
+  /* statedThings, NOT terms.length. The comment on isScorable ties this gate to that function
+     exactly, and a hand-copied expression cannot keep that property: once a stated choice became
+     one term, this half counted the choice and that half counted its branches, so a posting this
+     gate declared too thin was one the scorer was perfectly willing to score. */
+  if (statedThings(terms) >= MIN_SCORABLE_TERMS) return capToEmphasis(terms);
 
   // A noise heading runs until the next recognised heading, so a posting that OPENS with
   // "Compensation" or "Pay range" (mandatory first in pay-transparency states, and increasingly
@@ -2699,6 +2804,7 @@ export function extractJdTerms(jdText: string, context?: JdContext): JdTerm[] {
       ),
       casing,
       context?.company,
+      groupChoices,
     ),
   );
   return capToEmphasis(salvaged.length > terms.length ? salvaged : terms);
@@ -2764,6 +2870,25 @@ function preferStatedRequirements(list: JdTerm[]): JdTerm[] {
 }
 
 /**
+ * THE FLOOR COUNTS WHAT THE EMPLOYER NAMED, NOT HOW MANY SLOTS IT SPENDS.
+ *
+ * Both totals below were `terms.length` until inline choices started arriving as one term. That
+ * read the same list the denominator does, and it should not: the denominator asks how many
+ * REQUIREMENTS a posting states, while the floor asks whether the posting named enough concrete
+ * things that a number about it would mean anything. "First hand experience with SQL and/or Python.
+ * Familiarity with Docker. Comfortable with Git." states three requirements and names four
+ * technologies, and it was scorable before the grouping existed. Counting the choice as one thing
+ * would have made it refuse, and "this posting does not list enough specific requirements" is a
+ * false statement about a posting that lists four.
+ *
+ * Every group is uniformly hard-signal or uniformly not, enforced where they are built, so summing
+ * `stated` reports both totals exactly as the ungrouped list did.
+ */
+function statedThings(terms: JdTerm[]): number {
+  return terms.reduce((total, t) => total + (t.stated ?? 1), 0);
+}
+
+/**
  * The one definition of "enough to be honest about".
  *
  * Written twice before this: once here in the positive and once in scoreJdMatch in the negative.
@@ -2774,8 +2899,8 @@ function preferStatedRequirements(list: JdTerm[]): JdTerm[] {
  */
 function isScorable(terms: JdTerm[]): boolean {
   return (
-    terms.length >= MIN_SCORABLE_TERMS &&
-    terms.filter((t) => t.signal).length >= MIN_SIGNAL_TERMS
+    statedThings(terms) >= MIN_SCORABLE_TERMS &&
+    statedThings(terms.filter((t) => t.signal)) >= MIN_SIGNAL_TERMS
   );
 }
 
@@ -3010,16 +3135,221 @@ function countNormalizedMentions(haystack: string, needle: string): number {
  * differ enough (a stripped apostrophe inside a word) that the reverse search misses - and the
  * caller keeps the normalized key. Display only; nothing downstream matches on it.
  */
-function verbatimSpelling(sectionText: string, term: string): string | undefined {
+function verbatimSpellingMatch(sectionText: string, term: string): RegExpExecArray | null {
   const pattern = term
     .split(' ')
     .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
     .join('[^A-Za-z0-9]{1,3}');
-  return new RegExp(`(?<![A-Za-z0-9])${pattern}(?![A-Za-z0-9])`, 'i').exec(sectionText)?.[0];
+  return new RegExp(`(?<![A-Za-z0-9])${pattern}(?![A-Za-z0-9])`, 'i').exec(sectionText);
 }
 
-function extractFrom(sections: JdSection[], casing?: JdCasing, company?: string): JdTerm[] {
+function verbatimSpelling(sectionText: string, term: string): string | undefined {
+  return verbatimSpellingMatch(sectionText, term)?.[0];
+}
+
+/**
+ * ONE REQUIREMENT WRITTEN AS A CHOICE IS ONE REQUIREMENT, even when the employer writes the choice
+ * inside a sentence instead of as a bulleted "at least one of the following" list.
+ *
+ * The bulleted form already had this: clauseMatch's scorePosting reads the parent line, collects
+ * the labelled branches under it, and publishes ONE verdict for the group. The inline form had
+ * nothing. kos.ai's Ashby posting writes "Current CS or ML undergrad or Master's student with a
+ * hands-on project or internship track record" as a single line, and the term model split it into
+ * two independent requirements, `Current CS` and `ML`, then charged the resume for both. A student
+ * reading a colour legend was shown two gaps where the posting stated one choice, and the branch
+ * she satisfies was one of them.
+ *
+ * FOUR BOUNDS, and each one closes a way this could invent a choice the employer did not state.
+ *
+ * 1. ONLY WHERE THE TERM WAS EXTRACTED FROM. A group is built from the ANCHOR of each term, the
+ *    exact span at which the extraction passes above first admitted it, never from a rescan of the
+ *    document for its spelling. Rescanning let any two terms that happen to co-occur anywhere form
+ *    a group, so a posting listing "Strong Python", "Strong SQL", "Strong Docker" and "Strong Git"
+ *    as four bullets and then adding the culture line "We use Python or Git day to day" folded two
+ *    of those four bullets into one requirement. The score moved because of the culture blurb, and
+ *    the covered mark landed on the prose while the bullet it came from went uncoloured.
+ *
+ * 2. NAMED ONCE. A term the posting names more than once is a requirement in its own right and
+ *    never becomes somebody else's branch. This is what closes the same hole when the prose comes
+ *    FIRST and the anchor lands there.
+ *
+ * 3. A CONNECTOR BETWEEN EVERY ADJACENT PAIR, not merely somewhere in the run. `and` is never a
+ *    connector, because "SQL and Docker" asks for both and folding them would credit a resume
+ *    carrying one for carrying both. So "at least one of Python, Ruby, or PHP and production SQL
+ *    and Docker" groups the three languages the marker governs and leaves `sql` and `docker`
+ *    standing as separate mandatory terms, because " and production " is not a connector.
+ *
+ * 4. A COMMA IS ONLY A CONNECTOR WHEN THE EMPLOYER SAID THE LIST IS A CHOICE. An unmarked
+ *    "Experience with Python, SQL, Docker or Kubernetes" is ambiguous between "all of these" and
+ *    "any of these", and reading it as a single choice folded four requirements into one and
+ *    reported 100 for a resume carrying only Kubernetes. Unmarked, only the pair the employer
+ *    actually joined with `or` folds, so that line reads as Python AND SQL AND (Docker OR
+ *    Kubernetes). Marked - "one of", "at least one of", "one or more of", "any of" - the comma
+ *    list folds whole, which is the same thing the bulleted form does with the same words. That
+ *    marker is also what makes kos.ai's own second bullet, "Fluent in one of Python, TypeScript,
+ *    or Go", read as the one requirement it is.
+ *
+ *    THE MARKER GOVERNS ONE LIST, NOT ONE LINE, and it governs it by GRAMMAR rather than by
+ *    distance. It is re-read for every run against that run's own first branch, because a posting
+ *    flattened onto a single line carries several lists and only one of them is the one the
+ *    employer marked; and it counts only when it runs straight into that run's first branch, so
+ *    "one of our teams on Python, SQL, Docker" marks nothing. See LIST_INTRODUCER.
+ *
+ * NOTHING IS INVENTED. Every member is still matched literally, exactly as it was before; what
+ * changes is only how many slots the group spends and how many gaps it can report. The merged entry
+ * carries every member in `alternatives`, which is the field resumeSatisfies already reads to mean
+ * "any of these covers this requirement".
+ */
+const ALTERNATION_CONNECTOR = /^\s*(?:,\s*)?(?:or|and\/or)\s*$/i;
+const ALTERNATION_COMMA = /^\s*,\s*$/;
+/**
+ * The employer saying, in their own words, that the list which follows is a choice.
+ *
+ * `either` IS NOT HERE, and it never needed to be. "Fluent in either Python or Kotlin" folds on the
+ * `or` the employer wrote between the two branches, with no marker involved, so listing the word
+ * bought nothing. What it cost was "Either way, Python, SQL and Docker and Git matter to us", where
+ * `Either way` is ordinary prose and turned three separate requirements into one.
+ */
+const ONE_OF_MARKER = /\b(?:at least one of|one or more of|any (?:one )?of|one of)\b/gi;
+/**
+ * What may stand between the marker and the first branch, and nothing else may.
+ *
+ * GRAMMAR, NOT DISTANCE. This was a character budget, and a character budget cannot tell "one of
+ * Python, SQL, Docker" from "one of our teams on Python, SQL, Docker": the marker in the second
+ * governs a noun phrase and has nothing to do with the list, but it sits close enough to the list to
+ * be admitted. Measured on a four-bullet posting against a resume carrying only Docker, that phrase
+ * took the score from 71 to 100 and emptied the gap list, on a posting naming Python and SQL.
+ *
+ * The same budget was also the residual of the per-run fix below: when the marked list is short, the
+ * marker is still within any fixed distance of the NEXT list, so "Fluent in one of Python,
+ * TypeScript, Go. SQL, Docker, Kubernetes also needed." folded the second list too.
+ *
+ * A marker introduces a list by running straight into it, optionally through a colon and the words
+ * "the following". Anything else between them is a sentence about something else.
+ */
+const LIST_INTRODUCER = /^[\s:]*(?:the following[\s:]*)?$/i;
+
+/** Where the extraction passes first admitted a term: which scored line, and where within it. */
+type TermAnchor = { line: number; start: number; end: number };
+
+function statesChoiceAnywhere(line: string): boolean {
+  ONE_OF_MARKER.lastIndex = 0;
+  return ONE_OF_MARKER.test(line);
+}
+
+function marksChoiceBefore(line: string, firstBranchStart: number): boolean {
+  ONE_OF_MARKER.lastIndex = 0;
+  for (let hit = ONE_OF_MARKER.exec(line); hit; hit = ONE_OF_MARKER.exec(line)) {
+    const after = hit.index + hit[0].length;
+    if (after <= firstBranchStart && LIST_INTRODUCER.test(line.slice(after, firstBranchStart))) return true;
+  }
+  return false;
+}
+
+/** Contiguous runs of two or more anchors on one line, joined at every step by a connector. */
+function inlineAlternationRuns(
+  lines: readonly string[],
+  anchors: ReadonlyMap<string, TermAnchor>,
+  byTerm: Map<string, JdTerm>,
+): Array<{ keys: string[]; display: string }> {
+  const byLine = new Map<number, Array<{ key: string } & TermAnchor>>();
+  for (const [key, anchor] of anchors) {
+    if (!byTerm.has(key)) continue;
+    const bucket = byLine.get(anchor.line);
+    if (bucket) bucket.push({ key, ...anchor });
+    else byLine.set(anchor.line, [{ key, ...anchor }]);
+  }
+
+  const runs: Array<{ keys: string[]; display: string }> = [];
+  for (const [index, occurrences] of byLine) {
+    if (occurrences.length < 2) continue;
+    const line = lines[index];
+    if (line === undefined) continue;
+    occurrences.sort((a, b) => a.start - b.start);
+    /* Nothing on this line says CHOICE, so there is nothing to group. Cheap, and it is also the
+       correctness statement: a run is only ever built where the employer wrote `or` between two
+       branches or declared the list a choice in front of it. */
+    if (!/\b(?:or|and\/or)\b/i.test(line) && !statesChoiceAnywhere(line)) continue;
+    let start = 0;
+    while (start < occurrences.length) {
+      let end = start;
+      /* PER RUN, AGAINST ITS OWN FIRST BRANCH. Asking once per line and reusing the answer let a
+         marker governing one list turn commas into connectors for every OTHER list on the same
+         line. "Fluent in one of Python, TypeScript, Go. Also required: SQL, Docker, Kubernetes."
+         folded the second list too, and a resume carrying only Kubernetes was told it met a
+         sentence that says "Also required: SQL, Docker, Kubernetes", with SQL and Docker absent
+         from the gap list. A flattened one-line posting is the common shape for this, and kos.ai's
+         own posting is one. */
+      const marked = marksChoiceBefore(line, occurrences[start].start);
+      while (end + 1 < occurrences.length) {
+        const gap = line.slice(occurrences[end].end, occurrences[end + 1].start);
+        if (!ALTERNATION_CONNECTOR.test(gap) && !(marked && ALTERNATION_COMMA.test(gap))) break;
+        end += 1;
+      }
+      if (end > start) {
+        const members = occurrences.slice(start, end + 1);
+        runs.push({
+          keys: members.map((occurrence) => occurrence.key),
+          display: line.slice(members[0].start, members[members.length - 1].end),
+        });
+      }
+      start = end + 1;
+    }
+  }
+  return runs;
+}
+
+function mergeInlineAlternations(
+  byTerm: Map<string, JdTerm>,
+  lines: readonly string[],
+  anchors: ReadonlyMap<string, TermAnchor>,
+): void {
+  for (const run of inlineAlternationRuns(lines, anchors, byTerm)) {
+    const members = [...new Set(run.keys)]
+      .map((key) => byTerm.get(key))
+      .filter((term): term is JdTerm => term !== undefined);
+    // Two survivors is the floor. A run whose members were merged away by an earlier pass is not a
+    // choice any more, and guessing at what it used to be would invent a requirement.
+    if (members.length < 2) continue;
+    // Bound 2. A term the posting names twice is asked for in its own right, wherever else it also
+    // appears, so it is never spent as a branch of somebody else's choice.
+    if (members.some((term) => (term.mentions ?? 1) !== 1)) continue;
+    /* A CHOICE IS BETWEEN THINGS OF THE SAME KIND, and requiring that here is what keeps the
+       scorability floor exactly where it was. isScorable counts the branches of a group rather than
+       the group, and it counts the hard-signal ones separately; a group mixing a lexicon skill with
+       a bare proper noun could not report both totals from one `signal` flag without guessing at
+       one of them. Mixed runs are left ungrouped, which is precisely today's behaviour. */
+    if (members.some((term) => Boolean(term.signal) !== Boolean(members[0].signal))) continue;
+    const head = members[0];
+    const strongest = members.reduce((best, term) => (term.weight > best.weight ? term : best), head);
+    head.weight = strongest.weight;
+    head.kind = strongest.kind;
+    head.display = run.display;
+    head.signal = members.some((term) => term.signal);
+    head.mentions = members.reduce((total, term) => total + (term.mentions ?? 1), 0);
+    head.order = Math.min(...members.map((term) => term.order ?? 0));
+    head.alternatives = [
+      ...new Set(members.flatMap((term) => term.alternatives ?? [term.term])),
+    ];
+    head.stated = members.reduce((total, term) => total + (term.stated ?? 1), 0);
+    for (const member of members.slice(1)) byTerm.delete(member.term);
+  }
+}
+
+function extractFrom(
+  sections: JdSection[],
+  casing?: JdCasing,
+  company?: string,
+  groupChoices = true,
+): JdTerm[] {
   const byTerm = new Map<string, JdTerm>();
+  /* The exact lines the passes below read, kept so the alternation pass can see the text BETWEEN
+     two terms, and the exact span at which each term was first admitted. It runs last, over the
+     surviving terms, so it never groups a term that subsumption or the singular fold has already
+     merged away, and it reads ONLY these anchors: see bound 1 on that pass for what rescanning the
+     document for a term's spelling let through. */
+  const scoredLines: string[] = [];
+  const anchors = new Map<string, TermAnchor>();
   // A character offset, not a counter over the extraction passes.
   //
   // A counter would have ordered every unigram in a section ahead of every bigram in it, because
@@ -3047,6 +3377,26 @@ function extractFrom(sections: JdSection[], casing?: JdCasing, company?: string)
       .split(/\r?\n/)
       .filter((line) => !isNonResumeRequirementLine(line))
       .join('\n');
+    const sectionLines = sectionText.split('\n');
+    const lineBase = scoredLines.length;
+    scoredLines.push(...sectionLines);
+    /* Section offsets to (line, offset within line). Recorded on FIRST admission only: a term
+       admitted again later is the same requirement named twice, and bound 2 on the alternation
+       pass declines to group it at all. */
+    const lineStarts: number[] = [];
+    let lineAt = 0;
+    for (const line of sectionLines) {
+      lineStarts.push(lineAt);
+      lineAt += line.length + 1;
+    }
+    const anchor = (key: string, start: number, end: number) => {
+      if (anchors.has(key) || start < 0 || end <= start) return;
+      let index = 0;
+      while (index + 1 < lineStarts.length && lineStarts[index + 1] <= start) index += 1;
+      // A span that runs past its own line's end straddles a break and anchors nothing.
+      if (end - lineStarts[index] > sectionLines[index].length) return;
+      anchors.set(key, { line: lineBase + index, start: start - lineStarts[index], end: end - lineStarts[index] });
+    };
     const tokens = tokenizeSection(sectionText);
     // Computed once per section rather than per token: the scan is linear and the spans are
     // reused by both the unigram and the bigram pass below.
@@ -3069,13 +3419,14 @@ function extractFrom(sections: JdSection[], casing?: JdCasing, company?: string)
     for (const term of PHRASE_LEXICON) {
       const mentionCount = countNormalizedMentions(normalizedSection, term);
       if (mentionCount === 0) continue;
+      const spelled = verbatimSpellingMatch(sectionText, term);
+      if (spelled) anchor(term, spelled.index, spelled.index + spelled[0].length);
       const existing = byTerm.get(term);
       const mentions = (existing?.mentions ?? 0) + mentionCount;
       if (!existing || section.weight > existing.weight) {
         byTerm.set(term, {
           term,
-          display:
-            term.toUpperCase() === 'PRD' ? 'PRD' : (verbatimSpelling(sectionText, term) ?? term),
+          display: term.toUpperCase() === 'PRD' ? 'PRD' : (spelled?.[0] ?? term),
           weight: section.weight,
           kind: section.kind,
           signal: true,
@@ -3093,6 +3444,7 @@ function extractFrom(sections: JdSection[], casing?: JdCasing, company?: string)
       if (!isSpecific(tok.text, tok.positional, tok.nextIsCapitalized, casing, tok.afterVerbMarker))
         continue;
       const term = normalizeTerm(tok.text);
+      anchor(term, tok.start, tok.end);
       const existing = byTerm.get(term);
       // The count survives the weight upgrade below: a term named three times in prose and once
       // under Requirements was named four times, and it is the total that measures emphasis.
@@ -3153,6 +3505,7 @@ function extractFrom(sections: JdSection[], casing?: JdCasing, company?: string)
       // the SAME section, so if the term is in PHRASE_LEXICON the entry already exists at this
       // section's weight. There is nothing for this loop to add.
       if (PHRASE_LEXICON.has(term)) continue;
+      anchor(term, a.start, b.end);
       const existing = byTerm.get(term);
       const mentions = (existing?.mentions ?? 0) + 1;
       if (!existing || section.weight > existing.weight) {
@@ -3267,6 +3620,11 @@ function extractFrom(sections: JdSection[], casing?: JdCasing, company?: string)
     bySingular.set(key, keep.term);
   }
 
+  /* LAST, over the terms that survived every fold above. See the note on the pass itself: an
+     inline "A or B" states one requirement, and running this earlier would group a spelling that
+     the subsumption or singular passes were about to merge away anyway. */
+  if (groupChoices) mergeInlineAlternations(byTerm, scoredLines, anchors);
+
   return [...byTerm.values()].sort((x, y) => y.weight - x.weight || x.term.localeCompare(y.term));
 }
 
@@ -3371,9 +3729,120 @@ const SAME_CAPABILITY_TERMS = new Map<string, string[]>([
  * packets, and after the other anchoring fixes it was the ONLY remaining case. Naming the covering
  * string lets the pane mark React and keep the hover link pointing at the requirement `frontend`,
  * which is the question the student came to the screen with. */
-function resumeSatisfies(resumeText: string, term: JdTerm): string | undefined {
-  if (term.alternatives) return term.alternatives.find((t) => resumeCovers(resumeText, t));
-  if (resumeCovers(resumeText, term.term)) return term.term;
+/* AN ENROLLMENT REQUIREMENT IS ANSWERED BY A DEGREE, NOT BY A WORD.
+ *
+ * "Current CS ... undergrad" asks whether the student is studying computer science right now. The
+ * literal matcher can only ask whether the two characters `CS` appear somewhere on the page, and on
+ * kos.ai's posting the answer was no, so a student whose resume says "Bachelor of Science in
+ * Computer Science" in as many words was told the posting asked for something she did not have.
+ *
+ * BOUND TO THE DEGREE, AND ONLY TO THE DEGREE. The field has to be read out of the degree claim
+ * itself, never out of the page as a whole: "University of Southern California" contains neither
+ * field and a "University of Computer Science" contains one it did not confer. The span therefore
+ * starts at a degree level word and stops at the first thing that cannot still be part of that
+ * degree - a school name, a date, a line or sentence end - so a school sitting on either side of
+ * the degree is outside it in both directions.
+ *
+ * CURRENT MEANS UNFINISHED, and unfinished is a date question. The claim counts only when the
+ * degree carries a graduation date that has not passed. A completed degree in the right field does
+ * not answer it, and neither does a degree with no readable date at all: an enrollment requirement
+ * we cannot check stays unmet rather than turning into a mark the student cannot defend.
+ *
+ * The alias table is an enumeration, like SKILL_LEXICON and clauseMatch's FIELD_SYNONYMS, and for
+ * the same reason. Fields are never inferred from one another. */
+const CURRENT_ENROLLMENT_FIELDS = new Map<string, RegExp>([
+  ['cs', /\b(?:computer science|cs)\b/i],
+  ['computer science', /\b(?:computer science|cs)\b/i],
+  ['ml', /\b(?:machine learning|ml)\b/i],
+  ['machine learning', /\b(?:machine learning|ml)\b/i],
+  ['ee', /\b(?:electrical engineering|ee)\b/i],
+  ['electrical engineering', /\b(?:electrical engineering|ee)\b/i],
+  ['data science', /\bdata science\b/i],
+]);
+
+/* NEITHER `undergraduate` NOR `M.A.` IS ON THIS LIST, and both were.
+ *
+ * `undergraduate` is a job title as often as a degree: "Undergraduate Research Assistant, Computer
+ * Science Department, May 2027" satisfied a current-CS requirement off a resume stating no degree
+ * at all. `m\.?a\.?` matches the US state abbreviation, so "Cambridge, MA Computer Science
+ * coursework May 2028" did the same off a city line. A real degree statement names its level in one
+ * of the words that are left, and a resume that does not name one leaves the requirement unmet,
+ * which is the direction this whole rule fails in. */
+const DEGREE_LEVEL_WORD =
+  String.raw`\b(?:bachelors?|bachelor'?s|masters?|master'?s|b\.?s\.?c?|b\.?a\.?|b\.?eng\.?|m\.?s\.?|m\.?eng\.?|mba|ph\.?d\.?|doctorate)\b`;
+/** A school is never part of the degree's own name, whichever side of it the resume puts it on. */
+const SCHOOL_WORD = /\b(?:university|universite|college|institute|school|academy|polytechnic)\b/i;
+const RESUME_DATE =
+  /(?:\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+)?\b((?:19|20)\d{2})\b/i;
+/* A period only ends a sentence after a word. "B.S. in Computer Science" is four periods and no
+   sentence, and stopping at the first of them would cut the claim off before its own field. */
+const SENTENCE_END = /[a-z]{2}\.\s/;
+const MONTH_INDEX: Record<string, number> = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+/** How far past the degree's own words a graduation date may sit. Bounded so an experience entry's
+ *  date can never be read as the graduation date of a degree named far above it. */
+const GRADUATION_DATE_WINDOW = 64;
+/** How far a degree claim may run before the field has to have appeared. */
+const DEGREE_CLAIM_WINDOW = 100;
+
+function degreeClaimSpan(resumeText: string, from: number): string {
+  const window = resumeText.slice(from, from + DEGREE_CLAIM_WINDOW);
+  const sentence = SENTENCE_END.exec(window);
+  const stops = [
+    window.search(/[\n\r|;•]/),
+    sentence ? sentence.index + 2 : -1,
+    window.search(SCHOOL_WORD),
+    window.search(RESUME_DATE),
+  ].filter((at) => at >= 0);
+  return stops.length > 0 ? window.slice(0, Math.min(...stops)) : window;
+}
+
+/** The stated month and year, or a bare year. Null when nothing readable is there. */
+function graduationDateAt(text: string): Date | null {
+  const hit = RESUME_DATE.exec(text);
+  if (!hit) return null;
+  const year = Number(hit[2]);
+  const month = hit[1] ? MONTH_INDEX[hit[1].toLowerCase()] : undefined;
+  // Spent at the END of the stated period, the same reading engine/resumePolicy.ts uses: a degree
+  // dated May 2028 is unfinished for every day of May 2028, and a bare 2028 for all of 2028.
+  return month === undefined
+    ? new Date(year, 11, 31, 23, 59, 59)
+    : new Date(year, month + 1, 0, 23, 59, 59);
+}
+
+/** Does the resume claim an UNFINISHED degree in this field, read from the degree and not the page? */
+function resumeShowsCurrentDegreeField(
+  resumeText: string,
+  field: RegExp,
+  now: Date = new Date(),
+): boolean {
+  const levels = new RegExp(DEGREE_LEVEL_WORD, 'gi');
+  for (let level = levels.exec(resumeText); level; level = levels.exec(resumeText)) {
+    const claim = degreeClaimSpan(resumeText, level.index);
+    if (!field.test(claim)) continue;
+    const after = level.index + claim.length;
+    const graduation = graduationDateAt(resumeText.slice(after, after + GRADUATION_DATE_WINDOW));
+    if (graduation && graduation.getTime() >= now.getTime()) return true;
+  }
+  return false;
+}
+
+function satisfiesCurrentEnrollment(resumeText: string, key: string, now?: Date): boolean {
+  const asked = /^current\s+(.+)$/.exec(key);
+  const field = asked ? CURRENT_ENROLLMENT_FIELDS.get(asked[1]) : undefined;
+  return field !== undefined && resumeShowsCurrentDegreeField(resumeText, field, now);
+}
+
+function resumeSatisfies(resumeText: string, term: JdTerm, now?: Date): string | undefined {
+  /* One loop over BOTH shapes, so a merged inline alternation gets the same reading of each branch
+     that a lone term gets. Alternatives still short-circuit ahead of SAME_CAPABILITY_TERMS exactly
+     as they did: a requirement the employer spelled several ways is answered by those spellings. */
+  for (const candidate of term.alternatives ?? [term.term]) {
+    if (resumeCovers(resumeText, candidate)) return candidate;
+    if (satisfiesCurrentEnrollment(resumeText, candidate, now)) return candidate;
+  }
+  if (term.alternatives) return undefined;
   return (SAME_CAPABILITY_TERMS.get(normalizeTerm(term.term)) ?? []).find((t) => resumeCovers(resumeText, t));
 }
 
@@ -3416,6 +3885,10 @@ export function scoreJdMatch(
   resumeText: string,
   jdText: string,
   context?: JdContext,
+  /* The clock, injectable for one reason: whether a degree is still IN PROGRESS is a comparison
+     against today, and a test that could not pin today would be asserting the calendar rather than
+     the rule. Production passes nothing. */
+  options?: { now?: Date },
 ): JdMatchResult {
   const terms = extractJdTerms(jdText, context);
 
@@ -3442,7 +3915,7 @@ export function scoreJdMatch(
   for (const t of terms) {
     total += t.weight;
     if (t.kind === 'required') requiredTotal += 1;
-    const covered = resumeSatisfies(resumeText, t);
+    const covered = resumeSatisfies(resumeText, t, options?.now);
     if (covered !== undefined) {
       got += t.weight;
       if (t.kind === 'required') requiredGot += 1;

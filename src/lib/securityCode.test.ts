@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import type { ApplicationReviewState } from './applicationReview';
-import type { ManagedBrowserAction } from './browserbase';
+import { managedApplicationSubmitOptions, type ManagedBrowserAction } from './browserbase';
 import { applyReviewPatch } from './applicationStall';
 import { submitRequestDisposition, resumeEditDisposition } from './submissionSafety';
 import {
@@ -16,6 +16,7 @@ import {
   findSecurityCodeAttempt,
   normalizeSecurityCode,
   readManagedSecurityCodeChallenge,
+  securityCodeChallengeMatchesRecipient,
   securityCodeAttentionReason,
   securityCodeContinuationActions,
   securityCodeFingerprint,
@@ -74,6 +75,14 @@ test('a control that did not say how long the code is reports zero, not a guesse
   // Greenhouse's own sentence says "8-character". Reading the number out of that sentence is exactly
   // the prose-matching this design refuses, so an unstated length stays unstated.
   assert.deepEqual(challenge, { digits: 0 });
+});
+
+test('a challenge is bound to the frozen packet recipient after narrow email normalization', () => {
+  const challenge = readManagedSecurityCodeChallenge(CHALLENGE);
+  assert.equal(securityCodeChallengeMatchesRecipient(challenge, ' MehekMandal05@GMAIL.com '), true);
+  assert.equal(securityCodeChallengeMatchesRecipient(challenge, 'other@example.com'), false);
+  assert.equal(securityCodeChallengeMatchesRecipient({ digits: 8 }, 'mehekmandal05@gmail.com'), false);
+  assert.equal(securityCodeChallengeMatchesRecipient(null, 'mehekmandal05@gmail.com'), false);
 });
 
 // ---- the sentence and its category ----
@@ -248,6 +257,61 @@ test('attempts survive a re-issued challenge, so a replay is still recognised', 
   assert.equal(findSecurityCodeAttempt(reissued, first)?.outcome, 'rejected');
 });
 
+test('a spent code fingerprint is durable before continuation and its measured outcome replaces the provisional one', () => {
+  const fingerprint = securityCodeFingerprint('app-1', 'TPHJrFMJ');
+  const state = beginSecurityCodeState({ challenge: { digits: 8 }, attemptedAt: 'x', authorized: true });
+  const spent = withSecurityCodeAttempt(state, { at: 'y', fingerprint, outcome: 'error' });
+  assert.equal(findSecurityCodeAttempt(spent, fingerprint)?.outcome, 'error');
+  const measured = withSecurityCodeAttempt(spent, { at: 'z', fingerprint, outcome: 'rejected' });
+  assert.equal(measured.attempts?.length, 1);
+  assert.equal(findSecurityCodeAttempt(measured, fingerprint)?.outcome, 'rejected');
+});
+
+/* A SPENT CODE HAD A WAY BACK, AND IT WAS TEN ROWS WIDE.
+ *
+ * The cap was a plain slice(-10), so ten further attempts pushed the oldest fingerprint off the
+ * front. findSecurityCodeAttempt then stopped finding it, codeWasAlreadyAttempted went false again,
+ * and the standing 24 hour mailbox lookback was free to reselect and re-spend the same dead code.
+ * It is reachable without anything unusual: every wrong code the applicant supplies records one
+ * 'superseded' row of its own. The blast radius is bounded, a verification click on a wall that is
+ * already standing rather than a second application send, which is why this is the cheap fix rather
+ * than a schema change: the rows that mark a code burnt are evicted last.
+ */
+test('a spent code fingerprint survives ten later attempts and cannot be reselected', () => {
+  const spentFingerprint = securityCodeFingerprint('app-1', 'SPENTCOD');
+  let state = withSecurityCodeAttempt(
+    beginSecurityCodeState({ challenge: { digits: 8 }, attemptedAt: 'x', authorized: true }),
+    { at: '2026-08-11T12:00:00.000Z', fingerprint: spentFingerprint, outcome: 'rejected' },
+  );
+  for (let index = 0; index < 10; index += 1) {
+    state = withSecurityCodeAttempt(state, {
+      at: `2026-08-11T12:0${index}:30.000Z`,
+      fingerprint: securityCodeFingerprint('app-1', `LATER${String(index).padStart(3, '0')}`),
+      outcome: 'superseded',
+    });
+  }
+  assert.equal(findSecurityCodeAttempt(state, spentFingerprint)?.outcome, 'rejected',
+    'evicting this row hands the dead code straight back to the mailbox lookback');
+  const attempts = state.attempts ?? [];
+  assert.equal(attempts[attempts.length - 1].fingerprint, securityCodeFingerprint('app-1', 'LATER009'),
+    'the newest attempt must still be last, because every reader of attempts assumes that order');
+});
+
+test('attempts that never reached the page are the ones the cap evicts', () => {
+  // 'no_control' and 'not_entered' mean Litos never typed the code, so the code is untouched and
+  // forgetting its fingerprint costs nothing. They are what the ten-row window is for.
+  let state = beginSecurityCodeState({ challenge: { digits: 8 }, attemptedAt: 'x', authorized: true });
+  for (let index = 0; index < 40; index += 1) {
+    state = withSecurityCodeAttempt(state, {
+      at: `2026-08-11T13:00:${String(index).padStart(2, '0')}.000Z`,
+      fingerprint: securityCodeFingerprint('app-1', `NOCTRL${String(index).padStart(2, '0')}`),
+      outcome: 'no_control',
+    });
+  }
+  assert.equal(state.attempts?.length, 10);
+  assert.equal(findSecurityCodeAttempt(state, securityCodeFingerprint('app-1', 'NOCTRL00')), undefined);
+});
+
 test('an unauthorized submit is recorded as one', () => {
   // A fill run that reaches this screen has submitted an application with nobody's authorization,
   // which is a Litos defect and not a fact about the employer. It has to be countable.
@@ -354,14 +418,20 @@ test('the first managed run of a code finish is an application submit with no co
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const start = source.indexOf('const initialActions = buildManagedPortalActions(portal, packet, true);');
   assert.ok(start > 0, 'the first run must build the ordinary packet actions');
-  const firstRun = source.slice(start, source.indexOf('const initialChallenge = readManagedSecurityCodeChallenge(result);', start));
+  const firstRun = source.slice(start, source.indexOf('const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);', start));
   // THE REGRESSION GUARD. The code must not be attached to a list that begins with a page load.
   assert.doesNotMatch(firstRun, /withSecurityCode\(/);
   assert.doesNotMatch(firstRun, /options\.securityCode/);
   // And the continuation is requested on every managed submit now, not only on the ones that expect
-  // to scrape a mailbox: without a live token there is no second half to enter a code into.
-  assert.match(firstRun, /requestContinuation: true/);
-  assert.match(firstRun, /continuationTtlSeconds: SECURITY_CODE_CONTINUATION_TTL_SECONDS/);
+  // to scrape a mailbox: without a live token there is no second half to enter a code into. The
+  // options themselves are asserted in browserbase.test.ts, against the runner's own rule for when
+  // a continuation is offered, rather than by matching a literal that can move.
+  assert.match(firstRun, /managedApplicationSubmitOptions\(SECURITY_CODE_CONTINUATION_TTL_SECONDS\)/);
+  assert.deepEqual(managedApplicationSubmitOptions(180), {
+    allowSubmit: true,
+    requestContinuation: true,
+    continuationTtlSeconds: 180,
+  });
 });
 
 /* THE CODE THAT GETS TYPED IS READ INSIDE THE RUN, AND THERE IS NO OTHER SOURCE.
@@ -377,8 +447,8 @@ test('the first managed run of a code finish is an application submit with no co
  */
 test('a code supplied out of band is never typed, only fingerprinted as superseded', async () => {
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const start = source.indexOf('const initialChallenge = readManagedSecurityCodeChallenge(result);');
-  const end = source.indexOf('if (!receiptResult.screenshot)', start);
+  const start = source.indexOf('const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);');
+  const end = source.indexOf('if (!receiptEvidenceResult.screenshot)', start);
   assert.ok(start > 0 && end > start);
   const half = source.slice(start, end);
   // The only thing done with the supplied code in the whole second half.
@@ -407,7 +477,7 @@ test('a code finish is only recorded as submitted when the code was accepted AND
   // The attempt records what the runner actually said. 'accepted' used to be written here as a
   // literal, on every code run that got this far, whatever the runner reported.
   assert.match(body, /receiptResult\.securityCodeAttempt\?\.outcome/);
-  assert.match(body, /outcome: codeOutcome === 'rejected' \? 'rejected'/);
+  assert.match(body, /recordEnteredCodeOutcome\(\s*codeOutcome === 'rejected' \? 'rejected'/);
 });
 
 test('a list with no submit click is left alone rather than given one', () => {
@@ -481,7 +551,7 @@ test('nothing but the code endpoint can move a packet out of the waiting state',
 
 test('a security-code challenge is persisted before any receipt is parsed', async () => {
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const managedStart = source.indexOf('const challenge = readManagedSecurityCodeChallenge(receiptResult);');
+  const managedStart = source.indexOf('const challengeCandidate = readManagedSecurityCodeChallenge(receiptResult);');
   assert.ok(managedStart > 0, 'the managed result must inspect the challenge');
   const challengeBranch = source.indexOf('if (challenge)', managedStart);
   const awaitingWrite = source.indexOf("status: 'awaiting_security_code'", challengeBranch);
@@ -497,7 +567,7 @@ test('a security-code challenge is persisted before any receipt is parsed', asyn
 test('automatic verification records one remote managed continuation without exposing its token', async () => {
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const start = source.indexOf('const continuationEvidence = continuationIsLive');
-  const end = source.indexOf('if (!receiptResult.screenshot)', start);
+  const end = source.indexOf('if (!receiptEvidenceResult.screenshot)', start);
   assert.ok(start > 0 && end > start);
   const continuation = source.slice(start, end);
   assert.match(continuation, /runner: 'stratus-managed'/);
@@ -521,8 +591,12 @@ test('manual code continuation atomically claims the waiting application', async
   assert.ok(helperStart > 0 && helperEnd > helperStart);
   const helper = source.slice(helperStart, helperEnd);
   assert.match(helper, /status: 'submitting'/);
-  assert.match(helper, /submission_claimed_at: new Date\(\)\.toISOString\(\)/);
-  assert.match(helper, /submission_claim_id: randomUUID\(\)/);
+  /* The claim fields are written by submissionClaimPatch rather than inline, because taking the
+     claim and clearing the previous run's stop record have to be ONE write: a claim site that sets
+     the timestamp by hand leaves a stale before_click:true on a row that is about to press Send.
+     What this line cares about is that the claim is taken here, atomically, with the conditional
+     update below; submissionClaimStopClear.test.ts owns the shape of the patch itself. */
+  assert.match(helper, /\.\.\.submissionClaimPatch\(new Date\(\)\.toISOString\(\), randomUUID\(\)\)/);
   assert.match(helper, /->>'status' = 'awaiting_security_code'/);
   assert.match(helper, /->>'submission_claimed_at' is null/);
   assert.match(helper, /\.returning\(\)/);

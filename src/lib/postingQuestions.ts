@@ -41,6 +41,7 @@
 
 import type { JobCountry } from './jobLocation';
 import {
+  discoveredFieldIsNotAQuestion,
   discoveredFieldIsRequired,
   isCoreIdentityField,
   isOpenEndedQuestion,
@@ -50,6 +51,7 @@ import {
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from './questionDiscovery';
+import { consentAcceptanceValue } from './profileFieldResolution';
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from './selfDeclaration';
 import { isDeclaredAbsenceRefusal } from './questionDiscovery';
 import { answerReuseScope, savedAnswerFor, type AnswerReuseContext } from './answerReuse';
@@ -129,6 +131,12 @@ export function postingQuestionsFromDiscovered(discovered: readonly DiscoveredQu
     const label = normalizeReviewQuestionLabel(raw);
     if (!label) continue;
     if (isCoreIdentityField(normalizeDiscoveredLabel(raw))) continue;
+    /* A radio's own option, or a widget's rendered subtree, is not a question. Tested on BOTH the
+     * raw label and the normalized one: the handle strippers turn Lever's "Yes cards[<uuid>][field0]"
+     * into "Yes", which is what makes the answer-token vocabulary able to see it at all, while the
+     * widget-subtree markers live in punctuation the normalizer collapses. */
+    if (discoveredFieldIsNotAQuestion({ label: raw, options: field.options })) continue;
+    if (discoveredFieldIsNotAQuestion({ label, options: field.options })) continue;
     const options = Array.isArray(field.options)
       ? [...new Set(field.options.map((option) => (option ?? '').trim()).filter(Boolean))]
       : [];
@@ -146,8 +154,15 @@ export function postingQuestionsFromDiscovered(discovered: readonly DiscoveredQu
       byLabel.set(key, next);
       continue;
     }
-    // Two controls under one label: keep the richer record rather than the later one. A radio group
-    // discovered control-by-control arrives as several rows, and only some of them carry options.
+    /* Two controls under one label: keep the richer record rather than the later one.
+     *
+     * This merge handles the radio group that arrives control-by-control AND SHARES A LABEL, which
+     * is what happens when the group has a fieldset legend or a role=group[aria-label]: every row
+     * reads "Do you require sponsorship?" and only some of them carry options. It is not the whole
+     * of the radio-group problem, and the note that used to sit here implied it was. When there is
+     * no legend the rows do NOT share a label - each one carries its own option text - so they
+     * never collide on this key and nothing here ever sees them. Those are rejected upstream by
+     * discoveredFieldIsNotAQuestion instead. */
     byLabel.set(key, {
       ...existing,
       options: existing.options ?? next.options,
@@ -244,6 +259,24 @@ export function resolvePrescript(
       max_length: question.max_length,
       reusable,
     };
+
+    /* THE CONSENT CLASS, ABOVE THE SELF-DECLARATION BRANCH, and only ever when the applicant has
+     * granted standing permission AND the control's accepting value is identifiable.
+     *
+     * Above it because these labels ARE self-declarations by isSelfDeclarationQuestion's reckoning
+     * and always will be: that predicate guards the DRAFTER and answer reuse, where "never invent
+     * one of these" is still exactly right, and it is deliberately left alone. What changes is only
+     * whether this screen hands the consent back to her, and it stops doing that for the one class
+     * she has already agreed Litos may accept.
+     *
+     * consentAcceptanceValue returns null for no permission, for the held class, and for a list
+     * whose accepting option could not be read - all three fall through to the branch below and are
+     * asked, which is what main does with every one of them. */
+    const consentAnswer = consentAcceptanceValue(label, profile, question.options, context.jdText);
+    if (consentAnswer !== null) {
+      out.push({ ...base, ask: false, answer: consentAnswer, remembered: false });
+      continue;
+    }
 
     if (isSelfDeclarationQuestion(label)) {
       out.push({
