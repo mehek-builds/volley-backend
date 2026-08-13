@@ -701,6 +701,19 @@ export const application_profile = pgTable('application_profile', {
   // was answered with the applicant's home city. Nothing may ever guess at these. Null means the
   // question is left for the applicant, and the classifier now refuses the label outright.
   politically_exposed: text('politically_exposed'),
+  // "Are you currently bound by any agreements with a current or former employer that may restrict
+  // your ability to work for us?" (Scale AI), and the non-compete / non-solicitation / notice-period
+  // variants (DRW, Jump Trading x2). 4 postings, 3 companies, so it clears the two-posting bar for
+  // an onboarding question rather than an ask-at-Apply.
+  //
+  // THE REASON THIS IS A STORED DECLARATION AND NOT A DEFAULT. resolveKnownAnswer returned a
+  // hardcoded "No" here until 2026-08-11, when it was removed for the right reason: it is a legal
+  // statement about her contractual obligations to a DIFFERENT employer, and no column was
+  // consulted before a machine made it. Restoring the behaviour as a constant would restore the
+  // defect. Null means the question is left for her, exactly as it is today; a value means she
+  // declared it herself and Litos is only relaying it. See selfDeclaration.ts: Litos may relay a
+  // declaration she has made and may never generate one.
+  restrictive_agreements: text('restrictive_agreements'),
   politically_exposed_family: text('politically_exposed_family'),
   // "Are you considering or committed to pursuing further education immediately after completing
   // your current academic studies?" (Five Rings), "if you are an undergraduate considering a

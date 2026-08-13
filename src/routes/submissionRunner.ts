@@ -1687,8 +1687,11 @@ export async function discoverAndResolveQuestions(
     // making them "required answer missing" would block every application on data Litos supplied.
     const fieldIsRequired = discoveredFieldIsRequired(field) && !isCoreIdentityField(label);
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
+    // field.options is passed for one rule only: a declared absence of test scores is spoken in the
+    // employer's own wording or not at all. See the parameter's note in lib/questionDiscovery.ts.
     const profileKnown = resolveKnownAnswer(
       label, field.inputType, ap, questionContext, postingCountry, postingCountryCode,
+      field.options ?? undefined,
       controlCanAcceptADocument(field.inputType, field.options),
     );
     /* A REMEMBERED ANSWER, and where it sits in the order.

@@ -54,6 +54,7 @@ import {
 } from './questionDiscovery';
 import { consentAcceptanceValue } from './profileFieldResolution';
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from './selfDeclaration';
+import { isDeclaredAbsenceRefusal } from './questionDiscovery';
 import { answerReuseScope, savedAnswerFor, type AnswerReuseContext } from './answerReuse';
 
 /** One control on an employer's application form, as the pre-script remembers it. */
@@ -178,7 +179,12 @@ export type PrescriptAskReason =
   | 'self_declaration'
   | 'choice_for_you'
   | 'nothing_on_file'
-  | 'needs_your_words';
+  | 'needs_your_words'
+  /* SHE ANSWERED, AND THIS EMPLOYER LEFT HER NO WAY TO SAY IT. A declared absence of standardized
+     test scores against a control that offers only score bands and no "none". Its own reason
+     because 'nothing_on_file' is FALSE here and says so on screen: something IS on file, she put it
+     there, and telling her otherwise is the exact conflation this feature exists to remove. */
+  | 'declared_absence_unsupported';
 
 /** One row of the pre-script, resolved for one applicant. */
 export type PrescriptQuestion = {
@@ -296,6 +302,10 @@ export function resolvePrescript(
       context.jdText,
       context.postingCountry,
       context.postingCountryCode,
+      // Only standardizedTestAnswer reads this, and only to find the form's own wording for "I have
+      // no scores". Null lists arrive here for every text-shaped control and mean the same as
+      // omitting it: hold.
+      question.options ?? undefined,
       controlCanAcceptADocument(question.input_type, question.options),
     );
     if (known && 'value' in known) {
@@ -311,9 +321,13 @@ export function resolvePrescript(
       continue;
     }
 
-    const reason: PrescriptAskReason = (question.options?.length ?? 0) > 0
-      ? 'choice_for_you'
-      : (isOpenEndedQuestion(label) ? 'needs_your_words' : 'nothing_on_file');
+    /* The resolver's own refusal is consulted BEFORE the shape-based guess, because it knows
+       something the shape cannot: whether the question is unanswered or answered-and-unsayable. */
+    const reason: PrescriptAskReason = known && 'skipReason' in known && isDeclaredAbsenceRefusal(known.skipReason)
+      ? 'declared_absence_unsupported'
+      : ((question.options?.length ?? 0) > 0
+        ? 'choice_for_you'
+        : (isOpenEndedQuestion(label) ? 'needs_your_words' : 'nothing_on_file'));
     out.push({ ...base, ask: true, reason, answer: '', remembered: false });
   }
 
@@ -335,6 +349,8 @@ export function prescriptAskExplanation(reason: PrescriptAskReason, label: strin
       return 'this employer offers a fixed list of answers and the choice is yours';
     case 'needs_your_words':
       return 'an open question this employer wants in your own words';
+    case 'declared_absence_unsupported':
+      return 'you said you have no standardized test scores, and this employer offers no way to say that';
     case 'nothing_on_file':
     default:
       return 'the employer requires this and nothing on your profile answers it';

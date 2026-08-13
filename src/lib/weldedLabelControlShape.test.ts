@@ -46,9 +46,14 @@ const STORED: ApplicationProfileLike = {
 const JD = frozenJobEmployerContext('Acme');
 const COUNTRY = postingCountryFromJobContext({ location: 'New York, NY, United States', country: 'United States' });
 
+/* Mirrors a real caller: the control's own option list goes in as `options`, and the shape signal
+   is derived from that same control and passed separately after it. The two are not the same
+   argument, and the resolver reads them for different rules. */
 function resolve(label: string, inputType: string, options?: string[]) {
   return resolveKnownAnswer(
-    label, inputType, STORED, JD, COUNTRY, 'US', controlCanAcceptADocument(inputType, options),
+    label, inputType, STORED, JD, COUNTRY, 'US',
+    options,
+    controlCanAcceptADocument(inputType, options),
   );
 }
 function answer(label: string, inputType: string, options?: string[]): string | null {

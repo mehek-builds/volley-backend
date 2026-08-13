@@ -170,6 +170,18 @@ function normalized(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9+#./-]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function fallbackUnscoreableClause(jdText: string) {
+  const firstLine = /[^\s\r\n](?:[^\r\n]*[^\s\r\n])?/u.exec(jdText);
+  if (!firstLine || firstLine.index == null) return null;
+  const text = firstLine[0].slice(0, 400);
+  return {
+    text,
+    start: firstLine.index,
+    end: firstLine.index + text.length,
+    verdict: 'unscoreable' as const,
+  };
+}
+
 function evidenceForTerm(
   term: JdTerm,
   spec: ResumeSpec,
@@ -397,6 +409,14 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
       ...(groundedCovered ? { evidence: rawEvidence } : {}),
     };
   });
+  /* A low-detail posting can legitimately contain no requirement clause. The audit still needs one
+     exact JD slice so the applicant can see what was frozen and the audit stays bound to the saved
+     description. Marking the first visible line unscoreable makes no fit claim and keeps the packet
+     integrity gate usable for open applications such as a general internship intake. */
+  if (clauses.length === 0) {
+    const fallback = fallbackUnscoreableClause(review.jd_text);
+    if (fallback) clauses.push(fallback);
+  }
   const edited = new Set(review.edited_terms.map(normalized));
   const terms: {
     covered: Array<{ start: number; end: number; evidence: EvidencePointer }>;
@@ -648,10 +668,22 @@ export async function currentAcknowledgedPacketAudit(
 
 export async function createAndPersistPacketAudit(
   row: ResumeRow,
-  options: { loadPdf?: PdfLoader; validateApplicantEmail?: (row: ResumeRow) => Promise<void> } = {},
+  options: {
+    loadPdf?: PdfLoader;
+    validateApplicantEmail?: (row: ResumeRow) => Promise<void>;
+    /* The question set to audit, when the caller has one that differs from the stored review.
+     *
+     * Mirrors currentPacketAudit's option of the same name and exists for the same reason: the
+     * constructor and the verifier have to be looking at ONE packet. The send gate verifies
+     * against refreshKnownQuestionAnswers output, so a route that builds an audit for the
+     * applicant to acknowledge has to build it over that same set, or the acknowledgement it
+     * produces is spent on a packet_version the gate will never compute. */
+    questions?: readonly ApplicationReviewQuestion[];
+  } = {},
 ): Promise<{ audit: PacketAudit; persisted: boolean; pdfBytes: Buffer }> {
-  const review = readApplicationReview(row.spec);
-  if (!review) throw new Error('Application review is not available for this resume');
+  const stored = readApplicationReview(row.spec);
+  if (!stored) throw new Error('Application review is not available for this resume');
+  const review = options.questions ? { ...stored, questions: [...options.questions] } : stored;
   const emailIssue = packetEmailIdentityIssue(row, review);
   if (emailIssue) throw new Error(emailIssue);
   await (options.validateApplicantEmail ?? verifyCurrentPacketEmailIdentities)(row);

@@ -1094,8 +1094,13 @@ export function resolveProfileField(
 ): ResolvedProfileField | null {
   const label = normalizeDiscoveredLabel(shape.label);
   if (!label) return null;
+  /* The option list goes IN as well as being matched against on the way out, and only one rule
+     reads it there. A declared absence of standardized test scores has no canonical spelling, so
+     the resolver needs the form's own list to say it; everything else is decided from the label and
+     the profile, and then snapped onto the list below exactly as before. */
   const known = resolveKnownAnswer(
     label, shape.inputType ?? 'text', ap, jdText, postingCountry, postingCountryCode,
+    shape.options ?? undefined,
     controlCanAcceptADocument(shape.inputType, shape.options),
   );
   if (!known || !('value' in known)) return null;
