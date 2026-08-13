@@ -7,6 +7,7 @@ import {
   attentionBlockersForManagedResult,
   atsApiSubmissionEnabled,
   describeDiscoveryFailure,
+  discoveredControlInputType,
   discoverAndResolveQuestions,
   discoveryHonestyReasons,
   isProviderSessionFailureMessage,
@@ -1196,6 +1197,12 @@ test('combobox discoveries resolve stored academic facts without direct text sel
       { question: 'Degree', answer: 'Bachelor\'s Degree', portal_selector: '[data-litos-discovered-6]' },
     ],
   );
+});
+
+test('a text input with combobox role is classified as a dropdown for every replay', () => {
+  const portalInputType = discoveredControlInputType({ inputType: 'text', role: 'combobox' });
+  assert.equal(portalInputType, 'combobox');
+  assert.equal(discoveredControlInputType({ inputType: 'text', role: null }), 'text');
 });
 
 /* "I had an answer and I deliberately did not pick anything off this list."

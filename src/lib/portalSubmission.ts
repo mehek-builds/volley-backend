@@ -3065,8 +3065,9 @@ function pushGreenhouseQuestionComboboxActions(
   contextText = '',
   referralEvidence?: ReferralSourceEvidence,
   answerIsResolved = false,
+  knownClosedList = false,
 ) {
-  if (!questionMayBeClosedList(questionText)) return;
+  if (!knownClosedList && !questionMayBeClosedList(questionText)) return;
   const selectors = [selector];
   if (isSamsaraLearnedAboutQuestion(questionText)) {
     selectors.push(
@@ -5888,6 +5889,7 @@ export function buildManagedPortalActions(
           packet.jdText,
           packet.referralSourceEvidence,
           answerIsResolved,
+          true,
         );
         pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
         continue;

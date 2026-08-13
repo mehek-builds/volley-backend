@@ -4151,6 +4151,22 @@ function andurilPacket(overrides: Record<string, unknown> = {}) {
   } as Parameters<typeof buildManagedPortalActions>[1];
 }
 
+test('a reviewed combobox answer is selected rather than left as uncommitted text', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    questions: [{
+      question: 'Select your standardized test score type',
+      answer: 'Other',
+      portalSelector: '#question_9176667001',
+      portalInputType: 'combobox',
+    }],
+  }));
+  const group = actions.filter((action) => /standardized test score type/i.test(action.label ?? ''));
+  assert.ok(group.some((action) => action.type === 'click' && action.label?.endsWith('_open')));
+  assert.ok(group.some((action) => action.type === 'press' && action.value === 'Enter'));
+  assert.equal(group.some((action) => action.type === 'fill' && action.label?.startsWith('question:')), false,
+    'a dropdown must never use the plain text replay path');
+});
+
 /* R-101. The discovery run fits inside the runner's ceiling, on every portal and every packet.
  *
  * stratus-browser-cloud rejects a run of more than MANAGED_ACTION_LIMIT actions with HTTP 400
