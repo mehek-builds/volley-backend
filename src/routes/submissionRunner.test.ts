@@ -1202,6 +1202,11 @@ test('combobox discoveries resolve stored academic facts without direct text sel
 test('a text input with combobox role is classified as a dropdown for every replay', () => {
   const portalInputType = discoveredControlInputType({ inputType: 'text', role: 'combobox' });
   assert.equal(portalInputType, 'combobox');
+  assert.equal(discoveredControlInputType({
+    inputType: 'text',
+    role: null,
+    options: ['January 2028 - July 2028', 'August 2028 - December 2028'],
+  }), 'combobox');
   assert.equal(discoveredControlInputType({ inputType: 'text', role: null }), 'text');
 });
 
