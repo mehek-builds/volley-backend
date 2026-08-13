@@ -31,6 +31,15 @@ import { browserApplicationCapability, type BrowserApplicationFamily } from './b
 import { isControlledTestPortalUrl } from './controlledTestPortal';
 import { chooseCanonicalFinalSubmit } from './finalSubmitChooserPolicy';
 import {
+  SUBMIT_READINESS_ASTERISK_LEGEND,
+  SUBMIT_READINESS_ASTERISK_MARK,
+  SUBMIT_READINESS_ERROR_TEXT,
+  SUBMIT_READINESS_LEGEND_TEXT,
+  SUBMIT_READINESS_OWN_QUESTION_SKIP,
+  SUBMIT_READINESS_REQUIRED_ATTRIBUTES,
+  SUBMIT_READINESS_REQUIRED_CLASS_MARKERS,
+} from './submitReadinessGrammar';
+import {
   referralSourceForApplication,
   referralSourceOptionCandidates,
   type ReferralSourceEvidence,
@@ -9010,7 +9019,7 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
   // required attribute at all, so a gate built only on [required] cannot see an unanswered
   // Greenhouse screener question - which is exactly the control this gate exists to catch.
   for (const element of scanRoot.querySelectorAll(
-    'input[required], textarea[required], select[required], [aria-required="true"]'
+    '${SUBMIT_READINESS_REQUIRED_ATTRIBUTES}'
   )) {
     if (element.disabled) continue;
     if (!isVisible(element) && !isVisible(widgetOf(element))) continue;
@@ -9067,13 +9076,13 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     if (!target || target.disabled) return;
     note(widget, target);
   };
-  for (const marker of scanRoot.querySelectorAll('label[class*="_required_"], legend[class*="_required_"]')) {
+  for (const marker of scanRoot.querySelectorAll('${SUBMIT_READINESS_REQUIRED_CLASS_MARKERS}')) {
     // An Ashby question block with no readable control still has to block, which is where PR #22
     // measured this arm.
     noteMarkedLabel(marker, true);
   }
-  const ASTERISK_MARK = /\*(?:\s|$)|(?:^|\s)\*/;
-  const ASTERISK_LEGEND = /\*\s*(?:indicates|denotes|means|marks|=)/i;
+  const ASTERISK_MARK = /${SUBMIT_READINESS_ASTERISK_MARK}/;
+  const ASTERISK_LEGEND = /${SUBMIT_READINESS_ASTERISK_LEGEND}/i;
   for (const marker of scanRoot.querySelectorAll('label, legend')) {
     const markerText = (marker.textContent || '').replace(/\s+/g, ' ').trim();
     if (!ASTERISK_MARK.test(markerText) || ASTERISK_LEGEND.test(markerText)) continue;
@@ -9082,12 +9091,12 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     noteMarkedLabel(marker, false);
   }
   const stale = [];
-  const ERROR_TEXT = /\bis required\b|\brequired field\b|\bplease (?:select|enter|complete|choose|provide)\b|\bcannot be blank\b/i;
+  const ERROR_TEXT = /${SUBMIT_READINESS_ERROR_TEXT}/i;
   // A form's own legend says "* indicates a required field", and it matches the line above. On the
   // live Redwood form that legend was the ONLY thing an early version of this found on a completely
   // and correctly filled application, so the gate would have refused every Greenhouse submission
   // there is. A gate that blocks everything is not caution.
-  const LEGEND_TEXT = /\bindicates?\b|\bdenotes?\b|\bfields?\s+marked\b|\ball fields\b/i;
+  const LEGEND_TEXT = /${SUBMIT_READINESS_LEGEND_TEXT}/i;
   for (const element of scanRoot.querySelectorAll('*')) {
     if (element.children.length > 0) continue;
     const text = clean(element.textContent);
@@ -9097,7 +9106,11 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     if (!widget || widget === element) continue;
     // A message in a block that holds no control at all is not a field error. It is a legend or a
     // page-level notice, and attributing it to a field invents a blocker.
-    const control = widget.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]');
+    // A list rather than the first match, purely so the skip below can be the SAME statement the
+    // managed runner's copy of this loop runs. That copy has to pick between several controls in one
+    // block, this one takes the first, and neither difference is anything the skip needs to know.
+    const controls = [...widget.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]')];
+    const control = controls[0];
     if (!control) continue;
     /* THE FIELD'S OWN QUESTION IS NOT THE FIELD'S OWN COMPLAINT.
      *
@@ -9120,10 +9133,12 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
      * here. What is given up is a field whose ONLY evidence of being required is that its own label
      * happens to contain "please provide", which was never evidence.
      *
-     * Kept in step, loop for loop, with the managed runner's gate in stratus-browser-cloud, which is
-     * the copy that produced the measured sentences. Until that copy carries this test, the runner
-     * refuses those sentences at the boundary instead (lib/conditionalFollowUp.ts). */
-    if (element.tagName === 'LABEL' && control.id && element.getAttribute('for') === control.id) continue;
+     * NOW ONE STATEMENT, SHARED, RATHER THAN TWO THAT AGREE. When this was written it lived only
+     * here, and the copy in stratus-browser-cloud that actually drives a managed application went on
+     * producing the sentences above for the whole life of the fix. It is now interpolated from
+     * lib/submitReadinessGrammar.ts, whose hash both repos pin, so the next divergence has to change
+     * a literal that is one string search away in the file that must match it. */
+    ${SUBMIT_READINESS_OWN_QUESTION_SKIP}
     if (widgetHasAnswer(widget)) { stale.push(text); continue; }
     // note() dedupes on the widget, so a field already reported by the scan above is not counted
     // twice for also carrying the matching error line.
