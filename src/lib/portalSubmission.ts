@@ -9099,6 +9099,31 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     // page-level notice, and attributing it to a field invents a blocker.
     const control = widget.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"]');
     if (!control) continue;
+    /* THE FIELD'S OWN QUESTION IS NOT THE FIELD'S OWN COMPLAINT.
+     *
+     * A <label for="..."> naming this widget's control is the employer ASKING, and reading it as
+     * the employer REFUSING blocks a field on the strength of its own wording. Measured read-only
+     * against the live Greenhouse markup on 2026-08-13: Scale AI's question_8788020005 is labelled
+     * "If yes, please provide further explanation below." and carries aria-required="false", no
+     * required attribute and no asterisk, and DV Trading's question_8954179005 is the same shape.
+     * "please provide" is in ERROR_TEXT, and a label is a LEAF element exactly when the field is
+     * optional, because a required Greenhouse label carries <span aria-hidden="true">*</span> inside
+     * it. So this loop could only ever mis-fire on fields the employer left optional, and it did:
+     * four Scale AI and three DV Trading packets stopped on a field neither form requires, and each
+     * one also reported "1 required field has no question you can answer in Litos" about it, since
+     * an optional field correctly has no question record.
+     *
+     * THIS OPENS NO HOLE ON A REQUIRED FIELD. Every field this loop can reach that the employer
+     * really does mark required is already reached by the three loops above it - the native and
+     * aria-required scan, the _required_ class marker, and the asterisk marker - and note() dedupes
+     * on the widget, so a genuinely required field caught there is unaffected by anything skipped
+     * here. What is given up is a field whose ONLY evidence of being required is that its own label
+     * happens to contain "please provide", which was never evidence.
+     *
+     * Kept in step, loop for loop, with the managed runner's gate in stratus-browser-cloud, which is
+     * the copy that produced the measured sentences. Until that copy carries this test, the runner
+     * refuses those sentences at the boundary instead (lib/conditionalFollowUp.ts). */
+    if (element.tagName === 'LABEL' && control.id && element.getAttribute('for') === control.id) continue;
     if (widgetHasAnswer(widget)) { stale.push(text); continue; }
     // note() dedupes on the widget, so a field already reported by the scan above is not counted
     // twice for also carrying the matching error line.
