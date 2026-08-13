@@ -2075,6 +2075,31 @@ const PROD_OWNER_PROFILE = {
   major: 'Computer Science',
 };
 
+test('IMC begin-working and future sponsorship questions use their separate declarations', () => {
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Will you require immigration sponsorship to begin working for IMC?',
+      'text',
+      PROD_OWNER_PROFILE,
+      'Software Engineer Intern, Summer 2027, Chicago, United States',
+      'us',
+      'US',
+    ),
+    { value: 'No' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Will you require immigration sponsorship in the future to continue working for IMC?',
+      'text',
+      PROD_OWNER_PROFILE,
+      'Software Engineer Intern, Summer 2027, Chicago, United States',
+      'us',
+      'US',
+    ),
+    { value: 'Yes' },
+  );
+});
+
 function skipReasonOf(result: ReturnType<typeof resolveKnownAnswer>): string | null {
   return result && 'skipReason' in result ? result.skipReason : null;
 }

@@ -367,7 +367,7 @@ const RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY =
  * employer reading them together concludes something false whichever one they believe. The whole
  * family is held until the profile says something coherent.
  */
-const CURRENT_SPONSORSHIP_QUESTION = /\b(?:currently|now|right now|at present|before (?:you|the applicant) start)\b/i;
+const CURRENT_SPONSORSHIP_QUESTION = /\b(?:currently|now|right now|at present|before (?:you|the applicant) start|to (?:begin|start) work(?:ing)?)\b/i;
 const FUTURE_SPONSORSHIP_QUESTION = /\b(?:in the future|future sponsorship|later|will you (?:need|require))\b/i;
 /* "What is your visa status?" is a request for a value. "Will you require sponsorship for
  * employment visa status?" is a yes/no question that happens to contain the same two words, and it
@@ -6651,4 +6651,3 @@ export function resolveKnownAnswer(
       return null;
   }
 }
-
