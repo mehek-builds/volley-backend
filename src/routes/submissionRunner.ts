@@ -99,6 +99,7 @@ import {
   type SupportedPortal,
   ManagedActionBudgetError,
   ManagedConfirmationUnprovenError,
+  ManagedRequiredFieldConfirmationError,
   assertManagedRequiredFieldsConfirmed,
   managedApplicationProofIsRequired,
   NoSubmitControlError,
@@ -4553,13 +4554,16 @@ export function submissionFailureOutcome(input: {
      boolean because the error composes its own reason from the portal and the question count, and
      re-deriving it here would be a second place to keep that wording correct. */
   actionBudgetStop?: string | null;
+  /* A ManagedRequiredFieldConfirmationError, which is a NoSubmitControlError by inheritance and is
+     NOT one in fact. See the arm below for what that inheritance was costing the applicant. */
+  requiredFieldConfirmation?: boolean;
   uncertainAfterClaim: boolean;
   externalGate: boolean;
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || uncertainAfterClaim || providerSessionFailure
+  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -4592,6 +4596,23 @@ export function submissionFailureOutcome(input: {
            hunt for. The error's own sentence is used verbatim - it already names the portal and the
            question count, which is what makes this one actionable rather than mysterious. */
         ? `${actionBudgetStop} Nothing was sent. Remove or answer fewer optional questions on this application, then try again.`
+      : requiredFieldConfirmation
+        /* RANKED ABOVE noSubmitControl, AND THAT ORDER IS THE WHOLE ARM.
+           ManagedRequiredFieldConfirmationError extends NoSubmitControlError, deliberately and
+           correctly: fail() reads that type as "the click PROVABLY did not happen", which is the one
+           thing that must stay true of it. What came with the inheritance was the SENTENCE, and the
+           sentence is about a different event. Every required-field stop, right or wrong, told the
+           applicant "Litos could not find the button that sends this application" about a run that
+           found the button, bound it uniquely and then withheld the press on purpose. Reading that
+           about a form whose Submit button is plainly on screen teaches her the message is noise,
+           which is exactly the wrong lesson from the one stop she can actually act on.
+
+           What is always true here, and is the only thing claimed: the form was reached, the send
+           control was found, one required answer could not be confirmed as accepted, and the press
+           was withheld because of it. Cause-neutral about WHICH answer for the same reason
+           noSubmitControl is cause-neutral - the error carries its own field list into
+           submission_error, and the blockers the run produced are surfaced on their own. */
+        ? 'Litos filled this application in and found the button that sends it, but could not confirm one of the required answers had been accepted, so it did not press it. Nothing has been sent and there is no confirmation to look for. Open it when you have a minute and finish it off.'
       : noSubmitControl
         /* CAUSE-NEUTRAL. NoSubmitControlError is thrown for a multi-step first page, a page that
            renders nothing in a headless browser, a control relabelled mid-run, and a click that
@@ -4638,15 +4659,25 @@ export function preClickNoSubmitReleasePatch(): Partial<ApplicationReviewState> 
   };
 }
 
-/** The exact persisted review for an atomic chooser stop that occurs before submitHandle.click. */
+/** The exact persisted review for an atomic chooser stop that occurs before submitHandle.click.
+ *
+ * `requiredFieldConfirmation` is passed rather than sniffed out of `message`, and it is passed
+ * BECAUSE this function is the one that runs. submissionFailureReview returns here for every
+ * NoSubmitControlError, subclasses included, so an arm added to submissionFailureOutcome alone
+ * would be correct, tested, and unreachable on the path that produces the sentence. The typed stop
+ * stays 'no_submit_control': what the row records about WHEN the run stopped is unchanged and
+ * already right, and only what the applicant reads about WHY differs between the two.
+ */
 export function preClickNoSubmitReview(
   current: ApplicationReviewState,
   message: string,
   now: () => string = () => new Date().toISOString(),
+  requiredFieldConfirmation = false,
 ): ApplicationReviewState {
   const outcome = submissionFailureOutcome({
     captchaStop: null,
     noSubmitControl: true,
+    requiredFieldConfirmation,
     uncertainAfterClaim: true,
     externalGate: false,
     providerSessionFailure: false,
@@ -4905,6 +4936,12 @@ export function submissionFailureReview(
      or your email" is the one thing that must not be said: there is no receipt to find. This is
      the routine outcome on a multi-step first page, not an edge case. */
   const noSubmitControl = error instanceof NoSubmitControlError || isManagedNoSubmitControl(message);
+  /* A MEMBER OF THAT FAMILY THAT IS NOT A MISSING BUTTON. The run found the submit control, bound
+     it uniquely, and withheld the press because a required answer could not be confirmed. The
+     pre-click classification above is right and is kept, including the release and everything
+     preClickNoSubmitReleasePatch erases; only the sentence differs, and it differed by inheritance
+     rather than by decision. */
+  const requiredFieldConfirmation = error instanceof ManagedRequiredFieldConfirmationError;
   const regenerationRequired = error instanceof ApplicantEmailRegenerationRequiredError;
   /* The third member of the same family as the two branches above, and it arrives with proof.
      buildManagedPortalActions throws this while ASSEMBLING the action list, before runManagedBrowser
@@ -4944,7 +4981,7 @@ export function submissionFailureReview(
      preClickNoSubmitReleasePatch also removes submission_attempted_at, submitted_at and the receipt,
      which is PR 494's decision about a stop known to happen before submitHandle.click, and folding
      it into the general rule below would quietly change what that branch erases. */
-  if (noSubmitControl) return preClickNoSubmitReview(current, message, now);
+  if (noSubmitControl) return preClickNoSubmitReview(current, message, now, requiredFieldConfirmation);
 
   /* CAN THIS ROW PROVE NOTHING WAS SENT? The typed stop is offered to the row's own evidence rather
      than trusted on its own. submissionProvablyNotSent still refuses a receipt, a standing code

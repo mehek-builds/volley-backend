@@ -248,6 +248,41 @@ test('no-submit-control outranks uncertainty, and captcha outranks both', () => 
   );
 });
 
+/* A REQUIRED-FIELD STOP ARRIVES WEARING noSubmitControl, BECAUSE ITS ERROR TYPE INHERITS FROM ONE.
+ *
+ * That inheritance is deliberate and stays: fail() reads NoSubmitControlError as "the click provably
+ * did not happen", which is the one thing that must be true of both. What must NOT be shared is the
+ * sentence. A run that stops here has found the send control and bound it uniquely, and has withheld
+ * the press on purpose - so "Litos could not find the button that sends this application" is false
+ * about a form whose Submit button is on screen, and reads as a malfunction rather than as the one
+ * stop the applicant can usually fix in a minute.
+ *
+ * Both flags are set together here because that is how the caller really arrives: never
+ * requiredFieldConfirmation alone.
+ */
+test('a required-answer stop outranks the missing-button sentence it arrives wearing', () => {
+  const out = submissionFailureOutcome({ ...base, noSubmitControl: true, requiredFieldConfirmation: true });
+
+  assert.equal(out.status, 'needs_attention');
+  assert.doesNotMatch(out.attentionReason!, /could not find the button/);
+  assert.match(out.attentionReason!, /found the button that sends it/);
+  assert.match(out.attentionReason!, /could not confirm one of the required answers/);
+  assert.match(out.attentionReason!, /nothing has been sent/i);
+  assert.doesNotMatch(out.attentionReason!, /check the portal or your email/i,
+    'the sentence every arm in this family exists to avoid');
+});
+
+test('and it yields to a captcha, which is the more actionable of the two', () => {
+  /* Same ordering the branch above it keeps. A standing human check is what she can act on first,
+     and a required answer she cannot reach past it is not yet the useful thing to say. */
+  assert.match(
+    submissionFailureOutcome({
+      ...base, noSubmitControl: true, requiredFieldConfirmation: true, captchaStop: 'at_submit',
+    }).attentionReason!,
+    /prove you are human/,
+  );
+});
+
 /* THE TWO STAGES ARE THE WHOLE POINT of carrying a stage at all, and neither sentence had a test.
    That gap is how prepareManaged shipped writing 'before_fill' on a path that fills the form first:
    nothing in the suite ever tied a stage to the words it produces, so a wrong stage read as a
