@@ -319,6 +319,44 @@ test('the review edit route still refuses this packet, which is why the save has
   assert.equal(persisted.status, 'needs_attention');
 });
 
+/* AND THE OTHER HALF OF THAT SENTENCE, WHICH IS THE WORSE ONE. Asserted rather than assumed,
+ * because a live website change was built on the assumption that it could not happen.
+ *
+ * The refusal above is a CLAIMED stopped run. An UNCLAIMED one is a different row and a different
+ * answer: submitRequestDisposition returns 'start' for it, so the edit route is permitted rather
+ * than refused. It writes `status: questions_ready | ready_to_submit` over a `...current` spread and
+ * replies 200, so a packet that is still blocked comes back wearing a ready status, and nothing in
+ * the response says the stop was dropped. The attention_reason prose survives on the row, which
+ * makes it worse rather than better: the row now says READY and carries the sentence explaining why
+ * it is not.
+ *
+ * Website PR #319 (a39fe29, live) routed EVERY needs_attention packet through that route to persist
+ * its reviewed answers before an exact-packet audit. The intent was right and the route was not.
+ * This test is the measurement behind features/applications/domain/review-answer-save.ts's
+ * auditAnswerWrite, which keeps the intent and sends the stalled packet here instead. */
+test('the edit route is not refused on an unclaimed stopped run, and relabels it', async () => {
+  const unclaimed = stoppedRun({ submission_claimed_at: undefined, submission_claim_id: undefined });
+  const throughEdit = await applicationWith(unclaimed);
+  const throughSave = await applicationWith(unclaimed);
+
+  const edited = await editReview(throughEdit);
+  assert.equal(edited.statusCode, 200, edited.body);
+  const afterEdit = await storedReview(throughEdit);
+  assert.equal(afterEdit.status, 'questions_ready',
+    'permitted, and the stop is gone from the one field the dashboard badges');
+  assert.equal(afterEdit.attention_reason, unclaimed.attention_reason,
+    'while the sentence saying what it is still waiting for stays on the row, under a ready status');
+
+  const saved = await saveAnswers(throughSave, 'No');
+  assert.equal(saved.statusCode, 200, saved.body);
+  const afterSave = await storedReview(throughSave);
+  assert.equal(afterSave.status, 'needs_attention',
+    'the same packet and the same answer, through the answers route, is still a stopped run');
+  assert.equal(afterSave.attention_reason, unclaimed.attention_reason, 'still owed the same thing');
+  assert.equal(afterSave.questions[0].answer, 'No',
+    'and the answer is stored, which is the whole reason #319 wanted a write here at all');
+});
+
 /* THE REFUSALS. Each asserts the row as well as the status, because a route that answered 409 and
  * wrote anyway would pass on the status line alone. */
 
