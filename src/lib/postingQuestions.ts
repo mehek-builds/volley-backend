@@ -50,6 +50,7 @@ import {
   resolveKnownAnswer,
   type ApplicationProfileLike,
   type DiscoveredQuestion,
+  controlCanAcceptADocument,
 } from './questionDiscovery';
 import { consentAcceptanceValue } from './profileFieldResolution';
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from './selfDeclaration';
@@ -305,6 +306,7 @@ export function resolvePrescript(
       // no scores". Null lists arrive here for every text-shaped control and mean the same as
       // omitting it: hold.
       question.options ?? undefined,
+      controlCanAcceptADocument(question.input_type, question.options),
     );
     if (known && 'value' in known) {
       out.push({ ...base, ask: false, answer: known.value, remembered: false });

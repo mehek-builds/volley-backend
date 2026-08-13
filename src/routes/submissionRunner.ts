@@ -159,6 +159,7 @@ import {
   discoveredFieldIsNotAQuestion,
   type ApplicationProfileLike,
   type DiscoveredQuestion,
+  controlCanAcceptADocument,
 } from '../lib/questionDiscovery';
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from '../lib/selfDeclaration';
 import {
@@ -1688,7 +1689,11 @@ export async function discoverAndResolveQuestions(
     const existing = existingByLabel.get(reviewLabel.toLowerCase());
     // field.options is passed for one rule only: a declared absence of test scores is spoken in the
     // employer's own wording or not at all. See the parameter's note in lib/questionDiscovery.ts.
-    const profileKnown = resolveKnownAnswer(label, field.inputType, ap, questionContext, postingCountry, postingCountryCode, field.options ?? undefined);
+    const profileKnown = resolveKnownAnswer(
+      label, field.inputType, ap, questionContext, postingCountry, postingCountryCode,
+      field.options ?? undefined,
+      controlCanAcceptADocument(field.inputType, field.options),
+    );
     /* A REMEMBERED ANSWER, and where it sits in the order.
      *
      * It stands in only where Litos has nothing of its own. The structured profile wins over a copy

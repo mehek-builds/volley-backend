@@ -1993,7 +1993,13 @@ export function sensitiveQuestionRequiresAttention(
 ): boolean {
   if (!isRefusedQuestion(label)) return false;
   if (NEVER_FILL_PATTERNS.some((re) => re.test(label))) return true;
-  const known = resolveKnownAnswer(label, inputType, ap, jdText, postingCountry, postingCountryCode);
+  // No option list on this path, so the absence rule holds exactly as it did before; the shape
+  // signal is the separate argument after it.
+  const known = resolveKnownAnswer(
+    label, inputType, ap, jdText, postingCountry, postingCountryCode,
+    undefined,
+    controlCanAcceptADocument(inputType),
+  );
   return !(known && 'value' in known && comparableAnswer(known.value) === comparableAnswer(answer));
 }
 
@@ -2048,8 +2054,26 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      * Read by standardizedTestAnswer and nothing else, so no other rule changes.
      */
     const storedAsCandidate = question.answer.trim() ? [question.answer.trim()] : undefined;
+    /* The stored control shape, when the question carries one. The 'text' above is about how the
+       ANSWER is parsed and says nothing about the control, so it must not be read as the shape: a
+       welded label on a checkbox would have its refusal relaxed and "Yes" put back on it. An absent
+       portal_input_type falls back to the refusing default.
+
+       storedAsCandidate is NOT read as a shape either. It is the stored answer handed back for the
+       one absence rule above, not the control's own option list, so it must not decide that this
+       control offers choices. Only portal_input_type speaks for the shape here. */
+    const storedShape = (question as { portal_input_type?: unknown }).portal_input_type;
     const known = label
-      ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry, postingCountryCode, storedAsCandidate)
+      ? resolveKnownAnswer(
+        label,
+        'text',
+        ap,
+        jdText,
+        postingCountry,
+        postingCountryCode,
+        storedAsCandidate,
+        controlCanAcceptADocument(typeof storedShape === 'string' ? storedShape : undefined),
+      )
       : null;
     const withProvenance = question as T & {
       answer_source?: unknown;
@@ -4178,6 +4202,47 @@ export function isHeldDeclarationLabel(label: string): boolean {
  * pre-existing hole rather than something the standing permission opened, and closing it only when a
  * permission exists would leave the ungranted case answering.
  */
+/* WHICH CONTROLS A TICK CAN ACCEPT A DOCUMENT WITH.
+ *
+ * The stated harm of a welded label is "one control, one tick, two statements". A plain text box
+ * has no tick: typing a graduation date into it accepts nothing, whatever boilerplate the employer
+ * printed underneath the field. So the refusal belongs on controls that can carry an acceptance,
+ * and applying it to text inputs cost coverage for nothing. Measured on main after the weld rule
+ * landed:
+ *
+ *   'Expected graduation date. By submitting you accept our Terms and Conditions.'   2027-05 -> skip
+ *   'Which university do you attend? Read our privacy policy for how we use this.'   USC     -> skip
+ *
+ * Both are ordinary factual fields wearing a consent footer, and both were answered before.
+ *
+ * AN ALLOWLIST, AND UNKNOWN FAILS CLOSED. `undefined` and any unrecognised shape count as
+ * accepting, so a caller that does not know what it is looking at keeps the refusal. That direction
+ * is not decoration: refreshKnownQuestionAnswers passes a hardcoded 'text' for every question it
+ * re-resolves, because that literal is about how the ANSWER is parsed and not about the control. A
+ * rule that read the shape straight off that parameter would relax the refusal for every welded
+ * CHECKBOX on the refresh path and quietly put "Yes" back on it. So the signal is separate,
+ * explicit, and defaults to refusing.
+ *
+ * An option list overrides the input type outright: a control offering choices is one a choice can
+ * be made on, whatever the type attribute claims. */
+/* THE ALLOWLIST IS OF CONTROLS THAT CANNOT ACCEPT, not of controls that can, and the inversion is
+ * the point. Written the other way round first, as a list of tick-shaped inputs, and the test for
+ * an unrecognised shape caught it: `some-future-widget` fell off the end of that list and RELAXED
+ * the refusal, which is the failure direction this rule must never have. Enumerating the shapes a
+ * document cannot be accepted on is a closed and stable set; enumerating every widget an ATS might
+ * ship is not. */
+const CANNOT_ACCEPT_A_DOCUMENT =
+  /^(?:text|textarea|email|tel|url|number|date|datetime-local|month|week|time|search|password)$/i;
+
+export function controlCanAcceptADocument(
+  inputType: string | undefined | null,
+  options?: readonly string[] | null,
+): boolean {
+  if (options && options.length > 0) return true;
+  if (!inputType) return true;
+  return !CANNOT_ACCEPT_A_DOCUMENT.test(inputType.trim());
+}
+
 export function weldsConsentToHeldDeclaration(label: string): boolean {
   const value = consentLabelSpelling(label);
   // Both halves required. A pure consent has no held vocabulary and is decided by the consent
@@ -6246,6 +6311,16 @@ export function resolveKnownAnswer(
    * Callers that do not have a list omit it, and every one of them then behaves exactly as before:
    * a declared absence with no list HOLDS. */
   options?: readonly string[],
+  /* Whether this control is one a tick could accept a document with. Read by exactly one rule, the
+     welded-label refusal below. DEFAULTS TO TRUE, which is the refusing direction, so every caller
+     that does not know the control's shape behaves exactly as it did before this parameter existed.
+     Build it with controlCanAcceptADocument rather than passing a bare boolean.
+
+     It sits AFTER `options` and is derived separately rather than read off it. The two answer
+     different questions: `options` is a list of candidate spellings the absence rule may pick from,
+     and this is a statement about the control's shape. refreshKnownQuestionAnswers passes the
+     STORED ANSWER as `options`, which says nothing about whether the control had a tick. */
+  controlAcceptsDocuments: boolean = true,
 ): { value: string } | { skipReason: string } | null {
   /* THE SELF-DECLARATIONS COME FIRST, before every classifier in this file.
    *
@@ -6265,7 +6340,7 @@ export function resolveKnownAnswer(
    * that no permission was ever consulted about. Placed above every rule rather than beside the
    * consent grammar because the consent grammar already refuses it correctly; it is the OTHER
    * branches that have to be stopped. See weldsConsentToHeldDeclaration. */
-  if (weldsConsentToHeldDeclaration(label)) {
+  if (controlAcceptsDocuments && weldsConsentToHeldDeclaration(label)) {
     return {
       skipReason: `this asks you to accept a document and state a fact in one tick, so it is left for you: "${label.slice(0, 60)}"`,
     };
