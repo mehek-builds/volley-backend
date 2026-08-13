@@ -170,6 +170,18 @@ function normalized(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9+#./-]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function fallbackUnscoreableClause(jdText: string) {
+  const firstLine = /[^\s\r\n](?:[^\r\n]*[^\s\r\n])?/u.exec(jdText);
+  if (!firstLine || firstLine.index == null) return null;
+  const text = firstLine[0].slice(0, 400);
+  return {
+    text,
+    start: firstLine.index,
+    end: firstLine.index + text.length,
+    verdict: 'unscoreable' as const,
+  };
+}
+
 function evidenceForTerm(
   term: JdTerm,
   spec: ResumeSpec,
@@ -397,6 +409,14 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
       ...(groundedCovered ? { evidence: rawEvidence } : {}),
     };
   });
+  /* A low-detail posting can legitimately contain no requirement clause. The audit still needs one
+     exact JD slice so the applicant can see what was frozen and the audit stays bound to the saved
+     description. Marking the first visible line unscoreable makes no fit claim and keeps the packet
+     integrity gate usable for open applications such as a general internship intake. */
+  if (clauses.length === 0) {
+    const fallback = fallbackUnscoreableClause(review.jd_text);
+    if (fallback) clauses.push(fallback);
+  }
   const edited = new Set(review.edited_terms.map(normalized));
   const terms: {
     covered: Array<{ start: number; end: number; evidence: EvidencePointer }>;
