@@ -9,10 +9,17 @@
  * Comparison form for option matching. Apostrophes are DELETED rather than spaced so that
  * "Bachelor's Degree" and "Bachelors Degree" collapse to one string: portals spell that enum
  * both ways and they are the same answer.
+ *
+ * THE CLASS IS WHAT PEOPLE TYPE, not what Unicode calls an apostrophe. The backtick (U+0060) and
+ * the acute accent (U+00B4) are not punctuation marks at all, but both sit where the apostrophe
+ * key does on common keyboard layouts and both are typed for one routinely. Left out of this
+ * class they survive to the next replace, which turns them into a SPACE, so "I don`t wish to
+ * answer" compared as "i don t wish to answer" and matched no refusal wording: the volitional
+ * branch needs "dont" or "do not" and got neither.
  */
 export function comparableOption(value: string): string {
   return value
-    .replace(/[‘’‛ʼ']/g, '')
+    .replace(/[‘’‛ʼ'`´]/g, '')
     .replace(/[“”]/g, '"')
     .toLowerCase()
     .replace(/[^a-z0-9.+/]+/g, ' ')
@@ -87,8 +94,15 @@ const DECLINE_TO_STATE_RE = new RegExp(
     /* A VOLITIONAL NEGATION IS ALREADY THE REFUSAL: "prefer not to say", "choose not to disclose",
        "would rather not say". Bare `identify` is deliberately absent here: "I choose not to
        identify with any of the above" states a category membership, and only the compound
-       "self identify" is the opt-out idiom. */
-    '(?:would rather not|rather not|prefers? not|chooses? not|wishes? not|wants? not)'
+       "self identify" is the opt-out idiom.
+
+       `wish` TAKES -es, NOT -s, and spelling it `wishes?` here meant the optional group hung off
+       the `e` instead of the stem: the alternative read "wishe" plus an optional "s", so it caught
+       "wishes not" and the non-word "wishe not" while missing the bare "wish not" that a person
+       actually types. The three neighbours that take an inflection group here (prefer, choose,
+       want) are regular verbs where `s?` is right, which is why the one irregular stem in the list
+       read as correct for as long as it did. */
+    '(?:would rather not|rather not|prefers? not|chooses? not|wish(?:es)? not|wants? not)'
     + '(?: to)? (?:answer|say|state|specify|disclose|self identify|respond|provide)',
     // the bare noun phrases short lists use, whole-string only so "no answer required" is not one
     '^(?:decline[ds]?|i decline|no answer|not disclosed|not specified|undisclosed)$',

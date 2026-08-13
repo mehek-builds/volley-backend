@@ -99,6 +99,44 @@ describe('the predicate itself', () => {
     assert.equal(isDeclineToState('I prefer not to say'), true);
     assert.equal(isDeclineToState('I do not say'), false);
   });
+
+  /* THE THREE WORDINGS THE TWO RUNTIMES DISAGREED ON, pinned here so the next drift fails a suite
+   * instead of a spot check. Found while aligning the stratus-browser-cloud copy of this predicate
+   * against this one: read out of both shipped sources and compared on one table, these were the
+   * only three of 21 wordings where the answers differed.
+   *
+   * Both causes were silent because both failed in the SAFE direction. A refusal misread as a claim
+   * leaves the control blank and surfaces a line to the applicant; it does not assert anything she
+   * did not say. So nothing in the corpus ever came back wrong, only unanswered.
+   */
+  test('a refusal survives the apostrophe the keyboard actually produced', () => {
+    /* The backtick and the acute accent are not apostrophes in Unicode, but they sit on the
+     * apostrophe key across common layouts and portals receive them typed for one. Uncollapsed they
+     * became a SPACE, so "don`t" compared as "don t" and matched no volitional branch. */
+    assert.equal(isDeclineToState('I don`t wish to answer'), true, 'backtick U+0060');
+    assert.equal(isDeclineToState('I don´t wish to answer'), true, 'acute accent U+00B4');
+    // The straight and curly forms already worked and must stay working.
+    assert.equal(isDeclineToState("I don't wish to answer"), true);
+    assert.equal(isDeclineToState('I don’t wish to answer'), true);
+    /* And collapsing them buys nothing on the claim side: "dont" is still not followed by a volition
+     * verb, so the confusable pair this file exists for stays resolved the way it was. */
+    assert.equal(isDeclineToState('I don`t identify with any of the above'), false);
+    assert.equal(isDeclineToState('I don´t identify with any of the above'), false);
+  });
+
+  test('a refusal survives the bare stem of an irregular verb', () => {
+    /* `wish` takes -es, so `wishes? not` parsed as "wishe" plus an optional "s" and matched the
+     * inflected form while missing the bare one a person types. Its neighbours are regular verbs
+     * where `s?` is correct, which is why the one irregular stem read as right for as long as it
+     * did. Both forms are asserted so a repair of either direction cannot drop the other. */
+    assert.equal(isDeclineToState('I wish not to answer'), true, 'bare stem');
+    assert.equal(isDeclineToState('I wishes not to answer'), true, 'inflected');
+    assert.equal(isDeclineToState('She wishes not to disclose'), true);
+    // The same shape on the regular neighbours, which were never broken and must not become so.
+    assert.equal(isDeclineToState('I want not to answer'), true);
+    assert.equal(isDeclineToState('She prefers not to say'), true);
+    assert.equal(isDeclineToState('She chooses not to disclose'), true);
+  });
 });
 
 describe('what the predicate is used for', () => {
