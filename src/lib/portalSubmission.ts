@@ -5851,6 +5851,8 @@ export function buildManagedPortalActions(
     const rawPortalSelector = reviewQuestionPortalSelector(item);
     const portalInputType = reviewQuestionPortalInputType(item);
     const portalSelector = durablePortalSelector(rawPortalSelector);
+    const measuredClosedOption = Boolean(item.answerOptionSource?.trim())
+      && /^(?:text|combobox)?$/i.test(portalInputType ?? '');
     const runtimeGreenhouseSelector = portalFamily(portal) === 'greenhouse'
       && isGreenhouseRuntimeSelectReplayQuestion(questionText)
       && rawPortalSelector?.trim().startsWith('[data-litos-discovered-')
@@ -5870,7 +5872,8 @@ export function buildManagedPortalActions(
       pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
     }
     if (portalSelector) {
-      if (portalFamily(portal) === 'greenhouse' && /^combobox$/i.test(portalInputType ?? '')) {
+      if (portalFamily(portal) === 'greenhouse'
+        && (/^combobox$/i.test(portalInputType ?? '') || measuredClosedOption)) {
         pushGreenhouseQuestionComboboxActions(
           actions,
           portalSelector,

@@ -4167,6 +4167,35 @@ test('a reviewed combobox answer is selected rather than left as uncommitted tex
     'a dropdown must never use the plain text replay path');
 });
 
+test('a measured option answer stays a dropdown when an older runner stored text', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    questions: [
+      {
+        question: 'When is your anticipated graduation date - please select a Graduation Date range',
+        answer: 'January 2028 - July 2028',
+        answerOptionSource: 'May 2028',
+        portalSelector: '#question_9170559101',
+        portalInputType: 'text',
+      },
+      {
+        question: 'Privacy statement',
+        answer: 'I Agree',
+        answerOptionSource: 'Yes',
+        portalSelector: '#question_9170569101',
+        portalInputType: 'text',
+      },
+    ],
+  }));
+  const group = actions.filter((action) => /anticipated graduation date/i.test(action.label ?? ''));
+  assert.ok(group.some((action) => action.type === 'click' && action.label?.endsWith('_open')));
+  assert.ok(group.some((action) => action.type === 'press' && action.value === 'Enter'));
+  assert.equal(group.some((action) => action.type === 'fill' && action.label?.startsWith('question:')), false,
+    'measured option provenance must bypass the plain text replay path');
+  const privacyGroup = actions.filter((action) => /privacy statement/i.test(action.label ?? ''));
+  assert.ok(privacyGroup.some((action) => action.type === 'click' && action.label?.endsWith('_open')));
+  assert.ok(privacyGroup.some((action) => action.type === 'press' && action.value === 'Enter'));
+});
+
 /* R-101. The discovery run fits inside the runner's ceiling, on every portal and every packet.
  *
  * stratus-browser-cloud rejects a run of more than MANAGED_ACTION_LIMIT actions with HTTP 400
