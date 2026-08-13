@@ -18,6 +18,7 @@ import {
   AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
   AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
   AUTOMATIC_SUBMISSION_CONSENT_VERSION,
+  automationConsentState,
   automationConsentValues,
   captchaResumeGranted,
   conductAcceptanceGranted,
@@ -579,25 +580,10 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // student can always see whether it is on, rather than having to trust that it stopped.
       harvest_active: !user.onboarding_completed_at,
       standing_consent_eligibility: standingConsentEligibility(await reviewedSubmitCount(userId)),
-      automatic_submission_enabled: user.automatic_submission_enabled,
-      automatic_submission_consented_at: user.automatic_submission_consented_at,
-      automatic_submission_consent_version: user.automatic_submission_consent_version,
-      automatic_verification_enabled: user.automatic_verification_enabled,
-      // Sent as the ALREADY-VERSION-CHECKED verdict, not the raw column. The 25 accounts carrying a
-      // stale version from the branch that never merged must not read as consented here, and a
-      // client re-deriving that rule is a client that will get it wrong.
-      automatic_captcha_enabled: captchaResumeGranted(user),
-      // The same rule, for the same reason: the verdict, not the column. A client must never decide
-      // for itself whether a stored consent version still means consent.
-      automatic_consent_acceptance_enabled: consentAcceptanceGranted(user),
-      // Sent alongside the verdict so a settings screen can say WHEN she granted it. The runner
-      // writes the same date onto every control it accepts, which is what makes the packet audit
-      // able to show a standing permission rather than an unexplained tick.
-      automatic_consent_acceptance_consented_at: user.automatic_consent_acceptance_consented_at,
-      automatic_consent_acceptance_consent_version: AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
-      automatic_conduct_acceptance_enabled: conductAcceptanceGranted(user),
-      automatic_conduct_acceptance_consented_at: user.automatic_conduct_acceptance_consented_at,
-      automatic_conduct_acceptance_consent_version: AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
+      // Every automation permission, from one place. See automationConsentState: a verdict with no
+      // date beside it is the defect this route shipped for eight days, and it is now a property of
+      // a function a test can call rather than of a literal a reader has to audit by eye.
+      ...automationConsentState(user),
     });
   });
 
@@ -747,6 +733,10 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       automatic_submission_consent_version: users.automatic_submission_consent_version,
       automatic_verification_enabled: users.automatic_verification_enabled,
       automatic_captcha_enabled: users.automatic_captcha_enabled,
+      // Selected so the response can carry it, matching /onboarding/state. Without it a settings
+      // screen that hydrates from this write loses the date it had until the next state read, and
+      // the same field would then mean two different things on the two routes.
+      automatic_captcha_consented_at: users.automatic_captcha_consented_at,
       automatic_captcha_consent_version: users.automatic_captcha_consent_version,
       automatic_consent_acceptance_enabled: users.automatic_consent_acceptance_enabled,
       automatic_consent_acceptance_consented_at: users.automatic_consent_acceptance_consented_at,

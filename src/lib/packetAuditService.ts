@@ -472,6 +472,9 @@ function auditInput(row: ResumeRow, review: ApplicationReviewState, pdfBytes: Bu
     jdText: review.jd_text,
     spec: editableSpec(row.spec),
     jobContext: row.job_context,
+    /* Passed whole. packetBindings projects these to the fields that make up packet identity, so
+       the audit and the send gate are narrowed at the same line and cannot disagree about what a
+       packet is. See PACKET_VISIBLE_QUESTION_FIELDS. */
     questions: normalizeApplicationReviewQuestions(review.questions),
     applicantSnapshot: review.applicant_snapshot ?? null,
     resumeEmail: String(contact.email ?? '').trim().toLowerCase(),

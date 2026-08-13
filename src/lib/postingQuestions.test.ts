@@ -63,6 +63,29 @@ test('a discovery result becomes a form inventory with no applicant in it', () =
   assert.deepEqual(Object.keys(discipline).sort(), ['input_type', 'label', 'max_length', 'options', 'required']);
 });
 
+/* A REQUIRED FIELD NOTHING FILLED AND NOTHING ASKED ABOUT.
+ *
+ * The drop above is for the ONE email control the fixed-field pass types from the packet. It was
+ * keyed on the bare word `email`, so IMC's required "Please provide your university email address."
+ * was dropped here too - and no per-portal selector fills anything but the identity field, so the
+ * form was refused and the packet reported "1 required field has no question you can answer in
+ * Litos". Measured 2026-08-12: not one email-labelled row existed in the whole posting_questions
+ * table.
+ */
+test('a second email control on the same form is inventory, not the packet\'s own field', () => {
+  const stored = postingQuestionsFromDiscovered([
+    { label: 'Email*', selector: '#email', inputType: 'email', maxLength: null, required: true },
+    { label: 'Please provide your university email address.', selector: '#question_1', inputType: 'text', maxLength: null, required: true },
+    { label: 'Reference email address', selector: '#question_2', inputType: 'email', maxLength: null, required: false },
+  ]);
+  assert.deepEqual(
+    stored.map((item) => item.label),
+    ['Please provide your university email address.', 'Reference email address'],
+  );
+  // Required-ness still comes off the raw label, so the inventory says it must be answered.
+  assert.equal(stored[0].required, true);
+});
+
 test('one label discovered twice keeps the richer record', () => {
   const stored = postingQuestionsFromDiscovered([
     { label: 'How did you hear about us?', selector: '#a', inputType: 'radio', maxLength: null, options: null, required: false },

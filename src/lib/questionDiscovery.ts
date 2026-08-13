@@ -39,6 +39,15 @@ import { eligibilityForCountry, namedCountryCodes } from './workEligibility';
 
 export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFacts & {
   full_name?: string;
+  /**
+   * The ADDRESS OF RECORD: what lib/resumeEmail.ts prints on the resume and what gets frozen into a
+   * packet's `_contact.email`. Read by exactly one rule, academicEmailAnswer.
+   *
+   * NOT the address the form's identity field gets. That one is the tracked Litos alias produced by
+   * resolveFrozenApplicantEmail, which lib/packetAudit.ts refuses to let equal this value - the two
+   * are separate identities on purpose and this field does not go near that fill.
+   */
+  contact_email?: string;
   phone?: string;
   address_city?: string;
   address_state?: string;
@@ -811,13 +820,23 @@ function applicationAlreadyAtPacketEmployer(
  * So under a removed sentence the rule is about the RECORDS, not the words:
  *   - never Yes, from any record. A Yes rests on an application whose membership in the restated
  *     scope cannot be established.
- *   - No only where SHE has declared none anywhere and no send is recorded anywhere either - not
- *     "none for this employer", none at all. Her declared `[]` is true under every restriction,
- *     every widening, every time window and every group-entity rewording, because there is nothing
- *     for a restatement to bring into scope. An empty send log alone cannot stand in for that
- *     declaration here for the same reason it cannot stand in for it anywhere else in this
- *     function.
+ *   - No only from her own declared `[]`, which is true under every restriction, every widening,
+ *     every time window and every group-entity rewording, because there is nothing for a
+ *     restatement to bring into scope. A declared list with anything in it holds, and so does an
+ *     unread column: an empty send log cannot stand in for that declaration here for the same
+ *     reason it cannot stand in for it anywhere else in this function.
+ *   - and the send log withdraws it on THIS EMPLOYER, exactly as it does below.
  *   - otherwise hold.
+ *
+ * THAT LAST POINT IS A CORRECTION, and it is the whole of the 2026-08-12 defect. This branch used to
+ * withdraw the answer on a positive record at ANY employer, on the argument that a widening tail is
+ * where an application elsewhere is the one that counts. The cost was measured on the owner account:
+ * she had declared `[]`, Litos' send log held Cresta and kos.ai and nothing at IMC, and IMC's live
+ * label was handed back - so two applications to unrelated companies took away an answer that both
+ * records agree on. It is also strictly stricter than the very same label WITHOUT the reminder
+ * sentence, which answers No off that declaration through the ordinary rules below; one employer
+ * appending help text should not change what her records say. The scope that matters to a
+ * prior-application question is the employer it names, and that is the scope this reads.
  *
  * THE COST, STATED. An account that never filled the onboarding column gets this question handed
  * back, which is one question she answers herself instead of a sentence Litos wrote for her out of
@@ -834,19 +853,23 @@ function previouslyAppliedAnswer(
   if (!parsed.valid || (!parsed.target && !parsed.globalPriorApplicationHistory)) return held;
 
   const declared = ap.prior_application_employers;
-  const history = ap.submitted_application_companies;
 
   /* A REMOVED SENTENCE RESTATED THE SCOPE, AND ONLY HER OWN EMPTY DECLARATION SURVIVES THAT.
    *
-   * Both records are read for their CONTENT, not for this employer: a widening tail is exactly the
-   * case where an application to some other employer is the one that counts. `[]` in
-   * prior_application_employers is her statement that there are none anywhere, which is what
-   * survives any restatement of scope. An empty SEND LOG is not that statement - it is Litos
-   * reporting on itself, and a widening tail is precisely where the applications it cannot see
-   * would count - so it cannot license the answer here any more than it can below. */
+   * Her declared `[]` is the statement that the set of applications is empty, and an empty set has
+   * nothing for a narrowing, a widening, a time window or a group-entity rewording to act on. That
+   * is why it is the only declaration this branch will answer from: a list with anything in it, and
+   * an unread column, both hold. An empty SEND LOG is not that statement either - it is Litos
+   * reporting on itself, and a widening tail is precisely where the applications it cannot see would
+   * count - so it cannot license the answer here any more than it can below. */
   if (withoutTrailingHelpText(label).stripped) {
-    const anyRecord = (declared?.length ?? 0) > 0 || (history?.length ?? 0) > 0;
-    return !anyRecord && declared?.length === 0 ? { value: 'No' } : held;
+    if (declared?.length !== 0) return held;
+    /* AND THE SEND LOG STILL WITHDRAWS IT, ON THIS EMPLOYER, which is the same job it has below and
+     * on the same test. A packet already sent to the employer the question names means the
+     * declaration was made before the send and is out of date. A packet sent to some OTHER employer
+     * says nothing about this question and no longer takes the answer away: see the correction in
+     * the block comment above for what that cost when it did. */
+    return applicationAlreadyAtPacketEmployer(ap, jdText) === true ? held : { value: 'No' };
   }
 
   if (declared && declared.length > 0) {
@@ -869,6 +892,78 @@ function previouslyAppliedAnswer(
   if (applicationAlreadyAtPacketEmployer(ap, jdText) === true) return held;
   // Her declaration, or nothing. An unread column and an unnamed employer are not the same fact.
   return declared ? { value: 'No' } : held;
+}
+
+/* THE ONE LABEL SHAPE THAT ASKS FOR AN ACADEMIC ADDRESS, and the noun has to be beside `email`.
+ *
+ * Windowed and unable to cross a `?`, so "What university do you attend? Email us your transcript"
+ * is two questions and matches neither arm. */
+const ACADEMIC_EMAIL_QUESTION = new RegExp(
+  String.raw`\b(?:universit(?:y|ies)|college|school|campus|academic|student|institution(?:al)?)\b[^?]{0,30}\be-?mail\b`
+  + String.raw`|\be-?mail\b[^?]{0,30}\b(?:universit(?:y|ies)|college|school|campus|academic|student|institution(?:al)?)\b`,
+  'i',
+);
+
+/* An antecedent this file cannot evaluate makes the whole label the applicant's. Kept beside the
+ * pattern it vetoes rather than borrowed from the school-leaver rule, which is about a different
+ * antecedent. */
+const ACADEMIC_EMAIL_CONDITIONAL = /\bif\s+(?:you|your|applicable|not)\b|\bwhere\s+applicable\b|\bonly\s+if\b/i;
+
+/**
+ * Is a stored address one an institution issued, rather than a consumer mailbox?
+ *
+ * `usc.edu`, `ox.ac.uk`, `iitb.ac.in`, `unam.edu.mx`. Not `gmail.com`, and that is the whole point:
+ * this is the test that decides whether the address ON FILE can honestly be offered as a university
+ * one, and it is applied to the value rather than to the question.
+ */
+function isAcademicEmailDomain(address: string): boolean {
+  const at = address.lastIndexOf('@');
+  if (at < 0) return false;
+  const domain = address.slice(at + 1);
+  return /(?:^|\.)edu$/.test(domain) || /(?:^|\.)(?:edu|ac)\.[a-z]{2,}$/.test(domain);
+}
+
+/**
+ * "Please provide your university email address." answered from the address of record, or held.
+ *
+ * IT IS ITS OWN ARM, and that is a correction of a specific past failure rather than tidiness. This
+ * exact label was once answered with the university's NAME, because the bare-keyword fallback at the
+ * bottom of classifyField saw `university` in a six-word label and returned the `school` key (see
+ * the block comment above FIELD_NAME_LABEL_MAX_WORDS, which is what closed that hole). So this rule
+ * is deliberately not a keyword match on `university`: it requires the academic noun to sit beside
+ * `email`, and the value it returns comes from ONE place, `contact_email` - the address
+ * lib/resumeEmail.ts already prints on the resume and freezes into the packet's `_contact`. There is
+ * no path from here to `ap.school`, `ap.degree` or `ap.major`, so the old wrong answer is not
+ * reachable however the label is phrased.
+ *
+ * GROUNDED ON THE VALUE, NOT ON THE QUESTION, which is the second half of the same discipline. The
+ * employer is asking for a university address because it is going to check one. An address of record
+ * that is a consumer mailbox is not a university address, and answering with it would be a confident
+ * wrong answer of exactly the kind a blank is preferable to - so the domain has to say so, or this
+ * holds and the applicant fills it in. Nothing is invented in either branch: the value is either an
+ * address already on file that reads as institutional, or it is not offered at all.
+ *
+ * A POLAR QUESTION IS NOT THIS QUESTION. "Do you have a university email address?" wants a yes or a
+ * no; typing the address into a yes/no control fills nothing and reports the field empty. It is
+ * refused here and left to the rules that already handle it.
+ *
+ * NEITHER IS A CONDITIONAL ONE. IMC's own other phrasing is "if you applied using your personal
+ * email address, please provide your university email address", and Akuna's "if you selected
+ * 'other', please list your university" is in this account's history as a conditional that was
+ * answered unconditionally. Whether the antecedent holds is not something on file, so the whole
+ * label is hers.
+ */
+function academicEmailAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | { skipReason: string } | null {
+  if (!ACADEMIC_EMAIL_QUESTION.test(label)) return null;
+  if (isPolarQuestion(label)) return null;
+  if (ACADEMIC_EMAIL_CONDITIONAL.test(label)) return null;
+  const held = { skipReason: `university email address left for you: "${label.slice(0, 60)}"` };
+  const stored = ap.contact_email?.trim().toLowerCase();
+  if (!stored || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(stored)) return held;
+  return isAcademicEmailDomain(stored) ? { value: stored } : held;
 }
 
 function referralAnswer(
@@ -1586,6 +1681,42 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
         ? withProvenance.answer_option_source
         : undefined;
       if (storedOptionAnswerIsCurrent(question.answer, derivedFrom, known.value)) return question;
+      /* NOTHING IS BEING REPLACED, so the applicant-claim survives. See APPLICANT_CLAIM_FIELDS.
+       *
+       * Every strip in this file is licensed by one sentence: a record left beside a value it was
+       * not written for is a lie the next reader cannot detect. That sentence is about a value that
+       * CHANGED. When the resolver recomputes the answer already on the record, byte for byte, "she
+       * read this exact text and let it stand" is as true as it was a moment ago, and returning a
+       * stripped copy asserts a change that did not happen.
+       *
+       * It also cost a send. answer_source and answer_reviewed_at were inside packet_version, so
+       * stripping them from two EEO questions whose answers recomputed to themselves moved the hash
+       * and the send gate answered packet_stale on a packet nothing had touched. The hash is
+       * separately narrowed so provenance can no longer move it, and THAT is the load-bearing fix
+       * (see PACKET_VISIBLE_QUESTION_FIELDS); this one stops the record lying about itself, which is
+       * worth having on its own.
+       *
+       * THE ANSWER-CLAIMS STILL DROP, and that asymmetry is not a compromise with the tests. A
+       * consent that round-trips through the review screen comes back as the RESOLVED constant
+       * "Yes" rather than the "I agree" she was shown, and a grant record beside "Yes" claims an
+       * acceptance of a value no control ever offered. Dropping it is how that record recovers on
+       * the next pass; keying currency on the permission alone is what made a recoverable
+       * divergence permanent once before. Same for answer_option_source, whose whole job is to say
+       * what a band was snapped from. Only the applicant-claim is safe to carry here, so only the
+       * applicant-claim is carried.
+       *
+       * STRICT EQUALITY, deliberately. A case or spacing difference is a different string on the
+       * employer's form: "Decline To Self Identify" is not the option "Decline to self-identify",
+       * and one of them is what gets typed. Those keep falling through to be replaced. */
+      if (known.value === question.answer) {
+        const {
+          answer_option_source: _optionSource,
+          consent_permission_granted_at: _grantedAt,
+          consent_permission_version: _grantVersion,
+          ...withApplicantClaim
+        } = withProvenance;
+        return withApplicantClaim as T;
+      }
       return { ...withoutProvenance(), answer: known.value };
     }
     const currentResolverRefuses = Boolean(known && 'skipReason' in known)
@@ -2351,11 +2482,10 @@ const QUESTION_HELP_TEXT_OPENER = /^(?:as a reminder|reminder|please note|note)\
  *
  * So nothing below reads the tail. `stripped` says only THAT a sentence was removed, and
  * previouslyAppliedAnswer treats a removed sentence as an unknown restatement of scope: it never
- * answers Yes, and it answers No only where there is no positive record of any application to any
- * employer at all. With zero records there is nothing for any restatement to bring into or out of
- * scope, so "No" is true under every restriction, every widening, every time window and every
- * group-entity rewording. That is a property of the records, established without any judgement
- * about what the words mean.
+ * answers Yes, and it answers No only from the applicant's own declared `[]`. An empty declared set
+ * has nothing for any restatement to bring into or out of scope, so "No" is true under every
+ * restriction, every widening, every time window and every group-entity rewording. That is a
+ * property of the record, established without any judgement about what the words mean.
  */
 type QuestionWithoutHelpText = {
   /** The label with the trailing sentence removed, for the shape grammar to read. */
@@ -4784,6 +4914,13 @@ export function discoveredFieldIsRequired(field: Pick<DiscoveredQuestion, 'label
   return field.required === true || labelMarksRequired(field.label);
 }
 
+/* The subjects that make an email control a DIFFERENT address from the one on the packet. Read only
+ * by isCoreIdentityField below; see the rationale there. Deliberately institutions and third parties
+ * rather than a general modifier test: "personal email" and "contact email" are still hers, still
+ * filled by the fixed-field pass, and must stay out of the applicant's question list. */
+const NON_APPLICANT_EMAIL_SUBJECT =
+  /\b(?:universit(?:y|ies)|college|school|campus|academic|student|institution(?:al)?|faculty|professor|advisor|adviser|supervisor|manager|employer|company|work|business|reference|referee|recommender|parent|guardian|emergency|spouse|colleague|friend)\b/i;
+
 /**
  * The applicant's name and email, which every family's fixed-field pass fills from the packet
  * before discovery ever runs.
@@ -4798,13 +4935,30 @@ export function discoveredFieldIsRequired(field: Pick<DiscoveredQuestion, 'label
  * "Legal first name" and "Preferred first name" are excluded deliberately. They are separate
  * questions an employer asks precisely because the answer may differ from the name on the resume,
  * and if one is required and unanswerable it is genuinely the applicant's to answer.
+ *
+ * AND SO IS AN EMAIL THAT IS NOT THAT ONE. The claim above is about a SINGLE control - the address
+ * the packet carries, typed by a hardcoded per-portal selector (lib/portalSubmission.ts) - and the
+ * bare `email` test claimed every email control on the form instead. IMC asks "Please provide your
+ * university email address." as a required field. It matched, so postingQuestionsFromDiscovered
+ * dropped it from the stored inventory before anything could ask about it
+ * (lib/postingQuestions.ts), and the runner's `discoveredFieldIsRequired(field) &&
+ * !isCoreIdentityField(label)` forced it non-required so no question record was manufactured either
+ * (routes/submissionRunner.ts) - while no fixed-field selector fills anything but the identity
+ * control. On 2026-08-12 that was measured end to end: zero email-labelled rows in the whole
+ * posting_questions table, the portal refusing the form, and the packet reporting "1 required field
+ * has no question you can answer in Litos". The predicate suppressed a question on the strength of a
+ * fill that structurally could not happen.
+ *
+ * A SUBJECT beside the noun is what says the address belongs to someone or something other than the
+ * applicant-as-account-holder. "Email", "Email address", "Confirm email address" carry none and are
+ * still core identity, which is the whole point of the predicate and is unchanged.
  */
 export function isCoreIdentityField(label: string): boolean {
   const l = (label ?? '').toLowerCase();
   if (!l) return false;
   if (/\b(?:legal|preferred|maiden|previous|former|nick)\b/.test(l)) return false;
   if (/\b(?:first|last|given|family|sur|full)\s*name\b|^name\b|\bname\s*\*/.test(l)) return true;
-  return /\be-?mail\b/.test(l);
+  return /\be-?mail\b/.test(l) && !NON_APPLICANT_EMAIL_SUBJECT.test(l);
 }
 
 const INLINE_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
@@ -5526,6 +5680,13 @@ export function resolveKnownAnswer(
    * a live form, and being up here is what stops any later rule reaching it. */
   const highSchoolRecord = highSchoolRecordRefusal(label);
   if (highSchoolRecord) return highSchoolRecord;
+
+  /* Up here with the self-declarations for the reason the block header gives, and this one has the
+   * receipt: "please provide your university email address" is a label a broad rule ALREADY answered
+   * wrongly on a live form, with the university's name. Being above every classifier is what stops
+   * any later rule reaching it again. See academicEmailAnswer. */
+  const academicEmail = academicEmailAnswer(label, ap);
+  if (academicEmail) return academicEmail;
 
   const previouslyApplied = previouslyAppliedAnswer(label, ap, jdText);
   if (previouslyApplied) return previouslyApplied;

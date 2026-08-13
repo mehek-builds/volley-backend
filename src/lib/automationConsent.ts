@@ -95,6 +95,68 @@ export function conductAcceptanceGranted(row: {
     && row.automatic_conduct_acceptance_consent_version === AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION;
 }
 
+/** The stored shape every permission verdict is derived from. */
+export type AutomationConsentRow = {
+  automatic_submission_enabled: boolean | null;
+  automatic_submission_consented_at: Date | null;
+  automatic_submission_consent_version: string | null;
+  automatic_verification_enabled: boolean | null;
+  automatic_verification_consented_at?: Date | null;
+  automatic_captcha_enabled?: boolean | null;
+  automatic_captcha_consented_at?: Date | null;
+  automatic_captcha_consent_version?: string | null;
+  automatic_consent_acceptance_enabled?: boolean | null;
+  automatic_consent_acceptance_consented_at?: Date | null;
+  automatic_consent_acceptance_consent_version?: string | null;
+  automatic_conduct_acceptance_enabled?: boolean | null;
+  automatic_conduct_acceptance_consented_at?: Date | null;
+  automatic_conduct_acceptance_consent_version?: string | null;
+};
+
+/**
+ * Every automation permission exactly as GET /onboarding/state sends it.
+ *
+ * ONE FUNCTION RATHER THAN A LITERAL IN THE ROUTE, because the rule this encodes was broken for
+ * eight days without anything going red. `automatic_captcha_consented_at` was written on every grant
+ * from 2026-08-04 and returned by nothing, so a settings screen could show a granted permission with
+ * no date and no way to find one. Writing and sending lived in different files, which is precisely
+ * what made the omission invisible. Here the pairing is a property of a function a test can call.
+ *
+ * TWO SHAPES, and the difference is the whole design:
+ *   *_enabled          the ALREADY-VERSION-CHECKED verdict. Never the raw column. A row whose stored
+ *                      version has been superseded is not consent to what ships now, and a client
+ *                      re-deriving that rule is a client that will get it wrong.
+ *   *_consented_at     the RAW date, ungated. A superseded grant therefore arrives as a false
+ *                      verdict WITH a real date, and that pairing is deliberate: the client prints
+ *                      no date whenever the verdict is false, which is what stops a stale grant from
+ *                      being displayed as a live one. Gating the date here would hide the one fact
+ *                      that makes the pairing legible.
+ *
+ * The version fields are the CURRENT constants, not the row's. What a client may know is which
+ * wording is live, never which wording a given row happens to carry, because the second invites
+ * exactly the re-derivation the first line above forbids.
+ */
+export function automationConsentState(row: AutomationConsentRow) {
+  return {
+    automatic_submission_enabled: row.automatic_submission_enabled,
+    automatic_submission_consented_at: row.automatic_submission_consented_at,
+    automatic_submission_consent_version: row.automatic_submission_consent_version,
+    automatic_verification_enabled: row.automatic_verification_enabled,
+    /* Sent for the first time here. It was written by PUT /onboarding/automation and read by
+       nothing, the same defect as the captcha column and found while fixing that one. Two permissions
+       with the same bug, and only one of them repaired, is how the class survives. */
+    automatic_verification_consented_at: row.automatic_verification_consented_at ?? null,
+    automatic_captcha_enabled: captchaResumeGranted(row),
+    automatic_captcha_consented_at: row.automatic_captcha_consented_at ?? null,
+    automatic_consent_acceptance_enabled: consentAcceptanceGranted(row),
+    automatic_consent_acceptance_consented_at: row.automatic_consent_acceptance_consented_at ?? null,
+    automatic_consent_acceptance_consent_version: AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
+    automatic_conduct_acceptance_enabled: conductAcceptanceGranted(row),
+    automatic_conduct_acceptance_consented_at: row.automatic_conduct_acceptance_consented_at ?? null,
+    automatic_conduct_acceptance_consent_version: AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
+  };
+}
+
 export function automationConsentValues(settings: AutomationPermissions, now: Date) {
   return {
     automatic_submission_enabled: settings.automatic_submission_enabled,

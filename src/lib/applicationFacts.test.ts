@@ -484,6 +484,69 @@ describe('stored application facts reach the control on the real employer questi
     );
   });
 
+  /* THE SEND LOG WITHDRAWS ON THIS EMPLOYER, NOT ON EVERY EMPLOYER. Measured on the owner account
+   * on 2026-08-12, on the live IMC packet fc6eade3.
+   *
+   * She had declared `[]` - applied nowhere - and Litos' send log held exactly two companies,
+   * Cresta and kos.ai, and nothing at IMC. The stripped-tail branch read both records GLOBALLY, so
+   * two applications to unrelated companies withdrew an answer that both records agree on and IMC's
+   * required question was handed back. The same label with the reminder sentence removed answered
+   * "No" off the same profile through the ordinary rules, which is what makes this a defect rather
+   * than a stricter reading: one employer appending help text should not change what her records
+   * say about that employer.
+   */
+  test('a send to another company does not withdraw the declared No for this one', () => {
+    const imc = frozenJobEmployerContext('IMC');
+    // Production shape, verbatim: prior_application_employers `[]`, send log Cresta and kos.ai.
+    const owner: ApplicationProfileLike = {
+      prior_application_employers: [],
+      submitted_application_companies: ['cresta', 'kos.ai'],
+    };
+    assert.deepEqual(resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', owner, imc), { value: 'No' });
+    // Discovery lowercases every label it captures, so this is the spelling that actually arrives.
+    assert.deepEqual(
+      resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL.toLowerCase(), 'text', owner, imc),
+      { value: 'No' },
+    );
+    // And it reaches the real yes/no control rather than producing a value nothing can select.
+    assert.equal(
+      filled(IMC_PRIOR_APPLICATION_LABEL, owner, { inputType: 'select', options: YES_NO, context: imc }),
+      'No',
+    );
+    assert.equal(questionRequiresHumanAttention({ question: IMC_PRIOR_APPLICATION_LABEL, answer: 'No' }), false);
+
+    /* AND A SUBMITTED APPLICATION TO THIS COMPANY STILL HANDS IT BACK, which is the half of the old
+     * rule that was right. Those rows carry no window and no role scope, so they cannot support a
+     * "Yes" either - the send log withdraws an answer, it never adds one. */
+    for (const sent of [['IMC'], ['cresta', 'IMC'], ['IMC', 'kos.ai']]) {
+      const ap: ApplicationProfileLike = {
+        prior_application_employers: [], submitted_application_companies: sent,
+      };
+      const held = resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', ap, imc);
+      assert.ok(held && 'skipReason' in held, `${JSON.stringify(sent)} -> ${JSON.stringify(held)}`);
+      assert.match(held.skipReason, /prior application question left for you/);
+      assert.doesNotMatch(held.skipReason, /compound application question/);
+      assert.notEqual(
+        filled(IMC_PRIOR_APPLICATION_LABEL, ap, { inputType: 'select', options: YES_NO, context: imc }),
+        'Yes',
+        JSON.stringify(sent),
+      );
+    }
+
+    /* NOTHING ELSE IN THE BRANCH MOVES. Only her own `[]` answers: a declared list with anything in
+     * it cannot be shown to fall inside whatever the removed sentence said, and an unread column is
+     * still "never asked". Both hold however empty the send log is. */
+    for (const ap of [
+      { prior_application_employers: ['Akuna'], submitted_application_companies: [] },
+      { prior_application_employers: ['IMC'], submitted_application_companies: [] },
+      { submitted_application_companies: [] },
+      {},
+    ] satisfies ApplicationProfileLike[]) {
+      const resolved = resolveKnownAnswer(IMC_PRIOR_APPLICATION_LABEL, 'text', ap, imc);
+      assert.ok(resolved && 'skipReason' in resolved, `${JSON.stringify(ap)} -> ${JSON.stringify(resolved)}`);
+    }
+  });
+
   test('the prior-application rule is company-scoped, and reaches nothing else', () => {
     const imc = frozenJobEmployerContext('IMC');
     const nothingSent: ApplicationProfileLike = { submitted_application_companies: [] };
