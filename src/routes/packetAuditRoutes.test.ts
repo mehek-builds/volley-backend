@@ -22,7 +22,10 @@ function routeSlice(start: string, end: string): string {
 test('packet audit endpoint is owner scoped and persists only with exact packet CAS', () => {
   const route = routeSlice("'/applications/:id/packet-audit'", "'/applications/:id/submission/extension-packet'");
   assert.match(route, /ownedResume\(request, reply\)/);
-  assert.match(route, /createAndPersistPacketAudit\(row\)/);
+  /* Was /createAndPersistPacketAudit\(row\)/. The constructor now takes the refreshed question
+   * set, so that the audit it persists carries the same packet_version the send gate computes.
+   * See the deadlock test at the bottom of this file. */
+  assert.match(route, /createAndPersistPacketAudit\(row,\s*\{\s*questions:\s*auditQuestions\s*\}\)/);
   assert.match(route, /currentPacketAudit\(row[,)]/);
   assert.match(route, /allowHourly\(request\.jwtPayload!\.userId, 'packet-audit', LIMITS\.perHour\.packetAudit\)/);
   assert.match(route, /PACKET_AUDIT_STALE/);
@@ -125,4 +128,43 @@ test('resume edits refuse a stale personal email before rendering or storing a r
   assert.ok(identityCheck < editRoute.indexOf('await put('));
   assert.match(editRoute, /!resumePacketEmailIsCurrent\(contact\.email, currentResumeEmail\)/);
   assert.match(editRoute, /resume_email_regeneration_required/);
+});
+
+/* THE CONSTRUCTOR AND THE VERIFIER MUST BE LOOKING AT ONE PACKET.
+ *
+ * On 2026-08-13, three merges that taught resolvers to ANSWER questions they had previously left
+ * blank (#509 declared test-score absence, #515/#518 restrictive_agreements) deadlocked every
+ * packet on the owner's account at once. Nothing about the packets changed. What changed is that
+ * refreshKnownQuestionAnswers stopped being a no-op for them:
+ *
+ *   POST /packet-audit  hashed review.questions            -> version A, which she acknowledged
+ *   submit-request      hashed refreshKnownQuestionAnswers -> version B, "packet_stale"
+ *
+ * Both sides recompute their own on every retry, so re-auditing could never converge. Same shape
+ * as the answer-provenance deadlock in packetAudit.ts, and the same fix: audit the packet the send
+ * gate will check.
+ *
+ * Asserted on the ROUTE SOURCE rather than through a live audit, deliberately. The failure is that
+ * one call site passes a question set the other does not, which is a wiring property; a behavioural
+ * test passes whenever the resolvers happen to be no-ops for its fixture, which is exactly the
+ * condition that hid this for as long as it was hidden.
+ */
+test('the packet-audit route audits the refreshed questions the send gate verifies against', () => {
+  const route = routeSlice("'/applications/:id/packet-audit'", "'/applications/:id/packet-audit/acknowledge'");
+
+  assert.match(
+    route,
+    /refreshKnownQuestionAnswers\(/,
+    'the audit must refresh known answers, or it hashes a packet that will never be sent',
+  );
+  assert.match(
+    route,
+    /currentPacketAudit\(row,\s*\{[^}]*questions:\s*auditQuestions/s,
+    'the refreshed set must reach currentPacketAudit',
+  );
+  assert.match(
+    route,
+    /createAndPersistPacketAudit\(row,\s*\{\s*questions:\s*auditQuestions\s*\}\)/,
+    'and must reach the constructor too, or a first-time audit persists the wrong version',
+  );
 });
