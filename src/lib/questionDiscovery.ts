@@ -4109,6 +4109,49 @@ export function isHeldDeclarationLabel(label: string): boolean {
   return HELD_DECLARATION_VOCABULARY.test(consentLabelSpelling(label));
 }
 
+/**
+ * ONE TICK, TWO STATEMENTS: a label that welds an employer document to a claim about the applicant.
+ *
+ * MEASURED, on main, with no permission granted at all:
+ *
+ *   "I acknowledge the Privacy Statement and confirm I am legally authorized to work in the
+ *    United States."                                 ->  "Yes"
+ *
+ * and the same from an option list reading ["I agree", "I do not agree"].
+ *
+ * The consent classifier is not what went wrong. HELD_DECLARATION_VOCABULARY vetoes this label
+ * exactly as designed, so isConsentAcknowledgementQuestion refuses it and no consent permission is
+ * ever consulted. The answer comes from the WORK-ELIGIBILITY branch, which sees a work-authorization
+ * question it can answer truthfully from her stored declaration, answers it, and in doing so ticks a
+ * control whose text also accepts the employer's Privacy Statement.
+ *
+ * So the veto held the consent path and the declaration path walked around it. Every rule in this
+ * file that decides whether a document may be accepted is downstream of a branch that never asks the
+ * question, which is why this cannot be fixed inside the consent grammar.
+ *
+ * THE HARM IS NOT THE VALUE. "Yes" is the true answer to the work-authorization half. It is the
+ * other half that nobody decided: an acceptance of a named document, made in her name, produced by a
+ * rule that was reasoning about her visa status. A standing permission she has not granted, or has
+ * granted and is being held, is bypassed entirely.
+ *
+ * REFUSED WHOLE, and refused for BOTH halves, because there is one control and one tick. There is no
+ * way to answer the work-authorization question here without also accepting the document, so the
+ * only honest outcome is to hand the label back. It is a genuinely rare shape and the cost is one
+ * question left for the applicant; the alternative is a document accepted by accident.
+ *
+ * NOT GATED on any permission, deliberately. This is answered today with nothing granted, so it is a
+ * pre-existing hole rather than something the standing permission opened, and closing it only when a
+ * permission exists would leave the ungranted case answering.
+ */
+export function weldsConsentToHeldDeclaration(label: string): boolean {
+  const value = consentLabelSpelling(label);
+  // Both halves required. A pure consent has no held vocabulary and is decided by the consent
+  // grammar; a pure declaration has no document span and is decided by its own resolver. Neither
+  // reaches here, which is what keeps this from becoming a second, blunter veto.
+  if (!HELD_DECLARATION_VOCABULARY.test(value)) return false;
+  return BARE_CONSENT_ACKNOWLEDGEMENT.test(value) || CONSENT_ACKNOWLEDGEMENT_SENTENCE.test(value);
+}
+
 /* WHICH DOCUMENT A CONSENT LABEL IS ABOUT, because the two are not one permission.
  *
  * A behavioural policy is not a privacy notice. CODE_OF_CONDUCT_ACKNOWLEDGEMENT's own comment says
@@ -6129,6 +6172,22 @@ export function resolveKnownAnswer(
    * undergraduate date. Recognising them up here means no later rule can reach them, and each one
    * returns a skipReason rather than null when nothing is stored, so the fall-through to the essay
    * drafter cannot invent an answer either. */
+
+  /* AND THIS ONE COMES FIRST OF ALL, because what it refuses is a label another branch would answer.
+   *
+   * A control whose text welds an employer document to a claim about the applicant is one tick
+   * carrying two statements, and the declaration half is answerable. Measured on main with nothing
+   * granted: "I acknowledge the Privacy Statement and confirm I am legally authorized to work in the
+   * United States." resolves to "Yes" off the work-eligibility branch, accepting a named document
+   * that no permission was ever consulted about. Placed above every rule rather than beside the
+   * consent grammar because the consent grammar already refuses it correctly; it is the OTHER
+   * branches that have to be stopped. See weldsConsentToHeldDeclaration. */
+  if (weldsConsentToHeldDeclaration(label)) {
+    return {
+      skipReason: `this asks you to accept a document and state a fact in one tick, so it is left for you: "${label.slice(0, 60)}"`,
+    };
+  }
+
   const exportControl = exportControlAnswer(label);
   if (exportControl) return exportControl;
 
