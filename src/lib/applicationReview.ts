@@ -23,6 +23,27 @@ export type ApplicationReviewQuestion = {
   answer_source?: 'applicant_review' | 'consent_permission';
   answer_reviewed_at?: string;
   /**
+   * SHE READ THIS MACHINE-WRITTEN DRAFT AND LET IT STAND. A DIFFERENT CLAIM FROM WRITING IT.
+   *
+   * A SEPARATE FIELD RATHER THAN A THIRD `answer_source` VALUE, and the reason is the 802 answers.
+   * `answer_source` names where the text CAME FROM, and an approved draft came from Litos. Spelling
+   * approval as a source value would put a value in that field for 223 machine-written essay answers
+   * across 93 live packets, and every reader that asks "which answers are attributed to the
+   * applicant" by testing that field for presence - the shape of the blanket-stamp regression this
+   * codebase already paid for once - would start counting them as hers. Left absent, it cannot be
+   * misread. Nothing here says she wrote a word of it; it says she saw it and did not object.
+   *
+   * IT ALSO COMPOSES, which one enum field cannot. An answer she typed into a blank in round R and
+   * then approved carries `answer_source: 'applicant_review'` AND this, and the record states both
+   * facts instead of picking one.
+   *
+   * AN APPLICANT-CLAIM, keyed exactly like the other two: on record identity, against the round in
+   * `answer_reviewed_at`. Approving is a statement about a record - this id, this label, this answer
+   * - so a rename or a replaced answer falsifies it and it drops. The approval route writes
+   * `answer_reviewed_at` beside it for that reason, and writes no `answer_source`.
+   */
+  answer_approved_at?: string;
+  /**
    * The PROFILE VALUE this answer was snapped from, when discovery could read the control's options
    * and resolveProfileField picked one of them. "May 2028" beside an answer of
    * "January 2028 - July 2028"; "3.89" beside "3.81 - 3.9".
@@ -86,12 +107,13 @@ export type ApplicationReviewQuestion = {
 type AnswerProvenanceField =
   | 'answer_source'
   | 'answer_reviewed_at'
+  | 'answer_approved_at'
   | 'answer_option_source'
   | 'consent_permission_granted_at'
   | 'consent_permission_version';
 
 /** Keyed on RECORD IDENTITY. Falsified by a rename or a stale review round. */
-export const APPLICANT_CLAIM_FIELDS = ['answer_source', 'answer_reviewed_at'] as const;
+export const APPLICANT_CLAIM_FIELDS = ['answer_source', 'answer_reviewed_at', 'answer_approved_at'] as const;
 /** Keyed on THE ANSWER. Falsified only by replacing the answer. */
 export const ANSWER_CLAIM_FIELDS = [
   'answer_option_source',
@@ -272,6 +294,7 @@ export function mergeSubmittedApplicationReviewQuestions(
       const {
         answer_source: _answerSource,
         answer_reviewed_at: _answerReviewedAt,
+        answer_approved_at: _answerApprovedAt,
         ...questionWithoutProvenance
       } = question;
       return questionWithoutProvenance;
@@ -281,7 +304,21 @@ export function mergeSubmittedApplicationReviewQuestions(
     const portalSelector = preferredPortalSelector(question.portal_selector, submittedQuestion.portal_selector);
     const portalInputType = submittedQuestion.portal_input_type ?? question.portal_input_type;
     const atsApiField = question.ats_api_field;
-    const provenanceMatchesCurrentReview = question.answer_source === 'applicant_review'
+    /* AN APPLICANT-CLAIM ON THIS RECORD, ANCHORED TO THE ROUND A READER CAN CHECK IT AGAINST.
+     *
+     * Two ways to hold one: she supplied the answer ('applicant_review'), or she approved the draft
+     * Litos wrote ('answer_approved_at'). Both are statements about what SHE did with this record,
+     * both are only readable beside the `questions_reviewed_at` they equal, and both are therefore
+     * keyed the same way, on the exact reviewed identity below.
+     *
+     * THE APPROVAL IS AN `||`, NOT A WIDENING OF THE MINT RULE. Nothing here creates a claim; this
+     * only decides whether a claim ALREADY on the record survives being posted back. What may mint
+     * one is unchanged: applicantSuppliedAnswer below, for a blank she filled, and nothing else on
+     * this path. An approval is minted by the approval route, one answer per request. */
+    const provenanceMatchesCurrentReview = (
+      question.answer_source === 'applicant_review'
+      || typeof question.answer_approved_at === 'string'
+    )
       && typeof question.answer_reviewed_at === 'string'
       && question.answer_reviewed_at === questionsReviewedAt;
     const exactReviewedIdentityUnchanged = provenanceMatchesCurrentReview
@@ -352,6 +389,11 @@ export function mergeSubmittedApplicationReviewQuestions(
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
+      /* Stripped here for the same reason as the two above it, and it is the reason the approval is
+       * worth recording at all: this branch runs when the reviewed identity MOVED, which for an
+       * approval means the words she approved are not the words being stored. An approval that
+       * survived that would say she signed off on text she never saw. */
+      answer_approved_at: _answerApprovedAt,
       answer_option_source: _answerOptionSource,
       consent_permission_granted_at: _consentGrantedAt,
       consent_permission_version: _consentVersion,
@@ -394,14 +436,15 @@ export function mergeSubmittedApplicationReviewQuestions(
     const key = questionKey(question.question);
     if (!key || storedKeys.has(key)) continue;
     /* A question that exists only in the submit body brings no provenance with it, including the
-     * option derivation. The two above are stripped because a caller must not assert that the
-     * applicant reviewed something; this one because a derivation is a claim that resolution snapped
-     * this answer onto a control's own option list, and nothing here resolved anything. The route's
-     * questionSchema drops the key before this is ever called, but this function is exported and
-     * this is the one branch that copies a submitted question wholesale. */
+     * option derivation. The three above are stripped because a caller must not assert that the
+     * applicant reviewed or approved something; this one because a derivation is a claim that
+     * resolution snapped this answer onto a control's own option list, and nothing here resolved
+     * anything. The route's questionSchema drops the key before this is ever called, but this
+     * function is exported and this is the one branch that copies a submitted question wholesale. */
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
+      answer_approved_at: _answerApprovedAt,
       answer_option_source: _answerOptionSource,
       consent_permission_granted_at: _consentGrantedAt,
       consent_permission_version: _consentVersion,
