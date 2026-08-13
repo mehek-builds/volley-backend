@@ -16,6 +16,8 @@ describe('job preferences', () => {
       role_types: ['internship'],
       locations: ['Dubai', 'London'],
       remote_only: true,
+      primary_period: null,
+      backup_period: null,
     });
   });
 

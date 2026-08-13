@@ -99,6 +99,19 @@ const OFFERS_PATTERNS: RegExp[] = [
   /\b(?:visa|relocation\s+and\s+visa)\s+sponsorship\s+for\s+(?:this|the)\s+role\b/i,
 ];
 
+/**
+ * A person who needs employment sponsorship cannot satisfy a posting restricted to U.S. Persons.
+ * Keep this source compatible with both JavaScript RegExp and PostgreSQL's case-insensitive regex
+ * operator: the parser classifies new polls, while sponsorOnlyPredicate protects existing rows.
+ */
+export const SPONSORSHIP_BLOCKING_STATUS_PATTERN = [
+  'u\\.?s\\.?\\s+person(\\s+status)?\\s+(is\\s+)?required',
+  'must\\s+be\\s+(an?\\s+)?u\\.?s\\.?\\s+citizen',
+  'only\\s+u\\.?s\\.?\\s+citizens?\\s+(are\\s+)?eligible',
+].join('|');
+
+const SPONSORSHIP_BLOCKING_STATUS = new RegExp(SPONSORSHIP_BLOCKING_STATUS_PATTERN, 'i');
+
 /* "SPONSOR" IS NOT ALWAYS ABOUT A VISA, and reading it as though it were hid a company's entire
  * board.
  *
@@ -137,6 +150,9 @@ export function readPostingSponsorship(description: string | null | undefined): 
      scoring is (SCORING_CHARS in routes/jobMonitor.ts): the statement, when it exists, is in the
      requirements or the legal block, never past 20k characters of one posting. */
   const text = description.slice(0, 20_000);
+  /* Check before sentence splitting because the full stop in "U.S." is punctuation, not the end
+     of the requirement. Splitting first would separate "U.S." from "Person status is required". */
+  if (SPONSORSHIP_BLOCKING_STATUS.test(text)) return 'refuses';
   /* Only sentences that mention sponsorship at all are worth splitting hairs over, and the split is
      on sentence enders plus newlines - postings are half prose and half bullet list, and a bullet
      ends with a line break far more often than a full stop. */

@@ -4,7 +4,14 @@ import { z } from 'zod';
 import { db } from '../db/index';
 import { career_page_sources, monitored_jobs, profiles, sponsor_employers, targeting, users } from '../db/schema';
 import { decide, isBlocked } from '../engine/eligibility';
-import { normalizeEmployerName, readPostingSponsorship, sponsorOnlyBoardRequired, sponsorshipVerdict, type PostingSponsorship } from '../lib/sponsorship';
+import {
+  normalizeEmployerName,
+  readPostingSponsorship,
+  SPONSORSHIP_BLOCKING_STATUS_PATTERN,
+  sponsorOnlyBoardRequired,
+  sponsorshipVerdict,
+  type PostingSponsorship,
+} from '../lib/sponsorship';
 import { resolveJobCountry } from '../lib/jobLocation';
 import { portalNameAgrees } from '../lib/sponsorIdentity';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
@@ -42,6 +49,7 @@ import {
   isRemoteLocation,
   normalizeTargeting,
   preferenceFit,
+  recommendationTargetingEligible,
   roleTypePattern,
   targetTitleTerms,
   type JobTargeting,
@@ -901,17 +909,18 @@ function evidenceFor(row: { sponsorship_status: string | null; employer_sponsors
   }).evidence;
 }
 
-async function baseResumeText(userId: string | undefined): Promise<string | null> {
-  if (!userId) return null;
+async function studentResumeFacts(userId: string | undefined): Promise<{ resumeText: string | null; degree: string | null }> {
+  if (!userId) return { resumeText: null, degree: null };
   const [profile] = await db
-    .select({ base_resume_json: profiles.base_resume_json })
+    .select({ base_resume_json: profiles.base_resume_json, parsed_json: profiles.parsed_json })
     .from(profiles)
     .where(eq(profiles.user_id, userId))
     .limit(1);
   const spec = profile?.base_resume_json as ResumeSpec | null | undefined;
-  if (!spec) return null;
-  const text = resumeSpecText(spec).trim();
-  return text.length > 0 ? text : null;
+  const parsed = profile?.parsed_json as { degree?: string | null } | null | undefined;
+  const text = spec ? resumeSpecText(spec).trim() : '';
+  const degree = spec?.degree?.trim() || parsed?.degree?.trim() || null;
+  return { resumeText: text || null, degree };
 }
 
 /**
@@ -1322,23 +1331,28 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
  * which is the same page-tiling bug the ranking cache exists to prevent.
  */
 export function sponsorOnlyPredicate() {
-  return or(
-    /* The posting's own words, wherever the role is. An employer writing "visa sponsorship
-       available" on a Berlin role is talking about Germany, and it is their statement to make. */
-    eq(monitored_jobs.sponsorship_status, 'offers'),
-    and(
-      isNotNull(career_page_sources.sponsor_employer_id),
-      /* Belt and braces with the unlink in pollSource: a source whose portal name disagrees with
-         ours is one we cannot identify, so nothing on it may be called a confirmed sponsor - even
-         if a link survived from before the mismatch was noticed. */
-      eq(career_page_sources.portal_name_mismatch, false),
-      ne(monitored_jobs.sponsorship_status, 'refuses'),
-      /* AND THE ROLE HAS TO BE ONE AN H-1B COULD COVER. The employer-level evidence is a US
-         petition record; applying it to a Bengaluru or Tokyo posting claims something about a
-         visa regime this product knows nothing about. 'unknown' (a bare "Remote") stays in: at a
-         company whose entire filing history is American, that is not evidence of a foreign role,
-         and hiding it would cost real US openings to avoid a hypothetical. */
-      ne(monitored_jobs.job_country, 'non_us'),
+  return and(
+    /* The posting itself always wins over company-level filing history. This also protects rows
+       saved before the parser learned the restriction, so the correction is immediate. */
+    sql<boolean>`${monitored_jobs.description} !~* ${SPONSORSHIP_BLOCKING_STATUS_PATTERN}`,
+    or(
+      /* The posting's own words, wherever the role is. An employer writing "visa sponsorship
+         available" on a Berlin role is talking about Germany, and it is their statement to make. */
+      eq(monitored_jobs.sponsorship_status, 'offers'),
+      and(
+        isNotNull(career_page_sources.sponsor_employer_id),
+        /* Belt and braces with the unlink in pollSource: a source whose portal name disagrees with
+           ours is one we cannot identify, so nothing on it may be called a confirmed sponsor - even
+           if a link survived from before the mismatch was noticed. */
+        eq(career_page_sources.portal_name_mismatch, false),
+        ne(monitored_jobs.sponsorship_status, 'refuses'),
+        /* AND THE ROLE HAS TO BE ONE AN H-1B COULD COVER. The employer-level evidence is a US
+           petition record; applying it to a Bengaluru or Tokyo posting claims something about a
+           visa regime this product knows nothing about. 'unknown' (a bare "Remote") stays in: at a
+           company whose entire filing history is American, that is not evidence of a foreign role,
+           and hiding it would cost real US openings to avoid a hypothetical. */
+        ne(monitored_jobs.job_country, 'non_us'),
+      ),
     ),
   )!;
 }
@@ -1504,11 +1518,12 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     /* OR, never override. The account's standing answer can only ever ADD the filter, so a request
        that omits the parameter (or sends sponsor_only=false) cannot unfilter the board of someone
        who declared at onboarding that they need sponsorship. */
-    const [accountSponsorOnly, jobTargeting, resumeText] = await Promise.all([
+    const [accountSponsorOnly, jobTargeting, resumeFacts] = await Promise.all([
       accountRequiresSponsor(request.jwtPayload?.userId),
       accountJobTargeting(request.jwtPayload?.userId),
-      baseResumeText(request.jwtPayload?.userId),
+      studentResumeFacts(request.jwtPayload?.userId),
     ]);
+    const { resumeText, degree: candidateDegree } = resumeFacts;
     const sponsorOnly = accountSponsorOnly || parsed.data.sponsor_only === 'true';
     // Only surface jobs Litos can carry all the way to a confirmation on its own.
     //
@@ -1718,6 +1733,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      * direction, and the clause judge still reads the body when the student opens it. */
     const gradDate = await studentGradDate(request.jwtPayload?.userId);
     let hiddenByGraduation = 0;
+    let hiddenByTargeting = 0;
     let eligibleIds = ranking.ids;
     const hasResumeScore = Boolean(resumeText?.trim());
     const beforeMatchGate = eligibleIds.length;
@@ -1734,7 +1750,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         'match score gate hid postings',
       );
     }
-    if (gradDate) {
+    if (gradDate || hasTargeting(jobTargeting) || candidateDegree) {
       const gateRows = eligibleIds.length
         ? await db
             .select({
@@ -1745,8 +1761,28 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
             .from(monitored_jobs)
             .where(inArray(monitored_jobs.id, eligibleIds))
         : [];
+      const targetingBlocked = new Set(
+        gateRows
+          .filter((row) => !recommendationTargetingEligible(row, jobTargeting, candidateDegree))
+          .map((row) => row.id),
+      );
+      if (targetingBlocked.size > 0) {
+        eligibleIds = eligibleIds.filter((id) => !targetingBlocked.has(id));
+        hiddenByTargeting = targetingBlocked.size;
+        request.log.info(
+          {
+            userId: request.jwtPayload?.userId,
+            hiddenByTargeting,
+            primaryPeriod: jobTargeting.primary_period,
+            backupPeriod: jobTargeting.backup_period,
+            pool: ranking.ids.length,
+          },
+          'targeting gate hid postings',
+        );
+      }
       const blocked = new Set(
         gateRows
+          .filter((row) => !targetingBlocked.has(row.id))
           .filter((row) => isBlocked(decide({ title: row.title, employment_type: row.employment_type }, gradDate)))
           .map((row) => row.id),
       );
@@ -1822,6 +1858,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       /* How many the graduation gate removed. Not rendered anywhere by choice; it exists so the
          gate is debuggable from a response when a student says a role they expected is missing. */
       eligibility_hidden: hiddenByGraduation,
+      targeting_hidden: hiddenByTargeting,
       sponsor_only: sponsorOnly,
       /* True when postings exist that were never ranked. Without this the client cannot tell the
          end of the ranking from the end of the board, and `has_more: false` at the pool boundary
