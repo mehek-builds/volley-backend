@@ -139,6 +139,7 @@ export type ApplicationProfileLike = StoredSalaryProfile & AvailabilityWindowFac
   act_score?: string;
   politically_exposed?: string;
   politically_exposed_family?: string;
+  restrictive_agreements?: string;
   advanced_study_plan?: 'no' | 'considering' | 'committed';
   attest_truthful_information?: boolean;
   accept_privacy_notices?: boolean;
@@ -6305,6 +6306,10 @@ export function resolveKnownAnswer(
   }
 
   if (EMPLOYER_RESTRICTION_AGREEMENT_QUESTION.test(label)) {
+    /* RELAYED, never generated. A stored declaration answers it; an unset column still holds.
+     * See application_profile.restrictive_agreements for why this is a column and not the "No"
+     * that used to sit here. */
+    if (ap.restrictive_agreements) return { value: ap.restrictive_agreements };
     /* CHANGED. This returned a hardcoded "No" - a legal declaration that she is under no
      * non-compete, non-solicitation or confidentiality obligation to any past employer, made by a
      * machine with no column consulted and nothing on file that could ever have supported it. It

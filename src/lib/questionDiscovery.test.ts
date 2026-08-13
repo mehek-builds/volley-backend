@@ -3505,3 +3505,36 @@ test('equality for keeping the record is exact, because casing is what gets type
     'a different string is a different option on the control, so it is replaced');
   assert.equal(refreshed[0].answer_source, undefined, 'and its record drops with it');
 });
+
+/* THE RESTRICTIVE-AGREEMENT DECLARATION, RELAYED AND NEVER GENERATED.
+ *
+ * The hardcoded "No" that used to answer this was removed on 2026-08-11 because it was a legal
+ * statement about the applicant's obligations to a different employer, made with no column
+ * consulted. These pin the shape that replaces it: stored is relayed, unset is still held. The
+ * "unset is held" half is also asserted in the absolute-rule loop above, deliberately, because the
+ * regression this guards against is a default creeping back in.
+ */
+test('a stored restrictive-agreement declaration is relayed, and an unset one is still held', () => {
+  const label = SCALE_AI_RESTRICTIVE_AGREEMENT_LABEL;
+
+  const declared = resolveKnownAnswer(label, 'text', { restrictive_agreements: 'No' }, undefined);
+  assert.ok(declared && 'value' in declared, 'a stored declaration must answer the question');
+  assert.equal(declared.value, 'No');
+
+  /* The value is relayed verbatim rather than normalised to a boolean. An applicant who declares
+   * "Yes - a 90 day notice period" is making a different statement from one who declares "Yes",
+   * and this rule is not entitled to compress it. */
+  const detailed = resolveKnownAnswer(
+    label, 'text', { restrictive_agreements: 'Yes - 90 day notice period' }, undefined,
+  );
+  assert.ok(detailed && 'value' in detailed);
+  assert.equal(detailed.value, 'Yes - 90 day notice period');
+
+  const unset = resolveKnownAnswer(label, 'text', {}, undefined);
+  assert.ok(unset && 'skipReason' in unset, 'with nothing stored it must stay held');
+
+  /* An empty string is not a declaration. It is what a cleared input sends, and treating it as one
+   * would answer a legal question with a blank the employer reads as the applicant's statement. */
+  const blank = resolveKnownAnswer(label, 'text', { restrictive_agreements: '' }, undefined);
+  assert.ok(blank && 'skipReason' in blank, 'an empty declaration must not be relayed');
+});

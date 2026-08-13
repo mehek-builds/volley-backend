@@ -102,6 +102,7 @@ export const bodySchema = z.object({
   military_service: z.string().nullable().optional(),
   politically_exposed: z.string().nullable().optional(),
   politically_exposed_family: z.string().nullable().optional(),
+  restrictive_agreements: z.string().nullable().optional(),
   // Constrained rather than free text: the resolver turns it into Yes/No answers on real forms, and
   // an unrecognised string would silently mean "never asked" instead of failing the save.
   advanced_study_plan: z.enum(['no', 'considering', 'committed']).nullable().optional(),
