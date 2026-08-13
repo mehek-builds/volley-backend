@@ -249,19 +249,65 @@ test('a packet with no generation binding is refused as before and nothing about
   assert.equal(reads.length, 2, 'with nothing to prove a copy against, there is nothing to keep');
 });
 
+/** The body of the `{ ... }` block that opens after `at`, brace matched. */
+function blockAfter(source: string, at: number): string {
+  const open = source.indexOf('{', at);
+  assert.ok(open >= 0, 'no block opened where one was expected');
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    else if (source[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, index + 1);
+    }
+  }
+  throw new Error('the block never closed');
+}
+
 /* The rate limiter is charged on the INVALID path only, which is why the poll never tripped it and
    why the fix had to be a cheaper read rather than a lower limit. Nothing here changed it, and this
-   is the assertion that says so out loud. */
-test('the packet audit route still charges the hourly limiter only when the current audit is invalid', () => {
+   is the assertion that says so out loud.
+
+   PINNED ON THE GUARD AND THE COUNT, NEVER ON AN ARGUMENT LIST. The first version of this matched
+   `createAndPersistPacketAudit(row)` exactly, and went red the moment main passed that call a
+   second argument. That is a check on the arity rather than on the property, and it is the same
+   trap the anchors at the top of packetAuditRoutes.test.ts already document: a green source regex
+   that is green for the wrong reason. What is held here instead is that the route contains exactly
+   ONE limiter charge and that it sits INSIDE the `!cached.valid` block, brace matched rather than
+   guessed at by proximity. No change to what either audit call is passed can break that quietly,
+   and moving the charge out of the guard, which is the actual regression, still fails it.
+
+   WHY THIS IS A SOURCE ASSERTION AND NOT A ROUTE TEST. The property wants a valid audit and an
+   invalid one driven through the real route, and the route gives currentPacketAudit no loader seam:
+   it reaches defaultPdfLoader, and both that and the review_only restore probe go through
+   resolveBlobUrl to @vercel/blob's list(). In a test process that throws 'No blob credentials
+   found' before allowHourly is reached at all, so neither half of the charge is observable over
+   HTTP. Until the route takes an injectable loader, the guard's shape is the most that can honestly
+   be pinned, so it is pinned as narrowly as possible. */
+test('the packet audit route charges the hourly limiter once, and only inside the invalid guard', () => {
   const applications = readFileSync('src/routes/applications.ts', 'utf8');
   const from = applications.indexOf("'/applications/:id/packet-audit'");
   const to = applications.indexOf("'/applications/:id/packet-audit/acknowledge'", from);
   assert.ok(from >= 0 && to > from, 'the packet audit route was not found');
   const route = applications.slice(from, to);
-  assert.match(
-    route,
-    /if \(!cached\.valid\) \{[\s\S]{0,240}allowHourly\(request\.jwtPayload!\.userId, 'packet-audit', LIMITS\.perHour\.packetAudit\)[\s\S]{0,160}rateLimitedReply\(reply\)/,
+
+  assert.equal(
+    (route.match(/allowHourly\(/g) ?? []).length,
+    1,
+    'the route charges the hourly counter exactly once, so there is one path to reason about',
   );
+
+  const guard = route.indexOf('if (!cached.valid)');
+  assert.ok(guard >= 0, 'the guard that tests the current audit was not found');
+  const invalidOnly = blockAfter(route, guard);
+  assert.match(
+    invalidOnly,
+    /allowHourly\(request\.jwtPayload!\.userId, 'packet-audit', LIMITS\.perHour\.packetAudit\)/,
+    'the only charge must sit inside the guard, so a valid cached audit never consumes the counter',
+  );
+  assert.match(invalidOnly, /rateLimitedReply\(reply\)/, 'and a refused charge must stop the request');
+
+  // The gate and the constructor are still the ones this route calls, whatever they are passed.
   assert.match(route, /currentPacketAudit\(row[,)]/);
-  assert.match(route, /createAndPersistPacketAudit\(row\)/);
+  assert.match(route, /createAndPersistPacketAudit\(row[,)]/);
 });
