@@ -78,15 +78,44 @@ export const SUBMIT_READINESS_LEGEND_TEXT = String.raw`\bindicates?\b|\bdenotes?
  * This is the rule PR #527 added here and did not add to the runner, and it is in the grammar for
  * exactly that reason: a hash over the vocabulary alone would not have noticed. Shipped as source
  * because both gates are serialized text evaluated inside a page, so source is the only form they
- * can share. Each copy supplies `element` and `controls` and its own indentation; nothing else about
- * the statement is theirs to choose.
+ * can share. Each copy supplies `element`, `controls` and `widget`, and its own indentation; nothing
+ * else about the statement is theirs to choose.
+ *
+ * `widget` is in that list deliberately rather than a scan root. This copy calls its root `scanRoot`
+ * and the runner calls its own `root`, so a fragment naming either one is a ReferenceError in the
+ * other repo the moment a page renders an inline error, which is exactly the page this gate exists
+ * for. `widget` is the one binding both copies already have under one name, and it is the more
+ * honest scope anyway: the question this label might be asking is the question of THIS block.
  *
  * A <label for="..."> naming a control in its own block is the employer ASKING. ERROR_TEXT contains
  * "please provide", and a Greenhouse label is a LEAF element exactly when the field is optional,
  * because a required one carries <span aria-hidden="true">*</span> inside it. So the loop this
  * guards could only ever mis-fire on fields the employer marked optional, and it did.
+ *
+ * BUT "A LABEL NAMES THIS CONTROL" IS NOT ENOUGH, and the first version of this rule stopped there.
+ * A <label for> is also the single most common cross-framework shape for an inline field ERROR:
+ * jQuery Validation's default errorElement IS `label`, it sets for=idOrName(element), and its
+ * default text "This field is required." is inside this gate's own ERROR_TEXT vocabulary. Measured
+ * in a real browser against both copies of the gate: with the rule keyed on tagName and `for` alone,
+ * '<label id="q_start-error" class="error" for="q_start">This field is required.</label>' and
+ * '<label class="error-message" for="applicant_phone">Phone cannot be blank</label>' each blocked
+ * before the rule existed and blocked NOTHING after it, and confirmAndSubmit does not cover the gap
+ * because its candidate scan is built from required/aria-required/_required_/asterisk markers and a
+ * field required only by the form's rendered message matches none of them.
+ *
+ * So the skip is bounded to the FIRST label naming that control. The question is authored with the
+ * field; a validator's complaint is appended to it afterwards. That distinction is what the rule
+ * turns on, and it is why this is `element === widget.querySelector(...)` rather than "some label
+ * names it".
+ *
+ * WHAT THIS STILL DOES NOT CATCH, said out loud rather than left for the next incident. A validator
+ * that PREPENDS its error, and a control whose only <label> is the error because its question is
+ * rendered as a <span> or a <div>, both put the complaint first, and both are skipped. Measured: on
+ * the prepend shape and the label-less-question shape this gate reports nothing. Neither is a
+ * regression from this change - the rule as it stood skipped them too - and closing them needs a
+ * signal this one does not have, so they are named here and left to a change that can measure one.
  */
-export const SUBMIT_READINESS_OWN_QUESTION_SKIP = String.raw`if (element.tagName === 'LABEL' && element.getAttribute('for') && controls.some((candidate) => candidate.id === element.getAttribute('for'))) continue;`;
+export const SUBMIT_READINESS_OWN_QUESTION_SKIP = String.raw`if (element.tagName === 'LABEL' && element.getAttribute('for') && controls.some((candidate) => candidate.id === element.getAttribute('for')) && element === widget.querySelector('label[for="' + CSS.escape(element.getAttribute('for')) + '"]')) continue;`;
 
 /** The exact bytes both copies of the gate have to agree on, in a fixed order. */
 export const SUBMIT_READINESS_GRAMMAR = [

@@ -29,7 +29,7 @@ test('the readiness grammar hash identifies the exact bytes both gates share', (
   /* KEEP THIS IN STEP WITH SUBMIT_READINESS_POLICY.grammarHash IN
      stratus-browser-cloud/src/managed-browser.js, which throws at boot if its own copy of the
      grammar does not hash to it. */
-  assert.equal(SUBMIT_READINESS_GRAMMAR_HASH, '4a020bdf8fce9a00aa4b9edbe99d65fc216d62f02d3d8eaa04bf0b7e1ab8c631');
+  assert.equal(SUBMIT_READINESS_GRAMMAR_HASH, '5382e70ebe4ac09c4a66af78dd1aae3b37032f30295621bdabfe43dbc0eaadbc');
   assert.equal(createHash('sha256').update(SUBMIT_READINESS_GRAMMAR).digest('hex'), SUBMIT_READINESS_GRAMMAR_HASH);
 });
 
@@ -55,6 +55,18 @@ test('the structural rule is in the grammar, and not only the vocabulary', () =>
   assert.match(SUBMIT_READINESS_OWN_QUESTION_SKIP, /'LABEL'/);
   assert.match(SUBMIT_READINESS_OWN_QUESTION_SKIP, /getAttribute\('for'\)/);
   assert.match(SUBMIT_READINESS_OWN_QUESTION_SKIP, /\bcontinue\b/);
+  /* AND THAT IT IS BOUNDED TO THE QUESTION, NOT TO ANY LABEL NAMING THE CONTROL. Without this the
+     rule reads a jQuery-Validation error label - errorElement 'label', for=idOrName(element),
+     "This field is required." - as the field's own question and skips the one message the gate was
+     built to read. Asserted on the decision rather than the spelling: the element must BE the first
+     label for that control, which is the one authored with the field rather than appended to it. */
+  assert.match(SUBMIT_READINESS_OWN_QUESTION_SKIP, /element === \w+\.querySelector\(/);
+  assert.match(SUBMIT_READINESS_OWN_QUESTION_SKIP, /label\[for=/);
+  /* The skip may only reach for bindings BOTH copies of the gate bind under the same name. This
+     repo's scan root is `scanRoot` and the runner's is `root`, so naming either is a ReferenceError
+     in the other repo on any page that renders an inline error. */
+  assert.doesNotMatch(SUBMIT_READINESS_OWN_QUESTION_SKIP, /\broot\b/);
+  assert.doesNotMatch(SUBMIT_READINESS_OWN_QUESTION_SKIP, /\bscanRoot\b/);
   assert.ok(
     SUBMIT_READINESS_GRAMMAR.includes(SUBMIT_READINESS_OWN_QUESTION_SKIP),
     'the rule the two copies actually diverged on must be inside the hashed bytes',
