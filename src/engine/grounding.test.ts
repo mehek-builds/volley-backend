@@ -114,6 +114,24 @@ test('ungroundedProperNouns does not flag names that appear in the corpus', () =
   assert.deepEqual(out, []);
 });
 
+test('ungroundedProperNouns does not invent a name from the tail of a hyphenated skill', () => {
+  const corpus = wordSet('Coursework in Data Structures and Object-Oriented Programming');
+  const out = ungroundedProperNouns(
+    'My coursework includes Data Structures and Object-Oriented Programming.',
+    corpus,
+  );
+  assert.deepEqual(out, []);
+});
+
+test('ungroundedProperNouns still flags a real unknown name after a hyphenated skill', () => {
+  const corpus = wordSet('Coursework in Object-Oriented Programming');
+  const out = ungroundedProperNouns(
+    'I studied Object-Oriented Programming before joining Goldman Sachs.',
+    corpus,
+  );
+  assert.deepEqual(out, ['Goldman Sachs']);
+});
+
 // R-042: ranking/ordering asks treat every rankable item as a skill claim. The live miss (DRW,
 // 2026-07-18): "rank your languages" drafted "Python first, JAVA second" with no Java anywhere
 // in the declared list. These helpers are the deterministic half of that fix.
