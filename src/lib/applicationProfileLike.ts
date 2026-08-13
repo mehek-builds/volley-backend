@@ -307,6 +307,7 @@ export async function loadApplicationProfileLike(userId: string): Promise<Applic
     military_service: factString(appRow, 'military_service'),
     politically_exposed: factString(appRow, 'politically_exposed'),
     politically_exposed_family: factString(appRow, 'politically_exposed_family'),
+    restrictive_agreements: factString(appRow, 'restrictive_agreements'),
     advanced_study_plan: advancedStudyPlan(factString(appRow, 'advanced_study_plan')),
     attest_truthful_information: factBoolean(appRow, 'attest_truthful_information'),
     accept_privacy_notices: factBoolean(appRow, 'accept_privacy_notices'),

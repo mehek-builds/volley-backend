@@ -65,6 +65,7 @@ function row(over: Partial<ApplicationProfile> = {}): ApplicationProfile {
     availability_window_end: null,
     availability_cycle: null,
     availability_valid_through: null,
+    restrictive_agreements: null,
     standardized_test_type: null,
     sat_score: null,
     act_score: null,
