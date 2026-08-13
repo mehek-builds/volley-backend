@@ -61,7 +61,9 @@ import {
   budgetDroppedReviewedQuestions,
   attachManagedFieldOptions,
   buildManagedDiscoveredOptionProbeBatches,
+  buildManagedWindowedOptionSearchBatches,
   managedOptionProbeAnalysis,
+  managedOptionSearchTerm,
   managedOptionProbeControlId,
   managedUnexplainedAnswers,
   managedUnexplainedAnswerReasons,
@@ -2378,7 +2380,7 @@ async function prepareManaged(
     discoveryFieldOptions,
     discoveryRoleCapability,
   );
-  const optionProbeResults = [];
+  const optionProbeResults: Array<Awaited<ReturnType<typeof runManagedBrowser>> | null> = [];
   const optionProbeBatchFailures: Array<{ controlIds: string[]; reason: string }> = [];
   for (const actions of optionProbeBatches) {
     const controlIds = [...new Set(actions.flatMap((action) => {
@@ -2405,7 +2407,7 @@ async function prepareManaged(
       });
     optionProbeResults.push(result);
   }
-  const optionProbe = managedOptionProbeAnalysis(
+  const analyseOptionProbe = () => managedOptionProbeAnalysis(
     portal,
     discoveryResult?.discovered ?? [],
     discoveryFieldOptions,
@@ -2413,6 +2415,79 @@ async function prepareManaged(
     optionProbeBatchFailures,
     discoveryRoleCapability,
   );
+  let optionProbe = analyseOptionProbe();
+  /* ─── THE FOURTH STAGE, and it exists only for the controls the third one could not finish ───
+   *
+   * A control whose menu renders 100 rows and stops has said nothing about whether the stored answer
+   * is on it. The stage above discards that read - correctly, because "her answer is not here" and
+   * "her answer is past row 100" are the same read - and then discards the CONTROL with it: removed
+   * from resolution, an attention line to the applicant, and the send held. Measured on Jump
+   * Trading's school control (question_67594852), which offers a full international university
+   * taxonomy and trips the cap on every read: 9 packets.
+   *
+   * The control is searchable. So it is asked the narrower question it can actually answer, by
+   * typing the leading tokens of the answer Litos already has for that field and reading the menu
+   * the control filters down to. Measured on the same shape: "University of Southern" returns 8
+   * entries that were nowhere in the first 100.
+   *
+   * THE PROFILE IS RE-READ RATHER THAN THREADED DOWN, and only when there is a windowed control to
+   * spend it on. The packet-merged profile the resolution stage uses is built further below, after
+   * the cover letter and transcript steps have decided what the packet contains, and reordering
+   * those to serve a search term would be a much larger change than this is worth. What is wanted
+   * here is not the final answer, it is a query: the profile's own words for this field, cut to
+   * their leading tokens. A read that comes back with nothing typeable simply produces no search,
+   * and the control fails exactly as it does today.
+   *
+   * NOTHING IS SELECTED. Every action is open, press, read, Escape - the same read-only shape as the
+   * probe rounds above, which is what makes it safe against an employer's form on an application the
+   * applicant has not approved. See buildManagedWindowedOptionSearchBatches for why the keystrokes
+   * are spelled out one at a time rather than filled. */
+  if (optionProbe.windowedIds.size > 0) {
+    const searchProfile = await loadApplicationProfileLike(row.user_id);
+    const searchPostingCountry = postingCountryFromJobContext(row.job_context);
+    const searchPostingCountryCode = postingCountryCodeFromJobContext(row.job_context);
+    const searchTerms: Record<string, string> = {};
+    for (const field of discoveryResult?.discovered ?? []) {
+      const controlId = managedOptionProbeControlId(field);
+      if (!controlId || !optionProbe.windowedIds.has(controlId) || searchTerms[controlId]) continue;
+      const label = normalizeDiscoveredLabel(field.label);
+      if (!label) continue;
+      // Resolved with NO option list on purpose: the list is the thing that could not be read, and
+      // what is wanted is the profile's own phrasing to search with, not a snapped answer.
+      const answer = resolveProfileField(
+        { label, inputType: field.inputType },
+        searchProfile,
+        undefined,
+        searchPostingCountry,
+        searchPostingCountryCode,
+      )?.value;
+      const term = managedOptionSearchTerm(answer);
+      if (term) searchTerms[controlId] = term;
+    }
+    const searchBatches = buildManagedWindowedOptionSearchBatches(portal, optionProbe.windowedIds, searchTerms);
+    for (const actions of searchBatches) {
+      const controlIds = [...new Set(actions.flatMap((action) => {
+        const id = action.label?.match(/^option_search_\w+:(.+)$/)?.[1]
+          ?? (action.label?.startsWith('options:') ? action.label.slice('options:'.length) : undefined);
+        return id ? [id] : [];
+      }))];
+      const result = await runManagedBrowser(applicationUrl, actions, { screenshot: false })
+        .catch((error: unknown) => {
+          /* NOT recorded as a batch failure. A batch failure is a read this run OWED and could not
+           * make; these controls have already failed, and this call is a second chance at them. A
+           * search that never returns leaves them failed with the sentence they already have, which
+           * is the truth of it, rather than replacing it with one about a request the applicant
+           * never knew was made. */
+          fastify.log.warn(
+            { applicationId: row.id, portal, error: describeDiscoveryFailure(error), controls: controlIds },
+            'Windowed option search failed, so those controls keep the windowed-read failure they already had',
+          );
+          return null;
+        });
+      optionProbeResults.push(result);
+    }
+    if (searchBatches.length > 0) optionProbe = analyseOptionProbe();
+  }
   /* NOT pushed into discoveryFailures. That array is the WHOLE-FORM honesty gate, and a per-control
    * read failure promoted into it made Litos tell her it could not read any of this form's questions
    * when it had read all but one of them. The failure is real and stays visible, and it still holds

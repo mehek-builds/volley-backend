@@ -1250,6 +1250,14 @@ const NON_OPTION_LISTBOX_LINE =
  * caller asks of an option list. "The stored answer is not on this list" and "the stored answer is
  * past row 100" look identical, and acting on the first would both skip a correct fill and tell the
  * applicant her saved answer is not offered, on a control that offers it.
+ *
+ * '>=' RATHER THAN '>', AND IT STAYS THAT WAY. A genuine hundred-entry list is discarded with the
+ * windows, and that is not a rounding error: the two measured windows above stop at EXACTLY 100,
+ * so a read of 100 is indistinguishable from a window by counting alone. What used to follow from
+ * that was giving up on the control; what follows from it now is asking the control a narrower
+ * question, which is what buildManagedWindowedOptionSearchBatches below does. A genuine 100-entry
+ * list answers the narrower question with fewer than 100 rows and is read; a window answers it with
+ * a shorter window and is still discarded.
  */
 const MANAGED_OPTION_LISTBOX_RENDER_CAP = 100;
 
@@ -1593,6 +1601,175 @@ export function buildManagedDiscoveredOptionProbeActions(
   return buildManagedDiscoveredOptionProbeBatches(portal, discovered, alreadyRead, discoveryRoleCapability)[0] ?? [];
 }
 
+/* ─── a windowed list is SEARCHED, not given up on ─────────────────────────────────────────────
+ *
+ * A control that renders 100 rows and stops has not told this repo that the stored answer is
+ * absent; it has told it that it renders 100 rows. Everything above discards that read, correctly,
+ * and then discards the CONTROL with it - the field is removed from resolution, an attention line
+ * goes to the applicant, and the send is held. Measured on Jump Trading's school control
+ * (`question_67594852`), which offers a full international university taxonomy and trips the cap on
+ * every read: 9 packets.
+ *
+ * THE LIST IS NOT UNREADABLE. It is searchable. Measured on the live Anduril posting, the same
+ * shape: typing "University of Southern" returns 8 entries that were nowhere in the first 100. So
+ * before a read is declared windowed for good, the control is asked the narrower question it can
+ * actually answer - "which of your rows begin like this answer" - and a filtered read that lands
+ * under the cap is a real read of real rows.
+ *
+ * WHAT A FILTERED READ IS, SAID PLAINLY, BECAUSE IT IS NOT THE WHOLE LIST. It is the sublist the
+ * control itself returns for the answer's own leading tokens. That is strictly less than the
+ * taxonomy and it is exactly the part of it that can answer what the caller asks: is the stored
+ * answer offered by this control, and how does the control spell it. Every row in it is a row the
+ * employer's control rendered, so nothing is invented; what is given up is the ability to say
+ * anything about rows that begin differently, which a windowed read could not say either.
+ *
+ * IT FAILS CLOSED EXACTLY AS BEFORE. A filtered read that is still at the cap parses as 'windowed'
+ * through the same predicate, so the control fails with the same sentence it fails with today. So
+ * does a control with no stored answer to type, a control whose answer has no typeable leading
+ * tokens, and a non-Greenhouse family. Nothing that fails today starts passing except by way of a
+ * real read.
+ *
+ * WHY IT IS TYPED ONE KEY AT A TIME, which looks absurd until the alternative is written out. The
+ * runner's `fill` action on a control whose role is `combobox` does not type: it enters
+ * fillCustomChoice, which opens the menu, ranks the rows and CLICKS one, and on every path where it
+ * does not click it presses Escape. Either way the listbox is gone before the next action runs, so
+ * a fill-then-extract reads nothing at all, and a probe pass that is documented read-only would
+ * start selecting values on an employer's form the applicant has not yet approved. `press` is the
+ * only primitive in the runner that puts a character into a focused control and leaves the page
+ * otherwise untouched. So the term is spelled out, the menu filters as it would under a person's
+ * hands, the listbox is read, and Escape closes it - which is what the two rounds above already do.
+ */
+
+/**
+ * The most of an answer that is typed into a control's search box.
+ *
+ * Long enough to cut a national university taxonomy down to a handful ("University of Southern" is
+ * 22 characters and returns 8 rows), short enough that a control costs a bounded number of actions.
+ */
+export const MANAGED_OPTION_SEARCH_MAX_CHARS = 28;
+
+/** How many windowed controls one run will spend a search pass on. */
+export const MANAGED_OPTION_SEARCH_MAX_CONTROLS = 4;
+
+/** Below this there is nothing to filter with, and a two-letter query narrows nothing. */
+const MANAGED_OPTION_SEARCH_MIN_CHARS = 4;
+
+/**
+ * The leading tokens of an answer, in the form the runner can press.
+ *
+ * TRUNCATED AT THE FIRST CHARACTER THAT IS NOT A LETTER, DIGIT OR SPACE, rather than having that
+ * character dropped. A react-select filter is a substring test, so silently deleting the apostrophe
+ * out of "St. John's University" would produce a query that matches nothing while looking like it
+ * should. Stopping there instead gives a shorter query that is still a true prefix of the answer -
+ * or, as with "St." above, nothing at all, which fails closed.
+ *
+ * AND AT A WHOLE WORD. A query cut mid-word is still a valid substring, but "University of Southern
+ * Califo" is a query no reader of the packet could recognise, and it buys nothing over the whole
+ * word before it.
+ */
+export function managedOptionSearchTerm(answer: string | null | undefined): string {
+  const trimmed = (answer ?? '').trim();
+  if (!trimmed) return '';
+  const typeable = trimmed.match(/^[A-Za-z0-9 ]+/)?.[0]?.replace(/\s+/g, ' ').trim() ?? '';
+  if (typeable.length < MANAGED_OPTION_SEARCH_MIN_CHARS) return '';
+  if (typeable.length <= MANAGED_OPTION_SEARCH_MAX_CHARS) return typeable;
+  const cut = typeable.slice(0, MANAGED_OPTION_SEARCH_MAX_CHARS);
+  const lastWord = cut.lastIndexOf(' ');
+  const whole = lastWord > 0 ? cut.slice(0, lastWord) : cut;
+  return whole.length >= MANAGED_OPTION_SEARCH_MIN_CHARS ? whole : '';
+}
+
+/**
+ * One keystroke per character, as the runner's `press` action names them.
+ *
+ * A space is sent as 'Space' rather than as ' '. Playwright accepts both, and the named key is the
+ * one whose behaviour is written down.
+ */
+export function managedOptionSearchKeys(term: string): string[] {
+  return [...term].map((character) => (character === ' ' ? 'Space' : character));
+}
+
+/** The actions per control: open, one press per character, read the filtered menu, close. */
+export const MANAGED_OPTION_SEARCH_FIXED_ACTIONS = 3;
+
+function pushWindowedOptionSearch(actions: ManagedBrowserAction[], controlId: string, term: string) {
+  const selector = closedControlSelector(controlId);
+  actions.push({
+    type: 'click',
+    selector,
+    label: `option_search_open:${controlId}`,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  for (const key of managedOptionSearchKeys(term)) {
+    actions.push({
+      type: 'press',
+      selector,
+      value: key,
+      label: `option_search_key:${controlId}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
+  // The SAME label the two probe rounds use, so managedOptionProbeAnalysis needs no new arm: a
+  // filtered read is just another read of that control, and it is the only one of them that parses
+  // as a list.
+  actions.push({
+    type: 'extract',
+    selector: reactSelectListboxSelector(controlId),
+    label: `${MANAGED_OPTION_EXTRACT_PREFIX}${controlId}`,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  // Escape rather than a second click, and for the same reason the probe rounds give: it closes the
+  // menu AND clears what was typed, so the control is left exactly as it was found.
+  actions.push({
+    type: 'press',
+    selector,
+    value: 'Escape',
+    label: `option_search_close:${controlId}`,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+}
+
+/**
+ * The search pass for the controls whose lists came back windowed, packed into bounded requests.
+ *
+ * Empty whenever there is nothing honest to type: a family that is not Greenhouse, a control with
+ * no windowed read, an answer with no typeable leading tokens. An empty list means the caller makes
+ * no extra managed call at all and the analysis stands exactly as it did.
+ */
+export function buildManagedWindowedOptionSearchBatches(
+  portal: SupportedPortal,
+  windowedControlIds: Iterable<string>,
+  searchTermByControlId: Readonly<Record<string, string>>,
+): ManagedBrowserAction[][] {
+  if (portalFamily(portal) !== 'greenhouse') return [];
+  const batches: ManagedBrowserAction[][] = [];
+  let actions: ManagedBrowserAction[] = [];
+  let spent = 0;
+  for (const controlId of new Set(windowedControlIds)) {
+    if (spent >= MANAGED_OPTION_SEARCH_MAX_CONTROLS) break;
+    const term = managedOptionSearchTerm(searchTermByControlId[controlId]);
+    if (!term) continue;
+    const next: ManagedBrowserAction[] = [];
+    pushWindowedOptionSearch(next, controlId, term);
+    // Whole controls only, exactly as the probe batches pack: a control half of whose keystrokes
+    // landed in one request and half in the next has typed two different queries into two different
+    // browser sessions and read the menu of neither.
+    if (actions.length > 0 && actions.length + next.length > MANAGED_ACTION_LIMIT) {
+      batches.push(actions);
+      actions = [];
+    }
+    if (next.length > MANAGED_ACTION_LIMIT) continue;
+    actions.push(...next);
+    spent += 1;
+  }
+  if (actions.length > 0) batches.push(actions);
+  return batches;
+}
+
 export function managedResultSupportsDiscoveryRole(result: ManagedBrowserResult | null | undefined): boolean {
   return result?.capabilities?.includes(MANAGED_DISCOVERY_ROLE_CAPABILITY) === true;
 }
@@ -1625,11 +1802,24 @@ export function managedOptionProbeAnalysis(
   results: readonly (ManagedBrowserResult | null | undefined)[],
   batchFailures: readonly ManagedOptionProbeBatchFailure[] = [],
   discoveryRoleCapability = false,
-): { options: Record<string, string[]>; failures: ManagedOptionProbeFailure[]; failedIds: Set<string> } {
+): {
+  options: Record<string, string[]>;
+  failures: ManagedOptionProbeFailure[];
+  failedIds: Set<string>;
+  /* The failures a narrower question could still answer, named separately from the rest.
+   *
+   * Every other failure here is final for this run: a conflicting read, a duplicated selector, a
+   * control that is not the shape it said it was, a request that never returned. A windowed read is
+   * the one that says nothing about the control except that its menu is longer than its window, and
+   * that is a question buildManagedWindowedOptionSearchBatches can put again. A caller that ignores
+   * this set behaves exactly as before. */
+  windowedIds: Set<string>;
+} {
   const targets = detailedManagedOptionProbeTargets(portal, discovered, alreadyRead, discoveryRoleCapability);
   const options = { ...alreadyRead };
   const failures: ManagedOptionProbeFailure[] = [];
   const failedIds = new Set<string>();
+  const windowedIds = new Set<string>();
   const counts = new Map<string, number>();
   for (const field of discovered) {
     const id = managedOptionProbeControlId(field);
@@ -1705,6 +1895,9 @@ export function managedOptionProbeAnalysis(
     const read = [...distinct.values()][0];
     if (!read) {
       const invalid = [...(invalidReads.get(target.controlId) ?? [])];
+      // Named before the failure is recorded, and only when NO read of this control produced a
+      // list. A control that came back windowed once and readable once is already answered.
+      if (invalid.includes('windowed')) windowedIds.add(target.controlId);
       const detail = invalid.includes('windowed')
         ? 'the option list was windowed at the render cap'
         : invalid.includes('loading')
@@ -1715,7 +1908,7 @@ export function managedOptionProbeAnalysis(
     }
     options[target.controlId] = read;
   }
-  return { options, failures, failedIds };
+  return { options, failures, failedIds, windowedIds };
 }
 
 function managedGreenhouseScopedReactSelectFill(
