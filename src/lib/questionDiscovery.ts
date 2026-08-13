@@ -893,7 +893,31 @@ const NO_SCORE_OPTION_LITERALS: ReadonlySet<string> = new Set([
  * `i dont have`. */
 const NO_SCORE_REDUCED_CLAIMS: ReadonlySet<string> = new Set([
   'not taken',
-  'taken',
+  /* `'taken'` WAS HERE AND IT ASSERTED THE OPPOSITE OF WHAT IT MEANT.
+   *
+   * TEST_FIELD_NOUN strips `test`, `exam`, `sat`, `act` and `score`, so the reducer turned the
+   * affirmative into the same string as the negative and this set then read it as an absence:
+   *
+   *   "Test not taken"  -> not taken  -> absence   correct
+   *   "Test taken"      -> taken      -> absence   WRONG
+   *   "Taken"           -> taken      -> absence   WRONG
+   *   "SAT taken"       -> taken      -> absence   WRONG
+   *
+   * noScoreOptionFor returns the FIRST match, so on a control offering both directions it chose
+   * the one claiming she sat the exam:
+   *
+   *   ["Test taken", "Test not taken"]  ->  "Test taken"
+   *
+   * For a student who sat no standardized test that is a false statement submitted on a job
+   * application under her name, which is the precise failure this whole feature exists to prevent.
+   * The refresh made it worse rather than catching it: a stored "Test taken" against a declared
+   * absence was KEPT, because the stored answer is offered back as its own candidate list, while
+   * every other wrong value on that path is correctly wiped.
+   *
+   * It was load-bearing for nothing. The 24 tests here passed identically with and without it, and
+   * 'not taken', 'no taken' and 'none taken' below already cover every legitimate reduction.
+   * No corpus evidence says such a list is live on a form today, so this was latent rather than
+   * firing, and it is deleted anyway: the cost of it firing is unrecoverable and the fix is free. */
   'no taken',
   'none taken',
   'did not take',

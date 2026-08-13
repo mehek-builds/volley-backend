@@ -290,6 +290,40 @@ describe('the rows that are actually blocked', () => {
     assert.equal(valueOf(resolve(SAT, satNoNumber, IMC_SAT_OPTIONS)), undefined);
   });
 
+  test('the AFFIRMATIVE direction is never read as an absence', () => {
+    /* THE ONE-ENTRY DEFECT. `'taken'` was in the reduced-claims set, and TEST_FIELD_NOUN strips
+     * `test`, `exam`, `sat` and `score`, so "Test taken" reduced to the same string as
+     * "Test not taken" and was read as an absence. noScoreOptionFor returns the FIRST match, so a
+     * control offering both directions answered with the one claiming she sat the exam: a false
+     * statement about an academic record, submitted under her name.
+     *
+     * The fixture is the confusable PAIR, in the order that loses, because a single-option test
+     * would have passed on the negative alone. */
+    assert.equal(noScoreOptionFor(['Test taken', 'Test not taken']), 'Test not taken');
+    assert.equal(noScoreOptionFor(['Taken', 'Not taken']), 'Not taken');
+    assert.equal(noScoreOptionFor(['SAT taken', 'SAT not taken']), 'SAT not taken');
+    for (const affirmative of ['Test taken', 'Taken', 'SAT taken', 'ACT taken', 'Exam taken', 'Score taken']) {
+      assert.equal(noScoreOptionFor([affirmative]), null, `must not read as an absence: ${affirmative}`);
+    }
+    // The negatives still work, so the fix is not "refuse everything containing taken".
+    for (const negative of ['Not taken', 'Test not taken', 'None taken', 'No test taken']) {
+      assert.equal(noScoreOptionFor([negative]), negative, `must still be an absence: ${negative}`);
+    }
+  });
+
+  test('the refresh cannot launder an affirmative that is already stored', () => {
+    /* The stored answer is offered back as its own candidate list, which is what keeps a legitimate
+     * absence alive across a packet rebuild. The same mechanism would have PRESERVED "Test taken"
+     * against a declared absence, while correctly wiping every other wrong value on that path. */
+    for (const stored of ['Test taken', 'Taken', 'SAT taken']) {
+      const refreshed = refreshKnownQuestionAnswers([{ question: SAT, answer: stored }], ABSENT, undefined);
+      assert.equal(refreshed[0].answer, '', `a claim she sat the exam must not survive: ${stored}`);
+    }
+    // And a real absence still does survive, so this is not the refresh wiping everything.
+    const kept = refreshKnownQuestionAnswers([{ question: SAT, answer: 'Test not taken' }], ABSENT, undefined);
+    assert.equal(kept[0].answer, 'Test not taken');
+  });
+
   test('the vocabulary refuses everything that is not an absence', () => {
     for (const option of ['1400-1600', '1200-1399', 'Below 1200', '30-36', 'Other', 'Yes', 'No', 'SAT', 'ACT', 'Both']) {
       assert.equal(noScoreOptionFor([option]), null, `must not read as an absence: ${option}`);
