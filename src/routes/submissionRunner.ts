@@ -1567,10 +1567,11 @@ export function applicationContextForQuestionResolution(row: ResumeRow, current:
 // result (buildManagedDiscoveryActions / stratus-browser-cloud PR #7) - this function has no
 // browser dependency of its own, so both callers share one resolution path and can never drift on
 // what counts as an answerable question.
-export function discoveredControlInputType(field: Pick<DiscoveredQuestion, 'inputType' | 'role'>): string {
+export function discoveredControlInputType(field: Pick<DiscoveredQuestion, 'inputType' | 'role' | 'options'>): string {
   const inputType = field.inputType.trim().toLowerCase();
   const role = field.role?.trim().toLowerCase();
   if (role === 'combobox') return 'combobox';
+  if (inputType === 'text' && usableOptions(field.options).length > 0) return 'combobox';
   return inputType;
 }
 
