@@ -367,7 +367,7 @@ const RESIDENCE_CLAUSE_JOINED_TO_ELIGIBILITY =
  * employer reading them together concludes something false whichever one they believe. The whole
  * family is held until the profile says something coherent.
  */
-const CURRENT_SPONSORSHIP_QUESTION = /\b(?:currently|now|right now|at present|before (?:you|the applicant) start)\b/i;
+const CURRENT_SPONSORSHIP_QUESTION = /\b(?:currently|now|right now|at present|before (?:you|the applicant) start|to (?:begin|start) work(?:ing)?)\b/i;
 const FUTURE_SPONSORSHIP_QUESTION = /\b(?:in the future|future sponsorship|later|will you (?:need|require))\b/i;
 /* "What is your visa status?" is a request for a value. "Will you require sponsorship for
  * employment visa status?" is a yes/no question that happens to contain the same two words, and it
@@ -4668,6 +4668,17 @@ export function labelNamesProfileField(label: string, noun: RegExp): boolean {
 }
 
 const SCHOOL_NOUN = /\b(school|university|college|institution)\b/i;
+/* The attributes of a school that KEYWORD_SUBJECT_QUALIFIER does not name.
+ *
+ * That list was written for the bare-keyword path and covers email, address, dates, scores and
+ * grades. It has no word for the two that the "select your ... school" phrasing actually collides
+ * with, both caught in review: "select your college MAJOR" and "select your current school
+ * LOCATION" were classified as school, which fills a major dropdown and a location field with the
+ * university's name. Kept separate from KEYWORD_SUBJECT_QUALIFIER rather than appended to it,
+ * because widening the shared list changes every bare-keyword decision in this file and these two
+ * words are only ambiguous next to a school noun. */
+const SCHOOL_ATTRIBUTE_QUALIFIER =
+  /\bmajors?\b|\bminors?\b|\bdisciplines?\b|\bfields?\s+of\s+study\b|\bdegrees?\b|\bprograms?\b|\blocations?\b|\bcit(?:y|ies)\b|\bstates?\b|\bcountr(?:y|ies)\b/i;
 const PHONE_NOUN = /\b(phone|mobile)\b/i;
 const STATE_NOUN = /\b(state|province|prefecture)\b(?!\s+(?:your|the|you|it|why|how|what|when|where))|state\s*\/\s*province/i;
 const CITY_NOUN = /\b(city|town)\b|\blocation\b/i;
@@ -4764,6 +4775,37 @@ function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
   if (STUDIES_COMPLETION_QUESTION.test(l)) return 'education_end_date';
   // Explicit phrasings that unambiguously ask for the institution's NAME. Everything else has to
   // clear labelNamesProfileField further down: the bare keyword is not enough on its own.
+  /* "please select your current school from the list below" (Jump Trading, 2 postings, 2026-08-13).
+   *
+   * Nine words, so the bare-keyword path at the bottom of this function refuses it on the
+   * six-word field-name budget, and it says "select ... school" rather than any of the phrasings
+   * above, so nothing claimed it and the school never reached the form. The value was on the
+   * profile the whole time.
+   *
+   * Tight on purpose: the SELECT VERB has to sit beside the school noun. That is what keeps it off
+   * "which of these schools have you heard of", off ANOTHER_INSTITUTION_NOUN's transfer questions,
+   * and off anything asking the applicant to choose between schools rather than to name her own.
+   * "your" and "current" are optional because the corpus writes both "select your current school"
+   * and the bare "select school". */
+  if (/\bselect\s+(?:your\s+)?(?:current\s+)?(?:school|university|college|institution)\b/i.test(l)
+    /* THE QUALIFIER GUARD, and this pattern is NOT allowed to skip it.
+     *
+     * The first version of this rule returned here unconditionally and regressed five labels in
+     * review, every one of them asking for something ABOUT the school rather than for the school:
+     *
+     *   "please select your university email address"   -> school   (an email field)
+     *   "select your current school location"           -> school   (a location field)
+     *   "select your college major"                     -> school   (a major field)
+     *   "select your university start date"             -> school   (a date field)
+     *
+     * That is the harm the FIELD_NAME_LABEL_MAX_WORDS note already records verbatim: "please
+     * provide your university email address" was once answered with the university's NAME.
+     * KEYWORD_SUBJECT_QUALIFIER exists to stop it and labelNamesProfileField applies it, but an
+     * explicit pattern that returns early never reaches that code. So it is applied here, the same
+     * way and against the same list, with the school noun removed first so the noun cannot mask a
+     * qualifier sitting beside it. */
+    && !KEYWORD_SUBJECT_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))
+    && !SCHOOL_ATTRIBUTE_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))) return 'school';
   if (/\bwhich\s+(?:school|university|college|institution)\b|\b(?:school|university|college|institution)\s+(?:name|(?:you\s+|are\s+you\s+)?(?:currently\s+)?(?:attend(?:ing|ed)?|enrolled(?:\s+in)?))\b|\bname\s+of\s+(?:your\s+)?(?:school|university|college|institution)\b|^university\s*\/\s*institution\b/i.test(l)) return 'school';
   if (MAJOR_QUESTION.test(l)) return 'major';
   if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
@@ -6651,4 +6693,3 @@ export function resolveKnownAnswer(
       return null;
   }
 }
-

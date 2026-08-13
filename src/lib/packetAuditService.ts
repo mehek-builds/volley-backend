@@ -25,7 +25,8 @@ import {
   type PacketAuditEvidencePointer,
 } from './packetAudit';
 import { resolveBlobUrl } from './resumeAccess';
-import { pdfGenerationBindingIsCurrent } from './pdfGenerationBinding';
+import { bindingPdfIdentity, pdfGenerationBindingIsCurrent } from './pdfGenerationBinding';
+import { loadPacketPdf, type StoredPdfIdentity } from './packetPdfCache';
 import {
   PACKET_EXPIRED_REASON,
   restoreExpiredPacketResume,
@@ -118,13 +119,17 @@ export function validStoredPdf(input: { bytes: Buffer; contentType?: string }): 
   return true;
 }
 
-function hasCurrentGenerationBinding(row: ResumeRow, pdfBytes: Buffer): boolean {
-  const quality = row.spec && typeof row.spec === 'object' && !Array.isArray(row.spec)
-    ? (row.spec as Record<string, unknown>)._quality
+function storedGenerationBinding(spec: unknown): unknown {
+  const quality = spec && typeof spec === 'object' && !Array.isArray(spec)
+    ? (spec as Record<string, unknown>)._quality
     : null;
-  const binding = quality && typeof quality === 'object' && !Array.isArray(quality)
+  return quality && typeof quality === 'object' && !Array.isArray(quality)
     ? (quality as Record<string, unknown>).pdfGenerationBinding
     : null;
+}
+
+function hasCurrentGenerationBinding(row: ResumeRow, pdfBytes: Buffer): boolean {
+  const binding = storedGenerationBinding(row.spec);
   const contact = row.spec && typeof row.spec === 'object' && !Array.isArray(row.spec)
     ? (row.spec as Record<string, unknown>)._contact
     : null;
@@ -133,6 +138,17 @@ function hasCurrentGenerationBinding(row: ResumeRow, pdfBytes: Buffer): boolean 
     : '';
   return Boolean(resumeEmail)
     && pdfGenerationBindingIsCurrent(binding, row.spec, row.resume_object_key, pdfBytes, resumeEmail);
+}
+
+/**
+ * What the row records about the file at its current key, or null when it records nothing checkable.
+ *
+ * Null is the honest answer for a packet with no generation binding, and it is also the safe one:
+ * hasCurrentGenerationBinding refuses such a packet no matter what bytes arrive, so there is nothing
+ * to be gained by caching them and nothing they could be proven against.
+ */
+function storedPdfIdentity(row: ResumeRow): StoredPdfIdentity | null {
+  return bindingPdfIdentity(storedGenerationBinding(row.spec), row.resume_object_key);
 }
 
 function editableSpec(value: unknown): ResumeSpec {
@@ -168,6 +184,18 @@ function specStrings(spec: ResumeSpec): EvidencePointer[] {
 
 function normalized(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9+#./-]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function fallbackUnscoreableClause(jdText: string) {
+  const firstLine = /[^\s\r\n](?:[^\r\n]*[^\s\r\n])?/u.exec(jdText);
+  if (!firstLine || firstLine.index == null) return null;
+  const text = firstLine[0].slice(0, 400);
+  return {
+    text,
+    start: firstLine.index,
+    end: firstLine.index + text.length,
+    verdict: 'unscoreable' as const,
+  };
 }
 
 function evidenceForTerm(
@@ -397,6 +425,14 @@ export async function scoreAuditEvidence(row: ResumeRow, review: ApplicationRevi
       ...(groundedCovered ? { evidence: rawEvidence } : {}),
     };
   });
+  /* A low-detail posting can legitimately contain no requirement clause. The audit still needs one
+     exact JD slice so the applicant can see what was frozen and the audit stays bound to the saved
+     description. Marking the first visible line unscoreable makes no fit claim and keeps the packet
+     integrity gate usable for open applications such as a general internship intake. */
+  if (clauses.length === 0) {
+    const fallback = fallbackUnscoreableClause(review.jd_text);
+    if (fallback) clauses.push(fallback);
+  }
   const edited = new Set(review.edited_terms.map(normalized));
   const terms: {
     covered: Array<{ start: number; end: number; evidence: EvidencePointer }>;
@@ -585,7 +621,21 @@ export async function currentPacketAudit(
   }
   let loaded: { bytes: Buffer; contentType?: string };
   try {
-    loaded = await (options.loadPdf ?? defaultPdfLoader)(row.resume_object_key);
+    /* THROUGH THE PROCESS CACHE, which is the whole of the cost fix. This route is polled every 2.5
+       seconds while a packet is open - measured 1,440 calls an hour per open packet against a rate
+       limit that is only charged on the INVALID path, so the hot path was entirely unmetered - and
+       every one of those calls downloaded the same immutable 31.7 KB file.
+
+       NOTHING BELOW THIS LINE CHANGES. validStoredPdf and hasCurrentGenerationBinding run on
+       whatever bytes come back, cached or not, and auditInput receives those same bytes, so a
+       cached copy is re-proven against the row's recorded sha256 on every single request rather
+       than being taken on the cache's word. See packetPdfCache for why the entry could not have
+       been the wrong file in the first place, and what happens when a row's record moves. */
+    loaded = await loadPacketPdf({
+      objectKey: row.resume_object_key,
+      identity: storedPdfIdentity(row),
+      load: options.loadPdf ?? defaultPdfLoader,
+    });
   } catch (error) {
     return {
       valid: false,

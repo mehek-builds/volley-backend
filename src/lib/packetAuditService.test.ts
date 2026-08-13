@@ -218,6 +218,50 @@ test('packet scoring keeps met, unmet, and unparseable experience-year requireme
   assert.equal(skillAndDatesMet.clauses[0]?.verdict, 'covered');
 });
 
+test('a low-detail open internship gets one exact unscoreable clause instead of a broken audit', async () => {
+  const jdText = [
+    'Internship',
+    'Join us for your internship and get hands-on experience in real projects within games, web, design, and platforms.',
+    'Happy to hear from you!',
+  ].join('\n');
+  const spec = {
+    target_role: 'Intern', school: '', degree: '', grad_date: '', gpa: '', school_location: '', coursework: '', skills: [],
+    experience: [],
+    _review: {},
+  };
+  const scored = await scoreAuditEvidence(
+    { spec, job_context: { company: 'Fully', role: 'Internship' } } as never,
+    { jd_text: jdText, questions: [], edited_terms: [], status: 'ready_to_submit' } as never,
+  );
+
+  assert.equal(scored.clauses.length, 1);
+  assert.deepEqual(scored.clauses[0], {
+    text: 'Internship',
+    start: 0,
+    end: 'Internship'.length,
+    verdict: 'unscoreable',
+  });
+  assert.equal(scored.degraded, false);
+  assert.doesNotThrow(() => createPacketAudit({
+    ownerId: 'owner-fully',
+    applicationId: 'application-fully',
+    jdText,
+    spec,
+    jobContext: { company: 'Fully', role: 'Internship' },
+    questions: [],
+    applicantSnapshot: null,
+    resumeEmail: 'student@example.edu',
+    applicantEmail: 'app-fully@apply.trylitos.com',
+    pdfObjectKey: 'users/owner-fully/resumes/application-fully.pdf',
+    pdfBytes: Buffer.from('%PDF-1.7\nFully packet'),
+    editedTerms: scored.editedTerms,
+    clauses: scored.clauses,
+    rejected: scored.rejected,
+    degraded: scored.degraded,
+    terms: scored.terms,
+  }));
+});
+
 test('packet scoring requires frozen enrollment truth and an exact requested degree level', async () => {
   const score = async (degree: string, currently_enrolled: boolean | undefined, requirement: string) => {
     const spec = {

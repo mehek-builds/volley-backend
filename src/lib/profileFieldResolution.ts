@@ -219,6 +219,26 @@ function optionDatePoints(option: string): { points: number[]; years: number[] }
  */
 export type CalendarInterval = { min: number; max: number };
 
+/* A RUN OF SEASON WORDS SHARING ONE YEAR, as "Spring/Summer 2028" writes it.
+ *
+ * MEASURED, on the owner's two live Jump Trading applications (generated_resumes
+ * f4f278d2-edb8-482e-ae3d-403b45c7bc10 and 928e0c9a-5a05-4aaf-8fe7-10dcb9a44950, 2026-08-13).
+ * Both postings offer the same seventeen-entry graduation list, and the entry that states her
+ * real graduation is "Spring/Summer 2028". The year used to be reached from a season word across
+ * a gap of at most six non-digit characters, and "/Summer " is eight, so the Spring half of every
+ * such label was dropped: the option read as June through August only, May 2028 looked uncovered,
+ * and the one correct entry on the list could never be selected. Both packets then reported
+ * `no option matched "May 2028"` and left a required field empty.
+ *
+ * Each season word in the run takes the year the run ends with. Only punctuation and "and"/"or"
+ * may join two of them, so "Fall 2027 - Spring 2028" is still two runs with a year each: the digits
+ * between them end the first run before the second begins.
+ */
+const SEASON_RUN_RE = new RegExp(
+  `\\b((?:(?:${Object.keys(SEASON_MONTHS).join('|')})\\b(?:\\s*[/&+,]\\s*|\\s+(?:and|or)\\s+)?)+)[^0-9]{0,6}\\b((?:19|20)\\d{2})\\b`,
+  'gi',
+);
+
 /**
  * The intervals a season names, as separate runs rather than one min-to-max span.
  *
@@ -228,10 +248,12 @@ export type CalendarInterval = { min: number; max: number };
  */
 function optionSeasonIntervals(option: string): CalendarInterval[] {
   const intervals: CalendarInterval[] = [];
-  for (const [season, months] of Object.entries(SEASON_MONTHS)) {
-    const seasonal = [...option.matchAll(new RegExp(`\\b${season}\\b[^0-9]{0,6}\\b((?:19|20)\\d{2})\\b`, 'gi'))];
-    for (const match of seasonal) {
-      const year = Number(match[1]);
+  for (const match of option.matchAll(SEASON_RUN_RE)) {
+    const year = Number(match[2]);
+    const named = [...match[1].matchAll(new RegExp(`\\b(${Object.keys(SEASON_MONTHS).join('|')})\\b`, 'gi'))];
+    for (const seasonMatch of named) {
+      const months = SEASON_MONTHS[seasonMatch[1].toLowerCase()];
+      if (!months) continue;
       const sorted = [...months].sort((a, b) => a - b);
       let run: CalendarInterval | null = null;
       for (const month of sorted) {
@@ -560,10 +582,45 @@ export function chooseClosestOption(
     if (extending.ambiguous) break;
   }
 
+  /* THE NUMERIC STAGE IS FOR GPA BANDS, AND A CALENDAR OPTION IS NOT ONE.
+   *
+   * This is the stage that put "Winter 2028" on two live Jump Trading applications for an applicant
+   * who graduates in May. The ladder for a graduation date ends with the bare year, parseNumericRange
+   * reads "Winter 2028" as the one-point range 2028 to 2028, and 2028 is inside it, so the candidate
+   * "2028" selected whichever season of 2028 the employer happened to list first. Winter is listed
+   * before Spring/Summer on Greenhouse's standard term list, so the answer named a term six months
+   * before she finishes. Nothing about that is a measurement: it is DOM order.
+   *
+   * A year is not a quantity to be bucketed, it is a date, and every honest way to place a date on
+   * this list has already run and declined by the time control reaches here. So an option that names
+   * any calendar span is skipped, and a graduation list made entirely of them yields null: the
+   * question comes back to the applicant unanswered. That is the whole trade. An unanswered
+   * graduation date costs her one selection she can make in a second from the list in front of her;
+   * a guessed one is a false statement about her degree that she cannot retract once sent.
+   *
+   * Skipped per option rather than per list, so a band that names no date at all still resolves
+   * through the branch it was written for. "0-2 years" carries no calendar interval and is still
+   * matched here, including on a mixed list that also holds a date: chooseClosestOption(['1'],
+   * ['0-2 years', 'Before 2020']) returns "0-2 years" on both sides of this change.
+   *
+   * A ONE-SIDED YEAR BAND IS NOT IN THAT SET, and this comment used to claim it was. "2020 or
+   * earlier" names a calendar span, so the skip above removes it, and that is a real behaviour
+   * change: chooseClosestOption(['2020'], ['2020 or earlier']) returned that option before and
+   * returns null now. It is the one shape measured to move. The reach is narrow, a bare-year
+   * candidate whose year is exactly the band's own year, and the direction is the safe one. No
+   * realistic graduation-year list changes: both ['2027 or earlier', '2028', '2029 or later'] and a
+   * plain list of years resolve a May 2028 ladder to "2028" before and after, through the exact and
+   * calendar stages above rather than through here.
+   *
+   * NARROWING THE SKIP TO SEASON-BEARING OPTIONS would make the old sentence true and is the wrong
+   * trade. "December 2028" and "June 2028" name no season, so a bare-year candidate would go back to
+   * selecting whichever of them the employer listed first. That is this bug again in a second
+   * vocabulary, and months are how the more precise lists are written. */
   for (const candidate of candidates) {
     const numeric = numericValueOf(candidate);
     if (numeric === null) continue;
     const bucket = comparableOptions.find((entry) => {
+      if (optionCalendarIntervals(entry.option).length > 0) return false;
       const range = parseNumericRange(entry.option);
       return !!range && numeric >= range.min && numeric <= range.max;
     });
