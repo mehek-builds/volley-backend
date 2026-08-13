@@ -166,6 +166,43 @@ export function submitRequestDisposition(
   return 'reject';
 }
 
+/**
+ * Whether an ANSWER may be written to this packet. Not whether anything may be sent.
+ *
+ * DELIBERATELY NOT submitRequestDisposition, AND THAT IS THE WHOLE POINT OF IT EXISTING. That
+ * predicate answers "may a browser run start against the employer", and its refusals are all about
+ * one risk: a second application at a board that caps them. A save of answers books nothing, opens
+ * nothing and reaches nobody. Every one of its refusals is therefore about a different question, so
+ * borrowing it here would refuse for reasons that do not apply - and it did. A run that stops mid
+ * fill lands at needs_attention still wearing its claim, which submitRequestDisposition answers
+ * 'reject' for; that is exactly the packet whose whole remaining ask is "type the answer this form
+ * needs", and the screen that asks for it is the one this route serves.
+ *
+ * WHAT IS REFUSED, and each for its own reason rather than by inheritance:
+ *
+ *   submitted, awaiting_security_code   The answers on the row are the record of what the employer
+ *                                       was given. Rewriting them makes that record describe a form
+ *                                       nobody filled.
+ *   preparing, filling, submitting,     A run holds this row and writes the same `_review` blob when
+ *   claimed submit_requested            it finishes. The conditional update below would lose the
+ *                                       race; refusing says so instead of half-saving.
+ *   ready_for_final_approval            The form is already filled and there is a preview screenshot
+ *                                       of it on screen. New answers underneath it would leave the
+ *                                       picture the applicant approves describing something else.
+ *                                       Her way in is the resume edit, which resets the packet and
+ *                                       refills it - see resumeEditDisposition.
+ */
+export function reviewAnswerSaveDisposition(
+  status: ApplicationReviewState['status'],
+  submissionWasClaimed = false,
+): 'save' | 'reject' {
+  if (status === 'submitted' || status === 'awaiting_security_code') return 'reject';
+  if (['preparing', 'filling', 'submitting'].includes(status)) return 'reject';
+  if (status === 'submit_requested' && submissionWasClaimed) return 'reject';
+  if (status === 'ready_for_final_approval') return 'reject';
+  return 'save';
+}
+
 export function resumeEditDisposition(
   status: ApplicationReviewState['status'],
   submissionWasClaimed = false,

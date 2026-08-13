@@ -1015,6 +1015,39 @@ export type ApplicationReviewEdit = {
 };
 
 /**
+ * THE REVIEW ROUND ITSELF, WITHOUT AN OPINION ABOUT WHAT THE PACKET SHOULD DO NEXT.
+ *
+ * Two things happen when the applicant presses Save on a screen of answers, and only one of them
+ * belongs to the edit route. The first is the record: every answer she left standing came from her,
+ * so it is stamped 'applicant_review' against a review round, and the round is written beside it as
+ * `questions_reviewed_at`. Both halves or neither - an `answer_reviewed_at` with no round to equal
+ * is a claim no reader can check, and mergeSubmittedApplicationReviewQuestions and
+ * refreshKnownQuestionAnswers both discard it.
+ *
+ * The second is the status move to 'questions_ready'/'ready_to_submit', which is right for an edit
+ * that also rewrites the portal URL and the ATS name, and wrong for a packet stopped at
+ * needs_attention: that status is the record of a run that stopped and of what it is still owed, and
+ * a save of answers is not an answer to it. Writing it anyway is how PUT /review would silently
+ * clear a stall while claiming only to have stored an answer.
+ *
+ * So the record lives here on its own and the status move stays with the edit route below.
+ */
+export function applyApplicantReviewedAnswers(
+  current: ApplicationReviewState,
+  questions: readonly ApplicationReviewQuestion[],
+  reviewedAt: string = new Date().toISOString(),
+): ApplicationReviewState {
+  return {
+    ...current,
+    questions: questions.map((question) => question.answer.trim()
+      ? { ...question, answer_source: 'applicant_review' as const, answer_reviewed_at: reviewedAt }
+      : question),
+    questions_reviewed_at: reviewedAt,
+    updated_at: reviewedAt,
+  };
+}
+
+/**
  * The third write path for portal_supported, and the one that can contradict itself.
  *
  * Creation writes the flag from the URL it was handed, and readApplicationReview derives it for
@@ -1044,12 +1077,11 @@ export function applyApplicationReviewEdit(
     current.questions_reviewed_at,
   );
   return {
-    ...current,
-    ...edit,
-    questions: mergedQuestions.map((question) => question.answer.trim()
-      ? { ...question, answer_source: 'applicant_review' as const, answer_reviewed_at: reviewedAt }
-      : question),
-    questions_reviewed_at: reviewedAt,
+    /* The MERGED list, not the edit's own. #533 put the merge in front of this stamp so an edit
+     * cannot drop the provenance a run wrote (the option band an answer was snapped from, the ATS
+     * field binding), and the stamp still has to run over whatever survives that merge. Handing
+     * `edit.questions` to the record below would put the merge back where it was before #533. */
+    ...applyApplicantReviewedAnswers({ ...current, ...edit }, mergedQuestions, reviewedAt),
     ...(canonicalPortalUrl === undefined ? {} : {
       portal_url: canonicalPortalUrl,
       ats_name: isPortalSupported(canonicalPortalUrl) ? detectPortal(canonicalPortalUrl) : edit.ats_name ?? current.ats_name,
@@ -1058,6 +1090,5 @@ export function applyApplicationReviewEdit(
     // perfectly good stored true, which is the same lockout arriving by a different door.
     ...(canonicalPortalUrl === undefined ? {} : { portal_supported: isPortalSupported(canonicalPortalUrl) }),
     status: edit.questions.length > 0 ? 'questions_ready' : 'ready_to_submit',
-    updated_at: reviewedAt,
   };
 }

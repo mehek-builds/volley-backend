@@ -20,6 +20,7 @@ import { pruneUngroundedSkills, validatePdfLayout, validateResumeSpec } from '..
 import { resumeSafeTargetRole } from '../engine/resumePolicy';
 import { leadAlignmentIssues, selectJdAlignedLead } from '../engine/leadAlignment';
 import {
+  applyApplicantReviewedAnswers,
   applyApplicationReviewEdit,
   deriveEditedTerms,
   finalApprovalCoverLetterIssue,
@@ -45,7 +46,8 @@ import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type Jo
 import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
-import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, submitRequestDisposition } from '../lib/submissionSafety';
+import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
+import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, reviewAnswerSaveDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import { submissionClaimPatch } from '../lib/submissionStop';
 import {
   detectPortal,
@@ -108,6 +110,13 @@ const reviewBodySchema = z.object({
   portal_url: z.string().url().max(4000),
   questions: z.array(questionSchema).max(100),
   skipped_reasons: z.array(z.string().max(1000)).max(100).default([]),
+});
+/* ANSWERS AND NOTHING ELSE. The edit body above requires an ATS name and a portal URL because an
+ * edit is allowed to change them; a save from the Review-answers screen changes neither, and asking
+ * that screen to post them back would make a round trip of the portal identity every time somebody
+ * fixes a typo in an essay. Narrower body, narrower route, nothing to re-derive. */
+const reviewAnswersBodySchema = z.object({
+  questions: z.array(questionSchema).max(100),
 });
 const submitBodySchema = z.object({
   questions: z.array(questionSchema).max(100),
@@ -212,10 +221,17 @@ function approvedReviewSpec(review: unknown, approvedAt: string) {
 export function freshSubmitRequestReview(
   current: ApplicationReviewState,
   questions: ApplicationReviewQuestion[],
+  /* The review round the questions above were stamped against. Optional so every caller that has
+   * nothing new to record keeps the stored round, and required in spirit for the one that does: a
+   * question carrying answer_reviewed_at next to a review carrying a different (or no)
+   * questions_reviewed_at is a claim the next reader has to throw away. See submit-request's call
+   * site for the 130 packets that were in exactly that state. */
+  questionsReviewedAt?: string,
 ): ApplicationReviewState {
   return {
     ...current,
     questions,
+    ...(questionsReviewedAt ? { questions_reviewed_at: questionsReviewedAt } : {}),
     status: 'submit_requested',
     updated_at: new Date().toISOString(),
     submission_run_id: randomUUID(),
@@ -1302,6 +1318,81 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     },
   );
 
+  /* SAVE THE ANSWERS. START NOTHING. LEAVE THE STATUS WHERE IT IS.
+   *
+   * THE DEFECT THIS EXISTS FOR. The Review-answers screen's Save button persisted nothing at all,
+   * for packets stopped at needs_attention - the ones whose entire remaining ask is an answer only
+   * the applicant can give. It called a local-only handler, showed "Saved." synchronously, and
+   * issued no request. Through d0d71a0 that button went to POST /submit-request; 8240abe narrowed
+   * the local-only save to the Apply-time pre-script, which is correct for THAT screen because the
+   * answers there ride into the packet on the next step; and 5410ba8 then made the local-only
+   * version unconditional, so the stalled-run path fell into it too.
+   *
+   * WHY THIS IS A THIRD ROUTE RATHER THAN EITHER OF THE TWO THAT EXIST.
+   *
+   *   POST /submit-request   books a browser run. Not starting one is the whole reason the Save
+   *                          button stopped calling it, and a save that files an application is a
+   *                          worse defect than a save that files nothing.
+   *   PUT  /review           writes 'questions_ready' or 'ready_to_submit' over the status - see
+   *                          applyApplicationReviewEdit - so it would clear the needs_attention the
+   *                          applicant is answering FROM. It also refuses this packet outright:
+   *                          its gate is submitRequestDisposition, which answers 'reject' for a
+   *                          claimed needs_attention row, which is what a stopped run leaves.
+   *
+   * So: the same review-round stamping both of those rely on, applied through
+   * applyApplicantReviewedAnswers, with the status left alone and a gate that asks the question a
+   * save actually poses. See reviewAnswerSaveDisposition for what it refuses and why.
+   *
+   * MERGED ONTO THE STORED QUESTIONS, not substituted for them, which is where PUT /review's
+   * treatment would also have been wrong. questionSchema strips every field a run wrote and a client
+   * cannot vouch for, so a wholesale replacement drops the ATS field binding the fill types into and
+   * the answer_option_source that says what a banded answer was snapped from.
+   * mergeSubmittedApplicationReviewQuestions keeps the stored record and adopts the answer, which is
+   * the only thing this route is being asked to change. */
+  fastify.put(
+    '/applications/:id/review/answers',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const parsed = reviewAnswersBodySchema.safeParse(request.body);
+      if (!parsed.success) return reply.status(400).send({ error: 'We could not read these answers', detail: parsed.error.issues });
+      const current = readApplicationReview(row.spec as StoredSpec);
+      if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      if (reviewAnswerSaveDisposition(current.status, Boolean(current.submission_claimed_at)) !== 'save') {
+        return reply.status(409).send({
+          error: 'These answers can no longer be edited from this application’s current submission state',
+          code: 'REVIEW_ANSWERS_NOT_EDITABLE',
+        });
+      }
+      const merged = mergeSubmittedApplicationReviewQuestions(
+        current.questions,
+        parsed.data.questions as ApplicationReviewQuestion[],
+        current.questions_reviewed_at,
+      );
+      const next = applyApplicantReviewedAnswers(current, merged);
+      const saved = await db.update(generated_resumes)
+        .set({ spec: reviewSpec(next) })
+        .where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
+        ))
+        .returning({ id: generated_resumes.id });
+      if (saved.length === 0) {
+        // The row moved under the save, which for this packet means a run wrote to it. Answer with
+        // what is actually stored rather than with what this request wanted to store, so the screen
+        // stops showing a save that did not land. Same shape as the edit route above.
+        const refreshed = await ownedResume(request, reply);
+        if (!refreshed) return;
+        const review = readApplicationReview(refreshed.spec);
+        return reply.status(202).send({ application_id: row.id, review: review ?? current });
+      }
+      return reply.send({ application_id: row.id, review: next });
+    },
+  );
+
   fastify.post(
     '/applications/:id/submit-request',
     { preHandler: requireAuth },
@@ -1414,19 +1505,19 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         loadSensitiveQuestionProfile(request.jwtPayload!.userId),
       ]);
       const submittedQuestions = parsed.data.questions as ApplicationReviewQuestion[];
-      const mergedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions(
-        current.questions,
-        submittedQuestions,
-        current.questions_reviewed_at,
-      );
-      const normalizedSubmittedQuestions = refreshKnownQuestionAnswers(
-        mergedSubmittedQuestions,
-        sensitiveProfile,
-        current.jd_text,
-        current.questions_reviewed_at,
-        postingCountryFromJobContext(row.job_context),
-        postingCountryCodeFromJobContext(row.job_context),
-      );
+      /* A REVIEW ROUND FOR THIS BODY, NOT ONLY FOR WHATEVER ROUND THE ROW ALREADY HAD. The merge,
+       * the refresh and the review this persists all have to be keyed to the same one, so they are
+       * one call. See resolveSubmittedApplicationAnswers for the 130 packets on which reusing an
+       * absent stored round erased the applicant's own answer on the request that reaches the
+       * employer. */
+      const { questions: normalizedSubmittedQuestions, questionsReviewedAt: submittedReviewedAt } =
+        resolveSubmittedApplicationAnswers({
+          current,
+          submitted: submittedQuestions,
+          profile: sensitiveProfile,
+          postingCountry: postingCountryFromJobContext(row.job_context),
+          postingCountryCode: postingCountryCodeFromJobContext(row.job_context),
+        });
       /* THE REQUIRED-ANSWER GATE, ON THE SEND AND NOT ON THE RUN.
        *
        * This route has two outcomes and they need opposite treatment. On a supported portal it
@@ -1514,7 +1605,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // portal_supported check is helpful UI, not an enforcement point.
       if (current.portal_url && !isPortalSupported(current.portal_url)) {
         const authorizedAt = new Date().toISOString();
-        const base = freshSubmitRequestReview(current, normalizedSubmittedQuestions);
+        const base = freshSubmitRequestReview(current, normalizedSubmittedQuestions, submittedReviewedAt);
         const pending: ApplicationReviewState = {
           ...base,
           status: 'submitting',
@@ -1621,7 +1712,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
         });
       }
-      const next = freshSubmitRequestReview(current, normalizedSubmittedQuestions);
+      const next = freshSubmitRequestReview(current, normalizedSubmittedQuestions, submittedReviewedAt);
       const claimed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(

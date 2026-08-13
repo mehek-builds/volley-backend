@@ -55,9 +55,17 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
   }
   assert.match(helper, /updated_at:\s*new Date\(\)\.toISOString\(\)/);
   assert.match(route, /const submittedQuestions = parsed\.data\.questions/);
-  assert.match(route, /const mergedSubmittedQuestions = mergeSubmittedApplicationReviewQuestions\([\s\S]{0,180}current\.questions_reviewed_at/);
-  assert.match(route, /const normalizedSubmittedQuestions = refreshKnownQuestionAnswers\([\s\S]{0,180}current\.questions_reviewed_at/);
-  assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions\)/);
+  /* THE MERGE, THE REFRESH AND THE PERSISTED REVIEW ARE KEYED TO ONE REVIEW ROUND.
+   *
+   * These were three separate lines each naming `current.questions_reviewed_at`, which agreed only
+   * by inspection and which is NULL on a packet that has never been through a review save - 130 of
+   * the 134 packets holding a resolver-held question on 2026-08-12. On those, an answer the
+   * applicant typed was adopted by the merge with nothing recording where it came from, and the
+   * refresh blanked it on the request that reaches the employer. One call now returns both the
+   * questions and the round they were stamped against, and that round is what gets persisted.
+   * src/lib/submittedAnswers.test.ts holds the behaviour rather than the shape. */
+  assert.match(route, /resolveSubmittedApplicationAnswers\(\{[\s\S]{0,240}submitted: submittedQuestions/);
+  assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions, submittedReviewedAt\)/);
 });
 
 /* R-095's gate, put on the transition it belongs to.
@@ -109,7 +117,7 @@ test('a filled but unclaimed packet can be restarted, and only when asked by nam
   assert.match(route, /if \(disposition === 'reject' && !\(restartable && parsed\.data\.restart === true\)\)/);
   assert.match(route, /code: 'PREPARED_RUN_RESTARTABLE'/);
   // A restart must not carry the previous run's filled form, preview or approval forward.
-  assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions\)/);
+  assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions, submittedReviewedAt\)/);
 });
 
 /* Staleness has to be readable, or a results table silently measures the wrong build. */
