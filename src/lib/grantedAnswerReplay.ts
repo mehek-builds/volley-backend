@@ -127,12 +127,29 @@ export function acknowledgementPermissionsFor(
 }
 
 /**
- * The same gate for the work-authorization and sponsorship class. DECLARED, NOT YET CALLED.
+ * The same gate for the work-authorization and sponsorship class. DECLARED, NOT CALLED.
  *
- * It is written here rather than left for later because the whole point of one predicate is that
- * both classes flip together, and a second author adding a second switch later is the failure this
- * file is shaped to prevent. It is not yet wired because wiring it correctly is not a one-line
- * change and pretending otherwise would produce a gate that looks closed and is not:
+ * SO THE CLASS IS NOT HELD. Say it plainly, because a predicate that exists and is never invoked
+ * reads like a safeguard and is not one: work-authorization and sponsorship answers reach
+ * option-shaped controls today exactly as they do on main, and the targeting defect above can still
+ * land one on a neighbouring control. Measured, with the gate closed and the owner's stored
+ * declaration on file:
+ *
+ *   "Are you legally authorized to work in the United States?"   ->  "Yes"
+ *   "Will you now, or in the future, require sponsorship..."      ->  "Yes"
+ *
+ * both on a select, on both sides of the switch. There is a test asserting exactly that, in a
+ * describe block named KNOWN OPEN, which will fail the day someone wires this. That failure is the
+ * signal, not a regression.
+ *
+ * IT ALSO MEANS THIS GATE DOES NOT CLOSE THE REPRO IT WAS WRITTEN FROM. In that measurement the
+ * TRIGGER was filling the sponsorship combobox and the VICTIM was the consent listbox. Holding the
+ * consent answer stops Litos PRODUCING an acceptance; it does not stop the sponsorship fill, so
+ * that exact sequence is unchanged by this module. What the hold buys is narrower and still worth
+ * having: Litos stops deliberately putting acceptances of named legal documents onto option-shaped
+ * controls while the runner cannot be trusted to hit the one it was asked about.
+ *
+ * WHY IT IS NOT WIRED HERE. Not an oversight, and not laziness about a one-line call:
  *
  *   The class must be held only where the defect reaches it, which is an OPTION-SHAPED control.
  *     A work-authorization question served as a text input has no row for the runner to mis-click,
@@ -144,9 +161,9 @@ export function acknowledgementPermissionsFor(
  *   The legacy US scalars answer through a different branch from the scoped records, so a gate
  *     placed carelessly would hold one and not the other.
  *
- * Wire it at the same time as the per-jurisdiction declaration work, and delete this paragraph
- * then. Until it is called, the work-authorization class behaves exactly as it does on main today,
- * which is the pre-existing behaviour and not a regression introduced here.
+ * It is declared here rather than left for later because the whole point of one predicate is that
+ * both classes flip together, and a second author adding a second switch is the failure this file
+ * is shaped to prevent. Wire it with the per-jurisdiction work, and delete these paragraphs then.
  */
 export function workEligibilityReplayMayReachControls(): boolean {
   return exactControlTargetingDeployed();

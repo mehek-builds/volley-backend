@@ -1,16 +1,26 @@
-/* THE HOLD, AND WHAT IT MUST NOT COST.
+/* THE HOLD, WHAT IT COSTS, AND WHAT IT DOES NOT COVER.
  *
- * Two properties, and the second is the one that can actually go wrong:
+ * THIS FILE PREVIOUSLY CLAIMED SOMETHING FALSE, and the correction is the reason it reads as it
+ * does now. It said a work-authorization declaration "still fails closed" under the licence. It
+ * does not. It resolves to "Yes" on both sides of the gate, and the claim passed only because the
+ * fixture carried no stored facts AND the helpers called resolveKnownAnswer with FOUR arguments
+ * while every production site passes SIX, the two omitted ones being exactly what
+ * workEligibilityAnswer refuses on. An adversary that cannot win, measured in a shape no caller
+ * uses. Both are fixed here, and the properties are now stated separately because they are
+ * different properties:
  *
  *   1. While exact control targeting is undeployed, a GRANTED and CURRENT consent permission does
  *      not become a licence, so every consent label resolves exactly as it did before PR 502.
- *   2. When it IS deployed and the licence is live, a truth attestation, an EEO question, a health
- *      or accommodation disclosure and a work-authorization declaration STILL fail closed.
+ *   2. When the licence IS live, some declarations are never answered at all, and others are
+ *      answered legitimately out of declarations she made herself. What holds for ALL of them is
+ *      that the licence is INVISIBLE: the same label resolves to the same thing with it and
+ *      without. That is the property, not "everything is held".
+ *   3. Work authorization and sponsorship are NOT held by this gate. That is pinned in its own
+ *      describe block, named as known-open rather than hidden, because the second predicate is
+ *      declared and unwired.
  *
- * Property 2 is asserted with the grant SWITCHED ON, because that is the only configuration in
- * which it can fail. Asserting it with the permission absent would be asserting nothing: the
- * adversary has to be capable of winning, and an ungranted profile cannot accept anything by
- * construction.
+ * Everything runs against the owner's real production profile shape and the six-argument call, so
+ * the adversary is capable of winning throughout.
  *
  * Both sides of the gate are exercised, so the day stratus-browser-cloud PR 50 deploys, flipping
  * the single `false` in grantedAnswerReplay.ts needs no test rewritten.
@@ -37,6 +47,7 @@ import {
   type ApplicationProfileLike,
 } from './questionDiscovery';
 import { resolveProfileField } from './profileFieldResolution';
+import { postingCountryFromJobContext } from './jobLocation';
 
 process.env.ENCRYPTION_KEY ??= 'test-encryption-key-at-least-32-chars-long';
 
@@ -65,35 +76,109 @@ function permissions(row: AcknowledgementPermissionRow | null | undefined, mayRe
   return acknowledgementPermissionsFor(row, GRANTED_PREDICATES, mayReach);
 }
 
+/* THE PROFILE PRODUCTION ACTUALLY RESOLVES AGAINST, not an empty object.
+ *
+ * The first version of this file used `{}` plus the two licences, and that made every boundary
+ * assertion below vacuous: with nothing on file, a work-authorization question has nothing to
+ * answer FROM, so it was refused for a reason that had nothing to do with the permission. The
+ * fixture is now the owner's real production shape, measured off application_profile on
+ * 2026-08-12, so the adversary can win.
+ */
+const STORED_FACTS: ApplicationProfileLike = {
+  work_authorized: true,
+  needs_sponsorship: true,
+  eeo_prefs: {
+    race: 'South Asian',
+    gender: 'Female',
+    veteran_status: 'Decline to self-identify',
+    disability_status: 'Decline to self-identify',
+  },
+  work_eligibility_by_country: [
+    { country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: true },
+  ],
+};
+
+/* AND THE ARGUMENT SHAPE PRODUCTION ACTUALLY USES.
+ *
+ * Every live call site passes SIX arguments. The first version of this file passed four, and the
+ * two it omitted, postingCountry and postingCountryCode, are the exact parameters
+ * workEligibilityAnswer refuses on when they are absent. So the omission WAS the refusal: the file
+ * claimed the work-authorization class fails closed and was in fact measuring an argument shape no
+ * caller uses. Every helper here now passes six, built the way the runner builds them. */
+const JD = frozenJobEmployerContext('Acme');
+const POSTING_COUNTRY = postingCountryFromJobContext({
+  location: 'New York, NY, United States',
+  country: 'United States',
+});
+const POSTING_COUNTRY_CODE = 'US';
+
+function resolve(label: string, ap: ApplicationProfileLike, inputType = 'checkbox') {
+  return resolveKnownAnswer(label, inputType, ap, JD, POSTING_COUNTRY, POSTING_COUNTRY_CODE);
+}
+
 function answer(label: string, ap: ApplicationProfileLike, inputType = 'checkbox'): string | null {
-  const resolved = resolveKnownAnswer(label, inputType, ap, frozenJobEmployerContext('Acme'));
+  const resolved = resolve(label, ap, inputType);
   return resolved && 'value' in resolved ? resolved.value : null;
 }
 
 function held(label: string, ap: ApplicationProfileLike, inputType = 'checkbox'): string | null {
-  const resolved = resolveKnownAnswer(label, inputType, ap, frozenJobEmployerContext('Acme'));
+  const resolved = resolve(label, ap, inputType);
   return resolved && 'skipReason' in resolved ? resolved.skipReason : null;
+}
+
+/** What a control with an option list would actually receive. */
+function selected(label: string, ap: ApplicationProfileLike, options: string[]) {
+  return resolveProfileField(
+    { label, inputType: 'select', options },
+    ap,
+    JD,
+    POSTING_COUNTRY,
+    POSTING_COUNTRY_CODE,
+  );
 }
 
 /** The two IMC labels that blocked a real run, verbatim from its blockers. */
 const IMC_PRIVACY = 'Privacy Statement';
 const IMC_CONDUCT = 'Interview Code of Conduct';
 
-/* THE CLASS THAT MUST NEVER BE ACCEPTED, whatever any permission says. The four the scope addition
- * named, plus the two the original boundary was built around. Each is a claim about the applicant
- * rather than an agreement to a document. */
-const NEVER_ACCEPTED: Array<[string, string]> = [
+/* WHAT EACH CLASS ACTUALLY DOES, MEASURED, rather than the single sentence this file used to
+ * claim. The first version said every one of these "fails closed". That was FALSE, and it passed
+ * only because the fixture had nothing on file and the helper used the wrong argument count.
+ *
+ * Measured with both licences live, the production six-argument shape and the profile above:
+ *
+ *   truth attestation        skip     never answered
+ *   health / accommodation   null     never answered
+ *   criminal / background    null     never answered
+ *   unclassified document    null     never answered
+ *   EEO race                 "South Asian"                filled, from HER OWN stored claim
+ *   EEO veteran / disability "Decline to self-identify"   filled, from HER OWN stored opt-out
+ *   work authorization       "Yes"    filled, from her stored declaration. NOT held by this gate.
+ *   sponsorship              "Yes"    filled, from her stored declaration. NOT held by this gate.
+ *
+ * So there are two different properties here and they need two different tests. Some classes are
+ * never answered at all. Others ARE answered, legitimately, out of declarations she made herself,
+ * and the property that matters for them is that the CONSENT PERMISSION is invisible to them: the
+ * same label resolves to the same thing with the licences and without.
+ */
+
+/** Never answered by anything, permission or no permission. */
+const NEVER_ANSWERED: Array<[string, string]> = [
   ['truth attestation', 'I certify that the information provided is true and complete'],
   ['truth attestation, second wording', 'I confirm to the best of my knowledge that the details above are correct.'],
-  ['EEO race', 'please select your racial/ethnic background'],
-  ['veteran status', 'Are you a protected veteran?'],
-  ['disability', 'Do you have a disability or history of a disability?'],
   ['health disclosure', 'I confirm I have no medical condition that would prevent me performing this role.'],
   ['interview accommodation', 'Do you require any accommodation for the interview process?'],
-  ['work authorization', 'Are you legally authorized to work in the United States?'],
-  ['sponsorship', 'Will you now, or in the future, require sponsorship for employment visa status?'],
   ['criminal history', 'Have you ever been convicted of a felony?'],
   ['background authorization', 'I authorize Acme to conduct a background check and to contact my references.'],
+];
+
+/** Answered from her own stored declaration. The permission must be invisible to every one. */
+const ANSWERED_FROM_HER_OWN_RECORD: Array<[string, string, string]> = [
+  ['EEO race', 'please select your racial/ethnic background', 'South Asian'],
+  ['EEO veteran', 'Are you a protected veteran?', 'Decline to self-identify'],
+  ['EEO disability', 'Do you have a disability or history of a disability?', 'Decline to self-identify'],
+  ['work authorization', 'Are you legally authorized to work in the United States?', 'Yes'],
+  ['sponsorship', 'Will you now, or in the future, require sponsorship for employment visa status?', 'Yes'],
 ];
 
 describe('the gate itself', () => {
@@ -127,7 +212,7 @@ describe('with the gate closed, a granted permission does not become a licence',
   test('and the consent labels that PR 502 unblocked go back to the applicant', () => {
     /* The exact pre-502 behaviour: a named refusal, not an answer and not silence. These two are
      * the ones that blocked the live IMC run, so this is the cost of the hold stated plainly. */
-    const ap = permissions(FULLY_GRANTED, false) as ApplicationProfileLike;
+    const ap = { ...STORED_FACTS, ...permissions(FULLY_GRANTED, false) } as ApplicationProfileLike;
     assert.equal(answer(IMC_PRIVACY, ap), null);
     assert.equal(answer(IMC_CONDUCT, ap), null);
     assert.match(held(IMC_PRIVACY, ap) ?? '', /privacy notice/);
@@ -150,7 +235,8 @@ describe('with the gate closed, a granted permission does not become a licence',
 describe('with the gate open, the feature works and the boundary still holds', () => {
   /* THE ADVERSARY THAT CAN WIN. Everything below runs with both licences live, which is the only
    * configuration in which a factual declaration could be accepted by mistake. */
-  const LIVE = permissions(FULLY_GRANTED, true) as ApplicationProfileLike;
+  const LIVE = { ...STORED_FACTS, ...permissions(FULLY_GRANTED, true) } as ApplicationProfileLike;
+  const WITHOUT_LICENCE = { ...STORED_FACTS, ...permissions(FULLY_GRANTED, false) } as ApplicationProfileLike;
 
   test('the licences are live, so the tests below are not vacuous', () => {
     assert.equal(LIVE.consent_acknowledgement_permission?.version, AUTOMATIC_CONSENT_ACCEPTANCE_VERSION);
@@ -160,21 +246,31 @@ describe('with the gate open, the feature works and the boundary still holds', (
     assert.equal(answer(IMC_CONDUCT, LIVE), 'Yes');
   });
 
-  test('a truth attestation, EEO, health, accommodation and work authorization all still fail closed', () => {
-    for (const [what, label] of NEVER_ACCEPTED) {
-      assert.notEqual(answer(label, LIVE), 'Yes', `${what} must never be accepted: ${label}`);
+  test('the profile really answers things, so a refusal below is never "nothing on file"', () => {
+    /* THE GUARD THE FIRST VERSION OF THIS FILE DID NOT HAVE. With an empty profile every
+     * declaration refuses for a reason that has nothing to do with any permission, and the whole
+     * boundary reads as proven while proving nothing. */
+    assert.equal(answer('Are you legally authorized to work in the United States?', LIVE, 'select'), 'Yes');
+    assert.equal(answer('please select your racial/ethnic background', LIVE, 'select'), 'South Asian');
+  });
+
+  test('the never-answered classes are never answered', () => {
+    for (const [what, label] of NEVER_ANSWERED) {
+      assert.equal(answer(label, LIVE), null, `${what} must not be answered: ${label}`);
     }
   });
 
-  test('and none of them can be agreed to out of an option list either', () => {
+  test('the classes answered from her own record are answered from HER RECORD, not the permission', () => {
+    for (const [what, label, expected] of ANSWERED_FROM_HER_OWN_RECORD) {
+      assert.equal(answer(label, LIVE, 'select'), expected, `${what}: ${label}`);
+    }
+  });
+
+  test('no declaration can be agreed to out of an option list', () => {
     /* The option list is where an "I agree" wording makes a declaration LOOK like a consent. The
      * decision is made on the label before any list is read, so the list cannot change it. */
-    for (const [what, label] of NEVER_ACCEPTED) {
-      const resolved = resolveProfileField(
-        { label, inputType: 'select', options: ['I agree', 'I do not agree'] },
-        LIVE,
-        frozenJobEmployerContext('Acme'),
-      );
+    for (const [what, label] of [...NEVER_ANSWERED, ...ANSWERED_FROM_HER_OWN_RECORD.map(([a, b]) => [a, b] as [string, string])]) {
+      const resolved = selected(label, LIVE, ['I agree', 'I do not agree']);
       assert.ok(
         resolved === null || resolved.value !== 'I agree',
         `${what} must not be agreed to from an option list: ${label}`,
@@ -182,20 +278,19 @@ describe('with the gate open, the feature works and the boundary still holds', (
     }
   });
 
-  test('the permission is invisible to every one of them, not merely refused by a second rule', () => {
-    /* The stronger property, and the one that survives a future widening of the consent grammar:
-     * the same label resolves to the same thing with the licences and without them. */
-    const withoutLicence = permissions(FULLY_GRANTED, false) as ApplicationProfileLike;
-    for (const [what, label] of NEVER_ACCEPTED) {
+  test('the permission is invisible to every declaration, answered or held', () => {
+    /* THE PROPERTY THIS FEATURE IS ACTUALLY JUDGED ON, and the honest version of the sentence this
+     * file used to get wrong. Not "these are held", because several of them are legitimately
+     * ANSWERED out of declarations she made herself. The property is that the licence changes
+     * nothing about any of them, so no widening of the consent grammar can put an acceptance on
+     * one. */
+    for (const [what, label] of [...NEVER_ANSWERED, ...ANSWERED_FROM_HER_OWN_RECORD.map(([a, b]) => [a, b] as [string, string])]) {
+      assert.equal(answer(label, LIVE), answer(label, WITHOUT_LICENCE), `${what} answer must not move: ${label}`);
+      assert.equal(held(label, LIVE), held(label, WITHOUT_LICENCE), `${what} refusal must not move: ${label}`);
       assert.equal(
-        answer(label, LIVE),
-        answer(label, withoutLicence),
-        `${what} must resolve identically with and without the licence: ${label}`,
-      );
-      assert.equal(
-        held(label, LIVE),
-        held(label, withoutLicence),
-        `${what} must be held identically with and without the licence: ${label}`,
+        answer(label, LIVE, 'select'),
+        answer(label, WITHOUT_LICENCE, 'select'),
+        `${what} must not move on a select either: ${label}`,
       );
     }
   });
@@ -205,6 +300,60 @@ describe('with the gate open, the feature works and the boundary still holds', (
      * carrying a second, unplaceable document is held rather than accepted. */
     const stray = 'I accept the Privacy Statement and the Supplier Expectations Handbook.';
     assert.equal(answer(stray, LIVE), null);
+  });
+
+  test('a label welding a document to a declaration is refused whole, on both sides', () => {
+    /* MEASURED ON MAIN, with nothing granted at all: this resolved to "Yes", and to "I agree" off
+     * an option list. The consent classifier refused it correctly; the WORK-ELIGIBILITY branch
+     * answered it, accepting a named document as a side effect of answering a visa question. One
+     * control, one tick, two statements, and only one of them was decided. */
+    const welded = 'I acknowledge the Privacy Statement and confirm I am legally authorized to work in the United States.';
+    for (const [what, ap] of [['granted', LIVE], ['not granted', WITHOUT_LICENCE]] as Array<[string, ApplicationProfileLike]>) {
+      assert.equal(answer(welded, ap), null, `${what}: must not answer a welded label`);
+      assert.ok(held(welded, ap), `${what}: must say why it is left`);
+      assert.equal(selected(welded, ap, ['I agree', 'I do not agree']), null, `${what}: and not from a list`);
+    }
+    // Neither half alone is disturbed: a pure consent is still accepted, a pure declaration still
+    // answered. Without this the rule could pass by refusing everything.
+    assert.equal(answer(IMC_PRIVACY, LIVE), 'Yes');
+    assert.equal(answer('Are you legally authorized to work in the United States?', LIVE, 'select'), 'Yes');
+  });
+});
+
+describe('KNOWN OPEN: the work-authorization class is NOT held by this gate', () => {
+  /* NAMED RATHER THAN HIDDEN, following the jurisdiction false-hold class pinned by 5fc9a2a.
+   *
+   * workEligibilityReplayMayReachControls() exists, reads the same switch, and is NOT CALLED. So
+   * work-authorization and sponsorship answers reach option-shaped controls exactly as they do on
+   * main, and the targeting defect can still land one on a neighbouring control. This PR does not
+   * change that and must not be read as though it did.
+   *
+   * It matters for the repro this whole gate was written from: the TRIGGER there was filling the
+   * sponsorship combobox and the VICTIM was a consent listbox. This gate stops Litos PRODUCING the
+   * consent answer; it does not stop the sponsorship fill, so that exact sequence is unchanged.
+   *
+   * These assertions are expected to FAIL when someone wires the second predicate. That is the
+   * point: the day the class is held, this test says so instead of the change passing silently. */
+  const LIVE = { ...STORED_FACTS, ...permissions(FULLY_GRANTED, true) } as ApplicationProfileLike;
+  const HELD_SIDE = { ...STORED_FACTS, ...permissions(FULLY_GRANTED, false) } as ApplicationProfileLike;
+
+  test('work authorization and sponsorship answer on BOTH sides of the gate', () => {
+    for (const label of [
+      'Are you legally authorized to work in the United States?',
+      'Will you now, or in the future, require sponsorship for employment visa status?',
+    ]) {
+      assert.equal(answer(label, LIVE, 'select'), 'Yes', `still answered with the gate open: ${label}`);
+      assert.equal(answer(label, HELD_SIDE, 'select'), 'Yes', `still answered with the gate closed: ${label}`);
+    }
+  });
+
+  test('and they reach an option-shaped control, which is where the targeting defect bites', () => {
+    const resolved = selected('Are you legally authorized to work in the United States?', HELD_SIDE, ['Yes', 'No']);
+    assert.equal(resolved?.value, 'Yes');
+  });
+
+  test('the second predicate is declared, reads the same switch, and is still unwired', () => {
+    assert.equal(workEligibilityReplayMayReachControls(), exactControlTargetingDeployed());
   });
 });
 
