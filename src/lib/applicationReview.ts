@@ -1032,10 +1032,15 @@ export function applyApplicationReviewEdit(
     ? undefined
     : canonicalSupportedPortalUrl(edit.portal_url, edit.ats_name ?? current.ats_name) ?? edit.portal_url;
   const reviewedAt = new Date().toISOString();
+  const mergedQuestions = mergeSubmittedApplicationReviewQuestions(
+    current.questions,
+    edit.questions,
+    current.questions_reviewed_at,
+  );
   return {
     ...current,
     ...edit,
-    questions: edit.questions.map((question) => question.answer.trim()
+    questions: mergedQuestions.map((question) => question.answer.trim()
       ? { ...question, answer_source: 'applicant_review' as const, answer_reviewed_at: reviewedAt }
       : question),
     questions_reviewed_at: reviewedAt,

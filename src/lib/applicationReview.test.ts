@@ -451,6 +451,85 @@ test('review edits stamp server-owned current-answer provenance', () => {
   assert.equal(edited.updated_at, edited.questions_reviewed_at);
 });
 
+test('review edits preserve unchanged employer option derivations', () => {
+  const current = {
+    jd_text: 'Role',
+    status: 'needs_attention',
+    edited_terms: [],
+    questions: [
+      {
+        id: 'graduation',
+        question: 'when is your anticipated graduation date - please select a graduation date range',
+        answer: 'January 2028 - July 2028',
+        kind: 'required' as const,
+        required: true,
+        portal_selector: '#question_9170559101',
+        answer_option_source: 'May 2028',
+      },
+      {
+        id: 'gpa',
+        question: 'what is your gpa?',
+        answer: '3.81 - 3.9',
+        kind: 'required' as const,
+        required: true,
+        portal_selector: '#question_9170560101',
+        answer_option_source: '3.89',
+      },
+    ],
+    skipped_reasons: [],
+    updated_at: '2026-08-13T00:00:00.000Z',
+  } as ApplicationReviewState;
+  const publicQuestions = current.questions.map(({ answer_option_source: _source, ...question }) => question);
+
+  const edited = applyApplicationReviewEdit(current, {
+    questions: publicQuestions,
+    skipped_reasons: [],
+  });
+
+  assert.equal(edited.questions[0].answer, 'January 2028 - July 2028');
+  assert.equal(edited.questions[0].answer_option_source, 'May 2028');
+  assert.equal(edited.questions[1].answer, '3.81 - 3.9');
+  assert.equal(edited.questions[1].answer_option_source, '3.89');
+});
+
+test('current applicant-reviewed ranges recover safely when older packets lost their derivation', () => {
+  const reviewedAt = '2026-08-13T14:19:01.979Z';
+  const profile = { grad_date: 'May 2028', grad_year: 2028, gpa: '3.89' };
+  const currentAnswers = refreshKnownQuestionAnswers([
+    {
+      id: 'graduation',
+      question: 'when is your anticipated graduation date - please select a graduation date range',
+      answer: 'January 2028 - July 2028',
+      kind: 'required' as const,
+      required: true,
+      answer_source: 'applicant_review' as const,
+      answer_reviewed_at: reviewedAt,
+    },
+    {
+      id: 'gpa',
+      question: 'what is your gpa?',
+      answer: '3.81 - 3.9',
+      kind: 'required' as const,
+      required: true,
+      answer_source: 'applicant_review' as const,
+      answer_reviewed_at: reviewedAt,
+    },
+  ], profile, undefined, reviewedAt);
+
+  assert.equal(currentAnswers[0].answer, 'January 2028 - July 2028');
+  assert.equal(currentAnswers[1].answer, '3.81 - 3.9');
+
+  const staleAnswers = refreshKnownQuestionAnswers([
+    { ...currentAnswers[0], answer: 'August 2028 - December 2028' },
+    { ...currentAnswers[1], answer: '3.0 - 3.5' },
+  ], profile, undefined, reviewedAt);
+
+  assert.equal(staleAnswers[0].answer, 'May 2028');
+  assert.equal(staleAnswers[1].answer, '3.89');
+  assert.equal(staleAnswers[0].answer_source, undefined);
+  assert.equal(staleAnswers[1].answer_source, undefined);
+});
+
 test('submit merge preserves provenance only for an exact current reviewed identity', () => {
   const reviewedAt = '2026-08-09T12:00:00.000Z';
   const stored = [{

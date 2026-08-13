@@ -65,3 +65,56 @@ export function storedOptionAnswerIsCurrent(
   if (!source || !current) return false;
   return source.toLowerCase() === current.toLowerCase();
 }
+
+const MONTHS = [
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+];
+
+function monthIndex(value: string): number | undefined {
+  const normalized = value.trim().toLowerCase();
+  const index = MONTHS.findIndex((month) => month === normalized
+    || (normalized.length >= 3 && month.startsWith(normalized)));
+  return index < 0 ? undefined : index + 1;
+}
+
+function monthYearValue(value: string): number | undefined {
+  const match = /^([A-Za-z]{3,9})\s+((?:19|20)\d{2})$/.exec(value.trim());
+  if (!match) return undefined;
+  const month = monthIndex(match[1]);
+  return month === undefined ? undefined : Number(match[2]) * 12 + month;
+}
+
+/**
+ * Whether a reviewed employer range still contains the current exact profile value.
+ *
+ * This is intentionally narrower than optionBandAnswer. It accepts only numeric ranges and
+ * month-year ranges whose endpoints and current value can all be parsed without guessing. It is
+ * used only for an answer stamped as the applicant's current review, which lets an older packet
+ * recover after losing its discovery provenance without making an arbitrary stale range sticky.
+ */
+export function reviewedOptionBandCoversCurrentValue(
+  answer: string | undefined | null,
+  currentProfileValue: string | undefined | null,
+): boolean {
+  const band = answer?.trim();
+  const current = currentProfileValue?.trim();
+  if (!band || !current) return false;
+  const separator = /\s*(?:[-\u2010-\u2015]|\bto\b|\bthrough\b)\s*/i;
+  const parts = band.split(separator);
+  if (parts.length !== 2) return false;
+
+  const currentNumber = Number(current);
+  const lowNumber = Number(parts[0]);
+  const highNumber = Number(parts[1]);
+  if ([currentNumber, lowNumber, highNumber].every(Number.isFinite)) {
+    return currentNumber >= Math.min(lowNumber, highNumber)
+      && currentNumber <= Math.max(lowNumber, highNumber);
+  }
+
+  const currentDate = monthYearValue(current);
+  const lowDate = monthYearValue(parts[0]);
+  const highDate = monthYearValue(parts[1]);
+  if (currentDate === undefined || lowDate === undefined || highDate === undefined) return false;
+  return currentDate >= Math.min(lowDate, highDate) && currentDate <= Math.max(lowDate, highDate);
+}
