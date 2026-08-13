@@ -3558,4 +3558,13 @@ test('a "select your school" label is classified, and its neighbours still are n
   assert.equal(classifyField('have you ever transferred from another school?'), null);
   // And the verb alone decides nothing: it is the noun beside it that picks the field.
   assert.equal(classifyField('select your current employer'), 'current_employer');
+
+  /* THE QUALIFIER GUARD, added after review caught the first version answering all of these with
+   * the university's NAME. Each asks for something ABOUT the school, and the school noun sitting
+   * in the label is not permission to answer with the school. The email case is the one the
+   * FIELD_NAME_LABEL_MAX_WORDS note already records as having shipped once. */
+  assert.equal(classifyField('please select your university email address'), null);
+  assert.equal(classifyField('select your school email'), null);
+  assert.notEqual(classifyField('select your college major'), 'school');
+  assert.equal(classifyField('select your college major'), 'major');
 });
