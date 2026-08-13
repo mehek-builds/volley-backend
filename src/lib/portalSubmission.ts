@@ -2753,6 +2753,7 @@ function greenhouseComboboxValuesForQuestion(
   const normalizedContext = contextText.toLowerCase();
   const isRobloxContext = /\broblox\b/.test(normalizedQuestion) || /\broblox\b/.test(normalizedContext);
   const isAkunaContext = /\bakuna\b/.test(normalizedQuestion) || /\bakuna\b/.test(normalizedContext);
+  const isImcContext = /\bimc\b/.test(normalizedQuestion) || /\bimc\b/.test(normalizedContext);
   if (isAkunaContext
     && /\bhigh\s+school\s+diploma\b|\bhigh\s+school\b[^?]{0,120}\bgraduation\b/.test(normalizedQuestion)
     && !/\b(?:spring|summer|fall|winter|jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|20\d{2})\b/i.test(answer)) {
@@ -2853,7 +2854,7 @@ function greenhouseComboboxValuesForQuestion(
     && /^(?:yes|i\s+agree|agree|acknowledge(?:d)?|confirm(?:ed)?|understood|read)/i.test(answer.trim())) {
     values.unshift('I acknowledge that I have read and understood Roblox\'s Job Applicant Privacy Notice.');
   }
-  if (/\bgender\s+identity\b/.test(normalizedQuestion) && /^female$/i.test(answer.trim())) {
+  if (!isImcContext && /\bgender\s+identity\b/.test(normalizedQuestion) && /^female$/i.test(answer.trim())) {
     values.unshift('Woman');
   }
   if (/\brace\/ethnicity\b|\brace\b|\bethnicit/.test(normalizedQuestion) && /decline|self-ident/i.test(answer.trim())) {
@@ -3021,11 +3022,6 @@ function isSamsaraLearnedAboutQuestion(question: string): boolean {
   return /\bwhere\s+have\s+you\s+learned\s+about\s+samsara\b/i.test(question);
 }
 
-function isGreenhouseRuntimeSelectReplayQuestion(question: string): boolean {
-  if (!isGreenhouseReactSelectQuestion(question)) return false;
-  return /\b(?:how\s+did\s+you\s+hear|where\s+have\s+you\s+learned|gender|race|ethnicit|veteran|disability|processing\s+of\s+personal\s+data)\b/i.test(question);
-}
-
 /**
  * A Greenhouse education-row combobox: School, Degree, Discipline.
  *
@@ -3126,28 +3122,6 @@ function comboboxValueLimit(questionText: string, contextText: string): number {
     && /\bgraduat(?:ion|e)\b|\bexpect(?:ing)?\s+to\s+graduat(?:e|ion)\b|\bgraduate\s+or\s+complete\s+your\s+program\b/i.test(questionText)
     ? 3
     : 1;
-}
-
-function pushGreenhouseQuestionSelectActions(
-  actions: ManagedBrowserAction[],
-  selector: string,
-  questionText: string,
-  answer: string,
-  labelPrefix: string,
-  contextText = '',
-  referralEvidence?: ReferralSourceEvidence,
-  answerIsResolved = false,
-) {
-  const values = greenhouseComboboxValuesForQuestion(
-    questionText,
-    answer,
-    contextText,
-    referralEvidence,
-    answerIsResolved,
-  ).slice(0, 3);
-  for (const [index, value] of values.entries()) {
-    managedSelect(actions, selector, value, `${labelPrefix}_select_live:${index}:${questionText.slice(0, 80)}`);
-  }
 }
 
 /**
@@ -5853,24 +5827,13 @@ export function buildManagedPortalActions(
     const portalSelector = durablePortalSelector(rawPortalSelector);
     const measuredClosedOption = Boolean(item.answerOptionSource?.trim())
       && /^(?:text|combobox)?$/i.test(portalInputType ?? '');
-    const runtimeGreenhouseSelector = portalFamily(portal) === 'greenhouse'
-      && isGreenhouseRuntimeSelectReplayQuestion(questionText)
-      && rawPortalSelector?.trim().startsWith('[data-litos-discovered-')
-      ? rawPortalSelector.trim()
-      : undefined;
-    if (runtimeGreenhouseSelector) {
-      pushGreenhouseQuestionSelectActions(
-        actions,
-        runtimeGreenhouseSelector,
-        questionText,
-        answer,
-        'question',
-        packet.jdText,
-        packet.referralSourceEvidence,
-        answerIsResolved,
-      );
-      pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question');
-    }
+    /* Never replay a data-litos-discovered selector in this managed fill. The discovery pass and
+     * the fill pass are separate stateless Stratus runs. Those attributes exist only on the page
+     * where discovery assigned them, so preserving one here protects a chain that cannot match and
+     * lets the budget trim remove the label-scoped chain that can. Gender and race on IMC were the
+     * measured result: both answers existed, both temporary selectors were protected, and both
+     * live controls stayed empty. Falling through to the label-scoped Greenhouse path below is the
+     * durable replay for these runtime selects. */
     if (portalSelector) {
       if (portalFamily(portal) === 'greenhouse'
         && (/^combobox$/i.test(portalInputType ?? '') || measuredClosedOption)) {
