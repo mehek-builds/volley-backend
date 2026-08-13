@@ -160,6 +160,10 @@ import {
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from '../lib/questionDiscovery';
+import {
+  REQUIRED_AND_EMPTY_BLOCKER,
+  unmetConditionalFollowUpBlockers,
+} from '../lib/conditionalFollowUp';
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from '../lib/selfDeclaration';
 import {
   referralSourceForApplication,
@@ -1236,8 +1240,6 @@ export function reconcileManagedProviderBlockers(
  */
 export const FORM_NOT_REACHED_REASON =
   'Litos could not confirm it reached this company\u2019s application form. Nothing was filled in and nothing has been sent. Open it when you have a minute and finish it off.';
-
-const REQUIRED_AND_EMPTY_BLOCKER = /^"(.+)" is required and is still empty$/;
 
 /**
  * Whether the run has POSITIVE evidence it was looking at the application form.
@@ -2503,7 +2505,7 @@ async function prepareManaged(
   // written. So the runner's CAPTCHA verdict, arriving here in result.blockers, is what stopped
   // them, on Greenhouse pages whose only challenge is an invisible reCAPTCHA behind the badge.
   // corroborateManagedCaptchaBlockers is the layer that asks the page rather than the provider.
-  const blockers = corroborateManagedCaptchaBlockers(
+  const providerBlockers = corroborateManagedCaptchaBlockers(
     portal,
     attentionBlockersForManagedResult(
       portal,
@@ -2513,6 +2515,35 @@ async function prepareManaged(
     ),
     result,
   );
+  /* A REQUIRED-FIELD SENTENCE ABOUT A FIELD THE EMPLOYER DID NOT MARK REQUIRED.
+   *
+   * Measured on Scale AI packet 9ddffb88 (2026-08-13): the whole send stopped on '"If yes, please
+   * provide further explanation below." is required and is still empty', about `question_8788020005`,
+   * which carries aria-required="false", no required attribute and no asterisk in its label. The
+   * provider's readiness gate reads a leaf element whose text matches its field-error vocabulary as
+   * a validation message, and "please provide" is in that vocabulary, so the employer's own QUESTION
+   * was read back as the employer's own COMPLAINT. The same false sentence then propagated into
+   * `unansweredRequired` below as "1 required field has no question you can answer in Litos",
+   * because a field the employer left optional correctly has no question record.
+   *
+   * Refused HERE rather than in the gate, because the gate that produced it runs in the managed
+   * provider's own service. See lib/conditionalFollowUp.ts for the four independent facts a refusal
+   * needs, and for why the absence of any one of them keeps the blocker: this is the only edit in
+   * this function that can make a packet MORE sendable, and every other measured instance keeps its
+   * blocker because the gating question was itself left unanswered.
+   *
+   * Read before every other use of `blockers`, so the send gate, the unanswerable count and the
+   * applicant's attention_reason cannot disagree about which sentences this run stands behind. */
+  const unmetFollowUps = unmetConditionalFollowUpBlockers(providerBlockers, discoveredFields, mergedQuestions);
+  const blockers = unmetFollowUps.length > 0
+    ? providerBlockers.filter((blocker) => !unmetFollowUps.includes(blocker))
+    : providerBlockers;
+  if (unmetFollowUps.length > 0) {
+    fastify.log.info(
+      { applicationId: row.id, portal, blockers: unmetFollowUps },
+      'Conditional follow-up reported required on a field the employer marked optional, and its condition is unmet',
+    );
+  }
   const networkAccessRestriction = managedNetworkAccessRestrictionReason(portal, result.text, result.title, result);
   // A blocker naming a field the stored profile CAN answer is a Litos defect, never work for the
   // applicant. Twenty-five prod packets carried exactly these lines (GPA, university, education
