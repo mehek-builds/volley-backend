@@ -331,6 +331,8 @@ type HandlerCalls = {
   claimed: number;
   markedForwarded: number;
   failures: string[];
+  /** Every value written to application_email_messages.forward_decision, in order. */
+  decisions: string[];
   order: string[];
 };
 
@@ -338,6 +340,7 @@ function handlerDeps(overrides: {
   resolveConfirmation?: StoredEmployerMessageDeps['resolveConfirmation'];
   forward?: StoredEmployerMessageDeps['forward'];
   claim?: boolean;
+  securityCodeInFlight?: boolean;
 } = {}): { deps: StoredEmployerMessageDeps; calls: HandlerCalls } {
   const calls: HandlerCalls = {
     resolved: [],
@@ -345,6 +348,7 @@ function handlerDeps(overrides: {
     claimed: 0,
     markedForwarded: 0,
     failures: [],
+    decisions: [],
     order: [],
   };
   const deps: StoredEmployerMessageDeps = {
@@ -353,6 +357,11 @@ function handlerDeps(overrides: {
       calls.resolved.push(input);
       if (overrides.resolveConfirmation) return overrides.resolveConfirmation(input);
       return { resolved: true, review: review({ status: 'submitted' }) } as SubmissionConfirmationOutcome;
+    },
+    // Deliberately absent from calls.order, which exists to prove resolve happens before forward.
+    securityCodeInFlight: async () => overrides.securityCodeInFlight ?? false,
+    recordDecision: async ({ decision }) => {
+      calls.decisions.push(decision);
     },
     claimForwarding: async () => {
       calls.claimed += 1;
@@ -400,9 +409,128 @@ function handle(
   message: StoredInboundMessage | null,
   deps: StoredEmployerMessageDeps,
   aliasRow = ALIAS_ROW,
+  senderAuthenticationFailed = false,
 ) {
-  return handleStoredEmployerMessage({ aliasRow, message, classification, receivedAt: RECEIVED_AT }, deps);
+  return handleStoredEmployerMessage(
+    { aliasRow, message, classification, receivedAt: RECEIVED_AT, senderAuthenticationFailed },
+    deps,
+  );
 }
+
+/* THE REPLAY. Two deliveries of one stored message, the second reporting no authentication at all.
+ *
+ * Before the stored decision was read back this measured:
+ *   delivery 1 (auth FAIL)   -> withheld, row = withheld:sender_authentication_failed
+ *   delivery 2 (auth ABSENT) -> FORWARDED, row overwritten to 'forward'
+ * A message already judged forged was mailed to the applicant from Litos's verified sending
+ * identity, and the record that anything had been refused was destroyed on the way out. */
+test('a message once refused for authentication stays refused on every later delivery', async () => {
+  const first = handlerDeps();
+  const beforeAnyDecision = storedMessage({ forward_decision: null });
+  const firstResult = await handle('other', beforeAnyDecision, first.deps, ALIAS_ROW, true);
+  assert.equal(firstResult.forwarded, false);
+  assert.equal(firstResult.reason, 'sender_authentication_failed');
+  assert.deepEqual(first.calls.decisions, ['withheld:sender_authentication_failed']);
+
+  // The same row, redelivered, with the header missing this time.
+  const second = handlerDeps();
+  const asStored = storedMessage({ forward_decision: 'withheld:sender_authentication_failed' });
+  const secondResult = await handle('other', asStored, second.deps, ALIAS_ROW, false);
+  assert.equal(secondResult.forwarded, false, 'a silent redelivery must not launder a forgery through');
+  assert.equal(secondResult.reason, 'sender_authentication_failed');
+  assert.equal(second.calls.forwarded, 0);
+  assert.equal(second.calls.claimed, 0);
+  // And the annotation is rewritten to the same value, never downgraded to 'forward'.
+  assert.deepEqual(second.calls.decisions, ['withheld:sender_authentication_failed']);
+});
+
+/* THE DELIVERY ORDER THE FIRST VERSION DID NOT TEST, and the mirror image of the bug above.
+ *
+ * The withhold was recorded before the forwarded_at check, so:
+ *   delivery 1, authentication passes -> forwarded, forwarded_at set, decision 'forward'
+ *   delivery 2, authentication FAILS  -> decision overwritten to withheld:sender_authentication_failed
+ * The ledger then claimed Litos had withheld a message it demonstrably sent, and /health counted it
+ * among the drops. A copy already in her mailbox cannot be un-sent by a later verdict, and the row
+ * has to say what happened rather than what we now wish had. */
+test('a message that has already gone out is never recorded as withheld', async () => {
+  const { deps, calls } = handlerDeps();
+  const result = await handle(
+    'other',
+    storedMessage({ forwarded_at: new Date('2026-08-10T17:36:10.000Z'), forward_decision: 'forward' }),
+    deps,
+    ALIAS_ROW,
+    true,
+  );
+  assert.equal(result.forwarded, false);
+  assert.equal(result.reason, 'already_forwarded', 'the honest record of a sent message is forwarded_at');
+  assert.deepEqual(calls.decisions, [], 'and nothing rewrites the decision on it');
+  assert.equal(calls.forwarded, 0, 'nor does it go out a second time');
+});
+
+/* The same verdict on a message that has NOT gone out still sticks, so the fix above narrows
+ * nothing: it separates "already sent" from "not sent yet". */
+test('a failing verdict still withholds a message that has not been forwarded', async () => {
+  const { deps, calls } = handlerDeps();
+  const result = await handle('other', storedMessage({ forwarded_at: null }), deps, ALIAS_ROW, true);
+  assert.equal(result.forwarded, false);
+  assert.equal(result.reason, 'sender_authentication_failed');
+  assert.deepEqual(calls.decisions, ['withheld:sender_authentication_failed']);
+});
+
+/* THE QUESTION IS ABOUT NOW, and this is the assertion that pins it.
+ *
+ * "Is a run spending a code" was asked with the row's own received_at, which never advances, so for
+ * a message that arrived during a window the answer was frozen at yes forever and no later delivery
+ * or sweep could release it. Mutating the argument back to the frozen value keeps every other test
+ * in the suite green, which is why this one reads the timestamp the handler actually passes rather
+ * than only the outcome. */
+test('the in-flight question is asked about the present, not about when the message arrived', async () => {
+  const asked: Date[] = [];
+  const { deps } = handlerDeps();
+  const longAgo = new Date(Date.now() - 45 * 60 * 1000);
+  await handleStoredEmployerMessage({
+    aliasRow: ALIAS_ROW,
+    message: storedMessage({ received_at: longAgo }),
+    classification: 'verification_code',
+    receivedAt: longAgo,
+  }, {
+    ...deps,
+    securityCodeInFlight: async ({ at }) => {
+      asked.push(at);
+      return false;
+    },
+  });
+  assert.equal(asked.length, 1);
+  assert.ok(
+    Math.abs(asked[0].getTime() - Date.now()) < 5000,
+    'the window has to be measured from now, or it can never close',
+  );
+  assert.notEqual(asked[0].getTime(), longAgo.getTime(), 'and never from the frozen arrival time');
+});
+
+/* The stickiness is deliberately narrow. A code withheld because a run was spending it must forward
+ * once the run is over, or a one-off race would bury the message permanently. */
+test('the security-code withhold is not sticky, because that window closes', async () => {
+  const { deps, calls } = handlerDeps({ securityCodeInFlight: false });
+  const result = await handle(
+    'verification_code',
+    storedMessage({ forward_decision: 'withheld:security_code_in_flight' }),
+    deps,
+  );
+  assert.equal(result.forwarded, true, 'the run is over, so the code is hers');
+  assert.deepEqual(calls.decisions, ['forward']);
+});
+
+/* A row that has never been decided, and a database too old to answer, are different states, and
+ * neither is a refusal. */
+test('an unannotated row and an unmigrated database both leave the decision to this delivery', async () => {
+  for (const forward_decision of [null, undefined]) {
+    const { deps, calls } = handlerDeps();
+    const result = await handle('other', storedMessage({ forward_decision }), deps);
+    assert.equal(result.forwarded, true, String(forward_decision));
+    assert.deepEqual(calls.decisions, ['forward'], String(forward_decision));
+  }
+});
 
 /* The gate that made every row written before the resolution existed unresolvable forever: the call
  * used to sit BELOW `if (!message || message.forwarded_at) return`. */
@@ -465,15 +593,46 @@ test('the ordinary confirmation both resolves and forwards', async () => {
 });
 
 /* THE FALSE POSITIVE THIS MUST NOT HAVE. Only a submission confirmation files an application.
- * Interview logistics are forwarded and change nothing about whether the employer received it, and
- * an internal-only classification is neither forwarded nor allowed to file anything. */
+ * Everything else is forwarded on its own merits and changes nothing about whether the employer
+ * received the application, which is a fact about the application rather than about the mail. */
 test('no classification but a submission confirmation resolves a packet', async () => {
   for (const classification of ['interview_request', 'verification_code', 'recruiter_reply', 'applicant_reply', 'other'] as const) {
     const { deps, calls } = handlerDeps();
     const result = await handle(classification, storedMessage(), deps);
     assert.equal(result.resolved, false, `${classification} must not resolve a packet`);
     assert.equal(calls.resolved.length, 0, `${classification} must not reach the resolver`);
-    assert.equal(result.forwarded, classification === 'interview_request');
+    /* This line used to read `classification === 'interview_request'`, which was the two-outcome
+     * whitelist. Her own reply is now the only classification that does not travel inward, because
+     * it is on its way out through the relay. */
+    assert.equal(result.forwarded, classification !== 'applicant_reply', classification);
+    assert.deepEqual(
+      calls.decisions,
+      classification === 'applicant_reply' ? ['withheld:applicant_reply'] : ['forward'],
+      classification,
+    );
+  }
+});
+
+/* The one withhold, exercised through the handler rather than through the pure decision function,
+ * because what matters is that the reason reaches the row. */
+test('a code withheld from a live run is annotated, not merely dropped', async () => {
+  const { deps, calls } = handlerDeps({ securityCodeInFlight: true });
+  const result = await handle('verification_code', storedMessage(), deps);
+  assert.equal(result.forwarded, false);
+  assert.equal(result.reason, 'security_code_in_flight');
+  assert.deepEqual(calls.decisions, ['withheld:security_code_in_flight']);
+  assert.equal(calls.forwarded, 0);
+  assert.equal(calls.claimed, 0, 'a withheld message must not take the forwarding claim');
+});
+
+/* The withhold is scoped to the race and to nothing else. An offer letter arriving in the seconds
+ * a run is spending a code is still an offer letter. */
+test('a live run does not license withholding anything but the code', async () => {
+  for (const classification of ['other', 'account_registration', 'recruiter_reply', 'submission_confirmation'] as const) {
+    const { deps, calls } = handlerDeps({ securityCodeInFlight: true });
+    const result = await handle(classification, storedMessage(), deps);
+    assert.equal(result.forwarded, true, classification);
+    assert.deepEqual(calls.decisions, ['forward'], classification);
   }
 });
 

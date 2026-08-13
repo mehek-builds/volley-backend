@@ -6,6 +6,8 @@ import {
   applicationEmailRouteLabel,
   applicationEmailRouteGenerationFingerprint,
   classifyApplicationEmail,
+  managedSessionIsConsumingSecurityCode,
+  type ApplicationEmailClassification,
   forwardingAddressWouldLoop,
   forwardEmailPayload,
   ApplicantEmailRegenerationRequiredError,
@@ -16,8 +18,13 @@ import {
   readPinnedApplicantEmail,
   retrieveResendReceivedEmail,
   routeInboundApplicationEmail,
+  senderAuthenticationFailed,
 } from './applicationEmail';
 import type { AliasDeliverability } from './applicationEmailDeliverability';
+/* The REAL reader the managed session uses. Imported here and nowhere in the source, because
+ * emailVerification imports applicationEmail and the cycle is what keeps the two apart in the
+ * first place. A test is a leaf, so it can hold both and assert they agree. */
+import { extractCodeFromVerificationText } from './emailVerification';
 
 test('application aliases are deterministic and live on the configured domain', () => {
   const previousMailbox = process.env.LITOS_APPLICATION_EMAIL_MAILBOX;
@@ -220,16 +227,526 @@ test('application email classifier recognizes employer outcomes', () => {
   );
 });
 
-test('application email forwarding is a strict outcome whitelist', () => {
-  assert.deepEqual(applicationEmailForwardingDecision('submission_confirmation'), { forward: true });
-  assert.deepEqual(applicationEmailForwardingDecision('interview_request'), { forward: true });
-  for (const classification of ['verification_code', 'recruiter_reply', 'applicant_reply', 'other'] as const) {
+/* THE NINE SHAPES MEASURED AGAINST THE SHIPPED CLASSIFIER ON 2026-08-10, when the forwarding
+ * whitelist admitted two classifications and every one of these was stored and dropped in silence.
+ * Both facts are asserted for each: what it is called, and whether it reaches the applicant. */
+const MEASURED_SHAPES: Array<{ subject: string; text: string; classification: ApplicationEmailClassification }> = [
+  {
+    subject: 'Please confirm your email address',
+    text: 'Click https://careers.example.com/confirm?t=abc to continue your application.',
+    classification: 'account_registration',
+  },
+  {
+    subject: 'Verify your account',
+    text: 'Verify your account to finish creating your Workday candidate profile.',
+    classification: 'account_registration',
+  },
+  {
+    subject: 'Your account has been created',
+    text: 'Your account has been created for the Acme careers site.',
+    classification: 'account_registration',
+  },
+  {
+    subject: 'Activate your candidate account',
+    text: 'Activate your candidate account before applying to this role.',
+    classification: 'account_registration',
+  },
+  {
+    subject: 'Reset your password',
+    text: 'Reset your password using the link below.',
+    classification: 'account_registration',
+  },
+  {
+    subject: 'Complete your online assessment',
+    text: 'Please complete the online assessment within five days.',
+    classification: 'other',
+  },
+  {
+    subject: 'Your offer from Acme',
+    text: 'We are delighted to extend an offer for the Software Engineer role.',
+    classification: 'other',
+  },
+  {
+    subject: 'Update on your application',
+    text: 'We have decided to move forward with other candidates.',
+    classification: 'other',
+  },
+  {
+    subject: 'Quick note from our talent team',
+    text: 'Our talent team wanted to reach out about your background.',
+    classification: 'recruiter_reply',
+  },
+];
+
+test('every shape the old whitelist dropped is classified, and every one of them reaches her', () => {
+  for (const shape of MEASURED_SHAPES) {
+    const classification = classifyApplicationEmail(shape.subject, shape.text);
+    assert.equal(classification, shape.classification, shape.subject);
+    assert.deepEqual(applicationEmailForwardingDecision(classification), { forward: true }, shape.subject);
+  }
+});
+
+test('the account wall is one classification, because it is one job with one destination', () => {
+  // The employer's own words for "there is no application form until you have an account".
+  assert.equal(
+    classifyApplicationEmail('Welcome to the Acme careers portal', 'Thanks for registering. Your login is ready.'),
+    'account_registration',
+  );
+  assert.equal(
+    classifyApplicationEmail('Set your password', 'Set your password to finish setting up your profile.'),
+    'account_registration',
+  );
+  assert.equal(
+    classifyApplicationEmail('Action required', 'Please validate the email address on your candidate profile.'),
+    'account_registration',
+  );
+});
+
+test('the account-wall patterns capture accounts, not every message with a verb in it', () => {
+  /* A marketing blast is the exact false capture these patterns are anchored against: it uses the
+   * same verb, and its footer talks about an account. The noun after the verb is what decides. */
+  assert.equal(
+    classifyApplicationEmail(
+      'Activate your career alerts',
+      'New roles are posted every week. Activate your career alerts to be the first to know. '
+        + 'You can manage your account preferences at any time.',
+    ),
+    'other',
+  );
+  // A receipt for a filed application stays a receipt, however warmly it opens.
+  assert.equal(
+    classifyApplicationEmail(
+      'Welcome to Acme',
+      'Thank you for applying to the Software Engineer Intern role. Your candidate profile is now '
+        + 'available in our careers portal.',
+    ),
+    'submission_confirmation',
+  );
+  // Interview logistics are not an account wall just because the portal is mentioned.
+  assert.equal(
+    classifyApplicationEmail('Interview availability', 'Can you schedule a call with our recruiter this week?'),
+    'interview_request',
+  );
+});
+
+test('forwarding is a list of what to WITHHOLD, and everything not on it reaches her', () => {
+  for (const classification of [
+    'submission_confirmation',
+    'interview_request',
+    'account_registration',
+    'verification_code',
+    'recruiter_reply',
+    'other',
+  ] as const) {
+    assert.deepEqual(applicationEmailForwardingDecision(classification), { forward: true }, classification);
+  }
+  // Her own message travels outward through the relay. Sending it back in would be an echo.
+  assert.deepEqual(
+    applicationEmailForwardingDecision('applicant_reply'),
+    { forward: false, reason: 'applicant_reply' },
+  );
+  // The single withhold, and it is about a race, not about importance.
+  assert.deepEqual(
+    applicationEmailForwardingDecision('verification_code', { securityCodeInFlight: true }),
+    { forward: false, reason: 'security_code_in_flight' },
+  );
+  // Narrow: an active run does not license withholding anything else, least of all an offer.
+  for (const classification of ['account_registration', 'other', 'recruiter_reply'] as const) {
     assert.deepEqual(
-      applicationEmailForwardingDecision(classification),
-      { forward: false, reason: 'internal_only' },
+      applicationEmailForwardingDecision(classification, { securityCodeInFlight: true }),
+      { forward: true },
       classification,
     );
   }
+});
+
+/* THE INVARIANT BETWEEN THE CLASSIFIER AND THE READER, corrected. The strong version was false.
+ *
+ * This test used to assert "if the reader gets a code, the classifier says verification_code", and
+ * the classifier was built to satisfy it. That invariant cannot hold and should never have been
+ * asked for. extractCodeFromVerificationText is the INNER half of the reader: it is safe only
+ * because extractVerificationCode gates it on the sender domain, the recipient alias, a ten minute
+ * window and a single unambiguous candidate. Nothing the classifier can see supplies those gates,
+ * so the honest measurement is that THE READER RETURNS A CODE FOR AN ORDINARY APPLICATION RECEIPT.
+ * It returns "2026".
+ *
+ * Satisfying the strong version therefore promoted receipts, interviews and offers into
+ * verification_code, and a receipt that is not classified submission_confirmation never resolves
+ * its packet: resolution fires only on that classification and the backfill filters on it too. The
+ * Cresta bug, rebuilt out of an invariant that sounded careful.
+ *
+ * The true statement is weaker and is what the code now expresses: AN OTHERWISE UNRECOGNISED
+ * MESSAGE THAT THE READER COULD TAKE A CODE FROM IS TREATED AS A CREDENTIAL HANDOVER. Everything
+ * the classifier already recognises outranks it. */
+const CODE_CORPUS: Array<{ subject: string; text: string; readerFinds: string | null }> = [
+  {
+    subject: 'Your security code',
+    text: 'Hi Mehek,\n\nplease enter the code below to continue:\n\n483920\n\nThanks',
+    readerFinds: '483920',
+  },
+  {
+    subject: 'Confirm your email address',
+    text: 'To confirm your email address, use this verification code:\n\n739104',
+    readerFinds: '739104',
+  },
+  {
+    subject: 'Complete your sign in',
+    text: 'Your confirmation is required.\n\n204815\n\nEnter it on the page you left open.',
+    readerFinds: '204815',
+  },
+  // No token anywhere: a door, not a credential. The reader has nothing to spend.
+  {
+    subject: 'Activate your candidate account',
+    text: 'Use your one-time activation link to finish setting up your account:\nhttps://acme.example.com/activate?t=abc',
+    readerFinds: null,
+  },
+  {
+    subject: 'Reset your password',
+    text: 'We received a request to reset your password. Use the one-time link below.\nhttps://acme.example.com/reset?t=xyz',
+    readerFinds: null,
+  },
+];
+
+test('an otherwise unrecognised message the reader could take a code from is treated as a code', () => {
+  for (const { subject, text, readerFinds } of CODE_CORPUS) {
+    // The real reader, not a restatement of it.
+    assert.equal(extractCodeFromVerificationText(`${subject}\n${text}`), readerFinds, subject);
+    if (readerFinds === null) continue;
+    assert.equal(classifyApplicationEmail(subject, text), 'verification_code', subject);
+    // And therefore it is withheld while the runner is spending it, which is the whole point.
+    assert.deepEqual(
+      applicationEmailForwardingDecision(classifyApplicationEmail(subject, text), { securityCodeInFlight: true }),
+      { forward: false, reason: 'security_code_in_flight' },
+      subject,
+    );
+  }
+});
+
+/* THE REGRESSION THE STRONG INVARIANT CAUSED, pinned shape by shape.
+ *
+ * Every one of these makes the real reader return a code, so under "anything the reader can extract
+ * a code from is a verification_code" every one of them was misclassified. Three were receipts,
+ * which is the expensive kind: a receipt that is not submission_confirmation never resolves its
+ * packet, and listStoredConfirmations filters on the same classification so the backfill cannot
+ * recover it either. The packet sits in `submitting` forever with the employer's own receipt one
+ * row away.
+ *
+ * The expectations below are the MEASURED behaviour, including the two that are still wrong, which
+ * are recorded as facts rather than hidden behind a passing test. */
+const READER_FALSE_POSITIVES: Array<{
+  name: string;
+  subject: string;
+  text: string;
+  readerFinds: string;
+  classification: ApplicationEmailClassification;
+  exact: boolean;
+}> = [
+  {
+    name: 'receipt + copyright year',
+    subject: 'Thank you for applying to Cresta',
+    text: 'We have received your application. This email is your confirmation. Copyright 2026 Cresta Inc.',
+    readerFinds: '2026',
+    classification: 'submission_confirmation',
+    exact: true,
+  },
+  {
+    name: 'receipt + confirmation number',
+    subject: 'Thank you for applying',
+    text: 'Your application has been received. Confirmation number: 48392017.',
+    readerFinds: '48392017',
+    classification: 'submission_confirmation',
+    exact: true,
+  },
+  {
+    name: 'receipt + reference number',
+    subject: 'Application received',
+    text: 'Thanks for applying. Your confirmation reference is 7741204.',
+    readerFinds: '7741204',
+    classification: 'submission_confirmation',
+    exact: true,
+  },
+  {
+    name: 'interview + dial-in number',
+    subject: 'Interview availability',
+    text: 'Can you schedule a call with our recruiter? Dial-in confirmation 8461920.',
+    readerFinds: '8461920',
+    classification: 'interview_request',
+    exact: true,
+  },
+  {
+    name: 'recruiter note + year',
+    subject: 'Quick note from our talent team',
+    text: 'Our talent team wanted to reach out. Confirmation of interest by 2026 please.',
+    readerFinds: '2026',
+    classification: 'recruiter_reply',
+    exact: true,
+  },
+  /* STILL WRONG, and recorded rather than papered over. An offer letter is 'other' on origin/main,
+   * so nothing outranks the last limb and a salary or a year beside the word "confirmation" reads
+   * as a code. Demoting the limb cannot fix these, and neither can any ordering: the classifier has
+   * none of the gates that make the reader safe. What makes it tolerable is that the consequence is
+   * now a pause rather than a deletion. It costs a withhold only while a run is actually spending a
+   * code, and releaseExpiredSecurityCodeWithholds forwards it once that window closes. */
+  {
+    name: 'offer + confirmation + year',
+    subject: 'Your offer from Acme',
+    text: 'We are delighted to extend an offer. Please send written confirmation by 2026.',
+    readerFinds: '2026',
+    classification: 'verification_code',
+    exact: false,
+  },
+  {
+    name: 'offer + confirmation + salary',
+    subject: 'Your offer from Acme',
+    text: 'Base salary 120000. Reply with your confirmation.',
+    readerFinds: '120000',
+    classification: 'verification_code',
+    exact: false,
+  },
+];
+
+test('a message the reader would take a year out of is still a receipt, an interview or a reply', () => {
+  for (const shape of READER_FALSE_POSITIVES) {
+    // The reader really does return a code for every one of these. That is the point.
+    assert.equal(extractCodeFromVerificationText(`${shape.subject}\n${shape.text}`), shape.readerFinds, shape.name);
+    assert.equal(classifyApplicationEmail(shape.subject, shape.text), shape.classification, shape.name);
+  }
+  // Five of the seven are exact. The two that are not are offers, and both are known and stated.
+  assert.deepEqual(
+    READER_FALSE_POSITIVES.filter((shape) => !shape.exact).map((shape) => shape.name),
+    ['offer + confirmation + year', 'offer + confirmation + salary'],
+    'the set of known-imprecise shapes must not grow without somebody saying so',
+  );
+});
+
+/* THE EXPENSIVE CONSEQUENCE, asserted directly rather than through the classification alone.
+ * Only submission_confirmation resolves a packet, so a receipt promoted out of that class stops
+ * applications being filed and cannot be recovered by the backfill either. */
+test('a receipt carrying a number still resolves its packet', () => {
+  for (const shape of READER_FALSE_POSITIVES.filter((entry) => entry.classification === 'submission_confirmation')) {
+    assert.equal(classifyApplicationEmail(shape.subject, shape.text), 'submission_confirmation', shape.name);
+  }
+});
+
+/* THE OTHER DIRECTION, which is the guarantee the account-wall class exists to give.
+ *
+ * `namesACredential` matched a bare `one[- ]?time`, so a one-time activation LINK and a one-time
+ * password-reset LINK, neither carrying any code, both classified verification_code and were
+ * withheld during a code window. Those are the two messages that finish a registration, so the
+ * class written to keep the account wall passable was refusing exactly the mail that passes it.
+ * A one-time code is a credential. A one-time link is a door. */
+test('a one-time link carries no credential, so it stays account mail and still goes out', () => {
+  for (const { subject, text, readerFinds } of CODE_CORPUS.filter((entry) => entry.readerFinds === null)) {
+    assert.equal(readerFinds, null);
+    assert.equal(classifyApplicationEmail(subject, text), 'account_registration', subject);
+    assert.deepEqual(
+      applicationEmailForwardingDecision(classifyApplicationEmail(subject, text), { securityCodeInFlight: true }),
+      { forward: true },
+      subject,
+    );
+  }
+});
+
+/* THE GATE THE WIDENED POLICY PAYS FOR.
+ *
+ * routeInboundApplicationEmail returns employer_message at `sender !== forwardTo`, before it ever
+ * reaches its own authentication check, so no SPF, DKIM or DMARC verdict has ever been consulted
+ * for a message from an employer. Under a two-outcome allowlist almost nothing was forwarded and
+ * the gap did not bite. Once forwarding is the default it does: a forgery would go out from Litos's
+ * own verified sending identity, into her inbox, wearing the employer's name.
+ */
+test('a message whose sender authentication explicitly failed is never forwarded', () => {
+  for (const authentication of [
+    { spf: 'fail' },
+    { dkim: 'fail' },
+    { dmarc: 'fail' },
+    { spf: 'pass', dkim: 'pass', dmarc: 'fail' },
+  ]) {
+    assert.equal(senderAuthenticationFailed(authentication), true, JSON.stringify(authentication));
+  }
+  // The most valuable message to forge is the most valuable message to send, so the refusal is not
+  // conditional on what the message claims to be.
+  for (const classification of [
+    'submission_confirmation',
+    'interview_request',
+    'account_registration',
+    'recruiter_reply',
+    'verification_code',
+    'other',
+  ] as const) {
+    assert.deepEqual(
+      applicationEmailForwardingDecision(classification, { senderAuthenticationFailed: true }),
+      { forward: false, reason: 'sender_authentication_failed' },
+      classification,
+    );
+  }
+  // It outranks the code race too: there is no point asking who is spending a code that nobody
+  // trustworthy sent.
+  assert.deepEqual(
+    applicationEmailForwardingDecision('verification_code', {
+      senderAuthenticationFailed: true,
+      securityCodeInFlight: true,
+    }),
+    { forward: false, reason: 'sender_authentication_failed' },
+  );
+});
+
+/* PASS, SOFTFAIL AND ABSENT ARE THREE DIFFERENT THINGS, and only one of them is a failure.
+ *
+ * THE RESIDUAL IS RECORDED HERE RATHER THAN DEFENDED. An earlier version of this comment argued
+ * softfail must be ignored because SPF breaks under forwarding. That is true of SPF and irrelevant
+ * to the softfail line: forwarded mail from a `-all` domain scores spf=fail, so the distinction was
+ * never about relaying. The actual reason is narrower and weaker. `~all` is the sending domain
+ * asking receivers not to reject on its behalf, and with no DMARC record there is nothing to align
+ * against, so a domain in that posture has given us no assertion to act on.
+ *
+ * The cost is real and is not hidden: an attacker who knows an alias, spoofing a domain that
+ * publishes `~all` and no DMARC, reaches her inbox from Litos's verified sending identity. Closing
+ * it means withholding on the ABSENCE of a positive signal, which withholds every employer whose
+ * provider does not stamp the header. Fail-open on a non-assertion, fail-closed on an assertion. */
+test('only an explicit failure withholds: pass, softfail and silence all deliver', () => {
+  for (const authentication of [
+    { spf: 'pass', dkim: 'pass', dmarc: 'pass' },
+    { spf: 'softfail' },
+    { spf: 'softfail', dkim: 'pass', dmarc: 'pass' },
+    { spf: 'neutral', dkim: 'none' },
+    { spf: 'permerror', dkim: 'temperror' },
+    {},
+    undefined,
+  ]) {
+    assert.equal(senderAuthenticationFailed(authentication), false, JSON.stringify(authentication ?? null));
+    assert.deepEqual(
+      applicationEmailForwardingDecision('other', {
+        senderAuthenticationFailed: senderAuthenticationFailed(authentication),
+      }),
+      { forward: true },
+      JSON.stringify(authentication ?? null),
+    );
+  }
+});
+
+/* THE RACE GUARD A RENAME REMOVED.
+ *
+ * Moving "confirm your email" out of verification_code and into account_registration put the two
+ * commonest code-carrying subject lines into a class with no in-flight gate. Measured with a run
+ * mid-submit, before this was fixed:
+ *
+ *   "Confirm your email address" -> account_registration -> {"forward":true}
+ *   "Verify your account"        -> account_registration -> {"forward":true}
+ *
+ * Both forwarded while the runner was spending the code they carried, so both raced, the code
+ * burned, and the application was filed by neither. The subject line does not decide this. */
+test('a message that hands over a code is a verification_code, whatever its subject says', () => {
+  const carriers = [
+    ['Confirm your email address', 'Enter the code below to confirm your email address: 483920'],
+    ['Verify your account', 'Your confirmation code is 771204.'],
+    ['Verify your account', 'Use code: TPHJrFM9 to finish signing in.'],
+    ['Action required', '483920 is your security code.'],
+  ] as const;
+  for (const [subject, text] of carriers) {
+    assert.equal(classifyApplicationEmail(subject, text), 'verification_code', subject);
+    assert.deepEqual(
+      applicationEmailForwardingDecision(classifyApplicationEmail(subject, text), { securityCodeInFlight: true }),
+      { forward: false, reason: 'security_code_in_flight' },
+      subject,
+    );
+  }
+});
+
+/* And the other half, which is what keeps the account wall passable: an activation mail carrying a
+ * LINK and no code is not a credential handover, so it stays account_registration and still goes
+ * out during a run. Withholding it would deny her the only thing that can finish a registration. */
+test('an activation mail carrying only a link is still forwarded during a run', () => {
+  const linkOnly = [
+    ['Confirm your email address', 'Click https://careers.example.com/confirm?t=a1b2c3 to continue.'],
+    ['Activate your candidate account', 'Activate your candidate account: https://acme.wd1.myworkdayjobs.com/activate'],
+    ['Reset your password', 'Follow the link below to choose a new password.'],
+  ] as const;
+  for (const [subject, text] of linkOnly) {
+    assert.equal(classifyApplicationEmail(subject, text), 'account_registration', subject);
+    assert.deepEqual(
+      applicationEmailForwardingDecision(classifyApplicationEmail(subject, text), { securityCodeInFlight: true }),
+      { forward: true },
+      subject,
+    );
+  }
+  // A bare number that is not handed over as a code does not make a message a credential either.
+  assert.equal(
+    classifyApplicationEmail('Update on your application', 'Requisition 4820 has been closed.'),
+    'other',
+  );
+});
+
+/* DMARC IS THE VERDICT THAT SURVIVES FORWARDING, and the reason the previous rule was wrong.
+ *
+ * The old defence of ignoring softfail was that SPF breaks under forwarding. It does, but that is
+ * independent of the domain's policy: a forwarded message from a `-all` domain scores spf=fail, so
+ * the fail/softfail line never tracked "was this relayed". DMARC does, through DKIM alignment. */
+test('DMARC decides when it has spoken, and rescues ordinary forwarded mail', () => {
+  // The case the raw rule got wrong: a relay broke the SPF path and the signature carried through.
+  assert.equal(senderAuthenticationFailed({ spf: 'fail', dkim: 'pass', dmarc: 'pass' }), false);
+  assert.deepEqual(
+    applicationEmailForwardingDecision('other', {
+      senderAuthenticationFailed: senderAuthenticationFailed({ spf: 'fail', dkim: 'pass', dmarc: 'pass' }),
+    }),
+    { forward: true },
+  );
+  // A DMARC failure is authoritative even beside a passing SPF, because alignment is what failed.
+  assert.equal(senderAuthenticationFailed({ spf: 'pass', dkim: 'pass', dmarc: 'fail' }), true);
+  // With no DMARC verdict there is no alignment statement, so a bare dkim=pass rescues nothing.
+  assert.equal(senderAuthenticationFailed({ spf: 'fail', dkim: 'pass' }), true);
+  assert.equal(senderAuthenticationFailed({ spf: 'fail' }), true);
+  assert.equal(senderAuthenticationFailed({ dkim: 'fail' }), true);
+});
+
+test('every withhold reason is a machine token, not a sentence', () => {
+  const reasons = [
+    applicationEmailForwardingDecision('applicant_reply'),
+    applicationEmailForwardingDecision('verification_code', { securityCodeInFlight: true }),
+  ].map((decision) => (decision.forward ? '' : decision.reason));
+  for (const reason of reasons) {
+    assert.match(reason, /^[a-z][a-z0-9_]*$/, reason);
+  }
+});
+
+test('a one-time code is withheld only while a managed session is spending it', () => {
+  const now = new Date('2026-08-11T10:00:00.000Z');
+  const requestedAt = '2026-08-11T09:58:00.000Z';
+  assert.equal(
+    managedSessionIsConsumingSecurityCode(
+      { status: 'awaiting_security_code', security_code: { digits: 8, requested_at: requestedAt, submit_was_authorized: true } },
+      now,
+    ),
+    true,
+  );
+  assert.equal(
+    managedSessionIsConsumingSecurityCode(
+      { status: 'filling', verification: { status: 'verification_pending', requested_at: '2026-08-11T09:59:30.000Z' } },
+      now,
+    ),
+    true,
+  );
+  /* An hour later the run is over, whatever became of it. Nothing is racing her, and a code she
+   * cannot reach is a wall rather than a safeguard. */
+  assert.equal(
+    managedSessionIsConsumingSecurityCode(
+      { status: 'awaiting_security_code', security_code: { digits: 8, requested_at: '2026-08-11T08:30:00.000Z', submit_was_authorized: true } },
+      now,
+    ),
+    false,
+  );
+  // Not knowing is never a reason to withhold: no packet, no review, no recorded request.
+  assert.equal(managedSessionIsConsumingSecurityCode(null, now), false);
+  assert.equal(managedSessionIsConsumingSecurityCode(undefined, now), false);
+  assert.equal(managedSessionIsConsumingSecurityCode({ status: 'needs_attention' }, now), false);
+  assert.equal(managedSessionIsConsumingSecurityCode({ status: 'awaiting_security_code' }, now), false);
+  assert.equal(
+    managedSessionIsConsumingSecurityCode(
+      { status: 'awaiting_security_code', security_code: { digits: 8, requested_at: 'not a date', submit_was_authorized: true } },
+      now,
+    ),
+    false,
+  );
 });
 
 test('security codes and generic recruiter follow-ups are never promoted to interview mail', () => {

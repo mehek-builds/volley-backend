@@ -1,6 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'fs';
+import { readFileSync, readdirSync } from 'fs';
+import { join } from 'path';
+
+/** Every TypeScript source file under a directory, tests excluded, in a stable order. */
+function sourceFilesUnder(root: string): string[] {
+  return readdirSync(root, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .flatMap((entry) => {
+      const path = join(root, entry.name);
+      if (entry.isDirectory()) return sourceFilesUnder(path);
+      return entry.isFile() && path.endsWith('.ts') && !path.endsWith('.test.ts') ? [path] : [];
+    });
+}
 
 const resumeRoute = readFileSync('src/routes/resume.ts', 'utf8');
 const indexRoute = readFileSync('src/index.ts', 'utf8');
@@ -138,6 +150,11 @@ test('the health probe measures the world instead of reading environment variabl
   assert.match(service, /resend_domain_status: check\.resend_domain_status/);
   assert.match(service, /inbound_route_configured: check\.inbound_route_configured/);
   assert.match(service, /last_inbound_message_at/);
+  /* A FRESH last_inbound_message_at IS NOT A WORKING INBOX. On 2026-08-10 mail was landing, that
+   * timestamp was current, and every message was being dropped. The count of what was withheld is
+   * the field that can see that, and null rather than 0 when it cannot be taken. */
+  assert.match(service, /withheld_messages_recent: withheldCount/);
+  assert.match(service, /like 'withheld:%'/);
   // 'degraded' must be reachable and must not be the same answer as 'ok'.
   assert.match(service, /status: check\.deliverable\s*\n\s*\? 'ok'/);
   assert.match(service, /'degraded'/);
@@ -174,8 +191,10 @@ test('managed receiving rejects applicant replies before any relay ledger insert
  * The property is exactly what it always was: the ledger row is written FIRST, and only then does
  * anything decide whether that message may leave Litos. What moved is where the deciding happens -
  * handleStoredEmployerMessage - and why: resolution of a submission confirmation had to stop being a
- * side effect of a successful first forward. */
-test('employer mail is stored before the strict forwarding whitelist is applied', () => {
+ * side effect of a successful first forward. The second property is newer: whatever is decided, the
+ * row is annotated with it, so a message that was stored and withheld can never again be mistaken
+ * for one nothing has looked at. */
+test('employer mail is stored before the forwarding decision, and every decision is recorded', () => {
   const handlerStart = service.indexOf('export async function handleStoredEmployerMessage');
   const processorStart = service.indexOf('export async function processInboundApplicationEmail');
   const handler = service.slice(handlerStart, processorStart);
@@ -184,14 +203,63 @@ test('employer mail is stored before the strict forwarding whitelist is applied'
   const handoff = processor.indexOf('return handleStoredEmployerMessage({');
   assert.ok(ledgerInsert >= 0);
   assert.ok(handoff > ledgerInsert, 'the message must be in the ledger before anything decides what to do with it');
-  const decision = handler.indexOf('applicationEmailForwardingDecision(classification)');
+  const decision = handler.indexOf('applicationEmailForwardingDecision(classification, {');
   const claim = handler.indexOf('deps.claimForwarding(');
   const send = handler.indexOf('deps.forward(');
   assert.ok(decision >= 0);
   assert.ok(claim > decision);
   assert.ok(send > claim);
   assert.match(handler, /reason: forwardingDecision\.reason/);
-  assert.match(service, /classification === 'submission_confirmation' \|\| classification === 'interview_request'/);
+  /* THE WHITELIST IS A WITHHOLD LIST NOW, and this is the assertion that says so.
+   *
+   * It used to pin the literal `classification === 'submission_confirmation' || classification ===
+   * 'interview_request'`, the two-outcome allowlist that forwarded nothing for a day and silently
+   * dropped an offer letter. What has to stay true is the shape: the default answer is to deliver,
+   * and a refusal has to name a reason from a closed set. */
+  assert.match(service, /if \(classification === 'applicant_reply'\) return \{ forward: false, reason: 'applicant_reply' \}/);
+  assert.match(service, /classification === 'verification_code' && context\.securityCodeInFlight === true/);
+  assert.match(service, /\n {2}return \{ forward: true \};\n\}/);
+  assert.doesNotMatch(service, /classification === 'submission_confirmation' \|\| classification === 'interview_request'/);
+  /* THE GATE THE WIDENED POLICY PAYS FOR, and the reason it lives here rather than at the door.
+   *
+   * routeInboundApplicationEmail returns employer_message at `sender !== forwardTo`, BEFORE it
+   * reaches its own senderAuthenticationFailed call, so an employer message's SPF, DKIM and DMARC
+   * verdicts were never consulted at all. Harmless while two classifications forwarded; a spoofing
+   * and deliverability problem the moment forwarding became the default, because the relay leaves
+   * from Litos's own verified sending identity.
+   *
+   * It must be checked ahead of the classification, since what a forgery calls itself is not
+   * evidence, and it must be reached by employer mail, which the route's own check is not. */
+  assert.match(service, /if \(context\.senderAuthenticationFailed === true\) \{\n\s*return \{ forward: false, reason: 'sender_authentication_failed' \};/);
+  const authGate = service.indexOf("context.senderAuthenticationFailed === true");
+  const codeGate = service.indexOf("classification === 'verification_code' && context.securityCodeInFlight");
+  assert.ok(authGate > 0 && codeGate > authGate, 'an untrusted sender is refused before anything else is weighed');
+  assert.match(processor, /senderAuthenticationFailed: senderAuthenticationFailed\(input\.authentication\)/);
+  assert.match(handler, /senderAuthenticationFailed: senderRefused/);
+  /* THE REFUSAL IS REMEMBERED, not recomputed from whatever the current delivery says.
+   *
+   * Measured before this existed: delivery one failed authentication and was withheld, delivery two
+   * arrived with the header absent, and the message was both forwarded and its annotation
+   * overwritten to 'forward'. A control with no memory can be replayed around. */
+  assert.match(handler, /const senderRefused = input\.senderAuthenticationFailed === true\s*\n\s*\|\| forwardDecisionRefusedSender\(message\?\.forward_decision\)/);
+  assert.match(service, /forward_decision: application_email_messages\.forward_decision,\n\} as const/);
+  assert.match(service, /export function forwardDecisionRefusedSender/);
+  // The stored decision has to be SELECTED for any of that to be readable.
+  assert.match(service, /const LEDGER_ROW_SELECTION = \{\n\s*\.\.\.LEDGER_ROW_SELECTION_BEFORE_FORWARD_DECISION/);
+  // Absent stays fail-open, and DMARC is authoritative when it has spoken.
+  assert.match(service, /if \(!authentication\) return false;/);
+  assert.match(service, /if \(dmarc === 'fail'\) return true;\n\s*if \(dmarc === 'pass'\) return false;/);
+  assert.doesNotMatch(service, /=== 'softfail'/);
+  // Every decision is annotated on the row, and the withhold is annotated before the early return.
+  assert.match(handler, /deps\.recordDecision\(\{ messageId: message\.id, decision: withheldForwardDecision\(forwardingDecision\.reason\) \}\)/);
+  assert.match(handler, /await deps\.recordDecision\(\{ messageId: message\.id, decision: 'forward' \}\)/);
+  // The withhold value has one spelling, so the writer and the sticky reader cannot drift apart.
+  assert.match(service, /export function withheldForwardDecision\(reason: ApplicationEmailWithholdReason\): string \{\n\s*return `withheld:\$\{reason\}`;/);
+  assert.match(service, /storedForwardDecision === withheldForwardDecision\('sender_authentication_failed'\)/);
+  const withheldRecord = handler.indexOf('decision: withheldForwardDecision(');
+  assert.ok(withheldRecord > decision && withheldRecord < claim, 'the drop is recorded before the function returns from it');
+  assert.ok(handler.indexOf("decision: 'forward'") < claim, 'a lost claim still leaves the decision on the row');
+  assert.match(service, /set\(\{ forward_decision: decision \}\)/);
   assert.match(processor, /onConflictDoNothing\(\{ target: application_email_messages\.dedupe_key \}\)/);
   assert.match(service, /sql`\(\$\{application_email_messages\.forwarding_claimed_at\} is null or/);
   assert.match(processor, /storedApplicationEmailClassification\(message\.classification\)/);
@@ -201,6 +269,53 @@ test('employer mail is stored before the strict forwarding whitelist is applied'
   const verificationReader = readFileSync('src/lib/emailVerification.ts', 'utf8');
   assert.match(verificationReader, /from\(application_email_messages\)/);
   assert.match(verificationReader, /extractLitosVerificationCode\(\s*rows/);
+});
+
+/* EVERY PLACE forward_decision IS TOUCHED SURVIVES ITS OWN MIGRATION NOT HAVING RUN, because on
+ * Vercel a merge is a deploy and the two land in either order.
+ *
+ * The three that only annotate degrade to "unmeasurable" and carry on. The fourth is the ledger
+ * INSERT, which cannot degrade: Drizzle names every declared column in an INSERT, so an unmigrated
+ * database rejects the statement that stores employer mail. That one is repeated without the
+ * column instead. The behaviour is measured in applicationEmailForwardDecision.test.ts against a
+ * database with the column dropped; these assertions are here so the shim is not deleted by
+ * somebody tidying up before the migration has run everywhere. */
+test('forward_decision is written by code that works before its migration', () => {
+  // The writer: swallows undefined_column and nothing else.
+  assert.match(service, /set\(\{ forward_decision: decision \}\)[\s\S]{0,200}if \(!isUndefinedColumnError\(error\)\) throw error;/);
+  // The health count: null when it cannot be taken, never 0.
+  assert.match(service, /like 'withheld:%'[\s\S]{0,600}\.catch\(\(\) => null\)/);
+  // The ledger route: falls back to the pre-migration shape rather than 500ing the inbox.
+  assert.match(route, /forward_decision: application_email_messages\.forward_decision/);
+  assert.match(route, /if \(!isUndefinedColumnError\(error\)\) throw error;[\s\S]{0,400}forward_decision: null as string \| null/);
+  /* BOTH inserts: repeated without the column, because storing a message may not depend on the
+   * column that only annotates it. The relay one was missed the first time round, because the sweep
+   * that found the other hazards looked for bare SELECTs and an INSERT is the statement Drizzle
+   * fills out with every declared column. On an unmigrated database the applicant's reply threw,
+   * the webhook 500d, and her answer never reached the employer. */
+  assert.match(service, /async function insertLedgerRowWithoutForwardDecision/);
+  assert.match(service, /return insertLedgerRowWithoutForwardDecision\(ledgerValues\)/);
+  assert.match(service, /return insertLedgerRowWithoutForwardDecision\(relayValues\)/);
+  assert.doesNotMatch(service, /insert into application_email_messages[\s\S]{0,700}forward_decision/);
+  /* Nothing anywhere in src may insert into this table without going through one of those two
+   * guarded call sites. Scanned across the whole tree rather than this one file: the first version
+   * of this guard counted inserts in applicationEmail.ts alone, so a third insert added HERE failed
+   * the suite as intended while an identical one added to routes/applicationEmail.ts passed
+   * uncaught. A guard that only looks where the bug already happened is not a guard. */
+  const insertSites = sourceFilesUnder('src')
+    .map((file) => ({ file, hits: (readFileSync(file, 'utf8').match(/db\.insert\(application_email_messages\)/g) ?? []).length }))
+    .filter(({ hits }) => hits > 0);
+  assert.deepEqual(insertSites, [{ file: 'src/lib/applicationEmail.ts', hits: 2 }]);
+  // The re-read after a conflict is the redelivery path, so it needs the same fallback.
+  assert.match(service, /\.select\(LEDGER_ROW_SELECTION_BEFORE_FORWARD_DECISION\)/);
+  /* The account export: a BARE select is the form that breaks, because Drizzle names every declared
+   * column whether or not the caller wants it. Measured against production on this branch's head as
+   * `column "forward_decision" does not exist`, taking GET /account/export down for every user. */
+  const accountRoute = readFileSync('src/routes/account.ts', 'utf8');
+  assert.match(accountRoute, /selectApplicationEmailMessagesForUser\(userId\)/);
+  assert.doesNotMatch(accountRoute, /db\.select\(\)\.from\(application_email_messages\)/);
+  assert.match(service, /export async function selectApplicationEmailMessagesForUser/);
+  assert.match(service, /forward_decision: _notMigratedYet, \.\.\.columns \} = getTableColumns\(application_email_messages\)/);
 });
 
 test('the forwarding destination is a stored preference, not the login address', () => {
