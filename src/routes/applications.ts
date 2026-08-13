@@ -506,17 +506,52 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'This application can no longer be audited before submission' });
       }
       try {
+        /* AUDIT THE PACKET THE SEND GATE WILL CHECK, not the one sitting in the row.
+         *
+         * submit-request gates on currentAcknowledgedPacketAudit(row, { questions:
+         * normalizedSubmittedQuestions }), and those questions come out of
+         * refreshKnownQuestionAnswers. This route used to audit the STORED questions instead. While
+         * every resolver in that refresh was a no-op for a given packet the two were byte-identical
+         * and nothing showed. The moment a resolver starts ANSWERING a question that was stored
+         * blank - restrictive_agreements in #515/#518, a declared test-score absence in #509 - the
+         * refreshed set and the stored set hash differently, and the two sides converge on
+         * different packet_versions by construction:
+         *
+         *   audit  -> hashes the stored blank answer   -> version A, acknowledged
+         *   gate   -> hashes the refreshed answer      -> version B, "packet_stale"
+         *
+         * and no number of re-audits can clear it, because each side keeps recomputing its own.
+         * Measured on production 2026-08-13 after those three merges deployed: every packet on the
+         * account deadlocked at once, audit returning a stable version and the send gate rejecting
+         * it immediately. This is the same shape as the answer-provenance deadlock recorded in
+         * packetAudit.ts, and the same lesson: the constructor and the verifier must be looking at
+         * one packet.
+         *
+         * It is also the more honest thing to show her. What she acknowledges is what the employer
+         * receives, and an auto-resolved answer is part of that. Auditing the pre-refresh snapshot
+         * asked her to approve a document that was never going to be sent. */
+        const auditQuestions = refreshKnownQuestionAnswers(
+          review.questions,
+          await loadSensitiveQuestionProfile(request.jwtPayload!.userId),
+          review.jd_text,
+          review.questions_reviewed_at,
+          postingCountryFromJobContext(row.job_context),
+          postingCountryCodeFromJobContext(row.job_context),
+        );
         // review_only: this route RENDERS the packet for the applicant to look at. It may rebuild
         // a file that aged out so she can see it; it authorizes nothing, and the acknowledgement
         // she has to give is the separate POST below.
-        const cached = await currentPacketAudit(row, { restoreExpiredResume: 'review_only' });
+        const cached = await currentPacketAudit(row, {
+          questions: auditQuestions,
+          restoreExpiredResume: 'review_only',
+        });
         if (!cached.valid) {
           const allowed = await allowHourly(request.jwtPayload!.userId, 'packet-audit', LIMITS.perHour.packetAudit);
           if (!allowed) return rateLimitedReply(reply);
         }
         const result = cached.valid
           ? { audit: cached.audit, persisted: true, pdfBytes: cached.pdfBytes }
-          : await createAndPersistPacketAudit(row);
+          : await createAndPersistPacketAudit(row, { questions: auditQuestions });
         if (!result.persisted) {
           return reply.status(409).send({
             error: 'The saved application changed while it was being audited. Reload it and audit again.',

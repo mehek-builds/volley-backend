@@ -10,7 +10,10 @@
  * different properties:
  *
  *   1. While exact control targeting is undeployed, a GRANTED and CURRENT consent permission does
- *      not become a licence, so every consent label resolves exactly as it did before PR 502.
+ *      not become a licence, so every consent label resolves exactly as it did before PR 502. That
+ *      is no longer the state of the world, and it is still asserted: the gate opened on 2026-08-13
+ *      and this is the behaviour the switch buys back if the runner ever regresses, so it is driven
+ *      by the injected `mayReach = false` rather than by the deployment.
  *   2. When the licence IS live, some declarations are never answered at all, and others are
  *      answered legitimately out of declarations she made herself. What holds for ALL of them is
  *      that the licence is INVISIBLE: the same label resolves to the same thing with it and
@@ -22,8 +25,17 @@
  * Everything runs against the owner's real production profile shape and the six-argument call, so
  * the adversary is capable of winning throughout.
  *
- * Both sides of the gate are exercised, so the day stratus-browser-cloud PR 50 deploys, flipping
- * the single `false` in grantedAnswerReplay.ts needs no test rewritten.
+ * Both sides of the gate are exercised, and that claim was tested on 2026-08-13 when
+ * stratus-browser-cloud PR 50 deployed and the switch was flipped. What it bought, exactly: of the
+ * twenty tests here, NINETEEN passed untouched across the flip, including every test that measures
+ * what a label resolves to. One failed, and it is the one written to fail. It asserted the value of
+ * the switch itself and carried a note saying it "is expected to be changed, once, by the person who
+ * flips the switch". Updating it is the recorded act of flipping, not a rewrite forced by the flip.
+ *
+ * The distinction is worth keeping straight, because the sentence in grantedAnswerReplay.ts that
+ * said "nothing needs rewriting to flip it" overreached by exactly this one line. No BEHAVIOURAL
+ * test needed rewriting. The state-of-the-world tripwire did, and that is what a tripwire is for. If
+ * that assertion had also passed across the flip, it would have been the useless kind of test.
  */
 
 import assert from 'node:assert/strict';
@@ -188,11 +200,47 @@ describe('the gate itself', () => {
     assert.equal(workEligibilityReplayMayReachControls(), exactControlTargetingDeployed());
   });
 
-  test('it is CLOSED today, because stratus-browser-cloud PR 50 is not deployed', () => {
-    /* This assertion is expected to be changed, once, by the person who flips the switch, and it is
-     * here so that flipping it is a deliberate edit to a line that says what it means rather than a
-     * silent behaviour change nothing records. */
-    assert.equal(exactControlTargetingDeployed(), false);
+  test('it is OPEN, because stratus-browser-cloud PR 50 is merged and deployed', () => {
+    /* THIS IS THE ONE ASSERTION THE FLIP CHANGED, and changing it is the act, not a casualty of it.
+     * The line it replaced asserted `false` and carried the note that it "is expected to be changed,
+     * once, by the person who flips the switch", so that opening the gate is a deliberate edit to a
+     * line that says what it means rather than a silent behaviour change nothing records. That is
+     * what happened here, and this is the line saying so.
+     *
+     * Merged as 0572a94ccc79a196ea6f9a37c51597ff62a81c35, deployed to Production 2026-08-13.
+     *
+     * Note what this test is and is not. It is a tripwire on the state of the world, so that neither
+     * opening nor closing this gate can happen without someone editing a sentence about why. It is
+     * NOT evidence that the runner is fixed: no test in this repo can be, because the defect and its
+     * repair are both in Chromium, in another service. The evidence for the repair is PR 50's own
+     * replay suite. The evidence THIS file carries is about the backend's behaviour on both sides of
+     * the switch, which is the next test and every test below it. */
+    assert.equal(exactControlTargetingDeployed(), true);
+  });
+
+  test('the production call, with mayReach DEFAULTED, reads the gate and not a literal', () => {
+    /* THE PATH NOTHING ELSE IN THIS FILE TOUCHES. Every other test injects `mayReach`, which is
+     * right for asserting both sides but means the whole file would report identical results if the
+     * default parameter stopped reading the gate: loadApplicationProfileLike calls
+     * acknowledgementPermissionsFor with THREE arguments, and that third one defaulting correctly is
+     * the entire mechanism by which flipping the switch reaches production.
+     *
+     * WHAT IT CATCHES, MEASURED BY MUTATION RATHER THAN ASSUMED, because the first version of this
+     * comment claimed more than the code does and the mutation is what caught it:
+     *
+     *   default replaced by `false`, gate open   ->  FAILS. This is the direction that matters.
+     *   default replaced by `true`, gate open    ->  PASSES. It cannot be told apart from the real
+     *                                                thing while the gate agrees with the literal.
+     *
+     * So this is not a proof that the default reads the gate. It is a proof that the default AGREES
+     * with the gate, which is weaker and is still the property worth pinning: the day someone closes
+     * this switch to stop a live harm, a default that stayed `true` would keep producing acceptances
+     * while every other test in this file reported the gate closed. That is the failure this catches
+     * and it is the one that would hurt. The fixture is a GRANTED row, so the two sides genuinely
+     * differ and neither line is vacuous. */
+    const viaDefault = acknowledgementPermissionsFor(FULLY_GRANTED, GRANTED_PREDICATES);
+    assert.deepEqual(viaDefault, permissions(FULLY_GRANTED, exactControlTargetingDeployed()));
+    assert.notDeepEqual(viaDefault, permissions(FULLY_GRANTED, !exactControlTargetingDeployed()));
   });
 });
 
@@ -325,15 +373,35 @@ describe('KNOWN OPEN: the work-authorization class is NOT held by this gate', ()
    *
    * workEligibilityReplayMayReachControls() exists, reads the same switch, and is NOT CALLED. So
    * work-authorization and sponsorship answers reach option-shaped controls exactly as they do on
-   * main, and the targeting defect can still land one on a neighbouring control. This PR does not
-   * change that and must not be read as though it did.
+   * main. OPENING THE GATE DID NOT CHANGE THAT EITHER, which is the specific thing this block is
+   * carrying across the 2026-08-13 flip: a shared predicate going from `false` to `true` must not
+   * silently wire the half that was never wired. Every assertion below passed unchanged across that
+   * flip, which is what says it did not.
    *
-   * It matters for the repro this whole gate was written from: the TRIGGER there was filling the
-   * sponsorship combobox and the VICTIM was a consent listbox. This gate stops Litos PRODUCING the
-   * consent answer; it does not stop the sponsorship fill, so that exact sequence is unchanged.
+   * WHAT DID CHANGE IS UPSTREAM AND NOT VISIBLE FROM HERE. This class was exposed to the targeting
+   * defect, and PR 50 repaired the defect in the runner, so the exposure is gone. It was never this
+   * gate that was going to close it: the TRIGGER in the original repro was filling the sponsorship
+   * combobox and the VICTIM was a consent listbox, and holding the consent answer only ever stopped
+   * Litos PRODUCING the acceptance. It never stopped the sponsorship fill. So the sequence is closed
+   * now, in Chromium, by a change no assertion in this file can see or should claim.
    *
-   * These assertions are expected to FAIL when someone wires the second predicate. That is the
-   * point: the day the class is held, this test says so instead of the change passing silently. */
+   * THE TRIPWIRE IN THIS BLOCK IS NOW ARMED ONLY WHILE THE GATE IS CLOSED, and the old sentence
+   * here said it fired unconditionally. Measured, by actually wiring the predicate into
+   * workEligibilityAnswer and running this file:
+   *
+   *   gate CLOSED + predicate wired  ->  5 failures, two of them in this block by name
+   *   gate OPEN   + predicate wired  ->  0 failures
+   *
+   * That is not a hole, but it has to be said out loud or the next reader trusts a guard that is
+   * asleep. Wiring a predicate that returns `true` is a behavioural no-op, so there is nothing for
+   * any assertion to see, and nothing is harmed. The harm only exists when the switch is CLOSED,
+   * because then a wired predicate would hold work-authorization answers too, which is the false
+   * hold 5fc9a2a pinned. These assertions fire exactly then. The guard is armed at the moment it
+   * matters and is silent when the thing it guards against is harmless.
+   *
+   * And with the defect repaired, wiring this at all would now be a hold with no defect behind it,
+   * so that failure is more likely to be a mistake than a milestone. See the note on the predicate
+   * itself in grantedAnswerReplay.ts. */
   const LIVE = { ...STORED_FACTS, ...permissions(FULLY_GRANTED, true) } as ApplicationProfileLike;
   const HELD_SIDE = { ...STORED_FACTS, ...permissions(FULLY_GRANTED, false) } as ApplicationProfileLike;
 
