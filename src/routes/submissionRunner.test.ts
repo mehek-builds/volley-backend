@@ -2562,6 +2562,25 @@ test('buildPacket refreshes stored answers and carries the option derivation ont
   );
 });
 
+test('managed discovery keeps option provenance on the packet used by the real fill', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const prepareStart = source.indexOf('async function prepareManaged(');
+  const prepareEnd = source.indexOf('\nasync function prepareControlled', prepareStart);
+  assert.ok(prepareStart > 0 && prepareEnd > prepareStart);
+  const prepareBody = source.slice(prepareStart, prepareEnd);
+  assert.match(
+    prepareBody,
+    /packet\.questions = mergedQuestions\.map\(\(q\) => \(\{[\s\S]{0,1200}?answerOptionSource: q\.answer_option_source,/,
+    'the discovery-to-fill rebuild must not strip the measured option before the action builder sees it',
+  );
+  const mapping = prepareBody.match(/packet\.questions = mergedQuestions\.map\(\(q\) => \(\{[\s\S]*?\}\)\);/)?.[0] ?? '';
+  assert.ok(
+    mapping.indexOf('answerOptionSource: q.answer_option_source')
+      < prepareBody.indexOf('const fillActions = buildManagedPortalActions(portal, packet)'),
+    'option provenance must be restored before the production fill actions are built',
+  );
+});
+
 /* THE HONESTY THE OLD CODE WAS PROTECTING, kept at the scope it belongs to.
  *
  * Narrowing a run-level admission to a per-control one is only safe while the per-control refusal is

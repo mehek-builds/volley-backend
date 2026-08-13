@@ -2495,6 +2495,12 @@ async function prepareManaged(
     answer: q.answer,
     portalSelector: q.portal_selector,
     portalInputType: q.portal_input_type,
+    /* Discovery rebuilds the packet immediately before the real fill. Keep the measured option
+     * provenance here just as buildPacket does above, or every managed run loses the only fact
+     * that distinguishes a dropdown answer from plain text at the last handoff. That made IMC's
+     * graduation range, GPA band and consent selects take the text path even though discovery had
+     * read their option lists and resolved exact answers. */
+    answerOptionSource: q.answer_option_source,
   }));
   // The fill run gets the same option lists, so the fixed education comboboxes type an exact option
   // instead of the profile's own phrasing. It only ever gets ONE attempt at a react-select (a second
