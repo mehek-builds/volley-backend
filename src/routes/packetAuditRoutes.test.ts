@@ -115,7 +115,7 @@ test('every employer-bound path names the current packet audit gate', () => {
 });
 
 test('submission polling hides a retained handoff when the current packet identity is no longer valid', () => {
-  assert.match(applications, /review\.status === 'needs_attention'[\s\S]*currentAcknowledgedPacketAudit\(row[,)]/);
+  assert.match(applications, /review\.status === 'filling' \|\| review\.status === 'needs_attention'[\s\S]*currentAcknowledgedPacketAudit\(row[,)]/);
   assert.match(applications, /handoff_packet_valid = audit\.valid/);
   assert.match(applications, /if \(audit\.valid\)[\s\S]*getLiveViewUrl/);
 });

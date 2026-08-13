@@ -1725,6 +1725,26 @@ export async function discoverAndResolveQuestions(
       )
       : null;
     const knownValue = resolvedField?.value ?? (known && 'value' in known ? known.value : '');
+    const offeredOptions = usableOptions(field.options);
+    const reviewedOption = existing?.answer_source === 'applicant_review'
+      ? offeredOptions.find((option) => option.trim().toLowerCase() === existing.answer.trim().toLowerCase())
+      : undefined;
+    const reviewedAnswerStillFits = existing?.answer_source === 'applicant_review'
+      && existing.answer_reviewed_at === current.questions_reviewed_at
+      && existing.answer.trim().length > 0
+      && !(known && 'value' in known)
+      && (offeredOptions.length === 0 || reviewedOption !== undefined);
+    if (reviewedAnswerStillFits && existing) {
+      questions.push({
+        ...existing,
+        question: reviewLabel,
+        answer: reviewedOption ?? existing.answer,
+        required: existing.required || fieldIsRequired,
+        portal_selector: portalSelectorForField(field),
+        portal_input_type: field.inputType,
+      });
+      continue;
+    }
     /* WHAT THAT SNAPPED VALUE WAS SNAPPED FROM, recorded so a later pass can tell current from stale.
      *
      * Only when resolveProfileField really picked off the control's list. matchedOption is false for
@@ -2251,6 +2271,9 @@ async function prepareManaged(
     status: 'filling',
     submission_run_id: runId,
     submission_error: undefined,
+    progress_screenshot_url: undefined,
+    progress_stage: 'Opening the company form',
+    progress_updated_at: new Date().toISOString(),
   }));
   // Neither document goes on the discovery pass. It runs before anything is known about the form,
   // and its whole job is to read the page; carrying a file there would spend an upload action on a
@@ -2291,6 +2314,28 @@ async function prepareManaged(
       );
       return null;
     });
+  let progressScreenshotUrl: string | undefined;
+  if (discoveryResult?.screenshot) {
+    try {
+      const progressPreview = await storeFilledPreviewScreenshot(
+        `users/${row.user_id}/submission-runs/${runId}/progress-discovery.png`,
+        Buffer.from(discoveryResult.screenshot, 'base64'),
+      );
+      progressScreenshotUrl = progressPreview.url;
+    } catch (error) {
+      fastify.log.warn(
+        { applicationId: row.id, error: error instanceof Error ? error.message : String(error) },
+        'Could not store the in-progress form preview',
+      );
+    }
+  }
+  await writeReview(row, nextReview(current, {
+    status: 'filling',
+    submission_run_id: runId,
+    progress_screenshot_url: progressScreenshotUrl,
+    progress_stage: 'Reading the company questions',
+    progress_updated_at: new Date().toISOString(),
+  }));
   // The closed lists' REAL option texts, read off the live page by the discovery pass. Without
   // these, resolveProfileField's option snapping (PR #361) is inert on this path: the managed
   // provider's discover action reports no options at all, so a control offering "Computer Science"
@@ -2460,6 +2505,13 @@ async function prepareManaged(
       unattemptedQuestions,
     }, 'The action budget could not hold every reviewed question, so some were not attempted');
   }
+  await writeReview(row, nextReview(current, {
+    status: 'filling',
+    submission_run_id: runId,
+    progress_screenshot_url: progressScreenshotUrl,
+    progress_stage: 'Filling your answers',
+    progress_updated_at: new Date().toISOString(),
+  }));
   const result = await runManagedBrowser(applicationUrl, fillActions);
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
   /* A value Litos typed that the run then never accounted for.
