@@ -1188,7 +1188,15 @@ test('every season boundary on the real Greenhouse term list is pinned to one bu
    * December is a winter month - but it IS the academic one: a degree conferred in December
    * completes the fall semester, and the applicant would say Fall herself. The two readings
    * genuinely disagree, so the honest thing is to leave the shipped behaviour alone and say so,
-   * rather than pin a claim about somebody's degree to whichever reading this file preferred. */
+   * rather than pin a claim about somebody's degree to whichever reading this file preferred.
+   *
+   * AND THE OUTCOME IS LIST-DEPENDENT, which is the stronger reason. Measured on this same option
+   * list, unchanged by this branch: the bare candidate ['December 2028'] selects "Winter 2028" off
+   * the calendar stage, the full ladder selects "Fall 2028" because its own Fall rung exact-matches
+   * a row this list happens to carry, and the same ladder against this list with the Fall row
+   * removed selects "Winter 2028" again. So a December graduate's answer turns on whether the
+   * employer wrote a Fall row at all. The codebase has not decided this anywhere; it falls out of
+   * the list. Pinning either answer here would settle that judgement by accident, in a test. */
 });
 
 test('a season list that cannot place the graduation holds instead of guessing', () => {

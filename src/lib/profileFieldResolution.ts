@@ -598,8 +598,24 @@ export function chooseClosestOption(
    * graduation date costs her one selection she can make in a second from the list in front of her;
    * a guessed one is a false statement about her degree that she cannot retract once sent.
    *
-   * Skipped per option rather than per list, so a genuinely numeric band on a list that also holds a
-   * date - "0-2 years", "2020 or earlier" - still resolves through the branch it was written for. */
+   * Skipped per option rather than per list, so a band that names no date at all still resolves
+   * through the branch it was written for. "0-2 years" carries no calendar interval and is still
+   * matched here, including on a mixed list that also holds a date: chooseClosestOption(['1'],
+   * ['0-2 years', 'Before 2020']) returns "0-2 years" on both sides of this change.
+   *
+   * A ONE-SIDED YEAR BAND IS NOT IN THAT SET, and this comment used to claim it was. "2020 or
+   * earlier" names a calendar span, so the skip above removes it, and that is a real behaviour
+   * change: chooseClosestOption(['2020'], ['2020 or earlier']) returned that option before and
+   * returns null now. It is the one shape measured to move. The reach is narrow, a bare-year
+   * candidate whose year is exactly the band's own year, and the direction is the safe one. No
+   * realistic graduation-year list changes: both ['2027 or earlier', '2028', '2029 or later'] and a
+   * plain list of years resolve a May 2028 ladder to "2028" before and after, through the exact and
+   * calendar stages above rather than through here.
+   *
+   * NARROWING THE SKIP TO SEASON-BEARING OPTIONS would make the old sentence true and is the wrong
+   * trade. "December 2028" and "June 2028" name no season, so a bare-year candidate would go back to
+   * selecting whichever of them the employer listed first. That is this bug again in a second
+   * vocabulary, and months are how the more precise lists are written. */
   for (const candidate of candidates) {
     const numeric = numericValueOf(candidate);
     if (numeric === null) continue;
