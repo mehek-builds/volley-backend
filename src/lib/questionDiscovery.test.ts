@@ -1737,7 +1737,14 @@ test('Databricks prior employer questions answer only a proven positive', () => 
 
 test('graduation date inputs use the graduation end of an education range', () => {
   assert.equal(graduationDateAnswer('August 2024 - May 2028', 2028, 'date'), '2028-05-01');
-  assert.equal(graduationDateAnswer('August 2024 - 2028-05-15', 2028, 'date'), '2028-05-01');
+  assert.equal(graduationDateAnswer('August 2024 - 2028-05-15', 2028, 'date'), '2028-05-15');
+  assert.equal(graduationDateAnswer('August 2024 - May 15, 2028', 2028, 'date'), '2028-05-15');
+});
+
+test('a month-only graduation becomes the first day only when an exact day is required', () => {
+  assert.equal(graduationDateAnswer('May 2028', 2028, 'date'), '2028-05-01');
+  assert.equal(graduationDateAnswer('May 2028', 2028, 'text'), 'May 2028');
+  assert.equal(graduationDateAnswer('May 31, 2028', 2028, 'date'), '2028-05-31');
 });
 
 test('graduation-related prose is not filled with a graduation date', () => {
