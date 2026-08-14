@@ -5378,6 +5378,56 @@ test('option lists come back keyed by control even though the provider drops the
   assert.equal(Object.keys(parsed).length, 2);
 });
 
+test('managed Greenhouse discovery replays every exact reviewed checkbox option', () => {
+  const question = 'In which settings have you used Python?';
+  const offered = ['Personal Projects', 'Classwork', 'Internship/Workplace', 'Not Used'];
+  const selected = offered.slice(0, 3);
+  // Greenhouse gives each checkbox an id containing [] and a numeric option suffix. Discovery
+  // records the first input as the durable selector and records the full group option list on it.
+  const durableSelector = 'input[id="question_67998839[]_731437073"]';
+  const discovered = {
+    label: question,
+    selector: durableSelector,
+    durableSelector,
+    inputType: 'checkbox',
+    maxLength: null,
+    options: offered,
+    required: true,
+  } satisfies ManagedDiscoveredQuestion;
+  const analysis = managedOptionProbeAnalysis('greenhouse', [discovered], {}, []);
+  const inventoryKey = managedOptionProbeControlId(discovered);
+
+  assert.ok(inventoryKey, 'the durable Greenhouse checkbox selector must identify its option inventory');
+  assert.deepEqual(analysis.options[inventoryKey], offered);
+  assert.deepEqual(analysis.failures, []);
+  assert.equal(analysis.failedIds.size, 0);
+
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    fieldOptions: analysis.options,
+    questions: [{
+      question,
+      answer: selected.join(', '),
+      portalSelector: durableSelector,
+      portalInputType: 'checkbox',
+    }],
+  });
+
+  assert.deepEqual(
+    actions.filter((action) => action.type === 'fillByLabelText' && action.text === question)
+      .map((action) => action.value),
+    selected,
+  );
+  assert.equal(
+    actions.some((action) => action.type === 'click' && action.selector?.includes(durableSelector)),
+    false,
+    'a group selector click would choose only its first checkbox and ignore the reviewed values',
+  );
+});
+
 test('managed Workable name-only choice inventory reaches exact multi-select replay', () => {
   const options = ['English', 'Hindi', 'Arabic', 'French'];
   const durableSelector = 'input[name="5854742"]';

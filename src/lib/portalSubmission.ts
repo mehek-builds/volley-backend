@@ -1370,6 +1370,7 @@ function controlIdFromDiscoveredSelector(selector: string | undefined | null): s
 }
 
 const MANAGED_OPTION_NAME_KEY_PREFIX = 'name:';
+const MANAGED_OPTION_SELECTOR_KEY_PREFIX = 'selector:';
 
 /** Stable name-only controls need an inventory key, but must never be mistaken for a DOM id. */
 function controlNameOptionKeyFromDiscoveredSelector(
@@ -1377,16 +1378,33 @@ function controlNameOptionKeyFromDiscoveredSelector(
 ): string | undefined {
   const trimmed = (selector ?? '').trim();
   const name = trimmed.match(
-    /^(?:[a-z][a-z0-9-]*)?\[name=["']([A-Za-z0-9][A-Za-z0-9_.:-]*)["']\]$/i,
+    /^(?:[a-z][a-z0-9-]*)?\[name=["']([A-Za-z0-9][A-Za-z0-9_.:-]*(?:\[\])?)["']\]$/i,
   )?.[1];
   return name ? `${MANAGED_OPTION_NAME_KEY_PREFIX}${name}` : undefined;
+}
+
+/**
+ * Greenhouse checkbox options have stable ids such as `question_67998839[]_731437073`.
+ * The brackets intentionally keep them out of controlIdFromDiscoveredSelector because they are
+ * native checkboxes, not React selects to probe. They still need a stable inventory key so the
+ * exact option labels discovery already read can reach reviewed-answer replay.
+ */
+function greenhouseCheckboxOptionInventoryKey(
+  selector: string | undefined | null,
+): string | undefined {
+  const trimmed = (selector ?? '').trim();
+  const id = trimmed.match(
+    /^(?:[a-z][a-z0-9-]*)?\[id=["'](question_\d+\[\]_\d+)["']\]$/i,
+  )?.[1];
+  return id ? `${MANAGED_OPTION_SELECTOR_KEY_PREFIX}${trimmed}` : undefined;
 }
 
 function managedOptionInventoryKeyFromSelector(
   selector: string | undefined | null,
 ): string | undefined {
   return controlIdFromDiscoveredSelector(selector)
-    ?? controlNameOptionKeyFromDiscoveredSelector(selector);
+    ?? controlNameOptionKeyFromDiscoveredSelector(selector)
+    ?? greenhouseCheckboxOptionInventoryKey(selector);
 }
 
 // The handles managed discovery concatenates onto the visible label, in the order they are trusted.
@@ -1465,6 +1483,7 @@ function managedOptionProbeTarget(
   // cannot be interpolated into Greenhouse's id-based React-select probe selectors.
   if (!controlId
     || controlId.startsWith(MANAGED_OPTION_NAME_KEY_PREFIX)
+    || controlId.startsWith(MANAGED_OPTION_SELECTOR_KEY_PREFIX)
     || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) return undefined;
   const inputType = (field.inputType ?? '').trim().toLowerCase();
   const role = (field.role ?? '').trim().toLowerCase();
@@ -5955,10 +5974,31 @@ export function buildManagedPortalActions(
       }
       if (/^(?:checkbox|radio)$/i.test(portalInputType ?? '')) {
         if (portalFamily(portal) === 'greenhouse') {
-          // The discovered selector leads the same single click as the shape alternatives rather
-          // than being a click of its own. Two clicks on one checkbox untick it; see
-          // pushGreenhouseCheckboxOptionActions.
-          pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question', [portalSelector]);
+          const offered = /^checkbox$/i.test(portalInputType ?? '')
+            ? packetReadOptionsForQuestion(packet, item)
+            : undefined;
+          const values = offered ? exactChoiceOptionValues(answer, offered) : null;
+          if (offered) {
+            // One exact scoped action per reviewed value. The managed runner uses check(), not a
+            // toggle, so a later language or experience-setting option preserves the earlier ones.
+            // When the live list cannot prove one decomposition, emit nothing rather than guess
+            // whether a comma belongs inside one option or separates several options.
+            if (!values) continue;
+            for (const value of values) {
+              pushScopedQuestionChoiceActions(
+                actions,
+                questionText,
+                value,
+                'question',
+                { includeSelectFallbacks: false },
+              );
+            }
+          } else {
+            // The discovered selector leads the same single click as the shape alternatives rather
+            // than being a click of its own. Two clicks on one checkbox untick it; see
+            // pushGreenhouseCheckboxOptionActions.
+            pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question', [portalSelector]);
+          }
         } else if (portalFamily(portal) === 'workable') {
           const offered = packetReadOptionsForQuestion(packet, item);
           const values = offered ? exactChoiceOptionValues(answer, offered) : [answer];

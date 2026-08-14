@@ -98,6 +98,29 @@ function generatedResumeJobId(row: typeof generated_resumes.$inferSelect): strin
   return parsed.success ? parsed.data : null;
 }
 
+export function requestedResumeLookupId<T extends { id: string }>(
+  latestRows: readonly T[],
+  requestedValue: unknown,
+): string | null {
+  const requestedId = z.string().uuid().safeParse(requestedValue);
+  if (!requestedId.success) return null;
+  if (latestRows.some((row) => row.id.toLowerCase() === requestedId.data.toLowerCase())) return null;
+  return requestedId.data;
+}
+
+export function includeRequestedResumeInHistory<T extends { id: string; user_id: string }>(
+  latestRows: readonly T[],
+  requestedRow: T | null,
+  userId: string,
+): T[] {
+  if (
+    !requestedRow
+    || requestedRow.user_id !== userId
+    || latestRows.some((row) => row.id === requestedRow.id)
+  ) return [...latestRows];
+  return [requestedRow, ...latestRows];
+}
+
 function generatedResumeContextText(row: typeof generated_resumes.$inferSelect, key: 'company' | 'role' | 'jd_hash'): string | null {
   const context = row.job_context;
   if (!context || typeof context !== 'object' || Array.isArray(context)) return null;
@@ -1306,7 +1329,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
   // Files older than the retention window are gone, and their link 404s by design.
   //
   // THE SPEC GOES OUT WHOLE, WHICH IS WHY IT GOES OUT THROUGH specWithoutDocumentPointers. This
-  // route answers with fifty complete specs, so it began serving _documents.transcript.object_key
+  // route normally answers with fifty complete specs, plus one explicitly requested older packet
+  // for a direct link, so it began serving _documents.transcript.object_key
   // the day attachments were added, without a line of this file ever mentioning documents and
   // without the contract test that fences routes/documents.ts being able to see it. A Blob object
   // is written `access: 'public'` because that is the only mode the SDK has, so that key plus the
@@ -1315,12 +1339,27 @@ export async function resumeRoutes(fastify: FastifyInstance) {
   // Neon's monthly transfer ceiling, and this is the payload the plan named next to it.
   fastify.get('/resume/history', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
-    const rows = await db
+    const latestRows = await db
       .select()
       .from(generated_resumes)
       .where(eq(generated_resumes.user_id, userId))
       .orderBy(desc(generated_resumes.created_at))
       .limit(50);
+    const query = request.query && typeof request.query === 'object'
+      ? request.query as Record<string, unknown>
+      : {};
+    const requestedId = requestedResumeLookupId(latestRows, query.application);
+    const requestedRows = requestedId
+      ? await db
+        .select()
+        .from(generated_resumes)
+        .where(and(
+          eq(generated_resumes.id, requestedId),
+          eq(generated_resumes.user_id, userId),
+        ))
+        .limit(1)
+      : [];
+    const rows = includeRequestedResumeInHistory(latestRows, requestedRows[0] ?? null, userId);
     const jobIds = [...new Set(rows.map(generatedResumeJobId).filter((id): id is string => Boolean(id)))];
     const monitoredRows = jobIds.length === 0 ? [] : await db
       .select({
