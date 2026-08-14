@@ -9769,13 +9769,33 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     }
     return false;
   };
+  // A scalar control owns its own answer. Reading its entire widget is unsafe when widgetOf had to
+  // fall back to a broad parent such as the form: a different filled field can then answer this
+  // empty one. Composite controls are intentionally excluded here because their answer lives in
+  // the widget, not in this element: React Select renders a value chip, file uploaders render a
+  // filename, and checkbox or radio peers answer one question together.
+  const scalarAnswerOf = (element) => {
+    if (!element?.matches?.('input, textarea, select')) return null;
+    const type = (element.getAttribute('type') || '').toLowerCase();
+    if (/^(hidden|file|checkbox|radio)$/.test(type)) return null;
+    if (element.getAttribute('role') === 'combobox') return null;
+    return Boolean(clean(element.value));
+  };
   const blocking = [];
   const seen = new Set();
   const note = (widget, element) => {
-    if (!widget || seen.has(widget)) return;
-    seen.add(widget);
+    if (!widget) return;
+    const unconfirmedChoice = widget.matches?.('[${WORKABLE_CHOICE_UNCONFIRMED_ATTR}="true"]')
+      || widget.querySelector('[${WORKABLE_CHOICE_UNCONFIRMED_ATTR}="true"]');
+    const scalarAnswer = unconfirmedChoice ? null : scalarAnswerOf(element);
+    // Scalar controls are separate questions even when widgetOf falls back to one broad parent.
+    // Composite controls retain widget-level deduplication so one radio group or upload is not
+    // reported once per child control.
+    const key = scalarAnswer === null ? widget : element;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
     if (!isVisible(widget)) return;
-    if (widgetHasAnswer(widget)) return;
+    if (scalarAnswer === true || (scalarAnswer === null && widgetHasAnswer(widget))) return;
     const label = labelOf(widget, element);
     blocking.push(label
       ? '"' + label + '" is required and is still empty'

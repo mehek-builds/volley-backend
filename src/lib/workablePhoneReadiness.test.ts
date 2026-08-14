@@ -1,7 +1,17 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import test from 'node:test';
+import { chromium } from 'playwright-core';
 
 import { READ_SUBMIT_READINESS_SCRIPT } from './portalSubmission';
+
+const BROWSER_EXECUTABLE = [
+  process.env.LITOS_TEST_BROWSER_EXECUTABLE,
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/usr/bin/google-chrome',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+].find((candidate): candidate is string => Boolean(candidate && existsSync(candidate)));
 
 type FakeControl = {
   disabled: boolean;
@@ -148,3 +158,65 @@ test('a starred wrapping label cannot borrow an unrelated required field from it
     'marker-input',
   );
 });
+
+test(
+  'the full readiness script keeps an empty marked scalar blocked inside a broad parent form',
+  { skip: BROWSER_EXECUTABLE ? false : 'No Chromium executable is installed' },
+  async () => {
+    assert.ok(BROWSER_EXECUTABLE);
+    const browser = await chromium.launch({ executablePath: BROWSER_EXECUTABLE, headless: true });
+    try {
+      const page = await browser.newPage();
+      const readinessOf = async (markup: string) => {
+        await page.setContent(markup);
+        return await page.evaluate(READ_SUBMIT_READINESS_SCRIPT) as {
+          blocking: string[];
+          stale: string[];
+        };
+      };
+      const readiness = await readinessOf(`
+        <form data-litos-submit-scope-v1="active">
+          <label>* Marker only<input value=""></label>
+          <input required value="filled">
+        </form>
+      `);
+      assert.deepEqual(readiness.blocking, ['"* Marker only" is required and is still empty']);
+      assert.deepEqual(readiness.stale, []);
+
+      const answeredReactSelect = await readinessOf(`
+        <form data-litos-submit-scope-v1="active">
+          <div class="field">
+            <label for="office">Office</label>
+            <div class="select__container">
+              <span class="select__single-value">New York</span>
+              <input id="office" role="combobox" aria-required="true" value="">
+            </div>
+          </div>
+        </form>
+      `);
+      assert.deepEqual(answeredReactSelect.blocking, []);
+
+      const answeredUpload = await readinessOf(`
+        <form data-litos-submit-scope-v1="active">
+          <div class="file-upload" aria-label="Resume" aria-required="true">
+            <span class="file-upload__filename">resume.pdf</span>
+          </div>
+        </form>
+      `);
+      assert.deepEqual(answeredUpload.blocking, []);
+
+      const answeredChoiceGroup = await readinessOf(`
+        <form data-litos-submit-scope-v1="active">
+          <fieldset>
+            <legend>* Preferred office</legend>
+            <label><input name="office" type="radio" required>New York</label>
+            <label><input name="office" type="radio" checked>San Francisco</label>
+          </fieldset>
+        </form>
+      `);
+      assert.deepEqual(answeredChoiceGroup.blocking, []);
+    } finally {
+      await browser.close();
+    }
+  },
+);
