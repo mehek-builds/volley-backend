@@ -12,6 +12,7 @@ type FakeControl = {
 };
 
 type FakeMarker = {
+  contains: (candidate: FakeControl) => boolean;
   getAttribute: (name: string) => string | null;
 };
 
@@ -39,9 +40,11 @@ const NOTE_MARKED_LABEL_END = '\n  for (const marker of scanRoot.querySelectorAl
 function selectMarkedTarget({
   controls,
   markerFor = null,
+  markerOwnedIds = controls.map((candidate) => candidate.id),
 }: {
   controls: FakeControl[];
   markerFor?: string | null;
+  markerOwnedIds?: string[];
 }): FakeControl | null {
   const start = READ_SUBMIT_READINESS_SCRIPT.indexOf(NOTE_MARKED_LABEL_START);
   const end = READ_SUBMIT_READINESS_SCRIPT.indexOf(NOTE_MARKED_LABEL_END, start);
@@ -63,6 +66,7 @@ function selectMarkedTarget({
     },
   };
   const marker: FakeMarker = {
+    contains: (candidate) => markerOwnedIds.includes(candidate.id),
     getAttribute: (name: string) => (name === 'for' ? markerFor : null),
   };
   let selected: FakeControl | null = null;
@@ -130,5 +134,17 @@ test('zero or multiple marked descendants preserve the first-control fail-closed
       ],
     })?.id,
     'country-trigger',
+  );
+});
+
+test('a starred wrapping label cannot borrow an unrelated required field from its parent form', () => {
+  const markerInput = control({ id: 'marker-input', value: '' });
+  const unrelatedRequired = control({ id: 'unrelated-required', value: 'filled', required: true });
+  assert.equal(
+    selectMarkedTarget({
+      controls: [markerInput, unrelatedRequired],
+      markerOwnedIds: ['marker-input'],
+    })?.id,
+    'marker-input',
   );
 });

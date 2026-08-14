@@ -9846,14 +9846,16 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     const controls = [...widget.querySelectorAll(
       'input:not([type="hidden"]):not([type="file"]), textarea, select, [role="combobox"]'
     )];
-    const explicitlyRequired = controls.filter((candidate) => !candidate.disabled
+    const explicitlyRequired = controls.filter((candidate) => marker.contains(candidate)
+      && !candidate.disabled
       && (candidate.required || candidate.getAttribute('aria-required') === 'true'));
     const target = (named && widget.querySelector('#' + CSS.escape(named)))
       // Workable wraps its country-code combobox and required phone input in one starred label,
       // with the combobox first in DOM order. The star belongs to the one descendant Workable
       // actually marks required, not to that adjacent opener. Prefer that unambiguous machine
-      // signal before retaining the existing first-control fallback for zero or multiple
-      // marked descendants, where guessing would be less safe than holding the send.
+      // signal only when the marked label owns that control. A broad widget fallback can be
+      // the entire form, and must not borrow an unrelated required field. Retain the existing
+      // first-control fallback for zero or multiple marked descendants.
       || (explicitlyRequired.length === 1 ? explicitlyRequired[0] : null)
       || controls[0]
       || (widgetFallback ? widget : null);
