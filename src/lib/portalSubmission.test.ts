@@ -1256,6 +1256,27 @@ test('direct Workable US phone selects United States and writes exact national d
   assert.equal(result.blockers.some((blocker) => /phone/i.test(blocker)), false);
 });
 
+test('direct Workable phone fails closed for malformed and unsupported international numbers', async () => {
+  for (const phone of ['+442071234567', '+1 213', '+971 50', '+abc']) {
+    const fixture = workablePhoneUploadFixture();
+    const result = await fillPortal(fixture.page, 'workable', {
+      fullName: 'Taylor Example',
+      email: 'taylor@example.com',
+      phone,
+      resume: Buffer.from('resume-pdf'),
+      resumeName: 'resume.pdf',
+      questions: [],
+    });
+
+    assert.equal(fixture.events.includes('country:open'), false, phone);
+    assert.equal(fixture.events.includes('country:ae'), false, phone);
+    assert.equal(fixture.events.includes('country:us'), false, phone);
+    assert.equal(fixture.phoneValue(), '', phone);
+    assert.equal(result.filledFields.includes('phone'), false, phone);
+    assert.ok(result.blockers.some((blocker) => /phone/i.test(blocker)), `${phone}: ${result.blockers}`);
+  }
+});
+
 test('direct Workable phone fails closed when the late cookie backdrop does not unmount', async () => {
   const fixture = workablePhoneUploadFixture(1, undefined, '', undefined, true, false);
   const result = await fillPortal(fixture.page, 'workable', {
@@ -4090,6 +4111,34 @@ test('managed Workable US phone selects exact United States and proves national 
   assert.equal(actions[phoneProofIndex]?.expectedValueDigits, '2135746270');
   assert.equal(actions[phoneProofIndex]?.requireUnique, true);
   assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
+});
+
+test('managed Workable submit is gated by invalid nonempty phones but not an absent phone', () => {
+  const invalidPhones = [
+    '+442071234567',
+    '+1 213',
+    '+971 50',
+    '+abc',
+  ];
+  for (const phone of invalidPhones) {
+    const actions = buildManagedPortalActions('workable', { ...capturePacket, phone }, true);
+    assert.equal(
+      actions.some((action) => action.type === 'confirmAndSubmit'),
+      false,
+      phone,
+    );
+    assert.equal(actions.some((action) => action.label === 'phone_country_open'), false, phone);
+    assert.equal(actions.some((action) => action.label === 'phone'), false, phone);
+  }
+
+  for (const phone of ['+1 213 574 6270', '+971 56 741 7451']) {
+    const actions = buildManagedPortalActions('workable', { ...capturePacket, phone }, true);
+    assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1, phone);
+  }
+  for (const phone of [undefined, '']) {
+    const actions = buildManagedPortalActions('workable', { ...capturePacket, phone }, true);
+    assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1);
+  }
 });
 
 test('managed Workable final cookie boundary handles both a late modal and no modal', () => {

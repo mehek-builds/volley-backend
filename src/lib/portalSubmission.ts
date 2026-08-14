@@ -4558,9 +4558,14 @@ function workablePhoneBlockerLabel(phone: string | undefined): string {
   return country ? `Phone ${country.displayedDialCode}` : 'Phone';
 }
 
-function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone: string | undefined) {
+function pushWorkableManagedPhoneActions(
+  actions: ManagedBrowserAction[],
+  phone: string | undefined,
+): boolean {
+  const raw = phone?.trim();
+  if (!raw) return true;
   const plan = workablePhonePlan(phone);
-  if (!plan) return;
+  if (!plan) return false;
   // This action is deliberately a new action TYPE. An older Stratus rejects the request while
   // normalizing it, before opening a browser, instead of dropping unknown assertion fields and
   // reporting a weak read under the same proof label.
@@ -4641,6 +4646,7 @@ function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone:
     expectedValueDigits: plan.expectedDigits,
     stabilityWindowMs: 1_200,
   });
+  return true;
 }
 
 // ─── JazzHR (*.applytojob.com) ────────────────────────────────────────────────
@@ -6097,6 +6103,7 @@ export function buildManagedPortalActions(
   // login, CAPTCHA, or privacy gate that happens to be on screen.
   if (ACCOUNT_WALLED_FAMILIES.has(family)) return [];
   const actions: ManagedBrowserAction[] = [];
+  let workablePhoneReadyForSubmit = true;
   pushFixedFieldActions(actions, portal, packet);
   // These three integrations are structurally fixed-field-only. SuccessFactors has no reachable
   // form at all, while Zoho Recruit and Bullhorn have only the exact identity and resume controls
@@ -6295,7 +6302,9 @@ export function buildManagedPortalActions(
   }
   // Workable resume parsing can rewrite contact fields. Phone therefore runs after every upload,
   // address commit, and reviewed-question action, then proves the selected dial code and live value.
-  if (portalFamily(portal) === 'workable') pushWorkableManagedPhoneActions(actions, packet.phone);
+  if (family === 'workable') {
+    workablePhoneReadyForSubmit = pushWorkableManagedPhoneActions(actions, packet.phone);
+  }
   // Prepare only. The submit path makes the standalone probe call above this one and reads its
   // evidence from there, so repeating the reads inside the submit action list would spend budget on
   // a page that is about to be clicked anyway. On prepare there is no probe call at all, and this is
@@ -6347,7 +6356,11 @@ export function buildManagedPortalActions(
    * a redundant guess before the blunt pass takes a whole unprotected group from the tail. Core
    * fields and the selected question chains are protected through every pass.
    */
-  const canAppendSubmit = submit && portalCanAutoSubmit(portal);
+  // A nonempty Workable phone that cannot be mapped to an exact country and national value is not
+  // the same as no phone on file. The runner must never reach its atomic submit action in that
+  // state. A truly absent phone keeps the previous behavior, so required-field confirmation on the
+  // employer form remains the authority on whether the application can proceed without one.
+  const canAppendSubmit = submit && portalCanAutoSubmit(portal) && workablePhoneReadyForSubmit;
   const familyActionLimit = portalFamily(portal) === 'greenhouse' && packetLooksAkuna(packet)
     ? 100
     : MANAGED_ACTION_LIMIT;
