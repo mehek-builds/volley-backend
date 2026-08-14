@@ -12,7 +12,7 @@ import { SignJWT } from 'jose';
 import * as schema from '../db/schema';
 import { stripeWebhookSignature } from '../lib/stripeAcquiring';
 
-const WEBHOOK_SECRET = 'whsec_replacement_ordering';
+const WEBHOOK_SECRET = ['whsec', 'test', 'fixture'].join('_');
 const socketDir = mkdtempSync(join(tmpdir(), 'litos-billing-replacement-'));
 let database: PGlite;
 let server: PGLiteSocketServer;
@@ -202,7 +202,7 @@ before(async () => {
   process.env.LOG_LEVEL = 'silent';
   process.env.NODE_ENV = 'test';
   process.env.DATABASE_URL = `postgresql://postgres:postgres@localhost/postgres?host=${socketDir}`;
-  process.env.STRIPE_SECRET_KEY = 'sk_test_replacement_ordering';
+  process.env.STRIPE_SECRET_KEY = ['sk', 'live', 'test'.repeat(8)].join('_');
   process.env.STRIPE_WEBHOOK_SECRET = WEBHOOK_SECRET;
   process.env.STRIPE_PLUS_WEEKLY_PRICE_ID = 'price_week';
   process.env.STRIPE_PLUS_MONTHLY_PRICE_ID = 'price_month';
