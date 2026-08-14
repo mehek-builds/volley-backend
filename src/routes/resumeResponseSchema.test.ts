@@ -24,6 +24,8 @@ describe('resume response contract', () => {
     const result = resumeGenerateSuccessResponseSchema.safeParse({
       resume_id: 'd6693be1-9d1d-4f61-9911-8d95f1ad1b01',
       resume_url: 'https://api.example.com/resume/download?t=token',
+      canonical_application_id: '4ab51106-6fbe-4b56-8822-0db01b27bef0',
+      artifact_id: '84f8cab7-3a83-4d16-9ca6-2815e78889b7',
       file_name: 'Alex_Example_Engineer_Resume.pdf',
       spec: {},
       application: {
@@ -63,7 +65,11 @@ describe('resume response contract', () => {
       },
     });
     assert.equal(result.success, true);
-    if (result.success) assert.equal(result.data.application?.job_context.portal_country, 'GB');
+    if (result.success) {
+      assert.equal(result.data.application?.job_context.portal_country, 'GB');
+      assert.equal(result.data.canonical_application_id, '4ab51106-6fbe-4b56-8822-0db01b27bef0');
+      assert.equal(result.data.artifact_id, '84f8cab7-3a83-4d16-9ca6-2815e78889b7');
+    }
   });
 
   test('rejects a changed legacy field type', () => {

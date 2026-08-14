@@ -10,6 +10,8 @@ import {
   SUBMISSION_PREVIEW_RETENTION_DAYS,
   type UserBlobCategory,
 } from '../lib/resumeAccess';
+import { purgeExpiredEntitledUsageResults } from '../lib/entitlements';
+import { purgeExpiredNetworkImportPreviews } from '../lib/networkPreviewRetention';
 
 // The breakdown fields are optional because they describe a sweep's own bookkeeping, not the
 // contract a caller depends on: the production implementation always fills them, and a test
@@ -30,6 +32,8 @@ type SweepResult = {
 export type ResumeRetentionDependencies = {
   sweepExpiredResumeBlobs: () => Promise<SweepResult>;
   clearLegacyPointers: (userIds: string[]) => Promise<void>;
+  purgeExpiredUsageResults: () => Promise<number>;
+  purgeExpiredNetworkPreviews: () => Promise<number>;
 };
 
 type ResumeRetentionRouteOptions = FastifyPluginOptions & {
@@ -38,6 +42,8 @@ type ResumeRetentionRouteOptions = FastifyPluginOptions & {
 
 const productionDependencies: ResumeRetentionDependencies = {
   sweepExpiredResumeBlobs,
+  purgeExpiredUsageResults: purgeExpiredEntitledUsageResults,
+  purgeExpiredNetworkPreviews: purgeExpiredNetworkImportPreviews,
   // Scoped to the owners whose legacy original was actually deleted on this run. It was
   // previously an unscoped `db.update(profiles).set({...: null})` with no WHERE, which nulled both
   // columns for EVERY profile on every successful sweep, including the zero-deletion nights that
@@ -65,8 +71,8 @@ const productionDependencies: ResumeRetentionDependencies = {
 // schedule so the exposure of any future leak is bounded by time rather than by luck.
 //
 // The generated_resumes row (the tailoring decision, kept for audit) is deliberately left
-// alone; only the PDF goes. GET /resume/download 404s for a swept file, which is the intended
-// end state, not an error.
+// alone; only the PDF goes. A still-valid capability may safely re-render the immutable saved
+// content in memory, while the swept blob remains deleted and the capability expires on schedule.
 //
 // There is deliberately no query parameter that can narrow or skip the sweep. One used to exist:
 // `?run=<operation id>` claimed a one-shot usage_counters slot to perform an approved legacy
@@ -108,6 +114,8 @@ async function handleSweep(
     // The blob deletion succeeded, so stale legacy pointers can no longer lead an export or
     // onboarding response to claim the original still exists.
     await dependencies.clearLegacyPointers(legacyOriginalOwnerIds(deletedPathnames));
+    const expiredUsageReceipts = await dependencies.purgeExpiredUsageResults();
+    const expiredNetworkPreviews = await dependencies.purgeExpiredNetworkPreviews();
     // A key shape no retention rule recognises is kept, because deleting an artifact nobody has
     // classified is the worse mistake - but it is never kept SILENTLY. Form previews sat
     // unswept for the life of the feature because a new prefix simply fell through the old
@@ -128,6 +136,8 @@ async function handleSweep(
         deletedByCategory,
         retentionDays: RESUME_RETENTION_DAYS,
         previewRetentionDays: SUBMISSION_PREVIEW_RETENTION_DAYS,
+        expiredUsageReceipts,
+        expiredNetworkPreviews,
       },
       'resume retention sweep complete',
     );
@@ -138,6 +148,8 @@ async function handleSweep(
       unclassified,
       retention_days: RESUME_RETENTION_DAYS,
       preview_retention_days: SUBMISSION_PREVIEW_RETENTION_DAYS,
+      expired_usage_receipts: expiredUsageReceipts,
+      expired_network_previews: expiredNetworkPreviews,
     });
   } catch (err) {
     fastify.log.error(err, 'resume retention sweep failed');

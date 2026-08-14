@@ -78,9 +78,19 @@ Set these for Production (and Preview if you want):
 | `LITOS_APPLICATION_EMAIL_ALIAS_SECRET` | stable secret used to mint opaque per-application alias local parts |
 | `RESEND_WEBHOOK_SECRET` | Resend `email.received` webhook signing secret, returned when the webhook is created |
 | `LITOS_INBOUND_EMAIL_WEBHOOK_SECRET` | compatibility HMAC secret for signed non-Resend `POST /application-email/inbound` calls |
-| `LEMONSQUEEZY_CHECKOUT_URL` | reusable live product URL containing `/checkout/buy/` |
-| `LEMONSQUEEZY_VARIANT_ID` | numeric ID of the $49.99 monthly Pro variant |
-| `LEMONSQUEEZY_WEBHOOK_SECRET` | signing secret configured on the Lemon Squeezy webhook |
+| `LEMONSQUEEZY_CHECKOUT_URL` | legacy reusable product URL, retained only for real legacy subscriptions |
+| `LEMONSQUEEZY_VARIANT_ID` | legacy variant ID, retained only for real legacy subscriptions |
+| `LEMONSQUEEZY_WEBHOOK_SECRET` | signing secret for legacy Lemon Squeezy lifecycle events |
+| `LITOS_BILLING_ENABLED` | literal `true` only after the migration, three Prices, webhook, portal, and return URLs are verified |
+| `STRIPE_SECRET_KEY` | restricted or secret live Stripe API key |
+| `STRIPE_WEBHOOK_SECRET` | signing secret for the live Litos+ webhook endpoint |
+| `STRIPE_PLUS_WEEKLY_PRICE_ID` | active recurring USD Price for $19.99 every week |
+| `STRIPE_PLUS_MONTHLY_PRICE_ID` | active recurring USD Price for $39.99 every month |
+| `STRIPE_PLUS_QUARTERLY_PRICE_ID` | active recurring USD Price for $89.99 every three months |
+| `LITOS_BILLING_SUCCESS_URL` | `https://trylitos.com/billing/return?session_id={CHECKOUT_SESSION_ID}` |
+| `LITOS_BILLING_CANCEL_URL` | `https://trylitos.com/billing/return?status=cancelled` |
+| `STRIPE_BILLING_PORTAL_RETURN_URL` | `https://trylitos.com/dashboard/settings#plan` |
+| `ENTITLEMENT_V2_CUTOVER_AT` | one recorded UTC instant used by the idempotent grandfathering migration, never changed afterward |
 | `UPSTASH_REDIS_REST_URL` | optional, turns on the ranking cache's shared tier; see below |
 | `UPSTASH_REDIS_REST_TOKEN` | optional, pairs with the URL above |
 | `NODE_ENV` | `production` |
@@ -224,19 +234,47 @@ secret for the webhook and `LEMONSQUEEZY_WEBHOOK_SECRET`. Keep
 
 ### Stripe subscriptions
 
-Litos uses Stripe Checkout for weekly and monthly Pro subscriptions. In Stripe live mode,
-create the two recurring USD prices, activate the default customer portal configuration,
-and add a webhook endpoint at
+Litos+ uses one feature bundle with three recurring terms. In Stripe live mode, create and
+activate these exact recurring USD Prices:
+
+- `litos_plus_week`: $19.99 every one week
+- `litos_plus_month`: $39.99 every one month
+- `litos_plus_quarter`: $89.99 every three months
+
+Apply the additive schema and grandfathering migration before deploying code that reads the new
+tables. Record one UTC cutover instant and keep it unchanged on every retry:
+
+```bash
+DATABASE_URL="<your-neon-pooled-url>" \
+ENTITLEMENT_V2_CUTOVER_AT="2026-08-14T00:00:00.000Z" \
+npm run db:litos-plus-v2
+```
+
+Activate the default Stripe customer portal configuration and add a live webhook endpoint at
 `https://student-outreach-backend.vercel.app/billing/stripe-webhook` for these events:
 
 - `checkout.session.completed`
+- `checkout.session.async_payment_succeeded`
+- `checkout.session.async_payment_failed`
 - `customer.subscription.created`
 - `customer.subscription.updated`
 - `customer.subscription.deleted`
+- `invoice.paid`
+- `invoice.payment_failed`
+- `invoice.payment_action_required`
+- `charge.refunded`
+- `charge.dispute.created`
+- `charge.dispute.closed`
 
-Set `LITOS_PAY_PROCESSOR_ENABLED`, `LITOS_PAY_STRIPE_ENABLED`,
-`LITOS_PAY_SIGNING_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
-`STRIPE_WEEKLY_PRICE_ID`, and `STRIPE_MONTHLY_PRICE_ID` in the Production environment.
+Set `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PLUS_WEEKLY_PRICE_ID`,
+`STRIPE_PLUS_MONTHLY_PRICE_ID`, `STRIPE_PLUS_QUARTERLY_PRICE_ID`,
+`LITOS_BILLING_SUCCESS_URL`, `LITOS_BILLING_CANCEL_URL`, and
+`STRIPE_BILLING_PORTAL_RETURN_URL` in Production. The API reads each live Price from Stripe and
+rejects checkout if its amount, currency, active state, interval, or interval count differs from
+the server-owned catalog. Only then set `LITOS_BILLING_ENABLED=true`.
+
+The old `LITOS_PAY_*`, `STRIPE_WEEKLY_PRICE_ID`, and `STRIPE_MONTHLY_PRICE_ID` variables are legacy
+compatibility settings. They do not configure the new three-term Litos+ checkout.
 Set `STRIPE_AUTOMATIC_TAX_ENABLED=true` only after Stripe Tax is registered and configured.
 Production rejects Stripe test keys and test-mode webhook events.
 

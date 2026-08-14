@@ -11,6 +11,7 @@ import {
   boolean,
   index,
   uniqueIndex,
+  check,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
@@ -34,12 +35,9 @@ export const users = pgTable('users', {
   // Incrementing this revokes every previously issued JWT immediately. It
   // avoids timestamp precision races during password changes and recovery.
   session_version: integer('session_version').default(0).notNull(),
-  // Billing: 'free' | 'pro' ('plus' is a legacy alias, treated as 'pro' - see quota.ts).
-  // Every feature (outreach + resume-gen/autofill) is available on 'free', including 20
-  // resume generations per month (recurring, Apollo.io-style credits, not a one-time
-  // trial); 'pro' is the paid tier with a 1,000-resume monthly cap
-  // (2026-07-02 decision, see quota.ts's LIMITS comments for the full model).
-  // Reverse trial runs until trial_ends_at (set at signup) at pro-level limits.
+  // Compatibility projection only: 'free' | 'pro', with 'plus' retained as a legacy alias.
+  // Commercial access is resolved from the v2 policy, subscription, trial, and grandfather fields
+  // below. Older clients can continue reading plan without making it the entitlement authority.
   plan: text('plan').default('free').notNull(),
   trial_ends_at: timestamp('trial_ends_at', { withTimezone: true }),
   billing_provider: text('billing_provider'),
@@ -51,6 +49,18 @@ export const users = pgTable('users', {
   billing_ends_at: timestamp('billing_ends_at', { withTimezone: true }),
   billing_portal_url: text('billing_portal_url'),
   billing_event_updated_at: timestamp('billing_event_updated_at', { withTimezone: true }),
+  // Commercial policy is intentionally separate from the legacy plan projection. Existing
+  // clients continue to read plan, while every protected operation resolves this policy state.
+  entitlement_policy_version: text('entitlement_policy_version').default('legacy-v1').notNull(),
+  grandfather_policy: text('grandfather_policy'),
+  grandfathered_at: timestamp('grandfathered_at', { withTimezone: true }),
+  trial_started_at: timestamp('trial_started_at', { withTimezone: true }),
+  entitlement_revision: uuid('entitlement_revision').defaultRandom().notNull(),
+  manual_access_override: text('manual_access_override'),
+  manual_access_override_ends_at: timestamp('manual_access_override_ends_at', { withTimezone: true }),
+  // Backfilled from the pre-cutover setting. This preserves an old grant after a user turns the
+  // toggle off, without giving automatic submission to grandfathered accounts that never had it.
+  automatic_submission_legacy_granted: boolean('automatic_submission_legacy_granted').default(false).notNull(),
   /* DECLARED TO MATCH THE DATABASE, not because main uses them. These columns are live in prod
      because codex/regional-pricing ran scripts/apply-regional-pricing-schema.mjs against it before
      merging, which is the exact sequence check-schema-drift.mjs exists to catch: undeclared here,
@@ -193,10 +203,35 @@ export const billing_webhook_events = pgTable('billing_webhook_events', {
   event_key: text('event_key').primaryKey(),
   provider: text('provider').notNull(),
   event_name: text('event_name'),
+  provider_object_id: text('provider_object_id'),
+  provider_event_created_at: timestamp('provider_event_created_at', { withTimezone: true }),
+  payload_sha256: text('payload_sha256'),
+  livemode: boolean('livemode'),
+  processing_attempts: integer('processing_attempts').default(0).notNull(),
+  last_error: text('last_error'),
   result: text('result').default('processing').notNull(),
   received_at: timestamp('received_at', { withTimezone: true }).defaultNow().notNull(),
   processed_at: timestamp('processed_at', { withTimezone: true }),
-});
+}, (t) => ({
+  objectTimeIdx: index('billing_events_object_time_idx').on(t.provider, t.provider_object_id, t.provider_event_created_at),
+}));
+
+// Pseudonymized terminal-event receipt for subscriptions canceled as an account is deleted.
+// It carries no user id, customer id, email, or raw provider subscription id. Its only purpose is
+// to acknowledge the exact provider-confirmed cancellation event that can race the account cascade.
+export const billing_account_deletion_tombstones = pgTable('billing_account_deletion_tombstones', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  provider: text('provider').notNull(),
+  provider_subscription_hash: text('provider_subscription_hash').notNull(),
+  cancellation_confirmed_at: timestamp('cancellation_confirmed_at', { withTimezone: true }),
+  account_deleted_at: timestamp('account_deleted_at', { withTimezone: true }),
+  expires_at: timestamp('expires_at', { withTimezone: true }).notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  providerSubscriptionUnique: uniqueIndex('billing_account_deletion_tombstone_provider_subscription_unique')
+    .on(t.provider, t.provider_subscription_hash),
+  expiryIdx: index('billing_account_deletion_tombstone_expiry_idx').on(t.expires_at),
+}));
 
 /* Versioned setup runs are separate from users.onboarding_completed_at on purpose.
  *
@@ -269,7 +304,388 @@ export const pricing_offers = pgTable('pricing_offers', {
   checkout_created_at: timestamp('checkout_created_at', { withTimezone: true }),
   paid_at: timestamp('paid_at', { withTimezone: true }),
   verified_at: timestamp('verified_at', { withTimezone: true }),
+  product_code: text('product_code'),
+  term_code: text('term_code'),
+  provider_price_id: text('provider_price_id'),
+  surface: text('surface'),
+  trigger: text('trigger'),
+  placement: text('placement'),
+  client_idempotency_key: text('client_idempotency_key'),
+  pending_action_id: uuid('pending_action_id'),
+  completed_at: timestamp('completed_at', { withTimezone: true }),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userIdempotencyUnique: uniqueIndex('pricing_offers_user_idempotency_unique')
+    .on(t.user_id, t.client_idempotency_key)
+    .where(sql`${t.client_idempotency_key} is not null`),
+  oneLiveCheckoutUnique: uniqueIndex('pricing_offers_one_live_litos_checkout_idx')
+    .on(t.user_id)
+    .where(sql`${t.product_code} = 'litos_plus' and ${t.status} in ('creating', 'checkout_created')`),
+}));
+
+// ---- Litos+ billing subscriptions ----
+// Provider records are retained through cancellation. users.plan remains a compatibility
+// projection, not payment evidence.
+export const billing_subscriptions = pgTable('billing_subscriptions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  provider_customer_id: text('provider_customer_id').notNull(),
+  provider_subscription_id: text('provider_subscription_id').notNull().unique(),
+  provider_price_id: text('provider_price_id').notNull(),
+  product_code: text('product_code').notNull(),
+  term_code: text('term_code').notNull(),
+  status: text('status').notNull(),
+  cancel_at_period_end: boolean('cancel_at_period_end').default(false).notNull(),
+  current_period_start: timestamp('current_period_start', { withTimezone: true }),
+  current_period_end: timestamp('current_period_end', { withTimezone: true }),
+  access_ends_at: timestamp('access_ends_at', { withTimezone: true }),
+  canceled_at: timestamp('canceled_at', { withTimezone: true }),
+  ended_at: timestamp('ended_at', { withTimezone: true }),
+  latest_invoice_id: text('latest_invoice_id'),
+  latest_payment_intent_id: text('latest_payment_intent_id'),
+  dispute_previous_status: text('dispute_previous_status'),
+  provider_event_created_at: timestamp('provider_event_created_at', { withTimezone: true }).notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userUpdatedIdx: index('billing_subscriptions_user_idx').on(t.user_id, t.updated_at),
+}));
+
+// ---- Litos+ trial generation usage ----
+export const trial_generation_usage = pgTable('trial_generation_usage', {
+  user_id: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  tailored_resumes_used: integer('tailored_resumes_used').default(0).notNull(),
+  cover_letters_used: integer('cover_letters_used').default(0).notNull(),
+  answer_applications_used: integer('answer_applications_used').default(0).notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const trial_answer_applications = pgTable('trial_answer_applications', {
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  application_id: uuid('application_id').notNull(),
+  granted_at: timestamp('granted_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.user_id, t.application_id] }),
+}));
+
+export const trial_company_usage = pgTable('trial_company_usage', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  company_scope_key: text('company_scope_key').notNull(),
+  company_name: text('company_name').notNull(),
+  contacts_used: integer('contacts_used').default(0).notNull(),
+  drafts_used: integer('drafts_used').default(0).notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userScopeUnique: uniqueIndex('trial_company_usage_user_scope_unique').on(t.user_id, t.company_scope_key),
+  userCreatedIdx: index('trial_company_usage_user_idx').on(t.user_id, t.created_at),
+}));
+
+export const entitlement_usage_reservations = pgTable('entitlement_usage_reservations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  feature_key: text('feature_key').notNull(),
+  usage_kind: text('usage_kind').notNull(),
+  scope_key: text('scope_key').notNull(),
+  request_hash: text('request_hash').default('').notNull(),
+  idempotency_key: text('idempotency_key').notNull(),
+  requested_units: integer('requested_units').default(1).notNull(),
+  units: integer('units').notNull(),
+  metered: boolean('metered').default(true).notNull(),
+  status: text('status').notNull(),
+  trial_company_usage_id: uuid('trial_company_usage_id').references(() => trial_company_usage.id, { onDelete: 'set null' }),
+  expires_at: timestamp('expires_at', { withTimezone: true }).notNull(),
+  committed_at: timestamp('committed_at', { withTimezone: true }),
+  released_at: timestamp('released_at', { withTimezone: true }),
+  result_status_code: integer('result_status_code'),
+  result_envelope: jsonb('result_envelope'),
+  result_expires_at: timestamp('result_expires_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userKindIdempotencyUnique: uniqueIndex('entitlement_reservations_user_kind_idempotency_unique')
+    .on(t.user_id, t.usage_kind, t.idempotency_key),
+  expiryIdx: index('entitlement_reservations_expiry_idx').on(t.status, t.expires_at),
+  resultExpiryIdx: index('entitlement_reservations_result_expiry_idx').on(t.result_expires_at),
+}));
+
+// ---- canonical applications and artifacts ----
+export const artifacts = pgTable('artifacts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  legacy_generated_resume_id: uuid('legacy_generated_resume_id'),
+  kind: text('kind').notNull(),
+  structured_content: jsonb('structured_content'),
+  rendered_object_key: text('rendered_object_key'),
+  rendered_blob_url: text('rendered_blob_url'),
+  retention_class: text('retention_class').default('generated_spec').notNull(),
+  source: text('source').notNull(),
+  deleted_at: timestamp('deleted_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userKindIdx: index('artifacts_user_kind_idx').on(t.user_id, t.kind, t.created_at),
+  legacyResumeUnique: uniqueIndex('artifacts_legacy_resume_unique')
+    .on(t.legacy_generated_resume_id)
+    .where(sql`${t.legacy_generated_resume_id} is not null`),
+}));
+
+export const applications = pgTable('applications', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  legacy_generated_resume_id: uuid('legacy_generated_resume_id'),
+  job_id: uuid('job_id'),
+  company_scope_key: text('company_scope_key').notNull(),
+  company_name: text('company_name').notNull(),
+  role: text('role').notNull(),
+  portal_url: text('portal_url'),
+  source_surface: text('source_surface').notNull(),
+  tracker_state: text('tracker_state').default('saved').notNull(),
+  review_state: text('review_state').default('not_started').notNull(),
+  submission_state: text('submission_state').default('not_started').notNull(),
+  selected_resume_artifact_id: uuid('selected_resume_artifact_id').references(() => artifacts.id, { onDelete: 'set null' }),
+  resume_attached: boolean('resume_attached').default(false).notNull(),
+  resume_source: text('resume_source').default('none').notNull(),
+  resume_attached_at: timestamp('resume_attached_at', { withTimezone: true }),
+  application_fingerprint: text('application_fingerprint').notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userFingerprintUnique: uniqueIndex('applications_user_fingerprint_unique').on(t.user_id, t.application_fingerprint),
+  userUpdatedIdx: index('applications_user_updated_idx').on(t.user_id, t.updated_at),
+  legacyResumeUnique: uniqueIndex('applications_legacy_resume_unique')
+    .on(t.legacy_generated_resume_id)
+    .where(sql`${t.legacy_generated_resume_id} is not null`),
+  resumeAttachmentStateCheck: check('applications_resume_attachment_state_check', sql`
+    (${t.resume_attached} = false and ${t.resume_source} = 'none')
+    or (${t.resume_attached} = true and ${t.resume_source} = 'artifact' and ${t.selected_resume_artifact_id} is not null)
+    or (${t.resume_attached} = true and ${t.resume_source} = 'base_resume')
+  `),
+}));
+
+export const artifact_versions = pgTable('artifact_versions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  artifact_id: uuid('artifact_id').notNull().references(() => artifacts.id, { onDelete: 'cascade' }),
+  version_number: integer('version_number').notNull(),
+  generation_source: text('generation_source').notNull(),
+  job_context: jsonb('job_context'),
+  content_hash: text('content_hash').notNull(),
+  structured_content: jsonb('structured_content').notNull(),
+  // Bind the immutable source version to the exact retained blob capability. An artifact's
+  // current pointer is mutable, so recovery must never infer this association from that pointer.
+  rendered_object_key: text('rendered_object_key'),
+  rendered_blob_url: text('rendered_blob_url'),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  artifactVersionUnique: uniqueIndex('artifact_versions_artifact_version_unique').on(t.artifact_id, t.version_number),
+  renderedObjectKeyUnique: uniqueIndex('artifact_versions_rendered_object_key_unique')
+    .on(t.rendered_object_key)
+    .where(sql`${t.rendered_object_key} is not null`),
+}));
+
+export const application_artifacts = pgTable('application_artifacts', {
+  application_id: uuid('application_id').notNull().references(() => applications.id, { onDelete: 'cascade' }),
+  artifact_id: uuid('artifact_id').notNull().references(() => artifacts.id, { onDelete: 'cascade' }),
+  purpose: text('purpose').notNull(),
+  selected: boolean('selected').default(false).notNull(),
+  attachment_result: text('attachment_result'),
+  attached_at: timestamp('attached_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.application_id, t.artifact_id, t.purpose] }),
+}));
+
+export const application_submission_events = pgTable('application_submission_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  application_id: uuid('application_id').notNull().references(() => applications.id, { onDelete: 'cascade' }),
+  event_id: uuid('event_id').notNull(),
+  outcome: text('outcome').notNull(),
+  final_url: text('final_url').notNull(),
+  portal_identity: text('portal_identity').notNull(),
+  confirmation_text: text('confirmation_text'),
+  applied_submission_state: text('applied_submission_state').notNull(),
+  observed_at: timestamp('observed_at', { withTimezone: true }).defaultNow().notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userEventUnique: uniqueIndex('application_submission_events_user_event_unique').on(t.user_id, t.event_id),
+  applicationTimeIdx: index('application_submission_events_application_time_idx')
+    .on(t.application_id, t.observed_at),
+}));
+
+// ---- checkout action restoration and monetization ledger ----
+export const pending_premium_actions = pgTable('pending_premium_actions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  nonce_hash: text('nonce_hash').notNull().unique(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  feature_key: text('feature_key').notNull(),
+  application_id: uuid('application_id'),
+  job_id: uuid('job_id'),
+  contact_id: uuid('contact_id'),
+  return_route: text('return_route').notNull(),
+  context_hash: text('context_hash').default('').notNull(),
+  idempotency_key: text('idempotency_key').notNull(),
+  idempotency_binding: text('idempotency_binding'),
+  state: text('state').default('pending').notNull(),
+  offer_id: uuid('offer_id'),
+  expires_at: timestamp('expires_at', { withTimezone: true }).notNull(),
+  consumed_at: timestamp('consumed_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userIdempotencyBindingUnique: uniqueIndex('pending_premium_actions_user_idempotency_binding_unique')
+    .on(t.user_id, t.idempotency_binding)
+    .where(sql`${t.idempotency_binding} is not null`),
+  userCreatedIdx: index('pending_premium_actions_user_idx').on(t.user_id, t.created_at),
+}));
+
+export const monetization_events = pgTable('monetization_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  event_key: text('event_key').notNull().unique(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+  event_name: text('event_name').notNull(),
+  surface: text('surface').notNull(),
+  placement: text('placement'),
+  trigger: text('trigger'),
+  feature_key: text('feature_key'),
+  plan_id: text('plan_id'),
+  offer_id: uuid('offer_id'),
+  application_id: uuid('application_id'),
+  job_id: uuid('job_id'),
+  session_id: text('session_id'),
+  properties: jsonb('properties').default({}).notNull(),
+  occurred_at: timestamp('occurred_at', { withTimezone: true }).notNull(),
+  received_at: timestamp('received_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userTimeIdx: index('monetization_events_user_time_idx').on(t.user_id, t.occurred_at),
+  funnelIdx: index('monetization_events_funnel_idx').on(t.event_name, t.occurred_at),
+}));
+
+// ---- user-owned LinkedIn CSV network baseline ----
+// Standard LinkedIn sign-in does not grant a connections list. These tables therefore model the
+// user's explicit data export import. OAuth records exist for a later approved integration, but
+// no route creates them without the restricted LinkedIn permission.
+export const network_consents = pgTable('network_consents', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  consent_version: text('consent_version').notNull(),
+  data_source: text('data_source').notNull(),
+  scopes: jsonb('scopes').$type<string[]>().notNull(),
+  disclosure_hash: text('disclosure_hash').notNull(),
+  granted_at: timestamp('granted_at', { withTimezone: true }).defaultNow().notNull(),
+  revoked_at: timestamp('revoked_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  oneActiveConsent: uniqueIndex('network_consents_one_active_idx')
+    .on(t.user_id, t.data_source)
+    .where(sql`${t.revoked_at} is null`),
+  userGrantedIdx: index('network_consents_user_idx').on(t.user_id, t.granted_at),
+}));
+
+export const linked_network_accounts = pgTable('linked_network_accounts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  encrypted_access_token: text('encrypted_access_token'),
+  encrypted_refresh_token: text('encrypted_refresh_token'),
+  granted_scopes: jsonb('granted_scopes').$type<string[]>().notNull(),
+  token_expires_at: timestamp('token_expires_at', { withTimezone: true }),
+  refresh_state: text('refresh_state').notNull(),
+  revoked_at: timestamp('revoked_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userProviderUnique: uniqueIndex('linked_network_accounts_user_provider_unique').on(t.user_id, t.provider),
+}));
+
+export const network_imports = pgTable('network_imports', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  source: text('source').notNull(),
+  file_sha256: text('file_sha256').notNull(),
+  consent_version: text('consent_version').notNull(),
+  disclosure_hash: text('disclosure_hash').notNull(),
+  row_count: integer('row_count').notNull(),
+  accepted_rows: integer('accepted_rows').notNull(),
+  rejected_rows: integer('rejected_rows').notNull(),
+  validation_result: jsonb('validation_result').notNull(),
+  // Normalized preview data only. Raw uploaded bytes and the user's local filename are never kept.
+  preview_rows: jsonb('preview_rows'),
+  status: text('status').notNull(),
+  expires_at: timestamp('expires_at', { withTimezone: true }).notNull(),
+  committed_at: timestamp('committed_at', { withTimezone: true }),
+  raw_deleted_at: timestamp('raw_deleted_at', { withTimezone: true }).notNull(),
+  deleted_at: timestamp('deleted_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userCreatedIdx: index('network_imports_user_idx').on(t.user_id, t.created_at),
+}));
+
+export const network_people = pgTable('network_people', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  canonical_identity_key: text('canonical_identity_key').notNull(),
+  first_name: text('first_name'),
+  last_name: text('last_name'),
+  full_name: text('full_name').notNull(),
+  profile_url: text('profile_url'),
+  company_scope_key: text('company_scope_key'),
+  company_name: text('company_name'),
+  title: text('title'),
+  source: text('source').notNull(),
+  source_import_id: uuid('source_import_id').references(() => network_imports.id, { onDelete: 'set null' }),
+  source_timestamp: timestamp('source_timestamp', { withTimezone: true }),
+  provenance: jsonb('provenance').notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userIdentityUnique: uniqueIndex('network_people_user_identity_unique').on(t.user_id, t.canonical_identity_key),
+  userCompanyIdx: index('network_people_user_company_idx').on(t.user_id, t.company_scope_key),
+}));
+
+export const network_edges = pgTable('network_edges', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  person_id: uuid('person_id').notNull().references(() => network_people.id, { onDelete: 'cascade' }),
+  relationship_type: text('relationship_type').notNull(),
+  source: text('source').notNull(),
+  source_import_id: uuid('source_import_id').references(() => network_imports.id, { onDelete: 'set null' }),
+  source_timestamp: timestamp('source_timestamp', { withTimezone: true }),
+  confidence: text('confidence').notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userPersonRelationshipUnique: uniqueIndex('network_edges_user_person_relationship_unique')
+    .on(t.user_id, t.person_id, t.relationship_type, t.source),
+  userCreatedIdx: index('network_edges_user_idx').on(t.user_id, t.created_at),
+}));
+
+export const network_company_matches = pgTable('network_company_matches', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  company_scope_key: text('company_scope_key').notNull(),
+  company_name: text('company_name').notNull(),
+  supporting_edge_ids: jsonb('supporting_edge_ids').$type<string[]>().notNull(),
+  connection_count: integer('connection_count').notNull(),
+  last_calculated_at: timestamp('last_calculated_at', { withTimezone: true }).defaultNow().notNull(),
+  expires_at: timestamp('expires_at', { withTimezone: true }),
+}, (t) => ({
+  userCompanyUnique: uniqueIndex('network_company_matches_user_company_unique').on(t.user_id, t.company_scope_key),
+  userCountIdx: index('network_company_matches_user_count_idx').on(t.user_id, t.connection_count),
+}));
+
+// This consent record is intentionally separate from the paid entitlement. The setting stays
+// private until verified recruiter access, moderation, contact relay, and auditing are functional.
+export const candidate_visibility_profiles = pgTable('candidate_visibility_profiles', {
+  user_id: uuid('user_id').primaryKey().references(() => users.id, { onDelete: 'cascade' }),
+  enabled: boolean('enabled').default(false).notNull(),
+  consent_version: text('consent_version'),
+  disclosure_hash: text('disclosure_hash'),
+  approved_fields: jsonb('approved_fields').$type<string[]>().default([]).notNull(),
+  resume_artifact_id: uuid('resume_artifact_id').references(() => artifacts.id, { onDelete: 'set null' }),
+  indexed_state: text('indexed_state').default('private').notNull(),
+  granted_at: timestamp('granted_at', { withTimezone: true }),
+  withdrawn_at: timestamp('withdrawn_at', { withTimezone: true }),
   updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
@@ -406,6 +822,57 @@ export const email_resolutions = pgTable('email_resolutions', {
   resolved_at: timestamp('resolved_at', { withTimezone: true }).defaultNow(),
 }, (t) => ({
   contactIdx: index('email_resolutions_contact_id_idx').on(t.contact_id),
+}));
+
+// A verified contact is charged only the first time it is unlocked for one account. Contact facts
+// remain shared, while this ownership ledger is user-scoped and leaves with the account.
+export const user_contact_unlocks = pgTable('user_contact_unlocks', {
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  contact_id: uuid('contact_id').notNull().references(() => contacts.id, { onDelete: 'cascade' }),
+  company_scope_key: text('company_scope_key').notNull(),
+  source: text('source').notNull(),
+  unlocked_at: timestamp('unlocked_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.user_id, t.contact_id] }),
+  userCompanyIdx: index('user_contact_unlocks_user_company_idx').on(t.user_id, t.company_scope_key, t.unlocked_at),
+}));
+
+// A generated outreach email is a durable, user-owned application artifact. The operation id is
+// the public idempotency key, while the request hash binds that key to the exact canonical contact,
+// application, and prompt inputs that produced this immutable result.
+export const outreach_draft_generations = pgTable('outreach_draft_generations', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  operation_id: uuid('operation_id').notNull(),
+  request_hash: text('request_hash').notNull(),
+  contact_id: uuid('contact_id').notNull().references(() => contacts.id, { onDelete: 'restrict' }),
+  application_id: uuid('application_id').notNull().references(() => applications.id, { onDelete: 'cascade' }),
+  company_scope_key: text('company_scope_key').notNull(),
+  company_name: text('company_name').notNull(),
+  role: text('role').notNull(),
+  draft_type: text('draft_type').notNull(),
+  generation_source: text('generation_source').default('ai_generated').notNull(),
+  contact_email: text('contact_email'),
+  original_subject: text('original_subject').notNull(),
+  original_body: text('original_body').notNull(),
+  subject: text('subject').notNull(),
+  body: text('body').notNull(),
+  word_count: integer('word_count').notNull(),
+  warnings: jsonb('warnings').$type<string[]>().default([]).notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userOperationUnique: uniqueIndex('outreach_draft_generations_user_operation_unique')
+    .on(t.user_id, t.operation_id),
+  userCreatedIdx: index('outreach_draft_generations_user_created_idx').on(t.user_id, t.created_at),
+  applicationCreatedIdx: index('outreach_draft_generations_application_created_idx')
+    .on(t.application_id, t.created_at),
+  draftTypeCheck: check('outreach_draft_generations_draft_type_check', sql`
+    ${t.draft_type} in ('first_note', 'follow_up', 'thank_you', 'referral_ask', 'offer_stage')
+  `),
+  generationSourceCheck: check('outreach_draft_generations_generation_source_check', sql`
+    ${t.generation_source} in ('ai_generated', 'user_written')
+  `),
 }));
 
 // ---- outreach_events ----

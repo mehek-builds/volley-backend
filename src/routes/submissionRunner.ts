@@ -13,6 +13,7 @@ import {
   user_documents,
   users,
 } from '../db/schema';
+import { getEntitlementSnapshot } from '../lib/entitlements';
 import {
   normalizeApplicationReviewQuestions,
   readApplicationReview,
@@ -300,13 +301,16 @@ async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
 }
 
 async function standingAuthorization(userId: string): Promise<StandingAuthorization> {
-  const [user] = await db.select({
-    enabled: users.automatic_submission_enabled,
-    consentedAt: users.automatic_submission_consented_at,
-    consentVersion: users.automatic_submission_consent_version,
-  }).from(users).where(eq(users.id, userId)).limit(1);
+  const [[user], entitlement] = await Promise.all([
+    db.select({
+      enabled: users.automatic_submission_enabled,
+      consentedAt: users.automatic_submission_consented_at,
+      consentVersion: users.automatic_submission_consent_version,
+    }).from(users).where(eq(users.id, userId)).limit(1),
+    getEntitlementSnapshot(userId),
+  ]);
   return {
-    enabled: user?.enabled === true,
+    enabled: user?.enabled === true && entitlement.features.automatic_submission,
     consentedAt: user?.consentedAt?.toISOString(),
     consentVersion: user?.consentVersion ?? undefined,
   };

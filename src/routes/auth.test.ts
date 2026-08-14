@@ -73,6 +73,8 @@ describe('Google identity claims', () => {
       email_verified: true,
       google_subject: 'google-new-user',
       plan: 'free',
+      entitlement_policy_version: 'litos-entitlements-v2',
+      trial_started_at: now,
       trial_ends_at: new Date('2026-08-02T08:00:00.000Z'),
       created_at: now,
       onboarding_completed_at: null,

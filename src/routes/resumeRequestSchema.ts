@@ -16,7 +16,24 @@ export const RESUME_REQUEST_LIMITS = {
 const optionalContactField = (maximum: number) =>
   z.string().max(maximum).nullable().optional().transform((value) => value ?? undefined);
 
+const resumeGenerationInitiationSchema = z.enum(['explicit_click', 'hover_prewarm']);
+
+export type ResumeGenerationInitiation = z.infer<typeof resumeGenerationInitiationSchema>;
+
+export function resumeGenerationFeatureSequence(
+  initiation: ResumeGenerationInitiation,
+): readonly ('hover_generation' | 'ai_resume_tailoring')[] {
+  return initiation === 'hover_prewarm'
+    ? ['hover_generation', 'ai_resume_tailoring']
+    : ['ai_resume_tailoring'];
+}
+
 export const resumeGenerateBodySchema = z.object({
+  // A caller-generated key makes trial usage safe to retry. Older clients can omit it and the
+  // route falls back to the generated packet id, preserving backwards compatibility.
+  operation_id: z.string().uuid().optional(),
+  // Canonical Free application record this paid artifact belongs to, when one already exists.
+  application_id: z.string().uuid().optional(),
   company: z.string().min(1).max(RESUME_REQUEST_LIMITS.company),
   role: z.string().trim().min(1).max(RESUME_REQUEST_LIMITS.role),
   jd_text: z.string().min(20).max(RESUME_REQUEST_LIMITS.jobDescription),
@@ -49,6 +66,9 @@ export const resumeGenerateBodySchema = z.object({
    * nobody is waiting; an interactive "Apply now" cannot. Default false, so the expensive path is
    * opt-in rather than something a caller has to know to avoid.
    */
+  // New callers state why generation started. `prewarm` remains accepted for the deployed client,
+  // but is normalized into the same paid-only initiation before the route does any work.
+  initiation: resumeGenerationInitiationSchema.optional(),
   prewarm: z.boolean().optional(),
   application: z.object({
     portal_url: z.string().url().max(4000),
@@ -67,6 +87,29 @@ export const resumeGenerateBodySchema = z.object({
     github_url: optionalContactField(RESUME_REQUEST_LIMITS.url),
     portfolio_url: optionalContactField(RESUME_REQUEST_LIMITS.url),
   }),
+}).superRefine((value, context) => {
+  if (value.initiation === 'explicit_click' && value.prewarm === true) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['prewarm'],
+      message: 'prewarm generation must use hover_prewarm initiation',
+    });
+  }
+  if (value.initiation === 'hover_prewarm' && value.prewarm === false) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['prewarm'],
+      message: 'hover_prewarm cannot disable prewarm',
+    });
+  }
+}).transform((value) => {
+  const initiation: ResumeGenerationInitiation = value.initiation
+    ?? (value.prewarm === true ? 'hover_prewarm' : 'explicit_click');
+  return {
+    ...value,
+    initiation,
+    prewarm: initiation === 'hover_prewarm',
+  };
 });
 
 export type ResumeGenerateBody = z.infer<typeof resumeGenerateBodySchema>;

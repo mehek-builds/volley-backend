@@ -53,6 +53,8 @@ export const resumeApplicantEmailResponseSchema = z.object({
 export const resumeGenerateSuccessResponseSchema = z.object({
   resume_id: z.string().uuid(),
   resume_url: z.string(),
+  canonical_application_id: z.string().uuid().optional(),
+  artifact_id: z.string().uuid().optional(),
   file_name: z.string(),
   spec: z.unknown(),
   applicant_email: resumeApplicantEmailResponseSchema.optional(),

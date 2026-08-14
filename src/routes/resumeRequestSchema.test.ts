@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
-import { RESUME_REQUEST_LIMITS, resumeGenerateBodySchema } from './resumeRequestSchema';
+import {
+  RESUME_REQUEST_LIMITS,
+  resumeGenerateBodySchema,
+  resumeGenerationFeatureSequence,
+} from './resumeRequestSchema';
 
 const validRequest = {
   company: 'Litos',
@@ -18,6 +22,38 @@ describe('resume generation request limits', () => {
   test('accepts normal request values and preserves nullable contact compatibility', () => {
     const parsed = resumeGenerateBodySchema.parse(validRequest);
     assert.equal(parsed.contact.linkedin_url, undefined);
+    assert.equal(parsed.initiation, 'explicit_click');
+    assert.equal(parsed.prewarm, false);
+  });
+
+  test('normalizes both explicit and legacy hover prewarm initiation without ambiguity', () => {
+    const explicitHover = resumeGenerateBodySchema.parse({
+      ...validRequest,
+      initiation: 'hover_prewarm',
+    });
+    const legacyHover = resumeGenerateBodySchema.parse({ ...validRequest, prewarm: true });
+    assert.equal(explicitHover.initiation, 'hover_prewarm');
+    assert.equal(explicitHover.prewarm, true);
+    assert.equal(legacyHover.initiation, 'hover_prewarm');
+    assert.equal(legacyHover.prewarm, true);
+    assert.deepEqual(resumeGenerationFeatureSequence('hover_prewarm'), [
+      'hover_generation',
+      'ai_resume_tailoring',
+    ]);
+    assert.deepEqual(resumeGenerationFeatureSequence('explicit_click'), ['ai_resume_tailoring']);
+  });
+
+  test('rejects contradictory initiation markers', () => {
+    assert.equal(resumeGenerateBodySchema.safeParse({
+      ...validRequest,
+      initiation: 'explicit_click',
+      prewarm: true,
+    }).success, false);
+    assert.equal(resumeGenerateBodySchema.safeParse({
+      ...validRequest,
+      initiation: 'hover_prewarm',
+      prewarm: false,
+    }).success, false);
   });
 
   test('accepts optional portal metadata so the dashboard can create a review packet in one request', () => {

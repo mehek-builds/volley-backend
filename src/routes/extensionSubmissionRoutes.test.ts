@@ -14,6 +14,19 @@ test('extension submission routes keep auth, ownership, quota, and claims server
   assert.match(source, /submission_claim_id'->|submission_claim_id/);
 });
 
+test('Free attended submissions stay manual while standing consent remains entitlement-gated', () => {
+  const route = source.slice(
+    source.indexOf("'/applications/:id/submission/extension-start'"),
+    source.indexOf("'/applications/:id/submission/extension-outcome'"),
+  );
+  assert.match(route, /extensionAuthorizationRequiresAutomaticSubmission\(parsed\.data\.authorization\)/);
+  assert.match(route, /requireFeature\([\s\S]*?'automatic_submission'/);
+  assert.ok(
+    route.indexOf('extensionAuthorizationRequiresAutomaticSubmission(parsed.data.authorization)')
+      < route.indexOf("'automatic_submission'"),
+  );
+});
+
 test('attended extension refill returns the exact owned generated packet and a fresh resume capability', () => {
   const route = source.slice(
     source.indexOf("'/applications/:id/submission/extension-packet'"),

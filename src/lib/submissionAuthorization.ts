@@ -1,5 +1,11 @@
 export type SubmissionAuthorizationSource = 'standing_consent' | 'per_application_approval' | 'user_initiated_extension';
 
+export function extensionAuthorizationRequiresAutomaticSubmission(
+  source: 'standing_consent' | 'user_initiated',
+): boolean {
+  return source === 'standing_consent';
+}
+
 export function preparedSubmissionStatus(options: {
   safe: boolean;
   standingConsentEnabled: boolean;

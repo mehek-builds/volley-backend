@@ -97,7 +97,7 @@ function checkoutReturnUrl(name: 'LITOS_PAY_SUCCESS_URL' | 'LITOS_PAY_CANCEL_URL
 }
 
 function portalReturnUrl(): string {
-  const configured = env('STRIPE_PORTAL_RETURN_URL');
+  const configured = env('STRIPE_BILLING_PORTAL_RETURN_URL') || env('STRIPE_PORTAL_RETURN_URL');
   if (configured) return configured;
   const base = env('PUBLIC_WEB_URL') || env('LITOS_WEB_URL') || 'https://trylitos.com';
   try {

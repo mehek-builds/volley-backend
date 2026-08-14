@@ -1,7 +1,15 @@
 import { del, put } from '@vercel/blob';
+import { randomUUID } from 'node:crypto';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
-import { generated_resumes, profiles } from '../db/schema';
+import {
+  application_artifacts,
+  applications,
+  artifact_versions,
+  artifacts,
+  generated_resumes,
+  profiles,
+} from '../db/schema';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { readApplicationReview } from './applicationReview';
 import { renderCoverLetterPdf } from './coverLetterPdf';
@@ -9,6 +17,8 @@ import { generateCoverLetter, validateCoverLetter } from '../llm/coverLetter';
 import { contestedMetrics } from '../engine/grounding';
 import { resolveBlobUrl } from './resumeAccess';
 import { coverLetterFileNameForRole } from './resumeFileName';
+import { immutableDocumentContentHash } from './immutableDocumentHash';
+import { deleteCanonicalCoverLetters } from './canonicalCoverLetterService';
 
 export type ApplicationRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -100,10 +110,59 @@ async function persistCoverLetter(
   const previous = storedCoverLetter(row);
   let updated: Array<{ id: string }>;
   try {
-    updated = await db.update(generated_resumes).set({
-      spec: sql`jsonb_set(${generated_resumes.spec}, '{_cover_letter}', ${JSON.stringify(artifact)}::jsonb, true)`,
-    }).where(and(eq(generated_resumes.id, row.id), eq(generated_resumes.user_id, row.user_id)))
-      .returning({ id: generated_resumes.id });
+    updated = await db.transaction(async (tx) => {
+      const [canonicalApplication] = await tx.select({
+        application_id: application_artifacts.application_id,
+      }).from(application_artifacts).innerJoin(artifacts, eq(
+        artifacts.id,
+        application_artifacts.artifact_id,
+      )).where(and(
+        eq(artifacts.user_id, row.user_id),
+        eq(artifacts.legacy_generated_resume_id, row.id),
+        eq(application_artifacts.purpose, 'resume'),
+      )).limit(1);
+      if (!canonicalApplication) throw new Error('This application is missing its retained document record');
+
+      const frozenContent = {
+        body: artifact.body,
+        full_name: contact.full_name,
+        email: contact.email,
+        company: job.company,
+        generated_at: artifact.generated_at,
+      };
+      const coverArtifactId = randomUUID();
+      const changed = await tx.update(generated_resumes).set({
+        spec: sql`jsonb_set(${generated_resumes.spec}, '{_cover_letter}', ${JSON.stringify(artifact)}::jsonb, true)`,
+      }).where(and(eq(generated_resumes.id, row.id), eq(generated_resumes.user_id, row.user_id)))
+        .returning({ id: generated_resumes.id });
+      if (!changed[0]) return changed;
+      await tx.insert(artifacts).values({
+        id: coverArtifactId,
+        user_id: row.user_id,
+        kind: 'cover_letter',
+        structured_content: frozenContent,
+        rendered_object_key: artifact.object_key,
+        rendered_blob_url: blob.url,
+        source: approved ? 'user_edited_cover_letter' : 'ai_cover_letter',
+      });
+      await tx.insert(artifact_versions).values({
+        artifact_id: coverArtifactId,
+        version_number: 1,
+        generation_source: approved ? 'user_edited_cover_letter' : 'ai_cover_letter',
+        job_context: row.job_context,
+        content_hash: immutableDocumentContentHash(frozenContent),
+        structured_content: frozenContent,
+        rendered_object_key: artifact.object_key,
+        rendered_blob_url: blob.url,
+      });
+      await tx.insert(application_artifacts).values({
+        application_id: canonicalApplication.application_id,
+        artifact_id: coverArtifactId,
+        purpose: 'cover_letter',
+        selected: true,
+      });
+      return changed;
+    });
   } catch (error) {
     await del(blob.url).catch(() => undefined);
     throw error;
@@ -201,6 +260,18 @@ export async function saveStoredCoverLetter(row: ApplicationRow, body: string) {
 
 export async function deleteStoredCoverLetter(row: ApplicationRow) {
   const existing = storedCoverLetter(row);
+  const [canonical] = await db.select({ id: applications.id }).from(applications).where(and(
+    eq(applications.user_id, row.user_id),
+    eq(applications.legacy_generated_resume_id, row.id),
+  )).limit(1);
+  if (canonical) {
+    await deleteCanonicalCoverLetters({
+      userId: row.user_id,
+      applicationId: canonical.id,
+      legacyPacketId: row.id,
+    });
+    return;
+  }
   await db.update(generated_resumes).set({
     spec: sql`${generated_resumes.spec} - '_cover_letter'`,
   }).where(and(eq(generated_resumes.id, row.id), eq(generated_resumes.user_id, row.user_id)));

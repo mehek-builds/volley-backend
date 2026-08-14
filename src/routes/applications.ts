@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { put } from '@vercel/blob';
+import { del, put } from '@vercel/blob';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -48,6 +48,7 @@ import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, reviewAnswerSaveDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import { submissionClaimPatch } from '../lib/submissionStop';
+import { extensionAuthorizationRequiresAutomaticSubmission } from '../lib/submissionAuthorization';
 import {
   detectPortal,
   isPortalSupported,
@@ -67,6 +68,8 @@ import {
 } from '../lib/submissionEducationGuard';
 import { resumeFileNameForRole } from '../lib/resumeFileName';
 import { sendUnsupportedPortalApplicationEmail } from '../lib/unsupportedPortalEmailFallback';
+import { requireFeature } from '../lib/entitlements';
+import { appendEditedResumeArtifactVersion } from '../lib/resumeArtifactVersions';
 import {
   extensionHandoffPacketMatches,
   extensionHandoffVersion,
@@ -876,6 +879,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const params = paramsSchema.safeParse(request.params);
       if (!params.success) return reply.status(400).send({ error: 'Invalid application id' });
       const userId = request.jwtPayload!.userId;
+      if (extensionAuthorizationRequiresAutomaticSubmission(parsed.data.authorization)) {
+        const automaticSubmission = await requireFeature(
+          userId,
+          'automatic_submission',
+          'extension_automatic_submission',
+        );
+        if (!automaticSubmission.allowed) return reply.status(402).send(automaticSubmission.denial);
+      }
       /* THE DUPLICATE GATE for the extension path, and it is the only one of the five that never
        * touches submissionRunner.submit: the extension does the filling and the clicking in the
        * applicant's own browser, and this route is the moment Litos authorizes it to. Refusing at
@@ -1271,18 +1282,37 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           layoutOmissions: rendered.omissions,
         },
       };
-      const updated = await db
-        .update(generated_resumes)
-        .set({ spec: updatedSpec, resume_object_key: blob.pathname })
-        .where(and(
-          eq(generated_resumes.id, row.id),
-          eq(generated_resumes.user_id, userId),
-          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
-          sql`${generated_resumes.spec}->'_review'->>'status' = ${review.status}`,
-        ))
-        .returning({ id: generated_resumes.id });
+      let updated: Array<{ id: string }>;
+      try {
+        updated = await db.transaction(async (tx) => {
+          const changed = await tx
+            .update(generated_resumes)
+            .set({ spec: updatedSpec, resume_object_key: blob.pathname })
+            .where(and(
+              eq(generated_resumes.id, row.id),
+              eq(generated_resumes.user_id, userId),
+              sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+              sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
+              sql`${generated_resumes.spec}->'_review'->>'status' = ${review.status}`,
+            ))
+            .returning({ id: generated_resumes.id });
+          if (changed.length === 0) return changed;
+          await appendEditedResumeArtifactVersion(tx, {
+            userId,
+            legacyGeneratedResumeId: row.id,
+            structuredContent: updatedSpec,
+            jobContext: row.job_context,
+            renderedObjectKey: blob.pathname,
+            renderedBlobUrl: blob.url,
+          });
+          return changed;
+        });
+      } catch (error) {
+        await del(blob.url).catch(() => undefined);
+        throw error;
+      }
       if (updated.length === 0) {
+        await del(blob.url).catch(() => undefined);
         return reply.status(409).send({ error: 'The application state changed before the resume edit finished' });
       }
 
@@ -2109,6 +2139,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     async (request: FastifyRequest, reply: FastifyReply) => {
       const row = await ownedResume(request, reply);
       if (!row) return;
+      const automaticSubmission = await requireFeature(
+        request.jwtPayload!.userId,
+        'automatic_submission',
+        'dashboard_automatic_submission',
+      );
+      if (!automaticSubmission.allowed) return reply.status(402).send(automaticSubmission.denial);
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current || current.status !== 'ready_for_final_approval') {

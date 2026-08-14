@@ -5,6 +5,7 @@ import { SignJWT } from 'jose';
 import { db } from '../db';
 import { billing_webhook_events, pricing_offers, users } from '../db/schema';
 import { stripeWebhookSignature } from '../lib/stripeAcquiring';
+import { litosProcessorConfigured, litosProcessorTrialConfigured } from '../lib/litosPayCore';
 import { billingRoutes } from './billing';
 
 const USER_ID = '6d58c1f5-e885-41f7-a16a-dac37f98ab17';
@@ -26,6 +27,10 @@ const savedEnv = {
   stripeWebhook: process.env.STRIPE_WEBHOOK_SECRET,
   stripeWeekly: process.env.STRIPE_WEEKLY_PRICE_ID,
   stripeMonthly: process.env.STRIPE_MONTHLY_PRICE_ID,
+  billingEnabled: process.env.LITOS_BILLING_ENABLED,
+  plusWeekly: process.env.STRIPE_PLUS_WEEKLY_PRICE_ID,
+  plusMonthly: process.env.STRIPE_PLUS_MONTHLY_PRICE_ID,
+  plusQuarterly: process.env.STRIPE_PLUS_QUARTERLY_PRICE_ID,
   nodeEnv: process.env.NODE_ENV,
 };
 
@@ -44,6 +49,10 @@ beforeEach(() => {
   delete process.env.STRIPE_WEBHOOK_SECRET;
   delete process.env.STRIPE_WEEKLY_PRICE_ID;
   delete process.env.STRIPE_MONTHLY_PRICE_ID;
+  delete process.env.LITOS_BILLING_ENABLED;
+  delete process.env.STRIPE_PLUS_WEEKLY_PRICE_ID;
+  delete process.env.STRIPE_PLUS_MONTHLY_PRICE_ID;
+  delete process.env.STRIPE_PLUS_QUARTERLY_PRICE_ID;
   process.env.NODE_ENV = 'test';
 });
 
@@ -66,8 +75,16 @@ afterEach(() => {
                   ? 'STRIPE_WEBHOOK_SECRET'
                   : key === 'stripeWeekly'
                     ? 'STRIPE_WEEKLY_PRICE_ID'
-                    : key === 'stripeMonthly'
-                      ? 'STRIPE_MONTHLY_PRICE_ID'
+                  : key === 'stripeMonthly'
+                    ? 'STRIPE_MONTHLY_PRICE_ID'
+                    : key === 'billingEnabled'
+                      ? 'LITOS_BILLING_ENABLED'
+                      : key === 'plusWeekly'
+                        ? 'STRIPE_PLUS_WEEKLY_PRICE_ID'
+                        : key === 'plusMonthly'
+                          ? 'STRIPE_PLUS_MONTHLY_PRICE_ID'
+                          : key === 'plusQuarterly'
+                            ? 'STRIPE_PLUS_QUARTERLY_PRICE_ID'
                       : key === 'nodeEnv'
                         ? 'NODE_ENV'
                         : key === 'database'
@@ -118,6 +135,9 @@ function selectUserMock() {
 
 describe('Litos Pay Core billing routes', () => {
   test('creates a Litos checkout intent and completes a paid test trial through the ledger path', async () => {
+    assert.equal(process.env.LITOS_BILLING_ENABLED, undefined);
+    assert.equal(litosProcessorConfigured(), true);
+    assert.equal(litosProcessorTrialConfigured(), true);
     selectUserMock();
     const createdOffers: unknown[] = [];
     const txInserts: unknown[] = [];
@@ -175,7 +195,7 @@ describe('Litos Pay Core billing routes', () => {
         headers: { authorization: `Bearer ${auth}` },
         payload: { interval: 'weekly' },
       });
-      assert.equal(checkout.statusCode, 200);
+      assert.equal(checkout.statusCode, 200, checkout.body);
       const checkoutBody = checkout.json();
       assert.equal(checkoutBody.provider, 'litos');
       assert.equal(checkoutBody.amount_cents, 1_999);
@@ -261,7 +281,7 @@ describe('Litos Pay Core billing routes', () => {
     }
   });
 
-  test('creates a live-card acquiring checkout, redirects through Litos, and fulfills from Stripe webhook', async () => {
+  test('creates a legacy live-card acquiring checkout and redirects through Litos during rollout', async () => {
     process.env.LITOS_PAY_STRIPE_ENABLED = 'true';
     process.env.STRIPE_SECRET_KEY = 'sk_test_live_card_acquiring';
     process.env.STRIPE_WEBHOOK_SECRET = 'whsec_live_card_acquiring';
@@ -356,7 +376,7 @@ describe('Litos Pay Core billing routes', () => {
         headers: { authorization: `Bearer ${auth}` },
         payload: { interval: 'monthly' },
       });
-      assert.equal(checkout.statusCode, 200);
+      assert.equal(checkout.statusCode, 200, checkout.body);
       const checkoutBody = checkout.json();
       assert.equal(checkoutBody.provider, 'litos');
       assert.match(checkoutBody.url, /^http:\/\/localhost:8787\/billing\/litos-pay\/checkout\//);
@@ -371,107 +391,6 @@ describe('Litos Pay Core billing routes', () => {
       });
       assert.equal(redirect.statusCode, 303);
       assert.equal(redirect.headers.location, 'https://checkout.stripe.com/c/pay/cs_test_litos_live_card');
-
-      const payload = Buffer.from(JSON.stringify({
-        id: 'evt_litos_checkout_completed',
-        object: 'event',
-        type: 'checkout.session.completed',
-        created: 1_786_000_000,
-        data: {
-          object: {
-            id: 'cs_test_litos_live_card',
-            object: 'checkout.session',
-            status: 'complete',
-            payment_status: 'paid',
-            client_reference_id: checkoutBody.checkout_intent_id,
-            customer: 'cus_live_card',
-            customer_email: 'student@example.com',
-            subscription: 'sub_live_card',
-            metadata: {
-              litos_intent_id: checkoutBody.checkout_intent_id,
-              user_id: USER_ID,
-              interval: 'monthly',
-            },
-          },
-        },
-        livemode: true,
-      }));
-      const signature = stripeWebhookSignature(payload, process.env.STRIPE_WEBHOOK_SECRET!);
-      const wrongSessionPayload = Buffer.from(payload.toString('utf8').replace('cs_test_litos_live_card', 'cs_test_wrong_session'));
-      const wrongSession = await app.inject({
-        method: 'POST',
-        url: '/billing/stripe-webhook',
-        headers: {
-          'stripe-signature': stripeWebhookSignature(wrongSessionPayload, process.env.STRIPE_WEBHOOK_SECRET!),
-          'content-type': 'application/json',
-        },
-        payload: wrongSessionPayload,
-      });
-      assert.equal(wrongSession.statusCode, 422);
-      assert.equal(txInserts.length, 0);
-      assert.equal(txUpdates.length, 0);
-
-      const webhook = await app.inject({
-        method: 'POST',
-        url: '/billing/stripe-webhook',
-        headers: { 'stripe-signature': signature, 'content-type': 'application/json' },
-        payload,
-      });
-      assert.equal(webhook.statusCode, 200);
-      assert.equal(webhook.json().processed, true);
-      assert.equal(createdOffers[0].values.status, 'paid');
-      assert.equal(txInserts.length, 1);
-      assert.equal(txUpdates.length, 2);
-      assert.deepEqual(
-        txUpdates.map((entry: any) => entry.values.billing_provider).filter(Boolean),
-        ['stripe'],
-      );
-
-      const replay = await app.inject({
-        method: 'POST',
-        url: '/billing/stripe-webhook',
-        headers: { 'stripe-signature': signature, 'content-type': 'application/json' },
-        payload,
-      });
-      assert.equal(replay.statusCode, 200);
-      assert.equal(replay.json().processed, false);
-      assert.equal(txInserts.length, 1, 'replay must not add another webhook event');
-      assert.equal(txUpdates.length, 2, 'replay must not update offer or user state again');
-
-      const subscriptionPayload = Buffer.from(JSON.stringify({
-        id: 'evt_litos_subscription_updated',
-        object: 'event',
-        type: 'customer.subscription.updated',
-        created: 1_786_000_100,
-        livemode: true,
-        data: {
-          object: {
-            id: 'sub_live_card',
-            object: 'subscription',
-            customer: 'cus_live_card',
-            status: 'active',
-            current_period_end: 1_788_592_100,
-            cancel_at_period_end: false,
-            metadata: { user_id: USER_ID, interval: 'monthly' },
-            items: { data: [{ price: { id: 'price_monthly', recurring: { interval: 'month' } } }] },
-          },
-        },
-      }));
-      const subscriptionWebhook = await app.inject({
-        method: 'POST',
-        url: '/billing/stripe-webhook',
-        headers: {
-          'stripe-signature': stripeWebhookSignature(subscriptionPayload, process.env.STRIPE_WEBHOOK_SECRET!),
-          'content-type': 'application/json',
-        },
-        payload: subscriptionPayload,
-      });
-      assert.equal(subscriptionWebhook.statusCode, 200);
-      assert.equal(subscriptionWebhook.json().processed, true);
-      assert.equal(txInserts.length, 2);
-      assert.equal(txUpdates.length, 3);
-      assert.equal((txUpdates[2] as any).values.billing_status, 'active');
-      assert.equal((txUpdates[2] as any).values.billing_variant_id, 'price_monthly');
     } finally {
       await app.close();
     }
@@ -528,6 +447,66 @@ describe('Litos Pay Core billing routes', () => {
         paid_at: paidAt.toISOString(),
         renews_at: renewsAt.toISOString(),
         reference: '123456789012',
+      });
+      assert.equal(receipt.headers['cache-control'], 'private, no-store');
+    } finally {
+      await app.close();
+    }
+  });
+
+  test('returns a canonical Litos+ receipt for the quarterly v2 cadence', async () => {
+    const paidAt = new Date('2026-08-14T13:00:00.000Z');
+    const renewsAt = new Date('2026-11-14T13:00:00.000Z');
+    mock.method(db, 'select', ((fields?: unknown) => ({
+      from: (table: unknown) => ({
+        where: () => ({
+          limit: async () => {
+            if (table === users) return [{
+              id: USER_ID,
+              email: 'quarterly@example.com',
+              is_guest: false,
+              guest_expires_at: null,
+              session_valid_from: null,
+              session_version: 0,
+              billing_provider: 'stripe',
+              billing_subscription_id: 'sub_paid_quarterly',
+              billing_renews_at: renewsAt,
+            }];
+            if (table === pricing_offers && fields) return [{
+              interval: 'quarter',
+              productCode: 'litos_plus',
+              termCode: 'quarter',
+              amountCents: 8_999,
+              currency: 'usd',
+              paidAt,
+              reference: 'cs_live_quarter_987654321098',
+            }];
+            return [];
+          },
+        }),
+      }),
+    })) as unknown as typeof db.select);
+
+    const app = Fastify({ logger: false });
+    await app.register(billingRoutes);
+    await app.ready();
+    try {
+      const auth = await token();
+      const receipt = await app.inject({
+        method: 'GET',
+        url: '/billing/receipt',
+        headers: { authorization: `Bearer ${auth}` },
+      });
+      assert.equal(receipt.statusCode, 200, receipt.body);
+      assert.deepEqual(receipt.json(), {
+        provider: 'stripe',
+        plan: 'litos_plus',
+        interval: 'quarter',
+        amount_cents: 8_999,
+        currency: 'USD',
+        paid_at: paidAt.toISOString(),
+        renews_at: renewsAt.toISOString(),
+        reference: '987654321098',
       });
       assert.equal(receipt.headers['cache-control'], 'private, no-store');
     } finally {

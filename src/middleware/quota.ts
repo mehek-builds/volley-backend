@@ -1,26 +1,22 @@
 import { FastifyReply } from 'fastify';
 import { sql, and, eq } from 'drizzle-orm';
 import { db, withDedicatedDatabase } from '../db/index';
-import { usage_counters, users } from '../db/schema';
+import { usage_counters } from '../db/schema';
 import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import { PRODUCT_NAME } from '../lib/product';
 import { lemonSqueezyCheckoutReadyUrl } from '../lib/lemonSqueezy';
+import { getEntitlementSnapshot, usesV2TrialMetering } from '../lib/entitlements';
 
-// Pricing model per PRD Section 10 (v0) + product decision 2026-07-02, revised same day
-// to a recurring-credits model (Apollo.io-style, not a one-time lifetime trial): every
-// feature - outreach AND resume-gen/autofill - is available on the free tier, including
-// 20 resume generations per month that reset like everything else. This keeps free
-// students coming back every month (job searches run for months, not a single session),
-// rather than a one-time trial that either converts immediately or churns the student
-// out entirely. Crossing 20/month is what moves a student onto the $49.99/mo paid tier,
-// which includes 1,000 resume generations per month. Gate volume, not discovery. All enforcement is server-side so
-// every client version is covered. Limits are env-tunable without a redeploy of intent.
+// Compatibility allowances for grandfathered Free accounts and pre-cutover trials. Current
+// Litos+ paid subscriptions are unlimited at the product layer and bypass these calendar-month
+// counters. Rolling hourly controls below remain the plan-independent abuse boundary.
 export const LIMITS = {
   free: {
     monthlyContacts: parseInt(process.env.FREE_MONTHLY_CONTACTS || '30', 10),
     monthlyDrafts: parseInt(process.env.FREE_MONTHLY_DRAFTS || '60', 10),
     monthlyResumes: parseInt(process.env.FREE_MONTHLY_RESUMES || '20', 10),
   },
+  // Kept only so an already-granted legacy reverse trial retains its original allowance.
   pro: {
     monthlyContacts: parseInt(process.env.PRO_MONTHLY_CONTACTS || '500', 10),
     monthlyDrafts: parseInt(process.env.PRO_MONTHLY_DRAFTS || '1000', 10),
@@ -175,25 +171,19 @@ export interface Entitlements {
 }
 
 export async function getEntitlements(userId: string): Promise<Entitlements> {
-  const rows = await db.select().from(users).where(eq(users.id, userId)).limit(1);
-  const user = rows[0];
-  // 'plus' is a legacy value from the short-lived 2026-07-01 Plus-tier resolution -
-  // treated identically to 'pro' now that resume-gen isn't a separate paid add-on.
-  if (user?.plan === 'pro' || user?.plan === 'plus') {
+  const snapshot = await getEntitlementSnapshot(userId);
+  if (snapshot.access_class === 'plus_paid' || snapshot.access_class === 'legacy_paid') {
     return { tier: 'pro', ...LIMITS.pro };
   }
-  // Reverse trial: full (pro-level) limits for the first TRIAL_DAYS after signup.
-  // trial_ends_at is set at signup; users created before this field existed fall
-  // back to created_at + TRIAL_DAYS.
-  const trialEnd = user?.trial_ends_at
-    ? new Date(user.trial_ends_at)
-    : user?.created_at
-      ? new Date(new Date(user.created_at).getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000)
-      : new Date(0);
-  if (trialEnd > new Date()) {
-    return { tier: 'trial', ...LIMITS.pro };
+  if (snapshot.access_class === 'trial_plus') {
+    return usesV2TrialMetering(snapshot)
+      ? { tier: 'trial', monthlyContacts: 10, monthlyDrafts: 10, monthlyResumes: 5 }
+      : { tier: 'trial', ...LIMITS.pro };
   }
-  return { tier: 'free', ...LIMITS.free };
+  if (snapshot.access_class === 'free_grandfathered') {
+    return { tier: 'free', ...LIMITS.free };
+  }
+  return { tier: 'free', monthlyContacts: 0, monthlyDrafts: 0, monthlyResumes: 0 };
 }
 
 // R-043: prod served the quota upsell with a Stripe TEST-mode checkout (buy.stripe.com/test_...),
@@ -218,7 +208,7 @@ export function quotaExceededPayload(ent: Entitlements, used: number, what: 'con
     const cap = ent.monthlyResumes;
     const base =
       ent.tier === 'free'
-        ? `You've used your ${cap} free resume generations this month. ${PRODUCT_NAME} Pro starts at $19.99/week and includes ${LIMITS.pro.monthlyResumes.toLocaleString()} resume generations + autofill. Resets on the 1st.`
+        ? `You've used your ${cap} free resume generations this month. ${PRODUCT_NAME}+ starts at $19.99/week and includes unlimited resume tailoring and autofill. Resets on the 1st.`
         : `You've hit this month's resume limit (${cap}). It resets on the 1st.`;
     return {
       error: upgradeLink && ent.tier === 'free' ? `${base} Upgrade: ${upgradeLink}` : base,
@@ -234,7 +224,7 @@ export function quotaExceededPayload(ent: Entitlements, used: number, what: 'con
   const base =
     ent.tier === 'pro'
       ? `You've hit this month's Pro limit (${cap} ${what}). It resets on the 1st.`
-      : `You've used your ${cap} free verified ${what} this month. ${PRODUCT_NAME} Pro unlocks ${what === 'contacts' ? LIMITS.pro.monthlyContacts : LIMITS.pro.monthlyDrafts} per month.`;
+      : `You've used your ${cap} free verified ${what} this month. ${PRODUCT_NAME}+ unlocks unlimited ${what}.`;
   return {
     error: upgradeLink && ent.tier !== 'pro' ? `${base} Upgrade: ${upgradeLink}` : base,
     code: 'quota_exceeded',
@@ -257,4 +247,32 @@ export function rateLimitedReply(reply: FastifyReply) {
       code: 'rate_limited',
       retry_after_seconds: retryAfterSeconds,
     });
+}
+
+export function paidSafetyLimitPayload(used: number, limit: number, what: 'contacts' | 'drafts' | 'resumes', now = new Date()) {
+  const resetAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  const retryAfterSeconds = Math.max(1, Math.ceil((resetAt.getTime() - now.getTime()) / 1000));
+  return {
+    error: `This account reached the monthly ${what} safety limit. It resets on the 1st. No plan change is needed.`,
+    code: 'rate_limited' as const,
+    reason: 'paid_safety_limit' as const,
+    used,
+    limit,
+    retry_after_seconds: retryAfterSeconds,
+    retry_at: resetAt.toISOString(),
+  };
+}
+
+export function paidSafetyLimitedReply(
+  reply: FastifyReply,
+  used: number,
+  limit: number,
+  what: 'contacts' | 'drafts' | 'resumes',
+) {
+  const payload = paidSafetyLimitPayload(used, limit, what);
+  return reply
+    .header('Retry-After', String(payload.retry_after_seconds))
+    .header('Cache-Control', 'private, no-store')
+    .status(429)
+    .send(payload);
 }
