@@ -4464,8 +4464,6 @@ const WORKABLE_LEGACY_CITY_SELECTOR = 'input[name="city"]:visible';
 const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible';
-const WORKABLE_UAE_PHONE_COUNTRY_OPTION_SELECTOR =
-  '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible';
 // Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
 // city input before the visible address autocomplete on current forms, so a plain comma list can
 // still pick the wrong control. The city arm exists only when no visible address control exists.
@@ -4501,29 +4499,63 @@ function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
   });
 }
 
+type WorkablePhoneCountryPlan = {
+  dialCode: string;
+  displayedDialCode: string;
+  optionSelector: string;
+};
+
 type WorkablePhonePlan = {
   fieldValue: string;
   expectedDigits: string;
-  uae: boolean;
+  country: WorkablePhoneCountryPlan | null;
 };
+
+const WORKABLE_PHONE_COUNTRY_SPECS = [
+  { countryCode: 'ae', dialCode: '971', nationalDigits: 9, domesticPrefix: '0' },
+  { countryCode: 'us', dialCode: '1', nationalDigits: 10, domesticPrefix: '' },
+] as const;
 
 function digitsOnly(value: string | null | undefined): string {
   return String(value ?? '').replace(/\D/g, '');
 }
 
+function workablePhoneCountryOptionSelector(countryCode: string, dialCode: string): string {
+  return `[role="option"][data-country-code="${countryCode}"][data-dial-code="${dialCode}"]`
+    + `[id$="__item-${countryCode}"]:visible`;
+}
+
 function workablePhonePlan(phone: string | undefined): WorkablePhonePlan | null {
   const raw = phone?.trim();
   if (!raw) return null;
-  if (!raw.startsWith('+971')) {
+  if (!raw.startsWith('+')) {
     const expectedDigits = digitsOnly(raw);
-    return expectedDigits ? { fieldValue: raw, expectedDigits, uae: false } : null;
+    return expectedDigits ? { fieldValue: raw, expectedDigits, country: null } : null;
   }
   const digits = digitsOnly(raw);
-  // UAE mobile numbers have nine national digits. A malformed international value is left blank
-  // rather than being reinterpreted under whichever country the widget happened to start on.
-  if (!digits.startsWith('971') || digits.length !== 12) return null;
-  const fieldValue = `0${digits.slice(3)}`;
-  return { fieldValue, expectedDigits: digitsOnly(fieldValue), uae: true };
+  const spec = WORKABLE_PHONE_COUNTRY_SPECS.find((candidate) =>
+    digits.startsWith(candidate.dialCode)
+    && digits.length === candidate.dialCode.length + candidate.nationalDigits);
+  // Unknown or malformed international values stay blank instead of being reinterpreted under
+  // whichever country the widget happened to start on.
+  if (!spec) return null;
+  const nationalDigits = digits.slice(spec.dialCode.length);
+  const fieldValue = `${spec.domesticPrefix}${nationalDigits}`;
+  const displayedDialCode = `+${spec.dialCode}`;
+  return {
+    fieldValue,
+    expectedDigits: digitsOnly(fieldValue),
+    country: {
+      dialCode: spec.dialCode,
+      displayedDialCode,
+      optionSelector: workablePhoneCountryOptionSelector(spec.countryCode, spec.dialCode),
+    },
+  };
+}
+
+function workablePhoneBlockerLabel(phone: string | undefined): string {
+  const country = workablePhonePlan(phone)?.country;
+  return country ? `Phone ${country.displayedDialCode}` : 'Phone';
 }
 
 function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone: string | undefined) {
@@ -4538,7 +4570,7 @@ function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone:
     label: 'workable_phone_assertion_capability',
     optional: false,
   });
-  if (plan.uae) {
+  if (plan.country) {
     // Workable can mount a fresh cookie dialog after resume parsing and the other form mutations.
     // Decline optional cookies again at the final phone boundary, then require both the dialog and
     // its pointer-intercepting backdrop to leave the DOM before touching the country combobox.
@@ -4567,7 +4599,7 @@ function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone:
     });
     actions.push({
       type: 'click',
-      selector: WORKABLE_UAE_PHONE_COUNTRY_OPTION_SELECTOR,
+      selector: plan.country.optionSelector,
       label: 'phone_country_option',
       optional: false,
       timeout: MANAGED_FILL_TIMEOUT_MS,
@@ -4583,7 +4615,7 @@ function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone:
     timeout: MANAGED_FILL_TIMEOUT_MS,
     requireUnique: true,
   });
-  if (plan.uae) {
+  if (plan.country) {
     actions.push({
       type: 'extract',
       selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
@@ -4592,8 +4624,8 @@ function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone:
       timeout: MANAGED_FILL_TIMEOUT_MS,
       requireUnique: true,
       requireNonEmpty: true,
-      expectedValueIncludes: '+971',
-      expectedValueDigits: '971',
+      expectedValueIncludes: plan.country.displayedDialCode,
+      expectedValueDigits: plan.country.dialCode,
       stabilityWindowMs: 1_200,
     });
   }
@@ -5389,11 +5421,12 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
     const phonePersisted = assertionContract
       && Boolean(expectedPhoneDigits)
       && digitsOnly(phoneEvidence?.value) === expectedPhoneDigits;
+    const countryEvidence = workableCountryProof.length === 1 ? workableCountryProof[0] : undefined;
+    const expectedCountryDigits = countryEvidence?.expectedValueDigits;
     const countryPersisted = workableCountryProof.length === 0
-      || (workableCountryProof.length === 1
-        && workableCountryProof[0]?.expectedValueDigits === '971'
-        && digitsOnly(workableCountryProof[0]?.value) === '971'
-        && workableCountryProof[0]?.value?.includes('+971'));
+      || (Boolean(expectedCountryDigits)
+        && digitsOnly(countryEvidence?.value) === expectedCountryDigits
+        && countryEvidence?.value?.includes(`+${expectedCountryDigits}`));
     if (phonePersisted && countryPersisted) fields.add('phone');
   }
   for (const item of result.extracted ?? []) {
@@ -7157,7 +7190,7 @@ async function fillWorkablePhone(
   };
 
   let countryTrigger: Locator | null = null;
-  if (plan.uae) {
+  if (plan.country) {
     const cookieDialogs = page.locator(WORKABLE_COOKIE_DIALOG_SELECTOR);
     const cookieDialogCount = await cookieDialogs.count().catch(() => 0);
     if (cookieDialogCount > 0) {
@@ -7182,7 +7215,7 @@ async function fillWorkablePhone(
     if (!countryTrigger || !await countryTrigger.click().then(() => true).catch(() => false)) {
       return failClosed();
     }
-    const countryOption = await uniqueVisibleLocator(page.locator(WORKABLE_UAE_PHONE_COUNTRY_OPTION_SELECTOR));
+    const countryOption = await uniqueVisibleLocator(page.locator(plan.country.optionSelector));
     if (!countryOption || !await countryOption.click().then(() => true).catch(() => false)) {
       await countryTrigger.press('Escape').catch(() => undefined);
       return failClosed();
@@ -7190,7 +7223,8 @@ async function fillWorkablePhone(
     let selected = false;
     for (let attempt = 0; attempt < 6; attempt += 1) {
       const renderedCountry = await locatorRenderedText(countryTrigger);
-      if (renderedCountry.includes('+971') && digitsOnly(renderedCountry) === '971') {
+      if (renderedCountry.includes(plan.country.displayedDialCode)
+        && digitsOnly(renderedCountry) === plan.country.dialCode) {
         selected = true;
         break;
       }
@@ -7205,7 +7239,9 @@ async function fillWorkablePhone(
     const persisted = await field.inputValue().catch(() => '');
     const renderedCountry = countryTrigger ? await locatorRenderedText(countryTrigger) : '';
     const countryPersisted = !countryTrigger
-      || (renderedCountry.includes('+971') && digitsOnly(renderedCountry) === '971');
+      || (plan.country !== null
+        && renderedCountry.includes(plan.country.displayedDialCode)
+        && digitsOnly(renderedCountry) === plan.country.dialCode);
     if (digitsOnly(persisted) !== plan.expectedDigits || !countryPersisted) return failClosed();
   }
   out.push('phone');
@@ -8028,7 +8064,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   // required-field fallback above have all finished before country selection and the stable reads.
   if (family === 'workable' && !await fillWorkablePhone(page, packet.phone, filledFields)) {
     labelledBlockers.push(
-      describeRequiredBlocker(packet.phone?.trim().startsWith('+971') ? 'Phone +971' : 'Phone', { type: 'tel' }),
+      describeRequiredBlocker(workablePhoneBlockerLabel(packet.phone), { type: 'tel' }),
     );
   }
 

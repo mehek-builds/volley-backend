@@ -280,6 +280,14 @@ test('managed Workable phone evidence replaces stale fill success with country a
       { selector: '#phone', label: 'filled_field:phone', value: '056 741 7451', expectedValueDigits: '0567417451' },
     ],
   }).includes('phone'), true);
+  assert.equal(managedResultFilledFields({
+    ...base,
+    capabilities: [MANAGED_EXTRACT_ASSERTIONS_CAPABILITY],
+    extracted: [
+      { selector: '#country', label: 'filled_field:phone_country', value: 'United States +1', expectedValueDigits: '1' },
+      { selector: '#phone', label: 'filled_field:phone', value: '(213) 574-6270', expectedValueDigits: '2135746270' },
+    ],
+  }).includes('phone'), true);
 });
 
 test('managed cover-letter detection requires an actual file input extraction', () => {
@@ -975,6 +983,7 @@ function workablePhoneUploadFixture(
   requiredCityPhoneOverwrite?: string,
   lateCookieModal = false,
   cookieDeclineClears = true,
+  usCountryOptionCount = 1,
 ) {
   const events: string[] = [];
   const queriedSelectors: string[] = [];
@@ -1024,6 +1033,20 @@ function workablePhoneUploadFixture(
     count: async () => countryOptions.length,
     first: () => countryOptions[0] ?? absentWorkableLocator(),
     nth: (index: number) => countryOptions[index] ?? absentWorkableLocator(),
+  };
+  const usCountryOptions = Array.from({ length: usCountryOptionCount }, () => oneWorkableLocator({
+    isVisible: async () => countryMenuOpen,
+    click: async () => {
+      countryOptionClicks += 1;
+      countryText = '+1';
+      countryMenuOpen = false;
+      events.push('country:us');
+    },
+  }));
+  const usCountryOptionLocator: any = {
+    count: async () => usCountryOptions.length,
+    first: () => usCountryOptions[0] ?? absentWorkableLocator(),
+    nth: (index: number) => usCountryOptions[index] ?? absentWorkableLocator(),
   };
   const resume = oneWorkableLocator({
     getAttribute: async (name: string) => name === 'type' ? 'file' : null,
@@ -1113,6 +1136,9 @@ function workablePhoneUploadFixture(
       if (selector === '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible') {
         return countryOptionLocator;
       }
+      if (selector === '[role="option"][data-country-code="us"][data-dial-code="1"][id$="__item-us"]:visible') {
+        return usCountryOptionLocator;
+      }
       if (selector === 'input[type="file"][data-ui="resume"]') return resume;
       return absentWorkableLocator();
     },
@@ -1199,6 +1225,33 @@ test('direct Workable phone declines a cookie modal that appears after resume pa
   assert.equal(fixture.events.includes('country:blocked-by-cookie'), false, fixture.events.join(', '));
   assert.equal(fixture.countryText(), '+971');
   assert.equal(fixture.phoneValue(), '0567417451');
+  assert.ok(result.filledFields.includes('phone'));
+  assert.equal(result.blockers.some((blocker) => /phone/i.test(blocker)), false);
+});
+
+test('direct Workable US phone selects United States and writes exact national digits', async () => {
+  const fixture = workablePhoneUploadFixture(1, undefined, '', undefined, true);
+  const result = await fillPortal(fixture.page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+1 213 574 6270',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  const lateOpenIndex = fixture.events.indexOf('cookie:late-open');
+  const declineIndex = fixture.events.indexOf('cookie:decline');
+  const clearedProofIndex = fixture.events.indexOf('cookie:wait-cleared');
+  const countryIndex = fixture.events.indexOf('country:us');
+  const phoneIndex = fixture.events.indexOf('phone:2135746270');
+  assert.ok(declineIndex > lateOpenIndex, fixture.events.join(', '));
+  assert.ok(clearedProofIndex > declineIndex, fixture.events.join(', '));
+  assert.ok(countryIndex > clearedProofIndex, fixture.events.join(', '));
+  assert.ok(phoneIndex > countryIndex, fixture.events.join(', '));
+  assert.equal(fixture.events.includes('country:ae'), false, fixture.events.join(', '));
+  assert.equal(fixture.countryText(), '+1');
+  assert.equal(fixture.phoneValue(), '2135746270');
   assert.ok(result.filledFields.includes('phone'));
   assert.equal(result.blockers.some((blocker) => /phone/i.test(blocker)), false);
 });
@@ -3996,6 +4049,45 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneProofIndex]?.attribute, 'value');
   assert.equal(actions[phoneProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[phoneProofIndex]?.expectedValueDigits, '0567417451');
+  assert.equal(actions[phoneProofIndex]?.requireUnique, true);
+  assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
+});
+
+test('managed Workable US phone selects exact United States and proves national digits', () => {
+  const actions = buildManagedPortalActions('workable', {
+    ...capturePacket,
+    phone: '+1 213 574 6270',
+  });
+  const lateCookieDeclineIndex = actions.findIndex(
+    (action) => action.label === 'workable_cookie_final_decline',
+  );
+  const lateCookieClearedIndex = actions.findIndex(
+    (action) => action.label === 'workable_cookie_final_cleared',
+  );
+  const countryOpenIndex = actions.findIndex((action) => action.label === 'phone_country_open');
+  const countryOptionIndex = actions.findIndex((action) => action.label === 'phone_country_option');
+  const phoneIndex = actions.findIndex((action) => action.type === 'fill' && action.label === 'phone');
+  const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
+  const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
+
+  assert.equal(lateCookieClearedIndex, lateCookieDeclineIndex + 1);
+  assert.equal(countryOpenIndex, lateCookieClearedIndex + 1);
+  assert.equal(countryOptionIndex, countryOpenIndex + 1);
+  assert.deepEqual(actions[countryOptionIndex], {
+    type: 'click',
+    selector: '[role="option"][data-country-code="us"][data-dial-code="1"][id$="__item-us"]:visible',
+    label: 'phone_country_option',
+    optional: false,
+    timeout: 10_000,
+    requireUnique: true,
+  });
+  assert.equal(actions[phoneIndex]?.value, '2135746270');
+  assert.equal(actions[phoneIndex]?.requireUnique, true);
+  assert.equal(actions[countryProofIndex]?.expectedValueIncludes, '+1');
+  assert.equal(actions[countryProofIndex]?.expectedValueDigits, '1');
+  assert.equal(actions[countryProofIndex]?.requireUnique, true);
+  assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
+  assert.equal(actions[phoneProofIndex]?.expectedValueDigits, '2135746270');
   assert.equal(actions[phoneProofIndex]?.requireUnique, true);
   assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
 });
