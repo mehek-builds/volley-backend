@@ -476,4 +476,62 @@ describe('Litos Pay Core billing routes', () => {
       await app.close();
     }
   });
+
+  test('returns the authenticated account\'s paid Stripe receipt with its stored amount', async () => {
+    const paidAt = new Date('2026-08-14T12:34:00.000Z');
+    const renewsAt = new Date('2026-09-14T12:34:00.000Z');
+    mock.method(db, 'select', ((fields?: unknown) => ({
+      from: (table: unknown) => ({
+        where: () => ({
+          limit: async () => {
+            if (table === users) return [{
+              id: USER_ID,
+              email: 'student@example.com',
+              is_guest: false,
+              guest_expires_at: null,
+              session_valid_from: null,
+              session_version: 0,
+              billing_provider: 'stripe',
+              billing_subscription_id: 'sub_paid_monthly',
+              billing_renews_at: renewsAt,
+            }];
+            if (table === pricing_offers && fields) return [{
+              interval: 'monthly',
+              amountCents: 3_999,
+              currency: 'usd',
+              paidAt,
+              reference: 'cs_live_receipt_123456789012',
+            }];
+            return [];
+          },
+        }),
+      }),
+    })) as unknown as typeof db.select);
+
+    const app = Fastify({ logger: false });
+    await app.register(billingRoutes);
+    await app.ready();
+    try {
+      const auth = await token();
+      const receipt = await app.inject({
+        method: 'GET',
+        url: '/billing/receipt',
+        headers: { authorization: `Bearer ${auth}` },
+      });
+      assert.equal(receipt.statusCode, 200);
+      assert.deepEqual(receipt.json(), {
+        provider: 'stripe',
+        plan: 'pro',
+        interval: 'monthly',
+        amount_cents: 3_999,
+        currency: 'USD',
+        paid_at: paidAt.toISOString(),
+        renews_at: renewsAt.toISOString(),
+        reference: '123456789012',
+      });
+      assert.equal(receipt.headers['cache-control'], 'private, no-store');
+    } finally {
+      await app.close();
+    }
+  });
 });

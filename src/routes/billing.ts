@@ -1,7 +1,7 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { db } from '../db/index';
 import { billing_webhook_events, pricing_offers, users } from '../db/schema';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { getEntitlements, getCount, monthPeriod, upgradeUrl } from '../middleware/quota';
 import {
@@ -238,6 +238,43 @@ export async function billingRoutes(fastify: FastifyInstance) {
         resumes: { used: usedResumes, limit: ent.monthlyResumes },
       },
       ...(upgradeLink && ent.tier !== 'pro' ? { upgrade_url: upgradeLink } : {}),
+    });
+  });
+
+  fastify.get('/billing/receipt', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const { userId, isGuest } = request.jwtPayload!;
+    if (isGuest) {
+      return reply.status(409).send({ error: 'Verify an email before viewing billing receipts.', code: 'claim_required' });
+    }
+    const userRows = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    const user = userRows[0];
+    if (!user?.billing_subscription_id) {
+      return reply.status(404).send({ error: 'No paid subscription receipt is available.', code: 'billing_receipt_missing' });
+    }
+    const offerRows = await db.select({
+      interval: pricing_offers.billing_interval,
+      amountCents: pricing_offers.amount_cents,
+      currency: pricing_offers.currency,
+      paidAt: pricing_offers.paid_at,
+      reference: pricing_offers.provider_checkout_id,
+    }).from(pricing_offers).where(and(
+      eq(pricing_offers.user_id, userId),
+      eq(pricing_offers.provider_subscription_id, user.billing_subscription_id),
+      eq(pricing_offers.status, 'paid'),
+    )).limit(1);
+    const offer = offerRows[0];
+    if (!offer || (offer.interval !== 'weekly' && offer.interval !== 'monthly')) {
+      return reply.status(404).send({ error: 'No paid subscription receipt is available.', code: 'billing_receipt_missing' });
+    }
+    return reply.header('Cache-Control', 'private, no-store').status(200).send({
+      provider: user.billing_provider === 'stripe' ? 'stripe' : 'litos',
+      plan: 'pro',
+      interval: offer.interval,
+      amount_cents: offer.amountCents,
+      currency: offer.currency.toUpperCase(),
+      paid_at: offer.paidAt,
+      renews_at: user.billing_renews_at ?? null,
+      reference: offer.reference ? offer.reference.slice(-12) : null,
     });
   });
 
