@@ -154,7 +154,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
       cb(null, {
         origin: (origin, originCb) => originCb(null, isAllowedOrigin(origin)),
         methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'X-Litos-Client', 'X-Litos-Version'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Litos-Client', 'X-Litos-Version', 'Idempotency-Key'],
         credentials: true,
       });
     },

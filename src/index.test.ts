@@ -508,6 +508,23 @@ test('the website and the extension keep their allowlisted access', async () => 
   assert.equal(ext.headers['access-control-allow-origin'], EXT_ORIGIN);
 });
 
+test('the website checkout preflight permits the Idempotency-Key header', async () => {
+  const app = await getApp();
+  const res = await app.inject({
+    method: 'OPTIONS',
+    url: '/billing/checkout',
+    headers: {
+      origin: SITE_ORIGIN,
+      'access-control-request-method': 'POST',
+      'access-control-request-headers': 'content-type,idempotency-key',
+    },
+  });
+
+  assert.equal(res.statusCode, 204);
+  assert.equal(res.headers['access-control-allow-origin'], SITE_ORIGIN);
+  assert.match(String(res.headers['access-control-allow-headers']), /(?:^|,\s*)Idempotency-Key(?:,|$)/i);
+});
+
 test('/privacy redirects to the canonical trylitos.com policy', async () => {
   const app = await getApp();
   const res = await app.inject({ method: 'GET', url: '/privacy' });
