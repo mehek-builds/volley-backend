@@ -4,7 +4,19 @@ import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
-import { profiles, generated_resumes, autofill_events, application_profile, monitored_jobs, career_page_sources, users } from '../db/schema';
+import {
+  applications,
+  application_artifacts,
+  artifact_versions,
+  artifacts,
+  profiles,
+  generated_resumes,
+  autofill_events,
+  application_profile,
+  monitored_jobs,
+  career_page_sources,
+  users,
+} from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import { allowHourly, claimCounterSlot, getCount, getEntitlements, LIMITS, monthPeriod, quotaExceededPayload, rateLimitedReply, releaseCounterSlot } from '../middleware/quota';
@@ -21,7 +33,11 @@ import {
 import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '../engine/resumeValidate';
 import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
-import { resumeGenerateBodySchema, type ResumeGenerateBody } from './resumeRequestSchema';
+import {
+  resumeGenerateBodySchema,
+  resumeGenerationFeatureSequence,
+  type ResumeGenerateBody,
+} from './resumeRequestSchema';
 import {
   ensureApplicationEmailAlias,
   type ApplicantEmailChoice,
@@ -57,9 +73,50 @@ import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '
 import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { specWithoutDocumentPointers } from '../lib/documentStore';
+import { recoverOwnedGeneratedDocument } from '../lib/downloadDocumentRecovery';
+import { immutableDocumentContentHash } from '../lib/immutableDocumentHash';
+import { linkGeneratedPacketToCanonicalApplication } from '../lib/resumeArtifactVersions';
+import { canonicalApplicationBindingMismatches } from '../lib/canonicalApplicationBinding';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { resumeContactOfRecord } from '../lib/resumeContactOfRecord';
 import { resumeEmailOfRecord } from '../lib/resumeEmail';
+import {
+  canonicalCompanyScope,
+  commitEntitledUsage,
+  entitledUsageRequestHash,
+  getEntitledUsageReplay,
+  releaseEntitledUsage,
+  requireFeature,
+  reserveEntitledUsage,
+  usesLegacyMonthlyProductQuota,
+} from '../lib/entitlements';
+
+async function refreshedResumeReplay(
+  request: FastifyRequest,
+  userId: string,
+  body: unknown,
+): Promise<unknown> {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return body;
+  const response = body as Record<string, unknown>;
+  if (typeof response.artifact_id !== 'string') return body;
+  const [artifact] = await db.select({
+    object_key: artifacts.rendered_object_key,
+    blob_url: artifacts.rendered_blob_url,
+  }).from(artifacts).where(and(
+    eq(artifacts.id, response.artifact_id),
+    eq(artifacts.user_id, userId),
+  )).limit(1);
+  if (!artifact?.object_key) return body;
+  const resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(
+    userId,
+    artifact.object_key,
+    { blobUrl: artifact.blob_url ?? undefined },
+  )}`;
+  const application = response.application && typeof response.application === 'object' && !Array.isArray(response.application)
+    ? { ...(response.application as Record<string, unknown>), download_url: resumeUrl }
+    : response.application;
+  return { ...response, resume_url: resumeUrl, application };
+}
 
 const MAX_SPEC_ATTEMPTS = 2; // 1 initial pass + 1 feedback-driven retry, per PRD-v2 Section 6.4's
 // "automated quality gate" - bounded so a stubborn JD can't loop the endpoint indefinitely.
@@ -382,6 +439,53 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Invalid request body', detail });
     }
 
+    const resumeId = randomUUID();
+    const operationId = body.operation_id ?? resumeId;
+    const requestHash = entitledUsageRequestHash('tailored_resume', {
+      ...body,
+      operation_id: undefined,
+      initiation: undefined,
+      prewarm: undefined,
+      company: body.company.trim(),
+      role: body.role.trim(),
+    });
+    const reservationScope = body.application_id ?? `resume:${requestHash}`;
+    try {
+      const replay = await getEntitledUsageReplay({
+        userId,
+        kind: 'tailored_resume',
+        idempotencyKey: operationId,
+        scopeKey: reservationScope,
+        requestHash,
+        requestedUnits: 1,
+      });
+      if (replay) {
+        return reply.status(replay.statusCode).send(await refreshedResumeReplay(request, userId, replay.body));
+      }
+    } catch (error) {
+      const candidate = error as { statusCode?: number; code?: string; message?: string };
+      return reply.status(candidate.statusCode ?? 409).send({
+        error: candidate.message ?? 'Resume generation cannot be replayed.',
+        code: candidate.code ?? 'resume_operation_conflict',
+      });
+    }
+
+    // Hover and background preparation are a distinct paid initiation. This check intentionally
+    // precedes posting reads, quotas, reservations, profile decryption, model calls, and rendering.
+    // An explicit click during a trial still checks only ai_resume_tailoring below.
+    let tailoringVerdict: Awaited<ReturnType<typeof requireFeature>> | undefined;
+    for (const feature of resumeGenerationFeatureSequence(body.initiation)) {
+      const initiationVerdict = await requireFeature(
+        userId,
+        feature,
+        feature === 'hover_generation' ? 'hover_resume_tailor' : 'resume_tailor',
+      );
+      if (!initiationVerdict.allowed) return reply.status(402).send(initiationVerdict.denial);
+      if (feature === 'ai_resume_tailoring') tailoringVerdict = initiationVerdict;
+    }
+    if (!tailoringVerdict?.allowed) throw new Error('Tailoring entitlement preflight did not run');
+    const featureVerdict = tailoringVerdict;
+
     /* THE POSTING, IN FULL, and not the preview the caller almost certainly sent.
      *
      * GET /jobs serves `left(description, 600)`, a preview sized for a list row, and the dashboard
@@ -414,25 +518,75 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       jdText = resolveJdText(jdText, row?.description);
     }
 
-    // Resume-gen + autofill is available on every tier (2026-07-02 decision): free gets
-    // 20/month that resets like contacts/drafts (Apollo.io-style recurring credits, not a
-    // one-time lifetime trial - keeps free students returning monthly). Pro/trial gets
-    // the larger monthly cap defined in quota.ts.
-    // The monthly quota check (read-only) runs BEFORE the hourly limiter, which increments a
-    // counter: a student already over their monthly cap gets a clean 402 without also spending
-    // one of their hourly rate-limit slots on the rejected call.
+    if (body.application_id) {
+      const [ownedCanonicalApplication] = await db.select({
+        id: applications.id,
+        job_id: applications.job_id,
+        company_name: applications.company_name,
+        role: applications.role,
+        portal_url: applications.portal_url,
+      }).from(applications).where(and(
+        eq(applications.id, body.application_id),
+        eq(applications.user_id, userId),
+      )).limit(1);
+      if (!ownedCanonicalApplication) {
+        return reply.status(404).send({ error: 'Canonical application not found', code: 'application_not_found' });
+      }
+      const mismatches = canonicalApplicationBindingMismatches({
+        jobId: ownedCanonicalApplication.job_id,
+        company: ownedCanonicalApplication.company_name,
+        role: ownedCanonicalApplication.role,
+        portalUrl: ownedCanonicalApplication.portal_url,
+      }, {
+        jobId: body.job_id,
+        company: body.company,
+        role: body.role,
+        portalUrl: body.application?.portal_url,
+      });
+      if (mismatches.length > 0) {
+        return reply.status(409).send({
+          error: 'Resume request does not match the canonical application',
+          code: 'application_context_mismatch',
+          mismatches,
+        });
+      }
+    }
+
+    // The v2 trial uses durable lifetime counters below. Existing grandfathered accounts retain
+    // their monthly allowance, and paid plans retain the existing high safety ceiling.
     const ent = await getEntitlements(userId);
     const period = monthPeriod();
-    const usedResumes = await getCount(userId, period, 'resumes');
-    if (usedResumes >= ent.monthlyResumes) {
-      return reply.status(402).send(quotaExceededPayload(ent, usedResumes, 'resumes'));
+    const useLegacyMonthlyCounter = usesLegacyMonthlyProductQuota(featureVerdict.snapshot);
+    if (useLegacyMonthlyCounter) {
+      const usedResumes = await getCount(userId, period, 'resumes');
+      if (usedResumes >= ent.monthlyResumes) {
+        return reply.status(402).send(quotaExceededPayload(ent, usedResumes, 'resumes'));
+      }
     }
 
     if (!(await allowHourly(userId, 'resume', LIMITS.perHour.resume))) {
       return rateLimitedReply(reply);
     }
 
-    const resumeId = randomUUID();
+    const entitlementReservation = await reserveEntitledUsage({
+      userId,
+      kind: 'tailored_resume',
+      idempotencyKey: operationId,
+      requestHash,
+      trigger: 'resume_tailor',
+      applicationId: reservationScope,
+    });
+    if (!entitlementReservation.allowed) {
+      return reply.status(402).send(entitlementReservation.denial);
+    }
+    if (entitlementReservation.replay) {
+      return reply.status(entitlementReservation.replay.statusCode).send(
+        await refreshedResumeReplay(request, userId, entitlementReservation.replay.body),
+      );
+    }
+    let entitlementUsageCommitted = false;
+
+    try {
 
     // These reads are independent. Starting them together removes one database round trip from
     // every generation while preserving readExperienceBank's load-bearing row ordering (R-022).
@@ -952,14 +1106,18 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const jdHash = createHash('sha256').update(jdText).digest('hex').slice(0, 16);
     const requestedKey = `users/${userId}/resumes/${jdHash}-${Date.now()}.pdf`;
 
-    const reservedCount = await claimCounterSlot(userId, period, 'resumes', ent.monthlyResumes);
-    if (reservedCount === null) {
+    const reservedCount = useLegacyMonthlyCounter
+      ? await claimCounterSlot(userId, period, 'resumes', ent.monthlyResumes)
+      : 0;
+    if (useLegacyMonthlyCounter && reservedCount === null) {
+      await releaseEntitledUsage(entitlementReservation.reservationId);
       const currentCount = await getCount(userId, period, 'resumes');
       return reply.status(402).send(quotaExceededPayload(ent, currentCount, 'resumes'));
     }
 
     let resumeUrl: string;
     let objectKey: string;
+    let renderedBlobUrl: string;
     try {
       // `access: 'public'` is not a choice - it is the only value @vercel/blob@0.27.3 accepts.
       // What we control is who ever learns the resulting URL, and the answer is nobody: the
@@ -977,6 +1135,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // with no resume attached. The suffix is left ON deliberately: an unguessable pathname is
       // defence in depth on an object we cannot make private.
       objectKey = blob.pathname;
+      renderedBlobUrl = blob.url;
       // R-040: carry put()'s own URL inside the sealed token. The download route's key -> URL
       // lookup rides list(), which is eventually consistent with no bound - a fresh resume can
       // 404 as "deleted" for the whole window a student is submitting in. put()'s URL is a
@@ -984,7 +1143,8 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey, { blobUrl: blob.url, fileName: resumeFileName })}`;
     } catch (err) {
       fastify.log.error(err);
-      await releaseCounterSlot(userId, period, 'resumes');
+      if (useLegacyMonthlyCounter) await releaseCounterSlot(userId, period, 'resumes');
+      await releaseEntitledUsage(entitlementReservation.reservationId);
       return reply.status(500).send({ error: 'Failed to store generated resume' });
     }
 
@@ -1109,17 +1269,74 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     };
 
     let persisted = false;
+    let canonicalApplicationId: string | undefined;
+    let canonicalArtifactId: string | undefined;
     try {
-      await db.insert(generated_resumes).values({
-        id: resumeId,
-        user_id: userId,
-        job_context: jobContext,
-        spec: storedSpec,
-        resume_object_key: objectKey,
+      await db.transaction(async (tx) => {
+        await tx.insert(generated_resumes).values({
+          id: resumeId,
+          user_id: userId,
+          job_context: jobContext,
+          spec: storedSpec,
+          resume_object_key: objectKey,
+        });
+        canonicalApplicationId = body.application_id ?? randomUUID();
+        canonicalArtifactId = randomUUID();
+        if (!body.application_id) {
+          await tx.insert(applications).values({
+            id: canonicalApplicationId,
+            user_id: userId,
+            legacy_generated_resume_id: resumeId,
+            job_id: body.job_id,
+            company_scope_key: canonicalCompanyScope({ companyName: body.company }),
+            company_name: body.company,
+            role: body.role,
+            portal_url: canonicalApplicationPortalUrl,
+            source_surface: 'dashboard',
+            tracker_state: 'applying',
+            review_state: 'ready',
+            selected_resume_artifact_id: null,
+            application_fingerprint: `legacy:${resumeId}`,
+          });
+        }
+        await tx.insert(artifacts).values({
+          id: canonicalArtifactId,
+          user_id: userId,
+          legacy_generated_resume_id: resumeId,
+          kind: 'tailored_resume',
+          structured_content: storedSpec,
+          rendered_object_key: objectKey,
+          rendered_blob_url: renderedBlobUrl,
+          source: 'ai_tailored',
+        });
+        await tx.insert(artifact_versions).values({
+          artifact_id: canonicalArtifactId,
+          version_number: 1,
+          generation_source: 'ai_tailored',
+          job_context: jobContext,
+          content_hash: immutableDocumentContentHash(storedSpec),
+          structured_content: storedSpec,
+          rendered_object_key: objectKey,
+          rendered_blob_url: renderedBlobUrl,
+        });
+        await tx.insert(application_artifacts).values({
+          application_id: canonicalApplicationId,
+          artifact_id: canonicalArtifactId,
+          purpose: 'resume',
+          selected: true,
+        });
+        await linkGeneratedPacketToCanonicalApplication(tx, {
+          userId,
+          applicationId: canonicalApplicationId,
+          generatedResumeId: resumeId,
+          artifactId: canonicalArtifactId,
+        });
       });
       persisted = true;
     } catch (err) {
       fastify.log.error(err);
+      await releaseEntitledUsage(entitlementReservation.reservationId);
+      if (useLegacyMonthlyCounter) await releaseCounterSlot(userId, period, 'resumes');
       /* `|| applicationEmail` is not decoration. The alias row is a foreign key onto this row, so a
        * lost packet means the portal identity frozen beside the PDF can never exist and employer
        * mail would route nowhere. Returning a document detached from its application identity would
@@ -1213,9 +1430,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       : { asked: 0, judged: 0, fromCache: 0, skipped: 'interactive generate, not warmed' };
     if (warm.skipped && body.prewarm) fastify.log.warn({ warm }, 'requirement cache not warmed');
 
-    return reply.status(200).send({
+    const successResponse = {
       ...responseTemplate,
       resume_url: resumeUrl,
+      canonical_application_id: canonicalApplicationId,
+      artifact_id: canonicalArtifactId,
       application: persisted ? {
         id: resumeId,
         job_context: jobContext,
@@ -1232,7 +1451,20 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         download_url: resumeUrl,
         created_at: now,
       } : undefined,
-    });
+    };
+    await commitEntitledUsage(
+      entitlementReservation.reservationId,
+      1,
+      new Date(),
+      { statusCode: 200, body: successResponse },
+    );
+    entitlementUsageCommitted = true;
+    return reply.status(200).send(successResponse);
+    } finally {
+      if (!entitlementUsageCommitted) {
+        await releaseEntitledUsage(entitlementReservation.reservationId);
+      }
+    }
   });
 
   // GET /resume/download?t=... - streams a generated resume via its capability token.
@@ -1268,24 +1500,33 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         return reply.status(502).send({ error: 'Could not reach resume storage' });
       }
     }
-    // Expected once the retention sweep has been through: the link is still cryptographically
-    // valid but the file is intentionally gone. That is a 404, not an error.
-    if (!blobUrl) return reply.status(404).send({ error: 'This resume has been deleted' });
-
-    let pdf: Buffer;
-    try {
-      const upstream = await fetch(blobUrl);
-      // A sweep-deleted blob answers 404 at the store; keep the same contract the resolve path
-      // has always had rather than turning "intentionally gone" into a 502.
-      if (upstream.status === 404 || upstream.status === 410) {
-        return reply.status(404).send({ error: 'This resume has been deleted' });
+    let pdf: Buffer | null = null;
+    let storageConfirmedMissing = !blobUrl;
+    if (blobUrl) {
+      try {
+        const upstream = await fetch(blobUrl);
+        if (upstream.status === 404 || upstream.status === 410) storageConfirmedMissing = true;
+        else if (!upstream.ok) throw new Error(`blob fetch ${upstream.status}`);
+        else pdf = Buffer.from(await upstream.arrayBuffer());
+      } catch (err) {
+        fastify.log.error(err);
+        return reply.status(502).send({ error: 'Could not read resume from storage' });
       }
-      if (!upstream.ok) throw new Error(`blob fetch ${upstream.status}`);
-      pdf = Buffer.from(await upstream.arrayBuffer());
-    } catch (err) {
-      fastify.log.error(err);
-      return reply.status(502).send({ error: 'Could not read resume from storage' });
     }
+    if (!pdf && storageConfirmedMissing) {
+      const recovery = await recoverOwnedGeneratedDocument({ userId: payload.u, objectKey: payload.k });
+      if (recovery.status === 'not_found') {
+        return reply.status(404).send({ error: 'This generated document is no longer available' });
+      }
+      if (recovery.status === 'unrecoverable') {
+        return reply.status(409).send({
+          error: 'The saved generated document could not be safely re-rendered.',
+          code: 'document_rerender_unavailable',
+        });
+      }
+      pdf = recovery.buffer;
+    }
+    if (!pdf) return reply.status(502).send({ error: 'Could not read resume from storage' });
 
     return reply
       .status(200)

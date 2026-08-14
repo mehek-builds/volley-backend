@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { quotaExceededPayload, upgradeUrl, LIMITS } from './quota';
+import { paidSafetyLimitPayload, quotaExceededPayload, upgradeUrl, LIMITS } from './quota';
 import type { Entitlements } from './quota';
 
 // Regression coverage for R-043 (prod, 2026-07-18): the /resume/generate 402 upsell linked a
@@ -78,7 +78,7 @@ describe('402 quota payload (R-043)', () => {
       const payload = quotaExceededPayload(ent('free'), 20, 'resumes');
       assert.equal(
         payload.error,
-        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Pro starts at $19.99/week and includes 1,000 resume generations + autofill. Resets on the 1st. Upgrade: ${LIVE_LINK}`
+        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos+ starts at $19.99/week and includes unlimited resume tailoring and autofill. Resets on the 1st. Upgrade: ${LIVE_LINK}`
       );
       assert.equal(payload.code, 'quota_exceeded');
       assert.equal(payload.used, 20);
@@ -93,7 +93,7 @@ describe('402 quota payload (R-043)', () => {
       const payload = quotaExceededPayload(ent('free'), 20, 'resumes');
       assert.equal(
         payload.error,
-        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Pro starts at $19.99/week and includes 1,000 resume generations + autofill. Resets on the 1st.`
+        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos+ starts at $19.99/week and includes unlimited resume tailoring and autofill. Resets on the 1st.`
       );
       assert.equal('upgrade_url' in payload, false);
       // The contract fields the extension parses stay put regardless of link configuration.
@@ -129,10 +129,10 @@ describe('402 quota payload (R-043)', () => {
     }
   });
 
-  test('contacts and drafts say Litos Pro', () => {
+  test('contacts and drafts say Litos+', () => {
     withUpgradeEnv({}, () => {
-      assert.match(quotaExceededPayload(ent('free'), 30, 'contacts').error, /Litos Pro/);
-      assert.match(quotaExceededPayload(ent('free'), 60, 'drafts').error, /Litos Pro/);
+      assert.match(quotaExceededPayload(ent('free'), 30, 'contacts').error, /Litos\+/);
+      assert.match(quotaExceededPayload(ent('free'), 60, 'drafts').error, /Litos\+/);
     });
   });
 
@@ -146,7 +146,7 @@ describe('402 quota payload (R-043)', () => {
     });
   });
 
-  test('pro includes 1,000 resume generations per month', () => {
+  test('pre-cutover trial compatibility retains its 1,000-resume allowance', () => {
     assert.equal(LIMITS.pro.monthlyResumes, 1000);
   });
 
@@ -160,6 +160,25 @@ describe('402 quota payload (R-043)', () => {
       assert.equal('upgrade_url' in payload, false);
     });
   });
+});
+
+test('paid product usage is unlimited while rolling hourly safety limits remain', async () => {
+  const payload = paidSafetyLimitPayload(1000, 1000, 'resumes', new Date('2026-08-14T00:00:00.000Z'));
+  assert.equal(payload.code, 'rate_limited');
+  assert.equal(payload.reason, 'paid_safety_limit');
+  assert.equal(payload.retry_at, '2026-09-01T00:00:00.000Z');
+  assert.equal('plans_url' in payload, false);
+  assert.equal('billing_state_url' in payload, false);
+  assert.equal('upgrade_url' in payload, false);
+  assert.doesNotMatch(payload.error, /upgrade|Litos\+/i);
+
+  const routes = await Promise.all(['resume.ts', 'resolve.ts', 'draft.ts'].map((name) =>
+    readFile(`src/routes/${name}`, 'utf8')));
+  for (const source of routes) {
+    assert.match(source, /usesLegacyMonthlyProductQuota/);
+    assert.match(source, /allowHourly/);
+    assert.doesNotMatch(source, /paidSafetyLimitedReply/);
+  }
 });
 
 test('resume generation atomically reserves the final monthly slot and refunds storage failures', async () => {

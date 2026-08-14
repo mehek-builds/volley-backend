@@ -104,7 +104,7 @@ describe('the generate route treats warming as optional', () => {
     // Warming first would spend a model call for a packet that then failed to save. Anchored on
     // the INSERT, not on the table name: the name appears in the import and in a later select, so
     // an indexOf against it was true whatever order the two statements were in.
-    const insert = route.indexOf('db.insert(generated_resumes)');
+    const insert = route.indexOf('tx.insert(generated_resumes)');
     const warm = route.indexOf('await warmRequirementCache(');
     assert.ok(insert !== -1 && warm !== -1);
     assert.ok(insert < warm, 'the packet must be saved before a model call is spent on it');

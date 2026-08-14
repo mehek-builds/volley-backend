@@ -30,6 +30,7 @@ import { isComposioConfigured } from '../lib/composioConnections';
 import { isUndefinedColumnError, selectApplicationProfileRow, upsertApplicationProfile } from '../lib/applicationFacts';
 import { verificationEmailSource } from '../lib/verificationEmailSource';
 import { countryEligibilityForRead } from '../lib/workEligibility';
+import { requireFeature } from '../lib/entitlements';
 
 /**
  * How many submissions has this student personally approved AND seen reach the employer?
@@ -50,8 +51,12 @@ import { countryEligibilityForRead } from '../lib/workEligibility';
 async function gatedAutomationConsent(
   userId: string,
   settings: { automatic_submission_enabled?: boolean; automatic_verification_enabled?: boolean },
-): Promise<{ ok: true } | { ok: false; status: 403; body: { error: string; eligibility: unknown } }> {
+): Promise<{ ok: true } | { ok: false; status: 402 | 403; body: unknown }> {
   if (settings.automatic_submission_enabled !== true) return { ok: true };
+  const entitlement = await requireFeature(userId, 'automatic_submission', 'automatic_submission_consent');
+  if (!entitlement.allowed) {
+    return { ok: false, status: 402, body: entitlement.denial };
+  }
   const eligibility = standingConsentEligibility(await reviewedSubmitCount(userId));
   const verdict = mayChangeStandingConsent({ enabling: true, eligibility });
   if (verdict.allowed) return { ok: true };

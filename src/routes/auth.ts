@@ -12,6 +12,7 @@ import { emailSender, sendEmail } from '../lib/email';
 import { requireAuth, type JWTPayload } from '../middleware/auth';
 import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import { reportAccountCreated } from '../lib/serverAnalytics';
+import { ENTITLEMENT_POLICY_VERSION } from '../lib/entitlements';
 import {
   hashPassword,
   normalizePassword,
@@ -152,6 +153,8 @@ export function googleRegistrationValues(
     email_verified: true,
     google_subject: identity.subject,
     plan: 'free',
+    entitlement_policy_version: ENTITLEMENT_POLICY_VERSION,
+    trial_started_at: now,
     trial_ends_at: trialEnd(now),
     created_at: now,
     onboarding_completed_at: null,
@@ -374,6 +377,8 @@ export async function authRoutes(fastify: FastifyInstance) {
           email_verified: false,
           is_guest: true,
           guest_key_hash: keyHash,
+          entitlement_policy_version: ENTITLEMENT_POLICY_VERSION,
+          trial_started_at: now,
           trial_ends_at,
           guest_expires_at,
           created_at: now,
@@ -558,6 +563,8 @@ export async function authRoutes(fastify: FastifyInstance) {
             email_verified,
             google_subject,
             plan,
+            entitlement_policy_version,
+            trial_started_at,
             trial_ends_at,
             created_at,
             onboarding_completed_at
@@ -567,6 +574,8 @@ export async function authRoutes(fastify: FastifyInstance) {
             ${registration.email_verified},
             ${registration.google_subject},
             ${registration.plan},
+            ${registration.entitlement_policy_version},
+            ${registration.trial_started_at},
             ${registration.trial_ends_at},
             ${registration.created_at},
             ${registration.onboarding_completed_at}
@@ -849,7 +858,15 @@ export async function authRoutes(fastify: FastifyInstance) {
       let user = await db.select().from(users).where(eq(users.email, email)).limit(1);
       if (user.length === 0) {
         const newUserId = uuidv4();
-        await db.insert(users).values({ id: newUserId, email, trial_ends_at: trialEnd(), created_at: new Date() });
+        const createdAt = new Date();
+        await db.insert(users).values({
+          id: newUserId,
+          email,
+          entitlement_policy_version: ENTITLEMENT_POLICY_VERSION,
+          trial_started_at: createdAt,
+          trial_ends_at: trialEnd(createdAt),
+          created_at: createdAt,
+        });
         user = await db.select().from(users).where(eq(users.email, email)).limit(1);
       }
 
@@ -1022,14 +1039,17 @@ export async function authRoutes(fastify: FastifyInstance) {
           }
 
           if (existing.length === 0) {
+            const createdAt = new Date();
             const created = await tx
               .insert(users)
               .values({
                 id: uuidv4(),
                 email,
                 email_verified: true,
-                trial_ends_at: trialEnd(),
-                created_at: new Date(),
+                entitlement_policy_version: ENTITLEMENT_POLICY_VERSION,
+                trial_started_at: createdAt,
+                trial_ends_at: trialEnd(createdAt),
+                created_at: createdAt,
               })
               .returning({ id: users.id, email: users.email, session_version: users.session_version });
             const user = created[0] ?? null;

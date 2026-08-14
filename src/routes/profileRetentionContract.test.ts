@@ -79,6 +79,6 @@ test('account export exposes only expiring wrappers for generated files', async 
 test('account deletion removes the complete user blob prefix before deleting the user row', async () => {
   const source = await routeSource('account.ts');
   const deleteBlobs = source.indexOf('deletedFiles = await deleteBlobsForUser(userId)');
-  const deleteUser = source.indexOf('await db.delete(users)');
+  const deleteUser = source.indexOf('await tx.delete(users)');
   assert.ok(deleteBlobs >= 0 && deleteUser > deleteBlobs);
 });

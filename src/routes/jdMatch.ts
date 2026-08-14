@@ -20,6 +20,7 @@ import { resolveRevision } from '../lib/buildInfo';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { readExperienceBank, readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
 import type { ResumeSpec } from '../llm/resumeSpec';
+import { requireFeature } from '../lib/entitlements';
 
 /**
  * POST /jd-match
@@ -264,6 +265,8 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.issues[0]?.message ?? 'Invalid request body' });
     }
+    const feedback = await requireFeature(userId, 'ai_resume_feedback', 'resume_requirement_suggestions');
+    if (!feedback.allowed) return reply.status(402).send(feedback.denial);
 
     /* METERED AND BOUNDED, like every other model-backed route here.
      *
@@ -451,6 +454,8 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       const message = err instanceof z.ZodError ? err.issues[0]?.message : undefined;
       return reply.status(400).send({ error: message ?? 'Invalid request body' });
     }
+    const feedback = await requireFeature(userId, 'ai_resume_feedback', 'resume_gap_evidence');
+    if (!feedback.allowed) return reply.status(402).send(feedback.denial);
 
     const [bank, storedResume] = await Promise.all([
       readExperienceBankOrSeedFromBaseResume(userId),

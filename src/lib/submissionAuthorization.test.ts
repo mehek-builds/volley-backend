@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mayClickFinalSubmit, preparedSubmissionStatus } from './submissionAuthorization';
+import {
+  extensionAuthorizationRequiresAutomaticSubmission,
+  mayClickFinalSubmit,
+  preparedSubmissionStatus,
+} from './submissionAuthorization';
 
 test('standing consent advances only a blocker-free application', () => {
   assert.equal(preparedSubmissionStatus({ safe: true, standingConsentEnabled: true }), 'submitting');
@@ -16,4 +20,12 @@ test('revocation stops a standing-consent click but not a one-time approval', ()
   assert.equal(mayClickFinalSubmit({ source: 'standing_consent', standingConsentEnabled: true }), true);
   assert.equal(mayClickFinalSubmit({ source: 'per_application_approval', standingConsentEnabled: false }), true);
   assert.equal(mayClickFinalSubmit({ source: undefined, standingConsentEnabled: true }), false);
+});
+
+test('Free user-initiated extension submission does not require automatic submission', () => {
+  assert.equal(extensionAuthorizationRequiresAutomaticSubmission('user_initiated'), false);
+});
+
+test('Free standing-consent extension submission still requires automatic submission', () => {
+  assert.equal(extensionAuthorizationRequiresAutomaticSubmission('standing_consent'), true);
 });

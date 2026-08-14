@@ -38,6 +38,7 @@ import type { ResumeSpec } from '../llm/resumeSpec';
 import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { resumeEmailOfRecord } from '../lib/resumeEmail';
+import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 
 /* GET /resume/base        - the stored base resume, or 404 if never built.
  * POST /resume/base/stream - build it, streaming each piece as it is decided (SSE).
@@ -261,6 +262,35 @@ export function sanitizeEditedSpec(raw: unknown): { spec?: ResumeSpec; error?: s
 }
 
 export async function baseResumeRoutes(fastify: FastifyInstance) {
+  // Authenticated, deterministic render of the saved base resume. This does no AI work, consumes
+  // no trial allowance, and remains available to every account for Free application filling.
+  fastify.get('/resume/base/file', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const userId = request.jwtPayload!.userId;
+    const [profile] = await db.select().from(profiles).where(eq(profiles.user_id, userId));
+    if (!profile?.base_resume_json) return reply.status(404).send({ error: 'No main resume yet' });
+    const applicationProfile = await loadApplicationProfileLike(userId);
+    const contact = contactHeaderFrom(
+      profile.parsed_json,
+      applicationProfile as unknown as Record<string, unknown>,
+      resumeEmailOfRecord(profile.parsed_json) ?? request.jwtPayload!.email,
+    );
+    try {
+      const rendered = await renderResumePdf(
+        profile.base_resume_json as ResumeSpec,
+        contact,
+        'General application resume',
+      );
+      return reply
+        .header('Cache-Control', 'private, no-store')
+        .header('Content-Type', 'application/pdf')
+        .header('Content-Disposition', 'attachment; filename="litos-base-resume.pdf"')
+        .send(rendered.buffer);
+    } catch (error) {
+      request.log.error({ error, userId }, 'saved main resume could not be rendered for Free filling');
+      return reply.status(422).send({ error: 'Your main resume needs review before it can be attached.' });
+    }
+  });
+
   fastify.get('/resume/base', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
     const [profile] = await db.select().from(profiles).where(eq(profiles.user_id, userId));

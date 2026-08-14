@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { OUTREACH_DRAFT_INSTRUCTIONS, type OutreachDraftType } from '../lib/outreachDraftTypes';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -60,7 +61,8 @@ export async function generateDraft(
   contact: ContactInput,
   role: string,
   company: string,
-  userProfile: UserProfileInput
+  userProfile: UserProfileInput,
+  draftType: OutreachDraftType,
 ): Promise<DraftResult> {
   const recentExperience = userProfile.experience.slice(0, 2);
   const topSkills = userProfile.skills.slice(0, 6).join(', ');
@@ -81,6 +83,9 @@ Contact to reach out to:
 - School match (same school as the applicant): ${contact.school_match}
 
 Role the applicant is interested in: ${role} at ${company}
+
+Message type: ${draftType}
+Type-specific instruction: ${OUTREACH_DRAFT_INSTRUCTIONS[draftType]}
 
 Applicant background:
 - School: ${userProfile.school} (Class of '${userProfile.grad_year})
