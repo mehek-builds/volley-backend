@@ -11,6 +11,9 @@ import {
   hasFocusTargeting,
   hasWorkEligibilityDeclaration,
   onboardingStepFrom,
+  flowAcknowledgementDecision,
+  nextReplayStep,
+  replaySteps,
 } from './onboarding';
 import { encryptField } from '../lib/fieldCrypto';
 
@@ -149,6 +152,42 @@ describe('onboarding step order', () => {
     for (const [expected, input] of cases) {
       assert.equal(onboardingStepFrom(input), expected);
     }
+  });
+});
+
+describe('version 2 walkthrough replay', () => {
+  test('an existing account reviews every core screen even when its data is already complete', () => {
+    const steps = replaySteps(false);
+    assert.deepEqual(steps, ['resume', 'impact', 'focus', 'sponsorship', 'base']);
+    assert.equal(nextReplayStep([], false), 'resume');
+    assert.equal(nextReplayStep(['resume'], false), 'impact');
+    assert.equal(nextReplayStep(['resume', 'impact', 'focus', 'sponsorship'], false), 'base');
+    assert.equal(nextReplayStep(steps, false), 'done');
+  });
+
+  test('the existing conditional details screen stays in the account-specific flow', () => {
+    const steps = replaySteps(true);
+    assert.deepEqual(steps, ['resume', 'impact', 'focus', 'sponsorship', 'base', 'gaps']);
+    assert.equal(nextReplayStep(steps.slice(0, -1), true), 'gaps');
+    assert.equal(nextReplayStep(steps, true), 'done');
+  });
+
+  test('duplicate receipts do not move the server-owned cursor out of order', () => {
+    assert.equal(nextReplayStep(['resume', 'resume', 'impact'], false), 'focus');
+    assert.equal(nextReplayStep(['impact'], false), 'resume');
+  });
+
+  test('a lost acknowledgement response can be retried idempotently', () => {
+    assert.deepEqual(flowAcknowledgementDecision(['resume'], 'resume', false), {
+      accepted: true,
+      alreadyRecorded: true,
+      expected: 'impact',
+    });
+    assert.deepEqual(flowAcknowledgementDecision(['resume'], 'focus', false), {
+      accepted: false,
+      alreadyRecorded: false,
+      expected: 'impact',
+    });
   });
 });
 
