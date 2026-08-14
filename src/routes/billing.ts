@@ -460,6 +460,60 @@ export async function billingRoutes(fastify: FastifyInstance) {
     });
   });
 
+  fastify.get('/billing/receipt', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const { userId, isGuest } = request.jwtPayload!;
+    if (isGuest) {
+      return reply.status(409).send({ error: 'Verify an email before viewing billing receipts.', code: 'claim_required' });
+    }
+    const userRows = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+    const user = userRows[0];
+    if (!user?.billing_subscription_id) {
+      return reply.status(404).send({ error: 'No paid subscription receipt is available.', code: 'billing_receipt_missing' });
+    }
+    const offerRows = await db.select({
+      interval: pricing_offers.billing_interval,
+      productCode: pricing_offers.product_code,
+      termCode: pricing_offers.term_code,
+      amountCents: pricing_offers.amount_cents,
+      currency: pricing_offers.currency,
+      paidAt: pricing_offers.paid_at,
+      reference: pricing_offers.provider_checkout_id,
+    }).from(pricing_offers).where(and(
+      eq(pricing_offers.user_id, userId),
+      eq(pricing_offers.provider_subscription_id, user.billing_subscription_id),
+      eq(pricing_offers.status, 'paid'),
+    )).limit(1);
+    const offer = offerRows[0];
+    const canonicalCadence = offer?.termCode === 'week'
+      || offer?.termCode === 'month'
+      || offer?.termCode === 'quarter'
+      ? offer.termCode
+      : offer?.interval === 'week' || offer?.interval === 'month' || offer?.interval === 'quarter'
+        ? offer.interval
+        : offer?.productCode === 'litos_plus' && offer.interval === 'weekly'
+          ? 'week'
+          : offer?.productCode === 'litos_plus' && offer.interval === 'monthly'
+            ? 'month'
+            : null;
+    const legacyInterval = offer?.interval === 'weekly' || offer?.interval === 'monthly'
+      ? offer.interval
+      : null;
+    const receiptInterval = canonicalCadence ?? legacyInterval;
+    if (!offer || !receiptInterval) {
+      return reply.status(404).send({ error: 'No paid subscription receipt is available.', code: 'billing_receipt_missing' });
+    }
+    return reply.header('Cache-Control', 'private, no-store').status(200).send({
+      provider: user.billing_provider === 'stripe' ? 'stripe' : 'litos',
+      plan: canonicalCadence !== null || offer.productCode === 'litos_plus' ? 'litos_plus' : 'pro',
+      interval: receiptInterval,
+      amount_cents: offer.amountCents,
+      currency: offer.currency.toUpperCase(),
+      paid_at: offer.paidAt,
+      renews_at: user.billing_renews_at ?? null,
+      reference: offer.reference ? offer.reference.slice(-12) : null,
+    });
+  });
+
   fastify.post<{ Body: CheckoutBody }>('/billing/checkout', { preHandler: requireAuth }, async (request, reply) => {
     const { userId, email, isGuest } = request.jwtPayload!;
     if (isGuest || !email) {

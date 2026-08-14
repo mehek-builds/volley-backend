@@ -9,6 +9,8 @@ import {
   experience_bank,
   targeting,
   autofill_events,
+  onboarding_flow_runs,
+  onboarding_flow_step_acknowledgements,
 } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { decryptField } from '../lib/fieldCrypto';
@@ -148,6 +150,60 @@ async function selectOnboardingUserRow(userId: string) {
 }
 
 type Step = 'focus' | 'sponsorship' | 'resume' | 'impact' | 'base' | 'gaps' | 'done';
+
+export const CURRENT_ONBOARDING_FLOW_VERSION = 2;
+const REPLAY_STEPS_WITHOUT_GAPS = ['resume', 'impact', 'focus', 'sponsorship', 'base'] as const;
+type ReplayStep = (typeof REPLAY_STEPS_WITHOUT_GAPS)[number] | 'gaps';
+
+export function replaySteps(includesGaps: boolean): ReplayStep[] {
+  return includesGaps
+    ? [...REPLAY_STEPS_WITHOUT_GAPS, 'gaps']
+    : [...REPLAY_STEPS_WITHOUT_GAPS];
+}
+
+export function nextReplayStep(acknowledged: readonly string[], includesGaps: boolean): Step {
+  const seen = new Set(acknowledged);
+  return replaySteps(includesGaps).find((step) => !seen.has(step)) ?? 'done';
+}
+
+export function flowAcknowledgementDecision(
+  acknowledged: readonly string[],
+  submitted: ReplayStep,
+  includesGaps: boolean,
+): { accepted: boolean; alreadyRecorded: boolean; expected: Step } {
+  const expected = nextReplayStep(acknowledged, includesGaps);
+  if (acknowledged.includes(submitted)) {
+    return { accepted: true, alreadyRecorded: true, expected };
+  }
+  return { accepted: expected === submitted, alreadyRecorded: false, expected };
+}
+
+function isUndefinedTableError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === '42P01';
+}
+
+async function onboardingFlowLedger(userId: string) {
+  try {
+    const [[run], acknowledgements] = await Promise.all([
+      db.select().from(onboarding_flow_runs).where(sql`${onboarding_flow_runs.user_id} = ${userId}
+        and ${onboarding_flow_runs.flow_version} = ${CURRENT_ONBOARDING_FLOW_VERSION}`).limit(1),
+      db.select({ step: onboarding_flow_step_acknowledgements.step })
+        .from(onboarding_flow_step_acknowledgements)
+        .where(sql`${onboarding_flow_step_acknowledgements.user_id} = ${userId}
+          and ${onboarding_flow_step_acknowledgements.flow_version} = ${CURRENT_ONBOARDING_FLOW_VERSION}`),
+    ]);
+    return {
+      available: true as const,
+      exists: !!run,
+      completed: run?.completed_at != null,
+      replayRequired: run?.replay_required === true,
+      acknowledged: acknowledgements.map((row) => row.step),
+    };
+  } catch (error) {
+    if (!isUndefinedTableError(error)) throw error;
+    return { available: false as const, exists: false, completed: false, replayRequired: false, acknowledged: [] as string[] };
+  }
+}
 
 /* 'gaps' IS BACK IN THIS UNION, and the reason #116 took it out is the reason this is safe now.
  *
@@ -363,6 +419,14 @@ const completeBodySchema = z.object({
   // The code-of-conduct permission, asked and stored separately. See db/schema.ts.
   automatic_conduct_acceptance_enabled: z.boolean().optional(),
 });
+const flowStepBodySchema = z.object({
+  flow_version: z.literal(CURRENT_ONBOARDING_FLOW_VERSION),
+  step: z.enum(['resume', 'impact', 'focus', 'sponsorship', 'base', 'gaps']),
+  disposition: z.enum(['continued', 'skipped']),
+});
+const flowCompleteBodySchema = z.object({
+  flow_version: z.literal(CURRENT_ONBOARDING_FLOW_VERSION),
+});
 const automationBodySchema = z.object({
   automatic_submission_enabled: z.boolean().optional(),
   automatic_verification_enabled: z.boolean().optional(),
@@ -557,7 +621,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // depends on, not an optional detail screen. But the gate is the STORED SPEC, so a student who
     // rebuilds or hand-edits later never gets sent back here, and an account created before this
     // shipped derives 'base' exactly once and then moves on for good.
-    const step = onboardingStepFrom({
+    const derivedStep = onboardingStepFrom({
       completed: !!user.onboarding_completed_at,
       hasResume: has_resume,
       hasImpactReview: parsed?.recent_experience_review?.completed !== false,
@@ -569,9 +633,25 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       hasSetupGaps: hasSetupGapsFrom(gaps),
       gapsAsked: gapsAskedFrom(appProfile),
     });
+    const includesGaps = includesGapsStepFrom(gaps, appProfile);
+    const flow = await onboardingFlowLedger(userId);
+    /* Existing accounts already contain the facts that normally derive every setup step as done.
+       A separate acknowledgement ledger makes them review each version 2 screen without deleting
+       those facts. If the migration has not landed, fail open to the legacy derived route rather
+       than blanking /start for every account. */
+    const step = flow.available && flow.replayRequired && !flow.completed
+      ? nextReplayStep(flow.acknowledged, includesGaps)
+      : derivedStep;
+    const flowCompleted = flow.available ? flow.completed : !!user.onboarding_completed_at;
+    const requiresOnboarding = flow.available
+      ? !flowCompleted || derivedStep !== 'done'
+      : derivedStep !== 'done';
 
     return reply.status(200).send({
       step,
+      flow_version: CURRENT_ONBOARDING_FLOW_VERSION,
+      flow_completed: flowCompleted,
+      requires_onboarding: requiresOnboarding,
       completed_at: user.onboarding_completed_at,
       has_focus,
       has_sponsorship_answer,
@@ -589,7 +669,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // Whether the flow contains the setup gaps screen, which is the step rail's denominator. The
       // client must not re-derive this from `gaps`: see includesGapsStepFrom for the two states
       // that look identical from the gap list alone.
-      includes_gaps_step: includesGapsStepFrom(gaps, appProfile),
+      includes_gaps_step: includesGaps,
       // Starting values for the gap questions, from the student's own resume. Never a stored
       // answer: see gapSuggestionsFrom for why offering one is not the inference schema.ts forbids.
       gap_suggestions: gapSuggestionsFrom(gaps, parsed),
@@ -651,6 +731,91 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     }
   });
 
+  /* Acknowledging a walkthrough screen is not the same act as changing profile data. The profile
+     endpoint owns any edits, and this append-only receipt records only that the version 2 screen
+     was continued or skipped. Finish later does not call this route. */
+  fastify.post('/onboarding/flow/steps', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = flowStepBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) return reply.status(400).send({ error: 'Invalid onboarding step acknowledgement' });
+    const userId = request.jwtPayload!.userId;
+    const [[user], appProfile] = await Promise.all([
+      db.select({ onboarding_completed_at: users.onboarding_completed_at }).from(users).where(eq(users.id, userId)).limit(1),
+      selectApplicationProfileRow(userId),
+    ]);
+    if (!user) return reply.status(404).send({ error: 'No such user' });
+
+    const flow = await onboardingFlowLedger(userId);
+    if (!flow.available) return reply.status(503).send({ error: 'The onboarding update is still being prepared. Try again shortly.' });
+    if (flow.replayRequired) {
+      const decision = flowAcknowledgementDecision(
+        flow.acknowledged,
+        parsed.data.step,
+        includesGapsStepFrom(gapsFrom(appProfile), appProfile),
+      );
+      if (decision.alreadyRecorded) return reply.status(200).send({ ok: true, ...parsed.data });
+      if (!decision.accepted) {
+        return reply.status(409).send({ error: `Review ${decision.expected} before continuing.` });
+      }
+    }
+
+    await db.transaction(async (tx) => {
+      await tx.insert(onboarding_flow_runs).values({
+        user_id: userId,
+        flow_version: CURRENT_ONBOARDING_FLOW_VERSION,
+          replay_required: false,
+      }).onConflictDoNothing();
+      await tx.insert(onboarding_flow_step_acknowledgements).values({
+        user_id: userId,
+        flow_version: CURRENT_ONBOARDING_FLOW_VERSION,
+        step: parsed.data.step,
+        disposition: parsed.data.disposition,
+      }).onConflictDoNothing();
+    });
+    return reply.status(200).send({ ok: true, ...parsed.data });
+  });
+
+  fastify.post('/onboarding/flow/complete', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = flowCompleteBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) return reply.status(400).send({ error: 'Invalid onboarding flow version' });
+    const userId = request.jwtPayload!.userId;
+    const [[user], appProfile] = await Promise.all([
+      db.select({ onboarding_completed_at: users.onboarding_completed_at }).from(users).where(eq(users.id, userId)).limit(1),
+      selectApplicationProfileRow(userId),
+    ]);
+    if (!user) return reply.status(404).send({ error: 'No such user' });
+    if (!user.onboarding_completed_at) {
+      return reply.status(409).send({ error: 'Finish the initial setup before recording this walkthrough version.' });
+    }
+
+    const flow = await onboardingFlowLedger(userId);
+    if (!flow.available) return reply.status(503).send({ error: 'The onboarding update is still being prepared. Try again shortly.' });
+    if (flow.completed) return reply.status(200).send({ ok: true, flow_version: CURRENT_ONBOARDING_FLOW_VERSION });
+
+    if (!flow.exists || flow.replayRequired) {
+      const required = replaySteps(includesGapsStepFrom(gapsFrom(appProfile), appProfile));
+      const seen = new Set(flow.acknowledged);
+      const missing = required.filter((step) => !seen.has(step));
+      if (missing.length > 0) {
+        return reply.status(409).send({ error: `Review ${missing[0]} before finishing this walkthrough.` });
+      }
+    }
+
+    const now = new Date();
+    await db.transaction(async (tx) => {
+      await tx.insert(onboarding_flow_runs).values({
+        user_id: userId,
+        flow_version: CURRENT_ONBOARDING_FLOW_VERSION,
+        replay_required: false,
+        completed_at: now,
+      }).onConflictDoNothing();
+      await tx.update(onboarding_flow_runs)
+        .set({ completed_at: now })
+        .where(sql`${onboarding_flow_runs.user_id} = ${userId}
+          and ${onboarding_flow_runs.flow_version} = ${CURRENT_ONBOARDING_FLOW_VERSION}`);
+    });
+    return reply.status(200).send({ ok: true, flow_version: CURRENT_ONBOARDING_FLOW_VERSION });
+  });
+
   // Explicit act, not an inference: this is what turns harvest off, so the student takes it.
   fastify.post('/onboarding/complete', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
@@ -683,7 +848,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       await db
         .update(users)
         .set({
-          onboarding_completed_at: now,
+          onboarding_completed_at: sql`coalesce(${users.onboarding_completed_at}, ${now})`,
           ...automationConsentValues(parsed.data, now),
         })
         .where(eq(users.id, userId));

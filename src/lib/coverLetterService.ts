@@ -56,7 +56,9 @@ export function canGenerateCoverLetter(supported: boolean | undefined, capabilit
  * a figure duplicated in the bank is duplicated everywhere downstream, and de-duplicating at the
  * bank catches it once. See engine/grounding.ts for why the defect is in her data, not here.
  */
-async function candidateContext(row: ApplicationRow) {
+export type CoverLetterCandidateContext = Awaited<ReturnType<typeof coverLetterCandidateContext>>;
+
+export async function coverLetterCandidateContext(row: ApplicationRow) {
   const [bank, profileRows] = await Promise.all([
     readExperienceBankOrSeedFromBaseResume(row.user_id),
     db.select().from(profiles).where(eq(profiles.user_id, row.user_id)).limit(1),
@@ -72,7 +74,10 @@ async function candidateContext(row: ApplicationRow) {
     org: entry.org,
     text: (entry.bullet_variants as string[] | null ?? []).join(' \n '),
   })));
-  return { source, contested };
+  const declaredSkills = Array.isArray(profileRows[0]?.skills)
+    ? profileRows[0].skills.filter((skill): skill is string => typeof skill === 'string' && skill.trim().length > 0)
+    : [];
+  return { source, contested, declaredSkills };
 }
 
 async function persistCoverLetter(
@@ -183,7 +188,7 @@ export async function generateStoredCoverLetter(row: ApplicationRow, force = fal
   }
   const existing = storedCoverLetter(row);
   if (existing && !force) return { cover_letter: existing, blob_url: undefined };
-  const { source, contested } = await candidateContext(row);
+  const { source, contested } = await coverLetterCandidateContext(row);
   let body = '';
   let validation = { issues: ['not generated'], warnings: [] as string[], word_count: 0, body: '' };
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -207,6 +212,25 @@ export async function generateStoredCoverLetter(row: ApplicationRow, force = fal
   return persistCoverLetter(row, validation.body, validation.warnings, validation.word_count, false);
 }
 
+/** Validate and persist a body produced by the compact packet call through the normal letter gate. */
+export async function persistGeneratedCoverLetterBody(
+  row: ApplicationRow,
+  body: string,
+  context?: CoverLetterCandidateContext,
+) {
+  const review = readApplicationReview(row.spec);
+  const job = row.job_context as { company?: string; role?: string };
+  if (!review?.jd_text || !job.company || !job.role) throw new Error('This application is missing something we need');
+  const { source, contested } = context ?? await coverLetterCandidateContext(row);
+  const validation = validateCoverLetter(body, job.company, job.role, source, contested);
+  if (validation.issues.length > 0) {
+    const error = new Error('The compact cover letter did not pass the normal quality gate') as Error & { issues?: string[] };
+    error.issues = validation.issues;
+    throw error;
+  }
+  return persistCoverLetter(row, validation.body, validation.warnings, validation.word_count, false);
+}
+
 /* The hand-edited letter is validated by exactly the same rules, on purpose.
  *
  * The argument for relaxing the commitment check here is real: a sentence Mehek typed is her promise
@@ -224,7 +248,7 @@ export async function saveStoredCoverLetter(row: ApplicationRow, body: string) {
   if (!job.company || !job.role || review?.cover_letter_supported !== true) {
     throw new Error('This company’s application page has nowhere to attach a cover letter');
   }
-  const { source, contested } = await candidateContext(row);
+  const { source, contested } = await coverLetterCandidateContext(row);
   const validation = validateCoverLetter(body, job.company, job.role, source, contested);
   if (validation.issues.length > 0) {
     const error = new Error('Fix the cover letter before saving.') as Error & { issues?: string[] };

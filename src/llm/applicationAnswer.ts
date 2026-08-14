@@ -10,6 +10,7 @@ import {
   extractRankedItems,
   claimedUnheldItems,
 } from '../engine/grounding';
+import { generateOpenAIText, logOpenAIFallback, openAIConfigured } from './openAIProvider';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -85,6 +86,10 @@ Voice and format:
 export interface AnswerResult {
   answer: string;
   warnings: string[];
+}
+
+export interface DraftedAnswerValidation extends AnswerResult {
+  blockingIssues: string[];
 }
 
 // The drafter's refusal sentinel (R-029). When the prompt's premise rule concludes no honest
@@ -254,6 +259,69 @@ export function groundingFactsText(education: ApplicantGroundingFacts): string {
   ].filter((value) => typeof value === 'string' && value.trim().length > 0).join(' ');
 }
 
+function answerGroundingCorpus(
+  bank: ExperienceBankEntry[],
+  jdText: string,
+  education: ApplicantGroundingFacts,
+): string {
+  const bankCorpus = bank
+    .map((entry) => {
+      const variants = Array.isArray(entry.bullet_variants) ? (entry.bullet_variants as string[]) : [];
+      const tags = Array.isArray(entry.tags) ? (entry.tags as string[]) : [];
+      return [entry.org, entry.title ?? '', entry.date_range ?? '', ...variants, ...tags].join(' ');
+    })
+    .join(' ');
+  return `${bankCorpus} ${jdText} ${groundingFactsText(education)}`;
+}
+
+/**
+ * Grade a model-produced answer without making another model call.
+ *
+ * The compact packet generator uses this exact gate before one of its answers may enter an
+ * application. Blocking issues route that one answer back through draftApplicationAnswer, whose
+ * existing feedback retries remain the final authority. This keeps batching a transport and cost
+ * optimization rather than a weaker generation path.
+ */
+export function validateDraftedApplicationAnswer(
+  rawAnswer: string,
+  question: string,
+  jdText: string,
+  bank: ExperienceBankEntry[],
+  education: ApplicantGroundingFacts,
+  declaredSkills?: string[] | null,
+): DraftedAnswerValidation {
+  const declared = (declaredSkills ?? []).filter(
+    (skill) => typeof skill === 'string' && skill.trim().length > 0,
+  );
+  const ranking = rankingGroundingFor(question, declared);
+  if (ranking && ranking.items.length > 0 && ranking.held.length === 0) {
+    return { answer: '', warnings: [], blockingIssues: ['none of the ranked items are declared skills'] };
+  }
+
+  let answer = normalizeDraftedAnswer(rawAnswer);
+  if (!answer) return { answer: '', warnings: [], blockingIssues: ['the model could not draft an honest answer'] };
+
+  const corpusText = answerGroundingCorpus(bank, jdText, education);
+  const badNumbers = ungroundedNumbers(answer, numberSignatures(corpusText));
+  const unheldClaims = ranking ? claimedUnheldItems(answer, ranking.unheld) : [];
+  const blockingIssues: string[] = [];
+  if (badNumbers.length > 0) blockingIssues.push(`ungrounded numbers: ${badNumbers.join(', ')}`);
+  if (unheldClaims.length > 0) blockingIssues.push(`undeclared ranked skills: ${unheldClaims.join(', ')}`);
+
+  answer = stripEmDashes(answer);
+  const warnings: string[] = [];
+  const suspectNames = ungroundedProperNouns(answer, wordSet(corpusText));
+  if (suspectNames.length > 0) {
+    warnings.push(`Names/orgs not found in your background or the job post (verify): ${suspectNames.slice(0, 5).join(', ')}`);
+  }
+  const thinRanking = ranking ? thinRankingWarning(ranking) : null;
+  if (thinRanking) warnings.push(thinRanking);
+  const wordCount = answer.split(/\s+/).filter(Boolean).length;
+  if (wordCount > 160) warnings.push(`Answer is ${wordCount} words - consider trimming.`);
+
+  return { answer, warnings, blockingIssues };
+}
+
 export async function draftApplicationAnswer(
   question: string,
   company: string,
@@ -294,6 +362,21 @@ export async function draftApplicationAnswer(
   const rankingRule = ranking ? rankingRuleText(ranking) : '';
 
   async function callModel(feedback?: string): Promise<string> {
+    const userContent = `Question: ${question}\n\nWrite the answer.${rankingRule ? `\n\n${rankingRule}` : ''}${feedback ? `\n\n${feedback}` : ''}`;
+    if (openAIConfigured() && !feedback) {
+      try {
+        const generated = await generateOpenAIText({
+          instructions: `${SYSTEM_PROMPT}\n\n${contextBlock}`,
+          input: userContent,
+          maxOutputTokens: 600,
+          reasoningEffort: 'medium',
+        });
+        return generated.text;
+      } catch (error) {
+        logOpenAIFallback('application answer', error);
+      }
+    }
+
     const response = await client.messages.create({
       model: 'claude-sonnet-5',
       max_tokens: 600,
@@ -304,7 +387,7 @@ export async function draftApplicationAnswer(
       messages: [
         {
           role: 'user',
-          content: `Question: ${question}\n\nWrite the answer.${rankingRule ? `\n\n${rankingRule}` : ''}${feedback ? `\n\n${feedback}` : ''}`,
+          content: userContent,
         },
       ],
     });
@@ -317,14 +400,7 @@ export async function draftApplicationAnswer(
   // she has stored. That last part is the whole of groundingFactsText and it is not decoration:
   // with only `school` in the corpus, a draft naming the city her university is in was reported to
   // her as an unverifiable name.
-  const bankCorpus = bank
-    .map((e) => {
-      const variants = Array.isArray(e.bullet_variants) ? (e.bullet_variants as string[]) : [];
-      const tags = Array.isArray(e.tags) ? (e.tags as string[]) : [];
-      return [e.org, e.title ?? '', e.date_range ?? '', ...variants, ...tags].join(' ');
-    })
-    .join(' ');
-  const corpusText = `${bankCorpus} ${jdText} ${groundingFactsText(education)}`;
+  const corpusText = answerGroundingCorpus(bank, jdText, education);
   const sourceSignatures = numberSignatures(corpusText);
   const corpusWords = wordSet(corpusText);
 

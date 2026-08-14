@@ -233,6 +233,33 @@ export const billing_account_deletion_tombstones = pgTable('billing_account_dele
   expiryIdx: index('billing_account_deletion_tombstone_expiry_idx').on(t.expires_at),
 }));
 
+/* Versioned setup runs are separate from users.onboarding_completed_at on purpose.
+ *
+ * onboarding_completed_at is the consent boundary that turns first-application harvesting off.
+ * Reusing or clearing it for a redesigned walkthrough would silently turn harvesting back on for
+ * returning accounts. These append-only rows record presentation progress while leaving that
+ * original boundary intact. A version can be completed only once per account, and deleting the
+ * account removes the run and its step receipts through the foreign keys below. */
+export const onboarding_flow_runs = pgTable('onboarding_flow_runs', {
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  flow_version: integer('flow_version').notNull(),
+  started_at: timestamp('started_at', { withTimezone: true }).defaultNow().notNull(),
+  replay_required: boolean('replay_required').default(false).notNull(),
+  completed_at: timestamp('completed_at', { withTimezone: true }),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.user_id, t.flow_version] }),
+}));
+
+export const onboarding_flow_step_acknowledgements = pgTable('onboarding_flow_step_acknowledgements', {
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  flow_version: integer('flow_version').notNull(),
+  step: text('step').notNull(),
+  disposition: text('disposition').notNull(),
+  acknowledged_at: timestamp('acknowledged_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({ columns: [t.user_id, t.flow_version, t.step] }),
+}));
+
 // ---- pricing_experiment_assignments ----
 // A user keeps the same variant for the lifetime of an experiment, even when they change browsers
 // or an operator changes allocation percentages after launch.

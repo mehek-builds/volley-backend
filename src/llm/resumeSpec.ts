@@ -4,6 +4,7 @@ import { extractJdSignals } from '../engine/jdSignals';
 import { leadRequirementCandidates, type LeadAlignment } from '../engine/leadAlignment';
 import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { STRONG_VERBS } from '../engine/resumeValidate';
+import { generateOpenAIText, logOpenAIFallback, openAIConfigured } from './openAIProvider';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -185,6 +186,81 @@ Rules:
 - NEVER use an em dash (—) anywhere in the output. Use a comma, colon, hyphen, or period instead.
 - Bullets must fit in roughly two lines of a resume (under 235 characters) - be concise, not padded.`;
 
+const RESUME_JSON_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    target_role: { type: 'string' },
+    school: { type: 'string' },
+    degree: { type: 'string' },
+    grad_date: { type: 'string' },
+    coursework: { type: 'string' },
+    education_position: { type: 'string', enum: ['top', 'after_experience'] },
+    lead_alignment: {
+      anyOf: [
+        {
+          type: 'object',
+          properties: {
+            entry_org: { type: 'string' },
+            requirement: { type: 'string' },
+            evidence: { type: 'string' },
+          },
+          required: ['entry_org', 'requirement', 'evidence'],
+          additionalProperties: false,
+        },
+        { type: 'null' },
+      ],
+    },
+    experience: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['job', 'project', 'leadership'] },
+          org: { type: 'string' },
+          title: { type: 'string' },
+          date_range: { type: 'string' },
+          bullets: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['type', 'org', 'title', 'date_range', 'bullets'],
+        additionalProperties: false,
+      },
+    },
+    skills: { type: 'array', items: { type: 'string' } },
+  },
+  required: [
+    'target_role',
+    'school',
+    'degree',
+    'grad_date',
+    'coursework',
+    'education_position',
+    'lead_alignment',
+    'experience',
+    'skills',
+  ],
+  additionalProperties: false,
+};
+
+function parseGeneratedResumeSpec(text: string, provider: string, stopReason: string): ResumeSpec {
+  try {
+    const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
+    return normalizeSpec(JSON.parse(cleaned));
+  } catch {
+    const first = text.indexOf('{');
+    const last = text.lastIndexOf('}');
+    if (first !== -1 && last > first) {
+      try {
+        return normalizeSpec(JSON.parse(text.slice(first, last + 1)));
+      } catch {
+        // Fall through to the descriptive provider error.
+      }
+    }
+    throw new Error(
+      `${provider} returned invalid JSON for resume spec (stop_reason=${stopReason}): ${text.slice(0, 200)}`,
+    );
+  }
+}
+
 // Coerce a parsed model response into a well-formed ResumeSpec: missing/mistyped fields become safe
 // empties and a non-array experience/skills/bullets becomes []. Without this, a syntactically valid
 // but partial JSON (e.g. no "experience" key) later crashed validateResumeSpec/renderResumePdf on
@@ -350,6 +426,26 @@ How to use it:
     ? `\n\nTHE POSTING'S PRIMARY ASKS, in the posting's own priority order. "lead_alignment.requirement" MUST be one of these lines, copied exactly:\n${primaryAsks.map((ask, i) => `${i + 1}. ${ask}`).join('\n')}`
     : '';
   const contextBlock = `Job: ${role} at ${company}\n\nJD extraction summary (use this to rank evidence; never use it as evidence that the applicant has a skill):\n${JSON.stringify(jdSignals)}${asksBlock}\n\nJob description:\n${jdText}\n\nEducation source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}${baseBlock}${priorityBlock}\n\nExperience bank:\n${JSON.stringify(bank)}`;
+  const userContent = `Return the tailoring spec JSON.${feedbackBlock}`;
+
+  // A validation retry deliberately goes straight to Claude. It means the first OpenAI result was
+  // syntactically usable but did not meet Litos's deterministic quality bar, which is exactly when
+  // the independent provider is more valuable than another attempt from the same model.
+  if (openAIConfigured() && !feedback?.length) {
+    try {
+      const generated = await generateOpenAIText({
+        instructions: `${RESUME_SYSTEM_PROMPT}\n\n${contextBlock}`,
+        input: userContent,
+        maxOutputTokens: 16384,
+        timeoutMs,
+        jsonSchema: { name: 'litos_resume_spec', schema: RESUME_JSON_SCHEMA },
+      });
+      return parseGeneratedResumeSpec(generated.text, 'OpenAI', 'completed');
+    } catch (error) {
+      logOpenAIFallback('resume tailoring', error);
+    }
+  }
+
   const response = await client.messages.create(
     {
       model: 'claude-sonnet-5',
@@ -381,7 +477,7 @@ How to use it:
       messages: [
         {
           role: 'user',
-          content: `Return the tailoring spec JSON.${feedbackBlock}`,
+          content: userContent,
         },
       ],
     },
@@ -399,23 +495,5 @@ How to use it:
     throw new Error(`Resume spec truncated at max_tokens (${text.length} chars) - raise the cap`);
   }
 
-  try {
-    const cleaned = text.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
-    return normalizeSpec(JSON.parse(cleaned));
-  } catch {
-    // Fence stripping can miss (explanation text around the fence, stray trailing output);
-    // the outermost brace pair is the spec whenever one parses.
-    const first = text.indexOf('{');
-    const last = text.lastIndexOf('}');
-    if (first !== -1 && last > first) {
-      try {
-        return normalizeSpec(JSON.parse(text.slice(first, last + 1)));
-      } catch {
-        // fall through to the descriptive error
-      }
-    }
-    throw new Error(
-      `Claude returned invalid JSON for resume spec (stop_reason=${response.stop_reason}): ${text.slice(0, 200)}`,
-    );
-  }
+  return parseGeneratedResumeSpec(text, 'Claude', response.stop_reason ?? 'unknown');
 }

@@ -9,6 +9,7 @@ import {
   draftApplicationAnswer,
   applicantGroundingFacts,
   groundingFactsText,
+  validateDraftedApplicationAnswer,
 } from './applicationAnswer';
 import { ungroundedProperNouns, wordSet } from '../engine/grounding';
 
@@ -197,6 +198,57 @@ describe('R-042: an all-unheld ranking rides the cannot-draft path', () => {
     );
     assert.equal(answer, '');
     assert.deepEqual(warnings, []);
+  });
+});
+
+describe('compact answers pass through the same deterministic quality gate', () => {
+  const bank = [{
+    id: 'entry-1',
+    user_id: 'user-1',
+    org: 'Acme Labs',
+    title: 'Software Engineer',
+    type: 'work',
+    date_range: '2025',
+    location: null,
+    bullet_variants: ['Reduced processing time by 35% using Python'],
+    tags: ['Python'],
+    created_at: new Date(),
+  }];
+
+  test('accepts grounded prose and strips prohibited dashes', () => {
+    const result = validateDraftedApplicationAnswer(
+      'At Acme Labs, I used Python to reduce processing time by 35%. This work maps directly to the role.',
+      'Why are you a fit?',
+      'We need a Python engineer.',
+      bank,
+      { school: 'USC' },
+      ['Python'],
+    );
+    assert.deepEqual(result.blockingIssues, []);
+  });
+
+  test('blocks a fabricated metric so the caller can use the dedicated retry path', () => {
+    const result = validateDraftedApplicationAnswer(
+      'At Acme Labs, I increased revenue by 82%.',
+      'Why are you a fit?',
+      'We need a Python engineer.',
+      bank,
+      { school: 'USC' },
+      ['Python'],
+    );
+    assert.ok(result.blockingIssues.some((issue) => issue.includes('82%')));
+  });
+
+  test('blocks an undeclared item in a ranking answer', () => {
+    const result = validateDraftedApplicationAnswer(
+      'Python first, Java second.',
+      'Rank these languages by proficiency: Python, Java',
+      'We need a Python engineer.',
+      bank,
+      { school: 'USC' },
+      ['Python'],
+    );
+    assert.ok(result.blockingIssues.some((issue) => issue.includes('Java')));
   });
 });
 

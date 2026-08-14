@@ -132,7 +132,15 @@ import { createDashboardHandoffBinding } from '../lib/extensionHandoffPacket';
 import { decryptRow } from './applicationProfile';
 import { readExperienceBank } from '../db/experienceBank';
 import { declaredSkillsList } from './profile';
-import { applicantGroundingFacts, draftApplicationAnswer, type ApplicantGroundingFacts } from '../llm/applicationAnswer';
+import {
+  applicantGroundingFacts,
+  draftApplicationAnswer,
+  rankingGroundingFor,
+  rankingRuleText,
+  validateDraftedApplicationAnswer,
+  type ApplicantGroundingFacts,
+} from '../llm/applicationAnswer';
+import { generateCompactApplicationMaterials, type CompactMaterialQuestion } from '../llm/applicationMaterials';
 import { isBillingOrAuthFailure } from './resume';
 import {
   completeEmailVerificationIfPresent,
@@ -177,7 +185,12 @@ import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { jobCountry, postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
-import { generateStoredCoverLetter, storedCoverLetter } from '../lib/coverLetterService';
+import {
+  coverLetterCandidateContext,
+  generateStoredCoverLetter,
+  persistGeneratedCoverLetterBody,
+  storedCoverLetter,
+} from '../lib/coverLetterService';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { mayClickFinalSubmit, preparedSubmissionStatus } from '../lib/submissionAuthorization';
@@ -1579,6 +1592,46 @@ export function discoveredControlInputType(field: Pick<DiscoveredQuestion, 'inpu
   return inputType;
 }
 
+/**
+ * The open prose controls worth including in the compact packet call.
+ *
+ * Resolution remains authoritative. This is only a conservative preselection made before that
+ * loop, and an answer is used later only if the normal resolver reaches its essay branch and the
+ * normal deterministic validator accepts it.
+ */
+export function compactMaterialQuestions(
+  discovered: readonly DiscoveredQuestion[],
+  current: ApplicationReviewState,
+  portal: SupportedPortal,
+  declaredSkills: readonly string[],
+): CompactMaterialQuestion[] {
+  const existing = new Map(
+    current.questions.map((question) => [normalizeReviewQuestionLabel(question.question).toLowerCase(), question]),
+  );
+  const selected = new Map<string, CompactMaterialQuestion>();
+  for (const field of discovered) {
+    const label = normalizeDiscoveredLabel(field.label);
+    const reviewLabel = normalizeReviewQuestionLabel(field.label);
+    if (!label || !reviewLabel) continue;
+    if (normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
+    if (discoveredFieldIsNotAQuestion({ label: field.label, options: field.options })
+      || discoveredFieldIsNotAQuestion({ label: reviewLabel, options: field.options })) continue;
+    const controlType = discoveredControlInputType(field);
+    const compactClosedControl = /^(?:select|radio|checkbox|combobox)$/i.test(controlType)
+      || usableOptions(field.options).length > 0;
+    if (compactClosedControl || !isOpenEndedQuestion(label) || isRefusedQuestion(label) || isSelfDeclarationQuestion(label)) continue;
+    const id = reviewLabel.toLowerCase();
+    if (existing.get(id)?.answer.trim()) continue;
+    const ranking = rankingGroundingFor(label, [...declaredSkills]);
+    selected.set(id, {
+      id,
+      question: label,
+      ...(ranking ? { ranking_rule: rankingRuleText(ranking) } : {}),
+    });
+  }
+  return [...selected.values()];
+}
+
 export async function discoverAndResolveQuestions(
   discovered: DiscoveredQuestion[],
   row: ResumeRow,
@@ -1593,6 +1646,7 @@ export async function discoverAndResolveQuestions(
    * re-checks the reuse scope against THIS posting's employer before handing one over - see
    * savedAnswerFor for why the read side has to check again rather than trust the write side. */
   savedAnswers: ReadonlyMap<string, string> = new Map(),
+  compactAnswers: ReadonlyMap<string, string> = new Map(),
 ): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[]; invalidatedQuestionKeys: string[] }> {
   const existingByLabel = new Map(
     current.questions.map((q) => [normalizeReviewQuestionLabel(q.question).toLowerCase(), q] as const),
@@ -1955,15 +2009,31 @@ export async function discoverAndResolveQuestions(
         if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
         continue;
       }
-      const { answer, warnings } = await draftApplicationAnswer(
-        label,
-        company,
-        current.role ?? 'this role',
-        current.jd_text,
-        bank,
-        groundingFacts,
-        declaredSkills,
-      );
+      const compactAnswer = compactAnswers.get(reviewLabel.toLowerCase());
+      const compactValidation = compactAnswer === undefined
+        ? null
+        : validateDraftedApplicationAnswer(
+          compactAnswer,
+          label,
+          current.jd_text,
+          bank,
+          groundingFacts,
+          declaredSkills,
+        );
+      // A compact answer enters the form only when the normal gate accepts it. If it misses, this
+      // one item falls back to the existing dedicated generator and keeps all of its feedback
+      // retries. Other accepted items from the same packet are still reused.
+      const { answer, warnings } = compactValidation && compactValidation.blockingIssues.length === 0
+        ? compactValidation
+        : await draftApplicationAnswer(
+          label,
+          company,
+          current.role ?? 'this role',
+          current.jd_text,
+          bank,
+          groundingFacts,
+          declaredSkills,
+        );
       const fitted = answer ? fitToBudget(answer, field.maxLength ?? 100_000) : null;
       if (!fitted) {
         attentionReasons.push(`open-ended question left for you (could not draft a confident answer): "${label.slice(0, 60)}"`);
@@ -2447,9 +2517,63 @@ async function prepareManaged(
       const controlId = managedOptionProbeControlId(field);
       return !controlId || !optionProbe.failedIds.has(controlId);
     });
+  const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
+  const resolutionCurrent = { ...current, questions: storedQuestions };
+  const applicationProfile = applicationProfileForPacket(
+    await loadApplicationProfileLike(row.user_id),
+    packet,
+  );
+  const savedAnswers = await loadSavedAnswers(row.user_id);
   const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
+  let compactAnswers: ReadonlyMap<string, string> = new Map();
+  let packetRow = row;
+  try {
+    const context = await coverLetterCandidateContext(row);
+    const compactQuestions = compactMaterialQuestions(
+      discoveredFields,
+      resolutionCurrent,
+      portal,
+      context.declaredSkills,
+    );
+    const includeCoverLetter = coverLetterSupported && !storedCoverLetter(row);
+    if (includeCoverLetter || compactQuestions.length > 0) {
+      const materials = await generateCompactApplicationMaterials({
+        company: jobContextCompany(row) || 'this company',
+        role: current.role ?? 'this role',
+        jdText: current.jd_text,
+        candidateSource: context.source,
+        contestedMetrics: context.contested.labels,
+        includeCoverLetter,
+        questions: compactQuestions,
+      });
+      fastify.log.info({
+        applicationId: row.id,
+        model: 'claude-sonnet-5',
+        coverLetterRequested: includeCoverLetter,
+        answerCount: compactQuestions.length,
+        ...materials.usage,
+      }, 'Compact generation usage');
+      compactAnswers = materials.answers;
+      if (includeCoverLetter && materials.coverLetter) {
+        try {
+          await persistGeneratedCoverLetterBody(row, materials.coverLetter, context);
+          const refreshedRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
+          if (refreshedRows[0]) packetRow = refreshedRows[0];
+        } catch (error) {
+          // The dedicated cover-letter path below retains its own feedback retry. A rejected
+          // bundled letter never enters the packet, while accepted bundled essays remain reusable.
+          fastify.log.warn({ error, applicationId: row.id }, 'Compact cover letter failed validation, retrying it through the dedicated generator');
+        }
+      }
+    }
+  } catch (error) {
+    if (isBillingOrAuthFailure(error)) throw error;
+    // A malformed or transient bundle falls back item by item to the generators that were already
+    // on this path. The application still gets the same quality behavior at the old call count.
+    fastify.log.warn({ error, applicationId: row.id }, 'Compact generation failed, using dedicated generators');
+  }
   const coverLetterOutcome = await packetForCoverLetterCapability(
-    row,
+    packetRow,
     coverLetterSupported,
     fastify,
     packetUsesControlledResumeFixture(portal),
@@ -2468,13 +2592,6 @@ async function prepareManaged(
     );
   }
   packet = transcriptOutcome.packet;
-  const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
-  const resolutionCurrent = { ...current, questions: storedQuestions };
-  const applicationProfile = applicationProfileForPacket(
-    await loadApplicationProfileLike(row.user_id),
-    packet,
-  );
-  const savedAnswers = await loadSavedAnswers(row.user_id);
   const {
     questions: discoveredQuestions,
     attentionReasons: discoveryAttention,
@@ -2487,6 +2604,7 @@ async function prepareManaged(
     authorization.enabled,
     portal,
     savedAnswers,
+    compactAnswers,
   );
   const failedQuestionKeys = failedFields.map((field) => normalizeReviewQuestionLabel(field.label).toLowerCase());
   const mergedQuestions = mergeDiscoveredPortalQuestions(
@@ -3255,8 +3373,61 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       applicationId: row.id,
     });
     const coverLetterSupported = await hasCoverLetterUpload(page, portal);
+    // Discover before generating documents so the cover letter and all unresolved prose fields can
+    // share the same call on this provider too. Discovery only reads the page and does not depend
+    // on the packet that is built below.
+    const discoveryFailures: string[] = [];
+    const discovered = await discoverPageQuestions(page).catch((error: unknown) => {
+      const message = describeDiscoveryFailure(error);
+      discoveryFailures.push(message);
+      fastify.log.error(
+        { applicationId: row.id, portal, error: message },
+        'Question discovery pass failed, so this run cannot see the questions this form asks',
+      );
+      return [];
+    });
+    const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
+    const resolutionCurrent = { ...current, questions: storedQuestions };
+    let compactAnswers: ReadonlyMap<string, string> = new Map();
+    let packetRow = row;
+    try {
+      const context = await coverLetterCandidateContext(row);
+      const compactQuestions = compactMaterialQuestions(discovered, resolutionCurrent, portal, context.declaredSkills);
+      const includeCoverLetter = coverLetterSupported && !storedCoverLetter(row);
+      if (includeCoverLetter || compactQuestions.length > 0) {
+        const materials = await generateCompactApplicationMaterials({
+          company: jobContextCompany(row) || 'this company',
+          role: current.role ?? 'this role',
+          jdText: current.jd_text,
+          candidateSource: context.source,
+          contestedMetrics: context.contested.labels,
+          includeCoverLetter,
+          questions: compactQuestions,
+        });
+        fastify.log.info({
+          applicationId: row.id,
+          model: 'claude-sonnet-5',
+          coverLetterRequested: includeCoverLetter,
+          answerCount: compactQuestions.length,
+          ...materials.usage,
+        }, 'Compact generation usage');
+        compactAnswers = materials.answers;
+        if (includeCoverLetter && materials.coverLetter) {
+          try {
+            await persistGeneratedCoverLetterBody(row, materials.coverLetter, context);
+            const refreshedRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
+            if (refreshedRows[0]) packetRow = refreshedRows[0];
+          } catch (error) {
+            fastify.log.warn({ error, applicationId: row.id }, 'Compact cover letter failed validation, retrying it through the dedicated generator');
+          }
+        }
+      }
+    } catch (error) {
+      if (isBillingOrAuthFailure(error)) throw error;
+      fastify.log.warn({ error, applicationId: row.id }, 'Compact generation failed, using dedicated generators');
+    }
     const builtOutcome = await packetForCoverLetterCapability(
-      row,
+      packetRow,
       coverLetterSupported,
       fastify,
       packetUsesControlledResumeFixture(portal),
@@ -3277,35 +3448,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     // See the managed path's transcriptAttention: this holds back a send that nothing else refuses.
     const transcriptAttention = transcriptOutcome.transcriptIssue ? [transcriptOutcome.transcriptIssue] : [];
 
-    // R-055: discover and resolve the posting's own custom questions before filling, so a
-    // dashboard-only submission does not depend on the extension having run first.
-    /* `.catch(() => [])` was the whole error handling here, and it is the direct-Playwright twin of
-     * the bug prepareManaged carries a long comment about: an empty array is what this path gets
-     * from a form with no custom questions AND from a scan that threw, so the two are
-     * indistinguishable downstream. The run then fills the fixed fields, writes zero question
-     * records, and reports no error - and on this path the consequence is worse than on the managed
-     * one, because standing consent turns a `safe` preparation into a click inside the same call.
-     *
-     * A scan that did not run cannot be the evidence that a form is complete. Same three
-     * consequences as the managed path: it is logged as an error because it is a product defect
-     * first, it is said to the applicant in her own attention list, and it gates `safe`. */
-    // An array rather than a nullable local, for the same reason prepareManaged uses one: TypeScript
-    // does not narrow across a closure it cannot prove ran.
-    const discoveryFailures: string[] = [];
-    const discovered = await discoverPageQuestions(page).catch((error: unknown) => {
-      // Normalized rather than taken raw, because `new Error()` carries `message === ''` and an
-      // empty string reaches discoveryHonestyReasons as falsy: the run would be correctly held back
-      // and the applicant would be shown no reason for it.
-      const message = describeDiscoveryFailure(error);
-      discoveryFailures.push(message);
-      fastify.log.error(
-        { applicationId: row.id, portal, error: message },
-        'Question discovery pass failed, so this run cannot see the questions this form asks',
-      );
-      return [];
-    });
-    const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
-    const resolutionCurrent = { ...current, questions: storedQuestions };
+    // R-055: resolve the posting's custom questions before filling, using the discovery above.
     const {
       questions: discoveredQuestions,
       attentionReasons: discoveryAttention,
@@ -3319,6 +3462,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         authorization.enabled,
         portal,
         await loadSavedAnswers(row.user_id),
+        compactAnswers,
       );
     const mergedQuestions = mergeDiscoveredPortalQuestions(discoveredQuestions, storedQuestions, invalidatedQuestionKeys);
     packet.questions = mergedQuestions.map((q) => ({

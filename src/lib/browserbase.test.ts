@@ -4,6 +4,7 @@ import {
   browserSessionBody,
   continueManagedBrowser,
   isBrowserbaseConfigured,
+  MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
   runManagedBrowser,
@@ -509,6 +510,85 @@ test('managed Stratus drops optional invalid selectors and rejects required inva
       { type: 'fillByLabelText', text: '', value: 'Taylor', label: 'required_empty_label' },
     ]),
     /Managed Stratus action has an invalid selector; action_audit=/,
+  );
+
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('managed Stratus serializes the required extract assertion capability and exact digit proof', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  let capturedActions: Array<Record<string, unknown>> = [];
+  let advertiseCapability = true;
+  globalThis.fetch = (async (_input, init) => {
+    capturedActions = (JSON.parse(String(init?.body)) as { actions: Array<Record<string, unknown>> }).actions;
+    return new Response(JSON.stringify({
+      run: {
+        title: 'Apply',
+        url: 'https://apply.workable.com/example/apply',
+        text: 'Apply',
+        ...(advertiseCapability ? { capabilities: [MANAGED_EXTRACT_ASSERTIONS_CAPABILITY] } : {}),
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+
+  const actions = [
+    {
+      type: 'requireCapability',
+      value: MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
+      label: 'phone',
+      optional: false,
+    },
+    {
+      type: 'extract',
+      selector: 'input[name="phone"][type="tel"]:visible',
+      attribute: 'value',
+      label: 'filled_field:phone',
+      optional: false,
+      requireUnique: true,
+      requireNonEmpty: true,
+      expectedValueDigits: '0567417451',
+      stabilityWindowMs: 1_200,
+    },
+  ] as const;
+  await runManagedBrowser('https://apply.workable.com/example/apply', [...actions]);
+
+  assert.deepEqual(capturedActions, [
+    {
+      type: 'requireCapability',
+      value: MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
+      label: 'phone',
+      optional: false,
+    },
+    {
+      type: 'extract',
+      selector: 'input[name="phone"][type="tel"]:visible',
+      attribute: 'value',
+      label: 'filled_field:phone',
+      optional: false,
+      requireUnique: true,
+      requireNonEmpty: true,
+      expectedValueDigits: '0567417451',
+      stabilityWindowMs: 1_200,
+    },
+  ]);
+  advertiseCapability = false;
+  await assert.rejects(
+    runManagedBrowser('https://apply.workable.com/example/apply', [...actions]),
+    /did not advertise required runner capability: extract-assertions-v1/,
+  );
+  await assert.rejects(
+    runManagedBrowser('https://apply.workable.com/example/apply', [
+      { type: 'requireCapability', value: 'extract-assertions-v2', optional: false },
+    ]),
+    /runner capability requirement is invalid/,
   );
 
   globalThis.fetch = previousFetch;

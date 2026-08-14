@@ -8,6 +8,7 @@ import {
   wordSet,
   ungroundedProperNouns,
 } from '../engine/grounding';
+import { generateOpenAIText, logOpenAIFallback, openAIConfigured } from './openAIProvider';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -190,6 +191,34 @@ export async function generateCoverLetter(
   },
   feedback: string[] = [],
 ): Promise<string> {
+  const userContent = `Role: ${input.role}\nCompany: ${input.company}\n\nJob description:\n${input.jd_text}\n\nCandidate source, the only authority for candidate claims:\n${input.candidate_source}${
+    input.contested_metrics?.length
+      ? `\n\nThese figures appear under more than one employer or project in the candidate source, so which one they belong to is not established: ${input.contested_metrics.join(', ')}. Do not use any of them, and do not use any claim built on them. Do not substitute a different number.`
+      : ''
+  }${feedback.length ? `\n\nFix these validation issues:\n${feedback.map((item) => `- ${item}`).join('\n')}` : ''}`;
+
+  if (openAIConfigured() && feedback.length === 0) {
+    try {
+      const generated = await generateOpenAIText({
+        instructions: COVER_LETTER_SYSTEM_PROMPT,
+        input: userContent,
+        maxOutputTokens: 8192,
+        jsonSchema: {
+          name: 'litos_cover_letter',
+          schema: {
+            type: 'object',
+            properties: { body: { type: 'string' } },
+            required: ['body'],
+            additionalProperties: false,
+          },
+        },
+      });
+      return parseCoverLetterBody(generated.text);
+    } catch (error) {
+      logOpenAIFallback('cover letter', error);
+    }
+  }
+
   const response = await client.messages.create({
     model: 'claude-sonnet-5',
     // max_tokens is a SHARED budget for thinking AND the emitted JSON, not just the JSON. Adaptive
@@ -204,11 +233,7 @@ export async function generateCoverLetter(
     system: [{ type: 'text', text: COVER_LETTER_SYSTEM_PROMPT }],
     messages: [{
       role: 'user',
-      content: `Role: ${input.role}\nCompany: ${input.company}\n\nJob description:\n${input.jd_text}\n\nCandidate source, the only authority for candidate claims:\n${input.candidate_source}${
-        input.contested_metrics?.length
-          ? `\n\nThese figures appear under more than one employer or project in the candidate source, so which one they belong to is not established: ${input.contested_metrics.join(', ')}. Do not use any of them, and do not use any claim built on them. Do not substitute a different number.`
-          : ''
-      }${feedback.length ? `\n\nFix these validation issues:\n${feedback.map((item) => `- ${item}`).join('\n')}` : ''}`,
+      content: userContent,
     }],
   });
   const block = response.content.find((item) => item.type === 'text');
@@ -220,4 +245,3 @@ export async function generateCoverLetter(
   }
   return parseCoverLetterBody(text);
 }
-
