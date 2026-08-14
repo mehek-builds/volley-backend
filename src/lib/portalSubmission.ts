@@ -4464,7 +4464,7 @@ const WORKABLE_ADDRESS_SELECTOR = 'input[name="address"]:visible';
 const WORKABLE_LEGACY_CITY_SELECTOR = 'input[name="city"]:visible';
 const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
-  'button[aria-label="Telephone country code"][aria-controls]:visible';
+  'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible';
 const WORKABLE_UAE_PHONE_COUNTRY_OPTION_SELECTOR =
   '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible';
 // Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
