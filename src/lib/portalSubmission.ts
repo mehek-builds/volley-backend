@@ -9781,6 +9781,44 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     if (element.getAttribute('role') === 'combobox') return null;
     return Boolean(clean(element.value));
   };
+  const semanticChoiceGroupOf = (element) => element?.closest?.(
+    '[role="group"][aria-labelledby], [role="group"][aria-label],'
+    + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+  ) || null;
+  const choiceAnswerOf = (widget, element) => {
+    if (!element || (element.type !== 'checkbox' && element.type !== 'radio')) return null;
+    const semanticGroup = semanticChoiceGroupOf(element);
+    if (semanticGroup) {
+      const peers = [...semanticGroup.querySelectorAll('input[type="checkbox"], input[type="radio"]')];
+      return {
+        key: semanticGroup,
+        answered: peers.some((peer) => peer.checked) || chosenPillOf(semanticGroup) === true,
+      };
+    }
+    const choiceRoot = element.form || scanRoot;
+    const allChoices = [...choiceRoot.querySelectorAll('input[type="checkbox"], input[type="radio"]')];
+    const peers = element.name
+      ? allChoices.filter((peer) => peer.name === element.name)
+      : [element];
+    // A pressed pill may carry the answer for one hidden mirror input, most notably Ashby "No".
+    // Read it only from a container whose native choices all belong to this exact name group. An
+    // outer fieldset holding several independent questions is not one control-specific composite.
+    const narrowComposite = element.closest(
+      '[data-field-path], [class*="_fieldEntry_"], [class*="_yesno_"], .field, .field-wrapper, [data-input-type]'
+    );
+    const ownsOnlyPeers = (scope) => {
+      if (!scope) return false;
+      const choices = [...scope.querySelectorAll('input[type="checkbox"], input[type="radio"]')];
+      return choices.length > 0 && choices.every((candidate) => peers.includes(candidate));
+    };
+    const composite = ownsOnlyPeers(narrowComposite)
+      ? narrowComposite
+      : ownsOnlyPeers(widget) ? widget : null;
+    return {
+      key: peers[0] || element,
+      answered: peers.some((peer) => peer.checked) || chosenPillOf(composite) === true,
+    };
+  };
   const blocking = [];
   const seen = new Set();
   const note = (widget, element) => {
@@ -9788,14 +9826,20 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     const unconfirmedChoice = widget.matches?.('[${WORKABLE_CHOICE_UNCONFIRMED_ATTR}="true"]')
       || widget.querySelector('[${WORKABLE_CHOICE_UNCONFIRMED_ATTR}="true"]');
     const scalarAnswer = unconfirmedChoice ? null : scalarAnswerOf(element);
+    const choiceAnswer = unconfirmedChoice ? null : choiceAnswerOf(widget, element);
     // Scalar controls are separate questions even when widgetOf falls back to one broad parent.
-    // Composite controls retain widget-level deduplication so one radio group or upload is not
-    // reported once per child control.
-    const key = scalarAnswer === null ? widget : element;
+    // Choice controls use their exact labeled group or HTML name peers for the same reason. Other
+    // composites retain widget-level deduplication so one upload or React Select is not repeated.
+    const key = scalarAnswer !== null
+      ? element
+      : choiceAnswer ? choiceAnswer.key : widget;
     if (!key || seen.has(key)) return;
     seen.add(key);
     if (!isVisible(widget)) return;
-    if (scalarAnswer === true || (scalarAnswer === null && widgetHasAnswer(widget))) return;
+    const answered = scalarAnswer !== null
+      ? scalarAnswer
+      : choiceAnswer ? choiceAnswer.answered : widgetHasAnswer(widget);
+    if (answered) return;
     const label = labelOf(widget, element);
     blocking.push(label
       ? '"' + label + '" is required and is still empty'

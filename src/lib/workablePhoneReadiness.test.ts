@@ -215,6 +215,56 @@ test(
         </form>
       `);
       assert.deepEqual(answeredChoiceGroup.blocking, []);
+
+      const independentChoicesInOneFieldset = await readinessOf(`
+        <form data-litos-submit-scope-v1="active">
+          <fieldset>
+            <legend>Independent declarations</legend>
+            <label>First choice<input name="first_choice" type="checkbox" checked></label>
+            <label>Second choice<input name="second_choice" type="checkbox" required></label>
+          </fieldset>
+        </form>
+      `);
+      assert.deepEqual(
+        independentChoicesInOneFieldset.blocking,
+        ['"Second choice" is required and is still empty'],
+      );
+
+      const semanticChoiceGroup = await readinessOf(`
+        <form data-litos-submit-scope-v1="active">
+          <div role="group" aria-label="Development experience">
+            <label><input name="internship" type="checkbox" required>Internship</label>
+            <label><input name="hackathon" type="checkbox" checked>Hackathon</label>
+          </div>
+        </form>
+      `);
+      assert.deepEqual(semanticChoiceGroup.blocking, []);
+
+      const answeredPillMirror = await readinessOf(`
+        <form data-litos-submit-scope-v1="active">
+          <div class="_fieldEntry_test" data-field-path="authorization">
+            <label>Work authorization</label>
+            <div class="_yesno_test">
+              <button type="button">Yes</button>
+              <button class="_active_test" type="button">No</button>
+            </div>
+            <input name="authorization" type="checkbox" required style="display:none">
+          </div>
+        </form>
+      `);
+      assert.deepEqual(answeredPillMirror.blocking, []);
+
+      const unconfirmedCheckedChoice = await readinessOf(`
+        <form data-litos-submit-scope-v1="active">
+          <div data-litos-choice-unconfirmed-v1="true">
+            <label>Languages<input name="languages" type="checkbox" required checked></label>
+          </div>
+        </form>
+      `);
+      assert.deepEqual(
+        unconfirmedCheckedChoice.blocking,
+        ['"Languages" is required and is still empty'],
+      );
     } finally {
       await browser.close();
     }
