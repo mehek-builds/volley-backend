@@ -975,6 +975,7 @@ function workablePhoneUploadFixture(
   requiredCityPhoneOverwrite?: string,
 ) {
   const events: string[] = [];
+  const queriedSelectors: string[] = [];
   let phoneValue = '';
   let countryText = '+1';
   let countryMenuOpen = false;
@@ -1048,10 +1049,11 @@ function workablePhoneUploadFixture(
   };
   const page: any = {
     locator: (selector: string) => {
+      queriedSelectors.push(selector);
       if (selector === 'input[name="phone"]'
         || selector === 'input[name="phone"][type="tel"]:visible') return phone;
       if (selector === 'input[required], textarea[required], select[required]') return requiredLocator;
-      if (selector === 'button[aria-label="Telephone country code"][aria-controls]:visible') {
+      if (selector === 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible') {
         return countryTrigger;
       }
       if (selector === '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible') {
@@ -1075,6 +1077,7 @@ function workablePhoneUploadFixture(
   return {
     page,
     events,
+    queriedSelectors,
     countryOptionClicks: () => countryOptionClicks,
     countryText: () => countryText,
     phoneValue: () => phoneValue,
@@ -1103,6 +1106,12 @@ test('direct Workable phone is selected and refilled after resume autofill clear
   assert.ok(phoneIndex > optionIndex, fixture.events.join(', '));
   assert.equal(fixture.countryText(), '+971');
   assert.equal(fixture.phoneValue(), '0567417451');
+  assert.ok(fixture.queriedSelectors.includes(
+    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible',
+  ));
+  assert.equal(fixture.queriedSelectors.includes(
+    'button[aria-label="Telephone country code"][aria-controls]:visible',
+  ), false);
   assert.ok(result.filledFields.includes('phone'));
   assert.equal(result.blockers.some((blocker) => /phone/i.test(blocker)), false);
 });
@@ -3822,7 +3831,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.ok(phoneProofIndex > countryProofIndex);
   assert.deepEqual(actions[countryOpenIndex], {
     type: 'click',
-    selector: 'button[aria-label="Telephone country code"][aria-controls]:visible',
+    selector: 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible',
     label: 'phone_country_open',
     optional: false,
     timeout: 10_000,
@@ -3848,6 +3857,10 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneIndex]?.optional, false);
   assert.equal(actions[countryProofIndex]?.expectedValueIncludes, '+971');
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
+  assert.equal(
+    actions[countryProofIndex]?.selector,
+    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible',
+  );
   assert.equal(actions[countryProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
