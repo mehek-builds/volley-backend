@@ -222,6 +222,24 @@ subscribe to `subscription_created` and `subscription_updated`. Use the same
 secret for the webhook and `LEMONSQUEEZY_WEBHOOK_SECRET`. Keep
 `LEMONSQUEEZY_ACCEPT_TEST_MODE` unset in production.
 
+### Stripe subscriptions
+
+Litos uses Stripe Checkout for weekly and monthly Pro subscriptions. In Stripe live mode,
+create the two recurring USD prices, activate the default customer portal configuration,
+and add a webhook endpoint at
+`https://student-outreach-backend.vercel.app/billing/stripe-webhook` for these events:
+
+- `checkout.session.completed`
+- `customer.subscription.created`
+- `customer.subscription.updated`
+- `customer.subscription.deleted`
+
+Set `LITOS_PAY_PROCESSOR_ENABLED`, `LITOS_PAY_STRIPE_ENABLED`,
+`LITOS_PAY_SIGNING_SECRET`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+`STRIPE_WEEKLY_PRICE_ID`, and `STRIPE_MONTHLY_PRICE_ID` in the Production environment.
+Set `STRIPE_AUTOMATIC_TAX_ENABLED=true` only after Stripe Tax is registered and configured.
+Production rejects Stripe test keys and test-mode webhook events.
+
 `VERCEL` is set automatically by Vercel. That disables the local listener.
 Do **not** set `PORT`/`HOST` (serverless ignores them).
 

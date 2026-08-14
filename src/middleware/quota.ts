@@ -218,7 +218,7 @@ export function quotaExceededPayload(ent: Entitlements, used: number, what: 'con
     const cap = ent.monthlyResumes;
     const base =
       ent.tier === 'free'
-        ? `You've used your ${cap} free resume generations this month. ${PRODUCT_NAME} Pro ($49.99/mo) includes ${LIMITS.pro.monthlyResumes.toLocaleString()} resume generations + autofill. Resets on the 1st.`
+        ? `You've used your ${cap} free resume generations this month. ${PRODUCT_NAME} Pro starts at $19.99/week and includes ${LIMITS.pro.monthlyResumes.toLocaleString()} resume generations + autofill. Resets on the 1st.`
         : `You've hit this month's resume limit (${cap}). It resets on the 1st.`;
     return {
       error: upgradeLink && ent.tier === 'free' ? `${base} Upgrade: ${upgradeLink}` : base,

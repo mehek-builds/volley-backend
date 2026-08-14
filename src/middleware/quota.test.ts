@@ -78,7 +78,7 @@ describe('402 quota payload (R-043)', () => {
       const payload = quotaExceededPayload(ent('free'), 20, 'resumes');
       assert.equal(
         payload.error,
-        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Pro ($49.99/mo) includes 1,000 resume generations + autofill. Resets on the 1st. Upgrade: ${LIVE_LINK}`
+        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Pro starts at $19.99/week and includes 1,000 resume generations + autofill. Resets on the 1st. Upgrade: ${LIVE_LINK}`
       );
       assert.equal(payload.code, 'quota_exceeded');
       assert.equal(payload.used, 20);
@@ -93,7 +93,7 @@ describe('402 quota payload (R-043)', () => {
       const payload = quotaExceededPayload(ent('free'), 20, 'resumes');
       assert.equal(
         payload.error,
-        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Pro ($49.99/mo) includes 1,000 resume generations + autofill. Resets on the 1st.`
+        `You've used your ${LIMITS.free.monthlyResumes} free resume generations this month. Litos Pro starts at $19.99/week and includes 1,000 resume generations + autofill. Resets on the 1st.`
       );
       assert.equal('upgrade_url' in payload, false);
       // The contract fields the extension parses stay put regardless of link configuration.

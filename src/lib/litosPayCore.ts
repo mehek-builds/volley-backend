@@ -1,6 +1,6 @@
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 
-export type LitosBillingInterval = 'monthly' | 'annual';
+export type LitosBillingInterval = 'weekly' | 'monthly';
 export type LitosProcessorEventName =
   | 'checkout.paid'
   | 'invoice.payment_failed'
@@ -37,8 +37,8 @@ export type LitosProcessorEvent = {
 };
 
 const CHECKOUT_TTL_MS = 30 * 60 * 1000;
-const ANNUAL_AMOUNT_CENTS = 47_988;
-const MONTHLY_AMOUNT_CENTS = 4_999;
+const WEEKLY_AMOUNT_CENTS = 1_999;
+const MONTHLY_AMOUNT_CENTS = 3_999;
 
 function signingSecret(): string | undefined {
   const value = process.env.LITOS_PAY_SIGNING_SECRET?.trim();
@@ -54,11 +54,11 @@ export function litosProcessorTrialConfigured(): boolean {
 }
 
 export function normalizeBillingInterval(value: unknown): LitosBillingInterval {
-  return value === 'annual' ? 'annual' : 'monthly';
+  return value === 'weekly' || value === 'week' ? 'weekly' : 'monthly';
 }
 
 export function litosAmountCents(interval: LitosBillingInterval): number {
-  return interval === 'annual' ? ANNUAL_AMOUNT_CENTS : MONTHLY_AMOUNT_CENTS;
+  return interval === 'weekly' ? WEEKLY_AMOUNT_CENTS : MONTHLY_AMOUNT_CENTS;
 }
 
 function base64urlJson(value: unknown): string {
@@ -171,7 +171,7 @@ export function parseLitosCheckoutToken(token: string, now = new Date()): null |
 export function eventFromPaidCheckout(token: string, now = new Date()): LitosProcessorEvent | null {
   const intent = parseLitosCheckoutToken(token, now);
   if (!intent) return null;
-  const periodMs = intent.interval === 'annual' ? 365 * 24 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000;
+  const periodMs = intent.interval === 'weekly' ? 7 * 24 * 60 * 60 * 1000 : 30 * 24 * 60 * 60 * 1000;
   return {
     eventKey: `litos:${intent.intentId}:checkout.paid`,
     eventName: 'checkout.paid',
