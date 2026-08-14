@@ -9769,13 +9769,77 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     }
     return false;
   };
+  // A scalar control owns its own answer. Reading its entire widget is unsafe when widgetOf had to
+  // fall back to a broad parent such as the form: a different filled field can then answer this
+  // empty one. Composite controls are intentionally excluded here because their answer lives in
+  // the widget, not in this element: React Select renders a value chip, file uploaders render a
+  // filename, and checkbox or radio peers answer one question together.
+  const scalarAnswerOf = (element) => {
+    if (!element?.matches?.('input, textarea, select')) return null;
+    const type = (element.getAttribute('type') || '').toLowerCase();
+    if (/^(hidden|file|checkbox|radio)$/.test(type)) return null;
+    if (element.getAttribute('role') === 'combobox') return null;
+    return Boolean(clean(element.value));
+  };
+  const semanticChoiceGroupOf = (element) => element?.closest?.(
+    '[role="group"][aria-labelledby], [role="group"][aria-label],'
+    + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+  ) || null;
+  const choiceAnswerOf = (widget, element) => {
+    if (!element || (element.type !== 'checkbox' && element.type !== 'radio')) return null;
+    const semanticGroup = semanticChoiceGroupOf(element);
+    if (semanticGroup) {
+      const peers = [...semanticGroup.querySelectorAll('input[type="checkbox"], input[type="radio"]')];
+      return {
+        key: semanticGroup,
+        answered: peers.some((peer) => peer.checked) || chosenPillOf(semanticGroup) === true,
+      };
+    }
+    const choiceRoot = element.form || scanRoot;
+    const allChoices = [...choiceRoot.querySelectorAll('input[type="checkbox"], input[type="radio"]')];
+    const peers = element.name
+      ? allChoices.filter((peer) => peer.name === element.name)
+      : [element];
+    // A pressed pill may carry the answer for one hidden mirror input, most notably Ashby "No".
+    // Read it only from a container whose native choices all belong to this exact name group. An
+    // outer fieldset holding several independent questions is not one control-specific composite.
+    const narrowComposite = element.closest(
+      '[data-field-path], [class*="_fieldEntry_"], [class*="_yesno_"], .field, .field-wrapper, [data-input-type]'
+    );
+    const ownsOnlyPeers = (scope) => {
+      if (!scope) return false;
+      const choices = [...scope.querySelectorAll('input[type="checkbox"], input[type="radio"]')];
+      return choices.length > 0 && choices.every((candidate) => peers.includes(candidate));
+    };
+    const composite = ownsOnlyPeers(narrowComposite)
+      ? narrowComposite
+      : ownsOnlyPeers(widget) ? widget : null;
+    return {
+      key: peers[0] || element,
+      answered: peers.some((peer) => peer.checked) || chosenPillOf(composite) === true,
+    };
+  };
   const blocking = [];
   const seen = new Set();
   const note = (widget, element) => {
-    if (!widget || seen.has(widget)) return;
-    seen.add(widget);
+    if (!widget) return;
+    const unconfirmedChoice = widget.matches?.('[${WORKABLE_CHOICE_UNCONFIRMED_ATTR}="true"]')
+      || widget.querySelector('[${WORKABLE_CHOICE_UNCONFIRMED_ATTR}="true"]');
+    const scalarAnswer = unconfirmedChoice ? null : scalarAnswerOf(element);
+    const choiceAnswer = unconfirmedChoice ? null : choiceAnswerOf(widget, element);
+    // Scalar controls are separate questions even when widgetOf falls back to one broad parent.
+    // Choice controls use their exact labeled group or HTML name peers for the same reason. Other
+    // composites retain widget-level deduplication so one upload or React Select is not repeated.
+    const key = scalarAnswer !== null
+      ? element
+      : choiceAnswer ? choiceAnswer.key : widget;
+    if (!key || seen.has(key)) return;
+    seen.add(key);
     if (!isVisible(widget)) return;
-    if (widgetHasAnswer(widget)) return;
+    const answered = scalarAnswer !== null
+      ? scalarAnswer
+      : choiceAnswer ? choiceAnswer.answered : widgetHasAnswer(widget);
+    if (answered) return;
     const label = labelOf(widget, element);
     blocking.push(label
       ? '"' + label + '" is required and is still empty'
@@ -9843,8 +9907,21 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     const widget = widgetOf(marker);
     if (!widget || !isVisible(widget)) return;
     const named = marker.getAttribute('for');
+    const controls = [...widget.querySelectorAll(
+      'input:not([type="hidden"]):not([type="file"]), textarea, select, [role="combobox"]'
+    )];
+    const explicitlyRequired = controls.filter((candidate) => marker.contains(candidate)
+      && !candidate.disabled
+      && (candidate.required || candidate.getAttribute('aria-required') === 'true'));
     const target = (named && widget.querySelector('#' + CSS.escape(named)))
-      || widget.querySelector('input:not([type="hidden"]):not([type="file"]), textarea, select, [role="combobox"]')
+      // Workable wraps its country-code combobox and required phone input in one starred label,
+      // with the combobox first in DOM order. The star belongs to the one descendant Workable
+      // actually marks required, not to that adjacent opener. Prefer that unambiguous machine
+      // signal only when the marked label owns that control. A broad widget fallback can be
+      // the entire form, and must not borrow an unrelated required field. Retain the existing
+      // first-control fallback for zero or multiple marked descendants.
+      || (explicitlyRequired.length === 1 ? explicitlyRequired[0] : null)
+      || controls[0]
       || (widgetFallback ? widget : null);
     if (!target || target.disabled) return;
     note(widget, target);
