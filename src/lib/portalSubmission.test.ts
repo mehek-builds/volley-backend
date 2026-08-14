@@ -59,7 +59,11 @@ import {
 } from './portalSubmission';
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
 import { resolveProfileField } from './profileFieldResolution';
-import { MANAGED_DISCOVERY_ROLE_CAPABILITY, type ManagedDiscoveredQuestion } from './browserbase';
+import {
+  MANAGED_DISCOVERY_ROLE_CAPABILITY,
+  MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
+  type ManagedDiscoveredQuestion,
+} from './browserbase';
 import type { ReferralSourceEvidence } from './referralSource';
 
 const JOB_BOARD_REFERRAL_EVIDENCE: ReferralSourceEvidence = {
@@ -243,6 +247,39 @@ test('managed Greenhouse extracted field evidence repairs missing filledFields w
     }).sort(),
     ['email', 'first_name', 'last_name', 'resume'].sort(),
   );
+});
+
+test('managed Workable phone evidence replaces stale fill success with country and value readback', () => {
+  const base = {
+    title: 'Apply',
+    url: 'https://apply.workable.com/pony-ai/j/example/apply',
+    text: 'Apply for this job',
+    filledFields: ['phone'],
+  };
+  assert.equal(managedResultFilledFields({ ...base, extracted: [] }).includes('phone'), false);
+  assert.equal(managedResultFilledFields({
+    ...base,
+    extracted: [
+      { selector: '#country', label: 'filled_field:phone_country', value: '+971', expectedValueDigits: '971' },
+      { selector: '#phone', label: 'filled_field:phone', value: '0567417451', expectedValueDigits: '0567417451' },
+    ],
+  }).includes('phone'), false);
+  assert.equal(managedResultFilledFields({
+    ...base,
+    capabilities: [MANAGED_EXTRACT_ASSERTIONS_CAPABILITY],
+    extracted: [
+      { selector: '#country', label: 'filled_field:phone_country', value: '+971', expectedValueDigits: '971' },
+      { selector: '#phone', label: 'filled_field:phone', value: '050 123 4567', expectedValueDigits: '0567417451' },
+    ],
+  }).includes('phone'), false);
+  assert.equal(managedResultFilledFields({
+    ...base,
+    capabilities: [MANAGED_EXTRACT_ASSERTIONS_CAPABILITY],
+    extracted: [
+      { selector: '#country', label: 'filled_field:phone_country', value: 'United Arab Emirates +971', expectedValueDigits: '971' },
+      { selector: '#phone', label: 'filled_field:phone', value: '056 741 7451', expectedValueDigits: '0567417451' },
+    ],
+  }).includes('phone'), true);
 });
 
 test('managed cover-letter detection requires an actual file input extraction', () => {
@@ -930,6 +967,226 @@ function oneWorkableLocator(overrides: Record<string, unknown> = {}): any {
   locator.nth = (index: number) => index === 0 ? locator : absentWorkableLocator();
   return locator;
 }
+
+function workablePhoneUploadFixture(
+  countryOptionCount = 1,
+  overwritePhoneAfterMs?: number,
+  overwritePhoneValue = '',
+  requiredCityPhoneOverwrite?: string,
+) {
+  const events: string[] = [];
+  let phoneValue = '';
+  let countryText = '+1';
+  let countryMenuOpen = false;
+  let countryOptionClicks = 0;
+  let elapsedAfterPhoneFill = 0;
+
+  const phone = oneWorkableLocator({
+    getAttribute: async (name: string) => {
+      if (name === 'type') return 'tel';
+      if (name === 'name') return 'phone';
+      return null;
+    },
+    inputValue: async () => phoneValue,
+    fill: async (value: string) => {
+      phoneValue = value;
+      elapsedAfterPhoneFill = 0;
+      events.push(`phone:${value}`);
+    },
+  });
+  const countryTrigger = oneWorkableLocator({
+    innerText: async () => countryText,
+    textContent: async () => countryText,
+    click: async () => {
+      countryMenuOpen = true;
+      events.push('country:open');
+    },
+  });
+  const countryOptions = Array.from({ length: countryOptionCount }, () => oneWorkableLocator({
+    isVisible: async () => countryMenuOpen,
+    click: async () => {
+      countryOptionClicks += 1;
+      countryText = '+971';
+      countryMenuOpen = false;
+      events.push('country:ae');
+    },
+  }));
+  const countryOptionLocator: any = {
+    count: async () => countryOptions.length,
+    first: () => countryOptions[0] ?? absentWorkableLocator(),
+    nth: (index: number) => countryOptions[index] ?? absentWorkableLocator(),
+  };
+  const resume = oneWorkableLocator({
+    getAttribute: async (name: string) => name === 'type' ? 'file' : null,
+    setInputFiles: async () => {
+      phoneValue = '';
+      countryText = '+1';
+      events.push('resume:upload-and-autofill');
+    },
+  });
+  let cityValue = '';
+  const city = oneWorkableLocator({
+    getAttribute: async (name: string) => {
+      if (name === 'type') return 'text';
+      if (name === 'name') return 'city';
+      return null;
+    },
+    inputValue: async () => cityValue,
+    evaluate: async () => 'INPUT',
+    fill: async (value: string) => {
+      cityValue = value;
+      phoneValue = requiredCityPhoneOverwrite ?? phoneValue;
+      if (requiredCityPhoneOverwrite !== undefined) countryText = '+1';
+      events.push(`required-city:${value}:phone:${phoneValue}`);
+    },
+  });
+  const requiredFields = requiredCityPhoneOverwrite === undefined ? [phone] : [phone, city];
+  const requiredLocator: any = {
+    count: async () => requiredFields.length,
+    first: () => requiredFields[0] ?? absentWorkableLocator(),
+    nth: (index: number) => requiredFields[index] ?? absentWorkableLocator(),
+  };
+  const page: any = {
+    locator: (selector: string) => {
+      if (selector === 'input[name="phone"]'
+        || selector === 'input[name="phone"][type="tel"]:visible') return phone;
+      if (selector === 'input[required], textarea[required], select[required]') return requiredLocator;
+      if (selector === 'button[aria-label="Telephone country code"][aria-controls]:visible') {
+        return countryTrigger;
+      }
+      if (selector === '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible') {
+        return countryOptionLocator;
+      }
+      if (selector === 'input[type="file"][data-ui="resume"]') return resume;
+      return absentWorkableLocator();
+    },
+    waitForTimeout: async (milliseconds: number) => {
+      if (!overwritePhoneAfterMs || phoneValue !== '0567417451') return;
+      elapsedAfterPhoneFill += milliseconds;
+      if (elapsedAfterPhoneFill >= overwritePhoneAfterMs) {
+        phoneValue = overwritePhoneValue;
+        events.push(overwritePhoneValue
+          ? `phone:delayed-autofill-overwrite:${overwritePhoneValue}`
+          : 'phone:delayed-autofill-clear');
+      }
+    },
+  };
+
+  return {
+    page,
+    events,
+    countryOptionClicks: () => countryOptionClicks,
+    countryText: () => countryText,
+    phoneValue: () => phoneValue,
+    cityValue: () => cityValue,
+  };
+}
+
+test('direct Workable phone is selected and refilled after resume autofill clears it', async () => {
+  const fixture = workablePhoneUploadFixture();
+  const result = await fillPortal(fixture.page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  const uploadIndex = fixture.events.indexOf('resume:upload-and-autofill');
+  const openIndex = fixture.events.indexOf('country:open');
+  const optionIndex = fixture.events.indexOf('country:ae');
+  const phoneIndex = fixture.events.indexOf('phone:0567417451');
+  assert.ok(uploadIndex >= 0);
+  assert.ok(openIndex > uploadIndex, fixture.events.join(', '));
+  assert.ok(optionIndex > openIndex, fixture.events.join(', '));
+  assert.ok(phoneIndex > optionIndex, fixture.events.join(', '));
+  assert.equal(fixture.countryText(), '+971');
+  assert.equal(fixture.phoneValue(), '0567417451');
+  assert.ok(result.filledFields.includes('phone'));
+  assert.equal(result.blockers.some((blocker) => /phone/i.test(blocker)), false);
+});
+
+test('direct Workable phone runs after a required City fallback overwrites the widget', async () => {
+  const fixture = workablePhoneUploadFixture(1, undefined, '', '0501234567');
+  const result = await fillPortal(fixture.page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    applicationProfile: { address_city: 'Dubai' },
+    questions: [],
+  });
+
+  const cityIndex = fixture.events.findIndex((event) => event === 'required-city:Dubai:phone:0501234567');
+  const countryIndex = fixture.events.findIndex((event) => event === 'country:ae');
+  const finalPhoneIndex = fixture.events.findIndex((event) => event === 'phone:0567417451');
+  assert.ok(cityIndex >= 0, fixture.events.join(', '));
+  assert.ok(countryIndex > cityIndex, fixture.events.join(', '));
+  assert.ok(finalPhoneIndex > countryIndex, fixture.events.join(', '));
+  assert.equal(fixture.cityValue(), 'Dubai');
+  assert.equal(fixture.countryText(), '+971');
+  assert.equal(fixture.phoneValue(), '0567417451');
+  assert.ok(result.filledFields.includes('phone'));
+  assert.equal(result.blockers.some((blocker) => /phone/i.test(blocker)), false);
+});
+
+test('direct Workable phone refuses an ambiguous exact UAE option', async () => {
+  const fixture = workablePhoneUploadFixture(2);
+  const result = await fillPortal(fixture.page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  assert.equal(fixture.countryOptionClicks(), 0);
+  assert.equal(fixture.phoneValue(), '');
+  assert.equal(result.filledFields.includes('phone'), false);
+  assert.ok(result.blockers.some((blocker) => /phone/i.test(blocker)), JSON.stringify(result.blockers));
+});
+
+test('direct Workable phone fails closed when delayed autofill clears an initially successful refill', async () => {
+  const fixture = workablePhoneUploadFixture(1, 900);
+  const result = await fillPortal(fixture.page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  assert.ok(fixture.events.includes('phone:0567417451'), fixture.events.join(', '));
+  assert.ok(fixture.events.includes('phone:delayed-autofill-clear'), fixture.events.join(', '));
+  assert.equal(fixture.phoneValue(), '');
+  assert.equal(result.filledFields.includes('phone'), false);
+  assert.ok(result.blockers.some((blocker) => /phone/i.test(blocker)), JSON.stringify(result.blockers));
+});
+
+test('direct Workable phone fails closed when delayed autofill overwrites the refill with a wrong nonempty value', async () => {
+  const fixture = workablePhoneUploadFixture(1, 900, '0501234567');
+  const result = await fillPortal(fixture.page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  assert.ok(fixture.events.includes('phone:0567417451'), fixture.events.join(', '));
+  assert.ok(
+    fixture.events.includes('phone:delayed-autofill-overwrite:0501234567'),
+    fixture.events.join(', '),
+  );
+  assert.equal(fixture.phoneValue(), '');
+  assert.equal(result.filledFields.includes('phone'), false);
+  assert.ok(result.blockers.some((blocker) => /phone/i.test(blocker)), JSON.stringify(result.blockers));
+});
 
 test('direct Workable replay checks the exact reviewed option inside its ARIA-linked question group', async () => {
   const questionText = 'Which programming languages can you work in?';
@@ -3537,6 +3794,70 @@ test('Workable uploads the resume by data-ui, never by id or a bare file selecto
   assert.notEqual(upload!.selector, 'input[type="file"]');
 });
 
+test('managed Workable phone selects exact UAE and verifies the final post-upload value', () => {
+  const actions = buildManagedPortalActions('workable', {
+    ...capturePacket,
+    phone: '+971 567417451',
+    transcript: Buffer.from('transcript-pdf'),
+    transcriptName: 'transcript.pdf',
+  });
+  const uploadIndexes = actions
+    .map((action, index) => action.type === 'upload' ? index : -1)
+    .filter((index) => index >= 0);
+  const addressIndexes = actions
+    .map((action, index) => action.label?.startsWith('location') ? index : -1)
+    .filter((index) => index >= 0);
+  const countryOpenIndex = actions.findIndex((action) => action.label === 'phone_country_open');
+  const capabilityIndex = actions.findIndex((action) => action.type === 'requireCapability');
+  const countryOptionIndex = actions.findIndex((action) => action.label === 'phone_country_option');
+  const phoneIndex = actions.findIndex((action) => action.type === 'fill' && action.label === 'phone');
+  const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
+  const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
+
+  assert.ok(capabilityIndex > Math.max(...uploadIndexes, ...addressIndexes));
+  assert.ok(countryOpenIndex > capabilityIndex);
+  assert.ok(countryOptionIndex > countryOpenIndex);
+  assert.ok(phoneIndex > countryOptionIndex);
+  assert.ok(countryProofIndex > phoneIndex);
+  assert.ok(phoneProofIndex > countryProofIndex);
+  assert.deepEqual(actions[countryOpenIndex], {
+    type: 'click',
+    selector: 'button[aria-label="Telephone country code"][aria-controls]:visible',
+    label: 'phone_country_open',
+    optional: false,
+    timeout: 10_000,
+    requireUnique: true,
+  });
+  assert.deepEqual(actions[capabilityIndex], {
+    type: 'requireCapability',
+    value: MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
+    label: 'workable_phone_assertion_capability',
+    optional: false,
+  });
+  assert.deepEqual(actions[countryOptionIndex], {
+    type: 'click',
+    selector: '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible',
+    label: 'phone_country_option',
+    optional: false,
+    timeout: 10_000,
+    requireUnique: true,
+  });
+  assert.equal(actions[phoneIndex]?.selector, 'input[name="phone"][type="tel"]:visible');
+  assert.equal(actions[phoneIndex]?.value, '0567417451');
+  assert.equal(actions[phoneIndex]?.requireUnique, true);
+  assert.equal(actions[phoneIndex]?.optional, false);
+  assert.equal(actions[countryProofIndex]?.expectedValueIncludes, '+971');
+  assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
+  assert.equal(actions[countryProofIndex]?.requireNonEmpty, true);
+  assert.equal(actions[countryProofIndex]?.requireUnique, true);
+  assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
+  assert.equal(actions[phoneProofIndex]?.attribute, 'value');
+  assert.equal(actions[phoneProofIndex]?.requireNonEmpty, true);
+  assert.equal(actions[phoneProofIndex]?.expectedValueDigits, '0567417451');
+  assert.equal(actions[phoneProofIndex]?.requireUnique, true);
+  assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
+});
+
 test('Workable opens the exact application route and clears optional-cookie overlays before filling', () => {
   const posting = 'https://apply.workable.com/mercari/j/EC5A1078C4/';
   const application = 'https://apply.workable.com/mercari/j/EC5A1078C4/apply';
@@ -3770,7 +4091,7 @@ test('each new adapter pushes the exact selector read off the live form', () => 
   const expected: Record<string, Record<string, string>> = {
     workable: {
       first_name: 'input[name="firstname"]', last_name: 'input[name="lastname"]',
-      email: 'input[name="email"]', phone: 'input[name="phone"]',
+      email: 'input[name="email"]', phone: 'input[name="phone"][type="tel"]:visible',
       location: 'input[name="address"]:visible, body:not(:has(input[name="address"]:visible)) input[name="city"]:visible',
       resume: 'input[type="file"][data-ui="resume"]',
     },

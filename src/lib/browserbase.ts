@@ -9,6 +9,12 @@ export const MANAGED_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY;
 /** Stratus result capability that proves discovered controls include their live DOM role. */
 export const MANAGED_DISCOVERY_ROLE_CAPABILITY = 'discovery-control-role-v1';
 /**
+ * Stratus runner capability for fail-closed selector uniqueness, exact digit assertions, and
+ * three-sample stability reads. A `requireCapability` action makes an older Stratus reject the
+ * whole request during action normalization, before it can execute any browser action.
+ */
+export const MANAGED_EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
+/**
  * Stratus result capability that proves an `extract` carrying `requireVisible` was answered by a
  * real layout read, one entry per match that is painting something, rather than by the ordinary
  * first-match attribute read.
@@ -33,7 +39,7 @@ export const MANAGED_DISCOVERY_ROLE_CAPABILITY = 'discovery-control-role-v1';
 export const MANAGED_CAPTCHA_VISIBILITY_CAPABILITY = 'extract-require-visible-v1';
 
 export type ManagedBrowserAction = {
-  type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover' | 'confirmAndSubmit';
+  type: 'click' | 'fill' | 'fillByLabelText' | 'upload' | 'waitForSelector' | 'press' | 'select' | 'extract' | 'discover' | 'requireCapability' | 'confirmAndSubmit';
   selector?: string;
   value?: string;
   text?: string;
@@ -41,6 +47,16 @@ export type ManagedBrowserAction = {
   optional?: boolean;
   timeout?: number;
   attribute?: string;
+  /** Selector-backed actions only. Refuse the action unless exactly one node matches. */
+  requireUnique?: boolean;
+  /** Extract only. Refuse the action when the live value is empty after trimming. */
+  requireNonEmpty?: boolean;
+  /** Extract only. Refuse the action unless the live value contains this exact text. */
+  expectedValueIncludes?: string;
+  /** Extract only. Refuse unless the live value's digits exactly equal this digit string. */
+  expectedValueDigits?: string;
+  /** Extract only. Require three passing reads spanning this bounded interval. */
+  stabilityWindowMs?: number;
   /**
    * Extract only. Asks the runner for the attribute of every match that a person could actually see,
    * one entry per visible node in DOM order, instead of the first match's attribute whether or not
@@ -123,7 +139,13 @@ export type ManagedBrowserResult = {
   discovered?: ManagedDiscoveredQuestion[];
   /** Additive runner features this exact result contract supports. Absence means unsupported. */
   capabilities?: string[];
-  extracted?: Array<{ selector: string; label?: string; value: string | null }>;
+  extracted?: Array<{
+    selector: string;
+    label?: string;
+    value: string | null;
+    /** Echoed only when the runner enforced this exact digit assertion on every stability read. */
+    expectedValueDigits?: string;
+  }>;
   continuationToken?: string;
   continuationExpiresAt?: string;
   /* The human check the page is holding the application behind, read off the CONTROL by the runner
@@ -235,6 +257,12 @@ type SessionResponse = {
 const STRATUS_SELECTOR_MAX_LENGTH = 500;
 
 function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
+  if (action.type === 'requireCapability') {
+    if (action.value !== MANAGED_EXTRACT_ASSERTIONS_CAPABILITY) {
+      throw new Error('Managed Stratus runner capability requirement is invalid');
+    }
+    return action;
+  }
   if (action.type === 'discover' && !action.selector?.trim()) {
     return { ...action, selector: 'body' };
   }
@@ -261,7 +289,7 @@ function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
 }
 
 function invalidSelectorReason(action: ManagedBrowserAction): string | undefined {
-  if (action.type === 'confirmAndSubmit') return undefined;
+  if (action.type === 'confirmAndSubmit' || action.type === 'requireCapability') return undefined;
   const selector = action.selector?.trim();
   if (!selector) return 'empty';
   if (selector.length > STRATUS_SELECTOR_MAX_LENGTH) return 'too_long';
@@ -285,6 +313,20 @@ function normalizeStratusActions(actions: ManagedBrowserAction[]): ManagedBrowse
     throw new Error(`Managed Stratus action has an invalid selector; action_audit=${managedActionAudit(invalidRequired)}`);
   }
   return outbound;
+}
+
+function assertRequiredManagedCapabilities(
+  result: ManagedBrowserResult,
+  actions: readonly ManagedBrowserAction[],
+) {
+  const required = [...new Set(actions
+    .filter((action) => action.type === 'requireCapability')
+    .map((action) => action.value)
+    .filter((value): value is string => Boolean(value)))];
+  const missing = required.filter((capability) => !result.capabilities?.includes(capability));
+  if (missing.length > 0) {
+    throw new Error(`Managed Stratus result did not advertise required runner capability: ${missing.join(', ')}`);
+  }
 }
 
 function preview(value: string | undefined): string | undefined {
@@ -457,6 +499,7 @@ export async function runManagedBrowser(
   if (!response.ok || !payload.run) {
     throw new Error(managedBrowserErrorMessage(payload.error, response.status, outboundActions));
   }
+  assertRequiredManagedCapabilities(payload.run, outboundActions);
   return payload.run;
 }
 
@@ -492,6 +535,7 @@ export async function continueManagedBrowser(
   if (!response.ok || !payload.run) {
     throw new Error(managedBrowserErrorMessage(payload.error, response.status, outboundActions));
   }
+  assertRequiredManagedCapabilities(payload.run, outboundActions);
   return payload.run;
 }
 
