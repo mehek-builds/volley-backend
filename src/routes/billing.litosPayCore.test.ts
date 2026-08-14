@@ -24,8 +24,8 @@ const savedEnv = {
   stripeEnabled: process.env.LITOS_PAY_STRIPE_ENABLED,
   stripeKey: process.env.STRIPE_SECRET_KEY,
   stripeWebhook: process.env.STRIPE_WEBHOOK_SECRET,
+  stripeWeekly: process.env.STRIPE_WEEKLY_PRICE_ID,
   stripeMonthly: process.env.STRIPE_MONTHLY_PRICE_ID,
-  stripeAnnual: process.env.STRIPE_ANNUAL_PRICE_ID,
   nodeEnv: process.env.NODE_ENV,
 };
 
@@ -42,8 +42,8 @@ beforeEach(() => {
   delete process.env.LITOS_PAY_STRIPE_ENABLED;
   delete process.env.STRIPE_SECRET_KEY;
   delete process.env.STRIPE_WEBHOOK_SECRET;
+  delete process.env.STRIPE_WEEKLY_PRICE_ID;
   delete process.env.STRIPE_MONTHLY_PRICE_ID;
-  delete process.env.STRIPE_ANNUAL_PRICE_ID;
   process.env.NODE_ENV = 'test';
 });
 
@@ -64,10 +64,10 @@ afterEach(() => {
                 ? 'STRIPE_SECRET_KEY'
                 : key === 'stripeWebhook'
                   ? 'STRIPE_WEBHOOK_SECRET'
-                  : key === 'stripeMonthly'
-                    ? 'STRIPE_MONTHLY_PRICE_ID'
-                    : key === 'stripeAnnual'
-                      ? 'STRIPE_ANNUAL_PRICE_ID'
+                  : key === 'stripeWeekly'
+                    ? 'STRIPE_WEEKLY_PRICE_ID'
+                    : key === 'stripeMonthly'
+                      ? 'STRIPE_MONTHLY_PRICE_ID'
                       : key === 'nodeEnv'
                         ? 'NODE_ENV'
                         : key === 'database'
@@ -173,12 +173,12 @@ describe('Litos Pay Core billing routes', () => {
         method: 'POST',
         url: '/billing/checkout',
         headers: { authorization: `Bearer ${auth}` },
-        payload: { interval: 'annual' },
+        payload: { interval: 'weekly' },
       });
       assert.equal(checkout.statusCode, 200);
       const checkoutBody = checkout.json();
       assert.equal(checkoutBody.provider, 'litos');
-      assert.equal(checkoutBody.amount_cents, 47_988);
+      assert.equal(checkoutBody.amount_cents, 2_000);
       assert.equal(createdOffers.length, 1);
 
       const checkoutUrl = new URL(checkoutBody.url);
@@ -205,6 +205,7 @@ describe('Litos Pay Core billing routes', () => {
       assert.equal(replay.json().processed, false);
       assert.equal(txInserts.length, 1, 'replay must not add another webhook event');
       assert.equal(txUpdates.length, 2, 'replay must not update offer or user state again');
+
     } finally {
       await app.close();
     }
@@ -232,8 +233,8 @@ describe('Litos Pay Core billing routes', () => {
     process.env.LITOS_PAY_STRIPE_ENABLED = 'true';
     process.env.STRIPE_SECRET_KEY = 'sk_test_not_live_money';
     process.env.STRIPE_WEBHOOK_SECRET = 'whsec_live_card_acquiring';
+    process.env.STRIPE_WEEKLY_PRICE_ID = 'price_weekly';
     process.env.STRIPE_MONTHLY_PRICE_ID = 'price_monthly';
-    process.env.STRIPE_ANNUAL_PRICE_ID = 'price_annual';
 
     const payload = Buffer.from(JSON.stringify({
       id: 'evt_test_mode',
@@ -262,10 +263,10 @@ describe('Litos Pay Core billing routes', () => {
 
   test('creates a live-card acquiring checkout, redirects through Litos, and fulfills from Stripe webhook', async () => {
     process.env.LITOS_PAY_STRIPE_ENABLED = 'true';
-    process.env.STRIPE_SECRET_KEY = 'sk_test_live-card-acquiring';
+    process.env.STRIPE_SECRET_KEY = 'sk_test_live_card_acquiring';
     process.env.STRIPE_WEBHOOK_SECRET = 'whsec_live_card_acquiring';
+    process.env.STRIPE_WEEKLY_PRICE_ID = 'price_weekly';
     process.env.STRIPE_MONTHLY_PRICE_ID = 'price_monthly';
-    process.env.STRIPE_ANNUAL_PRICE_ID = 'price_annual';
 
     const createdOffers: any[] = [];
     const txInserts: unknown[] = [];
@@ -436,6 +437,41 @@ describe('Litos Pay Core billing routes', () => {
       assert.equal(replay.json().processed, false);
       assert.equal(txInserts.length, 1, 'replay must not add another webhook event');
       assert.equal(txUpdates.length, 2, 'replay must not update offer or user state again');
+
+      const subscriptionPayload = Buffer.from(JSON.stringify({
+        id: 'evt_litos_subscription_updated',
+        object: 'event',
+        type: 'customer.subscription.updated',
+        created: 1_786_000_100,
+        livemode: true,
+        data: {
+          object: {
+            id: 'sub_live_card',
+            object: 'subscription',
+            customer: 'cus_live_card',
+            status: 'active',
+            current_period_end: 1_788_592_100,
+            cancel_at_period_end: false,
+            metadata: { user_id: USER_ID, interval: 'monthly' },
+            items: { data: [{ price: { id: 'price_monthly', recurring: { interval: 'month' } } }] },
+          },
+        },
+      }));
+      const subscriptionWebhook = await app.inject({
+        method: 'POST',
+        url: '/billing/stripe-webhook',
+        headers: {
+          'stripe-signature': stripeWebhookSignature(subscriptionPayload, process.env.STRIPE_WEBHOOK_SECRET!),
+          'content-type': 'application/json',
+        },
+        payload: subscriptionPayload,
+      });
+      assert.equal(subscriptionWebhook.statusCode, 200);
+      assert.equal(subscriptionWebhook.json().processed, true);
+      assert.equal(txInserts.length, 2);
+      assert.equal(txUpdates.length, 3);
+      assert.equal((txUpdates[2] as any).values.billing_status, 'active');
+      assert.equal((txUpdates[2] as any).values.billing_variant_id, 'price_monthly');
     } finally {
       await app.close();
     }

@@ -43,10 +43,11 @@ describe('Litos Pay Core checkout intents', () => {
   });
 
   test('normalizes supported intervals and prices the current Litos plans', () => {
-    assert.equal(normalizeBillingInterval('annual'), 'annual');
+    assert.equal(normalizeBillingInterval('weekly'), 'weekly');
+    assert.equal(normalizeBillingInterval('week'), 'weekly');
     assert.equal(normalizeBillingInterval('surprise'), 'monthly');
-    assert.equal(litosAmountCents('monthly'), 4_999);
-    assert.equal(litosAmountCents('annual'), 47_988);
+    assert.equal(litosAmountCents('weekly'), 2_000);
+    assert.equal(litosAmountCents('monthly'), 4_000);
   });
 
   test('builds a signed checkout token that can produce a paid processor event', () => {
@@ -58,19 +59,19 @@ describe('Litos Pay Core checkout intents', () => {
     const intent = buildLitosCheckoutIntent({
       userId: '6d58c1f5-e885-41f7-a16a-dac37f98ab17',
       email: 'Student@Example.com',
-      interval: 'annual',
+      interval: 'weekly',
       now,
     });
 
     assert.ok(intent);
-    assert.equal(intent.interval, 'annual');
-    assert.equal(intent.amountCents, 47_988);
+    assert.equal(intent.interval, 'weekly');
+    assert.equal(intent.amountCents, 2_000);
     assert.equal(new URL(intent.url).pathname, `/billing/litos-pay/checkout/${intent.intentId}`);
 
     const parsed = parseLitosCheckoutToken(intent.token, now);
     assert.equal(parsed?.userId, '6d58c1f5-e885-41f7-a16a-dac37f98ab17');
     assert.equal(parsed?.email, 'student@example.com');
-    assert.equal(parsed?.amountCents, 47_988);
+    assert.equal(parsed?.amountCents, 2_000);
 
     const event = eventFromPaidCheckout(intent.token, now);
     assert.equal(event?.eventName, 'checkout.paid');

@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, test } from 'node:test';
 import {
+  createStripePortalSession,
   parseStripeCheckoutCompleted,
+  parseStripeSubscriptionChanged,
+  secureStripePortalUrl,
   stripeAcquiringConfigured,
+  stripePlanForStatus,
   stripeWebhookSignature,
   verifyStripeWebhookSignature,
 } from './stripeAcquiring';
@@ -11,8 +15,8 @@ const savedEnv = {
   enabled: process.env.LITOS_PAY_STRIPE_ENABLED,
   key: process.env.STRIPE_SECRET_KEY,
   webhook: process.env.STRIPE_WEBHOOK_SECRET,
+  weekly: process.env.STRIPE_WEEKLY_PRICE_ID,
   monthly: process.env.STRIPE_MONTHLY_PRICE_ID,
-  annual: process.env.STRIPE_ANNUAL_PRICE_ID,
   nodeEnv: process.env.NODE_ENV,
 };
 
@@ -20,8 +24,8 @@ beforeEach(() => {
   process.env.LITOS_PAY_STRIPE_ENABLED = 'true';
   process.env.STRIPE_SECRET_KEY = 'sk_test_configured';
   process.env.STRIPE_WEBHOOK_SECRET = 'whsec_configured';
+  process.env.STRIPE_WEEKLY_PRICE_ID = 'price_weekly';
   process.env.STRIPE_MONTHLY_PRICE_ID = 'price_monthly';
-  process.env.STRIPE_ANNUAL_PRICE_ID = 'price_annual';
   process.env.NODE_ENV = 'test';
 });
 
@@ -31,10 +35,10 @@ afterEach(() => {
       ? 'LITOS_PAY_STRIPE_ENABLED'
       : key === 'webhook'
         ? 'STRIPE_WEBHOOK_SECRET'
-        : key === 'monthly'
-          ? 'STRIPE_MONTHLY_PRICE_ID'
-          : key === 'annual'
-            ? 'STRIPE_ANNUAL_PRICE_ID'
+        : key === 'weekly'
+          ? 'STRIPE_WEEKLY_PRICE_ID'
+          : key === 'monthly'
+            ? 'STRIPE_MONTHLY_PRICE_ID'
             : key === 'nodeEnv'
               ? 'NODE_ENV'
               : 'STRIPE_SECRET_KEY';
@@ -56,6 +60,14 @@ describe('Stripe acquiring adapter', () => {
     assert.equal(stripeAcquiringConfigured(), false);
     process.env.STRIPE_SECRET_KEY = 'sk_live_real_acquiring';
     assert.equal(stripeAcquiringConfigured(), true);
+  });
+
+  test('refuses malformed Stripe configuration', () => {
+    process.env.STRIPE_WEBHOOK_SECRET = 'not-a-signing-secret';
+    assert.equal(stripeAcquiringConfigured(), false);
+    process.env.STRIPE_WEBHOOK_SECRET = 'whsec_configured';
+    process.env.STRIPE_MONTHLY_PRICE_ID = 'prod_monthly';
+    assert.equal(stripeAcquiringConfigured(), false);
   });
 
   test('verifies signed Stripe webhook payloads with timestamp tolerance', () => {
@@ -92,7 +104,7 @@ describe('Stripe acquiring adapter', () => {
           metadata: {
             litos_intent_id: '6d58c1f5-e885-41f7-a16a-dac37f98ab17',
             user_id: '7e8de6fb-236b-4e9b-863a-7b4f2952e1a7',
-            interval: 'annual',
+            interval: 'weekly',
           },
         },
       },
@@ -102,8 +114,8 @@ describe('Stripe acquiring adapter', () => {
     assert.equal(parsed?.eventName, 'checkout.session.completed');
     assert.equal(parsed?.sessionId, 'cs_live_session');
     assert.equal(parsed?.livemode, true);
-    assert.equal(parsed?.interval, 'annual');
-    assert.equal(parsed?.amountCents, 47_988);
+    assert.equal(parsed?.interval, 'weekly');
+    assert.equal(parsed?.amountCents, 2_000);
     assert.equal(parsed?.plan, 'pro');
   });
 
@@ -150,5 +162,76 @@ describe('Stripe acquiring adapter', () => {
         },
       },
     }), null);
+  });
+
+  test('maps Stripe subscription lifecycle events to Litos access', () => {
+    const base = {
+      id: 'evt_subscription',
+      type: 'customer.subscription.updated',
+      created: 1_786_000_000,
+      livemode: true,
+      data: {
+        object: {
+          id: 'sub_123',
+          object: 'subscription',
+          customer: 'cus_123',
+          status: 'active',
+          current_period_end: 1_788_592_000,
+          cancel_at_period_end: false,
+          metadata: {
+            user_id: '7e8de6fb-236b-4e9b-863a-7b4f2952e1a7',
+            interval: 'weekly',
+          },
+          items: { data: [{ price: { id: 'price_weekly', recurring: { interval: 'week' } } }] },
+        },
+      },
+    };
+    const active = parseStripeSubscriptionChanged(base);
+    assert.equal(active?.eventKey, 'stripe:evt_subscription');
+    assert.equal(active?.plan, 'pro');
+    assert.equal(active?.interval, 'weekly');
+    assert.equal(active?.renewsAt?.toISOString(), '2026-09-05T07:06:40.000Z');
+
+    const ending = parseStripeSubscriptionChanged({
+      ...base,
+      data: {
+        object: {
+          ...base.data.object,
+          cancel_at_period_end: true,
+          canceled_at: 1_786_000_100,
+        },
+      },
+    });
+    assert.equal(ending?.plan, 'pro');
+    assert.equal(ending?.renewsAt, null);
+    assert.equal(ending?.endsAt?.toISOString(), '2026-09-05T07:06:40.000Z');
+
+    const canceled = parseStripeSubscriptionChanged({
+      ...base,
+      type: 'customer.subscription.deleted',
+      data: { object: { ...base.data.object, status: 'canceled', ended_at: 1_786_000_100 } },
+    });
+    assert.equal(canceled?.plan, 'free');
+    assert.equal(canceled?.renewsAt, null);
+    assert.equal(canceled?.endsAt?.toISOString(), '2026-08-06T07:08:20.000Z');
+  });
+
+  test('keeps access during Stripe retries but revokes after the subscription is unpaid', () => {
+    assert.equal(stripePlanForStatus('past_due'), 'pro');
+    assert.equal(stripePlanForStatus('unpaid'), 'free');
+    assert.equal(stripePlanForStatus('incomplete'), null);
+  });
+
+  test('creates short-lived customer portal sessions and accepts only Stripe portal URLs', async () => {
+    const url = await createStripePortalSession({
+      customerId: 'cus_123',
+      fetchImpl: async (_url, init) => {
+        assert.equal(new URLSearchParams(String(init?.body)).get('customer'), 'cus_123');
+        return new Response(JSON.stringify({ url: 'https://billing.stripe.com/p/session/test_123' }), { status: 200 });
+      },
+    });
+    assert.equal(url, 'https://billing.stripe.com/p/session/test_123');
+    assert.equal(secureStripePortalUrl('https://billing.stripe.com.evil.example/p/session/test'), null);
+    assert.equal(secureStripePortalUrl('http://billing.stripe.com/p/session/test'), null);
   });
 });
