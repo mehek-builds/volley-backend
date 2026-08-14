@@ -1,6 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { COVER_LETTER_SYSTEM_PROMPT, escapeRawControlCharacters } from './coverLetter';
 import { SYSTEM_PROMPT as APPLICATION_ANSWER_SYSTEM_PROMPT } from './applicationAnswer';
+import {
+  anthropicUsage,
+  generateOpenAIText,
+  logOpenAIFallback,
+  openAIConfigured,
+  type LlmUsage,
+} from './openAIProvider';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -13,12 +20,7 @@ export type CompactMaterialQuestion = {
 export type CompactApplicationMaterials = {
   coverLetter?: string;
   answers: Map<string, string>;
-  usage?: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheCreationInputTokens: number;
-    cacheReadInputTokens: number;
-  };
+  usage?: LlmUsage;
 };
 
 function bundledRules(): string {
@@ -78,18 +80,58 @@ export async function generateCompactApplicationMaterials(input: {
   questions: CompactMaterialQuestion[];
 }): Promise<CompactApplicationMaterials> {
   const requestedIds = new Set(input.questions.map((question) => question.id));
+  const userContent = `Role: ${input.role}\nCompany: ${input.company}\n\nJob description:\n${input.jdText}\n\nCandidate source, the only authority for candidate claims:\n${input.candidateSource}${
+    input.contestedMetrics?.length
+      ? `\n\nDo not use these contested figures because the source attributes each to more than one employer or project: ${input.contestedMetrics.join(', ')}.`
+      : ''
+  }\n\nCover letter requested: ${input.includeCoverLetter ? 'yes' : 'no, return null'}\n\nApplication questions:\n${JSON.stringify(input.questions)}`;
+
+  if (openAIConfigured()) {
+    try {
+      const generated = await generateOpenAIText({
+        instructions: bundledRules(),
+        input: userContent,
+        maxOutputTokens: 16384,
+        jsonSchema: {
+          name: 'litos_application_materials',
+          schema: {
+            type: 'object',
+            properties: {
+              cover_letter: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+              answers: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  properties: { id: { type: 'string' }, answer: { type: 'string' } },
+                  required: ['id', 'answer'],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ['cover_letter', 'answers'],
+            additionalProperties: false,
+          },
+        },
+      });
+      const parsed = parseCompactMaterials(generated.text, requestedIds);
+      if (input.includeCoverLetter && !parsed.coverLetter) {
+        throw new Error('OpenAI omitted the requested cover letter');
+      }
+      return { ...parsed, usage: generated.usage };
+    } catch (error) {
+      logOpenAIFallback('compact application materials', error);
+    }
+  }
+
+  const anthropicModel = 'claude-sonnet-5';
   const response = await client.messages.create({
-    model: 'claude-sonnet-5',
+    model: anthropicModel,
     // This is a ceiling, not a reservation. A normal packet is billed only for the tokens emitted.
     max_tokens: 16384,
     system: [{ type: 'text', text: bundledRules() }],
     messages: [{
       role: 'user',
-      content: `Role: ${input.role}\nCompany: ${input.company}\n\nJob description:\n${input.jdText}\n\nCandidate source, the only authority for candidate claims:\n${input.candidateSource}${
-        input.contestedMetrics?.length
-          ? `\n\nDo not use these contested figures because the source attributes each to more than one employer or project: ${input.contestedMetrics.join(', ')}.`
-          : ''
-      }\n\nCover letter requested: ${input.includeCoverLetter ? 'yes' : 'no, return null'}\n\nApplication questions:\n${JSON.stringify(input.questions)}`,
+      content: userContent,
     }],
   });
   const block = response.content.find((item) => item.type === 'text');
@@ -97,11 +139,6 @@ export async function generateCompactApplicationMaterials(input: {
   if (response.stop_reason === 'max_tokens') throw new Error('Compact application packet was truncated at max_tokens');
   return {
     ...parseCompactMaterials(text, requestedIds),
-    usage: {
-      inputTokens: response.usage.input_tokens,
-      outputTokens: response.usage.output_tokens,
-      cacheCreationInputTokens: response.usage.cache_creation_input_tokens ?? 0,
-      cacheReadInputTokens: response.usage.cache_read_input_tokens ?? 0,
-    },
+    usage: anthropicUsage(anthropicModel, response.usage),
   };
 }

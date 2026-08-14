@@ -10,6 +10,7 @@ import {
   extractRankedItems,
   claimedUnheldItems,
 } from '../engine/grounding';
+import { generateOpenAIText, logOpenAIFallback, openAIConfigured } from './openAIProvider';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -361,6 +362,21 @@ export async function draftApplicationAnswer(
   const rankingRule = ranking ? rankingRuleText(ranking) : '';
 
   async function callModel(feedback?: string): Promise<string> {
+    const userContent = `Question: ${question}\n\nWrite the answer.${rankingRule ? `\n\n${rankingRule}` : ''}${feedback ? `\n\n${feedback}` : ''}`;
+    if (openAIConfigured() && !feedback) {
+      try {
+        const generated = await generateOpenAIText({
+          instructions: `${SYSTEM_PROMPT}\n\n${contextBlock}`,
+          input: userContent,
+          maxOutputTokens: 600,
+          reasoningEffort: 'medium',
+        });
+        return generated.text;
+      } catch (error) {
+        logOpenAIFallback('application answer', error);
+      }
+    }
+
     const response = await client.messages.create({
       model: 'claude-sonnet-5',
       max_tokens: 600,
@@ -371,7 +387,7 @@ export async function draftApplicationAnswer(
       messages: [
         {
           role: 'user',
-          content: `Question: ${question}\n\nWrite the answer.${rankingRule ? `\n\n${rankingRule}` : ''}${feedback ? `\n\n${feedback}` : ''}`,
+          content: userContent,
         },
       ],
     });
