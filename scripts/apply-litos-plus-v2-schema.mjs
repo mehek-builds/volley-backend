@@ -177,7 +177,7 @@ const statements = [
   `alter table "artifact_versions" add column if not exists "rendered_object_key" text`,
   `alter table "artifact_versions" add column if not exists "rendered_blob_url" text`,
   `create unique index if not exists "artifact_versions_artifact_version_unique" on "artifact_versions" ("artifact_id", "version_number")`,
-  `create unique index if not exists "artifact_versions_rendered_object_key_unique" on "artifact_versions" ("rendered_object_key") where "rendered_object_key" is not null`,
+  `drop index if exists "artifact_versions_rendered_object_key_unique"`,
   `create table if not exists "application_artifacts" (
     "application_id" uuid not null references "applications"("id") on delete cascade,
     "artifact_id" uuid not null references "artifacts"("id") on delete cascade,
@@ -442,6 +442,76 @@ async function main() {
       const contentHash = createHash('sha256').update(canonicalJson(version.structured_content)).digest('hex');
       await client.query('update "artifact_versions" set "content_hash" = $1 where "id" = $2', [contentHash, version.id]);
     }
+    // Historical resume writes could reuse one object key for several generated rows. The blob at
+    // that key can represent only the newest write, but every stored spec remains an immutable
+    // document version. Keep the newest active version on the original key and give every loser a
+    // stable user-scoped recovery key. No blob is claimed at a recovery key: the download route
+    // deliberately falls through to the immutable-spec renderer when object storage has no match.
+    await client.query(`
+      create temporary table "litos_artifact_version_key_repairs" on commit drop as
+      with ranked as (
+        select
+          av."id" as "version_id",
+          av."artifact_id",
+          av."rendered_object_key" as "original_key",
+          a."user_id",
+          row_number() over (
+            partition by av."rendered_object_key"
+            order by
+              case when a."deleted_at" is null then 0 else 1 end,
+              av."created_at" desc nulls last,
+              av."version_number" desc,
+              av."id" desc
+          ) as "global_rank",
+          row_number() over (
+            partition by av."artifact_id", av."rendered_object_key"
+            order by av."version_number" desc, av."created_at" desc nulls last, av."id" desc
+          ) as "artifact_rank"
+        from "artifact_versions" av
+        inner join "artifacts" a on a."id" = av."artifact_id"
+        where av."rendered_object_key" is not null
+      )
+      select
+        "version_id",
+        "artifact_id",
+        "original_key",
+        "artifact_rank",
+        'users/' || "user_id"::text || '/resumes/recovery-' || "version_id"::text || '.pdf'
+          as "replacement_key"
+      from ranked
+      where "global_rank" > 1
+    `);
+    await client.query(`
+      update "generated_resumes" gr set
+        "resume_object_key" = repair."replacement_key"
+      from "artifacts" a
+      inner join "litos_artifact_version_key_repairs" repair
+        on repair."artifact_id" = a."id" and repair."artifact_rank" = 1
+      where gr."id" = a."legacy_generated_resume_id"
+        and gr."user_id" = a."user_id"
+        and gr."resume_object_key" = repair."original_key"
+    `);
+    await client.query(`
+      update "artifacts" a set
+        "rendered_object_key" = repair."replacement_key",
+        "rendered_blob_url" = null,
+        "updated_at" = now()
+      from "litos_artifact_version_key_repairs" repair
+      where a."id" = repair."artifact_id"
+        and repair."artifact_rank" = 1
+        and a."rendered_object_key" = repair."original_key"
+    `);
+    await client.query(`
+      update "artifact_versions" av set
+        "rendered_object_key" = repair."replacement_key",
+        "rendered_blob_url" = null
+      from "litos_artifact_version_key_repairs" repair
+      where av."id" = repair."version_id"
+    `);
+    await client.query(`
+      create unique index "artifact_versions_rendered_object_key_unique"
+        on "artifact_versions" ("rendered_object_key") where "rendered_object_key" is not null
+    `);
     await client.query(`
       insert into "application_artifacts" ("application_id", "artifact_id", "purpose", "selected", "created_at")
       select gr."id", gr."id", 'resume', true, coalesce(gr."created_at", now())
