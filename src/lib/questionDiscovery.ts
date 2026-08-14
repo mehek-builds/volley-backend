@@ -5929,6 +5929,11 @@ function isFixedPortalProfileField(portal: SupportedPortal, label: string): bool
   if (portal === 'greenhouse' || portal === 'controlled_test') {
     return key === 'phone' || key === 'address_city';
   }
+  if (portal === 'workable' || portal === 'controlled_workable') {
+    const builtIn = label.trim().replace(/^\s*\*+\s*/u, '').replace(/\s*\(optional\)\s*$/i, '').trim();
+    return /^address(?:\s+address){0,2}$/i.test(builtIn)
+      || /^phone(?:\s+\+\d{1,4})?(?:\s+phone)?$/i.test(builtIn);
+  }
   if (portal === 'smartrecruiters') {
     return key === 'phone' || key === 'linkedin_url' || key === 'portfolio_url';
   }
@@ -6004,6 +6009,23 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   function clean(s) {
     return (s == null ? '' : s).replace(/[​‌‍﻿ ]/g, ' ').replace(/\s+/g, ' ').trim();
   }
+  function renderedText(node) {
+    if (!node) return '';
+    if (typeof node.innerText === 'string') return clean(node.innerText);
+    return clean(node.textContent || '');
+  }
+  function labelledByText(node) {
+    var ids = node && node.getAttribute ? (node.getAttribute('aria-labelledby') || '') : '';
+    if (!ids) return '';
+    var out = [];
+    var list = ids.split(/\s+/);
+    for (var i = 0; i < list.length; i += 1) {
+      if (!list[i]) continue;
+      var text = renderedText(document.getElementById(list[i]));
+      if (text) out.push(text);
+    }
+    return clean(out.join(' '));
+  }
   function quoteAttr(s) {
     return String(s).replace(/["\\]/g, '\\$&');
   }
@@ -6045,30 +6067,31 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
    * only ever adds a question that was previously lost; it cannot rename one that was already right,
    * because questionLabel reaches it only after legend and aria-label have both come back empty. */
   function recoveredGroupLabel(el) {
-    var byIds = function (node) {
-      var ids = node && node.getAttribute ? (node.getAttribute('aria-labelledby') || '') : '';
-      if (!ids) return '';
-      var out = [];
-      var list = ids.split(/\s+/);
-      for (var i = 0; i < list.length; i += 1) {
-        if (!list[i]) continue;
-        var ref = document.getElementById(list[i]);
-        var text = ref ? clean(ref.innerText || ref.textContent || '') : '';
-        if (text) out.push(text);
-      }
-      return clean(out.join(' '));
-    };
-    var own = byIds(el);
-    if (own) return own;
-    var group = el.closest('[role="group"], [role="radiogroup"], fieldset');
-    var viaGroup = group ? byIds(group) : '';
+    var group = el.closest(
+      '[role="group"][aria-labelledby], [role="group"][aria-label],'
+      + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+    );
+    var viaGroup = group ? labelledByText(group) : '';
+    if (!viaGroup && group) viaGroup = clean(group.getAttribute('aria-label') || '');
     if (viaGroup) return viaGroup;
     var node = el.parentElement;
     for (var depth = 0; node && depth < 6; depth += 1) {
       var controls = node.querySelectorAll('input[type="radio"], input[type="checkbox"]');
       if (controls.length > 1) {
+        var semanticOwners = new Set();
+        var names = new Set();
+        for (var controlIndex = 0; controlIndex < controls.length; controlIndex += 1) {
+          var owner = controls[controlIndex].closest(
+            '[role="group"][aria-labelledby], [role="group"][aria-label],'
+            + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+          );
+          if (owner) semanticOwners.add(owner);
+          if (controls[controlIndex].name) names.add(controls[controlIndex].name);
+        }
+        var ownsOneQuestion = semanticOwners.size === 1 || (semanticOwners.size === 0 && names.size <= 1);
+        if (!ownsOneQuestion) return '';
         var heading = node.querySelector('h1, h2, h3, h4, h5, h6, legend, .application-label, .application-question');
-        var headingText = heading ? clean(heading.innerText || heading.textContent || '') : '';
+        var headingText = renderedText(heading);
         if (headingText) return headingText;
         return '';
       }
@@ -6117,18 +6140,46 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     return '';
   }
   function questionLabel(el) {
-    var fieldset = el.closest('fieldset');
-    var legend = fieldset ? fieldset.querySelector('legend') : null;
-    var legendText = legend && legend.textContent ? legend.textContent.trim() : '';
-    if (legendText) return legendText;
-    var group = el.closest('[role="group"], [role="radiogroup"]');
-    var groupLabel = group ? group.getAttribute('aria-label') : null;
-    if (groupLabel) return groupLabel;
     var type = (el.getAttribute('type') || '').toLowerCase();
-    if (type === 'radio' || type === 'checkbox') {
+    var choice = type === 'radio' || type === 'checkbox';
+    var semanticGroup = choice ? el.closest(
+      '[role="group"][aria-labelledby], [role="group"][aria-label],'
+      + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+    ) : null;
+    var semanticGroupLabel = semanticGroup
+      ? (labelledByText(semanticGroup) || clean(semanticGroup.getAttribute('aria-label') || ''))
+      : '';
+    if (semanticGroupLabel) return semanticGroupLabel;
+    var fieldset = el.closest('fieldset');
+    var fieldsetChoices = fieldset && choice
+      ? Array.prototype.slice.call(fieldset.querySelectorAll('input[type="radio"], input[type="checkbox"]'))
+      : [];
+    var referencedText = labelledByText(el);
+    var referenceIds = clean(el.getAttribute('aria-labelledby') || '');
+    var sameNamePeers = choice && el.name
+      ? (
+        fieldsetChoices.length > 0
+          ? fieldsetChoices
+          : Array.prototype.slice.call((el.form || document).querySelectorAll(
+            'input[type="radio"][name="' + quoteAttr(el.name) + '"], input[type="checkbox"][name="' + quoteAttr(el.name) + '"]'
+          ))
+      ).filter(function (input) { return input.name === el.name; })
+      : [el];
+    var sharedChoiceReference = !choice || (referenceIds && sameNamePeers.length > 0
+      && sameNamePeers.every(function (input) {
+        return clean(input.getAttribute('aria-labelledby') || '') === referenceIds;
+      }));
+    if (referencedText && sharedChoiceReference) return referencedText;
+    var fieldsetNames = new Set(fieldsetChoices.map(function (input) { return input.name; }).filter(Boolean));
+    var fieldsetOwnsChoice = !choice || fieldsetNames.size <= 1;
+    var legend = fieldsetOwnsChoice && fieldset ? fieldset.querySelector('legend') : null;
+    var legendText = renderedText(legend);
+    if (legendText) return legendText;
+    if (choice) {
       var recovered = recoveredGroupLabel(el);
       if (recovered) return recovered;
     }
+    if (referencedText && !choice) return referencedText;
     var labelEl = (el.labels && el.labels[0]) || (el.id ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]') : null);
     /* innerText, not textContent, with textContent kept as the fallback for a label that is not
      * rendered. A <label> wrapping a composite widget contains every text node under it, including
@@ -6136,15 +6187,14 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
      * field stored "Current location ✱No location found. Try entering a different locationLoading",
      * which is the heading, the required glyph, a typeahead empty state and a loading node fused
      * into one string. innerText reports what a person can actually see. */
-    var labelText = labelEl ? (clean(labelEl.innerText || '') || (labelEl.textContent || '')) : '';
+    var labelText = renderedText(labelEl);
+    if (labelText) return labelText;
+    var ariaLabelText = clean(el.getAttribute('aria-label') || '');
+    if (ariaLabelText) return ariaLabelText;
     var written = clean([
-      labelText || '',
-      el.getAttribute('aria-label') || '',
       el.getAttribute('placeholder') || '',
     ].join(' '));
     var parts = [
-      labelText || '',
-      el.getAttribute('aria-label') || '',
       el.getAttribute('placeholder') || '',
       el.getAttribute('name') || '',
       el.id || '',
@@ -6180,7 +6230,7 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     if (own) return own;
     var block = el.closest('div, section, li');
     var fallback = block ? block.querySelector('label, legend, .question, h3, h4') : null;
-    return ((fallback && fallback.textContent) || '').trim();
+    return renderedText(fallback);
   }
   // Does the employer require this control? Three shapes, because one of them alone misses the
   // react-select comboboxes that carry Greenhouse's hardest questions.
@@ -6202,6 +6252,8 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   function isRequiredField(el) {
     if (el.required === true) return true;
     if ((el.getAttribute('aria-required') || '').toLowerCase() === 'true') return true;
+    var workableWidget = el.closest('[data-input-type]');
+    if (workableWidget && workableWidget.querySelector('input[required], textarea[required], select[required], [aria-required="true"]')) return true;
     var node = el.parentElement;
     for (var depth = 0; node && depth < 6; depth += 1) {
       if (node.querySelectorAll('label').length > 1) return false;
@@ -6215,7 +6267,7 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     var labelEl = (input.labels && input.labels[0])
       || (input.id ? document.querySelector('label[for="' + CSS.escape(input.id) + '"]') : null);
     return clean(
-      (labelEl && labelEl.textContent)
+      renderedText(labelEl)
       || input.getAttribute('aria-label')
       || input.getAttribute('data-qa')
       || input.value
@@ -6237,12 +6289,29 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
       return out;
     }
     if (el.type === 'radio' || el.type === 'checkbox') {
+      var semanticGroup = el.closest(
+        '[role="group"][aria-labelledby], [role="group"][aria-label],'
+        + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+      );
+      var semanticControls = semanticGroup
+        ? semanticGroup.querySelectorAll('input[type="radio"], input[type="checkbox"]')
+        : [];
+      var fieldset = el.closest('fieldset');
+      var fieldsetControls = fieldset
+        ? fieldset.querySelectorAll('input[type="radio"], input[type="checkbox"]')
+        : [];
+      var fieldsetNames = new Set(Array.prototype.map.call(fieldsetControls, function (input) { return input.name; }).filter(Boolean));
+      var fieldsetOwnsChoice = fieldsetControls.length > 0 && fieldsetNames.size <= 1;
       var name = el.getAttribute('name');
-      if (!name) {
+      if (!semanticControls.length && !fieldsetOwnsChoice && !name) {
         var own = optionLabel(el);
         return own ? [own] : [];
       }
-      var group = document.querySelectorAll('input[name="' + quoteAttr(name) + '"]');
+      var group = semanticControls.length
+        ? semanticControls
+        : (fieldsetOwnsChoice && fieldsetControls.length
+          ? fieldsetControls
+          : document.querySelectorAll('input[name="' + quoteAttr(name) + '"]'));
       for (i = 0; i < group.length; i += 1) {
         var groupText = optionLabel(group[i]);
         if (groupText) out.push(groupText);
@@ -6260,6 +6329,13 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     }
     return out;
   }
+  function choiceQuestionKey(el) {
+    var semanticGroup = el.closest(
+      '[role="group"][aria-labelledby], [role="group"][aria-label],'
+      + ' [role="radiogroup"][aria-labelledby], [role="radiogroup"][aria-label]'
+    );
+    return semanticGroup || el.name || el;
+  }
 
   var els = Array.prototype.slice
     .call(
@@ -6268,21 +6344,32 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
       ),
     )
     .filter(function (el) {
-      return !el.closest('[id*="litos"]') && !el.disabled && !el.readOnly && isVisible(el) && !isHoneypot(el);
+      var readonlyChoiceOpener = el.readOnly
+        && (el.getAttribute('role') === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox');
+      return !el.closest('[id*="litos"]') && !el.disabled && (!el.readOnly || readonlyChoiceOpener)
+        && isVisible(el) && !isHoneypot(el);
     });
 
   var out = [];
+  var seenChoiceQuestions = new Set();
   var counter = 0;
   for (var i = 0; i < els.length; i += 1) {
     var el = els[i];
+    if (el.type === 'radio' || el.type === 'checkbox') {
+      var choiceKey = choiceQuestionKey(el);
+      if (seenChoiceQuestions.has(choiceKey)) continue;
+      seenChoiceQuestions.add(choiceKey);
+    }
     var label = clean(questionLabel(el));
     if (!label) continue;
     counter += 1;
     var marker = 'data-litos-discovered-' + counter;
     el.setAttribute(marker, '1');
+    var selector = stableSelector(el, marker);
     out.push({
       label: label,
-      selector: stableSelector(el, marker),
+      selector: selector,
+      durableSelector: selector.indexOf('[data-litos-discovered-') === 0 ? null : selector,
       inputType: el.tagName === 'TEXTAREA'
         ? 'textarea'
         : (el.tagName === 'SELECT' ? 'select' : (el.getAttribute('role') === 'combobox' ? 'combobox' : (el.type || 'text'))),

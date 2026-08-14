@@ -725,7 +725,14 @@ test('Greenhouse managed fill selects phone country and city comboboxes', () => 
   ]);
 });
 
-function directFillPage(selectors: string[]) {
+function directFillPage(
+  selectors: string[],
+  behavior: {
+    isVisible?: (selector: string, present: boolean) => boolean;
+    getAttribute?: (selector: string, name: string) => string | null;
+    onPress?: (selector: string, key: string, values: Map<string, string>) => void;
+  } = {},
+) {
   const values = new Map<string, string>();
   const makeLocator = (selector: string, index?: number): any => {
     const present = selectors.includes(selector);
@@ -733,12 +740,15 @@ function directFillPage(selectors: string[]) {
       first: () => makeLocator(selector, 0),
       nth: (nextIndex: number) => makeLocator(selector, nextIndex),
       count: async () => (present ? 1 : 0),
-      isVisible: async () => present,
+      isVisible: async () => behavior.isVisible?.(selector, present) ?? present,
       fill: async (value: string) => {
         if (present) values.set(selector, value);
       },
       press: async (key: string) => {
-        if (present) values.set(`${selector}::press`, key);
+        if (present) {
+          values.set(`${selector}::press`, key);
+          behavior.onPress?.(selector, key, values);
+        }
       },
       selectOption: async (option: string | { label?: string }) => {
         if (!present) return [];
@@ -747,7 +757,7 @@ function directFillPage(selectors: string[]) {
         values.set(selector, value);
         return [value];
       },
-      getAttribute: async () => null,
+      getAttribute: async (name: string) => behavior.getAttribute?.(selector, name) ?? null,
       inputValue: async () => values.get(selector) ?? '',
       locator: () => makeLocator(`${selector} child`, 0),
       evaluate: async () => false,
@@ -869,6 +879,529 @@ test('direct Greenhouse replay replaces a stale company-site answer with evidenc
     }],
   });
   assert.equal(values.get(referralSelector), 'Job board');
+});
+
+function absentWorkableLocator(): any {
+  const locator: any = {
+    first: () => locator,
+    nth: () => absentWorkableLocator(),
+    count: async () => 0,
+    isVisible: async () => false,
+    inputValue: async () => '',
+    innerText: async () => '',
+    textContent: async () => '',
+    getAttribute: async () => null,
+    locator: () => absentWorkableLocator(),
+    getByLabel: () => absentWorkableLocator(),
+    getByRole: () => absentWorkableLocator(),
+    getByText: () => absentWorkableLocator(),
+    evaluate: async () => false,
+    press: async () => undefined,
+    click: async () => undefined,
+    fill: async () => undefined,
+    uncheck: async () => undefined,
+    isChecked: async () => false,
+  };
+  return locator;
+}
+
+function oneWorkableLocator(overrides: Record<string, unknown> = {}): any {
+  const locator: any = {
+    count: async () => 1,
+    isVisible: async () => true,
+    inputValue: async () => '',
+    innerText: async () => '',
+    textContent: async () => '',
+    getAttribute: async () => null,
+    locator: () => absentWorkableLocator(),
+    getByLabel: () => absentWorkableLocator(),
+    getByRole: () => absentWorkableLocator(),
+    getByText: () => absentWorkableLocator(),
+    evaluate: async () => false,
+    press: async () => undefined,
+    click: async () => undefined,
+    fill: async () => undefined,
+    check: async () => undefined,
+    uncheck: async () => undefined,
+    isChecked: async () => false,
+    ...overrides,
+  };
+  locator.first = () => locator;
+  locator.nth = (index: number) => index === 0 ? locator : absentWorkableLocator();
+  return locator;
+}
+
+test('direct Workable replay checks the exact reviewed option inside its ARIA-linked question group', async () => {
+  const questionText = 'Which programming languages can you work in?';
+  let checked = false;
+  let decoyChecked = false;
+  const decoy = oneWorkableLocator({
+    evaluate: async () => ['JavaScript'],
+    check: async () => { decoyChecked = true; },
+    click: async () => { decoyChecked = true; },
+    isChecked: async () => decoyChecked,
+  });
+  const choice = oneWorkableLocator({
+    evaluate: async () => ['Python'],
+    check: async () => { checked = true; },
+    click: async () => { checked = true; },
+    isChecked: async () => checked,
+  });
+  const controls: any = {
+    count: async () => 2,
+    nth: (index: number) => index === 0 ? decoy : choice,
+  };
+  const group = oneWorkableLocator({
+    getAttribute: async (name: string) => name === 'aria-labelledby' ? 'QA_42_label' : null,
+    locator: (selector: string) => {
+      assert.equal(selector, 'input[type="checkbox"]');
+      return controls;
+    },
+  });
+  const question = oneWorkableLocator({
+    getAttribute: async (name: string) => name === 'id' ? 'QA_42_label' : null,
+    innerText: async () => `* ${questionText}`,
+  });
+  const page = {
+    locator: (selector: string) => {
+      if (selector === '[role="group"][aria-labelledby], [role="radiogroup"][aria-labelledby], fieldset[aria-labelledby]') return group;
+      if (selector === '[id="QA_42_label"]') return question;
+      return absentWorkableLocator();
+    },
+    getByText: () => absentWorkableLocator(),
+  } as unknown as Page;
+
+  const result = await fillPortal(page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: questionText,
+      answer: 'Python',
+      portalInputType: 'checkbox',
+    }],
+  });
+  assert.equal(checked, true);
+  assert.equal(decoyChecked, false);
+  assert.ok(result.filledFields.includes(`question_checkbox:${questionText}`));
+});
+
+test('direct Workable replay checks every exact value in a reviewed multi-select answer', async () => {
+  const questionText = 'Which languages do you speak?';
+  const checked = new Set<string>();
+  const languages = ['English', 'Hindi', 'Arabic', 'French'];
+  const choices = languages.map((language) => oneWorkableLocator({
+    evaluate: async () => [language],
+    check: async () => { checked.add(language); },
+    click: async () => { checked.add(language); },
+    isChecked: async () => checked.has(language),
+  }));
+  const controls: any = {
+    count: async () => choices.length,
+    nth: (index: number) => choices[index] ?? absentWorkableLocator(),
+  };
+  const group = oneWorkableLocator({
+    getAttribute: async (name: string) => name === 'aria-labelledby' ? 'QA_languages_label' : null,
+    locator: (selector: string) => {
+      assert.equal(selector, 'input[type="checkbox"]');
+      return controls;
+    },
+  });
+  const question = oneWorkableLocator({ innerText: async () => `* ${questionText}` });
+  const page = {
+    locator: (selector: string) => {
+      if (selector === '[role="group"][aria-labelledby], [role="radiogroup"][aria-labelledby], fieldset[aria-labelledby]') return group;
+      if (selector === '[id="QA_languages_label"]') return question;
+      return absentWorkableLocator();
+    },
+    getByText: () => absentWorkableLocator(),
+  } as unknown as Page;
+
+  const result = await fillPortal(page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: questionText,
+      answer: languages.join(', '),
+      portalInputType: 'checkbox',
+    }],
+  });
+  assert.deepEqual([...checked], languages);
+  assert.ok(result.filledFields.includes(`question_checkbox:${questionText}`));
+});
+
+test('direct Workable multi-select rolls back partial state and remains fail closed', async () => {
+  const questionText = 'Which languages do you speak?';
+  let englishChecked = false;
+  let hindiChecked = false;
+  let unconfirmed = false;
+  const english = oneWorkableLocator({
+    evaluate: async () => ['English'],
+    check: async () => { englishChecked = true; },
+    click: async () => { englishChecked = true; },
+    uncheck: async () => { englishChecked = false; },
+    isChecked: async () => englishChecked,
+  });
+  const hindi = oneWorkableLocator({
+    evaluate: async () => ['Hindi'],
+    check: async () => { throw new Error('provider check failed'); },
+    click: async () => undefined,
+    uncheck: async () => { hindiChecked = false; },
+    isChecked: async () => hindiChecked,
+  });
+  const controls: any = {
+    count: async () => 2,
+    nth: (index: number) => index === 0 ? english : hindi,
+  };
+  const group = oneWorkableLocator({
+    getAttribute: async (name: string) => name === 'aria-labelledby' ? 'QA_languages_atomic_label' : null,
+    evaluate: async (_callback: unknown, state: { active: boolean }) => {
+      unconfirmed = state.active;
+    },
+    locator: () => controls,
+  });
+  const question = oneWorkableLocator({ innerText: async () => `* ${questionText}` });
+  const page = {
+    locator: (selector: string) => {
+      if (selector === '[role="group"][aria-labelledby], [role="radiogroup"][aria-labelledby], fieldset[aria-labelledby]') return group;
+      if (selector === '[id="QA_languages_atomic_label"]') return question;
+      return absentWorkableLocator();
+    },
+    getByText: () => absentWorkableLocator(),
+  } as unknown as Page;
+
+  const result = await fillPortal(page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: questionText,
+      answer: 'English, Hindi',
+      portalInputType: 'checkbox',
+    }],
+  });
+
+  assert.equal(englishChecked, false, 'the first selection must be rolled back');
+  assert.equal(hindiChecked, false);
+  assert.equal(unconfirmed, true, 'readiness must reject the partially replayed group');
+  assert.ok(!result.filledFields.includes(`question_checkbox:${questionText}`));
+});
+
+test('direct Workable multi-select aborts when partial state cannot be rolled back', async () => {
+  const questionText = 'Which languages do you speak?';
+  let englishChecked = false;
+  const english = oneWorkableLocator({
+    evaluate: async () => ['English'],
+    check: async () => { englishChecked = true; },
+    click: async () => { englishChecked = true; },
+    uncheck: async () => { throw new Error('provider rollback failed'); },
+    isChecked: async () => englishChecked,
+  });
+  const hindi = oneWorkableLocator({
+    evaluate: async () => ['Hindi'],
+    check: async () => { throw new Error('provider check failed'); },
+    click: async () => undefined,
+    isChecked: async () => false,
+  });
+  const controls: any = {
+    count: async () => 2,
+    nth: (index: number) => index === 0 ? english : hindi,
+  };
+  const group = oneWorkableLocator({
+    getAttribute: async (name: string) => name === 'aria-labelledby' ? 'QA_languages_abort_label' : null,
+    evaluate: async () => undefined,
+    locator: () => controls,
+  });
+  const question = oneWorkableLocator({ innerText: async () => `* ${questionText}` });
+  const page = {
+    locator: (selector: string) => {
+      if (selector === '[role="group"][aria-labelledby], [role="radiogroup"][aria-labelledby], fieldset[aria-labelledby]') return group;
+      if (selector === '[id="QA_languages_abort_label"]') return question;
+      return absentWorkableLocator();
+    },
+    getByText: () => absentWorkableLocator(),
+  } as unknown as Page;
+
+  await assert.rejects(
+    fillPortal(page, 'workable', {
+      fullName: 'Taylor Example',
+      email: 'taylor@example.com',
+      resume: Buffer.from('resume-pdf'),
+      resumeName: 'resume.pdf',
+      questions: [{
+        question: questionText,
+        answer: 'English, Hindi',
+        portalInputType: 'checkbox',
+      }],
+    }),
+    /could not restore its previous selection state/,
+  );
+  assert.equal(englishChecked, true, 'the provider left partial state, so the run must abort');
+});
+
+test('managed Workable replay expands a reviewed multi-select only from exact live options', () => {
+  const questionText = 'Which languages do you speak?';
+  const portalSelector = 'input[id="input_QA_languages_english"]';
+  const languages = ['English', 'Hindi', 'Arabic', 'French'];
+  const actions = buildManagedPortalActions('workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    fieldOptions: { input_QA_languages_english: languages },
+    questions: [{
+      question: questionText,
+      answer: languages.join(', '),
+      portalSelector,
+      portalInputType: 'checkbox',
+    }],
+  });
+  assert.deepEqual(
+    actions.filter((action) => action.type === 'fillByLabelText' && action.text === questionText)
+      .map((action) => action.value),
+    languages,
+  );
+
+  const commaLabel = buildManagedPortalActions('workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    fieldOptions: { input_QA_location_cairo: ['Cairo, Egypt', 'Dubai'] },
+    questions: [{
+      question: 'Which office can you work from?',
+      answer: 'Cairo, Egypt',
+      portalSelector: 'input[id="input_QA_location_cairo"]',
+      portalInputType: 'checkbox',
+    }],
+  });
+  assert.deepEqual(
+    commaLabel.filter((action) => action.type === 'fillByLabelText' && action.text === 'Which office can you work from?')
+      .map((action) => action.value),
+    ['Cairo, Egypt'],
+  );
+});
+
+test('direct Workable choice replay refuses duplicate exact question labels', async () => {
+  const questionText = 'Which programming languages can you work in?';
+  const question = oneWorkableLocator({ innerText: async () => questionText });
+  const group = oneWorkableLocator({
+    getAttribute: async (name: string) => name === 'aria-labelledby' ? 'QA_42_label' : null,
+  });
+  const duplicateGroups: any = {
+    count: async () => 2,
+    nth: () => group,
+  };
+  const page = {
+    locator: (selector: string) => {
+      if (selector === '[role="group"][aria-labelledby], [role="radiogroup"][aria-labelledby], fieldset[aria-labelledby]') return duplicateGroups;
+      if (selector === '[id="QA_42_label"]') return question;
+      return absentWorkableLocator();
+    },
+    getByText: () => absentWorkableLocator(),
+  } as unknown as Page;
+
+  const result = await fillPortal(page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: questionText,
+      answer: 'Python',
+      portalInputType: 'checkbox',
+    }],
+  });
+  assert.equal(result.filledFields.includes(`question_checkbox:${questionText}`), false);
+});
+
+test('direct Workable readonly combobox selects and verifies one exact option in its declared listbox', async () => {
+  const questionText = 'Are you currently based in Japan?';
+  const portalSelector = 'input[id="input_QA_42_input"]';
+  let opened = false;
+  let selected = false;
+  let valueReads = 0;
+  let rawFillAttempted = false;
+  let unconfirmed = false;
+  const widget = oneWorkableLocator({
+    evaluate: async (_callback: unknown, state: { active: boolean }) => {
+      unconfirmed = state.active;
+    },
+  });
+  const option = oneWorkableLocator({
+    click: async () => { selected = true; },
+    getAttribute: async () => null,
+  });
+  const listbox = oneWorkableLocator({
+    isVisible: async () => opened,
+    getByRole: (role: string, options: { name: RegExp }) => {
+      assert.equal(role, 'option');
+      assert.equal(options.name.test('Yes'), true);
+      return option;
+    },
+  });
+  const field = oneWorkableLocator({
+    click: async () => { opened = true; },
+    fill: async () => { rawFillAttempted = true; throw new Error('readonly'); },
+    getAttribute: async (name: string) => {
+      if (name === 'role') return 'combobox';
+      if (name === 'readonly') return '';
+      if (name === 'id') return 'input_QA_42_input';
+      if (name === 'aria-controls') return opened ? 'input_QA_42_listbox' : null;
+      return null;
+    },
+    inputValue: async () => {
+      valueReads += 1;
+      return selected && valueReads >= 3 ? 'Yes' : '';
+    },
+    locator: (selector: string) => {
+      assert.equal(selector, 'xpath=ancestor::*[@data-input-type="select"][1]');
+      return widget;
+    },
+  });
+  const page = {
+    locator: (selector: string) => {
+      if (selector === portalSelector) return field;
+      if (selector === '[id="input_QA_42_listbox"][role="listbox"]') return listbox;
+      return absentWorkableLocator();
+    },
+    getByText: () => absentWorkableLocator(),
+  } as unknown as Page;
+
+  const result = await fillPortal(page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: questionText,
+      answer: 'Yes',
+      portalSelector,
+      portalInputType: 'combobox',
+    }],
+  });
+  assert.equal(selected, true);
+  assert.ok(valueReads >= 3, 'verification must poll until the React selection is committed');
+  assert.equal(rawFillAttempted, false);
+  assert.equal(unconfirmed, false);
+  assert.ok(result.filledFields.includes(`question:${questionText}`));
+});
+
+test('direct Workable readonly combobox refuses two exact options in its own listbox', async () => {
+  const questionText = 'Are you currently based in Japan?';
+  const portalSelector = 'input[id="input_QA_42_input"]';
+  let optionClicks = 0;
+  let escaped = false;
+  let unconfirmed = false;
+  const widget = oneWorkableLocator({
+    evaluate: async (_callback: unknown, state: { active: boolean }) => {
+      unconfirmed = state.active;
+    },
+  });
+  const option = oneWorkableLocator({ click: async () => { optionClicks += 1; } });
+  const duplicateOptions: any = {
+    count: async () => 2,
+    nth: () => option,
+  };
+  const listbox = oneWorkableLocator({
+    getByRole: () => duplicateOptions,
+  });
+  const field = oneWorkableLocator({
+    click: async () => undefined,
+    press: async (key: string) => { escaped = key === 'Escape'; },
+    getAttribute: async (name: string) => {
+      if (name === 'role') return 'combobox';
+      if (name === 'aria-controls') return 'input_QA_42_listbox';
+      return null;
+    },
+    locator: () => widget,
+  });
+  const page = {
+    locator: (selector: string) => {
+      if (selector === portalSelector) return field;
+      if (selector === '[id="input_QA_42_listbox"][role="listbox"]') return listbox;
+      return absentWorkableLocator();
+    },
+    getByText: () => absentWorkableLocator(),
+  } as unknown as Page;
+
+  const result = await fillPortal(page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: questionText,
+      answer: 'Yes',
+      portalSelector,
+      portalInputType: 'combobox',
+    }],
+  });
+  assert.equal(optionClicks, 0);
+  assert.equal(escaped, true);
+  assert.equal(unconfirmed, true);
+  assert.equal(result.filledFields.includes(`question:${questionText}`), false);
+});
+
+test('direct Workable combobox keeps readiness closed when an exact click leaves a stale prior selection', async () => {
+  const questionText = 'Are you currently based in Japan?';
+  const portalSelector = 'input[id="input_QA_stale_input"]';
+  let unconfirmed = false;
+  let optionClicks = 0;
+  const staleSelection = 'No';
+  const option = oneWorkableLocator({
+    click: async () => { optionClicks += 1; },
+    getAttribute: async () => null,
+  });
+  const listbox = oneWorkableLocator({
+    getByRole: () => option,
+  });
+  const field = oneWorkableLocator({
+    click: async () => undefined,
+    inputValue: async () => '',
+    evaluate: async (_callback: unknown, state: { active: boolean }) => {
+      unconfirmed = state.active;
+    },
+    getAttribute: async (name: string) => {
+      if (name === 'role') return 'combobox';
+      if (name === 'aria-controls') return 'input_QA_stale_listbox';
+      if (name === 'aria-valuetext') return staleSelection;
+      return null;
+    },
+    // This valid role=combobox shape has no data-input-type select ancestor. The unresolved marker
+    // must fall back to the field itself so its stale prior value cannot satisfy readiness.
+    locator: () => absentWorkableLocator(),
+  });
+  const page = {
+    locator: (selector: string) => {
+      if (selector === portalSelector) return field;
+      if (selector === '[id="input_QA_stale_listbox"][role="listbox"]') return listbox;
+      return absentWorkableLocator();
+    },
+    getByText: () => absentWorkableLocator(),
+  } as unknown as Page;
+
+  const result = await fillPortal(page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: questionText,
+      answer: 'Yes',
+      portalSelector,
+      portalInputType: 'combobox',
+    }],
+  });
+
+  assert.equal(optionClicks, 1);
+  assert.equal(staleSelection, 'No');
+  assert.equal(unconfirmed, true, 'a stale prior value must not satisfy readiness');
+  assert.equal(result.filledFields.includes(`question:${questionText}`), false);
 });
 
 test('managed referral replay emits only the packet-evidenced Job board channel', () => {
@@ -3237,7 +3770,8 @@ test('each new adapter pushes the exact selector read off the live form', () => 
   const expected: Record<string, Record<string, string>> = {
     workable: {
       first_name: 'input[name="firstname"]', last_name: 'input[name="lastname"]',
-      email: 'input[name="email"]', phone: 'input[name="phone"]', location: 'input[name="city"]',
+      email: 'input[name="email"]', phone: 'input[name="phone"]',
+      location: 'input[name="address"]:visible, body:not(:has(input[name="address"]:visible)) input[name="city"]:visible',
       resume: 'input[type="file"][data-ui="resume"]',
     },
     jazzhr: {
@@ -3261,6 +3795,102 @@ test('each new adapter pushes the exact selector read off the live form', () => 
       assert.equal(actions.find((a) => a.label === label)?.selector, selector, `${portal}.${label}`);
     }
   }
+});
+
+test('Workable commits the visible address autocomplete after filling it', async () => {
+  const managed = buildManagedPortalActions('workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    city: 'Dubai',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  const locationIndex = managed.findIndex((action) => action.label === 'location');
+  assert.ok(locationIndex >= 0);
+  assert.deepEqual(managed.slice(locationIndex, locationIndex + 2), [
+    {
+      type: 'fill',
+      selector: 'input[name="address"]:visible, body:not(:has(input[name="address"]:visible)) input[name="city"]:visible',
+      value: 'Dubai',
+      label: 'location',
+      optional: true,
+      timeout: 10_000,
+    },
+    {
+      type: 'press',
+      selector: 'input[name="address"]:visible, body:not(:has(input[name="address"]:visible)) input[name="city"]:visible',
+      value: 'Enter',
+      label: 'location_select',
+      optional: true,
+      timeout: 10_000,
+    },
+  ]);
+
+  const { page, values } = directFillPage([
+    'input[name="firstname"]',
+    'input[name="lastname"]',
+    'input[name="email"]',
+    'input[name="address"]:visible',
+    'input[name="city"]',
+  ], {
+    isVisible: (selector, present) => present && selector !== 'input[name="city"]',
+    getAttribute: (selector, name) => selector === 'input[name="city"]' && name === 'type' ? 'hidden' : null,
+    onPress: (selector, key, stored) => {
+      if (selector === 'input[name="address"]:visible' && key === 'Enter') {
+        stored.set('input[name="city"]', 'Dubai');
+      }
+    },
+  });
+  const committed = await fillPortal(page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    city: 'Dubai',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  assert.equal(values.get('input[name="address"]:visible'), 'Dubai');
+  assert.equal(values.get('input[name="address"]:visible::press'), 'Enter');
+  assert.equal(values.has('input[name="city"]:visible'), false);
+  assert.ok(committed.filledFields.includes('location'));
+
+  const legacy = directFillPage([
+    'input[name="firstname"]',
+    'input[name="lastname"]',
+    'input[name="email"]',
+    'input[name="address"]:visible',
+    'input[name="city"]:visible',
+  ]);
+  const legacyResult = await fillPortal(legacy.page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    city: 'Dubai',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  assert.equal(legacy.values.get('input[name="address"]:visible'), '');
+  assert.equal(legacy.values.get('input[name="city"]:visible'), 'Dubai');
+  assert.equal(legacy.values.get('input[name="city"]:visible::press'), 'Enter');
+  assert.ok(legacyResult.filledFields.includes('location'));
+
+  const uncommitted = directFillPage([
+    'input[name="firstname"]',
+    'input[name="lastname"]',
+    'input[name="email"]',
+    'input[name="address"]:visible',
+  ]);
+  const uncommittedResult = await fillPortal(uncommitted.page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    city: 'Dubai',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+  assert.equal(uncommitted.values.get('input[name="address"]:visible'), '');
+  assert.equal(uncommittedResult.filledFields.includes('location'), false);
 });
 
 test('the Paylocity advance selector is exactly the label-scoped form, never the bare id', () => {
@@ -4746,6 +5376,100 @@ test('option lists come back keyed by control even though the provider drops the
   assert.deepEqual(parsed['degree--0'], ["Bachelor's Degree", "Master's Degree"]);
   assert.equal('school--0' in parsed, false);
   assert.equal(Object.keys(parsed).length, 2);
+});
+
+test('managed Workable name-only choice inventory reaches exact multi-select replay', () => {
+  const options = ['English', 'Hindi', 'Arabic', 'French'];
+  const durableSelector = 'input[name="5854742"]';
+  const analysis = managedOptionProbeAnalysis('workable', [{
+    label: 'Which languages do you speak?',
+    selector: '[data-litos-discovered-4]',
+    durableSelector,
+    inputType: 'checkbox',
+    options,
+    required: true,
+  }], {}, []);
+
+  assert.equal(managedOptionProbeControlId({
+    label: 'Which languages do you speak?',
+    selector: '[data-litos-discovered-4]',
+    durableSelector,
+  }), 'name:5854742');
+  assert.deepEqual(analysis.options['name:5854742'], options);
+  assert.deepEqual(analysis.failures, []);
+  assert.equal(analysis.failedIds.size, 0);
+
+  const actions = buildManagedPortalActions('workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    fieldOptions: analysis.options,
+    questions: [{
+      question: 'Which languages do you speak?',
+      answer: options.join(', '),
+      portalSelector: durableSelector,
+      portalInputType: 'checkbox',
+    }],
+  });
+  assert.deepEqual(
+    actions.filter((action) => action.type === 'fillByLabelText' && action.text === 'Which languages do you speak?')
+      .map((action) => action.value),
+    options,
+  );
+});
+
+test('Workable discovery resolution preserves every exact offered stored language through managed replay', () => {
+  const offered = ['French', 'English', 'hindi', 'Arabic', 'HINDI'];
+  const selected = ['French', 'English', 'hindi', 'Arabic'];
+  const durableSelector = 'input[name="5854742"]';
+  const discovered = {
+    label: 'Which languages do you speak?',
+    selector: '[data-litos-discovered-4]',
+    durableSelector,
+    inputType: 'checkbox',
+    maxLength: null,
+    options: offered,
+    required: true,
+  } satisfies ManagedDiscoveredQuestion;
+  const analysis = managedOptionProbeAnalysis('workable', [discovered], {}, []);
+  const [field] = attachManagedFieldOptions(
+    [{ ...discovered, options: undefined }],
+    analysis.options,
+  );
+  const resolved = resolveProfileField(
+    { label: field!.label, inputType: field!.inputType, options: field!.options },
+    { languages: ['English', 'Hindi', 'Arabic', 'French', 'German'] },
+  );
+
+  assert.equal(resolved?.value, selected.join(', '));
+  assert.equal(resolved?.matchedOption, true);
+  assert.equal(resolveProfileField(
+    { label: field!.label, inputType: field!.inputType, options: ['Japanese'] },
+    { languages: ['English', 'Hindi'] },
+  ), null, 'a checkbox list with no exact stored-language intersection must decline');
+  assert.notEqual(resolveProfileField(
+    { label: field!.label, inputType: 'select', options: offered },
+    { languages: ['English', 'Hindi', 'Arabic', 'French'] },
+  )?.value, selected.join(', '), 'the multi-value behavior must not widen to a single-select');
+  const actions = buildManagedPortalActions('workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    fieldOptions: analysis.options,
+    questions: [{
+      question: field!.label,
+      answer: resolved!.value,
+      portalSelector: durableSelector,
+      portalInputType: field!.inputType,
+    }],
+  });
+  assert.deepEqual(
+    actions.filter((action) => action.type === 'fillByLabelText' && action.text === field!.label)
+      .map((action) => action.value),
+    selected,
+  );
 });
 
 test('a probed option list reaches the control it was read from, by its own id', () => {

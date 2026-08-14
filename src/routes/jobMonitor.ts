@@ -1391,6 +1391,10 @@ function companyScatter(filters: { company?: string }) {
   ];
 }
 
+function isUnitedStatesLocation(location: string): boolean {
+  return location.trim().toLowerCase() === 'united states';
+}
+
 export function boardConditions(f: {
   q?: string;
   title?: string;
@@ -1423,7 +1427,9 @@ export function boardConditions(f: {
   }
   if (f.title) conditions.push(ilike(monitored_jobs.title, `%${f.title}%`));
   if (f.location) {
-    conditions.push(ilike(monitored_jobs.location, `%${f.location}%`));
+    conditions.push(isUnitedStatesLocation(f.location)
+      ? eq(monitored_jobs.job_country, 'us')
+      : ilike(monitored_jobs.location, `%${f.location}%`));
   } else if (!f.remote && f.targeting?.locations.length) {
     /* "Remote" is one of the places a student can pick, and it cannot be matched as location text:
        a remote posting is routinely labelled with the head office's city, and a Cape Town office
@@ -1431,7 +1437,9 @@ export function boardConditions(f: {
        the flag instead, OR-ed with the real places so picking London and Remote returns both. */
     const places = f.targeting.locations.filter((location) => !isRemoteLocation(location));
     const wantsRemote = places.length < f.targeting.locations.length;
-    const clauses: SQL[] = places.map((location) => ilike(monitored_jobs.location, `%${location}%`));
+    const clauses: SQL[] = places.map((location) => isUnitedStatesLocation(location)
+      ? eq(monitored_jobs.job_country, 'us')
+      : ilike(monitored_jobs.location, `%${location}%`));
     if (wantsRemote) clauses.push(eq(monitored_jobs.remote, true));
     if (clauses.length) conditions.push(clauses.length === 1 ? clauses[0]! : or(...clauses)!);
   }
