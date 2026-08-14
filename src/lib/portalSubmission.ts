@@ -4156,15 +4156,14 @@ function isProtectedManagedAction(
   // from that flag, and a document she attached is silently left off. The `upload` action it decides
   // about is deliberately NOT protected - a fill is what the budget is for giving up.
   //
-  // The two workable_ entries arrived on main in PR #487 while this branch was open. Both sides of
-  // that merge were adding to this one list rather than disagreeing about it, so the resolution is
-  // the union: a Workable form that cannot report itself ready and a transcript control that cannot
-  // report itself present are two separate reads, and dropping either one loses a different fact.
-  // resume_upload_verify is protected for the same reason and one step further along: it is the read
-  // that says whether the transcript upload took the resume's control. A trim that dropped it would
-  // leave the run unable to tell a resume that is still attached from one that was replaced, which
-  // is the exact silence this read was added to break.
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_preflight$|workable_application_form_ready$|workable_phone_assertion_capability$)/
+  // Workable's form-ready barrier is also a required wait, and the final cookie decline and cleared
+  // barrier belong to the same protected sequence: dropping either one can strand a fresh
+  // pointer-intercepting cookie overlay directly in front of the phone country control.
+  // resume_upload_verify is protected as a required evidence read one step further along: it says
+  // whether the transcript upload took the resume's control. A trim that dropped it would leave the
+  // run unable to tell a resume that is still attached from one that was replaced, which is the
+  // exact silence this read was added to break.
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_assertion_capability$)/
     .test(label);
 }
 
@@ -4474,6 +4473,13 @@ const WORKABLE_LOCATION_SELECTOR = `${WORKABLE_ADDRESS_SELECTOR}, body:not(:has(
 const WORKABLE_COVER_LETTER_SELECTOR =
   'input[type="file"][data-ui="cover_letter"], input[type="file"][data-ui*="cover" i]';
 const WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR = 'button:has-text("Decline all")';
+const WORKABLE_COOKIE_DIALOG_SELECTOR =
+  'div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"]';
+const WORKABLE_COOKIE_BACKDROP_SELECTOR = 'div[data-ui="backdrop"]';
+const WORKABLE_FINAL_COOKIE_DECLINE_SELECTOR =
+  `${WORKABLE_COOKIE_DIALOG_SELECTOR} ${WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR}`;
+const WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR =
+  `body:not(:has(${WORKABLE_COOKIE_DIALOG_SELECTOR})):not(:has(${WORKABLE_COOKIE_BACKDROP_SELECTOR}))`;
 const WORKABLE_APPLICATION_FORM_READY_SELECTOR =
   `input[name="firstname"], input[name="email"], ${WORKABLE_RESUME_SELECTOR}`;
 const WORKABLE_CHOICE_UNCONFIRMED_ATTR = 'data-litos-choice-unconfirmed-v1';
@@ -4533,6 +4539,24 @@ function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone:
     optional: false,
   });
   if (plan.uae) {
+    // Workable can mount a fresh cookie dialog after resume parsing and the other form mutations.
+    // Decline optional cookies again at the final phone boundary, then require both the dialog and
+    // its pointer-intercepting backdrop to leave the DOM before touching the country combobox.
+    actions.push({
+      type: 'click',
+      selector: WORKABLE_FINAL_COOKIE_DECLINE_SELECTOR,
+      label: 'workable_cookie_final_decline',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+      requireUnique: true,
+    });
+    actions.push({
+      type: 'waitForSelector',
+      selector: WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR,
+      label: 'workable_cookie_final_cleared',
+      optional: false,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
     actions.push({
       type: 'click',
       selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
@@ -7134,6 +7158,26 @@ async function fillWorkablePhone(
 
   let countryTrigger: Locator | null = null;
   if (plan.uae) {
+    const cookieDialogs = page.locator(WORKABLE_COOKIE_DIALOG_SELECTOR);
+    const cookieDialogCount = await cookieDialogs.count().catch(() => 0);
+    if (cookieDialogCount > 0) {
+      const cookieDialog = await uniqueVisibleLocator(cookieDialogs);
+      const declineOptionalCookies = await uniqueVisibleLocator(
+        page.locator(WORKABLE_FINAL_COOKIE_DECLINE_SELECTOR),
+      );
+      if (!cookieDialog || !declineOptionalCookies
+        || !await declineOptionalCookies.click().then(() => true).catch(() => false)) {
+        return failClosed();
+      }
+    }
+    // Waiting on a body selector that can only match after both overlay nodes unmount is safe when
+    // no cookie dialog appeared, and it fails closed if a lone backdrop or a stuck dialog remains.
+    const cookieOverlayCleared = await page.locator(WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR).first()
+      .waitFor({ state: 'attached', timeout: MANAGED_FILL_TIMEOUT_MS })
+      .then(() => true)
+      .catch(() => false);
+    if (!cookieOverlayCleared) return failClosed();
+
     countryTrigger = await uniqueVisibleLocator(page.locator(WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR));
     if (!countryTrigger || !await countryTrigger.click().then(() => true).catch(() => false)) {
       return failClosed();
