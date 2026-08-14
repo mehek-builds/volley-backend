@@ -178,7 +178,7 @@ describe('Litos Pay Core billing routes', () => {
       assert.equal(checkout.statusCode, 200);
       const checkoutBody = checkout.json();
       assert.equal(checkoutBody.provider, 'litos');
-      assert.equal(checkoutBody.amount_cents, 2_000);
+      assert.equal(checkoutBody.amount_cents, 1_999);
       assert.equal(createdOffers.length, 1);
 
       const checkoutUrl = new URL(checkoutBody.url);

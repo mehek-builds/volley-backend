@@ -115,7 +115,7 @@ describe('Stripe acquiring adapter', () => {
     assert.equal(parsed?.sessionId, 'cs_live_session');
     assert.equal(parsed?.livemode, true);
     assert.equal(parsed?.interval, 'weekly');
-    assert.equal(parsed?.amountCents, 2_000);
+    assert.equal(parsed?.amountCents, 1_999);
     assert.equal(parsed?.plan, 'pro');
   });
 

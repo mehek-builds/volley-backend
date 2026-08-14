@@ -37,8 +37,8 @@ export type LitosProcessorEvent = {
 };
 
 const CHECKOUT_TTL_MS = 30 * 60 * 1000;
-const WEEKLY_AMOUNT_CENTS = 2_000;
-const MONTHLY_AMOUNT_CENTS = 4_000;
+const WEEKLY_AMOUNT_CENTS = 1_999;
+const MONTHLY_AMOUNT_CENTS = 3_999;
 
 function signingSecret(): string | undefined {
   const value = process.env.LITOS_PAY_SIGNING_SECRET?.trim();
