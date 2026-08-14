@@ -8,6 +8,7 @@ import {
   atsApiSubmissionEnabled,
   describeDiscoveryFailure,
   discoveredControlInputType,
+  compactMaterialQuestions,
   discoverAndResolveQuestions,
   discoveryHonestyReasons,
   isProviderSessionFailureMessage,
@@ -60,6 +61,37 @@ test('a profile with no usable experience yields undefined rather than throwing'
   assert.equal(readMostRecentRole({ experience: [] }), undefined);
   assert.equal(readMostRecentRole({ experience: 'Traeco' }), undefined);
   assert.equal(readMostRecentRole({ experience: {} }), undefined);
+});
+
+test('the compact packet preselects only unresolved open prose controls', () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'Build Python services.',
+    role: 'Software Engineer',
+    portal_url: 'https://job-boards.greenhouse.io/acme/jobs/1',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'stored',
+      question: 'Why this company?',
+      answer: 'My already reviewed answer.',
+      kind: 'essay',
+      required: true,
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const selected = compactMaterialQuestions([
+    { label: 'Why this company?', selector: '#why', inputType: 'textarea', maxLength: 1000 },
+    { label: 'Tell us about a project you are proud of.', selector: '#project', inputType: 'textarea', maxLength: 1000 },
+    { label: 'Rank these languages by proficiency: Python, Java', selector: '#rank', inputType: 'textarea', maxLength: 1000 },
+    { label: 'Choose your office', selector: '#office', inputType: 'select', options: ['New York', 'London'], maxLength: null },
+    { label: 'Have you previously applied here?', selector: '#history', inputType: 'textarea', maxLength: 1000 },
+  ], current, 'greenhouse', ['Python']);
+
+  assert.deepEqual(selected.map((question) => question.id), [
+    'tell us about a project you are proud of.',
+  ]);
 });
 
 test('a malformed first entry never throws, because it would break every other portal too', () => {
