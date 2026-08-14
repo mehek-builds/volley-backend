@@ -280,6 +280,14 @@ test('managed Workable phone evidence replaces stale fill success with country a
       { selector: '#phone', label: 'filled_field:phone', value: '056 741 7451', expectedValueDigits: '0567417451' },
     ],
   }).includes('phone'), true);
+  assert.equal(managedResultFilledFields({
+    ...base,
+    capabilities: [MANAGED_EXTRACT_ASSERTIONS_CAPABILITY],
+    extracted: [
+      { selector: '#country', label: 'filled_field:phone_country', value: 'United States +1', expectedValueDigits: '1' },
+      { selector: '#phone', label: 'filled_field:phone', value: '(213) 574-6270', expectedValueDigits: '2135746270' },
+    ],
+  }).includes('phone'), true);
 });
 
 test('managed cover-letter detection requires an actual file input extraction', () => {
@@ -973,6 +981,9 @@ function workablePhoneUploadFixture(
   overwritePhoneAfterMs?: number,
   overwritePhoneValue = '',
   requiredCityPhoneOverwrite?: string,
+  lateCookieModal = false,
+  cookieDeclineClears = true,
+  usCountryOptionCount = 1,
 ) {
   const events: string[] = [];
   const queriedSelectors: string[] = [];
@@ -981,6 +992,8 @@ function workablePhoneUploadFixture(
   let countryMenuOpen = false;
   let countryOptionClicks = 0;
   let elapsedAfterPhoneFill = 0;
+  let cookieDialogPresent = false;
+  let cookieBackdropPresent = false;
 
   const phone = oneWorkableLocator({
     getAttribute: async (name: string) => {
@@ -999,6 +1012,10 @@ function workablePhoneUploadFixture(
     innerText: async () => countryText,
     textContent: async () => countryText,
     click: async () => {
+      if (cookieDialogPresent || cookieBackdropPresent) {
+        events.push('country:blocked-by-cookie');
+        throw new Error('cookie overlay intercepted the country trigger');
+      }
       countryMenuOpen = true;
       events.push('country:open');
     },
@@ -1017,12 +1034,62 @@ function workablePhoneUploadFixture(
     first: () => countryOptions[0] ?? absentWorkableLocator(),
     nth: (index: number) => countryOptions[index] ?? absentWorkableLocator(),
   };
+  const usCountryOptions = Array.from({ length: usCountryOptionCount }, () => oneWorkableLocator({
+    isVisible: async () => countryMenuOpen,
+    click: async () => {
+      countryOptionClicks += 1;
+      countryText = '+1';
+      countryMenuOpen = false;
+      events.push('country:us');
+    },
+  }));
+  const usCountryOptionLocator: any = {
+    count: async () => usCountryOptions.length,
+    first: () => usCountryOptions[0] ?? absentWorkableLocator(),
+    nth: (index: number) => usCountryOptions[index] ?? absentWorkableLocator(),
+  };
   const resume = oneWorkableLocator({
     getAttribute: async (name: string) => name === 'type' ? 'file' : null,
     setInputFiles: async () => {
       phoneValue = '';
       countryText = '+1';
       events.push('resume:upload-and-autofill');
+      if (lateCookieModal) {
+        cookieDialogPresent = true;
+        cookieBackdropPresent = true;
+        events.push('cookie:late-open');
+      }
+    },
+  });
+  const cookieDialog = oneWorkableLocator({
+    count: async () => cookieDialogPresent ? 1 : 0,
+    isVisible: async () => cookieDialogPresent,
+  });
+  const cookieBackdrop = oneWorkableLocator({
+    count: async () => cookieBackdropPresent ? 1 : 0,
+    isVisible: async () => cookieBackdropPresent,
+  });
+  const declineCookies = oneWorkableLocator({
+    count: async () => cookieDialogPresent ? 1 : 0,
+    isVisible: async () => cookieDialogPresent,
+    click: async () => {
+      if (!cookieDialogPresent) throw new Error('cookie dialog is absent');
+      events.push('cookie:decline');
+      if (cookieDeclineClears) {
+        cookieDialogPresent = false;
+        cookieBackdropPresent = false;
+        events.push('cookie:cleared');
+      }
+    },
+  });
+  const cookieOverlayCleared = oneWorkableLocator({
+    count: async () => cookieDialogPresent || cookieBackdropPresent ? 0 : 1,
+    isVisible: async () => !cookieDialogPresent && !cookieBackdropPresent,
+    waitFor: async () => {
+      events.push('cookie:wait-cleared');
+      if (cookieDialogPresent || cookieBackdropPresent) {
+        throw new Error('cookie overlay did not clear');
+      }
     },
   });
   let cityValue = '';
@@ -1053,11 +1120,24 @@ function workablePhoneUploadFixture(
       if (selector === 'input[name="phone"]'
         || selector === 'input[name="phone"][type="tel"]:visible') return phone;
       if (selector === 'input[required], textarea[required], select[required]') return requiredLocator;
+      if (selector === 'div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"]') {
+        return cookieDialog;
+      }
+      if (selector === 'div[data-ui="backdrop"]') return cookieBackdrop;
+      if (selector === 'div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"] button:has-text("Decline all")') {
+        return declineCookies;
+      }
+      if (selector === 'body:not(:has(div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"])):not(:has(div[data-ui="backdrop"]))') {
+        return cookieOverlayCleared;
+      }
       if (selector === 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible') {
         return countryTrigger;
       }
       if (selector === '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible') {
         return countryOptionLocator;
+      }
+      if (selector === '[role="option"][data-country-code="us"][data-dial-code="1"][id$="__item-us"]:visible') {
+        return usCountryOptionLocator;
       }
       if (selector === 'input[type="file"][data-ui="resume"]') return resume;
       return absentWorkableLocator();
@@ -1097,10 +1177,14 @@ test('direct Workable phone is selected and refilled after resume autofill clear
   });
 
   const uploadIndex = fixture.events.indexOf('resume:upload-and-autofill');
+  const cookieClearedIndex = fixture.events.indexOf('cookie:wait-cleared');
   const openIndex = fixture.events.indexOf('country:open');
   const optionIndex = fixture.events.indexOf('country:ae');
   const phoneIndex = fixture.events.indexOf('phone:0567417451');
   assert.ok(uploadIndex >= 0);
+  assert.ok(cookieClearedIndex > uploadIndex, fixture.events.join(', '));
+  assert.ok(openIndex > cookieClearedIndex, fixture.events.join(', '));
+  assert.equal(fixture.events.includes('cookie:decline'), false, fixture.events.join(', '));
   assert.ok(openIndex > uploadIndex, fixture.events.join(', '));
   assert.ok(optionIndex > openIndex, fixture.events.join(', '));
   assert.ok(phoneIndex > optionIndex, fixture.events.join(', '));
@@ -1114,6 +1198,102 @@ test('direct Workable phone is selected and refilled after resume autofill clear
   ), false);
   assert.ok(result.filledFields.includes('phone'));
   assert.equal(result.blockers.some((blocker) => /phone/i.test(blocker)), false);
+});
+
+test('direct Workable phone declines a cookie modal that appears after resume parsing', async () => {
+  const fixture = workablePhoneUploadFixture(1, undefined, '', undefined, true);
+  const result = await fillPortal(fixture.page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  const uploadIndex = fixture.events.indexOf('resume:upload-and-autofill');
+  const lateOpenIndex = fixture.events.indexOf('cookie:late-open');
+  const declineIndex = fixture.events.indexOf('cookie:decline');
+  const clearedIndex = fixture.events.indexOf('cookie:cleared');
+  const clearedProofIndex = fixture.events.indexOf('cookie:wait-cleared');
+  const countryIndex = fixture.events.indexOf('country:open');
+  assert.ok(lateOpenIndex > uploadIndex, fixture.events.join(', '));
+  assert.ok(declineIndex > lateOpenIndex, fixture.events.join(', '));
+  assert.ok(clearedIndex > declineIndex, fixture.events.join(', '));
+  assert.ok(clearedProofIndex > clearedIndex, fixture.events.join(', '));
+  assert.ok(countryIndex > clearedProofIndex, fixture.events.join(', '));
+  assert.equal(fixture.events.includes('country:blocked-by-cookie'), false, fixture.events.join(', '));
+  assert.equal(fixture.countryText(), '+971');
+  assert.equal(fixture.phoneValue(), '0567417451');
+  assert.ok(result.filledFields.includes('phone'));
+  assert.equal(result.blockers.some((blocker) => /phone/i.test(blocker)), false);
+});
+
+test('direct Workable US phone selects United States and writes exact national digits', async () => {
+  const fixture = workablePhoneUploadFixture(1, undefined, '', undefined, true);
+  const result = await fillPortal(fixture.page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+1 213 574 6270',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  const lateOpenIndex = fixture.events.indexOf('cookie:late-open');
+  const declineIndex = fixture.events.indexOf('cookie:decline');
+  const clearedProofIndex = fixture.events.indexOf('cookie:wait-cleared');
+  const countryIndex = fixture.events.indexOf('country:us');
+  const phoneIndex = fixture.events.indexOf('phone:2135746270');
+  assert.ok(declineIndex > lateOpenIndex, fixture.events.join(', '));
+  assert.ok(clearedProofIndex > declineIndex, fixture.events.join(', '));
+  assert.ok(countryIndex > clearedProofIndex, fixture.events.join(', '));
+  assert.ok(phoneIndex > countryIndex, fixture.events.join(', '));
+  assert.equal(fixture.events.includes('country:ae'), false, fixture.events.join(', '));
+  assert.equal(fixture.countryText(), '+1');
+  assert.equal(fixture.phoneValue(), '2135746270');
+  assert.ok(result.filledFields.includes('phone'));
+  assert.equal(result.blockers.some((blocker) => /phone/i.test(blocker)), false);
+});
+
+test('direct Workable phone fails closed for malformed and unsupported international numbers', async () => {
+  for (const phone of ['+442071234567', '+1 213', '+971 50', '+abc']) {
+    const fixture = workablePhoneUploadFixture();
+    const result = await fillPortal(fixture.page, 'workable', {
+      fullName: 'Taylor Example',
+      email: 'taylor@example.com',
+      phone,
+      resume: Buffer.from('resume-pdf'),
+      resumeName: 'resume.pdf',
+      questions: [],
+    });
+
+    assert.equal(fixture.events.includes('country:open'), false, phone);
+    assert.equal(fixture.events.includes('country:ae'), false, phone);
+    assert.equal(fixture.events.includes('country:us'), false, phone);
+    assert.equal(fixture.phoneValue(), '', phone);
+    assert.equal(result.filledFields.includes('phone'), false, phone);
+    assert.ok(result.blockers.some((blocker) => /phone/i.test(blocker)), `${phone}: ${result.blockers}`);
+  }
+});
+
+test('direct Workable phone fails closed when the late cookie backdrop does not unmount', async () => {
+  const fixture = workablePhoneUploadFixture(1, undefined, '', undefined, true, false);
+  const result = await fillPortal(fixture.page, 'workable', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    phone: '+971 567417451',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  });
+
+  assert.ok(fixture.events.includes('cookie:decline'), fixture.events.join(', '));
+  assert.ok(fixture.events.includes('cookie:wait-cleared'), fixture.events.join(', '));
+  assert.equal(fixture.events.includes('country:open'), false, fixture.events.join(', '));
+  assert.equal(fixture.phoneValue(), '');
+  assert.equal(result.filledFields.includes('phone'), false);
+  assert.ok(result.blockers.some((blocker) => /phone/i.test(blocker)), JSON.stringify(result.blockers));
 });
 
 test('direct Workable phone runs after a required City fallback overwrites the widget', async () => {
@@ -3816,6 +3996,12 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   const addressIndexes = actions
     .map((action, index) => action.label?.startsWith('location') ? index : -1)
     .filter((index) => index >= 0);
+  const lateCookieDeclineIndex = actions.findIndex(
+    (action) => action.label === 'workable_cookie_final_decline',
+  );
+  const lateCookieClearedIndex = actions.findIndex(
+    (action) => action.label === 'workable_cookie_final_cleared',
+  );
   const countryOpenIndex = actions.findIndex((action) => action.label === 'phone_country_open');
   const capabilityIndex = actions.findIndex((action) => action.type === 'requireCapability');
   const countryOptionIndex = actions.findIndex((action) => action.label === 'phone_country_option');
@@ -3824,7 +4010,9 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
 
   assert.ok(capabilityIndex > Math.max(...uploadIndexes, ...addressIndexes));
-  assert.ok(countryOpenIndex > capabilityIndex);
+  assert.equal(lateCookieDeclineIndex, capabilityIndex + 1);
+  assert.equal(lateCookieClearedIndex, lateCookieDeclineIndex + 1);
+  assert.equal(countryOpenIndex, lateCookieClearedIndex + 1);
   assert.ok(countryOptionIndex > countryOpenIndex);
   assert.ok(phoneIndex > countryOptionIndex);
   assert.ok(countryProofIndex > phoneIndex);
@@ -3836,6 +4024,21 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
     optional: false,
     timeout: 10_000,
     requireUnique: true,
+  });
+  assert.deepEqual(actions[lateCookieDeclineIndex], {
+    type: 'click',
+    selector: 'div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"] button:has-text("Decline all")',
+    label: 'workable_cookie_final_decline',
+    optional: true,
+    timeout: 10_000,
+    requireUnique: true,
+  });
+  assert.deepEqual(actions[lateCookieClearedIndex], {
+    type: 'waitForSelector',
+    selector: 'body:not(:has(div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"])):not(:has(div[data-ui="backdrop"]))',
+    label: 'workable_cookie_final_cleared',
+    optional: false,
+    timeout: 10_000,
   });
   assert.deepEqual(actions[capabilityIndex], {
     type: 'requireCapability',
@@ -3869,6 +4072,115 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneProofIndex]?.expectedValueDigits, '0567417451');
   assert.equal(actions[phoneProofIndex]?.requireUnique, true);
   assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
+});
+
+test('managed Workable US phone selects exact United States and proves national digits', () => {
+  const actions = buildManagedPortalActions('workable', {
+    ...capturePacket,
+    phone: '+1 213 574 6270',
+  });
+  const lateCookieDeclineIndex = actions.findIndex(
+    (action) => action.label === 'workable_cookie_final_decline',
+  );
+  const lateCookieClearedIndex = actions.findIndex(
+    (action) => action.label === 'workable_cookie_final_cleared',
+  );
+  const countryOpenIndex = actions.findIndex((action) => action.label === 'phone_country_open');
+  const countryOptionIndex = actions.findIndex((action) => action.label === 'phone_country_option');
+  const phoneIndex = actions.findIndex((action) => action.type === 'fill' && action.label === 'phone');
+  const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
+  const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
+
+  assert.equal(lateCookieClearedIndex, lateCookieDeclineIndex + 1);
+  assert.equal(countryOpenIndex, lateCookieClearedIndex + 1);
+  assert.equal(countryOptionIndex, countryOpenIndex + 1);
+  assert.deepEqual(actions[countryOptionIndex], {
+    type: 'click',
+    selector: '[role="option"][data-country-code="us"][data-dial-code="1"][id$="__item-us"]:visible',
+    label: 'phone_country_option',
+    optional: false,
+    timeout: 10_000,
+    requireUnique: true,
+  });
+  assert.equal(actions[phoneIndex]?.value, '2135746270');
+  assert.equal(actions[phoneIndex]?.requireUnique, true);
+  assert.equal(actions[countryProofIndex]?.expectedValueIncludes, '+1');
+  assert.equal(actions[countryProofIndex]?.expectedValueDigits, '1');
+  assert.equal(actions[countryProofIndex]?.requireUnique, true);
+  assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
+  assert.equal(actions[phoneProofIndex]?.expectedValueDigits, '2135746270');
+  assert.equal(actions[phoneProofIndex]?.requireUnique, true);
+  assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
+});
+
+test('managed Workable submit is gated by invalid nonempty phones but not an absent phone', () => {
+  const invalidPhones = [
+    '+442071234567',
+    '+1 213',
+    '+971 50',
+    '+abc',
+  ];
+  for (const phone of invalidPhones) {
+    const actions = buildManagedPortalActions('workable', { ...capturePacket, phone }, true);
+    assert.equal(
+      actions.some((action) => action.type === 'confirmAndSubmit'),
+      false,
+      phone,
+    );
+    assert.equal(actions.some((action) => action.label === 'phone_country_open'), false, phone);
+    assert.equal(actions.some((action) => action.label === 'phone'), false, phone);
+  }
+
+  for (const phone of ['+1 213 574 6270', '+971 56 741 7451']) {
+    const actions = buildManagedPortalActions('workable', { ...capturePacket, phone }, true);
+    assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1, phone);
+  }
+  for (const phone of [undefined, '']) {
+    const actions = buildManagedPortalActions('workable', { ...capturePacket, phone }, true);
+    assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1);
+  }
+});
+
+test('managed Workable final cookie boundary handles both a late modal and no modal', () => {
+  const actions = buildManagedPortalActions('workable', {
+    ...capturePacket,
+    phone: '+971 567417451',
+  });
+  const boundaryLabels = new Set([
+    'workable_cookie_final_decline',
+    'workable_cookie_final_cleared',
+    'phone_country_open',
+  ]);
+  const boundary = actions.filter((action) => boundaryLabels.has(action.label ?? ''));
+
+  const replay = (appearsLate: boolean) => {
+    let dialogPresent = appearsLate;
+    let backdropPresent = appearsLate;
+    const events: string[] = [];
+    for (const action of boundary) {
+      if (action.label === 'workable_cookie_final_decline') {
+        if (dialogPresent) {
+          dialogPresent = false;
+          backdropPresent = false;
+          events.push('decline');
+        } else {
+          assert.equal(action.optional, true);
+          events.push('optional-miss');
+        }
+      } else if (action.label === 'workable_cookie_final_cleared') {
+        assert.equal(dialogPresent, false);
+        assert.equal(backdropPresent, false);
+        events.push('cleared');
+      } else if (action.label === 'phone_country_open') {
+        assert.equal(dialogPresent || backdropPresent, false, 'cookie overlay would intercept the phone trigger');
+        events.push('country-open');
+      }
+    }
+    return events;
+  };
+
+  assert.deepEqual(replay(true), ['decline', 'cleared', 'country-open']);
+  assert.deepEqual(replay(false), ['optional-miss', 'cleared', 'country-open']);
 });
 
 test('Workable opens the exact application route and clears optional-cookie overlays before filling', () => {

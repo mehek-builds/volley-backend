@@ -4156,15 +4156,14 @@ function isProtectedManagedAction(
   // from that flag, and a document she attached is silently left off. The `upload` action it decides
   // about is deliberately NOT protected - a fill is what the budget is for giving up.
   //
-  // The two workable_ entries arrived on main in PR #487 while this branch was open. Both sides of
-  // that merge were adding to this one list rather than disagreeing about it, so the resolution is
-  // the union: a Workable form that cannot report itself ready and a transcript control that cannot
-  // report itself present are two separate reads, and dropping either one loses a different fact.
-  // resume_upload_verify is protected for the same reason and one step further along: it is the read
-  // that says whether the transcript upload took the resume's control. A trim that dropped it would
-  // leave the run unable to tell a resume that is still attached from one that was replaced, which
-  // is the exact silence this read was added to break.
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_preflight$|workable_application_form_ready$|workable_phone_assertion_capability$)/
+  // Workable's form-ready barrier is also a required wait, and the final cookie decline and cleared
+  // barrier belong to the same protected sequence: dropping either one can strand a fresh
+  // pointer-intercepting cookie overlay directly in front of the phone country control.
+  // resume_upload_verify is protected as a required evidence read one step further along: it says
+  // whether the transcript upload took the resume's control. A trim that dropped it would leave the
+  // run unable to tell a resume that is still attached from one that was replaced, which is the
+  // exact silence this read was added to break.
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_assertion_capability$)/
     .test(label);
 }
 
@@ -4465,8 +4464,6 @@ const WORKABLE_LEGACY_CITY_SELECTOR = 'input[name="city"]:visible';
 const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible';
-const WORKABLE_UAE_PHONE_COUNTRY_OPTION_SELECTOR =
-  '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible';
 // Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
 // city input before the visible address autocomplete on current forms, so a plain comma list can
 // still pick the wrong control. The city arm exists only when no visible address control exists.
@@ -4474,6 +4471,13 @@ const WORKABLE_LOCATION_SELECTOR = `${WORKABLE_ADDRESS_SELECTOR}, body:not(:has(
 const WORKABLE_COVER_LETTER_SELECTOR =
   'input[type="file"][data-ui="cover_letter"], input[type="file"][data-ui*="cover" i]';
 const WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR = 'button:has-text("Decline all")';
+const WORKABLE_COOKIE_DIALOG_SELECTOR =
+  'div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"]';
+const WORKABLE_COOKIE_BACKDROP_SELECTOR = 'div[data-ui="backdrop"]';
+const WORKABLE_FINAL_COOKIE_DECLINE_SELECTOR =
+  `${WORKABLE_COOKIE_DIALOG_SELECTOR} ${WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR}`;
+const WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR =
+  `body:not(:has(${WORKABLE_COOKIE_DIALOG_SELECTOR})):not(:has(${WORKABLE_COOKIE_BACKDROP_SELECTOR}))`;
 const WORKABLE_APPLICATION_FORM_READY_SELECTOR =
   `input[name="firstname"], input[name="email"], ${WORKABLE_RESUME_SELECTOR}`;
 const WORKABLE_CHOICE_UNCONFIRMED_ATTR = 'data-litos-choice-unconfirmed-v1';
@@ -4495,34 +4499,73 @@ function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
   });
 }
 
+type WorkablePhoneCountryPlan = {
+  dialCode: string;
+  displayedDialCode: string;
+  optionSelector: string;
+};
+
 type WorkablePhonePlan = {
   fieldValue: string;
   expectedDigits: string;
-  uae: boolean;
+  country: WorkablePhoneCountryPlan | null;
 };
+
+const WORKABLE_PHONE_COUNTRY_SPECS = [
+  { countryCode: 'ae', dialCode: '971', nationalDigits: 9, domesticPrefix: '0' },
+  { countryCode: 'us', dialCode: '1', nationalDigits: 10, domesticPrefix: '' },
+] as const;
 
 function digitsOnly(value: string | null | undefined): string {
   return String(value ?? '').replace(/\D/g, '');
 }
 
+function workablePhoneCountryOptionSelector(countryCode: string, dialCode: string): string {
+  return `[role="option"][data-country-code="${countryCode}"][data-dial-code="${dialCode}"]`
+    + `[id$="__item-${countryCode}"]:visible`;
+}
+
 function workablePhonePlan(phone: string | undefined): WorkablePhonePlan | null {
   const raw = phone?.trim();
   if (!raw) return null;
-  if (!raw.startsWith('+971')) {
+  if (!raw.startsWith('+')) {
     const expectedDigits = digitsOnly(raw);
-    return expectedDigits ? { fieldValue: raw, expectedDigits, uae: false } : null;
+    return expectedDigits ? { fieldValue: raw, expectedDigits, country: null } : null;
   }
   const digits = digitsOnly(raw);
-  // UAE mobile numbers have nine national digits. A malformed international value is left blank
-  // rather than being reinterpreted under whichever country the widget happened to start on.
-  if (!digits.startsWith('971') || digits.length !== 12) return null;
-  const fieldValue = `0${digits.slice(3)}`;
-  return { fieldValue, expectedDigits: digitsOnly(fieldValue), uae: true };
+  const spec = WORKABLE_PHONE_COUNTRY_SPECS.find((candidate) =>
+    digits.startsWith(candidate.dialCode)
+    && digits.length === candidate.dialCode.length + candidate.nationalDigits);
+  // Unknown or malformed international values stay blank instead of being reinterpreted under
+  // whichever country the widget happened to start on.
+  if (!spec) return null;
+  const nationalDigits = digits.slice(spec.dialCode.length);
+  const fieldValue = `${spec.domesticPrefix}${nationalDigits}`;
+  const displayedDialCode = `+${spec.dialCode}`;
+  return {
+    fieldValue,
+    expectedDigits: digitsOnly(fieldValue),
+    country: {
+      dialCode: spec.dialCode,
+      displayedDialCode,
+      optionSelector: workablePhoneCountryOptionSelector(spec.countryCode, spec.dialCode),
+    },
+  };
 }
 
-function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone: string | undefined) {
+function workablePhoneBlockerLabel(phone: string | undefined): string {
+  const country = workablePhonePlan(phone)?.country;
+  return country ? `Phone ${country.displayedDialCode}` : 'Phone';
+}
+
+function pushWorkableManagedPhoneActions(
+  actions: ManagedBrowserAction[],
+  phone: string | undefined,
+): boolean {
+  const raw = phone?.trim();
+  if (!raw) return true;
   const plan = workablePhonePlan(phone);
-  if (!plan) return;
+  if (!plan) return false;
   // This action is deliberately a new action TYPE. An older Stratus rejects the request while
   // normalizing it, before opening a browser, instead of dropping unknown assertion fields and
   // reporting a weak read under the same proof label.
@@ -4532,7 +4575,25 @@ function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone:
     label: 'workable_phone_assertion_capability',
     optional: false,
   });
-  if (plan.uae) {
+  if (plan.country) {
+    // Workable can mount a fresh cookie dialog after resume parsing and the other form mutations.
+    // Decline optional cookies again at the final phone boundary, then require both the dialog and
+    // its pointer-intercepting backdrop to leave the DOM before touching the country combobox.
+    actions.push({
+      type: 'click',
+      selector: WORKABLE_FINAL_COOKIE_DECLINE_SELECTOR,
+      label: 'workable_cookie_final_decline',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+      requireUnique: true,
+    });
+    actions.push({
+      type: 'waitForSelector',
+      selector: WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR,
+      label: 'workable_cookie_final_cleared',
+      optional: false,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
     actions.push({
       type: 'click',
       selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
@@ -4543,7 +4604,7 @@ function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone:
     });
     actions.push({
       type: 'click',
-      selector: WORKABLE_UAE_PHONE_COUNTRY_OPTION_SELECTOR,
+      selector: plan.country.optionSelector,
       label: 'phone_country_option',
       optional: false,
       timeout: MANAGED_FILL_TIMEOUT_MS,
@@ -4559,7 +4620,7 @@ function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone:
     timeout: MANAGED_FILL_TIMEOUT_MS,
     requireUnique: true,
   });
-  if (plan.uae) {
+  if (plan.country) {
     actions.push({
       type: 'extract',
       selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
@@ -4568,8 +4629,8 @@ function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone:
       timeout: MANAGED_FILL_TIMEOUT_MS,
       requireUnique: true,
       requireNonEmpty: true,
-      expectedValueIncludes: '+971',
-      expectedValueDigits: '971',
+      expectedValueIncludes: plan.country.displayedDialCode,
+      expectedValueDigits: plan.country.dialCode,
       stabilityWindowMs: 1_200,
     });
   }
@@ -4585,6 +4646,7 @@ function pushWorkableManagedPhoneActions(actions: ManagedBrowserAction[], phone:
     expectedValueDigits: plan.expectedDigits,
     stabilityWindowMs: 1_200,
   });
+  return true;
 }
 
 // ─── JazzHR (*.applytojob.com) ────────────────────────────────────────────────
@@ -5365,11 +5427,12 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
     const phonePersisted = assertionContract
       && Boolean(expectedPhoneDigits)
       && digitsOnly(phoneEvidence?.value) === expectedPhoneDigits;
+    const countryEvidence = workableCountryProof.length === 1 ? workableCountryProof[0] : undefined;
+    const expectedCountryDigits = countryEvidence?.expectedValueDigits;
     const countryPersisted = workableCountryProof.length === 0
-      || (workableCountryProof.length === 1
-        && workableCountryProof[0]?.expectedValueDigits === '971'
-        && digitsOnly(workableCountryProof[0]?.value) === '971'
-        && workableCountryProof[0]?.value?.includes('+971'));
+      || (Boolean(expectedCountryDigits)
+        && digitsOnly(countryEvidence?.value) === expectedCountryDigits
+        && countryEvidence?.value?.includes(`+${expectedCountryDigits}`));
     if (phonePersisted && countryPersisted) fields.add('phone');
   }
   for (const item of result.extracted ?? []) {
@@ -6040,6 +6103,7 @@ export function buildManagedPortalActions(
   // login, CAPTCHA, or privacy gate that happens to be on screen.
   if (ACCOUNT_WALLED_FAMILIES.has(family)) return [];
   const actions: ManagedBrowserAction[] = [];
+  let workablePhoneReadyForSubmit = true;
   pushFixedFieldActions(actions, portal, packet);
   // These three integrations are structurally fixed-field-only. SuccessFactors has no reachable
   // form at all, while Zoho Recruit and Bullhorn have only the exact identity and resume controls
@@ -6238,7 +6302,9 @@ export function buildManagedPortalActions(
   }
   // Workable resume parsing can rewrite contact fields. Phone therefore runs after every upload,
   // address commit, and reviewed-question action, then proves the selected dial code and live value.
-  if (portalFamily(portal) === 'workable') pushWorkableManagedPhoneActions(actions, packet.phone);
+  if (family === 'workable') {
+    workablePhoneReadyForSubmit = pushWorkableManagedPhoneActions(actions, packet.phone);
+  }
   // Prepare only. The submit path makes the standalone probe call above this one and reads its
   // evidence from there, so repeating the reads inside the submit action list would spend budget on
   // a page that is about to be clicked anyway. On prepare there is no probe call at all, and this is
@@ -6290,7 +6356,11 @@ export function buildManagedPortalActions(
    * a redundant guess before the blunt pass takes a whole unprotected group from the tail. Core
    * fields and the selected question chains are protected through every pass.
    */
-  const canAppendSubmit = submit && portalCanAutoSubmit(portal);
+  // A nonempty Workable phone that cannot be mapped to an exact country and national value is not
+  // the same as no phone on file. The runner must never reach its atomic submit action in that
+  // state. A truly absent phone keeps the previous behavior, so required-field confirmation on the
+  // employer form remains the authority on whether the application can proceed without one.
+  const canAppendSubmit = submit && portalCanAutoSubmit(portal) && workablePhoneReadyForSubmit;
   const familyActionLimit = portalFamily(portal) === 'greenhouse' && packetLooksAkuna(packet)
     ? 100
     : MANAGED_ACTION_LIMIT;
@@ -7133,12 +7203,32 @@ async function fillWorkablePhone(
   };
 
   let countryTrigger: Locator | null = null;
-  if (plan.uae) {
+  if (plan.country) {
+    const cookieDialogs = page.locator(WORKABLE_COOKIE_DIALOG_SELECTOR);
+    const cookieDialogCount = await cookieDialogs.count().catch(() => 0);
+    if (cookieDialogCount > 0) {
+      const cookieDialog = await uniqueVisibleLocator(cookieDialogs);
+      const declineOptionalCookies = await uniqueVisibleLocator(
+        page.locator(WORKABLE_FINAL_COOKIE_DECLINE_SELECTOR),
+      );
+      if (!cookieDialog || !declineOptionalCookies
+        || !await declineOptionalCookies.click().then(() => true).catch(() => false)) {
+        return failClosed();
+      }
+    }
+    // Waiting on a body selector that can only match after both overlay nodes unmount is safe when
+    // no cookie dialog appeared, and it fails closed if a lone backdrop or a stuck dialog remains.
+    const cookieOverlayCleared = await page.locator(WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR).first()
+      .waitFor({ state: 'attached', timeout: MANAGED_FILL_TIMEOUT_MS })
+      .then(() => true)
+      .catch(() => false);
+    if (!cookieOverlayCleared) return failClosed();
+
     countryTrigger = await uniqueVisibleLocator(page.locator(WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR));
     if (!countryTrigger || !await countryTrigger.click().then(() => true).catch(() => false)) {
       return failClosed();
     }
-    const countryOption = await uniqueVisibleLocator(page.locator(WORKABLE_UAE_PHONE_COUNTRY_OPTION_SELECTOR));
+    const countryOption = await uniqueVisibleLocator(page.locator(plan.country.optionSelector));
     if (!countryOption || !await countryOption.click().then(() => true).catch(() => false)) {
       await countryTrigger.press('Escape').catch(() => undefined);
       return failClosed();
@@ -7146,7 +7236,8 @@ async function fillWorkablePhone(
     let selected = false;
     for (let attempt = 0; attempt < 6; attempt += 1) {
       const renderedCountry = await locatorRenderedText(countryTrigger);
-      if (renderedCountry.includes('+971') && digitsOnly(renderedCountry) === '971') {
+      if (renderedCountry.includes(plan.country.displayedDialCode)
+        && digitsOnly(renderedCountry) === plan.country.dialCode) {
         selected = true;
         break;
       }
@@ -7161,7 +7252,9 @@ async function fillWorkablePhone(
     const persisted = await field.inputValue().catch(() => '');
     const renderedCountry = countryTrigger ? await locatorRenderedText(countryTrigger) : '';
     const countryPersisted = !countryTrigger
-      || (renderedCountry.includes('+971') && digitsOnly(renderedCountry) === '971');
+      || (plan.country !== null
+        && renderedCountry.includes(plan.country.displayedDialCode)
+        && digitsOnly(renderedCountry) === plan.country.dialCode);
     if (digitsOnly(persisted) !== plan.expectedDigits || !countryPersisted) return failClosed();
   }
   out.push('phone');
@@ -7984,7 +8077,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
   // required-field fallback above have all finished before country selection and the stable reads.
   if (family === 'workable' && !await fillWorkablePhone(page, packet.phone, filledFields)) {
     labelledBlockers.push(
-      describeRequiredBlocker(packet.phone?.trim().startsWith('+971') ? 'Phone +971' : 'Phone', { type: 'tel' }),
+      describeRequiredBlocker(workablePhoneBlockerLabel(packet.phone), { type: 'tel' }),
     );
   }
 
