@@ -9843,8 +9843,19 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     const widget = widgetOf(marker);
     if (!widget || !isVisible(widget)) return;
     const named = marker.getAttribute('for');
+    const controls = [...widget.querySelectorAll(
+      'input:not([type="hidden"]):not([type="file"]), textarea, select, [role="combobox"]'
+    )];
+    const explicitlyRequired = controls.filter((candidate) => !candidate.disabled
+      && (candidate.required || candidate.getAttribute('aria-required') === 'true'));
     const target = (named && widget.querySelector('#' + CSS.escape(named)))
-      || widget.querySelector('input:not([type="hidden"]):not([type="file"]), textarea, select, [role="combobox"]')
+      // Workable wraps its country-code combobox and required phone input in one starred label,
+      // with the combobox first in DOM order. The star belongs to the one descendant Workable
+      // actually marks required, not to that adjacent opener. Prefer that unambiguous machine
+      // signal before retaining the existing first-control fallback for zero or multiple
+      // marked descendants, where guessing would be less safe than holding the send.
+      || (explicitlyRequired.length === 1 ? explicitlyRequired[0] : null)
+      || controls[0]
       || (widgetFallback ? widget : null);
     if (!target || target.disabled) return;
     note(widget, target);
