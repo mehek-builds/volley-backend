@@ -1463,4 +1463,24 @@ test('the readiness script reads a control where its answer actually lives', () 
      way, and all three were reported as "no label Litos can read" - a refusal the applicant cannot
      act on, on the three most obvious fields on the form. */
   assert.match(READ_SUBMIT_READINESS_SCRIPT, /const wrappingLabelTextOf = /);
+  // Workable keeps fallback SVG copy in textContent and the real label on a sibling combobox.
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /const renderedText = /);
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /typeof node\.innerText === 'string'/);
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /\[data-input-type\]/);
+  // A directly labelled phone input wins over the sibling country-code combobox. Only an actual
+  // listbox opener may proxy aria-labelledby, never an arbitrary descendant.
+  assert.doesNotMatch(READ_SUBMIT_READINESS_SCRIPT, /querySelector\('\[aria-labelledby\]'\)/);
+  assert.match(
+    READ_SUBMIT_READINESS_SCRIPT,
+    /querySelector\('\[role="combobox"\]\[aria-labelledby\], \[aria-haspopup="listbox"\]\[aria-labelledby\]'\)/,
+  );
+  const labelCandidates = READ_SUBMIT_READINESS_SCRIPT.slice(
+    READ_SUBMIT_READINESS_SCRIPT.indexOf('for (const candidate of ['),
+    READ_SUBMIT_READINESS_SCRIPT.indexOf(']) {', READ_SUBMIT_READINESS_SCRIPT.indexOf('for (const candidate of [')),
+  );
+  assert.ok(labelCandidates.indexOf('renderedText(byFor)') < labelCandidates.indexOf('renderedText(proxyReferenced)'));
+  assert.ok(labelCandidates.indexOf('wrappingLabelTextOf(element)') < labelCandidates.indexOf('renderedText(proxyReferenced)'));
+  // Any failed exact multi-select replay overrides the old "any checked peer" readiness shortcut.
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /data-litos-choice-unconfirmed-v1="true"/);
+  assert.match(READ_SUBMIT_READINESS_SCRIPT, /const failedChoice = element\.closest/);
 });

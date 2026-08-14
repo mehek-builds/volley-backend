@@ -47,10 +47,12 @@ import {
   isOpenEndedQuestion,
   normalizeDiscoveredLabel,
   normalizeReviewQuestionLabel,
+  normalizeStoredPortalQuestions,
   resolveKnownAnswer,
   type ApplicationProfileLike,
   type DiscoveredQuestion,
 } from './questionDiscovery';
+import type { SupportedPortal } from './portalSubmission';
 import { consentAcceptanceValue } from './profileFieldResolution';
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from './selfDeclaration';
 import { isDeclaredAbsenceRefusal } from './questionDiscovery';
@@ -124,7 +126,10 @@ export function postingQuestionsAreFresh(
  * the packet on every run, and carrying them into the pre-script would turn "here is what only you
  * can answer" into a list that opens with her own name.
  */
-export function postingQuestionsFromDiscovered(discovered: readonly DiscoveredQuestion[]): PostingQuestion[] {
+export function postingQuestionsFromDiscovered(
+  discovered: readonly DiscoveredQuestion[],
+  portal?: SupportedPortal | null,
+): PostingQuestion[] {
   const byLabel = new Map<string, PostingQuestion>();
   for (const field of discovered) {
     const raw = field?.label ?? '';
@@ -137,6 +142,11 @@ export function postingQuestionsFromDiscovered(discovered: readonly DiscoveredQu
      * widget-subtree markers live in punctuation the normalizer collapses. */
     if (discoveredFieldIsNotAQuestion({ label: raw, options: field.options })) continue;
     if (discoveredFieldIsNotAQuestion({ label, options: field.options })) continue;
+    // Portal-owned fixed fields are filled from the packet before reviewed questions run. Keeping
+    // one in the pre-script asks the applicant for data Litos already has, and can also leave a
+    // second representation of the same widget blocked. Use the shared submission normalizer so
+    // discovery and submission agree on exactly which fields the portal adapter owns.
+    if (portal && normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
     const options = Array.isArray(field.options)
       ? [...new Set(field.options.map((option) => (option ?? '').trim()).filter(Boolean))]
       : [];
@@ -163,9 +173,10 @@ export function postingQuestionsFromDiscovered(discovered: readonly DiscoveredQu
      * no legend the rows do NOT share a label - each one carries its own option text - so they
      * never collide on this key and nothing here ever sees them. Those are rejected upstream by
      * discoveredFieldIsNotAQuestion instead. */
+    const mergedOptions = [...new Set([...(existing.options ?? []), ...(next.options ?? [])])];
     byLabel.set(key, {
       ...existing,
-      options: existing.options ?? next.options,
+      options: mergedOptions.length > 0 ? mergedOptions : null,
       required: existing.required || next.required,
       max_length: existing.max_length ?? next.max_length,
     });

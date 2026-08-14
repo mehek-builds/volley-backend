@@ -1366,7 +1366,27 @@ function controlIdFromDiscoveredSelector(selector: string | undefined | null): s
   // (`#question_67998838\[\]_731437070`): a checkbox group has no listbox, so probing it would spend
   // three actions to read nothing.
   return trimmed.match(/^#([A-Za-z][A-Za-z0-9_-]*)$/)?.[1]
-    ?? trimmed.match(/^\[id="([A-Za-z][A-Za-z0-9_-]*)"\]$/)?.[1];
+    ?? trimmed.match(/^(?:[a-z][a-z0-9-]*)?\[id="([A-Za-z][A-Za-z0-9_-]*)"\]$/i)?.[1];
+}
+
+const MANAGED_OPTION_NAME_KEY_PREFIX = 'name:';
+
+/** Stable name-only controls need an inventory key, but must never be mistaken for a DOM id. */
+function controlNameOptionKeyFromDiscoveredSelector(
+  selector: string | undefined | null,
+): string | undefined {
+  const trimmed = (selector ?? '').trim();
+  const name = trimmed.match(
+    /^(?:[a-z][a-z0-9-]*)?\[name=["']([A-Za-z0-9][A-Za-z0-9_.:-]*)["']\]$/i,
+  )?.[1];
+  return name ? `${MANAGED_OPTION_NAME_KEY_PREFIX}${name}` : undefined;
+}
+
+function managedOptionInventoryKeyFromSelector(
+  selector: string | undefined | null,
+): string | undefined {
+  return controlIdFromDiscoveredSelector(selector)
+    ?? controlNameOptionKeyFromDiscoveredSelector(selector);
 }
 
 // The handles managed discovery concatenates onto the visible label, in the order they are trusted.
@@ -1416,9 +1436,10 @@ const LABEL_TRAILING_DEMOGRAPHIC_HANDLE_RE = new RegExp(
  * question text. The label is the fallback for controls the provider addressed by data attribute.
  */
 export function managedOptionProbeControlId(
-  field: { label?: string | null; selector?: string | null },
+  field: { label?: string | null; selector?: string | null; durableSelector?: string | null },
 ): string | undefined {
-  const fromSelector = controlIdFromDiscoveredSelector(field.selector);
+  const fromSelector = managedOptionInventoryKeyFromSelector(field.durableSelector)
+    ?? managedOptionInventoryKeyFromSelector(field.selector);
   if (fromSelector) return fromSelector;
   const label = (field.label ?? '').trim();
   if (!label) return undefined;
@@ -1436,11 +1457,15 @@ export type ManagedOptionProbeTarget = {
 };
 
 function managedOptionProbeTarget(
-  field: { label: string; selector?: string; inputType?: string; role?: string | null; required?: boolean },
+  field: { label: string; selector?: string; durableSelector?: string | null; inputType?: string; role?: string | null; required?: boolean },
   discoveryRoleCapability = false,
 ): ManagedOptionProbeTarget | undefined {
   const controlId = managedOptionProbeControlId(field);
-  if (!controlId || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) return undefined;
+  // A stable name is enough to join discovery options to the later packet. It is not a DOM id and
+  // cannot be interpolated into Greenhouse's id-based React-select probe selectors.
+  if (!controlId
+    || controlId.startsWith(MANAGED_OPTION_NAME_KEY_PREFIX)
+    || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) return undefined;
   const inputType = (field.inputType ?? '').trim().toLowerCase();
   const role = (field.role ?? '').trim().toLowerCase();
   const kind = /^select(?:-one|-multiple)?$/.test(inputType) ? 'native' : 'custom';
@@ -1472,7 +1497,7 @@ function managedOptionProbeTarget(
  */
 export function managedOptionProbeTargets(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; durableSelector?: string | null; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
   discoveryRoleCapability = false,
 ): string[] {
@@ -1497,7 +1522,7 @@ export function managedOptionProbeTargets(
 
 function detailedManagedOptionProbeTargets(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; durableSelector?: string | null; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]> = {},
   discoveryRoleCapability = false,
 ): ManagedOptionProbeTarget[] {
@@ -1620,7 +1645,7 @@ export type ManagedOptionProbeBatchFailure = { controlIds: string[]; reason: str
 
 export function managedOptionProbeAnalysis(
   portal: SupportedPortal,
-  discovered: readonly { label: string; selector?: string; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
+  discovered: readonly { label: string; selector?: string; durableSelector?: string | null; inputType?: string; role?: string | null; options?: string[] | null; required?: boolean }[],
   alreadyRead: Record<string, string[]>,
   results: readonly (ManagedBrowserResult | null | undefined)[],
   batchFailures: readonly ManagedOptionProbeBatchFailure[] = [],
@@ -1634,6 +1659,15 @@ export function managedOptionProbeAnalysis(
   for (const field of discovered) {
     const id = managedOptionProbeControlId(field);
     if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  // Native choice groups already carry their exact rendered option labels in discovery. Preserve
+  // those lists in the same packet map used by probed React selects, so managed Workable replay can
+  // distinguish a multi-value answer from a single option whose label contains a comma.
+  for (const field of discovered) {
+    const id = managedOptionProbeControlId(field);
+    if (!id || (counts.get(id) ?? 0) !== 1 || options[id]?.length) continue;
+    const read = [...new Set((field.options ?? []).map((option) => option.trim()).filter(Boolean))];
+    if (read.length > 0) options[id] = read;
   }
 
   const closedIds = new Set<string>();
@@ -1935,8 +1969,7 @@ function packetLabelFailed(packet: SubmissionPacket, label: string): boolean {
 
 function packetQuestionFailed(packet: SubmissionPacket, item: SubmissionPacket['questions'][number]): boolean {
   const selector = reviewQuestionPortalSelector(item);
-  const selectorId = selector?.match(/^#([A-Za-z0-9][A-Za-z0-9_-]*)$/)?.[1]
-    ?? selector?.match(/^\[id=["']([A-Za-z0-9][A-Za-z0-9_-]*)["']\]$/)?.[1];
+  const selectorId = managedOptionInventoryKeyFromSelector(selector);
   return packetTargetFailed(packet, {
     controlId: selectorId,
     selector,
@@ -1970,10 +2003,9 @@ function packetReadOptionsForQuestion(
   item: SubmissionPacket['questions'][number],
 ): string[] | undefined {
   const selector = reviewQuestionPortalSelector(item);
-  const controlId = selector?.match(/^#([A-Za-z0-9][A-Za-z0-9_-]*)$/)?.[1]
-    ?? selector?.match(/^\[id=["']([A-Za-z0-9][A-Za-z0-9_-]*)["']\]$/)?.[1];
-  if (!controlId) return undefined;
-  const options = packet.fieldOptions?.[controlId];
+  const controlId = managedOptionInventoryKeyFromSelector(selector);
+  const options = (selector ? packet.fieldOptions?.[selector] : undefined)
+    ?? (controlId ? packet.fieldOptions?.[controlId] : undefined);
   return options && options.length > 0 ? options : undefined;
 }
 
@@ -2349,10 +2381,10 @@ function reviewedQuestionSafetyContext(
   const selector = reviewQuestionPortalSelector(item) ?? '';
   const inputType = reviewQuestionPortalInputType(item) ?? '';
   const atsIdentity = item.atsApiField ?? '';
-  const selectorId = selector.match(/\[id=["']([^"']+)["']\]/i)?.[1];
+  const inventoryKey = managedOptionInventoryKeyFromSelector(selector);
   const options = [
     ...(packet.fieldOptions?.[selector] ?? []),
-    ...(selectorId ? packet.fieldOptions?.[selectorId] ?? [] : []),
+    ...(inventoryKey ? packet.fieldOptions?.[inventoryKey] ?? [] : []),
   ];
   return [item.question, selector, inputType, atsIdentity, ...options].join(' ');
 }
@@ -3426,6 +3458,50 @@ function pushScopedQuestionChoiceActions(
   }
 }
 
+function normalizedChoiceOption(value: string): string {
+  return value.replace(/\s+/g, ' ').replace(/\s*,\s*/g, ', ').trim().toLowerCase();
+}
+
+/**
+ * Resolve a possibly multi-value reviewed answer against the control's exact option labels.
+ *
+ * A blind comma split is not safe because an option label can itself contain a comma. This walks
+ * only prefixes that are complete offered labels and accepts exactly one decomposition. A single
+ * offered value such as "None of the above" therefore remains one value, while a joined language
+ * answer becomes several values only when the live options prove that reading is unambiguous.
+ */
+function exactChoiceOptionValues(answer: string, offeredOptions: readonly string[]): string[] | null {
+  const target = normalizedChoiceOption(answer);
+  if (!target) return null;
+  const unique = new Map<string, string>();
+  for (const raw of offeredOptions) {
+    const canonical = raw.trim();
+    const normalized = normalizedChoiceOption(canonical);
+    if (normalized && !unique.has(normalized)) unique.set(normalized, canonical);
+  }
+  const offered = [...unique].map(([normalized, canonical]) => ({ normalized, canonical }));
+  const solutions: string[][] = [];
+  const visit = (remaining: string, selected: string[], used: Set<string>) => {
+    if (solutions.length > 1) return;
+    for (const option of offered) {
+      if (used.has(option.normalized)) continue;
+      if (remaining === option.normalized) {
+        solutions.push([...selected, option.canonical]);
+        continue;
+      }
+      const prefix = `${option.normalized}, `;
+      if (!remaining.startsWith(prefix)) continue;
+      visit(
+        remaining.slice(prefix.length),
+        [...selected, option.canonical],
+        new Set([...used, option.normalized]),
+      );
+    }
+  };
+  visit(target, [], new Set());
+  return solutions.length === 1 ? solutions[0] : null;
+}
+
 function pushAshbyQuestionTextFallbackActions(
   actions: ManagedBrowserAction[],
   questionText: string,
@@ -4364,11 +4440,18 @@ export function budgetDroppedReviewedQuestions(
 // whichever comes first and can file the resume as the candidate's headshot. `data-ui="resume"` is
 // the stable, correct hook. Same two-file-input hazard the extension's adapters/ashby.ts documents.
 const WORKABLE_RESUME_SELECTOR = 'input[type="file"][data-ui="resume"]';
+const WORKABLE_ADDRESS_SELECTOR = 'input[name="address"]:visible';
+const WORKABLE_LEGACY_CITY_SELECTOR = 'input[name="city"]:visible';
+// Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
+// city input before the visible address autocomplete on current forms, so a plain comma list can
+// still pick the wrong control. The city arm exists only when no visible address control exists.
+const WORKABLE_LOCATION_SELECTOR = `${WORKABLE_ADDRESS_SELECTOR}, body:not(:has(${WORKABLE_ADDRESS_SELECTOR})) ${WORKABLE_LEGACY_CITY_SELECTOR}`;
 const WORKABLE_COVER_LETTER_SELECTOR =
   'input[type="file"][data-ui="cover_letter"], input[type="file"][data-ui*="cover" i]';
 const WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR = 'button:has-text("Decline all")';
 const WORKABLE_APPLICATION_FORM_READY_SELECTOR =
   `input[name="firstname"], input[name="email"], ${WORKABLE_RESUME_SELECTOR}`;
+const WORKABLE_CHOICE_UNCONFIRMED_ATTR = 'data-litos-choice-unconfirmed-v1';
 
 function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
   actions.push({
@@ -5456,7 +5539,17 @@ function pushFixedFieldActions(
     managedFill(actions, 'input[name="lastname"]', parts.slice(1).join(' '), 'last_name');
     managedFill(actions, 'input[name="email"]', packet.email, 'email');
     managedFill(actions, 'input[name="phone"]', packet.phone, 'phone');
-    managedFill(actions, 'input[name="city"]', packet.city, 'location');
+    managedFill(actions, WORKABLE_LOCATION_SELECTOR, packet.city, 'location');
+    if (packet.city) {
+      actions.push({
+        type: 'press',
+        selector: WORKABLE_LOCATION_SELECTOR,
+        value: 'Enter',
+        label: 'location_select',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+    }
     // Workable has no dedicated LinkedIn/GitHub field on the built-in form - those arrive as custom
     // QA_<numeric> questions when an employer adds them, and so are handled by the reviewed-question
     // path, not here. `headline` is the one free identity field, and it is left alone deliberately:
@@ -5866,6 +5959,19 @@ export function buildManagedPortalActions(
           // than being a click of its own. Two clicks on one checkbox untick it; see
           // pushGreenhouseCheckboxOptionActions.
           pushGreenhouseCheckboxOptionActions(actions, questionText, answer, 'question', [portalSelector]);
+        } else if (portalFamily(portal) === 'workable') {
+          const offered = packetReadOptionsForQuestion(packet, item);
+          const values = offered ? exactChoiceOptionValues(answer, offered) : [answer];
+          if (!values || (/^radio$/i.test(portalInputType ?? '') && values.length !== 1)) continue;
+          for (const value of values) {
+            pushScopedQuestionChoiceActions(
+              actions,
+              questionText,
+              value,
+              'question',
+              { includeSelectFallbacks: false },
+            );
+          }
         } else {
           /* A choice question on a non-Greenhouse board used to fall out of this branch having
            * pushed NOTHING, and that was invisible for as long as no choice question could get here:
@@ -6780,6 +6886,64 @@ async function fillComboboxFirst(page: Page, selectors: string[], value: string 
   }
 }
 
+async function hiddenWorkableCityValue(page: Page): Promise<string> {
+  const cities = page.locator('input[name="city"]');
+  for (let index = 0; index < (await cities.count().catch(() => 0)); index += 1) {
+    const city = cities.nth(index);
+    const type = (await city.getAttribute('type').catch(() => null))?.toLowerCase();
+    const ariaHidden = (await city.getAttribute('aria-hidden').catch(() => null))?.toLowerCase();
+    const visible = await city.isVisible().catch(() => false);
+    if (type !== 'hidden' && ariaHidden !== 'true' && visible) continue;
+    const value = await city.inputValue().catch(() => '');
+    if (value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function workableCityBackingMatches(backing: string, requested: string): boolean {
+  const left = backing.replace(/\s+/g, ' ').trim().toLowerCase();
+  const right = requested.replace(/\s+/g, ' ').trim().toLowerCase();
+  return left === right || right.startsWith(`${left},`) || left.startsWith(`${right},`);
+}
+
+async function fillWorkableLocation(
+  page: Page,
+  value: string | undefined,
+  out: string[],
+): Promise<void> {
+  if (!value) return;
+  const address = await uniqueVisibleLocator(page.locator(WORKABLE_ADDRESS_SELECTOR));
+  if (address) {
+    const filled = await address.fill(value).then(() => true).catch(() => false);
+    const pressed = filled && await address.press('Enter').then(() => true).catch(() => false);
+    if (pressed) {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        if (workableCityBackingMatches(await hiddenWorkableCityValue(page), value)) {
+          out.push('location');
+          return;
+        }
+        await waitForDirectWidget(page, 100);
+      }
+    }
+    // Typed autocomplete search text is not an answer. Clear it before trying a real legacy field
+    // or handing the unresolved required address back to the applicant.
+    await address.fill('').catch(() => undefined);
+  }
+
+  const legacyCity = await uniqueVisibleLocator(page.locator(WORKABLE_LEGACY_CITY_SELECTOR));
+  if (!legacyCity) return;
+  if (!await legacyCity.fill(value).then(() => true).catch(() => false)) return;
+  await legacyCity.press('Enter').catch(() => undefined);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const persisted = await legacyCity.inputValue().catch(() => '');
+    if (persisted.trim().toLowerCase() === value.trim().toLowerCase()) {
+      out.push('location');
+      return;
+    }
+    await waitForDirectWidget(page, 50);
+  }
+}
+
 async function selectFirst(page: Page, selectors: string[], value: string | undefined, label: string, out: string[]) {
   if (!value) return;
   for (const selector of selectors) {
@@ -6875,6 +7039,282 @@ async function uploadFirst(
   if (heldBy) ledger?.conflicts.push(uploadControlConflictBlocker(label, heldBy));
 }
 
+function exactVisibleTextPattern(value: string): RegExp {
+  return new RegExp(`^\\s*${value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i');
+}
+
+/** Return one visible match, or null when the locator is absent or ambiguous. */
+async function uniqueVisibleLocator(locator: Locator): Promise<Locator | null> {
+  let found: Locator | null = null;
+  const count = await locator.count().catch(() => 0);
+  for (let index = 0; index < count; index += 1) {
+    const candidate = locator.nth(index);
+    if (!(await candidate.isVisible().catch(() => false))) continue;
+    if (found) return null;
+    found = candidate;
+  }
+  return found;
+}
+
+async function locatorRenderedText(locator: Locator): Promise<string> {
+  const inner = await locator.innerText().catch(() => null);
+  if (typeof inner === 'string') return inner;
+  return await locator.textContent().catch(() => '') ?? '';
+}
+
+async function waitForDirectWidget(page: Page, milliseconds: number): Promise<void> {
+  const wait = (page as Page & { waitForTimeout?: (timeout: number) => Promise<void> }).waitForTimeout;
+  if (typeof wait === 'function') await wait.call(page, milliseconds).catch(() => undefined);
+}
+
+/**
+ * Workable choice groups point at the exact question label with aria-labelledby. Resolve that
+ * relationship in both directions and refuse duplicate text instead of borrowing a nearby group.
+ */
+async function exactWorkableQuestionGroup(page: Page, questionText: string): Promise<Locator | null> {
+  const normalizedQuestion = normalizeReviewQuestionLabel(questionText).toLowerCase();
+  const groups = page.locator(
+    '[role="group"][aria-labelledby], [role="radiogroup"][aria-labelledby], fieldset[aria-labelledby]',
+  );
+  let found: Locator | null = null;
+  for (let index = 0; index < (await groups.count().catch(() => 0)); index += 1) {
+    const group = groups.nth(index);
+    if (!(await group.isVisible().catch(() => false))) continue;
+    const labelledBy = (await group.getAttribute('aria-labelledby').catch(() => null))?.trim();
+    if (!labelledBy) continue;
+    let labelMatches = false;
+    for (const id of labelledBy.split(/\s+/).filter(Boolean)) {
+      const label = await uniqueVisibleLocator(page.locator(`[id="${quoteAttr(id)}"]`));
+      if (!label) continue;
+      const normalizedLabel = normalizeReviewQuestionLabel(await locatorRenderedText(label)).toLowerCase();
+      if (normalizedLabel === normalizedQuestion) {
+        labelMatches = true;
+        break;
+      }
+    }
+    if (!labelMatches) continue;
+    if (found) return null;
+    found = group;
+  }
+  return found;
+}
+
+async function markWorkableChoiceUnconfirmed(group: Locator, active: boolean): Promise<boolean> {
+  return group.evaluate((element, state) => {
+    const node = element as unknown as {
+      setAttribute(name: string, value: string): void;
+      removeAttribute(name: string): void;
+    };
+    if (state.active) node.setAttribute(state.attribute, 'true');
+    else node.removeAttribute(state.attribute);
+  }, { attribute: WORKABLE_CHOICE_UNCONFIRMED_ATTR, active }).then(() => true).catch(() => false);
+}
+
+async function setDirectChoiceState(control: Locator, checked: boolean): Promise<boolean> {
+  const current = await control.isChecked().catch(() => null);
+  if (current === null) return false;
+  if (current === checked) return true;
+  if (checked) {
+    await control.check().catch(() => control.click().catch(() => undefined));
+  } else {
+    await control.uncheck().catch(() => control.click().catch(() => undefined));
+  }
+  return await control.isChecked().catch(() => null) === checked;
+}
+
+async function restoreDirectChoiceStates(
+  snapshots: ReadonlyArray<{ control: Locator; checked: boolean }>,
+): Promise<boolean> {
+  let restored = true;
+  for (const snapshot of [...snapshots].reverse()) {
+    if (!await setDirectChoiceState(snapshot.control, snapshot.checked)) restored = false;
+  }
+  return restored;
+}
+
+async function failClosedAfterChoiceMutation(
+  snapshots: ReadonlyArray<{ control: Locator; checked: boolean }>,
+): Promise<false> {
+  if (!await restoreDirectChoiceStates(snapshots)) {
+    throw new Error('Workable choice replay could not restore its previous selection state');
+  }
+  return false;
+}
+
+async function fillExactWorkableChoice(
+  page: Page,
+  questionText: string,
+  answer: string,
+  inputType: string,
+): Promise<boolean> {
+  const group = await exactWorkableQuestionGroup(page, questionText);
+  if (!group) return false;
+  // Mark the whole question unresolved before touching any option. The readiness gate treats this
+  // marker as authoritative, so even a browser/provider failure that prevents rollback cannot turn
+  // one checked peer into proof that the complete reviewed multi-select answer was applied.
+  if (!await markWorkableChoiceUnconfirmed(group, true)) return false;
+  const controls = group.locator(`input[type="${quoteAttr(inputType.toLowerCase())}"]`);
+  const choices: Array<{ control: Locator; labels: string[] }> = [];
+  for (let index = 0; index < (await controls.count().catch(() => 0)); index += 1) {
+    const candidate = controls.nth(index);
+    if (!(await candidate.isVisible().catch(() => false))) continue;
+    const renderedLabels = await candidate.evaluate((element) => {
+      const input = element as unknown as {
+        labels?: ArrayLike<{ innerText?: string; textContent?: string | null }>;
+        getAttribute(name: string): string | null;
+      };
+      const labels = Array.from(input.labels ?? []);
+      const texts = labels.map((label) => (
+        typeof label.innerText === 'string' ? label.innerText : (label.textContent ?? '')
+      ));
+      const ariaLabel = input.getAttribute('aria-label');
+      if (ariaLabel) texts.push(ariaLabel);
+      return texts;
+    }).catch(() => [] as string[]);
+    const labels = [...new Set(renderedLabels.map((label) => label.trim()).filter(Boolean))];
+    if (labels.length > 0) choices.push({ control: candidate, labels });
+  }
+  const offered = choices.flatMap((choice) => choice.labels);
+  const values = exactChoiceOptionValues(answer, offered);
+  if (!values || (/^radio$/i.test(inputType) && values.length !== 1)) return false;
+
+  const selected: Locator[] = [];
+  for (const value of values) {
+    const normalizedValue = normalizedChoiceOption(value);
+    const matching = choices.filter((choice) => choice.labels.some(
+      (label) => normalizedChoiceOption(label) === normalizedValue,
+    ));
+    if (matching.length !== 1 || selected.includes(matching[0].control)) return false;
+    selected.push(matching[0].control);
+  }
+
+  const snapshots: Array<{ control: Locator; checked: boolean }> = [];
+  for (const choice of choices) {
+    const checked = await choice.control.isChecked().catch(() => null);
+    if (checked === null) return false;
+    snapshots.push({ control: choice.control, checked });
+  }
+
+  if (/^checkbox$/i.test(inputType)) {
+    for (const choice of choices) {
+      const shouldBeChecked = selected.includes(choice.control);
+      if (!await setDirectChoiceState(choice.control, shouldBeChecked)) {
+        return failClosedAfterChoiceMutation(snapshots);
+      }
+    }
+  } else {
+    if (!await setDirectChoiceState(selected[0], true)) {
+      return failClosedAfterChoiceMutation(snapshots);
+    }
+  }
+
+  for (const choice of choices) {
+    const expected = selected.includes(choice.control);
+    if (await choice.control.isChecked().catch(() => null) !== expected) {
+      return failClosedAfterChoiceMutation(snapshots);
+    }
+  }
+  // Clearing the marker is part of the commit. If the DOM cannot confirm that clear, the caller
+  // reports no filled field and the readiness gate remains closed.
+  return markWorkableChoiceUnconfirmed(group, false);
+}
+
+async function workableComboboxShowsSelection(
+  page: Page,
+  field: Locator,
+  selectedOption: Locator,
+  answer: string,
+): Promise<boolean> {
+  const normalizedAnswer = answer.trim().toLowerCase();
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    // The option may unmount as soon as its click closes the menu. A detached row falls through to
+    // the persistent field and widget checks in the same bounded polling pass.
+    if ((await selectedOption.getAttribute('aria-selected', { timeout: 100 }).catch(() => null)) === 'true') return true;
+    const fieldValues = [
+      await field.inputValue().catch(() => ''),
+      await field.getAttribute('aria-valuetext').catch(() => null),
+    ];
+    if (fieldValues.some((value) => value?.trim().toLowerCase() === normalizedAnswer)) return true;
+
+    // Workable clears the readonly search input after a selection and renders the committed answer
+    // beside it. Accept exactly one visible copy in this widget, excluding rows still in a menu.
+    const widget = await uniqueVisibleLocator(
+      field.locator('xpath=ancestor::*[@data-input-type="select"][1]'),
+    );
+    if (widget) {
+      const displayed = widget.getByText(exactVisibleTextPattern(answer), { exact: true });
+      let committedMatches = 0;
+      for (let index = 0; index < (await displayed.count().catch(() => 0)); index += 1) {
+        const candidate = displayed.nth(index);
+        if (!(await candidate.isVisible().catch(() => false))) continue;
+        const isMenuOption = await candidate.evaluate((element) => Boolean(element.closest('[role="option"]')))
+          .catch(() => true);
+        if (!isMenuOption) committedMatches += 1;
+      }
+      if (committedMatches === 1) return true;
+    }
+    await waitForDirectWidget(page, 100);
+  }
+  return false;
+}
+
+/** Select one exact option from the listbox declared by this Workable combobox, then read it back. */
+async function fillExactWorkableCombobox(
+  page: Page,
+  portalSelector: string,
+  answer: string,
+): Promise<boolean> {
+  const field = await uniqueVisibleLocator(page.locator(portalSelector));
+  if (!field || (await field.getAttribute('role').catch(() => null)) !== 'combobox') return false;
+  const widget = await uniqueVisibleLocator(
+    field.locator('xpath=ancestor::*[@data-input-type="select"][1]'),
+  ) ?? field;
+  if (!await markWorkableChoiceUnconfirmed(widget, true)) return false;
+  if (!await field.click().then(() => true).catch(() => false)) return false;
+
+  let declaredIds: string[] = [];
+  for (let attempt = 0; attempt < 3 && declaredIds.length === 0; attempt += 1) {
+    declaredIds = [
+      await field.getAttribute('aria-controls').catch(() => null),
+      await field.getAttribute('aria-owns').catch(() => null),
+    ].flatMap((value) => value?.trim().split(/\s+/).filter(Boolean) ?? []);
+    if (declaredIds.length === 0) await waitForDirectWidget(page, 100);
+  }
+  // Current Workable inputs and listboxes share this exact React-select id stem. It remains a
+  // question-local fallback when the component has not exposed aria-controls yet.
+  const fieldId = (await field.getAttribute('id').catch(() => null))?.trim();
+  if (fieldId && /^input_QA_[A-Za-z0-9_-]+_input$/.test(fieldId)) {
+    declaredIds.push(fieldId.replace(/_input$/, '_listbox'));
+  }
+  const uniqueIds = [...new Set(declaredIds)];
+  const listboxSelector = uniqueIds.map((id) => `[id="${quoteAttr(id)}"][role="listbox"]`).join(', ');
+  let listbox: Locator | null = null;
+  for (let attempt = 0; listboxSelector && attempt < 4 && !listbox; attempt += 1) {
+    listbox = await uniqueVisibleLocator(page.locator(listboxSelector));
+    if (!listbox) await waitForDirectWidget(page, 100);
+  }
+  if (!listbox) {
+    await field.press('Escape').catch(() => undefined);
+    return false;
+  }
+
+  const options = listbox.getByRole('option', { name: exactVisibleTextPattern(answer), exact: true });
+  let option: Locator | null = null;
+  for (let attempt = 0; attempt < 4 && !option; attempt += 1) {
+    option = await uniqueVisibleLocator(options);
+    if (!option) await waitForDirectWidget(page, 100);
+  }
+  if (!option) {
+    await field.press('Escape').catch(() => undefined);
+    return false;
+  }
+  if (!await option.click().then(() => true).catch(() => false)) return false;
+  if (!await workableComboboxShowsSelection(page, field, option, answer)) return false;
+  // A pre-existing answer is not evidence that this exact reviewed option committed. The marker is
+  // cleared only after bounded readback proves the requested value on the field or its widget.
+  return markWorkableChoiceUnconfirmed(widget, false);
+}
+
 async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet: SubmissionPacket, out: string[]) {
   for (const item of packet.questions) {
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
@@ -6884,7 +7324,8 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
     if (shouldSkipPortalConsentQuestion(portalFamily(portal), reviewedQuestionSafetyContext(item, packet))) continue;
     const portalSelector = durablePortalSelector(reviewQuestionPortalSelector(item));
-    if (/^(?:checkbox|radio)$/i.test(reviewQuestionPortalInputType(item) ?? '')) {
+    const portalInputType = reviewQuestionPortalInputType(item);
+    if (/^(?:checkbox|radio)$/i.test(portalInputType ?? '')) {
       if (portalFamily(portal) === 'greenhouse') {
         for (const selector of greenhouseCheckboxOptionSelectors(questionText, answer)) {
           const field = page.locator(selector).first();
@@ -6894,6 +7335,16 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
             break;
           }
         }
+      } else if (portalFamily(portal) === 'workable') {
+        if (await fillExactWorkableChoice(page, questionText, answer, portalInputType!)) {
+          out.push(`question_checkbox:${questionText.slice(0, 80)}`);
+        }
+      }
+      continue;
+    }
+    if (/^combobox$/i.test(portalInputType ?? '') && portalFamily(portal) === 'workable') {
+      if (portalSelector && await fillExactWorkableCombobox(page, portalSelector, answer)) {
+        out.push(`question:${questionText.slice(0, 80)}`);
       }
       continue;
     }
@@ -7075,7 +7526,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="lastname"]'], parts.slice(1).join(' '), 'last_name', filledFields);
     await fillFirst(page, ['input[name="email"]'], packet.email, 'email', filledFields);
     await fillFirst(page, ['input[name="phone"]'], packet.phone, 'phone', filledFields);
-    await fillFirst(page, ['input[name="city"]'], packet.city, 'location', filledFields);
+    await fillWorkableLocation(page, packet.city, filledFields);
     await uploadFirst(page, [WORKABLE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
     await uploadFirst(page, WORKABLE_COVER_LETTER_SELECTOR.split(', '), packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
   } else if (family === 'jazzhr') {
@@ -8819,6 +9270,10 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
   const scanRoot = document.querySelector('[data-litos-submit-scope-v1="active"]');
   if (!scanRoot) return { blocking: ['Litos could not bind required-field validation to the selected application form'], stale: [] };
   const clean = (value) => (value || '').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '');
+  const renderedText = (node) => {
+    if (!node) return '';
+    return typeof node.innerText === 'string' ? node.innerText : (node.textContent || '');
+  };
   const isVisible = (element) => {
     if (!element) return false;
     const rect = element.getBoundingClientRect();
@@ -8828,7 +9283,7 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
   };
   // The block that owns one question: its label, its control, and its error line.
   const widgetOf = (element) => element.closest(
-    '[class*="select__container"], .field, .field-wrapper, .file-upload, fieldset, [role="group"]'
+    '[class*="select__container"], .field, .field-wrapper, .file-upload, fieldset, [role="group"], [data-input-type]'
   ) || element.parentElement || element;
   /* THE LABEL THAT WRAPS ITS CONTROL AND NEVER NAMES IT.
    *
@@ -8847,7 +9302,7 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
     const wrapper = element && element.closest && element.closest('label');
     if (!wrapper) return '';
     if (wrapper.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
-    return wrapper.textContent;
+    return renderedText(wrapper);
   };
   /* The question a control sits under, when the control itself is labelled with nothing useful.
    * Last resort, and deliberately below the wrapping label. It is the only thing that names an
@@ -8868,7 +9323,7 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
       if (!block.matches || !block.matches('div, section, li, fieldset')) continue;
       if (block.querySelectorAll('input:not([type="hidden"]), textarea, select, [role="combobox"]').length > 1) return '';
       const candidate = block.querySelector('label, legend, .question, h3, h4');
-      const text = clean((candidate && candidate.textContent) || '');
+      const text = clean(renderedText(candidate));
       if (text && !genericControlText(text)) return text;
     }
     return '';
@@ -8876,16 +9331,24 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
   const labelOf = (widget, element) => {
     const labelledBy = (widget && widget.getAttribute('aria-labelledby'))
       || (element && element.getAttribute('aria-labelledby'));
+    // A Workable composite can keep the question label on its listbox opener, but arbitrary
+    // aria-labelledby descendants are not label proxies. In particular, the country-code combobox
+    // inside a directly labelled phone widget must not rename that phone field.
+    const proxyLabelledBy = widget
+      && widget.querySelector('[role="combobox"][aria-labelledby], [aria-haspopup="listbox"][aria-labelledby]')
+        ?.getAttribute('aria-labelledby');
     const referenced = labelledBy && document.getElementById(labelledBy.split(/\s+/)[0]);
+    const proxyReferenced = proxyLabelledBy && document.getElementById(proxyLabelledBy.split(/\s+/)[0]);
     const byFor = element && element.id && document.querySelector('label[for="' + CSS.escape(element.id) + '"]');
     const legend = widget && widget.querySelector('legend');
     const own = widget && widget.querySelector('label, .label, .upload-label, legend');
     for (const candidate of [
-      referenced && referenced.textContent,
-      byFor && byFor.textContent,
-      legend && legend.textContent,
-      own && own.textContent,
+      renderedText(referenced),
+      renderedText(byFor),
       wrappingLabelTextOf(element),
+      renderedText(proxyReferenced),
+      renderedText(legend),
+      renderedText(own),
       element && element.getAttribute('aria-label'),
       widget && widget.getAttribute('aria-label'),
       nearestQuestionText(element)
@@ -8952,6 +9415,8 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
   };
   const widgetHasAnswer = (widget) => {
     if (!widget) return false;
+    if (widget.matches?.('[${WORKABLE_CHOICE_UNCONFIRMED_ATTR}="true"]')
+      || widget.querySelector('[${WORKABLE_CHOICE_UNCONFIRMED_ATTR}="true"]')) return false;
     if (widget.querySelector('[class*="select__single-value"], [class*="select__multi-value__label"]')) return true;
     if (widget.querySelector('[class*="select__placeholder"]')) return false;
     if (widget.querySelector('.file-upload__filename, [class*="file-upload__filename"], [aria-label="Remove file" i]')) return true;
@@ -8983,6 +9448,12 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
       ? '"' + label + '" is required and is still empty'
       : 'A required field on the form has no label Litos can read, and is still empty');
   };
+  // A failed exact choice replay is a blocker even when the ATS omitted its own required marker.
+  // Scan this first so native-required children resolve to their semantic question group below.
+  for (const widget of scanRoot.querySelectorAll('[${WORKABLE_CHOICE_UNCONFIRMED_ATTR}="true"]')) {
+    const element = widget.querySelector('input, textarea, select') || widget;
+    note(widget, element);
+  }
   // Native required, PLUS aria-required. React Select's input carries aria-required="true" and no
   // required attribute at all, so a gate built only on [required] cannot see an unanswered
   // Greenhouse screener question - which is exactly the control this gate exists to catch.
@@ -8991,7 +9462,8 @@ export const READ_SUBMIT_READINESS_SCRIPT = String.raw`(() => {
   )) {
     if (element.disabled) continue;
     if (!isVisible(element) && !isVisible(widgetOf(element))) continue;
-    note(widgetOf(element), element);
+    const failedChoice = element.closest('[${WORKABLE_CHOICE_UNCONFIRMED_ATTR}="true"]');
+    note(failedChoice || widgetOf(element), element);
   }
   /* THE REQUIRED MARKER THAT IS NEITHER AN ATTRIBUTE NOR AN ARIA STATE.
    *

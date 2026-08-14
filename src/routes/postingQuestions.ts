@@ -184,7 +184,7 @@ export async function scanPostingQuestions(
     (result.discovered ?? []) as DiscoveredQuestion[],
     mergeManagedFieldOptions(scanFieldOptions, managedResultFieldOptions(probeResult)),
   );
-  const questions = postingQuestionsFromDiscovered(discovered);
+  const questions = postingQuestionsFromDiscovered(discovered, portal);
   // Zero controls is not "this form has no questions". It is a page this run could not read, and
   // storing it as a good scan would tell every later applicant the form is empty for a fortnight.
   return { questions, status: questions.length > 0 ? 'ok' : 'form_not_reached' };

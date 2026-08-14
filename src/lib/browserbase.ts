@@ -86,6 +86,9 @@ export type ManagedBrowserAction = {
 export type ManagedDiscoveredQuestion = {
   label: string;
   selector: string;
+  // Stable group or widget selector emitted by newer managed runners. Choice controls can have a
+  // unique name per option, so replay must be able to return to the semantic question container.
+  durableSelector?: string | null;
   inputType: string;
   // The DOM role is distinct from inputType. Greenhouse React-selects are text inputs whose role
   // is combobox, while end-year--0 is a genuine text input. This optional wire field lets the

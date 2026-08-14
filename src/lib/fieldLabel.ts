@@ -30,6 +30,9 @@ const FLATTENED_HANDLE_RE = /^(job_application|answers?)_|_attributes_|(^|_)\d+(
 const STRUCTURAL_TOKEN_RE = /^\S*[[\]:]\S/;
 // customQuestion12345, applicantAnswer42: a long lowerCamel run ending in digits.
 const LONG_CAMEL_WITH_DIGITS_RE = /^[a-z]{4,}[A-Z][A-Za-z]*\d+$/;
+// Browser fallback prose injected by an icon component when its SVG cannot render. This can sit
+// inside a real <label>, but it names no form field and must never become user-facing blocker text.
+const PROVIDER_RENDERING_NOISE_RE = /^SVGs?\s+not supported by this browser\.?$/i;
 
 // Generic placeholders providers substitute when THEY could not read a label either. They are
 // grammatical English, so no shape rule catches them, but they name nothing: quoting one back
@@ -52,6 +55,7 @@ export function isOpaqueIdentifier(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed) return true;
   if (PLACEHOLDER_LABELS.has(trimmed.toLowerCase())) return true;
+  if (PROVIDER_RENDERING_NOISE_RE.test(trimmed)) return true;
   if (UUID_RE.test(trimmed)) return true;
   if (LONG_HEX_RE.test(trimmed)) return true;
   if (NUMERIC_ID_RE.test(trimmed)) return true;
@@ -142,10 +146,11 @@ export function sanitizeProviderBlockers(blockers: readonly string[]): string[] 
     const line = rawLine.trim();
     if (!line) continue;
 
-    // The shape every provider uses for a missing required field: "<something> is required".
-    const match = line.match(/^(.*?)\s+is required\.?$/i);
+    // Providers return both the short sentence and Litos's already-canonical blocker sentence.
+    // Accept matching quote pairs so a second sanitize pass does not keep the quotes as label text.
+    const match = line.match(/^(?:"([^"]+)"|'([^']+)'|(.*?))\s+is required(?:\s+and is still empty)?\.?$/i);
     if (match) {
-      const label = humanFieldLabel([match[1]]);
+      const label = humanFieldLabel([match[1] ?? match[2] ?? match[3]]);
       if (label) readable.push(describeRequiredBlocker(label));
       else unlabelled += 1;
       continue;

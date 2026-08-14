@@ -209,6 +209,28 @@ test('the old double-appended template is repaired, not echoed', () => {
   assert.doesNotMatch(clean[0], /required field is required/);
 });
 
+test('an already-canonical quoted blocker is sanitized without nesting quotes or suffixes', () => {
+  const clean = sanitizeProviderBlockers(['"Address" is required and is still empty']);
+  assert.deepEqual(clean, ['"Address" is required and is still empty']);
+});
+
+test('Workable SVG fallback prose is treated as an unlabelled provider field', () => {
+  const fallback = 'SVGs not supported by this browser.';
+  assert.equal(isOpaqueIdentifier(fallback), true);
+  assert.deepEqual(
+    sanitizeProviderBlockers([`"${fallback}" is required and is still empty`]),
+    [describeRequiredBlocker(null)],
+  );
+});
+
+test('a genuine long quoted label remains readable through a canonical provider sentence', () => {
+  const label = 'Please describe the project where you made the most meaningful technical contribution';
+  assert.deepEqual(
+    sanitizeProviderBlockers([`"${label}" is required and is still empty`]),
+    [`"${label}" is required and is still empty`],
+  );
+});
+
 test('a single unnamed field reads naturally rather than as a count of one', () => {
   const clean = sanitizeProviderBlockers(['cf-4820193 is required']);
   assert.deepEqual(clean, [describeRequiredBlocker(null)]);

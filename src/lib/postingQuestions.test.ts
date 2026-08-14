@@ -96,6 +96,42 @@ test('one label discovered twice keeps the richer record', () => {
   assert.equal(stored[0].required, true);
 });
 
+test('one Workable checkbox question unions options discovered from separate controls', () => {
+  const stored = postingQuestionsFromDiscovered([
+    { label: 'Which teams interest you?', selector: '#engineering', inputType: 'checkbox', maxLength: null, options: ['Engineering'], required: true },
+    { label: 'Which teams interest you?*', selector: '#product', inputType: 'checkbox', maxLength: null, options: ['Product'], required: true },
+    { label: 'Which teams interest you?', selector: '#design', inputType: 'checkbox', maxLength: null, options: ['Design', 'Engineering'], required: false },
+  ], 'workable');
+
+  assert.equal(stored.length, 1);
+  assert.deepEqual(stored[0].options, ['Engineering', 'Product', 'Design']);
+  assert.equal(stored[0].required, true);
+});
+
+test('Workable fixed phone and address controls are not applicant questions', () => {
+  const stored = postingQuestionsFromDiscovered([
+    { label: 'Phone +971', selector: 'input[name="phone"]', inputType: 'tel', maxLength: null, options: null, required: true },
+    { label: 'Address', selector: 'input[name="address"]', inputType: 'text', maxLength: null, options: null, required: true },
+    { label: 'Why are you interested in this role?', selector: 'textarea[name="QA_1"]', inputType: 'textarea', maxLength: 500, options: null, required: true },
+  ], 'workable');
+
+  assert.deepEqual(stored.map((item) => item.label), ['Why are you interested in this role?']);
+});
+
+test('a Workable custom location question is never suppressed as the built-in address control', () => {
+  const stored = postingQuestionsFromDiscovered([
+    {
+      label: 'Where are you currently located?',
+      selector: 'input[name="QA_42"]',
+      inputType: 'text',
+      maxLength: null,
+      options: null,
+      required: true,
+    },
+  ], 'workable');
+  assert.deepEqual(stored.map((item) => item.label), ['Where are you currently located?']);
+});
+
 test('a scan is believed for a fortnight, and a scan that reached nothing for six hours', () => {
   const now = new Date('2026-08-08T12:00:00Z');
   const at = (msAgo: number) => new Date(now.getTime() - msAgo);

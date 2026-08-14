@@ -83,7 +83,10 @@ export type ProfileFieldShape = {
 export type ResolvedProfileField = {
   /** The question intent, or null when the label resolved through a non-classified rule. */
   key: ProfileKey | null;
-  /** The value to type or select. Equals one of `options` exactly when `matchedOption`. */
+  /**
+   * The value to type or select. Equals one option when a single-select matched. For a checkbox
+   * multi-select it is the comma-joined sequence of exact portal option texts to check.
+   */
   value: string;
   /** Ranked alias forms, best first, for a fill layer that cannot see the option list. */
   candidates: string[];
@@ -1141,6 +1144,35 @@ export function profileAnswerAliases(label: string, answer: string): string[] {
 }
 
 /**
+ * A checkbox language question is a set, not a single-select. Match only the exact
+ * case-insensitive intersection between the stored language array and the portal's real option
+ * list. Iterating the portal list preserves its exact spelling and order, while the seen set keeps
+ * duplicate case variants from becoming duplicate actions.
+ */
+function exactCheckboxLanguageSelections(
+  ap: ApplicationProfileLike,
+  rawOptions: readonly string[] | null | undefined,
+): string[] | null {
+  const stored = new Set(
+    (Array.isArray(ap.languages) ? ap.languages : [])
+      .map((language) => language.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  if (stored.size === 0) return null;
+  const selected: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of rawOptions ?? []) {
+    const option = typeof raw === 'string' ? raw.trim() : '';
+    if (!option || PLACEHOLDER_OPTION_RE.test(option)) continue;
+    const key = option.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (stored.has(key)) selected.push(option);
+  }
+  return selected.length > 0 ? selected : null;
+}
+
+/**
  * Resolve one discovered control against the stored profile.
  *
  * Returns null when the profile cannot answer it, so callers keep their existing fall-through to
@@ -1172,6 +1204,16 @@ export function resolveProfileField(
   // nothing else. See the EEO section above for why the opt-out is a legitimate second choice on
   // this family and on no other.
   const eeo = EEO_QUESTION.test(label);
+  if (key === 'languages' && /^checkbox$/i.test(shape.inputType ?? '')) {
+    const selected = exactCheckboxLanguageSelections(ap, shape.options);
+    if (!selected) return null;
+    return {
+      key,
+      value: selected.join(', '),
+      candidates: [base],
+      matchedOption: true,
+    };
+  }
   /* A CONSENT CONTROL GETS ITS OWN MATCHER, for the reason chooseConsentOption's header gives: the
    * generic one ranks options by how much they add to the answer, and "I agree" and "I do not
    * agree" add the same words to "Yes".

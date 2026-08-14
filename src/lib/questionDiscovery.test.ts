@@ -2002,6 +2002,22 @@ test('Ashby fixed profile fields never reappear as editable custom questions', (
   ]);
 });
 
+test('Workable suppresses only its built-in phone and address fields', () => {
+  const input = [
+    { id: 'phone', question: 'Phone +971', answer: '+971 50 123 4567' },
+    { id: 'address', question: 'Address', answer: 'Dubai' },
+    { id: 'custom-location', question: 'Where are you currently located?', answer: 'Dubai' },
+    { id: 'custom-address', question: 'What is your current mailing address?', answer: 'Dubai' },
+  ];
+
+  for (const portal of ['workable', 'controlled_workable'] as const) {
+    assert.deepEqual(normalizeStoredPortalQuestions(input, portal), [
+      { id: 'custom-location', question: 'Where are you currently located?', answer: 'Dubai' },
+      { id: 'custom-address', question: 'What is your current mailing address?', answer: 'Dubai' },
+    ]);
+  }
+});
+
 test('review question labels are never empty or longer than the managed runner limit', () => {
   assert.equal(normalizeReviewQuestionLabel('required field'), '');
   assert.equal(normalizeReviewQuestionLabel('56f41b98-0250-4e12-a2d1-aa038a33af27'), '');
@@ -3430,6 +3446,217 @@ test('the discovery walk falls through to a heading only for a handle, and only 
   assert.match(DISCOVER_QUESTIONS_SCRIPT, /var text = clean\(\(candidate && candidate\.textContent\) \|\| ''\);/);
   // A control's own placeholder is not a question.
   assert.match(DISCOVER_QUESTIONS_SCRIPT, /if \(text && !genericControlText\(text\)\) return text;/);
+});
+
+test('the discovery walk models current Workable composite controls', () => {
+  // Hidden country-menu text and SVG fallback copy must not become a question label.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /function renderedText\(node\)/);
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /typeof node\.innerText === 'string'/);
+  // Workable points visible address and custom-select inputs at their real question labels.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /function labelledByText\(node\)/);
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /var sharedChoiceReference = /);
+  // Its visible select opener is readonly, and its checkbox options use unique numeric names.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /var readonlyChoiceOpener = el\.readOnly/);
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /var fieldsetOwnsChoice = !choice \|\| fieldsetNames\.size <= 1;/);
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /function choiceQuestionKey\(el\)/);
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /var seenChoiceQuestions = new Set\(\);/);
+  // A stable id or name survives the later stateless fill run.
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /durableSelector: selector\.indexOf\('\[data-litos-discovered-'\) === 0 \? null : selector/);
+});
+
+test('direct discovery keeps name-only Workable choice groups separate inside an outer fieldset', () => {
+  const questionLabels = new Map<string, any>([
+    ['QA_languages_label', { innerText: 'Which languages do you speak?', textContent: 'Which languages do you speak?' }],
+    ['QA_authorized_label', { innerText: 'Are you authorized to work here?', textContent: 'Are you authorized to work here?' }],
+  ]);
+  const outerLegend = { innerText: 'Application questions', textContent: 'Application questions' };
+  const allControls: any[] = [];
+  const fieldset: any = {
+    parentElement: null,
+    querySelector: (selector: string) => selector === 'legend' ? outerLegend : null,
+    querySelectorAll: (selector: string) => selector.includes('input[type="radio"]') ? allControls : [],
+  };
+  const makeGroup = (labelId: string) => {
+    const group: any = {
+      controls: [] as any[],
+      parentElement: fieldset,
+      getAttribute: (name: string) => name === 'aria-labelledby' ? labelId : null,
+      querySelector: () => null,
+      querySelectorAll: (selector: string) => selector.includes('input[type="radio"]') ? group.controls : [],
+    };
+    return group;
+  };
+  const languages = makeGroup('QA_languages_label');
+  const authorization = makeGroup('QA_authorized_label');
+  const makeChoice = (group: any, name: string, option: string) => {
+    const attributes = new Map<string, string>([['name', name], ['type', 'checkbox']]);
+    const optionLabel = { innerText: option, textContent: option };
+    const control: any = {
+      tagName: 'INPUT',
+      type: 'checkbox',
+      name,
+      id: '',
+      value: option,
+      labels: [optionLabel],
+      form: null,
+      parentElement: group,
+      disabled: false,
+      readOnly: false,
+      required: false,
+      maxLength: -1,
+      getAttribute: (attribute: string) => attributes.get(attribute) ?? null,
+      setAttribute: (attribute: string, value: string) => { attributes.set(attribute, value); },
+      getBoundingClientRect: () => ({ width: 20, height: 20 }),
+      closest: (selector: string) => {
+        if (selector === 'fieldset') return fieldset;
+        if (selector.includes('[role="group"][aria-labelledby]')) return group;
+        return null;
+      },
+    };
+    group.controls.push(control);
+    allControls.push(control);
+    return control;
+  };
+  makeChoice(languages, '5854742', 'English');
+  makeChoice(languages, '5854743', 'Hindi');
+  makeChoice(authorization, '5854750', 'Yes');
+  makeChoice(authorization, '5854751', 'No');
+
+  const fakeDocument: any = {
+    querySelectorAll: () => allControls,
+    querySelector: () => null,
+    getElementById: (id: string) => questionLabels.get(id) ?? null,
+  };
+  const run = new Function(
+    'document',
+    'getComputedStyle',
+    'CSS',
+    `return ${DISCOVER_QUESTIONS_SCRIPT};`,
+  ) as (documentValue: unknown, style: unknown, css: unknown) => unknown;
+  const result = run(
+    fakeDocument,
+    () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    { escape: (value: string) => value },
+  );
+
+  assert.deepEqual(result, [
+    {
+      label: 'Which languages do you speak?',
+      selector: 'input[name="5854742"]',
+      durableSelector: 'input[name="5854742"]',
+      inputType: 'checkbox',
+      maxLength: null,
+      options: ['English', 'Hindi'],
+      required: false,
+    },
+    {
+      label: 'Are you authorized to work here?',
+      selector: 'input[name="5854750"]',
+      durableSelector: 'input[name="5854750"]',
+      inputType: 'checkbox',
+      maxLength: null,
+      options: ['Yes', 'No'],
+      required: false,
+    },
+  ]);
+});
+
+test('direct discovery scopes shared input aria labels by name inside an outer fieldset', () => {
+  const questionLabels = new Map<string, any>([
+    ['languages_label', { innerText: 'Which languages do you speak?', textContent: 'Which languages do you speak?' }],
+    ['authorization_label', { innerText: 'Are you authorized to work here?', textContent: 'Are you authorized to work here?' }],
+  ]);
+  const allControls: any[] = [];
+  const outerLegend = { innerText: 'Application questions', textContent: 'Application questions' };
+  const fieldset: any = {
+    parentElement: null,
+    querySelector: (selector: string) => selector === 'legend' ? outerLegend : null,
+    querySelectorAll: (selector: string) => selector.includes('input[type="radio"]') ? allControls : [],
+  };
+  const makePlainGroup = () => {
+    const group: any = {
+      controls: [] as any[],
+      parentElement: fieldset,
+      querySelector: () => null,
+      querySelectorAll: (selector: string) => selector.includes('input[type="radio"]') ? group.controls : [],
+    };
+    return group;
+  };
+  const languages = makePlainGroup();
+  const authorization = makePlainGroup();
+  const makeChoice = (group: any, name: string, questionId: string, option: string) => {
+    const attributes = new Map<string, string>([
+      ['name', name],
+      ['type', 'checkbox'],
+      ['aria-labelledby', questionId],
+    ]);
+    const optionLabel = { innerText: option, textContent: option };
+    const control: any = {
+      tagName: 'INPUT',
+      type: 'checkbox',
+      name,
+      id: '',
+      value: option,
+      labels: [optionLabel],
+      form: null,
+      parentElement: group,
+      disabled: false,
+      readOnly: false,
+      required: false,
+      maxLength: -1,
+      getAttribute: (attribute: string) => attributes.get(attribute) ?? null,
+      setAttribute: (attribute: string, value: string) => { attributes.set(attribute, value); },
+      getBoundingClientRect: () => ({ width: 20, height: 20 }),
+      closest: (selector: string) => selector === 'fieldset' ? fieldset : null,
+    };
+    group.controls.push(control);
+    allControls.push(control);
+  };
+  makeChoice(languages, 'languages', 'languages_label', 'English');
+  makeChoice(languages, 'languages', 'languages_label', 'Hindi');
+  makeChoice(authorization, 'authorization', 'authorization_label', 'Yes');
+  makeChoice(authorization, 'authorization', 'authorization_label', 'No');
+
+  const fakeDocument: any = {
+    querySelectorAll: (selector: string) => {
+      const name = selector.match(/\[name="([^"]+)"\]/)?.[1];
+      return name ? allControls.filter((control) => control.name === name) : allControls;
+    },
+    querySelector: () => null,
+    getElementById: (id: string) => questionLabels.get(id) ?? null,
+  };
+  const run = new Function(
+    'document',
+    'getComputedStyle',
+    'CSS',
+    `return ${DISCOVER_QUESTIONS_SCRIPT};`,
+  ) as (documentValue: unknown, style: unknown, css: unknown) => unknown;
+  const result = run(
+    fakeDocument,
+    () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    { escape: (value: string) => value },
+  );
+
+  assert.deepEqual(result, [
+    {
+      label: 'Which languages do you speak?',
+      selector: 'input[name="languages"]',
+      durableSelector: 'input[name="languages"]',
+      inputType: 'checkbox',
+      maxLength: null,
+      options: ['English', 'Hindi'],
+      required: false,
+    },
+    {
+      label: 'Are you authorized to work here?',
+      selector: 'input[name="authorization"]',
+      durableSelector: 'input[name="authorization"]',
+      inputType: 'checkbox',
+      maxLength: null,
+      options: ['Yes', 'No'],
+      required: false,
+    },
+  ]);
 });
 
 /* ---- a resolver that agrees is not a resolver that replaced anything ----
