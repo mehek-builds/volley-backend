@@ -21,7 +21,7 @@ import {
 } from '../lib/llmFailure';
 import { MultipartFile } from '@fastify/multipart';
 import { z } from 'zod';
-import { resumeEmailOfRecord } from '../lib/resumeEmail';
+import { resumeEmailForUpload, resumeEmailOfRecord } from '../lib/resumeEmail';
 import {
   extractDocxText,
   inspectResumeUpload,
@@ -787,6 +787,32 @@ export async function profileRoutes(fastify: FastifyInstance) {
     const minimumChars = Math.max(50, 700 * Math.max(1, sourcePages));
     const looksScanned = sourceFormat === 'pdf' && (!resumeText || resumeText.trim().length < minimumChars);
 
+    /* THE ADDRESS AN EMPLOYER REPLIES TO, resolved BEFORE the parse try below and deliberately
+     * outside it.
+     *
+     * `resume_email` is read by the base resume, the tailored resume, the packet audit and the
+     * academic-email answer, and NOTHING wrote it: the parser extracts no email at all
+     * (llm/parse.ts has no email field), so its only source was a text box under "Edit parsed
+     * details" in Documents, which onboarding never mentions. Measured 2026-08-16: 16 of 17
+     * production profiles had none, which is what made the base resume's ATS gate refuse nearly
+     * every account with "Add a personal resume email to your profile".
+     *
+     * OUTSIDE THE TRY, because that catch attributes everything it sees to the model. A database
+     * read that failed in there would be reported to the student as "Failed to parse resume with
+     * AI" on a parse that actually succeeded, which is the same wrong-blame defect the 503 twenty
+     * lines down exists to fix. A failure here reaches the global error boundary instead, which
+     * says "Internal server error" and claims nothing about their file.
+     *
+     * PRESERVE BEATS SEED. parsed_json is replaced WHOLESALE by each upload, so an address the
+     * student typed themselves was being destroyed by their next re-upload. Their value wins; the
+     * verified login email is only the default under it. See lib/resumeEmail.ts. */
+    const [existingProfile] = await db
+      .select({ parsed_json: profiles.parsed_json })
+      .from(profiles)
+      .where(eq(profiles.user_id, userId))
+      .limit(1);
+    const resumeEmail = resumeEmailForUpload(existingProfile?.parsed_json, request.jwtPayload!.email);
+
     // Annotated rather than inferred: an evolving `let` takes its type from every later use, so the
     // narrow Pick that academicSeedFrom accepts would otherwise become this variable's type and
     // reject the source_pages stamp two lines down.
@@ -801,6 +827,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
       parsedProfile = {
         ...parsedProfile,
         full_name: normalizeDisplayName(parsedProfile.full_name ?? ''),
+        ...(resumeEmail ? { resume_email: resumeEmail } : {}),
         ...(sourcePages > 0 ? { source_pages: sourcePages } : {}),
       };
     } catch (err) {

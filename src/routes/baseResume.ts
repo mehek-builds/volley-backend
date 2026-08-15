@@ -38,7 +38,7 @@ import {
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
-import { resumeEmailOfRecord } from '../lib/resumeEmail';
+import { resumeEmailForUpload } from '../lib/resumeEmail';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 
 /* GET /resume/base        - the stored base resume, or 404 if never built.
@@ -273,7 +273,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
     const contact = contactHeaderFrom(
       profile.parsed_json,
       applicationProfile as unknown as Record<string, unknown>,
-      resumeEmailOfRecord(profile.parsed_json) ?? request.jwtPayload!.email,
+      resumeEmailForUpload(profile.parsed_json, request.jwtPayload!.email),
     );
     try {
       const rendered = await renderResumePdf(
@@ -513,7 +513,30 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        * it passed is exactly R-017's failure mode, and a spec saved behind a check that silently
        * threw is the same lie in a different place. */
       send({ event: 'stage', stage: 'checking' });
-      const resumeEmail = resumeEmailOfRecord(profile.parsed_json);
+      /* THE ACCOUNT EMAIL IS A RESUME EMAIL, and leaving it out of this line blocked nearly every
+       * account in production.
+       *
+       * `resumeEmailOfRecord` reads only `parsed_json.resume_email`, which nothing in onboarding
+       * ever writes: measured 2026-08-16, 16 of 17 production profiles have none. So this resolved
+       * to undefined, `contactHeaderFrom` built a header with NO email, the renderer printed a
+       * resume an employer cannot reply to by mail, and the gate below then refused to save it. The
+       * student was told to "add a personal resume email to your profile" while looking at a
+       * preview with their own address printed on it, because /start passes the login email to the
+       * PREVIEW (app/start/page.tsx) even though the server never put it in the document.
+       *
+       * The fallback is not new and not invented here. `GET /resume/base/file`, 240 lines up in
+       * this same file, has always read `resumeEmailOfRecord(...) ?? request.jwtPayload!.email`.
+       * Two routes answering one question two ways is the whole defect; this makes them agree.
+       *
+       * The login email is the student's own address, NOT a portal routing alias. Aliases live in
+       * application_email_aliases and never reach `users.email`, so the separation that
+       * resumeEmail.ts's comment protects is untouched.
+       *
+       * `resumeEmailForUpload` rather than a bare `??`, so this and the upload resolve the address
+       * by one set of rules including the trim, the lowercase and the shape check. Two paths
+       * answering this question differently is the defect being fixed; leaving a second, laxer
+       * answer here would reintroduce it in miniature. */
+      const resumeEmail = resumeEmailForUpload(profile.parsed_json, request.jwtPayload!.email);
       const contact = contactHeaderFrom(
         profile.parsed_json,
         applicationRecord,
@@ -545,8 +568,20 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
               : [],
           },
         );
+        /* NO EMAIL GATE HERE ANY MORE, and nothing replaces it, because the case it was reaching
+         * for is already covered twice over.
+         *
+         * It read `!resumeEmail ? ['Add a personal resume email to your profile...'] : []`, which
+         * with the resolution above fixed would now be unreachable for anyone with a login email,
+         * and for a guest it blocked a resume that carried a perfectly good phone number. Most
+         * production accounts are guests.
+         *
+         * The genuine failure, a document an employer cannot reply to at all, is caught earlier and
+         * harder: renderResumePdf refuses to draw it (engine/resumeRender.ts hasContactRoute) and
+         * the ResumeContactError branch in the catch below already says so in those words. A second
+         * check here could never fire, since this array is only built once that render has
+         * succeeded. */
         const issues = [
-          ...(!resumeEmail ? ['Add a personal resume email to your profile before generating this resume.'] : []),
           ...finalValidation.issues,
           ...baseResumeSelectionIssues(printed, priorityEntries),
           ...layout.issues,

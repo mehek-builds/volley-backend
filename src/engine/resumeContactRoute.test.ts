@@ -212,7 +212,17 @@ describe('every path that can produce or send one of these packets is closed', (
   test('the main resume prints the stored phone and reports the guard as its own cause', () => {
     assert.match(baseResumeRoute, /phone: str\(appProfile\?\.phone\)/);
     // The decrypted row, not the raw one: phone is in ENCRYPTED_FIELDS and the raw column is base64.
-    assert.match(baseResumeRoute, /const resumeEmail = resumeEmailOfRecord\(profile\.parsed_json\)/);
+    /* The resolver changed on 2026-08-16 and the property this line protects did not. What matters
+     * here is that the address is resolved on the SERVER from the account rather than taken from a
+     * caller, which is the whole subject of this file. It used to read only
+     * `parsed_json.resume_email`, and since nothing ever wrote that field, the base resume was
+     * built with no email for 16 of 17 production accounts and its ATS gate then refused to store
+     * it. `resumeEmailForUpload` keeps the student's own stored address first and falls back to the
+     * verified login email, which GET /resume/base/file has always printed. */
+    assert.match(
+      baseResumeRoute,
+      /const resumeEmail = resumeEmailForUpload\(profile\.parsed_json, request\.jwtPayload!\.email\)/,
+    );
     assert.match(baseResumeRoute, /contactHeaderFrom\([\s\S]*profile\.parsed_json,[\s\S]*applicationRecord,[\s\S]*resumeEmail/);
     assert.match(baseResumeRoute, /err instanceof ResumeContactError/);
   });
