@@ -5,6 +5,7 @@ import {
   classifyDatabaseError,
   healthStatusCode,
   probeDatabase,
+  probeModel,
 } from './healthProbe';
 
 /**
@@ -108,5 +109,52 @@ describe('healthStatusCode', () => {
   test('unreachable is 503, so a monitor and a load balancer both read it correctly', () => {
     assert.equal(healthStatusCode({ status: 'ok', ms: 3 }), 200);
     assert.equal(healthStatusCode({ status: 'unreachable', ms: 3, reason: 'quota' }), 503);
+  });
+});
+
+/* THE MODEL PROBE, added after the 2026-08-15 credit exhaustion. /health answered 200 through an
+ * incident in which no student could get past the first screen of onboarding, because the only
+ * dependency it measured was the database and the database was fine. */
+describe('probeModel', () => {
+  const apiError = (status: number, message: string) => Object.assign(new Error(message), { status });
+
+  test('a served call is ok', async () => {
+    const health = await probeModel(async () => undefined);
+    assert.equal(health.status, 'ok');
+  });
+
+  test('the incident: an exhausted balance reports credit, not a generic error', async () => {
+    const health = await probeModel(async () => {
+      throw apiError(400, '400 {"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API."}');
+    });
+    assert.equal(health.status, 'unavailable');
+    assert.equal(health.status === 'unavailable' && health.reason, 'credit');
+  });
+
+  test('a revoked key and a capacity incident are told apart', async () => {
+    const auth = await probeModel(async () => { throw apiError(401, 'authentication_error'); });
+    const busy = await probeModel(async () => { throw apiError(529, 'overloaded_error'); });
+    assert.equal(auth.status === 'unavailable' && auth.reason, 'auth');
+    assert.equal(busy.status === 'unavailable' && busy.reason, 'overloaded');
+  });
+
+  test('a missing key is configuration, not an incident', async () => {
+    let called = false;
+    const health = await probeModel(async () => { called = true; }, { configured: false });
+    assert.equal(health.status, 'not_configured');
+    assert.equal(called, false, 'a probe with no key must not attempt a call');
+  });
+
+  test('a hanging provider times out rather than hanging the health endpoint', async () => {
+    const health = await probeModel(() => new Promise(() => {}), { timeoutMs: 10 });
+    assert.equal(health.status, 'unavailable');
+    assert.equal(health.status === 'unavailable' && health.reason, 'timeout');
+  });
+
+  test('the probe never throws, whatever comes out of the call', async () => {
+    for (const thrown of ['a string', null, undefined, { weird: true }]) {
+      const health = await probeModel(async () => { throw thrown; });
+      assert.equal(health.status, 'unavailable', 'a probe that throws breaks the page you need in an incident');
+    }
   });
 });

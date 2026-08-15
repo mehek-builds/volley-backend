@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { profiles, application_profile, targeting } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
+import { MODEL_UNAVAILABLE_MESSAGE, isModelUnavailable } from '../lib/llmFailure';
 import { readExperienceBank } from '../db/experienceBank';
 import {
   baseResumeSelectionIssues,
@@ -609,9 +610,16 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
     } catch (err) {
       fastify.log.error(err);
       send({ event: 'stage', stage: 'failed' });
+      /* This frame is printed to the student verbatim, so an upstream error may not pass through
+         it. Anthropic's own words for an exhausted balance are "Please go to Plans & Billing to
+         upgrade or purchase credits", which is addressed to us and would read to a student as
+         either their problem or an invitation to pay someone. Say what is true and useful to the
+         person reading it instead. See lib/llmFailure.ts. */
       send({
         event: 'error',
-        message: err instanceof Error ? err.message : 'Could not make your main resume',
+        message: isModelUnavailable(err)
+          ? MODEL_UNAVAILABLE_MESSAGE
+          : err instanceof Error ? err.message : 'Could not make your main resume',
       });
     } finally {
       if (!connection.closed) reply.raw.end();

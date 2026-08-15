@@ -32,6 +32,8 @@
  *   the detail. See routes: the full error is logged there.
  */
 
+import { modelFailureReason, type ModelFailureReason } from './llmFailure';
+
 /** Short enough that a hanging database still returns a fast, honest answer. */
 /**
  * Long enough to survive a Neon COLD START, short enough to beat any monitor's own timeout.
@@ -96,6 +98,70 @@ export async function probeDatabase(
   } finally {
     // Serverless will not freeze the invocation while a stray timer is pending, so an uncleared
     // one keeps the function billable after the response has been sent.
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/* ─── THE MODEL, for the same reason as the database ─────────────────────────────────────────────
+ *
+ * On 2026-08-15 the Anthropic balance ran out. Every model-backed flow failed (resume parsing, the
+ * base resume, tailoring, cover letters, application answers) and /health answered 200 the whole
+ * time, because it probed the database and the database was fine. The first signal was Mehek
+ * trying to upload her own resume and being told the parse had failed, which reads on that screen
+ * as a problem with the file.
+ *
+ * That is the 2026-08-04 lesson again with a different dependency: a health check only reports what
+ * it measures, and what it did not measure was the one thing onboarding cannot start without.
+ *
+ * THE PROBE MUST NOT SPEND THE THING IT WATCHES. This is the same trap as `select 1` against a
+ * TRANSFER quota, and it is sharper here because the resource is money. So the call is the smallest
+ * one the API accepts (a single token in, a single token out, on the cheapest model), and the
+ * caller is expected to cache the verdict rather than pay it on every monitor poll. When the
+ * balance is actually empty the call is refused before any tokens are billed, so the failing case
+ * is free, which is the case a monitor will be repeating.
+ *
+ * A REFUSAL IS NOT AN OUTAGE. Unlike the database, an empty balance does not mean "send no traffic
+ * here": the job board, the dashboard and every saved application still work. So this reports
+ * `degraded` through aggregateServiceHealthStatus and deliberately does NOT change the HTTP status
+ * code, which the database still owns.
+ */
+
+/** Long enough for a cold model call, short enough to beat a monitor's own timeout. */
+export const MODEL_PROBE_TIMEOUT_MS = 8_000;
+
+export type ModelHealth =
+  | { status: 'ok'; ms: number }
+  | { status: 'unavailable'; ms: number; reason: ModelFailureReason }
+  | { status: 'not_configured'; ms: number };
+
+/**
+ * Ask the model API whether it will serve us, cheaply and without ever throwing.
+ *
+ * `run` is injected for the same reason probeDatabase injects its query: this stays testable with
+ * no network, and the caller decides what the smallest possible call is for its SDK.
+ */
+export async function probeModel(
+  run: () => Promise<unknown>,
+  options: { configured?: boolean; timeoutMs?: number; now?: () => number } = {},
+): Promise<ModelHealth> {
+  const { configured = true, timeoutMs = MODEL_PROBE_TIMEOUT_MS, now = Date.now } = options;
+  const started = now();
+  /* Not an error: a deployment with no key is a configuration state, and reporting it as a failure
+     would make every preview environment look like an incident. */
+  if (!configured) return { status: 'not_configured', ms: 0 };
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('probe timeout')), timeoutMs);
+    });
+    await Promise.race([run(), timeout]);
+    return { status: 'ok', ms: now() - started };
+  } catch (error) {
+    return { status: 'unavailable', ms: now() - started, reason: modelFailureReason(error) };
+  } finally {
+    // Same reason as probeDatabase: a stray timer keeps a serverless invocation billable after the
+    // response has already been sent.
     if (timer !== undefined) clearTimeout(timer);
   }
 }

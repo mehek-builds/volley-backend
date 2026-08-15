@@ -12,12 +12,21 @@ process.env.ENCRYPTION_KEY ??= 'test-encryption-key-at-least-32-chars-long';
 
 type App = Awaited<ReturnType<typeof import('./index')['buildApp']>>;
 
+/* THE MODEL PROBE IS STUBBED IN EVERY TEST APP, and it is not optional politeness.
+ *
+ * src/index.ts imports dotenv/config, so a developer's .env puts a real ANTHROPIC_API_KEY into
+ * this process, and /health calls the model. Left alone, every assertion below would make a live,
+ * billed call to Anthropic: measured at 419ms of real network per run. It is free today only
+ * because the balance this change is about is empty, so the bill arrives the moment it is topped
+ * up. A test suite must not spend money, and must not need a network to pass. */
+const HEALTH_TEST_OPTIONS = { modelPing: async () => undefined };
+
 let appPromise: Promise<App> | null = null;
 async function getApp(): Promise<App> {
   if (!appPromise) {
     appPromise = (async () => {
       const { buildApp } = await import('./index');
-      const app = await buildApp();
+      const app = await buildApp(HEALTH_TEST_OPTIONS);
       await app.ready();
       return app;
     })();
@@ -80,7 +89,15 @@ test('/health identifies the deployable service and revision contract', async ()
   // route returned 500.
   assert.ok(['ok', 'unreachable'].includes(body.database), `unexpected database ${body.database}`);
   assert.equal(res.statusCode, body.database === 'ok' ? 200 : 503, 'status code must follow the probe');
-  assert.equal(body.status, body.database === 'ok' ? 'ok' : 'degraded');
+  /* The aggregate follows EVERY dependency, not the database alone. This asserted
+     `database === 'ok' ? 'ok' : 'degraded'` and passed only because the test DATABASE_URL is
+     unreachable, so both sides read 'degraded' by coincidence. A degraded application email
+     already broke that equivalence, and the model probe added a second way, so it would have
+     failed the first time this ran anywhere with a reachable database. */
+  const anyDependencyDown = body.database !== 'ok'
+    || body.model === 'unavailable'
+    || body.application_email?.status === 'degraded';
+  assert.equal(body.status, anyDependencyDown ? 'degraded' : 'ok');
   if (body.database !== 'ok') {
     // Coarse on purpose: /health is public, so the driver's message never reaches it.
     assert.ok(['timeout', 'quota', 'refused', 'error'].includes(body.database_reason));
@@ -123,7 +140,7 @@ test('/health reports which ranking-cache tiers are running', async () => {
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     {
       const { buildApp } = await import('./index');
-      const app = await buildApp();
+      const app = await buildApp(HEALTH_TEST_OPTIONS);
       const body = (await app.inject({ method: 'GET', url: '/health' })).json();
       assert.equal(body.ranking_cache, 'local', 'unset vars means L1 only, and it must say so');
       await app.close();
@@ -133,7 +150,7 @@ test('/health reports which ranking-cache tiers are running', async () => {
     process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token-value';
     {
       const { buildApp } = await import('./index');
-      const app = await buildApp();
+      const app = await buildApp(HEALTH_TEST_OPTIONS);
       const res = await app.inject({ method: 'GET', url: '/health' });
       const body = res.json();
       assert.equal(body.ranking_cache, 'shared', 'both vars set means the L2 tier is live');
@@ -150,7 +167,7 @@ test('/health reports which ranking-cache tiers are running', async () => {
     delete process.env.UPSTASH_REDIS_REST_TOKEN;
     {
       const { buildApp } = await import('./index');
-      const app = await buildApp();
+      const app = await buildApp(HEALTH_TEST_OPTIONS);
       const body = (await app.inject({ method: 'GET', url: '/health' })).json();
       assert.equal(body.ranking_cache, 'local', 'a half-configured pair is not shared');
       await app.close();
@@ -177,7 +194,7 @@ test('/health reports ATS API submission capability without exposing secrets', a
     process.env.GH_HEALTH_TEST_KEY = 'secret-health-key';
 
     const { buildApp } = await import('./index');
-    const app = await buildApp();
+    const app = await buildApp(HEALTH_TEST_OPTIONS);
     const res = await app.inject({ method: 'GET', url: '/health' });
     const body = res.json();
 
@@ -230,7 +247,7 @@ test('/health reports application email routing capability without exposing secr
     resetApplicationAliasDeliverabilityCache();
 
     const { buildApp } = await import('./index');
-    const app = await buildApp();
+    const app = await buildApp(HEALTH_TEST_OPTIONS);
     const res = await app.inject({ method: 'GET', url: '/health' });
     const body = res.json();
 
@@ -304,7 +321,7 @@ test('/health identifies the build even when no git SHA is exposed', async () =>
   process.env.VERCEL_URL = 'litos-should-not-win-team.vercel.app';
   try {
     const { buildApp } = await import('./index');
-    const app = await buildApp();
+    const app = await buildApp(HEALTH_TEST_OPTIONS);
     const body = (await app.inject({ method: 'GET', url: '/health' })).json();
     assert.equal(body.revision, null, 'this is the case where the SHA is genuinely unavailable');
     assert.equal(
@@ -347,7 +364,7 @@ test('a CLI deploy that passed GIT_SHA is as identifiable as a GitHub one', asyn
   process.env.GIT_SHA = 'cf071b61ce6f6b48850b5564bad3d6e0d4cf86a0';
   try {
     const { buildApp } = await import('./index');
-    const app = await buildApp();
+    const app = await buildApp(HEALTH_TEST_OPTIONS);
     const body = (await app.inject({ method: 'GET', url: '/health' })).json();
     assert.equal(body.revision, 'cf071b61ce6f6b48850b5564bad3d6e0d4cf86a0');
     assert.equal(body.revision_source, 'git-sha', 'a hand deploy is distinguishable from an automatic one');
@@ -368,7 +385,7 @@ test('the GitHub integration outranks a stale GIT_SHA', async () => {
   process.env.GIT_SHA = 'stale-from-a-laptop';
   try {
     const { buildApp } = await import('./index');
-    const app = await buildApp();
+    const app = await buildApp(HEALTH_TEST_OPTIONS);
     const body = (await app.inject({ method: 'GET', url: '/health' })).json();
     assert.equal(body.revision, 'from-the-integration');
     assert.equal(body.revision_source, 'vercel-git');
@@ -389,7 +406,7 @@ test('the deployment URL carries the identity when only the older variable is se
   process.env.VERCEL_URL = 'litos-abc123-team.vercel.app';
   try {
     const { buildApp } = await import('./index');
-    const app = await buildApp();
+    const app = await buildApp(HEALTH_TEST_OPTIONS);
     assert.equal((await app.inject({ method: 'GET', url: '/health' })).json().build, 'litos-abc123-team.vercel.app');
     await app.close();
   } finally {
@@ -557,5 +574,39 @@ test('the retention sweep is not runnable by an anonymous caller', async () => {
     if (internal === undefined) delete process.env.INTERNAL_CRON_SECRET;
     else process.env.INTERNAL_CRON_SECRET = internal;
     if (cron !== undefined) process.env.CRON_SECRET = cron;
+  }
+});
+
+test('/health probes the model through an injectable call, once per burst', async () => {
+  /* Two properties, both cost control, both easy to lose in a refactor.
+   *
+   * INJECTABLE, so the suite never makes a live billed call. If this stops being honoured the
+   * calls counter below stays 0 while a real request goes out, so assert the stub actually ran.
+   *
+   * ONCE PER BURST, because /health is public and sits in UNMETERED_PATHS: anyone can hit it as
+   * fast as they like, and without the in-flight guard every concurrent request on a cold
+   * instance starts its own paid call. */
+  const { buildApp } = await import('./index');
+  let calls = 0;
+  const app = await buildApp({
+    modelPing: async () => {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    },
+  });
+  await app.ready();
+  try {
+    const responses = await Promise.all(
+      Array.from({ length: 5 }, () => app.inject({ method: 'GET', url: '/health' })),
+    );
+    assert.equal(calls, 1, 'five concurrent health checks must not buy five model calls');
+    for (const res of responses) {
+      assert.equal(res.json().model, 'ok');
+    }
+    // And the cached verdict serves later requests without paying again.
+    await app.inject({ method: 'GET', url: '/health' });
+    assert.equal(calls, 1, 'a cached verdict must not be re-bought');
+  } finally {
+    await app.close();
   }
 });

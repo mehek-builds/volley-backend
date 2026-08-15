@@ -14,6 +14,11 @@ import {
 } from '../llm/parse';
 import { courseworkFromParsed } from '../engine/resumePolicy';
 import { extractPdfText } from '../lib/pdfText';
+import {
+  MODEL_UNAVAILABLE_CODE,
+  MODEL_UNAVAILABLE_MESSAGE,
+  isModelUnavailable,
+} from '../lib/llmFailure';
 import { MultipartFile } from '@fastify/multipart';
 import { z } from 'zod';
 import { resumeEmailOfRecord } from '../lib/resumeEmail';
@@ -800,6 +805,19 @@ export async function profileRoutes(fastify: FastifyInstance) {
       };
     } catch (err) {
       fastify.log.error(err);
+      /* THE MODEL BEING UNAVAILABLE IS NOT A VERDICT ON THE UPLOAD.
+       *
+       * On 2026-08-15 the Anthropic balance ran out and every upload got "Failed to parse resume
+       * with AI" printed above a Choose a file button. Everything on that screen said the resume
+       * was at fault, so the student's only move was to go looking for a file that would work, and
+       * none would have. A 503 that names our side, plus a code the client can act on, is the
+       * difference between "come back shortly" and "your resume is broken". See lib/llmFailure.ts. */
+      if (isModelUnavailable(err)) {
+        return reply.status(503).send({
+          error: MODEL_UNAVAILABLE_MESSAGE,
+          code: MODEL_UNAVAILABLE_CODE,
+        });
+      }
       return reply.status(500).send({ error: 'Failed to parse resume with AI' });
     }
 
