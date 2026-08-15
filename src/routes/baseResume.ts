@@ -22,7 +22,6 @@ import { academicRecordRowFor } from './profile';
 import {
   findPdfSafeMarginIssues,
   findPdfTextFidelityIssues,
-  hasContactRoute,
   renderResumePdf,
   ResumeContactError,
   type ContactHeader,
@@ -39,7 +38,7 @@ import {
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
-import { resumeEmailOfRecord } from '../lib/resumeEmail';
+import { resumeEmailForUpload } from '../lib/resumeEmail';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 
 /* GET /resume/base        - the stored base resume, or 404 if never built.
@@ -274,7 +273,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
     const contact = contactHeaderFrom(
       profile.parsed_json,
       applicationProfile as unknown as Record<string, unknown>,
-      resumeEmailOfRecord(profile.parsed_json) ?? request.jwtPayload!.email,
+      resumeEmailForUpload(profile.parsed_json, request.jwtPayload!.email),
     );
     try {
       const rendered = await renderResumePdf(
@@ -531,8 +530,13 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        *
        * The login email is the student's own address, NOT a portal routing alias. Aliases live in
        * application_email_aliases and never reach `users.email`, so the separation that
-       * resumeEmail.ts's comment protects is untouched. */
-      const resumeEmail = resumeEmailOfRecord(profile.parsed_json) ?? request.jwtPayload!.email;
+       * resumeEmail.ts's comment protects is untouched.
+       *
+       * `resumeEmailForUpload` rather than a bare `??`, so this and the upload resolve the address
+       * by one set of rules including the trim, the lowercase and the shape check. Two paths
+       * answering this question differently is the defect being fixed; leaving a second, laxer
+       * answer here would reintroduce it in miniature. */
+      const resumeEmail = resumeEmailForUpload(profile.parsed_json, request.jwtPayload!.email);
       const contact = contactHeaderFrom(
         profile.parsed_json,
         applicationRecord,
@@ -564,23 +568,20 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
               : [],
           },
         );
+        /* NO EMAIL GATE HERE ANY MORE, and nothing replaces it, because the case it was reaching
+         * for is already covered twice over.
+         *
+         * It read `!resumeEmail ? ['Add a personal resume email to your profile...'] : []`, which
+         * with the resolution above fixed would now be unreachable for anyone with a login email,
+         * and for a guest it blocked a resume that carried a perfectly good phone number. Most
+         * production accounts are guests.
+         *
+         * The genuine failure, a document an employer cannot reply to at all, is caught earlier and
+         * harder: renderResumePdf refuses to draw it (engine/resumeRender.ts hasContactRoute) and
+         * the ResumeContactError branch in the catch below already says so in those words. A second
+         * check here could never fire, since this array is only built once that render has
+         * succeeded. */
         const issues = [
-          /* CAN AN EMPLOYER REPLY TO THIS DOCUMENT? That is the question worth failing a resume
-           * over, and it is the one this check asked before 861e767 (2026-08-11) narrowed it to a
-           * single stored field.
-           *
-           * Gating on `!resumeEmail` alone blocks a guest, who has no login email to fall back to
-           * and no way to set one without an account, even when the resume carries a phone number
-           * an employer can call. Most accounts in production are guests. The narrower rule also
-           * said nothing true: it named a field the student could not see from that screen rather
-           * than the consequence, which is that the document is unreachable.
-           *
-           * `hasContactRoute` is the renderer's own rule for the same question (engine/resumeRender
-           * .ts) and it already refuses to draw a document with neither, so this reports the same
-           * boundary rather than inventing a second, stricter one. */
-          ...(!hasContactRoute(contact)
-            ? ['this resume has no email address and no phone number on it, so an employer who reads it cannot reply. Add one in Documents, under Edit parsed details, then build it again']
-            : []),
           ...finalValidation.issues,
           ...baseResumeSelectionIssues(printed, priorityEntries),
           ...layout.issues,
