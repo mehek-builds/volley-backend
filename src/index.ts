@@ -5,7 +5,9 @@ import multipart from '@fastify/multipart';
 
 import { sql } from 'drizzle-orm';
 import { db } from './db';
-import { healthStatusCode, probeDatabase } from './lib/healthProbe';
+import Anthropic from '@anthropic-ai/sdk';
+import type { FastifyBaseLogger } from 'fastify';
+import { healthStatusCode, probeDatabase, probeModel, type ModelHealth } from './lib/healthProbe';
 import { authRoutes } from './routes/auth';
 import { profileRoutes } from './routes/profile';
 import { resolveRoutes } from './routes/resolve';
@@ -176,6 +178,40 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // operations keep their separate database-backed per-user limits in quota.ts.
   fastify.addHook('onRequest', createRateLimitHook(options.rateLimit ?? defaultRateLimitConfig(), options.now));
 
+  /* The smallest call the API will accept: one cheap model, one token in, one token out, and no
+     system prompt. It exists to learn whether we will be served AT ALL, so it asks for the least
+     answer that still proves it. Haiku deliberately, and deliberately not the model any real
+     feature uses: this is a reachability and billing check, not a capability check. */
+  const modelPing = async () => {
+    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    await client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'ok' }],
+    });
+  };
+
+  /* One verdict per warm instance per TTL. See the comment at the call site for why this probe is
+     cached when the database one is not: this one costs money. */
+  const MODEL_HEALTH_TTL_MS = 60_000;
+  let modelHealthCache: { at: number; value: ModelHealth } | null = null;
+  const cachedModelHealth = async (log: FastifyBaseLogger): Promise<ModelHealth> => {
+    const now = Date.now();
+    if (modelHealthCache && now - modelHealthCache.at < MODEL_HEALTH_TTL_MS) {
+      return modelHealthCache.value;
+    }
+    const value = await probeModel(modelPing, {
+      configured: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
+    });
+    if (value.status === 'unavailable') {
+      // Same split as the database probe: the category goes in the response, the provider's own
+      // message goes to the log, because /health is public and that message names our account.
+      log.error({ reason: value.reason, ms: value.ms }, 'health: model unavailable');
+    }
+    modelHealthCache = { at: now, value };
+    return value;
+  };
+
   // Health check
   fastify.get('/health', async (request, reply) => {
     /* THE DATABASE, because a health check that cannot fail is not a health check.
@@ -234,13 +270,28 @@ export async function buildApp(options: BuildAppOptions = {}) {
       })
       : applicationEmailUnavailable('database_unavailable');
 
+    /* THE MODEL, cached, because this probe costs money and the database probe does not.
+     *
+     * A monitor polling every 30s would otherwise buy a model call every 30s forever. The verdict
+     * is cached per warm instance for MODEL_HEALTH_TTL_MS, which bounds the spend to roughly one
+     * call per instance per TTL and keeps /health fast. The staleness that buys is acceptable here:
+     * an exhausted balance does not repair itself within a minute, and the failure this exists to
+     * catch lasts until somebody tops it up.
+     *
+     * The failing case is free anyway. A refusal is returned before any tokens are billed, so the
+     * state a monitor will be repeating during an incident costs nothing to observe. */
+    const model = await cachedModelHealth(request.log);
+
     return reply.status(healthStatusCode(database)).send({
       /* 'degraded', not 'error': the service is up and answering, and is correctly reporting that a
          dependency it cannot work without is unavailable. Every identity field below is still
          present on a 503, because DEPLOY.md reads `revision` from this response to confirm what
          shipped, and that has to keep working during an incident. */
-      status: aggregateServiceHealthStatus({ database: database.status, applicationEmail }),
+      status: aggregateServiceHealthStatus({ database: database.status, applicationEmail, model }),
       database: database.status,
+      model: model.status,
+      ...(model.status === 'unavailable' ? { model_reason: model.reason } : {}),
+      model_ms: model.ms,
       ...(database.status === 'ok' ? {} : { database_reason: database.reason }),
       database_ms: database.ms,
       service: 'litos-api',

@@ -69,6 +69,29 @@ function messageOf(error: unknown): string {
   return typeof error === 'string' ? error : '';
 }
 
+/**
+ * Coarse enough to be safe on a public endpoint, specific enough to shorten an investigation.
+ *
+ * Same reasoning as classifyDatabaseError in healthProbe.ts, and `credit` earns its own value for
+ * the same reason `quota` does there: it is the failure this was written for, it is
+ * indistinguishable from any other 400 at the HTTP layer, and knowing it instantly is the
+ * difference between opening a billing page and debugging a parser.
+ */
+export type ModelFailureReason = 'credit' | 'auth' | 'rate_limit' | 'overloaded' | 'timeout' | 'error';
+
+/** Categorise a model failure without leaking the provider's message onto a public endpoint. */
+export function modelFailureReason(error: unknown): ModelFailureReason {
+  const status = apiStatus(error);
+  const message = messageOf(error).toLowerCase();
+  if (status === 429) return 'rate_limit';
+  if (status === 401 || status === 403) return 'auth';
+  if (status === 402) return 'credit';
+  if (status !== undefined && status >= 500) return 'overloaded';
+  if (status === 400 && /credit balance|billing|quota|insufficient/.test(message)) return 'credit';
+  if (/timeout|etimedout|aborted/.test(message)) return 'timeout';
+  return 'error';
+}
+
 /** What the student is told when the model is unavailable. Says whose fault it is, and what to do. */
 export const MODEL_UNAVAILABLE_MESSAGE =
   'Litos could not read your resume just now. This is a problem on our side, not with your file. Please try again in a few minutes.';
