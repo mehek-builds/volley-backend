@@ -59,6 +59,15 @@ import { aggregateServiceHealthStatus } from './lib/serviceHealth';
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
   now?: () => number;
+  /**
+   * The /health model probe's call, injected for the same reason probeDatabase injects its query.
+   *
+   * Without this the test suite makes a REAL, BILLED call to Anthropic: src/index.ts imports
+   * dotenv/config, so a repo .env supplies ANTHROPIC_API_KEY, and src/index.test.ts hits /health a
+   * dozen times. Measured at 419ms of live network per run. It happens to be free today only
+   * because the balance this whole change is about is empty. Tests pass a stub.
+   */
+  modelPing?: () => Promise<unknown>;
 }
 
 function trustProxySetting(): false | number {
@@ -182,34 +191,49 @@ export async function buildApp(options: BuildAppOptions = {}) {
      system prompt. It exists to learn whether we will be served AT ALL, so it asks for the least
      answer that still proves it. Haiku deliberately, and deliberately not the model any real
      feature uses: this is a reachability and billing check, not a capability check. */
-  const modelPing = async () => {
+  const modelPing = options.modelPing ?? (async () => {
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 1,
       messages: [{ role: 'user', content: 'ok' }],
     });
-  };
+  });
 
-  /* One verdict per warm instance per TTL. See the comment at the call site for why this probe is
-     cached when the database one is not: this one costs money. */
-  const MODEL_HEALTH_TTL_MS = 60_000;
+  /* ONE VERDICT PER WARM INSTANCE PER TTL, AND ONE CALL IN FLIGHT AT A TIME.
+   *
+   * Both halves matter, and for different reasons. The TTL bounds the steady cost of a monitor
+   * polling on a schedule. The in-flight promise bounds the BURST cost: /health is public and sits
+   * in UNMETERED_PATHS (middleware/rateLimit.ts), so it is the one endpoint anybody can hit as
+   * fast as they like, and without this every concurrent request on a cold instance would start
+   * its own paid call. Sharing the promise makes a burst cost exactly one.
+   *
+   * Five minutes rather than one: an exhausted balance does not repair itself, the failure lasts
+   * until somebody tops it up, and the shorter TTL was buying freshness nobody needed at five
+   * times the price. */
+  const MODEL_HEALTH_TTL_MS = 300_000;
   let modelHealthCache: { at: number; value: ModelHealth } | null = null;
+  let modelHealthInFlight: Promise<ModelHealth> | null = null;
   const cachedModelHealth = async (log: FastifyBaseLogger): Promise<ModelHealth> => {
     const now = Date.now();
     if (modelHealthCache && now - modelHealthCache.at < MODEL_HEALTH_TTL_MS) {
       return modelHealthCache.value;
     }
-    const value = await probeModel(modelPing, {
-      configured: Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
+    if (modelHealthInFlight) return modelHealthInFlight;
+    modelHealthInFlight = probeModel(modelPing, {
+      configured: Boolean(options.modelPing) || Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
+    }).then((value) => {
+      if (value.status === 'unavailable') {
+        // Same split as the database probe: the category goes in the response, the provider's own
+        // message goes to the log, because /health is public and that message names our account.
+        log.error({ reason: value.reason, ms: value.ms }, 'health: model unavailable');
+      }
+      modelHealthCache = { at: Date.now(), value };
+      return value;
+    }).finally(() => {
+      modelHealthInFlight = null;
     });
-    if (value.status === 'unavailable') {
-      // Same split as the database probe: the category goes in the response, the provider's own
-      // message goes to the log, because /health is public and that message names our account.
-      log.error({ reason: value.reason, ms: value.ms }, 'health: model unavailable');
-    }
-    modelHealthCache = { at: now, value };
-    return value;
+    return modelHealthInFlight;
   };
 
   // Health check
