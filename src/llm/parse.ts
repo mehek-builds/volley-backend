@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { isUpstreamApiError } from '../lib/llmFailure';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -463,6 +464,10 @@ export async function parseResumeWithClaude(resumeText: string): Promise<ParsedP
     // document instead of trusted. See reconcileGpaWithSource for the live misread that forced it.
     return reconcileGpaWithSource(parsed, resumeText);
   } catch (error) {
+    /* An error that arrived with an HTTP status came from the API, so it keeps its own message.
+       This catch used to wrap everything, which is how a 400 "Your credit balance is too low"
+       reached production logs on 2026-08-15 described as invalid JSON. See lib/llmFailure.ts. */
+    if (isUpstreamApiError(error)) throw error;
     throw new Error(`Claude returned invalid JSON for resume parsing: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}`);
   }
 }
@@ -513,6 +518,8 @@ export async function parseResumeFromPdf(pdf: Buffer): Promise<ParsedProfile> {
     const initial = await request();
     return await parsedProfileWithOneRepair(initial, request);
   } catch (error) {
+    // Same rule as the text path above: their errors keep their words, ours get ours.
+    if (isUpstreamApiError(error)) throw error;
     throw new Error(`Claude returned invalid JSON for scanned resume parsing: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}`);
   }
 }
