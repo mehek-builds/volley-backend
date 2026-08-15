@@ -22,6 +22,7 @@ import { academicRecordRowFor } from './profile';
 import {
   findPdfSafeMarginIssues,
   findPdfTextFidelityIssues,
+  hasContactRoute,
   renderResumePdf,
   ResumeContactError,
   type ContactHeader,
@@ -513,7 +514,25 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        * it passed is exactly R-017's failure mode, and a spec saved behind a check that silently
        * threw is the same lie in a different place. */
       send({ event: 'stage', stage: 'checking' });
-      const resumeEmail = resumeEmailOfRecord(profile.parsed_json);
+      /* THE ACCOUNT EMAIL IS A RESUME EMAIL, and leaving it out of this line blocked nearly every
+       * account in production.
+       *
+       * `resumeEmailOfRecord` reads only `parsed_json.resume_email`, which nothing in onboarding
+       * ever writes: measured 2026-08-16, 16 of 17 production profiles have none. So this resolved
+       * to undefined, `contactHeaderFrom` built a header with NO email, the renderer printed a
+       * resume an employer cannot reply to by mail, and the gate below then refused to save it. The
+       * student was told to "add a personal resume email to your profile" while looking at a
+       * preview with their own address printed on it, because /start passes the login email to the
+       * PREVIEW (app/start/page.tsx) even though the server never put it in the document.
+       *
+       * The fallback is not new and not invented here. `GET /resume/base/file`, 240 lines up in
+       * this same file, has always read `resumeEmailOfRecord(...) ?? request.jwtPayload!.email`.
+       * Two routes answering one question two ways is the whole defect; this makes them agree.
+       *
+       * The login email is the student's own address, NOT a portal routing alias. Aliases live in
+       * application_email_aliases and never reach `users.email`, so the separation that
+       * resumeEmail.ts's comment protects is untouched. */
+      const resumeEmail = resumeEmailOfRecord(profile.parsed_json) ?? request.jwtPayload!.email;
       const contact = contactHeaderFrom(
         profile.parsed_json,
         applicationRecord,
@@ -546,7 +565,22 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
           },
         );
         const issues = [
-          ...(!resumeEmail ? ['Add a personal resume email to your profile before generating this resume.'] : []),
+          /* CAN AN EMPLOYER REPLY TO THIS DOCUMENT? That is the question worth failing a resume
+           * over, and it is the one this check asked before 861e767 (2026-08-11) narrowed it to a
+           * single stored field.
+           *
+           * Gating on `!resumeEmail` alone blocks a guest, who has no login email to fall back to
+           * and no way to set one without an account, even when the resume carries a phone number
+           * an employer can call. Most accounts in production are guests. The narrower rule also
+           * said nothing true: it named a field the student could not see from that screen rather
+           * than the consequence, which is that the document is unreachable.
+           *
+           * `hasContactRoute` is the renderer's own rule for the same question (engine/resumeRender
+           * .ts) and it already refuses to draw a document with neither, so this reports the same
+           * boundary rather than inventing a second, stricter one. */
+          ...(!hasContactRoute(contact)
+            ? ['this resume has no email address and no phone number on it, so an employer who reads it cannot reply. Add one in Documents, under Edit parsed details, then build it again']
+            : []),
           ...finalValidation.issues,
           ...baseResumeSelectionIssues(printed, priorityEntries),
           ...layout.issues,

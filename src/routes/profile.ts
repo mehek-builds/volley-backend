@@ -21,7 +21,7 @@ import {
 } from '../lib/llmFailure';
 import { MultipartFile } from '@fastify/multipart';
 import { z } from 'zod';
-import { resumeEmailOfRecord } from '../lib/resumeEmail';
+import { resumeEmailForUpload, resumeEmailOfRecord } from '../lib/resumeEmail';
 import {
   extractDocxText,
   inspectResumeUpload,
@@ -798,9 +798,39 @@ export async function profileRoutes(fastify: FastifyInstance) {
       // Carried on the parse rather than in its own column: it is a fact ABOUT this parse of this
       // file, so it should be replaced wholesale when a student re-uploads, which is exactly what
       // parsed_json already does.
+      /* THE ADDRESS AN EMPLOYER REPLIES TO, given a value here rather than left for a screen
+       * nobody visits.
+       *
+       * `resume_email` is read by the base resume, the tailored resume, the packet audit and the
+       * academic-email answer, and NOTHING writes it: the parser does not extract an email at all
+       * (llm/parse.ts has no email field), so its only source was a text box under "Edit parsed
+       * details" in Documents, which onboarding never mentions. Measured 2026-08-16: 16 of 17
+       * production profiles had none, which is what made the base resume's ATS gate refuse nearly
+       * every account with "Add a personal resume email to your profile".
+       *
+       * Two rules, and the order matters:
+       *
+       *   PRESERVE first. parsed_json is replaced WHOLESALE on every upload, so an address the
+       *   student typed themselves was being destroyed by their next re-upload. It is their value,
+       *   not this parse's, and the comment below about replacing facts wholesale is exactly why it
+       *   has to be carried across by hand.
+       *
+       *   SEED second, from the verified login email. It is the address they signed up with and the
+       *   one `GET /resume/base/file` already prints, so this stores what the product was going to
+       *   show anyway, and stores it somewhere the student can see and change. A stored default is
+       *   not the same as an invisible fallback: the box in Documents now has their address in it
+       *   rather than a placeholder. */
+      const [existingProfile] = await db
+        .select({ parsed_json: profiles.parsed_json })
+        .from(profiles)
+        .where(eq(profiles.user_id, userId))
+        .limit(1);
+      const resumeEmail = resumeEmailForUpload(existingProfile?.parsed_json, request.jwtPayload!.email);
+
       parsedProfile = {
         ...parsedProfile,
         full_name: normalizeDisplayName(parsedProfile.full_name ?? ''),
+        ...(resumeEmail ? { resume_email: resumeEmail } : {}),
         ...(sourcePages > 0 ? { source_pages: sourcePages } : {}),
       };
     } catch (err) {
