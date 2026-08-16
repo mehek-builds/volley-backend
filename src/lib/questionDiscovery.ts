@@ -1451,7 +1451,9 @@ function academicEmailAnswer(
  * `source code` and `sources` as a plural noun are excluded outright, because no phrasing of this
  * question needs them and every phrasing of a software question does.
  */
-const OPEN_SOURCE_SUBJECT = /\b(?:open[\s-]?source|source\s+code|sources)\b/i;
+// `sources` as a bare plural is deliberately NOT excluded: it would reject "Referral sources -
+// additional details", a real phrasing, and it carries no software signal of its own.
+const OPEN_SOURCE_SUBJECT = /\b(?:open[\s-]?source|source\s+code)\b/i;
 const QUALIFIED_SOURCE =
   String.raw`(?:(?:referral|application|recruiting)\s+source|source\s+of\s+(?:your\s+|the\s+)?application|\(\s*for\s+source\s*\)|for\s+source\b|referrer|how\s+you\s+(?:heard|found))`;
 const REFERRAL_SOURCE_DETAIL_QUESTION = new RegExp(
