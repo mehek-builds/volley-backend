@@ -76,3 +76,39 @@ test('the choice control itself is still the referral question, not the detail b
   const choice = resolveKnownAnswer('How did you hear about us?', 'select', jobBoard, undefined);
   assert.notDeepEqual(choice, { value: 'Litos' });
 });
+
+/* THE TARGET THE QUESTION NAMES, when it is this posting written in more than one word.
+ *
+ * Palantir's Lever form, live 2026-08-16: "HOW DID YOU HEAR ABOUT THIS INTERNSHIP OPPORTUNITY?"
+ * came back held while Greenhouse's "How did you hear about us?" resolved in the same run. The
+ * target patterns allowed exactly one noun after the determiner, and "this internship opportunity"
+ * is two, so it fell through to the employer check and failed it.
+ */
+test('a multi-word generic target is still this posting', () => {
+  for (const label of [
+    'HOW DID YOU HEAR ABOUT THIS INTERNSHIP OPPORTUNITY?',
+    'How did you hear about this job opportunity?',
+    'How did you become aware of this internship opportunity?',
+    'Where did you find this job posting?',
+    // The single-noun forms that already worked must keep working.
+    'How did you hear about us?',
+    'How did you hear about this role?',
+  ]) {
+    assert.deepEqual(resolveKnownAnswer(label, 'select', jobBoard, undefined), { value: 'Job board' }, label);
+  }
+});
+
+test('widening the target does not answer a question scoped to someone else', () => {
+  /* The safety boundary, and the reason the noun list is closed. Any word outside it means the
+   * target is not plainly this posting, and the question goes back to employer validation - which
+   * fails closed with no packet employer. */
+  for (const label of [
+    'How did you hear about this role at Palantir?',
+    'How did you hear about our CEO?',
+    'How did you hear about this event?',
+    'How did you hear about our diversity program at Stanford?',
+  ]) {
+    const answer = resolveKnownAnswer(label, 'select', jobBoard, undefined);
+    assert.notDeepEqual(answer, { value: 'Job board' }, label);
+  }
+});
