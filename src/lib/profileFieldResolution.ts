@@ -66,6 +66,9 @@ import {
   referralSourceOptionCandidates,
   employerOwnSiteOption,
   isCompanySiteReferralClaim,
+  isJobBoardReferralClaim,
+  genericJobBoardOption,
+  otherReferralOption,
 } from './referralSource';
 import {
   comparableOption,
@@ -1247,6 +1250,21 @@ export function resolveProfileField(
     const evidenced = referralSourceForApplication(ap.referral_source_default, ap.referral_source_evidence);
     if (isCompanySiteReferralClaim(evidenced)) {
       matched = employerOwnSiteOption(usableOptions(shape.options)) ?? null;
+    }
+    /* HER STANDING ANSWER, UNDER THE BOARD'S OWN WORDING, AND THEN "OTHER".
+     *
+     * Order is the whole design. The alias ladder above has already tried her answer spelled the
+     * ordinary ways. genericJobBoardOption then reads the employer's list for an entry that states
+     * "a job board" and names nobody in particular, which is the same fact in the board's words.
+     * Only when the list genuinely does not offer it does "Other" apply.
+     *
+     * "Other" last, and never ahead of a job-board entry, because it says strictly less. Measured
+     * on Jane Street 2026-08-16: 128 options, no generic job-board entry, and the nearest match
+     * "University job board" is a claim she cannot make. Before this the question came back blank
+     * and held a complete application; now it is answered the way she asked for it to be. */
+    if (matched === null && isJobBoardReferralClaim(evidenced)) {
+      const options = usableOptions(shape.options);
+      matched = genericJobBoardOption(options) ?? otherReferralOption(options) ?? null;
     }
   }
   if (key === 'referral_source_default' && usableOptions(shape.options).length > 0 && matched === null) {
