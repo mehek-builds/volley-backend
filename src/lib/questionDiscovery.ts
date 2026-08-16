@@ -1434,13 +1434,41 @@ function academicEmailAnswer(
  * exactly the EEO self-identification Litos is forbidden to speak for. The label must say source,
  * referral, or how she heard.
  */
-const REFERRAL_SOURCE_DETAIL_QUESTION =
-  /(?:additional\s+(?:information|details?|context)|please\s+(?:specify|describe|provide|tell\s+us)|if\s+other|more\s+detail)[^.?]*\b(?:for\s+)?(?:source|referral|referrer|how\s+you\s+(?:heard|found))\b|\b(?:source|referral|referrer)\b[^.?]*(?:additional\s+(?:information|details?)|please\s+specify|details?)/i;
+/* A BARE "source" IS NOT THIS QUESTION, and reading it as one shipped a wrong answer.
+ *
+ * The first version matched the word `source` anywhere after a "please describe"-shaped opener.
+ * "Please describe your open source contributions" satisfied that, and resolveKnownAnswer returned
+ * {value: 'Litos'} for it - into an employer's box asking about her open-source work. Confirmed the
+ * same way for "Please specify your open source experience" and "Tell us about your open source
+ * work - additional details".
+ *
+ * parseReferralQuestion has guarded exactly this hazard from the start with an explicit
+ * `\bsource code\b` exclusion. This predicate runs EARLIER in resolveKnownAnswer and had no such
+ * guard, so it claimed the label before the careful code could refuse it.
+ *
+ * So the source word now has to be QUALIFIED - a referral source, the source of an application, the
+ * "(for source)" parenthetical Greenhouse writes - rather than merely present. `open source`,
+ * `source code` and `sources` as a plural noun are excluded outright, because no phrasing of this
+ * question needs them and every phrasing of a software question does.
+ */
+// `sources` as a bare plural is deliberately NOT excluded: it would reject "Referral sources -
+// additional details", a real phrasing, and it carries no software signal of its own.
+const OPEN_SOURCE_SUBJECT = /\b(?:open[\s-]?source|source\s+code)\b/i;
+const QUALIFIED_SOURCE =
+  String.raw`(?:(?:referral|application|recruiting)\s+source|source\s+of\s+(?:your\s+|the\s+)?application|\(\s*for\s+source\s*\)|for\s+source\b|referrer|how\s+you\s+(?:heard|found))`;
+const REFERRAL_SOURCE_DETAIL_QUESTION = new RegExp(
+  `(?:additional\\s+(?:information|details?|context)|please\\s+(?:specify|describe|provide|tell\\s+us)|if\\s+other|more\\s+detail)[^.?]*${QUALIFIED_SOURCE}`
+  + `|${QUALIFIED_SOURCE}[^.?]*(?:additional\\s+(?:information|details?)|please\\s+specify|details?)`,
+  'i',
+);
 
 function referralSourceDetailAnswer(
   label: string,
   ap: ApplicationProfileLike,
 ): { value: string } | null {
+  // The subject exclusion first, so no qualified-source phrasing can drag an open-source question
+  // back in. Same guard parseReferralQuestion has always had, applied at the earlier gate.
+  if (OPEN_SOURCE_SUBJECT.test(label)) return null;
   if (!REFERRAL_SOURCE_DETAIL_QUESTION.test(label)) return null;
   // Only alongside a job-board default. An applicant whose stored source is something else has not
   // declared this, and a constant here would be exactly the generated claim selfDeclaration forbids.
