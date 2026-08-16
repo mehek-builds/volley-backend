@@ -32,8 +32,34 @@ export function referralSourceOptionCandidates(
   const resolved = referralSourceForApplication(value, evidence);
   if (!resolved) return [];
   if (isJobBoardReferralClaim(resolved)) {
-    if (evidence?.kind !== 'litos_job_board' || evidence.value !== 'Job board') return [];
-    return ['Job board', 'Job Board', 'Online job board'];
+    /* THE STORED DEFAULT IS ITSELF THE DECLARATION, and requiring per-packet evidence on top of it
+     * is what made it unusable.
+     *
+     * This used to return [] unless the packet carried `litos_job_board` evidence. Almost no packet
+     * does, so an applicant with `referral_source_default: "Job board"` on file had that answer
+     * discarded before any option was compared, and the question came back as "left for you" on
+     * form after form. Measured 2026-08-16: "how did you hear about us" was the single largest
+     * blocker on the owner's queue.
+     *
+     * She has since declared the rule outright - this question is answered "Job board" every time -
+     * and a stored default is exactly the shape selfDeclaration.ts permits: Litos RELAYS a
+     * declaration she has made and never GENERATES one. The evidence gate stays meaningful in the
+     * other direction, because referralSourceForApplication still lets evidence override the stored
+     * value; what it no longer does is veto her own standing answer.
+     *
+     * The aliases are the spellings employers actually use, read off live boards. They stay narrow
+     * and GENERIC on purpose: a qualified board like "University job board" is a different claim,
+     * and genericJobBoardOption below is what refuses it. */
+    return [
+      'Job board',
+      'Job Board',
+      'Job boards',
+      'Online job board',
+      'Online Job Board',
+      'Job site',
+      'Job search site',
+      'Job posting site',
+    ];
   }
   if (isCompanySiteReferralClaim(resolved)) {
     if (evidence?.kind !== 'employer_career_site' || evidence.value !== 'Company website') return [];
@@ -91,6 +117,55 @@ export function employerOwnSiteOption(options: readonly string[]): string | unde
     .filter((option) => option && NAMES_A_SITE.test(option) && !NAMES_SOMEONE_ELSE.test(option));
   return named.length === 1 ? named[0] : undefined;
 }
+
+/* THE JOB BOARD ENTRY, UNDER THE BOARD'S OWN WORDING, AND THE ONE THAT MUST NOT BE PICKED.
+ *
+ * Same shape as employerOwnSiteOption above and for the same reason: the ladder cannot enumerate
+ * every spelling, but the list itself says which entry states the fact.
+ *
+ * MEASURED, live and read-only, on Jane Street 2026-08-16. Its 128-entry list has no plain
+ * "Job board" at all. The nearest entry is "University job board", and picking that would tell an
+ * employer she came through USC's careers board when she did not. That is the whole reason this is
+ * a predicate with exclusions rather than a fuzzy match: a QUALIFIED board is a different claim
+ * about how she found the role, and the qualifier is usually the only word that distinguishes them.
+ *
+ * So an entry naming a specific board, a school, a person, an event or a social network is not the
+ * generic job-board entry whatever else it says. When that leaves nothing, or leaves more than one,
+ * this returns undefined and the caller falls through to "Other", which is honest and answerable.
+ */
+const NAMES_A_JOB_BOARD = /\bjob\s*(?:board|site|posting\s+site|search\s+site)s?\b/i;
+const NAMES_A_PARTICULAR_BOARD =
+  /\b(?:college|university|universities|school|campus|alumni|student|career\s+fair|job\s+fair|fair|conference|event|newsletter|blog|podcast|professor|faculty|advisor|friend|family|colleague|employee|recruiter|agency|word\s+of\s+mouth|linkedin|indeed|glassdoor|handshake|monster|ziprecruiter|builtin|wellfound|angellist|dice|simplify|fairygodboss|piazza|google|bing|facebook|instagram|twitter|youtube|tiktok|reddit|github|company|our)\b/i;
+
+/** The one option that states "a job board", generically, or undefined. */
+export function genericJobBoardOption(options: readonly string[]): string | undefined {
+  const named = options
+    .map((option) => option.trim())
+    .filter((option) => option && NAMES_A_JOB_BOARD.test(option) && !NAMES_A_PARTICULAR_BOARD.test(option));
+  return named.length === 1 ? named[0] : undefined;
+}
+
+/* "OTHER", AND WHY IT IS A TRUTHFUL LAST RESORT RATHER THAN A SHRUG.
+ *
+ * Reached only once the list has been searched for her actual answer and does not offer it. On a
+ * list like Jane Street's, "Other" is the only entry that does not misstate how she found the role,
+ * and leaving the question blank holds a complete application over a question she HAS answered.
+ *
+ * It is deliberately last. An entry that says "job board" is always preferred, because it says more.
+ */
+const IS_OTHER_OPTION = /^(?:other|other\s*[:(-].*|others|other\s+\(please\s+specify\)|none\s+of\s+the\s+above)$/i;
+
+export function otherReferralOption(options: readonly string[]): string | undefined {
+  return options.map((option) => option.trim()).find((option) => option && IS_OTHER_OPTION.test(option));
+}
+
+/**
+ * What goes in the free-text box that an "Other" choice reveals, when the form has one.
+ *
+ * Her declaration, in her words: choose Other, then say Litos. It is also simply true - Litos is
+ * the job board this application came through - which is why it is safe to state rather than hold.
+ */
+export const REFERRAL_OTHER_DETAIL = 'Litos';
 
 /** Resolve a durable default against evidence for this one application. */
 export function referralSourceForApplication(

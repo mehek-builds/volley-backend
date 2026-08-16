@@ -502,6 +502,33 @@ test('a truncated school name never picks a campus it cannot distinguish', () =>
   );
 });
 
+/* THE WIRING, NOT THE MODULE. genericJobBoardOption and otherReferralOption are correct in
+ * referralSource.test.ts and answer nothing unless resolveProfileField actually reaches them. That
+ * is the composition-root defect this repo has now recorded four times: module correct, suite
+ * green, nothing mounts it. These assertions go through resolveProfileField's own `answer` helper
+ * for that reason. */
+test('a stored job-board default answers the question, by the board wording or by Other', () => {
+  const jobBoard: ApplicationProfileLike = { ...STORED_PROFILE, referral_source_default: 'Job board' };
+  const label = 'How did you hear about us?';
+
+  // The ordinary spelling, matched by the alias ladder.
+  assert.equal(answer(label, ['LinkedIn', 'Job Board', 'Employee referral'], jobBoard), 'Job Board');
+  // The board's own wording, read off the list rather than guessed at.
+  assert.equal(answer(label, ['Referral', 'Online Job Board', 'Career fair'], jobBoard), 'Online Job Board');
+
+  /* Jane Street, live read-only 2026-08-16: 128 entries, no generic job-board entry, and the only
+   * near-match is "University job board" - a claim about USC's careers board that she cannot make.
+   * Before this the question came back blank and held a complete application. */
+  assert.equal(
+    answer(label, ['3Blue1Brown', 'University job board', 'Advent of Code', 'Other'], jobBoard),
+    'Other',
+  );
+  // A qualified board with no Other to fall back on still refuses rather than misstating.
+  assert.equal(answer(label, ['3Blue1Brown', 'University job board', 'Advent of Code'], jobBoard), null);
+  // Other is the last resort and never outranks an entry that says more.
+  assert.equal(answer(label, ['Job board', 'Other'], jobBoard), 'Job board');
+});
+
 /* Every candidate is the same acquisition fact. A generic fallback can overwrite an earlier exact
  * managed selection, so a closed list with no same-channel option returns for review. */
 test('a referral source never claims a channel the applicant did not use', () => {
