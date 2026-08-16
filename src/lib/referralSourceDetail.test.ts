@@ -112,3 +112,24 @@ test('widening the target does not answer a question scoped to someone else', ()
     assert.notDeepEqual(answer, { value: 'Job board' }, label);
   }
 });
+
+test('an open-source question is never mistaken for the referral detail box', () => {
+  /* SHIPPED WRONG on 2026-08-16 and caught by review the next day. The predicate matched the bare
+   * word "source" after a "please describe"-shaped opener, so an employer asking about her
+   * open-source work was answered "Litos". parseReferralQuestion has guarded this exact hazard from
+   * the start with a `source code` exclusion; this predicate runs earlier and had none. */
+  for (const label of [
+    'Please describe your open source contributions',
+    'Please specify your open source experience',
+    'Tell us about your open source work - additional details',
+    'Please describe your source code management experience',
+    'List the open-source projects you maintain, please specify',
+  ]) {
+    assert.notDeepEqual(answerFor(label), { value: 'Litos' }, label);
+  }
+});
+
+test('a qualified source phrase is still the referral detail box', () => {
+  assert.deepEqual(answerFor('Please specify your application source'), { value: 'Litos' });
+  assert.deepEqual(answerFor('Recruiting source - additional information'), { value: 'Litos' });
+});
