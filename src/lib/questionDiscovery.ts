@@ -10,7 +10,12 @@ import {
   storedSalaryOf,
   type StoredSalaryProfile,
 } from './salary';
-import { referralSourceForApplication, type ReferralSourceEvidence } from './referralSource';
+import {
+  referralSourceForApplication,
+  isJobBoardReferralClaim,
+  REFERRAL_OTHER_DETAIL,
+  type ReferralSourceEvidence,
+} from './referralSource';
 import { usStateScopeSkipReason } from './residenceScope';
 import { comparableOption, declineWordingForControl } from './selfIdentification';
 import {
@@ -1411,11 +1416,46 @@ function academicEmailAnswer(
   return isAcademicEmailDomain(stored) ? { value: stored } : held;
 }
 
+/* THE BOX BESIDE THE REFERRAL QUESTION, WHICH IS A DIFFERENT QUESTION.
+ *
+ * Greenhouse renders "How did you hear about us?" with a sibling free-text control, labelled
+ * "Additional information (for source)" on the boards read so far. It is not the referral question
+ * and referralAnswer must not match it: one is a closed choice, the other is prose about the choice.
+ *
+ * Her declaration is that this box says Litos, and it is also simply true - Litos is the job board
+ * the application came through - so it is stated rather than held. It does not depend on which
+ * option the choice control resolved to, which is deliberate: there is no mechanism for one
+ * resolved answer to condition another control's fill, and inventing one to make "only when Other"
+ * work would be a cross-control dependency for no gain. "Litos" is the honest answer beside a
+ * job-board choice and beside an Other choice alike.
+ *
+ * SCOPED HARD to labels that name the source. A bare "please specify" or "if other, please
+ * describe" sits beside gender, ethnicity and disability controls too, and answering those is
+ * exactly the EEO self-identification Litos is forbidden to speak for. The label must say source,
+ * referral, or how she heard.
+ */
+const REFERRAL_SOURCE_DETAIL_QUESTION =
+  /(?:additional\s+(?:information|details?|context)|please\s+(?:specify|describe|provide|tell\s+us)|if\s+other|more\s+detail)[^.?]*\b(?:for\s+)?(?:source|referral|referrer|how\s+you\s+(?:heard|found))\b|\b(?:source|referral|referrer)\b[^.?]*(?:additional\s+(?:information|details?)|please\s+specify|details?)/i;
+
+function referralSourceDetailAnswer(
+  label: string,
+  ap: ApplicationProfileLike,
+): { value: string } | null {
+  if (!REFERRAL_SOURCE_DETAIL_QUESTION.test(label)) return null;
+  // Only alongside a job-board default. An applicant whose stored source is something else has not
+  // declared this, and a constant here would be exactly the generated claim selfDeclaration forbids.
+  const source = referralSourceForApplication(ap.referral_source_default, ap.referral_source_evidence);
+  return isJobBoardReferralClaim(source) ? { value: REFERRAL_OTHER_DETAIL } : null;
+}
+
 function referralAnswer(
   label: string,
   ap: ApplicationProfileLike,
   jdText?: string,
 ): { value: string } | { skipReason: string } | null {
+  // The detail box is answered by referralSourceDetailAnswer, and must not be treated as the
+  // referral choice itself.
+  if (REFERRAL_SOURCE_DETAIL_QUESTION.test(label)) return null;
   const parsed = parseReferralQuestion(label, jdText);
   if (!parsed) return null;
   if (!parsed.valid) {
@@ -6493,6 +6533,10 @@ export function resolveKnownAnswer(
 
   const previouslyApplied = previouslyAppliedAnswer(label, ap, jdText);
   if (previouslyApplied) return previouslyApplied;
+
+  // Ahead of referralAnswer, which declines this label anyway; the order makes that explicit.
+  const referralDetail = referralSourceDetailAnswer(label, ap);
+  if (referralDetail) return referralDetail;
 
   const referral = referralAnswer(label, ap, jdText);
   if (referral) return referral;
