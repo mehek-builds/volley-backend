@@ -3293,6 +3293,28 @@ function parsePriorApplicationQuestion(
   return { family: 'prior_application', valid: false };
 }
 
+/* THE THING THE QUESTION IS ASKING ABOUT, WHEN IT IS THIS POSTING AND NOBODY ELSE.
+ *
+ * Every arm of parseReferralQuestion has to decide whether the target names the packet's own
+ * posting - which she can answer - or somebody else, which she cannot. They each spelled that as
+ * `(?:this|the|our|current)\s+(?:role|job|...)` with room for exactly ONE noun after the
+ * determiner, and employers do not write like that.
+ *
+ * MEASURED, live, on Palantir's Lever form 2026-08-16: "HOW DID YOU HEAR ABOUT THIS INTERNSHIP
+ * OPPORTUNITY?" produced target "this internship opportunity", two nouns, matched nothing, fell
+ * through to the employer check, failed it, and came back "how you heard about this role is yours
+ * to answer" - on the one question the applicant has a standing answer for. "How did you hear about
+ * us?" on Greenhouse resolved fine in the same run, which is what made the shape obvious.
+ *
+ * So: one determiner, then one or more GENERIC posting nouns and nothing else. The list stays
+ * closed on purpose. A target with any word outside it - "this role at Palantir", "this posting on
+ * LinkedIn" - does not match here and still goes to validatedSiblingEmployerTarget, so widening
+ * this cannot start answering a question scoped to somebody else.
+ */
+const GENERIC_POSTING_NOUN = '(?:role|job|position|opportunity|vacancy|opening|internship|posting|listing|program|company|employer|organisation|organization)';
+const GENERIC_POSTING_TARGET = new RegExp(`^(?:this|the|our|current)\\s+${GENERIC_POSTING_NOUN}(?:\\s+${GENERIC_POSTING_NOUN})*$`, 'i');
+const GENERIC_POSTING_TARGET_PREFIX = new RegExp(`^(?:this|the|our|current)\\s+${GENERIC_POSTING_NOUN}\\b`, 'i');
+
 function parseReferralQuestion(label: string, jdText?: string): ParsedSiblingQuestion | null {
   const value = normalizedSiblingQuestionLabel(label);
   if (/\bsource code\b/i.test(value)
@@ -3305,10 +3327,10 @@ function parseReferralQuestion(label: string, jdText?: string): ParsedSiblingQue
   if (discovery) {
     const target = discovery[1]?.trim() ?? '';
     const packetEmployer = frozenJobEmployerFromContext(jdText);
-    const genericTarget = /^(?:this|the|our|current)\s+(?:role|job|position|opportunity|vacancy|opening|internship|company|employer)$/i.test(target)
+    const genericTarget = GENERIC_POSTING_TARGET.test(target)
       || (/^us$/i.test(target) && Boolean(packetEmployer));
     const employerTarget = validatedSiblingEmployerTarget(target, packetEmployer);
-    const recognizedTargetPrefix = /^(?:this|the|our|current)\s+(?:role|job|position|opportunity|vacancy|opening|internship|company|employer)\b/i.test(target)
+    const recognizedTargetPrefix = GENERIC_POSTING_TARGET_PREFIX.test(target)
       || /^us\b/i.test(target)
       || startsWithKnownTarget(target, packetEmployer ? siblingEmployerAliases(packetEmployer) : []);
     if (!genericTarget && !employerTarget && !recognizedTargetPrefix) return null;
@@ -3321,10 +3343,10 @@ function parseReferralQuestion(label: string, jdText?: string): ParsedSiblingQue
   if (find) {
     const target = find[1]?.trim() ?? '';
     const packetEmployer = frozenJobEmployerFromContext(jdText);
-    const genericTarget = /^(?:this|the|our|current)\s+(?:role|job|position|opportunity|vacancy|opening|internship|company|employer)$/i.test(target)
+    const genericTarget = GENERIC_POSTING_TARGET.test(target)
       || (/^us$/i.test(target) && Boolean(packetEmployer));
     const employerTarget = validatedSiblingEmployerTarget(target, packetEmployer);
-    const recognizedTargetPrefix = /^(?:this|the|our|current)\s+(?:role|job|position|opportunity|vacancy|opening|internship|company|employer)\b/i.test(target)
+    const recognizedTargetPrefix = GENERIC_POSTING_TARGET_PREFIX.test(target)
       || /^us\b/i.test(target)
       || startsWithKnownTarget(target, packetEmployer ? siblingEmployerAliases(packetEmployer) : []);
     if (!genericTarget && !employerTarget && !recognizedTargetPrefix) return null;
@@ -3368,7 +3390,7 @@ function parseReferralQuestion(label: string, jdText?: string): ParsedSiblingQue
   if (/^this employer$/i.test(rawTarget)) {
     return { family: 'referral', valid: Boolean(frozenJobEmployerFromContext(jdText)) };
   }
-  if (/^(?:this|the|our)\s+(?:role|job|position|opportunity|internship|company|organization|organisation)$|^us$/i.test(rawTarget)) {
+  if (GENERIC_POSTING_TARGET.test(rawTarget) || /^us$/i.test(rawTarget)) {
     return { family: 'referral', valid: true };
   }
   if (!rawTarget) return { family: 'referral', valid: true };
