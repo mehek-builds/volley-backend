@@ -2810,6 +2810,12 @@ function cityOnlyLocation(value: string): string | undefined {
   return match?.[1]?.trim() || undefined;
 }
 
+/* NOT WIDENED TO `learn about`, tried and reverted 2026-08-17. Belvedere Trading asks "How did you
+ * learn about Belvedere Trading?" and matches nothing here, so its referral control never gets the
+ * referral candidate ladder. The one-word fix is unsafe: a bare `learn about` also catches "what
+ * would you like to learn about at our company?", which would then be answered with an acquisition
+ * channel. It needs the same target validation the questionDiscovery side does, not a looser
+ * alternation. */
 function isReferralSourceQuestion(question: string): boolean {
   return /\b(?:how\s+did\s+you\s+hear|referral\s+source|hear\s+about|where\s+have\s+you\s+learned\s+about|source)\b/i.test(question);
 }
@@ -3221,6 +3227,28 @@ const ESCAPE_HATCH_LABEL_RE =
 export function escapeHatchOptionFor(questionText: string): string | undefined {
   return ESCAPE_HATCH_LABEL_RE.test(questionText.replace(/\s+/g, ' ')) ? 'Other' : undefined;
 }
+
+/* WHY THE "Other" FALLBACK IS NOT APPENDED HERE, tried and reverted 2026-08-17.
+ *
+ * The obvious fix for `no option matched "Job board"` - the receipt on twelve of thirteen packets
+ * in the 2026-08-16 queue run - is to append 'Other' to the candidate list the way the escape hatch
+ * does. It does not work, and the test `managed referral replay emits only the packet-evidenced Job
+ * board channel` catches it.
+ *
+ * MANAGED SELECT ACTIONS REPLAY IN ORDER, and a later value can replace an earlier one. The action
+ * list became `Job board | Enter | Other | Enter`, so on a board that DOES carry a job-board entry
+ * the correct selection is made and then overwritten with "Other". That is worse than the blocker
+ * it fixes: a wrong answer sent silently, instead of a right one held for review.
+ *
+ * `escapeHatchOptionFor` gets away with appending because its trigger is the employer writing
+ * "select Other if it is not listed" into the label - a statement that the list is incomplete, from
+ * the only party who knows.
+ *
+ * THE FIX THAT WOULD WORK is to decide ONE value against the control's real option list rather than
+ * queue two: `buildManagedPortalActions` already reads `packet.fieldOptions?.[inputId]`, and
+ * `genericJobBoardOption` / `otherReferralOption` in referralSource.ts already choose correctly
+ * given a list. The referral path needs to consult them and emit a single fill, not a ladder.
+ */
 
 /**
  * The candidate values for one combobox, with the label's own escape hatch appended last.
