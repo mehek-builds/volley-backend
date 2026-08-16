@@ -1251,6 +1251,18 @@ const NON_OPTION_LISTBOX_LINE =
  * caller asks of an option list. "The stored answer is not on this list" and "the stored answer is
  * past row 100" look identical, and acting on the first would both skip a correct fill and tell the
  * applicant her saved answer is not offered, on a control that offers it.
+ *
+ * THE CAP IS A FLOOR IT STOPS AT, NOT A LENGTH IT EXCEEDS, and reading it as ">= 100" was the
+ * defect. Measured on the live Jane Street posting 2026-08-16, read-only: "How did you hear about
+ * us?" opens with all 128 of its rows in the DOM, first "3Blue1Brown" and last "VLDB", with
+ * "University job board" at row 76. Nothing about it is a window - the menu is simply longer than
+ * a hundred - and ">= 100" called it one, dropped the control, and held the send. That single
+ * comparison was the largest blocker on the owner's queue: 55 of 167 needs_attention packets on
+ * 2026-08-16 were stuck behind this one sentence, every one of them on a "how did you hear about
+ * us" control whose answer is on file.
+ *
+ * A menu that stops AT the cap is still the suspicious case and still fails closed, which is what
+ * the Anduril reads above are. A menu that runs past it has demonstrably not been truncated by it.
  */
 const MANAGED_OPTION_LISTBOX_RENDER_CAP = 100;
 
@@ -1260,7 +1272,7 @@ function parsedManagedOptionLines(value: unknown): { options?: string[]; invalid
   const raw = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const options = raw.filter((line) => !NON_OPTION_LISTBOX_LINE.test(line));
   if (options.length === 0) return { invalid: raw.length > 0 ? 'loading' : 'empty' };
-  if (options.length >= MANAGED_OPTION_LISTBOX_RENDER_CAP) return { invalid: 'windowed' };
+  if (options.length === MANAGED_OPTION_LISTBOX_RENDER_CAP) return { invalid: 'windowed' };
   return { options: [...new Set(options)] };
 }
 

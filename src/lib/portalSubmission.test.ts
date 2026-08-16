@@ -6286,6 +6286,33 @@ test('a windowed option read is discarded, so a saved answer past row 100 is not
   assert.equal(parsed['degree--0']?.length, 3);
 });
 
+test('a menu longer than the render cap is the whole list, not a window over it', () => {
+  // Jane Street "How did you hear about us?", read live read-only 2026-08-16: the menu opens with
+  // all 128 rows in the DOM, "3Blue1Brown" first and "VLDB" last, "University job board" at 76.
+  // A list that runs PAST the cap was not truncated BY it. Reading the cap as ">= 100" called this
+  // complete list a window and held the send on 55 of the owner's 167 blocked packets.
+  const janeStreet = [
+    '3Blue1Brown', 'Academic advisor', 'Academic department', 'Advent of Code',
+    ...Array.from({ length: 71 }, (_, i) => `Source ${String(i).padStart(3, '0')}`),
+    'University job board',
+    ...Array.from({ length: 50 }, (_, i) => `Conference ${String(i).padStart(3, '0')}`),
+    'VLDB',
+  ];
+  assert.equal(janeStreet.length, 127, 'fixture must exceed the 100-row cap');
+  // And the exactly-100 read stays windowed: that one really did stop at the cap.
+  const stoppedAtCap = Array.from({ length: 100 }, (_, i) => `University ${String(i).padStart(3, '0')}`);
+  const parsed = managedResultFieldOptions({
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: reactSelectListboxSelector('hear--0'), value: janeStreet.join('\n') },
+      { selector: reactSelectListboxSelector('school--0'), value: stoppedAtCap.join('\n') },
+    ],
+  });
+  assert.equal(parsed['hear--0']?.length, 127, 'a 127-row menu is an option list');
+  assert.ok(parsed['hear--0']?.includes('University job board'));
+  assert.equal('school--0' in parsed, false, 'a read that stops exactly at the cap is still a window');
+});
+
 /* ---------------------------------------------------------------------------------------------
  * THE OPTION PROBE ON CONTROLS THIS REPO CANNOT NAME IN ADVANCE.
  *
