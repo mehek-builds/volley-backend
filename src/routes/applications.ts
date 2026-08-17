@@ -1509,6 +1509,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         postingCountryFromJobContext(row.job_context),
         postingCountryCodeFromJobContext(row.job_context),
       );
+      /* MEASURED, BECAUSE THE STORED CLAIM CANNOT BE. A confirm-minted claim is byte-identical to an
+       * edit-minted one on the row, so if a client ever regresses into flagging whole lists - the
+       * shape of the 802-answer laundering - the packets themselves cannot show it happened. This
+       * line is the trace: the count of confirmations per save, next to the application, in the
+       * request log where an incident investigation actually looks. The intended client sends one
+       * or two; a save arriving with dozens is the regression announcing itself. */
+      const confirmedCount = parsed.data.questions.filter((question) => question.confirmed === true).length;
+      if (confirmedCount > 0) {
+        request.log.info({ applicationId: row.id, confirmedAnswers: confirmedCount }, 'review answers save carries applicant confirmations');
+      }
       const merged = mergeSubmittedApplicationReviewQuestions(
         current.questions,
         parsed.data.questions as SubmittedApplicationReviewQuestion[],

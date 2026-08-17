@@ -442,7 +442,15 @@ export function mergeSubmittedApplicationReviewQuestions(
      * absent by default: a whole-list Save with no flags mints exactly what it minted before, which
      * is nothing. See SubmittedApplicationReviewQuestion. */
     const applicantConfirmedAnswer = Boolean(
-      questionsReviewedAt && submittedAnswer && submittedQuestion.confirmed === true,
+      questionsReviewedAt && submittedAnswer && submittedQuestion.confirmed === true
+      /* AND ONLY UNDER THE EXACT STORED TEXT. The claim is persisted against the stored label
+       * (`question: question.question` below), and the id fallback lets a submitted question match
+       * while carrying a DIFFERENT label - so without this test a public body could rename a control,
+       * flag it confirmed, and mint "she read this exact text" onto text its own request never
+       * contained. Exact equality rather than questionKey, matching exactReviewedIdentityUnchanged:
+       * the review screen posts back the stored label verbatim, so a genuine confirmation always
+       * passes, and a case-or-whitespace rename is still a rename. */
+      && submittedQuestion.question === question.question,
     );
     /* WHAT SHE WAS OVERRIDING, so her correction cannot outlive the fact it was made against.
      *
@@ -482,7 +490,18 @@ export function mergeSubmittedApplicationReviewQuestions(
         || question.answer_override_of?.trim()
         || question.answer_option_source?.trim()
         || '')
-      : '';
+      /* A CONFIRMATION OF A VALUE THE RESOLVER CURRENTLY DISPUTES IS AN OVERRIDE TOO, and without
+       * this branch it was a claim the next read threw away. The refresh keeps a claimed non-band
+       * answer only when it equals the resolver's value or when answer_override_of proves which
+       * resolution she disagreed with - so a confirm of a stale-tab value, or one racing a profile
+       * edit, minted its claim, answered 200, and was recomputed away on the very next read: the
+       * CONFIRM loop again, in a narrower shape. Only the live resolver value is recorded, exactly
+       * as the edit branch above records it, and only when one exists and disagrees: a confirmation
+       * of the resolver's own value needs no override (the refresh keeps it by equality), and a
+       * held question needs none (the refusal branch keeps her answer on the claim alone). */
+      : applicantConfirmedAnswer && !submittedIsResolverValue && resolverAnswer
+        ? resolverAnswer
+        : '';
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
@@ -501,6 +520,17 @@ export function mergeSubmittedApplicationReviewQuestions(
         const value = question[field];
         if (value !== undefined) carriedAnswerClaims[field] = value;
       }
+    }
+    /* A CONFIRMED ANSWER IS HERS, SO THE MACHINE'S GRANT RECORD GOES. The grant fields exist so the
+     * audit shows "an acceptance made on her behalf rather than a tick that reads as if she had made
+     * it herself" - and a confirmation is precisely her making it herself. Carrying them under the
+     * freshly minted 'applicant_review' would produce a record no other writer can produce and no
+     * reader has a ruling for: her claim next to a machine-permission grant for the same answer.
+     * Only the two grant fields drop; answer_option_source stays, because "this value was snapped
+     * from the control's list" is as true after she confirms it as before. */
+    if (applicantConfirmedAnswer) {
+      delete carriedAnswerClaims.consent_permission_granted_at;
+      delete carriedAnswerClaims.consent_permission_version;
     }
     const carriedForward = exactReviewedIdentityUnchanged
       ? question

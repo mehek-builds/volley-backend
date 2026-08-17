@@ -753,3 +753,86 @@ test('confirming the resolver\'s own value still mints the claim', async () => {
   assert.equal(persisted.questions[0].answer_override_of, undefined,
     'a confirmation is not an override: she typed nothing over anything');
 });
+
+/* THE FLAG CANNOT RIDE A RENAME. The claim is persisted against the STORED label, and the id
+ * fallback lets a submitted question match while carrying different text - so a confirm minted
+ * through that path would stamp "she read this exact text" onto text the request never contained.
+ * The mint demands exact label equality, which a genuine confirmation always has: the review screen
+ * posts back the label it displayed. */
+test('a confirmed answer under a renamed label mints nothing', async () => {
+  const id = await applicationWith(stoppedRunWithMachineAnswer());
+
+  const response = await saveQuestions(id, [
+    asSent(HELD_QUESTION, 'No'),
+    { ...asSent(MACHINE_ANSWERED_QUESTION), question: 'Gender identity', confirmed: true },
+  ]);
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  const machine = persisted.questions.find((question) => question.id === MACHINE_ANSWERED_QUESTION.id);
+  assert.equal(machine?.question, MACHINE_ANSWERED_QUESTION.question, 'the stored label is the form identity');
+  assert.equal(machine?.answer_source, undefined,
+    'no claim under a label the request did not repeat exactly');
+});
+
+/* A CONFIRMED CONSENT IS HERS, NOT THE MACHINE'S. The grant fields exist so the audit shows an
+ * acceptance made on her behalf rather than a tick that reads as her own - and a confirmation is
+ * her making it her own. Carrying the grant under the fresh applicant claim would produce a record
+ * no other writer produces: her claim beside a machine-permission grant for the same answer. */
+test('confirming a machine-accepted consent replaces the grant with her claim', async () => {
+  const CONSENT_QUESTION: ApplicationReviewQuestion = {
+    id: 'privacy-consent',
+    question: 'I have read and accept the candidate privacy notice',
+    answer: 'I agree',
+    kind: 'required',
+    required: true,
+    portal_selector: '#consent',
+    portal_input_type: 'select',
+    answer_source: 'consent_permission',
+    consent_permission_granted_at: '2026-08-01T00:00:00.000Z',
+    consent_permission_version: 'v3',
+    answer_option_source: 'Yes',
+  };
+  const id = await applicationWith(stoppedRun({ questions: [CONSENT_QUESTION] }));
+
+  const response = await saveQuestions(id, [{ ...asSent(CONSENT_QUESTION), confirmed: true }]);
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  const consent = persisted.questions[0];
+  assert.equal(consent.answer, 'I agree', 'the answer she confirmed, unchanged');
+  assert.equal(consent.answer_source, 'applicant_review', 'the acceptance now reads as hers');
+  assert.equal(consent.answer_reviewed_at, persisted.questions_reviewed_at);
+  assert.equal(consent.consent_permission_granted_at, undefined,
+    'the machine grant drops: her claim and the permission record cannot describe the same answer');
+  assert.equal(consent.consent_permission_version, undefined);
+  assert.equal(consent.answer_option_source, 'Yes',
+    'the snap derivation stays: what the value was snapped from is as true as before');
+});
+
+/* CONFIRMING A VALUE THE RESOLVER DISPUTES RECORDS WHAT SHE OVERRODE, exactly as an edit does.
+ * Without the override note the refresh keeps a claimed non-band answer only when it equals the
+ * resolver's value, so a confirm of a stale-tab value minted its claim, answered 200, and was
+ * recomputed away on the next read - the CONFIRM loop again, in a narrower shape. */
+test('confirming a value the resolver disputes records the override beside the claim', async () => {
+  const RESOLVED = 'Bachelor of Science in Computer Science';
+  const degreeQuestion: ApplicationReviewQuestion = {
+    id: 'degree--disputed',
+    question: 'What degree are you currently pursuing?',
+    answer: "Bachelor's Degree",
+    kind: 'required',
+    required: true,
+    portal_selector: '#degree',
+    portal_input_type: 'select',
+  };
+  const id = await applicationWith(stoppedRun({ questions: [degreeQuestion] }));
+
+  const response = await saveQuestions(id, [{ ...asSent(degreeQuestion), confirmed: true }]);
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, "Bachelor's Degree");
+  assert.equal(persisted.questions[0].answer_source, 'applicant_review');
+  assert.equal(persisted.questions[0].answer_override_of, RESOLVED,
+    'which resolution she disagreed with, so the refresh keeps her value while the profile stands');
+});
