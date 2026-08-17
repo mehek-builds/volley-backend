@@ -2086,7 +2086,12 @@ export function mergeDiscoveredPortalQuestions(
         label: question.question,
         selector: question.portal_selector,
       });
-      return !controlId || !invalidatedFieldIds.has(controlId);
+      if (!controlId || !invalidatedFieldIds.has(controlId)) return true;
+      // invalidatedFieldIds are the controls whose live option probe FAILED, meaning the list
+      // could not be read this run. An answer she chose herself does not need the list read; a
+      // stored machine answer does, because restoring it replays a value nobody stands behind
+      // against a control nobody read. Measured on Jump Trading packet 2e593ac5, 2026-08-17 late.
+      return question.answer_source === 'applicant_review' && Boolean(question.answer.trim());
     }),
   ]);
 }
@@ -2609,7 +2614,22 @@ async function prepareManaged(
     savedAnswers,
     compactAnswers,
   );
-  const failedQuestionKeys = failedFields.map((field) => normalizeReviewQuestionLabel(field.label).toLowerCase());
+  /* A failed option probe must not take an applicant-chosen answer out of the packet.
+   *
+   * Measured on Jump Trading packet 2e593ac5, 2026-08-17 late: the graduation control's probe
+   * failed on the live run, the label key computed here dropped her stored "Spring/Summer 2028"
+   * (answer_source applicant_review, verbatim on the employer's list) out of the merge, and the
+   * only value that ever reached the control was the speculative ladder's profile-derived
+   * "May 2028". A failed probe means the option list could not be READ this run; her answer does
+   * not need it read, because the fill types it verbatim and clicks the option whose text matches.
+   * Resolver-driven invalidation keys are untouched: those branches deliberately blank an answer
+   * so she re-confirms it, and this exemption is only for the read failure. */
+  const storedApplicantAnswerKeys = new Set(storedQuestions
+    .filter((question) => question.answer_source === 'applicant_review' && question.answer.trim())
+    .map((question) => normalizeReviewQuestionLabel(question.question).toLowerCase()));
+  const failedQuestionKeys = failedFields
+    .map((field) => normalizeReviewQuestionLabel(field.label).toLowerCase())
+    .filter((key) => !storedApplicantAnswerKeys.has(key));
   const mergedQuestions = mergeDiscoveredPortalQuestions(
     discoveredQuestions,
     storedQuestions,

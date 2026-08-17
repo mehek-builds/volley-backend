@@ -2011,10 +2011,50 @@ function managedClosedFieldFamily(label: string): string | undefined {
   return undefined;
 }
 
+/* Whether an applicant-chosen answer names the control this failed field records.
+ *
+ * A failed field says the run could not READ the control's option list, and the suppression built
+ * on it exists so no builder GUESSES at a list nobody read. An answer with answer_source
+ * applicant_review is not a guess: she chose it, the fill types it verbatim and clicks the option
+ * whose text matches, and none of that needs the list read in advance.
+ *
+ * Measured on Jump Trading packet 2e593ac5, 2026-08-17 late, AFTER the reviewed-answer ordering
+ * fix deployed: the graduation control's probe failed on the live run, the failed-field record
+ * suppressed her verbatim "Spring/Summer 2028" everywhere, and the speculative graduation ladder,
+ * whose own suppression needs the very list the probe failed to read, typed the profile's
+ * "May 2028" into the same control through a substring label match. The run reported
+ * `no option matched "May 2028"` on a question that was already answered correctly. */
+function applicantChosenQuestionMatchesFailedField(
+  item: SubmissionPacket['questions'][number],
+  field: NonNullable<SubmissionPacket['failedFields']>[number],
+): boolean {
+  const selector = reviewQuestionPortalSelector(item);
+  if (selector && field.selector && selector === field.selector) return true;
+  const selectorId = managedOptionInventoryKeyFromSelector(selector);
+  if (selectorId && field.controlId === selectorId) return true;
+  const itemLabel = normalizedFailedFieldLabel(item.question);
+  const fieldLabel = normalizedFailedFieldLabel(field.label);
+  if (itemLabel && itemLabel === fieldLabel) return true;
+  const itemFamily = managedClosedFieldFamily(item.question);
+  const fieldFamily = managedClosedFieldFamily(field.label);
+  return Boolean(itemFamily && fieldFamily && itemFamily === fieldFamily);
+}
+
+/* The failed fields still binding after the applicant's own answers are taken into account. A
+ * failed control she has answered herself is hers to drive; every other failed control keeps the
+ * full suppression. */
+function managedEffectiveFailedFields(packet: SubmissionPacket): NonNullable<SubmissionPacket['failedFields']> {
+  const fields = packet.failedFields ?? [];
+  if (fields.length === 0) return fields;
+  const chosen = packet.questions.filter(applicantChoseAnswer);
+  if (chosen.length === 0) return fields;
+  return fields.filter((field) => !chosen.some((item) => applicantChosenQuestionMatchesFailedField(item, field)));
+}
+
 function packetTargetFailed(packet: SubmissionPacket, target: ManagedFieldTarget): boolean {
   const targetLabel = normalizedFailedFieldLabel(target.label ?? '');
   const targetFamily = managedClosedFieldFamily(target.label ?? '');
-  return packet.failedFields?.some((field) => {
+  return managedEffectiveFailedFields(packet).some((field) => {
     if (target.controlId && field.controlId === target.controlId) return true;
     if (target.selector && field.selector && field.selector === target.selector) return true;
     const failedLabel = normalizedFailedFieldLabel(field.label);
@@ -2022,7 +2062,7 @@ function packetTargetFailed(packet: SubmissionPacket, target: ManagedFieldTarget
     if (targetLabel === failedLabel) return true;
     const failedFamily = managedClosedFieldFamily(field.label);
     return Boolean(targetFamily && failedFamily && targetFamily === failedFamily);
-  }) === true;
+  });
 }
 
 function packetControlFailed(packet: SubmissionPacket, controlId: string): boolean {
@@ -2128,7 +2168,15 @@ function packetAnswerOutranksAliasGuess(
       if (!targetFamily || !answeredFamily || targetFamily !== answeredFamily) return false;
     }
     const options = packetReadOptionsForQuestion(packet, item);
-    if (!options) return false;
+    /* No list read, but an answer she chose herself. The ladder's raw profile value cannot improve
+     * on her verbatim answer at the same control, and firing it anyway is the measured false alarm:
+     * Jump Trading, 2026-08-17 late, `no option matched "May 2028"` reported about a control whose
+     * reviewed "Spring/Summer 2028" was about to be typed. A ladder value that IS her answer still
+     * goes through, and a machine answer without a read list keeps the ladder as before. */
+    if (!options) {
+      return applicantChoseAnswer(item)
+        && candidates.every((value) => value !== answer.toLowerCase());
+    }
     const offered = new Set(options.map((option) => option.trim().toLowerCase()));
     return offered.has(answer.toLowerCase()) && candidates.every((value) => !offered.has(value));
   });
@@ -2155,7 +2203,8 @@ function managedSpeculativeLabelFillSuppressed(
 }
 
 function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: SubmissionPacket): boolean {
-  if (!packet.failedFields?.length) return false;
+  const failedFields = managedEffectiveFailedFields(packet);
+  if (!failedFields.length) return false;
   if (action.text && packetLabelFailed(packet, action.text)) return true;
   if (packetHasFailedReferralField(packet) && action.label?.startsWith('greenhouse_referral')) return true;
   const fixedEducation: Array<[string, RegExp]> = [
@@ -2167,7 +2216,7 @@ function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: S
   ];
   if (fixedEducation.some(([id, label]) => packetControlFailed(packet, id) && label.test(action.label ?? ''))) return true;
   const selector = action.selector ?? '';
-  return packet.failedFields.some((field) => {
+  return failedFields.some((field) => {
     if (field.selector && selector === field.selector) return true;
     const escapedId = field.controlId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return new RegExp(`(?:#${escapedId}(?![A-Za-z0-9_-])|\\[id=["']${escapedId}["']\\])`).test(selector);
