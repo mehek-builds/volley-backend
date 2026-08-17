@@ -1385,13 +1385,37 @@ function controlIdFromDiscoveredSelector(selector: string | undefined | null): s
 const MANAGED_OPTION_NAME_KEY_PREFIX = 'name:';
 const MANAGED_OPTION_SELECTOR_KEY_PREFIX = 'selector:';
 
-/** Stable name-only controls need an inventory key, but must never be mistaken for a DOM id. */
+/** Stable name-only controls need an inventory key, but must never be mistaken for a DOM id.
+ *
+ * BRACKETED SEGMENTS ARE NAMES TOO, AND EVERY LEVER CUSTOM QUESTION IS ONE.
+ *
+ * The pattern allowed a bare identifier with at most a trailing `[]`, which is Greenhouse's checkbox
+ * shape. Lever names its custom questions `cards[<uuid>][field0]`, brackets in the MIDDLE, so no key
+ * was derived, managedOptionProbeControlId answered undefined, and managedOptionProbeAnalysis skipped
+ * the field at its `!id` guard - discarding an option list discovery had already read correctly. So
+ * `packet.fieldOptions` was `{}` on every Lever packet, which is what `has_field_options: false`
+ * measured, and it was read as "discovery cannot see Lever's options" when discovery could.
+ *
+ * WHAT THAT COST, and it is not the resolved answer. Question resolution reads `field.options` off the
+ * discovered field, which keeps its own list, so the degree still snaps to the employer's "Bachelor
+ * Degree". What went missing is every rule keyed on the packet MAP: packetAnswerOutranksAliasGuess
+ * cannot see that a control is already answered with an option the employer offers, so the alias
+ * ladder is free to fire the raw profile value at a Lever control that was already correct; and
+ * reviewed multi-select replay has no list to decompose an answer against, so it emits nothing.
+ *
+ * SAFE TO WIDEN ONLY BECAUSE A NAME KEY IS NEVER A SELECTOR. These names contain `[` and `]`, which
+ * would be a broken CSS selector if interpolated, and managedOptionProbeTarget refuses every
+ * `name:`-prefixed id before any probe selector is built. The key is a Record key and nothing else.
+ *
+ * A radio or checkbox GROUP shares one name across its options, and discovery emits one entry per
+ * group, so the count-of-one guard in managedOptionProbeAnalysis still holds.
+ */
 function controlNameOptionKeyFromDiscoveredSelector(
   selector: string | undefined | null,
 ): string | undefined {
   const trimmed = (selector ?? '').trim();
   const name = trimmed.match(
-    /^(?:[a-z][a-z0-9-]*)?\[name=["']([A-Za-z0-9][A-Za-z0-9_.:-]*(?:\[\])?)["']\]$/i,
+    /^(?:[a-z][a-z0-9-]*)?\[name=["']([A-Za-z0-9][A-Za-z0-9_.:-]*(?:\[[A-Za-z0-9_.:-]*\])*)["']\]$/i,
   )?.[1];
   return name ? `${MANAGED_OPTION_NAME_KEY_PREFIX}${name}` : undefined;
 }
