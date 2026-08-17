@@ -5,6 +5,7 @@ import {
   canonicalSupportedPortalUrl,
   CAPTCHA_BLOCKER,
   detectPortal,
+  isCaptchaGatedPortalName,
   ICIMS_ATTENDED_GATE_REASON,
   ICIMS_SECURITY_CODE_GATE_REASON,
   JOBVITE_ATTENDED_GATE_REASON,
@@ -211,11 +212,26 @@ export function extensionHandoffPacketMatches(input: {
   return false;
 }
 
+/* The portals the DASHBOARD may open at action time, which is narrower than the set the extension
+ * can be armed for.
+ *
+ * jazzhr and comeet join bamboohr here so that all three CAPTCHA-GATED families can be finished by
+ * hand. They are the families portalCanAutoSubmit denies for a required challenge, and on an
+ * attended run Litos fills their form before stopping, so what is left really is "pass the check and
+ * press Send". Before this, bamboohr was the only one listed and its own arm below asked for a reason
+ * nothing ever wrote, so no CAPTCHA stall on any family could produce a dashboard handoff.
+ *
+ * NOT added, deliberately: greenhouse, ashby and lever. They raise the same captcha flag from an
+ * invisible v3 badge that asks a human for nothing, they can auto-submit, and offering a handoff
+ * there would tell her a challenge is waiting when none is. See managedExtensionHandoffUrl, which is
+ * keyed on the same distinction. */
 const DASHBOARD_ATTENDED_PORTALS = new Set([
   'smartrecruiters',
   'jobvite',
   'icims',
   'bamboohr',
+  'jazzhr',
+  'comeet',
 ]);
 
 export function createDashboardHandoffBinding(input: {
@@ -303,6 +319,19 @@ export function verifiedDashboardHandoffUrl(input: {
     : portal === 'icims'
       ? ((reasons.has(ICIMS_ATTENDED_GATE_REASON) && categories.has('account_login'))
         || (reasons.has(ICIMS_SECURITY_CODE_GATE_REASON) && categories.has('security_code')))
+      /* bamboohr still demands its OWN sentence, and that is deliberate rather than an oversight
+       * left in place: the assertion at extensionHandoffPacket.test.ts refuses a bamboohr row
+       * carrying only the generic CAPTCHA_BLOCKER, and BAMBOOHR_ATTENDED_GATE_REASON says something
+       * the generic blocker does not - that the form is already filled and only the check and the
+       * send button remain.
+       *
+       * KNOWN GAP, deliberately not closed here: nothing in the codebase writes that reason. Grep
+       * returns its declaration in portalSubmission.ts and this one consumer. So bamboohr sits in
+       * DASHBOARD_ATTENDED_PORTALS behind a cause that cannot currently occur - the
+       * composition-root shape this repo has recorded five times. The fix is to EMIT the reason from
+       * the runner's captcha stall, not to weaken this check, because weakening it would trade a
+       * precise sentence for a vague one on the surface a human acts from. Filed rather than done,
+       * so that a reason-composition change gets its own diff and its own review. */
       : portal === 'bamboohr'
         ? reasons.has(BAMBOOHR_ATTENDED_GATE_REASON) && categories.has('captcha')
         : (reasons.has(MANAGED_NETWORK_ACCESS_RESTRICTION_REASON)
@@ -328,7 +357,19 @@ export function verifiedDashboardHandoffUrl(input: {
     }
   }
 
-  if (portal === 'bamboohr') {
+  /* The CAPTCHA-gated families are checked for SELF-CONSISTENCY rather than through
+   * extensionHandoffPacketMatches, and bamboohr already was.
+   *
+   * These forms are single-page: the URL the run observed when it met the challenge is the same
+   * application URL the packet was frozen against, so the honest invariant is that the handoff URL
+   * canonicalizes to exactly the frozen posting. That is strictly stronger than what the shared
+   * matcher would ask, since it admits no second URL at all.
+   *
+   * Routing them here also leaves extensionHandoffPacketMatches untouched. Its own recovery-cause
+   * list grants a CAPTCHA exit to smartrecruiters only, and widening it would loosen the EXTENSION
+   * packet route as well - a different disclosure surface, on the same predicate. Two callers, one
+   * gate: exactly the shape that made a fix land in the wrong copy four times in this repo. */
+  if (isCaptchaGatedPortalName(portal)) {
     const frozenCanonical = input.frozenUrl
       ? canonicalSupportedPortalUrl(input.frozenUrl, input.frozenAtsName)
       : undefined;

@@ -2740,3 +2740,30 @@ test('a bare privacy label still reaches the packet as a question', async () => 
   assert.ok(labels.includes('privacy'), 'the bare "Privacy" label must stay a question');
   assert.ok(labels.includes('privacy statement'), 'the bare "Privacy statement" label must stay a question');
 });
+
+test('a CAPTCHA on a CAPTCHA-gated family persists the observed form URL for an attended finish', () => {
+  /* Measured shape, Foundation AI on JazzHR, application 355bcfb3 on 2026-08-17: an attended run
+     reached the form, filled six fields, and stopped on the required Human Check. Before this the
+     handoff URL was undefined for every family except smartrecruiters, so no binding was written and
+     the dashboard had nothing to offer. */
+  const jazz = 'https://foundationai.applytojob.com/apply/jobs/details/QhIlJU3sYr';
+  assert.equal(managedExtensionHandoffUrl('jazzhr', jazz, null, true), jazz);
+  /* A real captured BambooHR careers URL. A made-up short subdomain throws in detectPortal, which is
+     itself the guard working. Note the runner now stores a handoff URL here while
+     verifiedDashboardHandoffUrl still refuses it, because bamboohr's arm wants its own sentence and
+     nothing writes that yet - a stored field that does nothing today and starts working the moment
+     the reason is emitted. */
+  const bamboo = 'https://prentkeromich.bamboohr.com/careers/480';
+  assert.equal(managedExtensionHandoffUrl('bamboohr', bamboo, null, true), bamboo);
+
+  // No challenge observed is no handoff, on the same family.
+  assert.equal(managedExtensionHandoffUrl('jazzhr', jazz, null, false), undefined);
+
+  /* AND THE ADVERSARY THAT CAN WIN: the autonomous families raise the same captchaAttention flag off
+     an invisible v3 badge. Keying on the flag alone would hand a human a challenge that asks nothing,
+     on a family Litos can finish itself. This assertion is the one that fails if someone "simplifies"
+     the predicate to `captchaAttention ? canonical : undefined`. */
+  assert.equal(managedExtensionHandoffUrl('greenhouse', 'https://boards.greenhouse.io/acme/jobs/123', null, true), undefined);
+  assert.equal(managedExtensionHandoffUrl('ashby', 'https://jobs.ashbyhq.com/acme/123e4567-e89b-12d3-a456-426614174000', null, true), undefined);
+  assert.equal(managedExtensionHandoffUrl('lever', 'https://jobs.lever.co/acme/123e4567-e89b-12d3-a456-426614174000', null, true), undefined);
+});
