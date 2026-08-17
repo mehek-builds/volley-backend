@@ -387,13 +387,17 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
              * carries no secret. */
             fastify.log.error(
               { branch: 'canary_rejected', recipient_count: event.recipients.length, has_email_id: Boolean(event.emailId.trim()) },
-              'inbound receiving proof REFUSED: the signed canary was rejected. If recipient_count is 1, the one-time recipient is already consumed and LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN must be rotated to mint a new one',
+              'inbound receiving proof REFUSED: the signed canary was rejected. recipient_count other than 1 means the delivery was copied or carried a foreign recipient; recipient_count of 1 narrows it to a durable-row guard - either this provider message already stored a DIFFERENT proof, or a v1/v2 fingerprint row marks this one-time recipient as consumed, which needs a NEW LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN rather than a retry',
             );
             return reply.status(400).send({ error: 'Invalid receiving proof' });
           }
+          /* Two causes reach here and they need different actions, so the message must not pick one:
+           * the delivery genuinely was not addressed to the canary (ordinary alias mail, which is
+           * expected and harmless), or the managed route is not configured at all so no canary
+           * recipient could be derived to compare against. */
           fastify.log.warn(
             { branch: 'not_canary', recipient_count: event.recipients.length },
-            'signed Resend delivery parsed as a canary event but did not match the configured canary recipient; falling through to ordinary alias processing',
+            'signed Resend delivery was not treated as the canary, either because it is ordinary alias mail or because no managed canary recipient is configured; falling through to ordinary alias processing',
           );
         } catch (err) {
           fastify.log.error({ err, branch: 'proof_unavailable' }, 'inbound receiving proof could not be evaluated');
