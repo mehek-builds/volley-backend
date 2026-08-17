@@ -1945,3 +1945,29 @@ export type AutofillEvent = typeof autofill_events.$inferSelect;
 export type NewAutofillEvent = typeof autofill_events.$inferInsert;
 export type CompetencyVerdictRow = typeof competency_verdicts.$inferSelect;
 export type NewCompetencyVerdictRow = typeof competency_verdicts.$inferInsert;
+
+/* Declared to match what is ALREADY in the database, not to introduce anything.
+ *
+ * portal_accounts was created by a db:push from a branch that never merged its schema declaration,
+ * so from 2026-08-17 the schema-drift check reported one undeclared table on every branch - which
+ * means a db:push from any of them would have DROPPED this table and everything in it. Declaring it
+ * is the fix the check asks for; the shape below is transcribed from the live table rather than
+ * designed, so drizzle sees no difference and generates no migration.
+ *
+ * secret_ciphertext is deliberately nullable and deliberately named ciphertext: no plaintext
+ * credential belongs in this column. */
+export const portal_accounts = pgTable('portal_accounts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  portal_family: text('portal_family').notNull(),
+  tenant: text('tenant').notNull(),
+  login_email: text('login_email').notNull(),
+  secret_ciphertext: text('secret_ciphertext'),
+  status: text('status').notNull().default('pending'),
+  last_verified_at: timestamp('last_verified_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  identityUnique: uniqueIndex('portal_accounts_identity_idx').on(t.user_id, t.portal_family, t.tenant),
+  userIdx: index('portal_accounts_user_id_idx').on(t.user_id),
+}));
