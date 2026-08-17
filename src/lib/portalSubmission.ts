@@ -2258,6 +2258,44 @@ function managedFillByLabelUnlessHandled(
   managedFillByLabel(actions, text, value, label);
 }
 
+/**
+ * The applicant's own reviewed answer for the control a speculative label targets, when one exists.
+ *
+ * The alias ladders compute their values from PROFILE facts: "May 2028" at "Expected Graduation
+ * Date". When the packet carries an answer she wrote for the same control (answer_source
+ * applicant_review), that answer is the one with a claim behind it - the contract every other
+ * reader honours since PR #566 - and on a closed list it is very often the employer's own wording,
+ * because she read the list when she wrote it.
+ *
+ * This is the half packetAnswerOutranksAliasGuess deliberately does not carry. That guard stands
+ * the ladder DOWN, and only on evidence: a read option list her answer is on, or a measured probe
+ * failure at her own control. A control that was simply never probed keeps its ladder, because on
+ * a same-family form the ladder may be a different control's only fill. What that leaves is the
+ * measured DV Trading / Jump Trading shape, 2026-08-17 late: an unprobed react-select, her
+ * "January 2028 - July 2028" / "Spring/Summer 2028" stored and on the employer's list verbatim,
+ * and the ladder's first value - the only one a react-select's single attempt ever sees - was the
+ * profile's "May 2028", which is on neither. So the ladder still fires, and her answer LEADS its
+ * value list instead of being absent from it. The derived forms stay behind her answer for the
+ * board that really does spell it the profile's way.
+ */
+function packetApplicantAnswerForLabel(packet: SubmissionPacket, label: string): string | undefined {
+  const targetLabel = normalizedFailedFieldLabel(label);
+  if (!targetLabel) return undefined;
+  const targetFamily = managedSpeculativeAliasFamily(label);
+  for (const item of packet.questions) {
+    if (packetQuestionFailed(packet, item)) continue;
+    if (!applicantChoseAnswer(item)) continue;
+    const answeredLabel = normalizedFailedFieldLabel(item.question);
+    if (!answeredLabel) continue;
+    if (answeredLabel !== targetLabel) {
+      const answeredFamily = managedSpeculativeAliasFamily(item.question);
+      if (!targetFamily || !answeredFamily || targetFamily !== answeredFamily) continue;
+    }
+    return item.answer.trim();
+  }
+  return undefined;
+}
+
 /** The four fixed education controls, the value each will be given, and the label it reports under. */
 function greenhouseEducationComboboxFields(
   packet: SubmissionPacket,
@@ -2362,7 +2400,12 @@ function pushGreenhouseEducationComboboxActions(actions: ManagedBrowserAction[],
 }
 
 function pushGreenhouseGraduationDateComboboxActions(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
+  /* Her reviewed answer leads. Looked up once against one label because all three labels below
+   * share the education-graduation-date alias family, so the same question record answers each.
+   * See packetApplicantAnswerForLabel for the measured defect this closes. */
+  const applicantAnswer = packetApplicantAnswerForLabel(packet, 'Graduation Date');
   const values = uniqueDefined([
+    applicantAnswer,
     packet.graduationDate,
     packet.graduationDate ? greenhouseGraduationBucket(packet.graduationDate) : undefined,
     packet.graduationDate ? greenhouseClosestGraduationOption(packet.graduationDate) : undefined,

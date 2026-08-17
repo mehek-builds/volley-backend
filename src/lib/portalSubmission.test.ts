@@ -7575,3 +7575,51 @@ test('with no applicant referral answer the label pass still types the stored de
   assert.ok(labelTyped.some((value) => /job\s*board/i.test(value ?? '')),
     `expected the default, got ${JSON.stringify(labelTyped.slice(0, 6))}`);
 });
+
+test('an applicant-reviewed graduation answer leads the speculative date ladder', () => {
+  // Measured on DV Trading e0a0eb84 and Jump Trading 2e593ac5, 2026-08-17 late: the stored
+  // reviewed answer was on the employer's list verbatim, the control was never probed so the
+  // ladder rightly still fired, and the ladder's FIRST value - the only one a react-select's
+  // single attempt sees - was the profile-derived "May 2028", which is on neither board's list.
+  // The run reported `no option matched "May 2028"` about a question she had already answered.
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    graduationDate: 'May 2028',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'please re-confirm your expected graduation date',
+        answer: 'January 2028 - July 2028',
+        answerSource: 'applicant_review',
+      },
+    ],
+  });
+  const dateFills = actions.filter(
+    (action) => action.type === 'fill' && action.label?.startsWith('education_graduation_date_combo'),
+  );
+  assert.ok(dateFills.length > 0, 'the ladder must still fire on an unprobed control');
+  assert.equal(dateFills[0].value, 'January 2028 - July 2028');
+  // The derived forms stay on the ladder behind her answer, for the board that spells it that way.
+  assert.ok(dateFills.some((action) => action.value === 'May 2028'));
+});
+
+test('the speculative date ladder is unchanged when no applicant answer exists', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    graduationDate: 'May 2028',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      // A machine-resolved record must not lead: only answer_source applicant_review carries her claim.
+      { question: 'please re-confirm your expected graduation date', answer: 'January 2028 - July 2028' },
+    ],
+  });
+  const dateFills = actions.filter(
+    (action) => action.type === 'fill' && action.label?.startsWith('education_graduation_date_combo'),
+  );
+  assert.ok(dateFills.length > 0);
+  assert.equal(dateFills[0].value, 'May 2028');
+});
