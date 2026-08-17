@@ -679,6 +679,18 @@ export function packetAuditIsSubmissionReady(audit: unknown): audit is PacketAud
   }
 }
 
+/**
+ * The stale verdict's `reason` is a SENTENCE, not a token. It travels verbatim to people: the
+ * submit-request 409 body's `error` field lands in the dashboard's page banner, and the cron
+ * runner writes it into attention_reason, which the Tracker prints. Production 2026-08-18: the
+ * standing auto-send hit this verdict on two packets and the dashboard showed the applicant a
+ * red banner reading exactly "packet_stale". Machine callers key on the PACKET_AUDIT_STALE code
+ * that packetAuditService wraps around this verdict, never on this string.
+ */
+export const PACKET_STALE_REASON =
+  'This application changed after you last reviewed it, so Litos did not send it. '
+  + 'Open it and run Review and fill again to approve the exact packet that will go out.';
+
 export function verifyCurrentPacketAudit(input: VerifyCurrentPacketAuditInput): PacketAuditVerification {
   const issues = bindingIssues(input);
   if (issues.length > 0) return { valid: false, reason: issues.join('; ') };
@@ -692,7 +704,7 @@ export function verifyCurrentPacketAudit(input: VerifyCurrentPacketAuditInput): 
     return { valid: false, reason: 'application_mismatch', packetVersion: currentVersion };
   }
   if (input.audit.packet_version !== currentVersion) {
-    return { valid: false, reason: 'packet_stale', packetVersion: currentVersion };
+    return { valid: false, reason: PACKET_STALE_REASON, packetVersion: currentVersion };
   }
   return { valid: true, reason: 'valid', packetVersion: currentVersion };
 }
