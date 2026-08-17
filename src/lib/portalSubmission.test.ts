@@ -7708,3 +7708,29 @@ test('an applicant-reviewed GPA band leads the Akuna fixed-question ladder', () 
   assert.ok(gpaFills.length > 0, 'the Akuna GPA ladder must still fire');
   assert.equal(gpaFills[0].value, '3.6-4.0');
 });
+
+test('an answer-loss line names its field even with no employer question in the label', () => {
+  /* Measured across the Greenhouse batch of 2026-08-18: seven packets blocked and every one led
+   * with a bare "Litos could not leave an answer on the form", because managedActionLabelQuestion
+   * strips a leading [a-z_]+ run and a label like `education_discipline_combo:0` IS that run.
+   * DV Trading e0a0eb84 was hiding two distinct failures behind that one sentence. */
+  const reasons = managedAnswerLossReasons({
+    skipped: [
+      'education_discipline_combo:0: no option matched "Computer Science", left for you to choose',
+      'education_graduation_month: value did not persist after fill',
+      'question:overall gpa: value did not persist after fill',
+      'question_combo:0:0:which university: no option matched "USC", left for you to choose',
+      'nothing matched #some-optional-selector',
+    ],
+  } as any);
+
+  assert.ok(reasons.some((r) => r.includes('"education discipline"')), reasons.join('\n'));
+  assert.ok(reasons.some((r) => r.includes('"education graduation month"')), reasons.join('\n'));
+  // The employer's own wording still leads wherever the label carries one.
+  assert.ok(reasons.some((r) => r.includes('"overall gpa"')), reasons.join('\n'));
+  assert.ok(reasons.some((r) => r.includes('"which university"')), reasons.join('\n'));
+  // A selector that simply matched nothing is still not an answer loss.
+  assert.equal(reasons.some((r) => r.includes('some-optional-selector')), false);
+  // And nothing falls back to the unnamed sentence when a name was recoverable.
+  assert.equal(reasons.some((r) => r.startsWith('Litos could not leave an answer on the form:')), false);
+});
