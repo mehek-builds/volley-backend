@@ -161,6 +161,23 @@ export function extensionHandoffPacketMatches(input: {
     const reasons = input.attentionReason?.split('\n') ?? [];
     const eligibleRecoveryCause = reasons.includes(MANAGED_NETWORK_ACCESS_RESTRICTION_REASON)
       || (frozenPortal === 'smartrecruiters' && reasons.includes(CAPTCHA_BLOCKER))
+      /* The CAPTCHA-gated families, and this arm RESTORES prior behaviour rather than loosening it.
+       *
+       * This whole block only runs when a frozenHandoffUrl exists. Until the same change that added
+       * this line, the runner never wrote one for jazzhr/bamboohr/comeet, so their rows skipped this
+       * block entirely and fell through to the generic canonical comparison at the bottom, which
+       * returns TRUE for a matching form. Writing the URL flips that: the block now runs, finds no
+       * eligible cause, and returns false.
+       *
+       * Measured: same jazzhr row, extensionHandoffPacketMatches was true with frozenHandoffUrl
+       * undefined and false with it set. That would have taken out
+       * GET /applications/:id/submission/extension-packet (409) and extensionStartHandoffBinding
+       * ('mismatch') for every CAPTCHA-gated application - trading the working Chrome-extension path
+       * for the new dashboard one instead of adding to it.
+       *
+       * So this is the second caller of the gate the dashboard change touched, and it had to move
+       * with it. Exactly the two-callers-one-gate shape this file's other comments warn about. */
+      || (isCaptchaGatedPortalName(frozenPortal) && reasons.includes(CAPTCHA_BLOCKER))
       || (frozenPortal === 'jobvite' && reasons.includes(JOBVITE_ATTENDED_GATE_REASON))
       || (frozenPortal === 'icims' && (
         reasons.includes(ICIMS_ATTENDED_GATE_REASON)

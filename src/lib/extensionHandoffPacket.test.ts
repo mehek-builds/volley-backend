@@ -835,3 +835,44 @@ test('a CAPTCHA-gated handoff refuses a second posting on the same tenant', () =
     null,
   );
 });
+
+test('writing a CAPTCHA handoff URL does not break the extension packet route', () => {
+  /* REGRESSION for a defect introduced by the dashboard-handoff change itself and caught in review.
+   *
+   * extensionHandoffPacketMatches guards a DIFFERENT surface - GET /submission/extension-packet and
+   * extensionStartHandoffBinding - and its frozenHandoffUrl block only runs when that field is set.
+   * Before the runner started writing one for CAPTCHA-gated families these rows skipped the block and
+   * matched on the generic canonical comparison. Writing the URL made the block run, find no eligible
+   * cause, and refuse, which would have taken the working Chrome-extension path away from every
+   * JazzHR, BambooHR and Comeet application in exchange for the new dashboard one.
+   *
+   * Both shapes must match: the field is written now, and it must not matter here. */
+  const jazz = 'https://foundationai.applytojob.com/apply/jobs/details/QhIlJU3sYr';
+  const base = {
+    frozenUrl: jazz,
+    currentUrl: jazz,
+    frozenAtsName: 'jazzhr',
+    status: 'needs_attention' as const,
+    attentionReason: CAPTCHA_BLOCKER,
+  };
+  assert.equal(extensionHandoffPacketMatches({ ...base }), true, 'no handoff url, as before the change');
+  assert.equal(extensionHandoffPacketMatches({ ...base, frozenHandoffUrl: jazz }), true, 'handoff url written, as after it');
+
+  // The eligible cause is still a CAPTCHA one. An unrelated stop with a handoff URL stays refused.
+  assert.equal(extensionHandoffPacketMatches({
+    ...base,
+    frozenHandoffUrl: jazz,
+    attentionReason: 'A required field on the form has no label Litos can read',
+  }), false);
+
+  // And it must not have opened the same door on a family that can submit itself.
+  const gh = 'https://boards.greenhouse.io/acme/jobs/123';
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: gh,
+    currentUrl: gh,
+    frozenAtsName: 'greenhouse',
+    status: 'needs_attention' as const,
+    attentionReason: CAPTCHA_BLOCKER,
+    frozenHandoffUrl: gh,
+  }), false);
+});
