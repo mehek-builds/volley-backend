@@ -2875,3 +2875,46 @@ test('packetQuestionsForFill carries her provenance through to the fill', () => 
   assert.equal(plain.answerSource, undefined);
   assert.equal(plain.answer, 'Yes');
 });
+
+test('an applicant-reviewed answer beats a freshly discovered one', () => {
+  /* DV Trading e0a0eb84, 2026-08-18, measured live: "Other" saved and read back as
+   * applicant_review, then the fill ran and the persisted row was "Job board" with no
+   * answer_source, and the run reported `no option matched "Job board"`. Discovery resolves that
+   * label every run, and normalizeApplicationReviewQuestions is first-wins, so spreading
+   * ...discovered first meant her choice lost every time. */
+  const label = 'How did you hear about DV Trading?';
+  const merged = mergeDiscoveredPortalQuestions(
+    [{ question: label, answer: 'Job board', required: true, portal_selector: '#question_8969957005', portal_input_type: 'combobox' } as any],
+    [{ question: label, answer: 'Other', answer_source: 'applicant_review', required: true } as any],
+    [],
+  );
+  const row = merged.find((q) => /hear about/i.test(q.question));
+  assert.ok(row, 'the referral question must survive the merge');
+  assert.equal(row!.answer, 'Other', 'her reviewed answer wins the collision');
+  assert.equal(row!.answer_source, 'applicant_review', 'and keeps its provenance');
+  // The live selector still has to reach the fill, or the winning answer has no control to land on.
+  assert.equal(row!.portal_selector, '#question_8969957005');
+  assert.equal(row!.portal_input_type, 'combobox');
+});
+
+test('a stored machine answer still loses to a freshly discovered one', () => {
+  // Only an answer SHE reviewed is privileged. An unattributed stored value is exactly what
+  // discovery exists to correct, and this is the half that must not change.
+  const label = 'How did you hear about DV Trading?';
+  const merged = mergeDiscoveredPortalQuestions(
+    [{ question: label, answer: 'Job board', required: true } as any],
+    [{ question: label, answer: 'Stale value', required: true } as any],
+    [],
+  );
+  assert.equal(merged.find((q) => /hear about/i.test(q.question))!.answer, 'Job board');
+});
+
+test('a discovered answer still fills a blank applicant-reviewed row', () => {
+  const label = 'How did you hear about DV Trading?';
+  const merged = mergeDiscoveredPortalQuestions(
+    [{ question: label, answer: 'Job board', required: true } as any],
+    [{ question: label, answer: '   ', answer_source: 'applicant_review', required: true } as any],
+    [],
+  );
+  assert.equal(merged.find((q) => /hear about/i.test(q.question))!.answer, 'Job board');
+});
