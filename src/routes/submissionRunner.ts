@@ -1018,6 +1018,9 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
       // unable to distinguish them and it would fall back to the computed bucket, which is exactly
       // the state this packet was in before. See greenhouseReviewedAnswerIsResolved.
       answerOptionSource: item.answer_option_source,
+      // And WHO wrote the answer, for the same reason. Absent option evidence means "unproven" for a
+      // machine answer and "she picked it" for hers, and only this tells them apart.
+      answerSource: item.answer_source,
     })),
   };
 }
@@ -2624,6 +2627,7 @@ async function prepareManaged(
      * graduation range, GPA band and consent selects take the text path even though discovery had
      * read their option lists and resolved exact answers. */
     answerOptionSource: q.answer_option_source,
+    answerSource: q.answer_source,
   }));
   // The fill run gets the same option lists, so the fixed education comboboxes type an exact option
   // instead of the profile's own phrasing. It only ever gets ONE attempt at a react-select (a second
