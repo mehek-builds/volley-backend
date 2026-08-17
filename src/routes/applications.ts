@@ -28,6 +28,7 @@ import {
   normalizeApplicationReviewQuestions,
   readApplicationReview,
   type ApplicationReviewQuestion,
+  type SubmittedApplicationReviewQuestion,
 } from '../lib/applicationReview';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { connectToSession, getBrowserSession, getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
@@ -119,7 +120,13 @@ const reviewBodySchema = z.object({
  * that screen to post them back would make a round trip of the portal identity every time somebody
  * fixes a typo in an essay. Narrower body, narrower route, nothing to re-derive. */
 const reviewAnswersBodySchema = z.object({
-  questions: z.array(questionSchema).max(100),
+  /* Plus the one field only this screen can honestly send. `confirmed` is the applicant's explicit
+   * word that she read this exact answer and let it stand, which the merge turns into the
+   * applicant-claim an unedited confirmation can never earn through a diff - see
+   * applicantConfirmedAnswer in mergeSubmittedApplicationReviewQuestions, and the DV Trading CONFIRM
+   * loop it closes. `z.literal(true)` rather than boolean: absent is the only other honest state,
+   * and a stored `confirmed: false` would read as "she looked and refused", which no control says. */
+  questions: z.array(questionSchema.extend({ confirmed: z.literal(true).optional() })).max(100),
 });
 const submitBodySchema = z.object({
   questions: z.array(questionSchema).max(100),
@@ -1531,9 +1538,19 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         postingCountryFromJobContext(row.job_context),
         postingCountryCodeFromJobContext(row.job_context),
       );
+      /* MEASURED, BECAUSE THE STORED CLAIM CANNOT BE. A confirm-minted claim is byte-identical to an
+       * edit-minted one on the row, so if a client ever regresses into flagging whole lists - the
+       * shape of the 802-answer laundering - the packets themselves cannot show it happened. This
+       * line is the trace: the count of confirmations per save, next to the application, in the
+       * request log where an incident investigation actually looks. The intended client sends one
+       * or two; a save arriving with dozens is the regression announcing itself. */
+      const confirmedCount = parsed.data.questions.filter((question) => question.confirmed === true).length;
+      if (confirmedCount > 0) {
+        request.log.info({ applicationId: row.id, confirmedAnswers: confirmedCount }, 'review answers save carries applicant confirmations');
+      }
       const merged = mergeSubmittedApplicationReviewQuestions(
         current.questions,
-        parsed.data.questions as ApplicationReviewQuestion[],
+        parsed.data.questions as SubmittedApplicationReviewQuestion[],
         reviewedAt,
         resolverAnswerFor,
       );
