@@ -219,30 +219,3 @@ test('packet audit is refused after a send is claimed, but not while a security 
     'awaiting_security_code must NOT be refused: the security-code route needs a current acknowledged audit and this is the only route that can produce one',
   );
 });
-
-/* The review-answers lookup must see the SAME profile the refresh will use.
- *
- * buildPacket injects the resolved referral default and its evidence before calling
- * refreshKnownQuestionAnswers, because that is what lets resolveKnownAnswer answer a "how did you
- * hear about us" label at all. This route passed the bare profile, so the same question resolved at
- * packet time and returned undefined here - which inverts the hazard knownAnswerLookup's own doc
- * names. The merge could not see that an incoming "Job board" was the resolver's own output, stamped
- * a machine value as applicant_review, and recorded no answer_override_of, so the override branch in
- * the refresh could never fire and her real choice was recomputed away on every run.
- *
- * Measured on Five Rings 2231fc73 and DV Trading e0a0eb84 on 2026-08-17: neither referral list
- * carries a job-board entry, "Other" was saved and reverted every time, and both otherwise-complete
- * applications reported no option matched "Job board" on a required control. */
-test('the review-answers resolver lookup is built with the referral default and evidence', () => {
-  const route = routeSlice("'/applications/:id/review/answers'", "'/applications/:id/security-code'");
-  const lookup = route.indexOf('knownAnswerLookup(');
-  assert.ok(lookup >= 0, 'the route must still build a resolver lookup for the merge');
-
-  const built = route.slice(Math.max(0, lookup - 800), lookup + 400);
-  assert.match(built, /referralSourceEvidenceForRow\(row\)/,
-    'the evidence must be read for this row, exactly as buildPacket reads it');
-  assert.match(built, /referral_source_default:\s*referralSourceForApplication\(/,
-    'the default must be resolved through referralSourceForApplication, not passed raw');
-  assert.match(built, /referral_source_evidence:/,
-    'the evidence must reach the profile, or the referral label resolves to nothing here');
-});

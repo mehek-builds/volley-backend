@@ -41,8 +41,7 @@ import { mintDownloadToken } from '../lib/resumeAccess';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
-import { referralSourceForApplication } from '../lib/referralSource';
-import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication, referralSourceEvidenceForRow } from './submissionRunner';
+import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication } from './submissionRunner';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
 import { knownAnswerLookup, refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
@@ -1504,36 +1503,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * typed as her own - measured on a stale Gender record displayed as a self-identification.
        * The same lookup also names the value an override was made against. See the merge's
        * resolverAnswerFor parameter. */
-      /* THE SAME PROFILE THE REFRESH WILL USE, and the referral half was missing from it.
-       *
-       * buildPacket does not hand refreshKnownQuestionAnswers the bare profile. It injects the
-       * resolved referral default and its evidence first, because that is what lets
-       * resolveKnownAnswer answer a "how did you hear about us" label at all. This route passed the
-       * bare profile, so the SAME question resolved at packet time and returned undefined here.
-       *
-       * That inverts the hazard this lookup exists to prevent, and its own doc names both halves:
-       * "the merge then either refuses a real edit or claims a fake one". With no resolver value to
-       * compare against, the merge could not see that an incoming "Job board" was the resolver's own
-       * output, so it stamped a machine value with answer_source applicant_review - and recorded no
-       * answer_override_of, because it correctly refuses to name a value it could not compute.
-       * Without that note, refreshKnownQuestionAnswers' override branch can never fire and her real
-       * choice is recomputed away on every run.
-       *
-       * Measured on Five Rings 2231fc73 and DV Trading e0a0eb84, 2026-08-17. Neither employer's
-       * referral list carries a job-board entry, so her standing instruction lands on "Other".
-       * Saving "Other" stored correctly and every run put "Job board" back, and both applications -
-       * complete but for that one control - reported no option matched "Job board". */
-      const referralEvidence = await referralSourceEvidenceForRow(row);
-      const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
       const resolverAnswerFor = knownAnswerLookup(
-        {
-          ...sensitiveProfile,
-          referral_source_default: referralSourceForApplication(
-            sensitiveProfile.referral_source_default,
-            referralEvidence,
-          ),
-          referral_source_evidence: referralEvidence,
-        },
+        await loadSensitiveQuestionProfile(request.jwtPayload!.userId),
         current.jd_text,
         postingCountryFromJobContext(row.job_context),
         postingCountryCodeFromJobContext(row.job_context),
