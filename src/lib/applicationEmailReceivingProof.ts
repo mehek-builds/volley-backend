@@ -193,6 +193,74 @@ export async function acceptSignedManagedReceivingCanary(
   return sameProof ? { kind: 'accepted', replay: true } : { kind: 'rejected' };
 }
 
+/* A real delivery to our own receiving domain proves the route, and the canary alone deadlocked it.
+ *
+ * The canary was the ONLY writer of proof, and it can only be sent by the daily cron: the recipient
+ * embeds a secret token nobody can read back (Vercel marks it `sensitive`, which is write-only even
+ * through the API with decrypt=true). So when the proof aged out on 2026-08-17, the system could not
+ * recover on its own within the day, and the recovery it did attempt was circular - a fresh proof
+ * needs an inbound delivery, submissions are what generate inbound deliveries, and submissions were
+ * exactly what the stale proof was blocking.
+ *
+ * Meanwhile inbound receiving was demonstrably working the whole time. application_email_messages
+ * holds real employer deliveries on 2026-08-11 and 2026-08-16 ("Security code for your application
+ * to ..."), each one routed through the same MX, the same signed webhook and the same receiving key
+ * the canary exercises. That evidence was being thrown away.
+ *
+ * So an ordinary signed delivery now writes proof too, under the same conditions the canary must
+ * satisfy: a Svix-verified `email.received` (the caller checks this), arriving on the configured
+ * endpoint (the caller checks this), addressed to our configured managed receiving domain, and whose
+ * content the receiving key can actually read.
+ *
+ * WHAT IS GIVEN UP, precisely: the canary recipient is secret and one-time, which stops a third
+ * party who learns an address from mailing it to manufacture proof. That protection is already
+ * carried by the Svix signature - a third party cannot make Resend sign a delivery to our endpoint -
+ * and replay is covered twice over, by Svix's timestamp window and by the provider_message_hash
+ * dedupe below. The recipient-domain test keeps a delivery for some OTHER domain from vouching for
+ * this one, which is the property the canary's address shape was really enforcing.
+ */
+export async function recordManagedReceivingProofFromDelivery(
+  event: SignedResendCanaryEvent,
+  options: {
+    store?: ManagedReceivingProofStore;
+    now?: Date;
+    assertContentReadable?: (emailId: string) => Promise<void>;
+  } = {},
+): Promise<boolean> {
+  const route = applicationEmailRouteSelection();
+  const routeFingerprint = managedReceivingProofRouteFingerprint();
+  const domain = route.domain;
+  if (route.mode !== 'managed_resend' || !domain || !routeFingerprint) return false;
+
+  const emailId = event.emailId.trim();
+  if (!emailId) return false;
+  // At least one recipient on OUR receiving domain. A delivery addressed only elsewhere says nothing
+  // about whether this domain receives.
+  const onDomain = event.recipients
+    .map((recipient) => recipient.trim().toLowerCase())
+    .some((recipient) => recipient.endsWith(`@${domain}`));
+  if (!onDomain) return false;
+
+  await (options.assertContentReadable ?? assertResendReceivedEmailReadable)(emailId);
+
+  const store = options.store ?? databaseManagedReceivingProofStore;
+  const providerMessageHash = managedReceivingProviderMessageHash(emailId);
+  const existing = await store.findByMessageHash(providerMessageHash);
+  if (existing) {
+    return existing.route_fingerprint === routeFingerprint
+      && existing.domain === domain
+      && existing.proof_version === MANAGED_RECEIVING_PROOF_VERSION;
+  }
+
+  return store.insert({
+    provider_message_hash: providerMessageHash,
+    route_fingerprint: routeFingerprint,
+    proof_version: MANAGED_RECEIVING_PROOF_VERSION,
+    domain,
+    verified_at: options.now ?? new Date(),
+  });
+}
+
 export async function recentManagedReceivingProof(options: {
   store?: ManagedReceivingProofStore;
   now?: Date;

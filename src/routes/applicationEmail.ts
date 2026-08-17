@@ -24,9 +24,11 @@ import {
 } from '../lib/applicationEmailDeliverability';
 import {
   acceptSignedManagedReceivingCanary,
+  recordManagedReceivingProofFromDelivery,
   type SignedResendCanaryEvent,
 } from '../lib/applicationEmailReceivingProof';
 import { normalizedApplicationEmailWebhookEndpoint } from '../lib/applicationEmailRoute';
+import { managedReceivingProofNeedsRefresh } from '../lib/managedReceivingCanary';
 
 const WEBHOOK_MAX_SKEW_MS = 5 * 60 * 1000;
 
@@ -415,6 +417,36 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
       return reply.status(400).send({ error: 'Invalid inbound email payload' });
     }
     const result = await processInboundApplicationEmail(inbound);
+
+    /* An accepted delivery is also proof the route works, and it used to be discarded.
+     *
+     * Only the cron-sent canary wrote proof, and its recipient embeds a token that is write-only in
+     * Vercel, so nothing could re-prove the route between daily runs. Real employer mail arrives on
+     * this same path through the same MX, signature and receiving key; recording it means the route
+     * re-proves itself from traffic it already gets. Strictly additive: a failure here cannot change
+     * the answer this request already earned. */
+    if (signedByResend && result.accepted) {
+      const delivery = signedResendCanaryEvent(request.body);
+      if (delivery && signedWebhookRequestMatchesConfiguredEndpoint(request)) {
+        try {
+          /* Only when a refresh is actually wanted.
+           *
+           * Recording costs a Resend content GET, and that GET happens inside a provider webhook the
+           * provider will time out. Doing it on every accepted delivery would add that round trip to
+           * mail this route already handles fine, to rewrite a proof that is not close to expiring.
+           * Gated this way it fires while the proof is inside the canary's refresh lead - or expired,
+           * which is the state that blocks submissions - and is skipped the rest of the time. */
+          if (await managedReceivingProofNeedsRefresh()
+            && await recordManagedReceivingProofFromDelivery(delivery)) {
+            resetApplicationAliasDeliverabilityCache();
+            fastify.log.info('receiving proof refreshed from an ordinary accepted inbound delivery');
+          }
+        } catch (err) {
+          fastify.log.warn({ err }, 'accepted inbound delivery could not be recorded as receiving proof');
+        }
+      }
+    }
+
     return reply.status(result.accepted ? 202 : 404).send(result);
   });
 }
