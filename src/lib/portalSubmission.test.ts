@@ -7387,6 +7387,64 @@ test('a reviewed graduation answer on a probe-failed control is still the only v
   }
 });
 
+test('her answer to a custom question does not unlock a probe-failed fixed control in the same family', () => {
+  // The exemption is identity-scoped on purpose: a family bucket spans different controls on one
+  // form, and the fixed education builder types RAW profile values. If her custom graduation-year
+  // answer erased the failed record for end-year--0, the profile year would be typed into a
+  // react-select nobody read, one budget position before her own fill.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    graduationYear: '2028',
+    failedFields: [{
+      controlId: 'end-year--0',
+      label: 'Graduation Year',
+      selector: '#end-year--0',
+      inputType: 'combobox',
+    }],
+    questions: [{
+      question: 'What is your expected graduation year?',
+      answer: '2028 (first half)',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_11',
+      portalInputType: 'combobox',
+    }],
+  }));
+  assert.equal(actions.some((action) => (action.selector ?? '').includes('end-year--0')), false,
+    'the probe-failed fixed control must stay untouched');
+});
+
+test('her answer equal to the computed bucket still silences the ladder at her probe-failed control', () => {
+  // greenhouseGraduationBucket("May 2028") is "Spring 2028". When her chosen answer happens to BE
+  // that bucket, a candidate-by-candidate comparison would let the whole ladder fire, raw profile
+  // date first, and reproduce the measured `no option matched "May 2028"` on the one-attempt
+  // react-select her fill was about to commit.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    graduationDate: 'May 2028',
+    failedFields: [{
+      controlId: 'question_67595189',
+      label: 'What is your expected graduation date?',
+      selector: '#question_67595189',
+      inputType: 'combobox',
+    }],
+    questions: [{
+      question: 'What is your expected graduation date?',
+      answer: 'Spring 2028',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_67595189',
+      portalInputType: 'combobox',
+    }],
+  }));
+  assert.equal(actions.some((action) => action.value === 'May 2028'), false,
+    'the raw profile date must never be typed anywhere on this packet');
+  const graduationDateFills = actions.filter((action) =>
+    (action.type === 'fill' || action.type === 'fillByLabelText')
+    && /graduation\s+date/i.test(`${action.label ?? ''} ${action.selector ?? ''} ${action.text ?? ''}`));
+  assert.ok(graduationDateFills.length > 0, 'her reviewed answer must drive the control at all');
+  for (const action of graduationDateFills) {
+    assert.equal(action.value, 'Spring 2028',
+      `every value typed at the graduation-date control must be her own answer, got ${JSON.stringify(action.value)} via ${action.label}`);
+  }
+});
+
 test('a probe-failed control with no applicant answer still refuses every speculative guess at it', () => {
   // The suppression this file already promises: "Closed controls whose live option evidence failed.
   // No action builder may guess at these." Relaxing it for HER answer must not relax it for a

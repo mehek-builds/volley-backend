@@ -1943,6 +1943,51 @@ test('a stored applicant-reviewed answer survives a failed option probe on its c
   assert.equal(merged[0]?.answer_source, 'applicant_review');
 });
 
+/* Provenance follows the ANSWER. Discovery replaces a reviewed answer with the resolver's value
+ * whenever the profile knows one for the label, and the record spread used to carry
+ * answer_source: 'applicant_review' onto that machine value. Every applicant-override reader,
+ * including the failed-probe exemptions above, would then treat the machine value as a choice she
+ * made, and on the next probe failure type it verbatim at a control nobody read. */
+test('a machine value replacing a stale reviewed answer does not keep her provenance', async () => {
+  const reviewedAt = '2026-08-10T00:00:00.000Z';
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in San Francisco, California.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions_reviewed_at: '2026-08-17T00:00:00.000Z',
+    questions: [{
+      id: 'wa',
+      question: 'Are you legally authorized to work in the United States?',
+      answer: 'No',
+      kind: 'required',
+      required: true,
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'Are you legally authorized to work in the United States?',
+      selector: '[data-litos-discovered-1]',
+      inputType: 'text',
+      maxLength: null,
+    }],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { work_authorized: true },
+    true,
+    'greenhouse',
+  );
+  assert.equal(result.questions[0]?.answer, 'Yes');
+  assert.notEqual(result.questions[0]?.answer_source, 'applicant_review',
+    'a machine value must not wear applicant provenance');
+});
+
 /* R-101, the reporting half. The DRW Software Developer Intern run of 2026-08-08 recorded
  * `questions: 0`, twenty-seven "is required and is still empty" lines, `submission_error: null`
  * and no stall. Every sentence in it was true and the run as a whole was not: it named twenty-seven

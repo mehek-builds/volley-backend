@@ -1934,8 +1934,20 @@ export async function discoverAndResolveQuestions(
       && wouldNotDraftNow;
     if (existing) {
       if (known && 'value' in known) {
+        /* The spread must not carry HER provenance onto a machine value. `existing` can be an
+         * applicant_review record whose reviewed answer no longer fits (reviewedAnswerStillFits
+         * above is false whenever the resolver knows a value for this label), and replacing the
+         * answer while inheriting answer_source would mint a machine value that every
+         * applicant-override reader, including the failed-probe exemptions, then treats as a
+         * choice she made. Provenance follows the ANSWER: it survives only when the value is
+         * still the one she reviewed. */
+        const provenanceStillHers = existing.answer_source === 'applicant_review'
+          && knownValue.trim() === existing.answer.trim();
         questions.push({
           ...existing,
+          ...(existing.answer_source === 'applicant_review' && !provenanceStillHers
+            ? { answer_source: undefined, answer_reviewed_at: undefined }
+            : {}),
           question: reviewLabel,
           answer: knownValue,
           kind: 'required',
