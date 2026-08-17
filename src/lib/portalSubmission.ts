@@ -5986,14 +5986,30 @@ function pushFixedFieldActions(
     managedComboboxFill(actions, '#country', countryForPhoneField(packet.phone, packet.country), 'phone_country');
     managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
+    /* HER REVIEWED ANSWER LEADS HERE TOO, not only in the combobox ladder PR #583 fixed.
+     *
+     * These plain label fills are the SECOND emitter of the raw profile date. fillByLabelText
+     * resolves by label substring, so "Expected Graduation Date" lands in the same control as an
+     * employer label like "Please re-confirm your expected graduation date". Measured on the live
+     * DV Trading run, packet e0a0eb84, 2026-08-18, AFTER #583 deployed: her reviewed
+     * "January 2028 - July 2028" led the ladder, and this trio still typed the profile's
+     * "May 2028" at the same react-select, whose band list refuses it, so the run reported
+     * `no option matched "May 2028", left for you to choose` about a question she had answered.
+     *
+     * Same rule as the ladder: an applicant_review answer for the education-graduation-date family
+     * replaces the derived value. One lookup covers all three labels because they share the family.
+     * A packet with no applicant answer keeps typing packet.graduationDate, and machine-resolved
+     * question records are invisible to packetApplicantAnswerForLabel, so nothing else moves. */
+    const graduationDateLabelValue = packetApplicantAnswerForLabel(packet, 'Graduation Date')
+      ?? packet.graduationDate;
     if (!packetLooksAkuna(packet)) {
       pushGreenhouseEducationComboboxActions(actions, packet);
-      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
-      managedFillByLabelUnlessHandled(actions, packet, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
-      managedFillByLabelUnlessHandled(actions, packet, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', graduationDateLabelValue, 'graduation_date');
+      managedFillByLabelUnlessHandled(actions, packet, 'Graduation Date', graduationDateLabelValue, 'graduation_date_label');
+      managedFillByLabelUnlessHandled(actions, packet, 'Expected Graduation Date', graduationDateLabelValue, 'graduation_date_expected');
     }
     if (packetLooksDatabricks(packet)) {
-      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', graduationDateLabelValue, 'databricks_graduation_date');
     }
     if (!packetLooksAkuna(packet)) {
       managedFillByLabelUnlessHandled(actions, packet, 'End date month', packet.graduationMonth, 'education_end_month');
