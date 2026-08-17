@@ -679,24 +679,42 @@ export function schoolAliasLadder(school: string | undefined): string[] {
   return ladder(trimmed, institution, initialism && initialism.length >= 3 ? initialism : undefined);
 }
 
+/* THE SINGULAR NON-POSSESSIVE FORMS, which employers write and this ladder did not carry.
+ *
+ * MEASURED on Belvedere Trading's Lever form 2026-08-17. It offers "High School Diploma / Associate
+ * Degree / Bachelor Degree / Masters/PhD". The bachelor ladder held "Bachelor's Degree", "Bachelors
+ * Degree", "Bachelor's" and "Bachelors" - every form EXCEPT the one on the page - so
+ * chooseClosestOption refused (verified: ["Bachelor's Degree"] against that list returns null, and
+ * adding "Bachelor Degree" to the candidates returns it).
+ *
+ * The consequence was not a blank field. resolveProfileField returns `matched ?? candidates[0] ?? base`,
+ * so an unmatched closed list falls back to the RAW profile value, and the packet stored "Bachelor of
+ * Science in Computer Science" for a control offering four fixed options. That is what produced
+ * `no option matched` and left the question required-and-empty.
+ *
+ * Adding candidates is safe here because chooseClosestOption needs an exact comparable match: a form
+ * that does not offer "Bachelor Degree" is unaffected by the string being on the list.
+ */
+
 /** The standard education-level enum a closed-list "Degree" or "Education level" field offers. */
 export function educationLevelLadder(degree: string | undefined): string[] {
   const trimmed = degree?.trim();
   if (!trimmed) return [];
   if (/\bph\.?d\b|doctor of philosophy|doctorate|\bdoctoral\b/i.test(trimmed)) {
-    return ladder('Doctor of Philosophy (Ph.D.)', "Doctorate Degree", 'Doctorate', 'PhD', 'Ph.D.', trimmed);
+    return ladder('Doctor of Philosophy (Ph.D.)', "Doctorate Degree", 'Doctoral Degree', 'Doctorate', 'PhD', 'Ph.D.', trimmed);
   }
   if (/\bm\.?b\.?a\b/i.test(trimmed)) {
-    return ladder('MBA', "Master's Degree", 'Masters Degree', "Master's", 'Graduate Degree', trimmed);
+    return ladder('MBA', "Master's Degree", 'Masters Degree', 'Master Degree', "Master's", 'Graduate Degree', trimmed);
   }
   if (/\bmaster|\bm\.?s\.?\b|\bm\.?a\.?\b|\bm\.?eng\b/i.test(trimmed)) {
-    return ladder("Master's Degree", 'Masters Degree', "Master's", 'Masters', 'Graduate Degree', 'Graduate', trimmed);
+    return ladder("Master's Degree", 'Masters Degree', 'Master Degree', "Master's", 'Masters', 'Graduate Degree', 'Graduate', trimmed);
   }
   if (/\bbachelor|\bb\.?s\.?\b|\bb\.?a\.?\b|\bb\.?eng\b|\bundergrad/i.test(trimmed)) {
     const science = /\b(?:science|b\.?s\.?|b\.?eng\b|engineering)\b/i.test(trimmed);
     return ladder(
       "Bachelor's Degree",
       'Bachelors Degree',
+      'Bachelor Degree',
       "Bachelor's",
       'Bachelors',
       science ? 'Bachelor of Science' : 'Bachelor of Arts',
@@ -706,7 +724,7 @@ export function educationLevelLadder(degree: string | undefined): string[] {
     );
   }
   if (/\bassociate/i.test(trimmed)) {
-    return ladder("Associate's Degree", 'Associates Degree', "Associate's", 'Associates', trimmed);
+    return ladder("Associate's Degree", 'Associates Degree', 'Associate Degree', "Associate's", 'Associates', trimmed);
   }
   if (/\bhigh school|\bged\b|\bsecondary\b/i.test(trimmed)) {
     return ladder('High School', 'High School Diploma', 'High School or equivalent', trimmed);

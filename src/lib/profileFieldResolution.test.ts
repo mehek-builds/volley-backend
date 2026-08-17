@@ -671,13 +671,36 @@ test('the alias ladders are derived from the stored value, never from an employe
       'USC',
     ],
   );
+  /* 'Bachelor Degree' and 'Master Degree' - singular, no apostrophe-s - are in these ladders because
+   * employers write them. Belvedere Trading's Lever form offers "High School Diploma / Associate
+   * Degree / Bachelor Degree / Masters/PhD", and the ladder previously carried every bachelor form
+   * EXCEPT that one, so chooseClosestOption refused and resolveProfileField fell back to the raw
+   * profile value - storing "Bachelor of Science in Computer Science" into a four-option control.
+   * They survive dedupe rather than collapsing into the possessive forms precisely because the
+   * apostrophe-s differs, which is what made the employer's spelling unreachable. */
   assert.deepEqual(
-    educationLevelLadder('Bachelor of Science in Computer Science').slice(0, 4),
-    ["Bachelor's Degree", "Bachelor's", 'Bachelor of Science', 'Undergraduate Degree'],
+    educationLevelLadder('Bachelor of Science in Computer Science').slice(0, 5),
+    ["Bachelor's Degree", 'Bachelor Degree', "Bachelor's", 'Bachelor of Science', 'Undergraduate Degree'],
   );
   assert.deepEqual(
-    educationLevelLadder('Master of Science in Statistics').slice(0, 3),
-    ["Master's Degree", "Master's", 'Graduate Degree'],
+    educationLevelLadder('Master of Science in Statistics').slice(0, 4),
+    ["Master's Degree", 'Master Degree', "Master's", 'Graduate Degree'],
+  );
+  // The employer's own spelling is what gets selected, both ways round.
+  assert.equal(
+    chooseClosestOption(educationLevelLadder('Bachelor of Science in Computer Science'),
+      ['High School Diploma', 'Associate Degree', 'Bachelor Degree', 'Masters/PhD']),
+    'Bachelor Degree',
+  );
+  assert.equal(
+    chooseClosestOption(educationLevelLadder('Bachelor of Science in Computer Science'),
+      ["Bachelor's Degree", "Master's Degree"]),
+    "Bachelor's Degree",
+  );
+  assert.equal(
+    chooseClosestOption(educationLevelLadder('Associate of Arts'),
+      ['High School Diploma', 'Associate Degree', 'Bachelor Degree']),
+    'Associate Degree',
   );
   assert.deepEqual(
     disciplineLadder('Computer Science & Business Administration, Finance Emphasis').slice(0, 3),
