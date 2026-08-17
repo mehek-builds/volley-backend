@@ -1,6 +1,9 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
-import { sendManagedReceivingCanary } from '../lib/managedReceivingCanary';
+import {
+  managedReceivingCanaryHttpStatus,
+  sendManagedReceivingCanary,
+} from '../lib/managedReceivingCanary';
 
 async function handleCanary(request: FastifyRequest, reply: FastifyReply, fastify: FastifyInstance) {
   if (!isCronConfigured()) {
@@ -26,7 +29,9 @@ async function handleCanary(request: FastifyRequest, reply: FastifyReply, fastif
     );
   }
 
-  return reply.status(200).send({ checked_at: new Date().toISOString(), ...outcome });
+  return reply
+    .status(managedReceivingCanaryHttpStatus(outcome.reason))
+    .send({ checked_at: new Date().toISOString(), ...outcome });
 }
 
 export async function managedReceivingCanaryRoutes(fastify: FastifyInstance) {

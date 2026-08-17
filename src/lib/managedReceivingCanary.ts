@@ -41,11 +41,35 @@ export const MANAGED_RECEIVING_CANARY_REFRESH_LEAD_MS = 2 * 24 * 60 * 60 * 1000;
 
 const RESEND_SEND_TIMEOUT_MS = 5_000;
 
+export type ManagedReceivingCanaryReason =
+  | 'sent'
+  | 'proof_is_fresh'
+  | 'not_configured'
+  | 'sender_not_configured'
+  | 'send_failed';
+
 export type ManagedReceivingCanaryOutcome = {
   sent: boolean;
-  reason: 'sent' | 'proof_is_fresh' | 'not_configured' | 'sender_not_configured' | 'send_failed';
+  reason: ManagedReceivingCanaryReason;
   detail?: string;
 };
+
+/**
+ * HTTP status for a canary outcome, so a failure is visible without reading logs.
+ *
+ * A 200 on a failed send is the shape of the bug this file exists to remove: the damage is delayed
+ * by the refresh lead and lands days later as a refused packet audit, so the cron invocation that
+ * failed must itself read as failed in Vercel's cron history rather than as a success carrying a
+ * quiet `sent: false`.
+ *
+ * `not_configured` stays 200 deliberately. It means this environment has no managed receiving route
+ * at all, so there is no proof to keep fresh and nothing has gone wrong.
+ */
+export function managedReceivingCanaryHttpStatus(reason: ManagedReceivingCanaryReason): number {
+  if (reason === 'send_failed') return 502;
+  if (reason === 'sender_not_configured') return 503;
+  return 200;
+}
 
 /**
  * True when the newest usable proof is inside the refresh lead of expiry, or absent.

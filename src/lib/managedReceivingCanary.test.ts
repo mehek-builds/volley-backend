@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   MANAGED_RECEIVING_CANARY_REFRESH_LEAD_MS,
+  managedReceivingCanaryHttpStatus,
   managedReceivingProofNeedsRefresh,
   sendManagedReceivingCanary,
 } from './managedReceivingCanary';
@@ -218,4 +219,17 @@ test('says sender_not_configured rather than sending with no sender', async () =
     assert.deepEqual(outcome, { sent: false, reason: 'sender_not_configured' });
     assert.equal(calls.length, 0);
   });
+});
+
+/* A failed send must fail the cron invocation, not return 200 with sent:false.
+ *
+ * The whole failure mode being fixed is a delay between the cause and the symptom: the proof still
+ * carries the route for the refresh lead, so a 200 here means Vercel's cron history reads healthy
+ * for two days and the operator learns about it from a refused packet audit instead. */
+test('a failed send answers with a failing status, and a missing route does not', () => {
+  assert.equal(managedReceivingCanaryHttpStatus('send_failed'), 502);
+  assert.equal(managedReceivingCanaryHttpStatus('sender_not_configured'), 503);
+  assert.equal(managedReceivingCanaryHttpStatus('sent'), 200);
+  assert.equal(managedReceivingCanaryHttpStatus('proof_is_fresh'), 200);
+  assert.equal(managedReceivingCanaryHttpStatus('not_configured'), 200);
 });
