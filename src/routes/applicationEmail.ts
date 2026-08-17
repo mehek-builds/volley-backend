@@ -361,6 +361,10 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
       const event = signedResendCanaryEvent(request.body);
       if (event) {
         if (!signedWebhookRequestMatchesConfiguredEndpoint(request)) {
+          fastify.log.error(
+            { branch: 'endpoint_mismatch', delivered_host: firstHeader(request.headers['x-forwarded-host']) ?? firstHeader(request.headers.host) },
+            'inbound receiving proof REFUSED: signed delivery arrived on a host that is not the configured webhook endpoint',
+          );
           return reply.status(400).send({ error: 'Invalid receiving proof' });
         }
         try {
@@ -372,16 +376,40 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
             return reply.status(202).send({ accepted: true, receiving_proof: 'verified' });
           }
           if (canary.kind === 'rejected') {
+            /* Which guard refused, without naming the recipient.
+             *
+             * This branch answered a bare 400 and logged nothing, and on 2026-08-17 that cost a whole
+             * diagnosis: three signed deliveries were refused here and the only way to tell a
+             * consumed one-time recipient (the v1/v2 fingerprint guards in
+             * acceptSignedManagedReceivingCanary, which require a NEW canary token) from a
+             * recipient-shape mismatch was to read the source and guess. The recipient carries the
+             * canary token so it is never logged; the recipient COUNT is the distinguishing fact and
+             * carries no secret. */
+            fastify.log.error(
+              { branch: 'canary_rejected', recipient_count: event.recipients.length, has_email_id: Boolean(event.emailId.trim()) },
+              'inbound receiving proof REFUSED: the signed canary was rejected. If recipient_count is 1, the one-time recipient is already consumed and LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN must be rotated to mint a new one',
+            );
             return reply.status(400).send({ error: 'Invalid receiving proof' });
           }
-        } catch {
+          fastify.log.warn(
+            { branch: 'not_canary', recipient_count: event.recipients.length },
+            'signed Resend delivery parsed as a canary event but did not match the configured canary recipient; falling through to ordinary alias processing',
+          );
+        } catch (err) {
+          fastify.log.error({ err, branch: 'proof_unavailable' }, 'inbound receiving proof could not be evaluated');
           return reply.status(503).send({ error: 'Receiving proof is unavailable' });
         }
       }
     }
 
     const inbound = await inboundEmailFromWebhookBody(request.body);
-    if (!inbound) return reply.status(400).send({ error: 'Invalid inbound email payload' });
+    if (!inbound) {
+      fastify.log.warn(
+        { branch: 'invalid_inbound_payload', signed_by_resend: signedByResend },
+        'inbound email REFUSED: payload did not parse as an inbound email for any known alias',
+      );
+      return reply.status(400).send({ error: 'Invalid inbound email payload' });
+    }
     const result = await processInboundApplicationEmail(inbound);
     return reply.status(result.accepted ? 202 : 404).send(result);
   });
