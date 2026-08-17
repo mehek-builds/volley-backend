@@ -2867,9 +2867,30 @@ function greenhouseComboboxValuesForQuestion(
     return [];
   }
   const referralQuestion = isReferralSourceQuestion(question);
-  const values = referralQuestion
-    ? referralSourceOptionCandidates(answer, referralEvidence)
-    : selectValuesForAnswer(answer);
+  /* HER OWN REFERRAL CHOICE LEADS, because the synonym builder throws away anything it did not think of.
+   *
+   * referralSourceOptionCandidates emits the job-board wordings for a stored job-board default, and
+   * an answer outside that vocabulary produces an EMPTY list - which the line below turns into no
+   * actions at all, so the control is never touched.
+   *
+   * Measured on DV Trading packet e0a0eb84, 2026-08-17. That list is LinkedIn / DV Recruitment /
+   * DV Employee / DV Intern / DV Website / Student Organization / Campus Event / Word of Mouth /
+   * SHRM / Other - no job-board entry exists, so her standing instruction ("Job Board every time,
+   * and where the list offers Other with a detail box, Other then Litos") lands on "Other". The
+   * answer was stored as "Other" with answer_source applicant_review, the synonym builder did not
+   * recognise it, returned [], and the required control came back empty.
+   *
+   * answerIsResolved is the same gate #573 uses, and after that change it is true exactly when the
+   * applicant wrote the answer or the resolver snapped it off this control's real list. Either way
+   * the value has a claim behind it that a synonym table cannot improve on, so it leads and the
+   * synonyms follow. A bare stored default with neither provenance still goes through the builder
+   * alone, which is the relay-never-generate rule selfDeclaration.ts requires. */
+  const referralValues = referralQuestion
+    ? (answerIsResolved && answer.trim()
+      ? uniqueDefined([answer.trim(), ...referralSourceOptionCandidates(answer, referralEvidence)])
+      : referralSourceOptionCandidates(answer, referralEvidence))
+    : [];
+  const values = referralQuestion ? referralValues : selectValuesForAnswer(answer);
   if (referralQuestion && values.length === 0) return [];
   // The general, employer-independent ladder: education level enum, discipline family, the
   // institution name without its trailing "... School of Engineering" clause, GPA to two and one

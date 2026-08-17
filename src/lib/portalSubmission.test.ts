@@ -7361,3 +7361,48 @@ test('a machine answer with no option evidence still leads with the computed buc
   assert.equal(typed[0], 'Spring 2028',
     `an unproven machine answer must still lead with the bucket, got ${JSON.stringify(typed)}`);
 });
+
+/* Her own referral choice must reach a list the synonym table does not know.
+ *
+ * DV Trading's Greenhouse list, read live 2026-08-17: LinkedIn / DV Recruitment / DV Employee /
+ * DV Intern / DV Website / Student Organization / Campus Event / Word of Mouth / SHRM / Other. No
+ * job-board entry exists at all, so her standing instruction lands on "Other".
+ *
+ * referralSourceOptionCandidates emits job-board wordings and does not recognise "Other", so it
+ * returned an empty list and greenhouseComboboxValuesForQuestion turned that into NO actions - the
+ * required control was never touched and the application could not be sent. */
+test('an applicant-chosen referral answer is typed even when the synonym table does not know it', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    questions: [{
+      question: 'How did you hear about DV Trading?',
+      answer: 'Other',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_referral_dv',
+      portalInputType: 'combobox',
+    }],
+  }));
+  const typed = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo:'))
+    .map((action) => action.value);
+
+  assert.ok(typed.length > 0, 'the referral control must be driven at all');
+  assert.equal(typed[0], 'Other', `her choice must lead, got ${JSON.stringify(typed)}`);
+});
+
+test('a bare stored referral default still goes through the synonym builder alone', () => {
+  // The relay-never-generate rule: without provenance the stored value is not treated as a choice
+  // she made about THIS list, so the job-board wordings are what get offered.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    questions: [{
+      question: 'How did you hear about us?',
+      answer: 'Job board',
+      portalSelector: '#question_referral_plain',
+      portalInputType: 'combobox',
+    }],
+  }));
+  const typed = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo:'))
+    .map((action) => action.value);
+  assert.ok(typed.length > 0, 'a stored job-board default must still drive the control');
+  assert.ok(/job\s*board/i.test(typed[0]), `expected a job-board wording, got ${JSON.stringify(typed)}`);
+});
