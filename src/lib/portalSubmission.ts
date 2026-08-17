@@ -732,6 +732,16 @@ export type SubmissionPacket = {
      * treats absence as a reason to recompute rather than to trust.
      */
     answerOptionSource?: string;
+    /**
+     * Set when the APPLICANT wrote this answer through the review, copied from the question record's
+     * answer_source.
+     *
+     * It exists because absence of `answerOptionSource` above means two different things, and the
+     * fill was reading only one of them. A machine answer with no option evidence genuinely cannot
+     * be proven current, so recomputing a bucket ahead of it is right. An answer she chose herself
+     * has no option evidence either, and recomputing over it silently discards the choice.
+     */
+    answerSource?: string;
   }>;
 };
 
@@ -3823,6 +3833,28 @@ function graduationYearAnswerForControl(
  */
 function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][number], packet: SubmissionPacket): string {
   const questionText = normalizeReviewQuestionLabel(item.question);
+  /* AN ANSWER SHE WROTE IS THE ANSWER, and every branch below would otherwise recompute over it.
+   *
+   * The branches exist to beat a STALE record: a question written on an earlier run says "May 2027"
+   * after she has corrected her graduation to May 2028, and replaying it would submit a date she
+   * fixed. greenhouseCurrentOptionAnswer distinguishes a machine answer snapped off a real option
+   * list from one that was merely stored, using answerOptionSource.
+   *
+   * Neither test can see HER. An answer typed into the review was never snapped from a profile
+   * value, so answerOptionSource is absent and the date branch falls straight through to
+   * packet.graduationDate.
+   *
+   * Measured on Jump Trading packet 2e593ac5, 2026-08-17: the packet held "Spring/Summer 2028" with
+   * answer_source applicant_review, which is on that employer's list verbatim, and the fill typed
+   * "May 2028" and then the "Spring 2028" bucket. Neither exists on that list - these are
+   * react-selects filtered by the typed string, and "Spring/Summer 2028" contains neither substring -
+   * so the menu emptied and the run reported `no option matched "Spring 2028"` on a question that was
+   * already answered correctly.
+   *
+   * This is the contract PR #566 established for every other reader: an applicant override survives
+   * until she changes it. Staleness is her business once she has taken the field, exactly as it is
+   * for every other answer she edits. */
+  if (item.answerSource?.trim() === 'applicant_review' && item.answer.trim()) return item.answer.trim();
   if (isReferralSourceQuestion(questionText)) {
     return referralSourceForApplication(
       packet.referralSourceDefault ?? item.answer,
@@ -3909,6 +3941,27 @@ function greenhouseReviewedAnswerIsResolved(
   item: SubmissionPacket['questions'][number],
   packet: SubmissionPacket,
 ): boolean {
+  /* AN ANSWER SHE CHOSE HERSELF RANKS AHEAD OF A BUCKET COMPUTED FROM HER PROFILE.
+   *
+   * The option-evidence test below cannot see an applicant's own answer: answerOptionSource records
+   * the profile value an answer was SNAPPED FROM when discovery read the control's list, and an
+   * answer typed into the review has no such snap. So it read as unproven, the bucket went in front
+   * of it, and comboboxValueLimit is 1 on these controls - the bucket was the only value the form
+   * ever saw.
+   *
+   * Measured on Jump Trading packet 2e593ac5, 2026-08-17. The packet held
+   * "Spring/Summer 2028" with answer_source applicant_review, which is on that employer's list
+   * VERBATIM. greenhouseGraduationBucket computed "Spring 2028" from the profile's May 2028, that
+   * went first, and the run reported `no option matched "Spring 2028"`. These are react-selects: the
+   * value is TYPED to filter the menu, and "Spring/Summer 2028" does not contain the substring
+   * "Spring 2028", so the filter emptied and there was nothing to click. Her own answer would have
+   * filtered to exactly one row.
+   *
+   * This does not weaken the bucket where it earns its place. A machine answer with no option
+   * evidence still puts the bucket first, which is the Cloudflare, Databricks and Akuna case the
+   * bucket was written for. Only an answer with a human behind it moves ahead of it. */
+  if (item.answerSource?.trim() === 'applicant_review' && item.answer.trim()) return true;
+
   const stored = greenhouseCurrentOptionAnswer(item, packet);
   if (!stored) return false;
   return greenhouseReviewedQuestionAnswer(item, packet).trim() === stored;

@@ -7302,3 +7302,62 @@ test('a question that names no profile field gains no closed-list chain', () => 
     assert.equal(closedListChain(label, 'something').length, 0, `did not expect a closed-list chain for ${label}`);
   }
 });
+
+/* An answer the applicant chose herself must be TYPED FIRST, ahead of a bucket computed from her
+ * profile.
+ *
+ * These are react-selects: the value is typed to filter the menu, and comboboxValueLimit is 1, so
+ * whatever leads is the only string the form ever sees. greenhouseGraduationBucket turns the
+ * profile's "May 2028" into "Spring 2028", which is the right lead for a machine answer that has
+ * never been near this control. It is the wrong lead here.
+ *
+ * Measured on Jump Trading packet 2e593ac5, 2026-08-17. The employer's list, read from
+ * boards-api.greenhouse.io, offers "Spring/Summer 2028" - and "Spring/Summer 2028" does NOT contain
+ * the substring "Spring 2028", so typing the bucket empties the menu and there is nothing to click.
+ * The run reported `no option matched "Spring 2028", left for you to choose` on a question whose
+ * answer was already correct and already on file.
+ *
+ * answerOptionSource cannot carry this: it records the profile value an answer was snapped from when
+ * discovery read the list, and an answer she typed into the review was never snapped from anything.
+ * Hence answerSource. */
+test('an applicant-reviewed option leads the combobox, ahead of the computed bucket', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    graduationDate: 'May 2028',
+    questions: [{
+      question: 'What is your expected graduation date?',
+      answer: 'Spring/Summer 2028',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_67595189',
+      portalInputType: 'combobox',
+    }],
+  }));
+  // Scoped to the control bound to this question's own selector. The education_* chain alongside it
+  // is a label-scoped fallback aimed at differently-labelled controls and is not this field.
+  const typed = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo:'))
+    .map((action) => action.value);
+
+  assert.ok(typed.length > 0, 'the control must be driven at all');
+  assert.equal(typed[0], 'Spring/Summer 2028',
+    `her own answer must be typed first, got ${JSON.stringify(typed)}`);
+});
+
+test('a machine answer with no option evidence still leads with the computed bucket', () => {
+  // The case the bucket exists for, asserted so the fix above cannot quietly take it away: a profile
+  // fact that has never been near this control is rarely spelled the way a closed list spells it.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    graduationDate: 'May 2028',
+    questions: [{
+      question: 'What is your expected graduation date?',
+      answer: 'May 2028',
+      portalSelector: '#question_67595189',
+      portalInputType: 'combobox',
+    }],
+  }));
+  const typed = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo:'))
+    .map((action) => action.value);
+
+  assert.equal(typed[0], 'Spring 2028',
+    `an unproven machine answer must still lead with the bucket, got ${JSON.stringify(typed)}`);
+});
