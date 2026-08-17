@@ -13,6 +13,7 @@ import {
   type PacketAudit,
   type PacketAuditClauseInput,
   type PacketAuditTermInput,
+  PACKET_STALE_REASON,
   verifyCurrentPacketAudit,
 } from './packetAudit';
 
@@ -367,7 +368,7 @@ test('the current-packet verifier rejects stale JD, spec, job, answers, applican
   for (const changed of cases) {
     const result = verifyCurrentPacketAudit(changed);
     assert.equal(result.valid, false);
-    assert.equal(result.reason, 'packet_stale');
+    assert.equal(result.reason, PACKET_STALE_REASON);
     assert.notEqual(result.packetVersion, audit.packet_version);
   }
 });

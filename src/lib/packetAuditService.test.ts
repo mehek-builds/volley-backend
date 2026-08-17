@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createPacketAudit } from './packetAudit';
+import { createPacketAudit, PACKET_STALE_REASON } from './packetAudit';
 import {
   currentAcknowledgedPacketAudit,
   monthsOfExperienceFromSpec,
@@ -967,7 +967,7 @@ test('the send gate still refuses when an answer itself changed', async () => {
 
   assert.equal(verdict.valid, false, 'a different value reaches the employer, so the approval is spent');
   assert.deepEqual(verdict.valid ? null : verdict.code, 'PACKET_AUDIT_STALE');
-  assert.deepEqual(verdict.valid ? null : verdict.reason, 'packet_stale');
+  assert.deepEqual(verdict.valid ? null : verdict.reason, PACKET_STALE_REASON);
 });
 
 test('the acknowledgement is still spent by a question appearing, disappearing or being relabelled', async () => {
