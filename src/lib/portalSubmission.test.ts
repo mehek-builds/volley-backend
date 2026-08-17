@@ -7490,6 +7490,64 @@ test('a machine answer with no option evidence still leads with the computed buc
     `an unproven machine answer must still lead with the bucket, got ${JSON.stringify(typed)}`);
 });
 
+/* The SECOND emitter of the raw profile date, measured after PR #583 deployed.
+ *
+ * DV Trading, packet e0a0eb84, 2026-08-18 ~00:00 GST. #583 made the graduation-date combobox
+ * ladder lead with her reviewed answer, and the run receipt still carried BOTH lines: her
+ * "January 2028 - July 2028" typed, and `no option matched "May 2028", left for you to choose`.
+ *
+ * The emitter is the plain label-fill trio in pushFixedFieldActions - graduation_date,
+ * graduation_date_label, graduation_date_expected - which passed packet.graduationDate raw.
+ * fillByLabelText resolves by label substring, so "Expected Graduation Date" lands in the same
+ * react-select as the employer's "Please re-confirm your expected graduation date", a control her
+ * answer had already driven. Its suppression gate could not stand it down: the control was never
+ * probed and never failed, and packetAnswerOutranksAliasGuess deliberately keeps an unprobed
+ * ladder alive because on a same-family form it may be a different control's only fill. So the
+ * fill survives, and the fix is the same rule #583 established: her answer replaces the derived
+ * value in the fill itself. */
+test('the label-scoped graduation-date fills carry her reviewed answer, not the profile date', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    graduationDate: 'May 2028',
+    questions: [{
+      question: 'Please re-confirm your expected graduation date',
+      answer: 'January 2028 - July 2028',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_dv_graduation',
+      portalInputType: 'combobox',
+    }],
+  }));
+  const labelFills = actions.filter((action) => action.type === 'fillByLabelText'
+    && /^(?:graduation_date|graduation_date_label|graduation_date_expected)$/.test(action.label ?? ''));
+  assert.ok(labelFills.length > 0, 'the label-scoped graduation-date fills must still exist');
+  for (const action of labelFills) {
+    assert.equal(action.value, 'January 2028 - July 2028',
+      `her reviewed answer must replace the profile date, got ${JSON.stringify(action.value)} via ${action.label}`);
+  }
+  assert.equal(actions.some((action) => action.type === 'fillByLabelText' && action.value === 'May 2028'), false,
+    'no label-scoped fill may type the raw profile date on this packet');
+});
+
+test('the label-scoped graduation-date fills keep the profile date when no applicant answer exists', () => {
+  // The other half of the rule: machine-resolved records are invisible to the applicant lookup, so
+  // a packet whose graduation question was answered by the resolver changes nothing here.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    graduationDate: 'May 2028',
+    questions: [{
+      question: 'Please re-confirm your expected graduation date',
+      answer: 'January 2028 - July 2028',
+      portalSelector: '#question_dv_graduation',
+      portalInputType: 'combobox',
+    }],
+  }));
+  const labelFills = actions.filter((action) => action.type === 'fillByLabelText'
+    && /^(?:graduation_date|graduation_date_label|graduation_date_expected)$/.test(action.label ?? ''));
+  assert.ok(labelFills.length > 0, 'the label-scoped graduation-date fills must still exist');
+  for (const action of labelFills) {
+    assert.equal(action.value, 'May 2028',
+      `a machine-resolved record must not replace the profile date, got ${JSON.stringify(action.value)} via ${action.label}`);
+  }
+});
+
 /* Her own referral choice must reach a list the synonym table does not know.
  *
  * DV Trading's Greenhouse list, read live 2026-08-17: LinkedIn / DV Recruitment / DV Employee /
