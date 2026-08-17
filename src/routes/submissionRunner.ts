@@ -1371,6 +1371,33 @@ export function managedExtensionHandoffUrl(
       ? canonicalSmartRecruitersOneClickUrl(observedUrl)
       : undefined;
   }
+  /* A CAPTCHA on a CAPTCHA-GATED family is a handoff, not a dead end.
+   *
+   * These three families (jazzhr, bamboohr, comeet) carry a required challenge on every application
+   * form, so portalCanAutoSubmit denies them and Litos will never press their Send. But on an
+   * attended run - which is every run on an account without standing consent, per
+   * autoRunShouldPrepare - the form is still REACHED AND FILLED first, and the run then stops with
+   * CAPTCHA_BLOCKER and the `captcha` category. Measured on the Foundation AI JazzHR packet: status
+   * needs_attention, categories ["captcha"], six fields filled, and no handoff URL.
+   *
+   * Without a URL here, extension_handoff_binding is never written, so verifiedDashboardHandoffUrl
+   * returns null and the dashboard renders a blocker card with NO ACTION on a form Litos had already
+   * completed. The whole attended-handoff chain past this point already exists and is already gated:
+   * the binding writer below, the revalidating POST /submission/manual-handoff route, the typed-cause
+   * check, and both website paths (extension and extension-free). This one predicate is what starves
+   * it, and it is why the "CAPTCHA stall" cards have had nothing to click.
+   *
+   * Deliberately keyed on isCaptchaGatedFamily and NOT on captchaAttention alone. greenhouse, ashby
+   * and lever raise that flag from an INVISIBLE reCAPTCHA v3 badge or invisible hCaptcha that asks a
+   * human for nothing - 29 of the 30 flags on this account are that, and both were re-measured as
+   * 0x0 and hidden on 2026-08-17. Handing those to a human would be a false claim that a challenge
+   * is waiting, so they keep returning undefined and stay on the autonomous path.
+   *
+   * The URL is the server-observed one, canonicalized, exactly as the network-restriction arm below
+   * does. Nothing is derived from a posting URL or from React state. */
+  if (isCaptchaGatedFamily(portal) && captchaAttention) {
+    return canonicalSupportedPortalUrl(observedUrl, portal);
+  }
   return networkAccessRestriction ? canonicalSupportedPortalUrl(observedUrl, portal) : undefined;
 }
 

@@ -402,6 +402,23 @@ export function isCaptchaGatedFamily(portal: SupportedPortal): boolean {
   return CAPTCHA_GATED_FAMILIES.has(portalFamily(portal));
 }
 
+/**
+ * The same question, asked of a bare string.
+ *
+ * detectPortal hands back a plain `string`, so the handoff gate cannot reach the typed predicate
+ * above without a cast, and a cast there would be load-bearing: it would silently widen the day
+ * detectPortal learns a new portal. Membership is tested against the family set itself, so anything
+ * that is not one of the three CAPTCHA-gated families answers false. That is the fail-closed
+ * direction for a gate deciding whether a company URL is disclosed.
+ *
+ * Reading the set rather than re-listing the names is the point: a family added to
+ * CAPTCHA_GATED_FAMILIES is covered here with no second list to remember, which is the defect shape
+ * this file's own comments keep warning about. Mirrors isAutonomousPortalFamily.
+ */
+export function isCaptchaGatedPortalName(value: string): boolean {
+  return (CAPTCHA_GATED_FAMILIES as ReadonlySet<string>).has(value);
+}
+
 // Only for the paths that stop WITHOUT a live Page, where the provider cannot be observed. Both
 // values are measured, not assumed: JazzHR carries g-recaptcha-response on every application form
 // (confirmed 2026-07-28) and BambooHR does too, with window.grecaptcha defined and the badge

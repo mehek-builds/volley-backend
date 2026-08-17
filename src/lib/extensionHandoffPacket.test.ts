@@ -724,3 +724,155 @@ test('claimed, submitted, in-flight, and security-code packets are never disclos
     submissionClaimedAt: '2026-08-10T00:00:00.000Z',
   }), false);
 });
+
+/* The CAPTCHA-gated families, which had no dashboard handoff at all until the run that produced
+ * these tests.
+ *
+ * The fixtures are the REAL production packet, not an invention: Foundation AI on JazzHR, application
+ * 355bcfb3, measured on 2026-08-17 at status needs_attention, attention_categories ["captcha"],
+ * attention_reason exactly CAPTCHA_BLOCKER, and six fields already filled on the employer's form.
+ * That row could not produce a handoff URL, so the dashboard drew a blocker card with nothing to
+ * click on a form Litos had completed. */
+const FOUNDATION_AI_JAZZHR = 'https://foundationai.applytojob.com/apply/jobs/details/QhIlJU3sYr';
+
+function captchaStall(frozenUrl: string, frozenAtsName: string) {
+  return dashboardInput({
+    frozenUrl,
+    frozenHandoffUrl: frozenUrl,
+    frozenAtsName,
+    attentionReason: CAPTCHA_BLOCKER,
+    attentionCategories: ['captcha'] as ApplicationReviewState['attention_categories'],
+    status: 'needs_attention' as const,
+  });
+}
+
+test('a filled JazzHR form held at its required challenge hands off to the dashboard', () => {
+  assert.equal(
+    verifiedDashboardHandoffUrl(captchaStall(FOUNDATION_AI_JAZZHR, 'jazzhr')),
+    FOUNDATION_AI_JAZZHR,
+  );
+});
+
+test('BambooHR stays behind its own sentence, which nothing writes yet', () => {
+  /* This documents a KNOWN GAP rather than a behaviour to be proud of.
+   *
+   * bamboohr is in DASHBOARD_ATTENDED_PORTALS and its arm demands BAMBOOHR_ATTENDED_GATE_REASON,
+   * which no code path emits - grep returns the declaration and one consumer. So a real BambooHR
+   * CAPTCHA stall, which writes the generic blocker, still gets no handoff.
+   *
+   * The check is NOT weakened to accept the generic blocker: its own sentence tells her the form is
+   * already filled and only the check and Send remain, and swapping that for "CAPTCHA requires your
+   * attention" would make the surface she acts from less informative. The fix belongs in the runner's
+   * reason composition, in its own diff. */
+  const bamboo = 'https://prentkeromich.bamboohr.com/careers/480';
+  assert.equal(verifiedDashboardHandoffUrl(captchaStall(bamboo, 'bamboohr')), null);
+  assert.equal(
+    verifiedDashboardHandoffUrl(dashboardInput({
+      frozenUrl: bamboo,
+      frozenHandoffUrl: bamboo,
+      frozenAtsName: 'bamboohr',
+      attentionReason: BAMBOOHR_ATTENDED_GATE_REASON,
+      attentionCategories: ['captcha'] as ApplicationReviewState['attention_categories'],
+      status: 'needs_attention' as const,
+    })),
+    bamboo,
+  );
+});
+
+/* THE ADVERSARY THAT CAN WIN.
+ *
+ * Greenhouse, Ashby and Lever raise the identical captcha reason and the identical captcha category
+ * from an INVISIBLE reCAPTCHA v3 badge or invisible hCaptcha that asks a human for nothing: 29 of the
+ * 30 flags on the owner account are that, and every hCaptcha frame on two Lever tenants re-measured
+ * 0x0 and hidden on 2026-08-17. These rows are byte-identical to the JazzHR row above except for the
+ * portal, so a fix keyed on captchaAttention alone - which is the obvious way to write it - passes
+ * every test above and hands a human a challenge that does not exist, on a family Litos can submit
+ * autonomously. They must stay null. */
+test('an invisible-badge CAPTCHA on an autonomous family is never handed to the human', () => {
+  for (const [url, ats] of [
+    ['https://boards.greenhouse.io/acme/jobs/123', 'greenhouse'],
+    ['https://jobs.ashbyhq.com/acme/123e4567-e89b-12d3-a456-426614174000', 'ashby'],
+    ['https://jobs.lever.co/acme/123e4567-e89b-12d3-a456-426614174000', 'lever'],
+  ] as const) {
+    assert.equal(
+      verifiedDashboardHandoffUrl(captchaStall(url, ats)),
+      null,
+      `${ats} must stay on the autonomous path`,
+    );
+  }
+});
+
+test('a CAPTCHA-gated handoff fails closed without the captcha category', () => {
+  // The reason alone is not a classification. A sentence can travel in a multi-line reason list
+  // without the run having typed the stop as a challenge.
+  assert.equal(
+    verifiedDashboardHandoffUrl(dashboardInput({
+      frozenUrl: FOUNDATION_AI_JAZZHR,
+      frozenHandoffUrl: FOUNDATION_AI_JAZZHR,
+      frozenAtsName: 'jazzhr',
+      attentionReason: CAPTCHA_BLOCKER,
+      attentionCategories: ['form_not_reached'] as ApplicationReviewState['attention_categories'],
+      status: 'needs_attention' as const,
+    })),
+    null,
+  );
+});
+
+test('a CAPTCHA-gated handoff refuses a second posting on the same tenant', () => {
+  /* Self-consistency is the whole invariant for these single-page forms: the URL the run observed at
+   * the challenge must canonicalize to the frozen posting. The adversary is a REAL other job on the
+   * same employer's board, which is the shape that would actually leak - not a malformed string. */
+  const otherJob = 'https://foundationai.applytojob.com/apply/jobs/details/ZZZZZZZZZZ';
+  assert.equal(
+    verifiedDashboardHandoffUrl(dashboardInput({
+      frozenUrl: FOUNDATION_AI_JAZZHR,
+      frozenHandoffUrl: otherJob,
+      frozenAtsName: 'jazzhr',
+      attentionReason: CAPTCHA_BLOCKER,
+      attentionCategories: ['captcha'] as ApplicationReviewState['attention_categories'],
+      status: 'needs_attention' as const,
+    })),
+    null,
+  );
+});
+
+test('writing a CAPTCHA handoff URL does not break the extension packet route', () => {
+  /* REGRESSION for a defect introduced by the dashboard-handoff change itself and caught in review.
+   *
+   * extensionHandoffPacketMatches guards a DIFFERENT surface - GET /submission/extension-packet and
+   * extensionStartHandoffBinding - and its frozenHandoffUrl block only runs when that field is set.
+   * Before the runner started writing one for CAPTCHA-gated families these rows skipped the block and
+   * matched on the generic canonical comparison. Writing the URL made the block run, find no eligible
+   * cause, and refuse, which would have taken the working Chrome-extension path away from every
+   * JazzHR, BambooHR and Comeet application in exchange for the new dashboard one.
+   *
+   * Both shapes must match: the field is written now, and it must not matter here. */
+  const jazz = 'https://foundationai.applytojob.com/apply/jobs/details/QhIlJU3sYr';
+  const base = {
+    frozenUrl: jazz,
+    currentUrl: jazz,
+    frozenAtsName: 'jazzhr',
+    status: 'needs_attention' as const,
+    attentionReason: CAPTCHA_BLOCKER,
+  };
+  assert.equal(extensionHandoffPacketMatches({ ...base }), true, 'no handoff url, as before the change');
+  assert.equal(extensionHandoffPacketMatches({ ...base, frozenHandoffUrl: jazz }), true, 'handoff url written, as after it');
+
+  // The eligible cause is still a CAPTCHA one. An unrelated stop with a handoff URL stays refused.
+  assert.equal(extensionHandoffPacketMatches({
+    ...base,
+    frozenHandoffUrl: jazz,
+    attentionReason: 'A required field on the form has no label Litos can read',
+  }), false);
+
+  // And it must not have opened the same door on a family that can submit itself.
+  const gh = 'https://boards.greenhouse.io/acme/jobs/123';
+  assert.equal(extensionHandoffPacketMatches({
+    frozenUrl: gh,
+    currentUrl: gh,
+    frozenAtsName: 'greenhouse',
+    status: 'needs_attention' as const,
+    attentionReason: CAPTCHA_BLOCKER,
+    frozenHandoffUrl: gh,
+  }), false);
+});
