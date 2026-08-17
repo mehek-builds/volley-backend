@@ -45,6 +45,30 @@ export type ApplicationReviewQuestion = {
    * consent branch there.
    */
   answer_option_source?: string;
+  /**
+   * The RESOLVER VALUE this answer was typed over, when the applicant corrected a machine-resolved
+   * answer on the review screen. "Bachelor of Science in Computer Science" beside an answer of
+   * "Bachelor's Degree".
+   *
+   * WHY IT IS NOT answer_option_source, which looks like the same thing and is its opposite. That
+   * field records what an answer was DERIVED FROM, and applicationReview.test.ts pins it dropping
+   * the moment the answer is replaced, because a derivation beside a value it was not derived for is
+   * a lie the next reader cannot detect. An override is defined by being a replacement, so the two
+   * rules cannot share a field: writing one here would assert that resolution snapped this answer
+   * onto a control's list, and nothing resolved anything - she typed it.
+   *
+   * WHAT IT IS FOR. refreshKnownQuestionAnswers overwrites a known question's answer with the
+   * profile's, which is what makes the profile the source of truth. That rule has to yield to an
+   * explicit correction and must not yield forever: an override kept on the applicant claim alone
+   * would still be sent after she fixes the profile fact underneath it. Recording what she overrode
+   * makes staleness decidable in the same way answer_option_source does for a band - "does the
+   * resolver still say what it said when she disagreed with it" - so the override survives while the
+   * profile agrees and is recomputed when it moves.
+   *
+   * An ANSWER-CLAIM, so it dies with the answer it describes. Optional forever; absence reads as
+   * "cannot prove current", which recomputes. jsonb, so no migration.
+   */
+  answer_override_of?: string;
   /* The grant behind a 'consent_permission' answer: when she gave the permission, and the version of
    * the words she was shown when she gave it. Written per question rather than looked up later,
    * because the audit has to say what was true at the moment of the acceptance - revoking the
@@ -87,6 +111,7 @@ type AnswerProvenanceField =
   | 'answer_source'
   | 'answer_reviewed_at'
   | 'answer_option_source'
+  | 'answer_override_of'
   | 'consent_permission_granted_at'
   | 'consent_permission_version';
 
@@ -95,6 +120,7 @@ export const APPLICANT_CLAIM_FIELDS = ['answer_source', 'answer_reviewed_at'] as
 /** Keyed on THE ANSWER. Falsified only by replacing the answer. */
 export const ANSWER_CLAIM_FIELDS = [
   'answer_option_source',
+  'answer_override_of',
   'consent_permission_granted_at',
   'consent_permission_version',
 ] as const;
@@ -245,6 +271,17 @@ export function mergeSubmittedApplicationReviewQuestions(
   stored: readonly ApplicationReviewQuestion[],
   submitted: readonly ApplicationReviewQuestion[],
   questionsReviewedAt?: string,
+  /**
+   * What the resolver answers for a question, from questionDiscovery.knownAnswerLookup.
+   *
+   * OPTIONAL, AND WHAT IT COSTS TO OMIT IT. Two decisions below are strictly better with it and
+   * neither is wrong without it: an applicant claim is minted for a submitted answer that merely
+   * round-trips the resolver's own value, and an override records nothing unless the stored record
+   * already proves what it corresponds to. Callers on the paths that matter - the review-answers
+   * route and the send path - pass it. applyApplicationReviewEdit does not, because it has no
+   * profile to build it from and it stamps every non-empty answer itself anyway.
+   */
+  resolverAnswerFor?: (question: ApplicationReviewQuestion) => string | undefined,
 ): ApplicationReviewQuestion[] {
   const submittedByQuestion = new Map<string, { question: ApplicationReviewQuestion; index: number }>();
   const submittedByUniqueId = new Map<string, { question: ApplicationReviewQuestion; index: number } | undefined>();
@@ -332,27 +369,92 @@ export function mergeSubmittedApplicationReviewQuestions(
      * refusal branch can tell "she answered it" from "an earlier run resolved it". Litos still
      * writes no answer of its own for a held question, which is the property the hold exists for.
      *
-     * A BLANK STORED ANSWER, DELIBERATELY, AND NOT MERELY A CHANGED ONE. answer_source is an
-     * APPLICANT-CLAIM keyed on the exact reviewed identity, and a REPLACED answer invalidates that
-     * identity by rule - see the classification in ANSWER_CLAIM_FIELDS and the tests in
-     * answerProvenanceClasses.test.ts, which pin "I agree" edited to "I do not agree" dropping the
-     * claim. Filling a blank is the one case that does not collide with it: there was no reviewed
-     * identity to invalidate, so recording who filled it asserts nothing the old rule denied.
+     * ANY ANSWER THIS REQUEST CHANGED, AND THAT IS THE RECLASSIFICATION THIS COMMENT USED TO DEFER.
      *
-     * WHAT THAT LEAVES OPEN, STATED. Replacing an EXISTING answer to a held question still loses the
-     * claim and is still blanked. Closing that means reclassifying answer_source, which is a
-     * deliberate design decision with its own test suite behind it and is not this fix's to make.
+     * It was a blank stored answer only, on the reasoning that answer_source is an APPLICANT-CLAIM
+     * keyed on the exact reviewed identity and a REPLACED answer invalidates that identity by rule.
+     * That reasoning is right about CARRYING a claim forward and wrong about MINTING one. Carrying
+     * asserts "she read the text that is still on this record and let it stand", which a replacement
+     * does falsify. Minting asserts "she supplied the bytes in this request", which a replacement is
+     * the clearest possible case of: she typed them, on the screen built for typing them.
+     *
+     * THE DEFECT THAT FORCED THE DECISION. With minting restricted to blanks, no applicant edit of a
+     * machine-resolved answer recorded anything, so refreshKnownQuestionAnswers - which runs on this
+     * output at four read sites and on the fill that reaches the employer - recomputed every one of
+     * them away. Measured on the live Lever degree control: PUT /applications/:id/review/answers
+     * stored "Bachelor's Degree", answered 200, and every reader afterwards showed the raw profile
+     * degree. The supported edit path could not move a single resolved answer in the product.
+     *
+     * THE 802-ANSWER LAUNDERING IS STILL SHUT OUT, and it takes BOTH tests below rather than the
+     * first one alone. That incident came from applyApplicantReviewedAnswers stamping every question
+     * carrying a NON-EMPTY answer, which claimed 802 machine-resolved values across 174 packets as
+     * hers - gender, disability status, veteran status, sponsorship, compensation.
+     *
+     * `!answerUnchanged` ALONE LETS IT BACK IN, which is not obvious and was measured. It compares
+     * the submitted answer with the STORED one, and the screen was not shown the stored one:
+     * GET /applications/:id/submission refreshes on read and does not persist, so a row holding a
+     * stale "Male" is displayed as the resolved value, and the client posts back the whole list it
+     * was shown. An untouched Save then looks like an edit on every question whose stored value the
+     * refresh had corrected, and stamps a self-identification she never made.
+     *
+     * So the second test asks whether the submitted answer is the resolver's OWN value. If it is,
+     * this request changed nothing she can be said to have chosen, whatever the row happened to
+     * hold. Strict equality on the trimmed strings, matching the refresh's own strictness, because a
+     * case difference is a different string on the employer's form.
      *
      * AND ONLY AGAINST A REVIEW ROUND THAT EXISTS. `answer_reviewed_at` is only meaningful beside the
      * `questions_reviewed_at` it equals; writing one without the other would leave a claim no reader
      * can check, and the refusal branch would discard it anyway. */
+    const resolverAnswer = resolverAnswerFor?.(question)?.trim() || undefined;
+    const submittedAnswer = submittedQuestion.answer.trim();
+    const submittedIsResolverValue = resolverAnswer !== undefined && submittedAnswer === resolverAnswer;
     const applicantSuppliedAnswer = Boolean(
-      questionsReviewedAt && !question.answer.trim() && submittedQuestion.answer.trim(),
+      questionsReviewedAt && submittedAnswer && !answerUnchanged && !submittedIsResolverValue,
     );
+    /* WHAT SHE WAS OVERRIDING, so her correction cannot outlive the fact it was made against.
+     *
+     * The claim above is necessary and not sufficient. refreshKnownQuestionAnswers keeps an
+     * overridden answer only while the resolver still computes the value it replaced, which is what
+     * stops "Bachelor's Degree" being sent forever after she corrects her profile to a master's.
+     *
+     * ITS OWN FIELD AND NOT answer_option_source. Those two are near-opposites and a shared field
+     * would make one of them a lie; see the doc on answer_override_of.
+     *
+     * THE RESOLVER'S VALUE, NEVER THE STORED ANSWER, and that distinction is the whole rule. They are
+     * the same string on a plainly resolved record and different on every SNAPPED one: a band record
+     * holds "January 2028 - July 2028" while the resolver says "May 2028". Recording the stored answer
+     * there wrote a value the profile never produces, currency could never be proved, and her edit was
+     * recomputed away - so the override worked on the degree case and silently failed on exactly the
+     * graduation and GPA shapes these packets are full of.
+     *
+     * THE LOOKUP OUTRANKS BOTH STORED NOTES, and getting that order wrong reopens the same hole from
+     * the other side. A row can carry a STALE answer_override_of indefinitely: the refresh drops one
+     * the moment it stops matching, but the readers that run the refresh do not persist its output, so
+     * only the SERVED copy is corrected and the row keeps the old note. Preferring that note over a
+     * live resolution recorded "she overrode Bachelor of Science" on a profile that now says master's,
+     * currency failed, and her fresh edit was recomputed away - which is the defect this branch exists
+     * to fix, arriving through the row's own history. A live resolution cannot be stale by
+     * construction, so it wins; the stored notes are what a caller without a lookup falls back to, and
+     * for a second correction the lookup answers the same value the chain would have anyway.
+     *
+     * NOTHING IS RECORDED WHEN NO RESOLVER VALUE CAN BE NAMED, rather than guessing with the stored
+     * answer. Absence reads as "cannot prove current" in derivationIsCurrent, exactly as it does for a
+     * band with no derivation, and the cost is one recomputation. It also keeps essays out of this
+     * field entirely: the resolver answers nothing for an essay label, and copying a 20,000-character
+     * answer into a record no branch will ever read for an essay is pure weight in the packet spec.
+     *
+     * A HELD QUESTION NEEDS NONE OF THIS. The refusal branch keeps her answer on the claim alone. */
+    const overriddenResolverValue = applicantSuppliedAnswer
+      ? (resolverAnswer
+        || question.answer_override_of?.trim()
+        || question.answer_option_source?.trim()
+        || '')
+      : '';
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
       answer_option_source: _answerOptionSource,
+      answer_override_of: _answerOverrideOf,
       consent_permission_granted_at: _consentGrantedAt,
       consent_permission_version: _consentVersion,
       ...questionWithoutProvenance
@@ -386,6 +488,9 @@ export function mergeSubmittedApplicationReviewQuestions(
       ...(applicantSuppliedAnswer
         ? { answer_source: 'applicant_review' as const, answer_reviewed_at: questionsReviewedAt }
         : {}),
+      /* Beside the claim and never without it, because it is only meaningful as the other half of
+       * that claim. See overriddenResolverValue. */
+      ...(overriddenResolverValue ? { answer_override_of: overriddenResolverValue } : {}),
     };
   });
   const storedKeys = new Set(stored.map((question) => questionKey(question.question)).filter(Boolean));
@@ -396,13 +501,16 @@ export function mergeSubmittedApplicationReviewQuestions(
     /* A question that exists only in the submit body brings no provenance with it, including the
      * option derivation. The two above are stripped because a caller must not assert that the
      * applicant reviewed something; this one because a derivation is a claim that resolution snapped
-     * this answer onto a control's own option list, and nothing here resolved anything. The route's
+     * this answer onto a control's own option list, and nothing here resolved anything. The override
+     * record goes for the third reason: there is no stored answer here to have overridden, so a
+     * caller sending one would be claiming it overrode a resolution that never ran. The route's
      * questionSchema drops the key before this is ever called, but this function is exported and
      * this is the one branch that copies a submitted question wholesale. */
     const {
       answer_source: _answerSource,
       answer_reviewed_at: _answerReviewedAt,
       answer_option_source: _answerOptionSource,
+      answer_override_of: _answerOverrideOf,
       consent_permission_granted_at: _consentGrantedAt,
       consent_permission_version: _consentVersion,
       ...submittedWithoutProvenance

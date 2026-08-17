@@ -115,17 +115,27 @@ test('a replayed machine-drafted answer is still refused rather than promoted to
   assert.equal(questions[0].answer_source, undefined, 'a replayed answer is not an applicant review');
 });
 
-/* REPLACING an existing held answer is deliberately still outside the claim - see
- * mergeSubmittedApplicationReviewQuestions, which states what that leaves open and why closing it is
- * a separate design decision. Pinned so the minted round cannot be read as having widened it. */
-test('editing an existing held answer is still outside the applicant claim', () => {
-  const { questions } = submit(
+/* REPLACING an existing held answer is now inside the claim, which is the design decision the
+ * comment here used to defer to a later branch.
+ *
+ * What it cost while it was deferred: she could answer a held question once and never correct it. A
+ * "No" she needed to change to "Yes" was adopted by the merge, recorded as nobody's, and blanked by
+ * refreshKnownQuestionAnswers on the request that reaches the employer - so the correction was not
+ * merely ignored, it took the original answer down with it and left the field empty on a live form.
+ *
+ * The laundering this used to guard against is still guarded, one test up: a REPLAYED answer is
+ * byte-identical, so `answerUnchanged` holds and nothing is minted. Changed-by-this-request is the
+ * gate, not non-empty. See applicantSuppliedAnswer. */
+test('editing an existing held answer is the applicant\'s answer and survives the send', () => {
+  const { questions, questionsReviewedAt } = submit(
     neverReviewed([storedQuestion('No')]),
     [storedQuestion('Yes')],
   );
 
-  assert.equal(questions[0].answer, '', 'unchanged: only filling a blank records an applicant answer');
-  assert.equal(questions[0].answer_source, undefined);
+  assert.equal(questions[0].answer, 'Yes', 'her correction reaches the employer instead of a blank');
+  assert.equal(questions[0].answer_source, 'applicant_review');
+  assert.equal(questions[0].answer_reviewed_at, questionsReviewedAt,
+    'keyed to the round the packet also carries, or the refresh cannot check it');
 });
 
 /* THE 4 PACKETS THAT ALREADY WORKED, PROVED TO STILL WORK THE SAME WAY. Where a round is stored,

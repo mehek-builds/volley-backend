@@ -3,7 +3,12 @@ import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
 import { officeMetrosNamed } from './officeMetros';
-import { reviewedOptionBandCoversCurrentValue, storedOptionAnswerIsCurrent } from './optionBand';
+import {
+  derivationIsCurrent,
+  optionBandAnswer,
+  reviewedOptionBandCoversCurrentValue,
+  storedOptionAnswerIsCurrent,
+} from './optionBand';
 import type { SupportedPortal } from './portalSubmission';
 import {
   resolveSalary,
@@ -2074,6 +2079,58 @@ export function questionRequiresHumanAttention(question: { question: string; ans
   return false;
 }
 
+/**
+ * WHAT THE RESOLVER ANSWERS FOR A QUESTION, for callers that have to reason about their own output.
+ *
+ * refreshKnownQuestionAnswers replaces a known question's answer with this value, so it is the value
+ * the applicant is SHOWN, and two decisions in mergeSubmittedApplicationReviewQuestions turn on it:
+ *
+ *   1. Did this request change anything. A save posts back what the screen displayed, and the screen
+ *      displayed the refreshed value - GET /applications/:id/submission refreshes on read and does not
+ *      persist. So a submitted answer equal to this one is a round trip of a value nobody typed, and
+ *      minting an applicant claim for it is the 802-answer laundering with extra steps.
+ *   2. What an override was made against. Currency is decided by comparing the recorded value with
+ *      what the resolver says later, so the recorded value has to be the resolver's own, not the
+ *      stored answer - a band record holds "January 2028 - July 2028" while the resolver says
+ *      "May 2028", and recording the band makes every such override unprovable and therefore lost.
+ *
+ * Built here rather than at each call site so the lookup, the refresh and the merge cannot disagree
+ * about what the resolver says. Returns undefined whenever the resolver declines to answer, which is
+ * every held question and every essay, and undefined is read by both callers as "no resolver opinion".
+ */
+export function knownAnswerLookup(
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+  postingCountry?: JobCountry,
+  postingCountryCode?: string,
+): (question: { question: string; answer?: string }) => string | undefined {
+  return (question) => {
+    const label = normalizeReviewQuestionLabel(question.question ?? '');
+    if (!label) return undefined;
+    /* EVERY ARGUMENT BELOW MATCHES THE REFRESH'S OWN CALL, and that is the entire contract of this
+     * function rather than a detail of it. The point is to answer "what will the refresh serve", so a
+     * lookup that resolves with different inputs is worse than no lookup: it reports a value the
+     * refresh will not produce, and the merge then either refuses a real edit or claims a fake one.
+     *
+     * 'text' IS HARDCODED THERE, so it is hardcoded here. Passing the control's own portal_input_type
+     * looked more faithful and measured differently on the first run of these tests - a 'select' degree
+     * control resolved to something the refresh never returns, which is precisely the disagreement this
+     * comment exists to prevent. The stored answer is offered back as a one-element candidate list for
+     * the same reason; see the storedAsCandidate comment in refreshKnownQuestionAnswers. */
+    const storedAsCandidate = question.answer?.trim() ? [question.answer.trim()] : undefined;
+    const known = resolveKnownAnswer(
+      label,
+      'text',
+      ap,
+      jdText,
+      postingCountry,
+      postingCountryCode,
+      storedAsCandidate,
+    );
+    return known && 'value' in known ? known.value : undefined;
+  };
+}
+
 export function refreshKnownQuestionAnswers<T extends { question: string; answer: string }>(
   questions: readonly T[],
   ap: ApplicationProfileLike,
@@ -2123,6 +2180,7 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       answer_source?: unknown;
       answer_reviewed_at?: unknown;
       answer_option_source?: unknown;
+      answer_override_of?: unknown;
       consent_permission_version?: unknown;
       consent_permission_granted_at?: unknown;
     };
@@ -2148,6 +2206,7 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
         answer_source: _answerSource,
         answer_reviewed_at: _answerReviewedAt,
         answer_option_source: _answerOptionSource,
+        answer_override_of: _answerOverrideOf,
         consent_permission_version: _consentPermissionVersion,
         consent_permission_granted_at: _consentPermissionGrantedAt,
         ...rest
@@ -2230,6 +2289,46 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       if (storedOptionAnswerIsCurrent(question.answer, derivedFrom, known.value)) return question;
       if (applicantReviewedCurrentAnswer
         && reviewedOptionBandCoversCurrentValue(question.answer, known.value)) return question;
+      /* HER OWN CORRECTION OF A RESOLVED ANSWER, WHICH BEFORE THIS COULD NOT BE MADE AT ALL.
+       *
+       * THE DEFECT THIS CLOSES, measured on the live Lever degree control. resolveProfileField has
+       * no options to snap onto, so it answers with the raw profile degree, "Bachelor of Science in
+       * Computer Science", against a four-option list offering "Bachelor Degree". The applicant
+       * rewrites it to "Bachelor's Degree" through PUT /applications/:id/review/answers; the route
+       * returns 200 and the row genuinely holds her value. Then this function ran, no branch above
+       * recognised it, and the line below the band checks replaced it with the profile value again -
+       * on every read, on the audit, and on the fill that reaches the employer. So the supported
+       * edit path could not move a single machine-resolved answer, anywhere in the product, and a
+       * save that had really happened looked to the applicant like one that had not.
+       *
+       * BOTH HALVES ARE REQUIRED, exactly as they are for the band above, and for the same reason
+       * rather than by analogy. `applicantReviewedCurrentAnswer` says a human put this string here
+       * in the review round the row itself carries, which is the thing no computed answer can claim.
+       * `derivedFrom` says WHICH resolver value she was overriding, so this cannot become a sticky
+       * answer that outlives the fact it was chosen against: correct the profile degree to a
+       * master's and the derivation stops matching, this branch stops firing, and the answer is
+       * recomputed like any other stale record. That is the property that keeps the profile the
+       * source of truth while still letting her disagree with one resolution of it.
+       *
+       * A BAND IS NOT THIS BRANCH'S BUSINESS, and excluding it is not a technicality - it is the one
+       * case where an override must NOT win. reviewedOptionBandCoversCurrentValue above already rules
+       * on a reviewed range, and it asks a question this branch cannot: does the range she chose still
+       * CONTAIN the profile value. "August 2028 - December 2028" beside a graduation of May 2028 is a
+       * range that contradicts her own stated fact, and the rule above refuses it for that reason.
+       * Letting a claim plus a matching derivation carry it anyway would put a graduation window on a
+       * live application that her own profile says is wrong, and would silently reverse a decision
+       * pinned by 'a genuine edit on the review screen still wins'. Ranges keep their rule; everything
+       * else - the degree ladder, an employer's plain option text, a corrected city - gets this one.
+       *
+       * NOT OTHERWISE KEYED ON SHAPE. Shape exists in the band rule to prove a string could not have
+       * been computed here. An explicit applicant claim proves more than that and proves it directly,
+       * so demanding a recognised shape as well would refuse every override anyone would type. */
+      const overrodeResolverValue = typeof withProvenance.answer_override_of === 'string'
+        ? withProvenance.answer_override_of
+        : undefined;
+      if (applicantReviewedCurrentAnswer
+        && !optionBandAnswer(question.answer)
+        && derivationIsCurrent(overrodeResolverValue, known.value)) return question;
       /* NOTHING IS BEING REPLACED, so the applicant-claim survives. See APPLICANT_CLAIM_FIELDS.
        *
        * Every strip in this file is licensed by one sentence: a record left beside a value it was
@@ -2260,6 +2359,10 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       if (known.value === question.answer) {
         const {
           answer_option_source: _optionSource,
+          /* The resolver now answers exactly what is on the record, so there is nothing left for an
+           * override to be an override OF. Dropping it on the same rule as the other answer-claims
+           * keeps the record from saying she disagreed with a value it now agrees with. */
+          answer_override_of: _overrideOf,
           consent_permission_granted_at: _grantedAt,
           consent_permission_version: _grantVersion,
           ...withApplicantClaim

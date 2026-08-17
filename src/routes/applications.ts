@@ -42,7 +42,7 @@ import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
 import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication } from './submissionRunner';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
-import { refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { knownAnswerLookup, refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
@@ -1467,10 +1467,26 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * stamp over an edit's own questions is shipped behaviour with its own tests, and narrowing it
        * is not this route's to do. */
       const reviewedAt = current.questions_reviewed_at ?? new Date().toISOString();
+      /* WHAT THE SCREEN WAS ACTUALLY SHOWING, which is not what this row holds.
+       *
+       * GET /applications/:id/submission serves refreshKnownQuestionAnswers' output and persists
+       * nothing, so a row carrying a value the resolver has since corrected is DISPLAYED corrected,
+       * and this route's body is the whole list the screen was holding. Without the resolver the merge
+       * compares against the row, reads every one of those as an edit, and stamps answers she never
+       * typed as her own - measured on a stale Gender record displayed as a self-identification.
+       * The same lookup also names the value an override was made against. See the merge's
+       * resolverAnswerFor parameter. */
+      const resolverAnswerFor = knownAnswerLookup(
+        await loadSensitiveQuestionProfile(request.jwtPayload!.userId),
+        current.jd_text,
+        postingCountryFromJobContext(row.job_context),
+        postingCountryCodeFromJobContext(row.job_context),
+      );
       const merged = mergeSubmittedApplicationReviewQuestions(
         current.questions,
         parsed.data.questions as ApplicationReviewQuestion[],
         reviewedAt,
+        resolverAnswerFor,
       );
       const next: ApplicationReviewState = {
         ...current,

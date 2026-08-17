@@ -36,6 +36,7 @@ function storedQuestion(overrides: Partial<ApplicationReviewQuestion> = {}): App
     answer_source: 'applicant_review',
     answer_reviewed_at: REVIEWED_AT,
     answer_option_source: 'Yes',
+    answer_override_of: 'Yes',
     consent_permission_version: 'privacy_and_terms@2026-08-12',
     consent_permission_granted_at: '2026-08-12T09:15:00.000Z',
     ...overrides,
@@ -72,9 +73,21 @@ describe('answer-claims are keyed on the answer', () => {
       REVIEWED_AT,
     ) as ApplicationReviewQuestion[];
     assert.equal(merged.answer, 'I do not agree');
-    for (const field of ANSWER_CLAIM_FIELDS) {
+    /* `answer_override_of` is the one answer-claim a replacement CREATES rather than falsifies, so
+     * "absent" is the wrong test for it and it is asserted on its own line below. It is still keyed
+     * on the answer and still cannot go stale: the stored 'Yes' is gone, and what stands beside the
+     * new answer is the value this request actually typed over. A second edit replaces it again by
+     * the same rule. Filtering by name here rather than dropping the loop keeps every other field
+     * covered the moment it is classified, which is what this file is for. */
+    for (const field of ANSWER_CLAIM_FIELDS.filter((name) => name !== 'answer_override_of')) {
       assert.equal(merged[field], undefined, `${field} is an answer-claim and the answer changed`);
     }
+    /* 'Yes' rather than 'I agree' because the fixture already carries an override: resolution said
+     * "Yes", she wrote "I agree" over it, and she is now writing "I do not agree" over that. What the
+     * chain disagrees with is still "Yes", and it is the only value in it whose currency the refresh
+     * can check against the profile. See overriddenResolverValue. */
+    assert.equal(merged.answer_override_of, 'Yes',
+      'the resolver value the chain overrode, carried forward rather than restarted at her own answer');
   });
 
   test('a refusal never keeps an acceptance grant, stated as the case it was blocked for', () => {
@@ -85,7 +98,14 @@ describe('answer-claims are keyed on the answer', () => {
     ) as ApplicationReviewQuestion[];
     assert.equal(merged.consent_permission_version, undefined);
     assert.equal(merged.consent_permission_granted_at, undefined);
-    assert.equal(merged.answer_source, undefined);
+    /* AND SAYS WHOSE REFUSAL IT IS. This asserted `undefined` while minting an applicant claim was
+     * restricted to filling a blank, which made every edit of a resolved answer unrecordable and
+     * therefore unsendable - see applicantSuppliedAnswer. The grant fields above are what this test
+     * exists for and they still drop; the refusal itself is hers, she typed it over an acceptance,
+     * and a record that says so is the honest one. 'consent_permission' would be the wrong value
+     * here: no machine permission produced "I do not agree". */
+    assert.equal(merged.answer_source, 'applicant_review');
+    assert.equal(merged.answer_reviewed_at, REVIEWED_AT);
   });
 });
 

@@ -1,6 +1,6 @@
 import { mergeSubmittedApplicationReviewQuestions, type ApplicationReviewQuestion, type ApplicationReviewState } from './applicationReview';
 import type { JobCountry } from './jobLocation';
-import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from './questionDiscovery';
+import { knownAnswerLookup, refreshKnownQuestionAnswers, type ApplicationProfileLike } from './questionDiscovery';
 
 /**
  * The answers POST /submit-request will fill the employer's form from, and the review round they are
@@ -35,7 +35,18 @@ export function resolveSubmittedApplicationAnswers(options: {
   const { current, submitted, profile, postingCountry, postingCountryCode } = options;
   const questionsReviewedAt = current.questions_reviewed_at
     ?? (options.now ?? (() => new Date().toISOString()))();
-  const merged = mergeSubmittedApplicationReviewQuestions(current.questions, submitted, questionsReviewedAt);
+  /* The SAME lookup the refresh below resolves with, handed to the merge above it. The merge has to
+   * know what the resolver says for two decisions it cannot otherwise make - whether a submitted
+   * answer is her choice or a round trip of the resolver's own value, and which value an override was
+   * made against - and building it once here is what stops the two halves of this function
+   * disagreeing about that, the same reason the round is computed once. */
+  const resolverAnswerFor = knownAnswerLookup(profile, current.jd_text, postingCountry, postingCountryCode);
+  const merged = mergeSubmittedApplicationReviewQuestions(
+    current.questions,
+    submitted,
+    questionsReviewedAt,
+    resolverAnswerFor,
+  );
   const questions = refreshKnownQuestionAnswers(
     merged,
     profile,
