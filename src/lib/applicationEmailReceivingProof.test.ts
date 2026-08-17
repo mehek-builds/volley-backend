@@ -7,6 +7,7 @@ import {
   configuredManagedReceivingCanaryRecipient,
   managedReceivingProofRouteFingerprint,
   recentManagedReceivingProof,
+  recordManagedReceivingProofFromDelivery,
   type ManagedReceivingProof,
   type ManagedReceivingProofStore,
 } from './applicationEmailReceivingProof';
@@ -277,4 +278,84 @@ test('migration and setup keep proof minimal and canary material out of output a
   assert.match(setup, /input: `\$\{token\}\\n`/);
   assert.doesNotMatch(setup, /console\.(?:log|error)\([^\n]*(?:token|recipient)\s*[,)}]/i);
   assert.doesNotMatch(setup, /'--value'/);
+});
+
+/* Real inbound mail proves the route too, which is what broke the 2026-08-17 deadlock.
+ *
+ * The canary was the only writer of proof and only the daily cron can send it, because the recipient
+ * embeds a token Vercel stores as `sensitive` - write-only, unreadable even through the API with
+ * decrypt=true. When the proof aged out, recovery was circular: a fresh proof needed an inbound
+ * delivery, submissions generate inbound deliveries, and the stale proof was blocking submissions.
+ * Real employer mail was arriving on the same path the whole time and was being discarded. */
+test('an accepted delivery to the managed domain records proof', async () => {
+  await withManagedProofEnv(async () => {
+    const store = new MemoryProofStore();
+    const recorded = await recordManagedReceivingProofFromDelivery(
+      { emailId: 'resend-inbound-1', recipients: [`app-abc123@${DOMAIN}`] },
+      { store, assertContentReadable: async () => {}, now: new Date('2026-08-17T16:00:00.000Z') },
+    );
+    assert.equal(recorded, true);
+    assert.equal(store.rows.length, 1);
+    assert.equal(store.rows[0].domain, DOMAIN);
+    assert.equal(store.rows[0].proof_version, 3);
+    assert.equal(store.rows[0].route_fingerprint, managedReceivingProofRouteFingerprint());
+
+    // And it is immediately usable as health evidence, which is the whole point.
+    assert.equal(await recentManagedReceivingProof({
+      store,
+      now: new Date('2026-08-17T16:00:01.000Z'),
+    }), true);
+  });
+});
+
+test('a delivery addressed only to another domain proves nothing', async () => {
+  await withManagedProofEnv(async () => {
+    const store = new MemoryProofStore();
+    const recorded = await recordManagedReceivingProofFromDelivery(
+      { emailId: 'resend-inbound-2', recipients: ['someone@other-domain.example'] },
+      { store, assertContentReadable: async () => {} },
+    );
+    assert.equal(recorded, false);
+    assert.equal(store.rows.length, 0);
+  });
+});
+
+test('a delivery whose content the receiving key cannot read records nothing', async () => {
+  await withManagedProofEnv(async () => {
+    const store = new MemoryProofStore();
+    await assert.rejects(() => recordManagedReceivingProofFromDelivery(
+      { emailId: 'resend-inbound-3', recipients: [`app-abc123@${DOMAIN}`] },
+      {
+        store,
+        assertContentReadable: async () => { throw new Error('receiving read scope missing'); },
+      },
+    ), /receiving read scope missing/);
+    assert.equal(store.rows.length, 0);
+  });
+});
+
+test('the same provider message is idempotent rather than a second proof row', async () => {
+  await withManagedProofEnv(async () => {
+    const store = new MemoryProofStore();
+    const args = {
+      emailId: 'resend-inbound-4',
+      recipients: [`app-abc123@${DOMAIN}`],
+    };
+    const opts = { store, assertContentReadable: async () => {} };
+    assert.equal(await recordManagedReceivingProofFromDelivery(args, opts), true);
+    assert.equal(await recordManagedReceivingProofFromDelivery(args, opts), true);
+    assert.equal(store.rows.length, 1);
+  });
+});
+
+test('a delivery records nothing when the route is not managed Resend', async () => {
+  await withManagedProofEnv(async () => {
+    process.env.LITOS_APPLICATION_EMAIL_ROUTE_MODE = 'custom_domain';
+    const store = new MemoryProofStore();
+    assert.equal(await recordManagedReceivingProofFromDelivery(
+      { emailId: 'resend-inbound-5', recipients: [`app-abc123@${DOMAIN}`] },
+      { store, assertContentReadable: async () => {} },
+    ), false);
+    assert.equal(store.rows.length, 0);
+  });
 });
