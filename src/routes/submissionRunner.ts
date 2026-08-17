@@ -2132,21 +2132,52 @@ export function mergeDiscoveredPortalQuestions(
   invalidatedFieldIds: ReadonlySet<string> = new Set(),
 ): ApplicationReviewQuestion[] {
   const invalidated = new Set(invalidatedQuestionKeys);
+  const kept = stored.filter((question) => {
+    if (invalidated.has(normalizeReviewQuestionLabel(question.question).toLowerCase())) return false;
+    const controlId = managedOptionProbeControlId({
+      label: question.question,
+      selector: question.portal_selector,
+    });
+    if (!controlId || !invalidatedFieldIds.has(controlId)) return true;
+    // invalidatedFieldIds are the controls whose live option probe FAILED, meaning the list
+    // could not be read this run. An answer she chose herself does not need the list read; a
+    // stored machine answer does, because restoring it replays a value nobody stands behind
+    // against a control nobody read. Measured on Jump Trading packet 2e593ac5, 2026-08-17 late.
+    return question.answer_source === 'applicant_review' && Boolean(question.answer.trim());
+  });
+  /* HER ANSWER LEADS THE COLLISION, because ordering here decides who wins one.
+   *
+   * normalizeApplicationReviewQuestions is FIRST-WINS on the answer: for a duplicate label it keeps
+   * `existing.answer` and takes the later one only when the first is empty
+   * (`answer: existing.answer.trim() ? existing.answer : question.answer`), and the row it keeps is
+   * `{ ...existing }`. With `...discovered` spread first, the discovered row was always `existing`,
+   * so a freshly resolved answer beat an answer she had reviewed AND took its `answer_source` down
+   * with it.
+   *
+   * Measured on DV Trading e0a0eb84, 2026-08-18, live and end to end. Saved "Other" through
+   * PUT /review/answers; read it back as `Other` / `applicant_review`; ran the fill; the persisted
+   * row afterwards was `answer: "Job board"` with NO answer_source, and the run reported
+   * `no option matched "Job board"` against a list whose entries are LinkedIn / DV Recruitment /
+   * DV Employee / DV Intern / DV Website / Student Organization / Campus Event / Word of Mouth /
+   * SHRM / Other. So discovery resolves that label to "Job board" every run, and her choice was
+   * being discarded every run.
+   *
+   * This is the principle the filter above already states in so many words - "an answer she chose
+   * herself does not need the list read" - applied to the collision instead of only to which stored
+   * rows survive it. Scoped exactly as that filter scopes it: `applicant_review` with a non-empty
+   * answer, nothing else moves.
+   *
+   * The discovered row is NOT discarded. normalizeApplicationReviewQuestions merges
+   * portal_selector, portal_input_type and ats_api_field from the later occurrence regardless of
+   * which side won the answer, so this run's live selector still reaches the fill. Only the answer
+   * and its provenance change hands. */
+  const applicantChose = (question: ApplicationReviewQuestion): boolean => (
+    question.answer_source === 'applicant_review' && Boolean(question.answer.trim())
+  );
   return normalizeApplicationReviewQuestions([
+    ...kept.filter(applicantChose),
     ...discovered,
-    ...stored.filter((question) => {
-      if (invalidated.has(normalizeReviewQuestionLabel(question.question).toLowerCase())) return false;
-      const controlId = managedOptionProbeControlId({
-        label: question.question,
-        selector: question.portal_selector,
-      });
-      if (!controlId || !invalidatedFieldIds.has(controlId)) return true;
-      // invalidatedFieldIds are the controls whose live option probe FAILED, meaning the list
-      // could not be read this run. An answer she chose herself does not need the list read; a
-      // stored machine answer does, because restoring it replays a value nobody stands behind
-      // against a control nobody read. Measured on Jump Trading packet 2e593ac5, 2026-08-17 late.
-      return question.answer_source === 'applicant_review' && Boolean(question.answer.trim());
-    }),
+    ...kept.filter((question) => !applicantChose(question)),
   ]);
 }
 
