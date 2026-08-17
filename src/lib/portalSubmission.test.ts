@@ -7342,6 +7342,134 @@ test('an applicant-reviewed option leads the combobox, ahead of the computed buc
     `her own answer must be typed first, got ${JSON.stringify(typed)}`);
 });
 
+/* The SECOND half of the Jump Trading measurement, taken AFTER the ordering fix above deployed.
+ *
+ * Same packet, 2e593ac5, 2026-08-17 late: the reviewed answer "Spring/Summer 2028" is stored with
+ * answer_source applicant_review and is verbatim on the employer's list, and the live run still
+ * typed the profile-derived "May 2028" and reported `no option matched "May 2028"`. The ordering
+ * fix never reached this control because the run's own option probe FAILED on it, and a failed
+ * probe did three things at once:
+ *
+ *   1. packetQuestionFailed made the reviewed-question loop skip her answer entirely;
+ *   2. managedActionTargetsFailedField stripped any question action that did survive;
+ *   3. the speculative graduation-date ladder was NOT suppressed (its suppression needs the very
+ *      option list the probe failed to read), and its label selectors substring-match the
+ *      employer's real label, so raw profile values were the only thing the control ever saw.
+ *
+ * A failed probe means Litos could not READ the list. Her answer does not need the list read: she
+ * chose it, and the fill types it verbatim and clicks the option whose text matches. So an
+ * applicant-chosen answer survives the failed-control suppression, and the profile ladder stands
+ * down at a control she has answered. */
+test('a reviewed graduation answer on a probe-failed control is still the only value the form sees', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    graduationDate: 'May 2028',
+    failedFields: [{
+      controlId: 'question_67595189',
+      label: 'What is your expected graduation date?',
+      selector: '#question_67595189',
+      inputType: 'combobox',
+    }],
+    questions: [{
+      question: 'What is your expected graduation date?',
+      answer: 'Spring/Summer 2028',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_67595189',
+      portalInputType: 'combobox',
+    }],
+  }));
+  const graduationDateFills = actions.filter((action) =>
+    (action.type === 'fill' || action.type === 'fillByLabelText')
+    && /graduation\s+date/i.test(`${action.label ?? ''} ${action.selector ?? ''} ${action.text ?? ''}`));
+  assert.ok(graduationDateFills.length > 0, 'her reviewed answer must drive the control at all');
+  for (const action of graduationDateFills) {
+    assert.equal(action.value, 'Spring/Summer 2028',
+      `every value typed at the graduation-date control must be her own answer, got ${JSON.stringify(action.value)} via ${action.label}`);
+  }
+});
+
+test('her answer to a custom question does not unlock a probe-failed fixed control in the same family', () => {
+  // The exemption is identity-scoped on purpose: a family bucket spans different controls on one
+  // form, and the fixed education builder types RAW profile values. If her custom graduation-year
+  // answer erased the failed record for end-year--0, the profile year would be typed into a
+  // react-select nobody read, one budget position before her own fill.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    graduationYear: '2028',
+    failedFields: [{
+      controlId: 'end-year--0',
+      label: 'Graduation Year',
+      selector: '#end-year--0',
+      inputType: 'combobox',
+    }],
+    questions: [{
+      question: 'What is your expected graduation year?',
+      answer: '2028 (first half)',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_11',
+      portalInputType: 'combobox',
+    }],
+  }));
+  assert.equal(actions.some((action) => (action.selector ?? '').includes('end-year--0')), false,
+    'the probe-failed fixed control must stay untouched');
+});
+
+test('her answer equal to the computed bucket still silences the ladder at her probe-failed control', () => {
+  // greenhouseGraduationBucket("May 2028") is "Spring 2028". When her chosen answer happens to BE
+  // that bucket, a candidate-by-candidate comparison would let the whole ladder fire, raw profile
+  // date first, and reproduce the measured `no option matched "May 2028"` on the one-attempt
+  // react-select her fill was about to commit.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    graduationDate: 'May 2028',
+    failedFields: [{
+      controlId: 'question_67595189',
+      label: 'What is your expected graduation date?',
+      selector: '#question_67595189',
+      inputType: 'combobox',
+    }],
+    questions: [{
+      question: 'What is your expected graduation date?',
+      answer: 'Spring 2028',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_67595189',
+      portalInputType: 'combobox',
+    }],
+  }));
+  assert.equal(actions.some((action) => action.value === 'May 2028'), false,
+    'the raw profile date must never be typed anywhere on this packet');
+  const graduationDateFills = actions.filter((action) =>
+    (action.type === 'fill' || action.type === 'fillByLabelText')
+    && /graduation\s+date/i.test(`${action.label ?? ''} ${action.selector ?? ''} ${action.text ?? ''}`));
+  assert.ok(graduationDateFills.length > 0, 'her reviewed answer must drive the control at all');
+  for (const action of graduationDateFills) {
+    assert.equal(action.value, 'Spring 2028',
+      `every value typed at the graduation-date control must be her own answer, got ${JSON.stringify(action.value)} via ${action.label}`);
+  }
+});
+
+test('a probe-failed control with no applicant answer still refuses every speculative guess at it', () => {
+  // The suppression this file already promises: "Closed controls whose live option evidence failed.
+  // No action builder may guess at these." Relaxing it for HER answer must not relax it for a
+  // machine value, or the next probe failure submits a profile guess under a control nobody read.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    graduationDate: 'May 2028',
+    failedFields: [{
+      controlId: 'question_67595189',
+      label: 'What is your expected graduation date?',
+      selector: '#question_67595189',
+      inputType: 'combobox',
+    }],
+    questions: [{
+      question: 'What is your expected graduation date?',
+      answer: 'May 2028',
+      portalSelector: '#question_67595189',
+      portalInputType: 'combobox',
+    }],
+  }));
+  const questionFills = actions.filter((action) =>
+    action.type === 'fill' && action.label?.startsWith('question_combo:'));
+  assert.equal(questionFills.length, 0,
+    `a machine answer must stay suppressed at a failed control, got ${JSON.stringify(questionFills.map((action) => action.value))}`);
+});
+
 test('a machine answer with no option evidence still leads with the computed bucket', () => {
   // The case the bucket exists for, asserted so the fix above cannot quietly take it away: a profile
   // fact that has never been near this control is rarely spelled the way a closed list spells it.

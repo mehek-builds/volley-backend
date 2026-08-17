@@ -1905,6 +1905,89 @@ test('a failed live GPA selector cannot be restored from a stale stored question
   assert.deepEqual(merged, []);
 });
 
+/* Jump Trading packet 2e593ac5, 2026-08-17 late. The reviewed answer "Spring/Summer 2028"
+ * (answer_source applicant_review, verbatim on the employer's list) never reached the fill because
+ * this merge dropped the stored question the moment the run's own option probe failed on its
+ * control - and with the question gone from the packet, the only thing left to type was the
+ * speculative ladder's profile-derived "May 2028".
+ *
+ * A failed probe means the list could not be READ this run. An answer she chose herself does not
+ * need the list read, and the contract PR #566 set for every other reader is that her override
+ * survives until she changes it. The stale-machine-answer drop above is untouched: it has no
+ * applicant provenance, and restoring it really would replay a value nobody stands behind. */
+test('a stored applicant-reviewed answer survives a failed option probe on its control', () => {
+  const failedId = 'question_67595189';
+  const stored = {
+    id: 'jump-graduation',
+    question: 'What is your expected graduation date?',
+    answer: 'Spring/Summer 2028',
+    kind: 'required' as const,
+    required: true,
+    portal_selector: `#${failedId}`,
+    portal_input_type: 'combobox',
+    answer_source: 'applicant_review' as const,
+    answer_reviewed_at: '2026-08-17T20:00:00.000Z',
+  };
+  // The failed control's label key is deliberately absent from the invalidated list: the send path
+  // filters probe-failure keys for applicant-reviewed questions before calling this merge, and
+  // resolver-driven invalidation keys (which still drop her record so she re-confirms) cannot be
+  // told apart from probe keys in here.
+  const merged = mergeDiscoveredPortalQuestions(
+    [],
+    [stored],
+    [],
+    new Set([failedId]),
+  );
+  assert.equal(merged.length, 1, 'her reviewed answer must stay in the packet');
+  assert.equal(merged[0]?.answer, 'Spring/Summer 2028');
+  assert.equal(merged[0]?.answer_source, 'applicant_review');
+});
+
+/* Provenance follows the ANSWER. Discovery replaces a reviewed answer with the resolver's value
+ * whenever the profile knows one for the label, and the record spread used to carry
+ * answer_source: 'applicant_review' onto that machine value. Every applicant-override reader,
+ * including the failed-probe exemptions above, would then treat the machine value as a choice she
+ * made, and on the next probe failure type it verbatim at a control nobody read. */
+test('a machine value replacing a stale reviewed answer does not keep her provenance', async () => {
+  const reviewedAt = '2026-08-10T00:00:00.000Z';
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship is based in San Francisco, California.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions_reviewed_at: '2026-08-17T00:00:00.000Z',
+    questions: [{
+      id: 'wa',
+      question: 'Are you legally authorized to work in the United States?',
+      answer: 'No',
+      kind: 'required',
+      required: true,
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'Are you legally authorized to work in the United States?',
+      selector: '[data-litos-discovered-1]',
+      inputType: 'text',
+      maxLength: null,
+    }],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { work_authorized: true },
+    true,
+    'greenhouse',
+  );
+  assert.equal(result.questions[0]?.answer, 'Yes');
+  assert.notEqual(result.questions[0]?.answer_source, 'applicant_review',
+    'a machine value must not wear applicant provenance');
+});
+
 /* R-101, the reporting half. The DRW Software Developer Intern run of 2026-08-08 recorded
  * `questions: 0`, twenty-seven "is required and is still empty" lines, `submission_error: null`
  * and no stall. Every sentence in it was true and the run as a whole was not: it named twenty-seven

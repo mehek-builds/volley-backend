@@ -2011,6 +2011,47 @@ function managedClosedFieldFamily(label: string): string | undefined {
   return undefined;
 }
 
+/* Whether an applicant-chosen answer names EXACTLY the control this failed field records.
+ *
+ * A failed field says the run could not READ the control's option list, and the suppression built
+ * on it exists so no builder GUESSES at a list nobody read. An answer with answer_source
+ * applicant_review is not a guess: she chose it, the fill types it verbatim and clicks the option
+ * whose text matches, and none of that needs the list read in advance.
+ *
+ * Measured on Jump Trading packet 2e593ac5, 2026-08-17 late, AFTER the reviewed-answer ordering
+ * fix deployed: the graduation control's probe failed on the live run, the failed-field record
+ * suppressed her verbatim "Spring/Summer 2028" everywhere, and the speculative graduation ladder,
+ * whose own suppression needs the very list the probe failed to read, typed the profile's
+ * "May 2028" into the same control through a substring label match. The run reported
+ * `no option matched "May 2028"` on a question that was already answered correctly.
+ *
+ * DELIBERATELY NARROWER than the matcher inside packetTargetFailed: no closed-field-family clause.
+ * The suppression may be broad, because refusing a guess costs one blocker card; the exemption must
+ * be provably about HER control, because a family bucket spans different controls on one form and
+ * an exemption at that width let her sponsorship answer lift the suppression off a second, machine-
+ * answered sponsorship control whose list nobody read. Only identity evidence counts: the exact
+ * selector, the exact control id, or the exact stored label. */
+function applicantChosenQuestionMatchesFailedField(
+  item: SubmissionPacket['questions'][number],
+  field: NonNullable<SubmissionPacket['failedFields']>[number],
+): boolean {
+  const selector = reviewQuestionPortalSelector(item);
+  if (selector && field.selector && selector === field.selector) return true;
+  const selectorId = managedOptionInventoryKeyFromSelector(selector);
+  if (selectorId && field.controlId === selectorId) return true;
+  const itemLabel = normalizedFailedFieldLabel(item.question);
+  const fieldLabel = normalizedFailedFieldLabel(field.label);
+  return Boolean(itemLabel) && itemLabel === fieldLabel;
+}
+
+function applicantChoseAnswerForFailedField(
+  packet: SubmissionPacket,
+  field: NonNullable<SubmissionPacket['failedFields']>[number],
+): boolean {
+  return packet.questions.some((item) => applicantChoseAnswer(item)
+    && applicantChosenQuestionMatchesFailedField(item, field));
+}
+
 function packetTargetFailed(packet: SubmissionPacket, target: ManagedFieldTarget): boolean {
   const targetLabel = normalizedFailedFieldLabel(target.label ?? '');
   const targetFamily = managedClosedFieldFamily(target.label ?? '');
@@ -2033,10 +2074,20 @@ function packetLabelFailed(packet: SubmissionPacket, label: string): boolean {
   return packetTargetFailed(packet, { label });
 }
 
+/* PER-ITEM exemption, not a packet-wide one. An applicant-chosen answer un-suppresses exactly ONE
+ * consumer: the reviewed-question fill for that item. Every other reader of failedFields keeps the
+ * full record, so the id-scoped education fills, the demographic and known-question alias ladders,
+ * and a machine-answered question that happens to share the failed control's label or family all
+ * stay refused. An earlier shape of this fix filtered the failed-field list itself, which let the
+ * fixed education builder type the raw profile year into a probe-failed react-select one budget
+ * position BEFORE her answer reached it; the control's one attempt went to the machine value. */
 function packetQuestionFailed(packet: SubmissionPacket, item: SubmissionPacket['questions'][number]): boolean {
   const selector = reviewQuestionPortalSelector(item);
   const selectorId = managedOptionInventoryKeyFromSelector(selector);
-  return packetTargetFailed(packet, {
+  const binding = applicantChoseAnswer(item)
+    ? (packet.failedFields ?? []).filter((field) => !applicantChosenQuestionMatchesFailedField(item, field))
+    : packet.failedFields;
+  return packetTargetFailed({ ...packet, failedFields: binding }, {
     controlId: selectorId,
     selector,
     label: item.question,
@@ -2128,7 +2179,22 @@ function packetAnswerOutranksAliasGuess(
       if (!targetFamily || !answeredFamily || targetFamily !== answeredFamily) return false;
     }
     const options = packetReadOptionsForQuestion(packet, item);
-    if (!options) return false;
+    /* No list read, an answer she chose herself, and the reason the list is missing is a measured
+     * probe FAILURE on her own control. Then the ladder stands down entirely: her reviewed fill is
+     * the one attempt this react-select gets, and every ladder value, including one that happens to
+     * equal her answer, would spend or corrupt that attempt with a value the list never vouched
+     * for. Firing it anyway is the measured false alarm: Jump Trading, 2026-08-17 late,
+     * `no option matched "May 2028"` reported about a control whose reviewed "Spring/Summer 2028"
+     * was about to be typed.
+     *
+     * The probe-failure requirement is what keeps this narrow. packetReadOptionsForQuestion is also
+     * undefined for every control that was simply never probed, and on those the ladder may be a
+     * DIFFERENT same-family control's only fill (the Databricks free-text case in the doc above),
+     * so an answer with no failed probe behind it changes nothing here. */
+    if (!options) {
+      return applicantChoseAnswer(item)
+        && (packet.failedFields ?? []).some((field) => applicantChosenQuestionMatchesFailedField(item, field));
+    }
     const offered = new Set(options.map((option) => option.trim().toLowerCase()));
     return offered.has(answer.toLowerCase()) && candidates.every((value) => !offered.has(value));
   });
@@ -2168,9 +2234,16 @@ function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: S
   if (fixedEducation.some(([id, label]) => packetControlFailed(packet, id) && label.test(action.label ?? ''))) return true;
   const selector = action.selector ?? '';
   return packet.failedFields.some((field) => {
-    if (field.selector && selector === field.selector) return true;
-    const escapedId = field.controlId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`(?:#${escapedId}(?![A-Za-z0-9_-])|\\[id=["']${escapedId}["']\\])`).test(selector);
+    if (!field.selector || selector !== field.selector) {
+      const escapedId = field.controlId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (!new RegExp(`(?:#${escapedId}(?![A-Za-z0-9_-])|\\[id=["']${escapedId}["']\\])`).test(selector)) return false;
+    }
+    /* The only actions that reach a failed control by its exact selector are the reviewed-question
+     * chain's: every id-scoped builder above gates on packetControlFailed and packetQuestionFailed
+     * skips machine answers at failed controls, so an action here either carries her chosen answer
+     * or was suppressed before it was built. Stripping hers as a "last line" was the second half of
+     * the measured Jump Trading defect. */
+    return !applicantChoseAnswerForFailedField(packet, field);
   });
 }
 
