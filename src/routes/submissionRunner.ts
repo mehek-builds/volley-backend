@@ -2505,6 +2505,12 @@ async function prepareManaged(
     );
   }
   const fieldOptions = optionProbe.options;
+  const targetedControlIds = managedOptionProbeTargets(
+    portal,
+    discoveryResult?.discovered ?? [],
+    undefined,
+    discoveryRoleCapability,
+  );
   /* WHAT THE PROBE ACTUALLY DID, because until now only its FAILURES were observable.
    *
    * `optionProbe.failures` is logged above and nothing logs a success, so a probe that ran and
@@ -2529,15 +2535,23 @@ async function prepareManaged(
       applicationId: row.id,
       portal,
       discovered: (discoveryResult?.discovered ?? []).length,
-      targeted: managedOptionProbeTargets(
-        portal,
-        discoveryResult?.discovered ?? [],
-        undefined,
-        discoveryRoleCapability,
-      ).length,
+      targeted: targetedControlIds.length,
       read: Object.keys(fieldOptions).length,
       failures: optionProbe.failures.length,
       roleCapability: discoveryRoleCapability,
+      /* WHICH controls, not just how many. The counts said targeted 5 of 16 discovered and read 5,
+       * so the probe is healthy and the question moved to why the other eleven were never targeted -
+       * the degree control among them, which the same run reports as required-and-still-empty.
+       *
+       * Both lists, because the useful comparison is what got in against what did not. Capped and
+       * truncated: these are control HANDLES, but managedOptionProbeControlId can derive one from a
+       * label, and these forms carry demographic questions whose wording does not belong in a log. */
+      targetedIds: targetedControlIds.slice(0, 15).map((id) => id.slice(0, 60)),
+      untargetedIds: (discoveryResult?.discovered ?? [])
+        .map((field) => managedOptionProbeControlId(field))
+        .filter((id): id is string => Boolean(id) && !targetedControlIds.includes(id!))
+        .slice(0, 15)
+        .map((id) => id.slice(0, 60)),
     },
     'Option probe outcome: how many controls were targeted and how many option lists came back',
   );
