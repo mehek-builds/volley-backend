@@ -7404,5 +7404,5 @@ test('a bare stored referral default still goes through the synonym builder alon
     .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo:'))
     .map((action) => action.value);
   assert.ok(typed.length > 0, 'a stored job-board default must still drive the control');
-  assert.ok(/job\s*board/i.test(typed[0]), `expected a job-board wording, got ${JSON.stringify(typed)}`);
+  assert.ok(/job\s*board/i.test(typed[0] ?? ''), `expected a job-board wording, got ${JSON.stringify(typed)}`);
 });
