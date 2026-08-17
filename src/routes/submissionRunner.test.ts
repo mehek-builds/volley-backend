@@ -27,6 +27,7 @@ import {
   submissionGraduationDateParts,
   unansweredRequiredBlockerLabels,
   type ResumeRow,
+  packetQuestionsForFill,
 } from './submissionRunner';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
 import { savedAnswerKey } from '../lib/answerReuse';
@@ -2822,4 +2823,30 @@ test('a bare privacy label still reaches the packet as a question', async () => 
   const labels = result.questions.map((question) => question.question.toLowerCase());
   assert.ok(labels.includes('privacy'), 'the bare "Privacy" label must stay a question');
   assert.ok(labels.includes('privacy statement'), 'the bare "Privacy statement" label must stay a question');
+});
+
+test('packetQuestionsForFill carries her provenance through to the fill', () => {
+  /* The defect this pins: the map that builds packet.questions immediately before fillPortal listed
+   * question / answer / portalSelector / portalInputType and NOT answer_source, so applicantChoseAnswer
+   * was false for every question on that path and #573, #574 and #577 were all inert. Measured live on
+   * DV Trading e0a0eb84, 2026-08-18: packet said "Other" with answer_source applicant_review, the run
+   * typed the referral default and reported `no option matched "Job board"`. */
+  const [referral, plain] = packetQuestionsForFill([
+    {
+      question: 'How did you hear about DV Trading?',
+      answer: 'Other',
+      answer_source: 'applicant_review',
+      portal_selector: '#question_17808234008',
+      portal_input_type: 'combobox',
+    },
+    { question: 'Will you require sponsorship?', answer: 'Yes' },
+  ]);
+
+  assert.equal(referral.answerSource, 'applicant_review', 'her choice must reach the fill as HER choice');
+  assert.equal(referral.answer, 'Other');
+  assert.equal(referral.portalSelector, '#question_17808234008');
+  assert.equal(referral.portalInputType, 'combobox');
+  // An answer nobody reviewed stays unattributed. The bug was a dropped field, not a missing default.
+  assert.equal(plain.answerSource, undefined);
+  assert.equal(plain.answer, 'Yes');
 });

@@ -623,6 +623,47 @@ export function packetUsesControlledResumeFixture(portal: SupportedPortal): bool
   return portal === 'controlled_test';
 }
 
+/**
+ * The packet questions handed to fillPortal, with her provenance carried through.
+ *
+ * A NAMED FUNCTION RATHER THAN THE INLINE MAP IT REPLACES, because the defect was the map's field
+ * list and an inline literal has nowhere to hang a test. This is the last thing that touches
+ * packet.questions before the fill, and it dropped answer_source, so every question arrived with
+ * answerSource undefined regardless of what the earlier packet builds (~1024, ~2713) had set.
+ *
+ * applicantChoseAnswer is `answerSource === 'applicant_review'`. With it undefined here, three
+ * merged fixes were inert on this path: #573 (an applicant answer beats a bucket recomputed from
+ * the profile), #574 (her referral choice leads the typed candidates), #577 (the trailing label
+ * pass types her choice, not the stored default). That is why the referral bug outlived all three.
+ *
+ * Measured on DV Trading e0a0eb84, 2026-08-18, live: the packet question read "Other" with
+ * answer_source applicant_review right up to the submit, the run reported `no option matched
+ * "Job board"` - packet.referralSourceDefault, the value pushGreenhouseReferralSourceAliases falls
+ * back to when it cannot see an applicant choice - and her answer came back blanked.
+ *
+ * Ruled out first, by direct measurement rather than by reading: refreshKnownQuestionAnswers leaves
+ * an applicant-reviewed "Other" untouched, and knownAnswerLookup returns undefined for a referral
+ * label under every profile shape, including the packet-style injected one. Neither rewrites her
+ * answer. This map did.
+ */
+export function packetQuestionsForFill(
+  mergedQuestions: readonly {
+    question: string;
+    answer: string;
+    answer_source?: string;
+    portal_selector?: string;
+    portal_input_type?: string;
+  }[],
+): { question: string; answer: string; answerSource?: string; portalSelector?: string; portalInputType?: string }[] {
+  return mergedQuestions.map((q) => ({
+    question: q.question,
+    answer: q.answer,
+    answerSource: q.answer_source,
+    portalSelector: q.portal_selector,
+    portalInputType: q.portal_input_type,
+  }));
+}
+
 /** Load the resume bytes independently from the rest of packet assembly so fixture isolation is testable. */
 export async function resumeBytesForPacket(
   objectKey: string,
@@ -3552,12 +3593,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         compactAnswers,
       );
     const mergedQuestions = mergeDiscoveredPortalQuestions(discoveredQuestions, storedQuestions, invalidatedQuestionKeys);
-    packet.questions = mergedQuestions.map((q) => ({
-      question: q.question,
-      answer: q.answer,
-      portalSelector: q.portal_selector,
-      portalInputType: q.portal_input_type,
-    }));
+    /* The LAST thing that touches packet.questions before the fill on the next line, and it dropped
+     * answer_source, which made applicantChoseAnswer false for every question here. See
+     * packetQuestionsForFill for the measurement and for the three merged fixes it left inert. */
+    packet.questions = packetQuestionsForFill(mergedQuestions);
 
     let result = await fillPortal(page, portal, packet);
     const postFillVerification = await completeEmailVerificationIfPresent({
