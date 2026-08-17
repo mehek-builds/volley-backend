@@ -3831,6 +3831,21 @@ function graduationYearAnswerForControl(
  * The year branch now asks graduationYearAnswerForControl, which narrows only where the control
  * really is year-shaped.
  */
+/**
+ * Did the APPLICANT write this answer, as opposed to the resolver.
+ *
+ * One predicate, because two readers depend on it and they must not drift:
+ * greenhouseReviewedQuestionAnswer (which value is sent) and greenhouseReviewedAnswerIsResolved
+ * (whether a computed bucket ranks ahead of it). Widening this in one place only would send her
+ * answer while still leading with a bucket, or the reverse, and both are silent.
+ *
+ * `consent_permission` is deliberately NOT here. That provenance marks a permission Litos recorded,
+ * not a value she chose off a control, and it must keep going through the branches below.
+ */
+function applicantChoseAnswer(item: SubmissionPacket['questions'][number]): boolean {
+  return item.answerSource?.trim() === 'applicant_review' && Boolean(item.answer.trim());
+}
+
 function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][number], packet: SubmissionPacket): string {
   const questionText = normalizeReviewQuestionLabel(item.question);
   /* AN ANSWER SHE WROTE IS THE ANSWER, and every branch below would otherwise recompute over it.
@@ -3854,7 +3869,7 @@ function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][nu
    * This is the contract PR #566 established for every other reader: an applicant override survives
    * until she changes it. Staleness is her business once she has taken the field, exactly as it is
    * for every other answer she edits. */
-  if (item.answerSource?.trim() === 'applicant_review' && item.answer.trim()) return item.answer.trim();
+  if (applicantChoseAnswer(item)) return item.answer.trim();
   if (isReferralSourceQuestion(questionText)) {
     return referralSourceForApplication(
       packet.referralSourceDefault ?? item.answer,
@@ -3960,7 +3975,7 @@ function greenhouseReviewedAnswerIsResolved(
    * This does not weaken the bucket where it earns its place. A machine answer with no option
    * evidence still puts the bucket first, which is the Cloudflare, Databricks and Akuna case the
    * bucket was written for. Only an answer with a human behind it moves ahead of it. */
-  if (item.answerSource?.trim() === 'applicant_review' && item.answer.trim()) return true;
+  if (applicantChoseAnswer(item)) return true;
 
   const stored = greenhouseCurrentOptionAnswer(item, packet);
   if (!stored) return false;
