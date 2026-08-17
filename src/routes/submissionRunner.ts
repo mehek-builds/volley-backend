@@ -64,6 +64,7 @@ import {
   buildManagedDiscoveredOptionProbeBatches,
   managedOptionProbeAnalysis,
   managedOptionProbeControlId,
+  managedOptionProbeTargets,
   managedUnexplainedAnswers,
   managedUnexplainedAnswerReasons,
   managedResultFieldOptions,
@@ -2504,6 +2505,42 @@ async function prepareManaged(
     );
   }
   const fieldOptions = optionProbe.options;
+  /* WHAT THE PROBE ACTUALLY DID, because until now only its FAILURES were observable.
+   *
+   * `optionProbe.failures` is logged above and nothing logs a success, so a probe that ran and
+   * produced nothing looks identical from outside to a probe that never targeted anything. Measured
+   * on production 2026-08-17: 384 info logs and ZERO error logs across three Greenhouse runs, while
+   * every one of them ended with `no option matched "<raw profile value>"` on degree, referral and
+   * GPA. No failures, no options, and no way to tell which half was broken.
+   *
+   * That gap cost four separate investigations and three retracted root causes - a database column
+   * that is runtime-only, a capability flag read with the wrong grep, and a cross-repo contract that
+   * was fine. Every one came from inferring, because inference was all the instrumentation allowed.
+   *
+   * These three numbers separate the two remaining causes on the next run:
+   *   targeted 0                -> the fault is in managedOptionProbeTarget's own gating
+   *   targeted > 0, read 0      -> the fault is the probe's read or the merge
+   *
+   * Deliberately `info` and deliberately counts only. No label, no option text, no applicant answer:
+   * this is a diagnostic about the RUN, and option text can carry employer-specific and demographic
+   * wording that has no business in a log line. */
+  fastify.log.info(
+    {
+      applicationId: row.id,
+      portal,
+      discovered: (discoveryResult?.discovered ?? []).length,
+      targeted: managedOptionProbeTargets(
+        portal,
+        discoveryResult?.discovered ?? [],
+        undefined,
+        discoveryRoleCapability,
+      ).length,
+      read: Object.keys(fieldOptions).length,
+      failures: optionProbe.failures.length,
+      roleCapability: discoveryRoleCapability,
+    },
+    'Option probe outcome: how many controls were targeted and how many option lists came back',
+  );
   const failedFields = (discoveryResult?.discovered ?? []).flatMap((field) => {
     const controlId = managedOptionProbeControlId(field);
     if (!controlId || !optionProbe.failedIds.has(controlId)) return [];
