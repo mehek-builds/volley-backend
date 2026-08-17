@@ -5795,6 +5795,33 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
 const MANAGED_ANSWER_LOSS_SUFFIX =
   /:\s*(?:no option matched\b|(?:choice )?value did not persist\b|left the answer already on the form\b|choice option not found\b)/i;
 
+/**
+ * The FIELD the action was for, when the action label carries no employer question.
+ *
+ * managedActionLabelQuestion strips a leading `^[a-z_]+` run, which is right for a label like
+ * `question:overall gpa` and total for a label like `education_discipline_combo:0`: the whole
+ * label IS that run, so it returns empty and the applicant is told "Litos could not leave an
+ * answer on the form" with no indication of which one.
+ *
+ * Measured across the Greenhouse batch of 2026-08-18. Seven packets came back blocked and every
+ * one of them led with that bare sentence; DV Trading e0a0eb84 was hiding TWO distinct failures
+ * behind it, a non-persisting control and `no option matched "Computer Science"` on the discipline
+ * combo. An unnamed blocker cannot be acted on by her and cannot be reproduced by an engineer.
+ *
+ * The internal name is not the employer's wording, and it is not offered as though it were: it is
+ * reached only when there is no employer wording to show, and it is the same string the runner and
+ * the logs already use, which is what makes a report actionable. Trailing scaffolding is removed
+ * (`_combo`, `_combo_label`, `_field`, indices) and underscores become spaces, so
+ * `education_discipline_combo:0` reads "education discipline".
+ */
+function managedActionLabelFieldName(label: string): string {
+  const head = /^[a-z_]+/i.exec(label.trim())?.[0] ?? '';
+  return head
+    .replace(/_(?:combo_label|combo|field|input|select|value)$/i, '')
+    .replace(/_+/g, ' ')
+    .trim();
+}
+
 /** Strip the action-label scaffolding off the front, leaving the employer's own question. */
 function managedActionLabelQuestion(label: string): string {
   return label
@@ -5827,7 +5854,8 @@ export function managedAnswerLossReasons(result: Pick<ManagedBrowserResult, 'ski
     // The provider keys these on the ACTION label ("question_combo:0:0:which university..."), which
     // is an internal name. The applicant is shown the employer's question and the runner's own
     // words about it, and nothing about how many selectors were tried.
-    const question = managedActionLabelQuestion(text.slice(0, match.index));
+    const label = text.slice(0, match.index);
+    const question = managedActionLabelQuestion(label) || managedActionLabelFieldName(label);
     const detail = text.slice(match.index).replace(/^:\s*/, '').trim();
     out.add(question
       ? `Litos could not leave this answer on the form, so it is yours to finish: "${question.slice(0, 60)}" (${detail.slice(0, 120)})`
