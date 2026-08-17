@@ -13,6 +13,6 @@
     { "path": "/internal/resume-retention-sweep", "schedule": "30 3 * * *" },
     { "path": "/internal/job-monitor", "schedule": "0 6 * * *" },
     { "path": "/internal/application-submission-runner", "schedule": "15 4 * * *" },
-    { "path": "/internal/managed-receiving-canary", "schedule": "30 13 * * *" }
+    { "path": "/internal/managed-receiving-canary", "schedule": "0 15 * * *" }
   ]
 }
