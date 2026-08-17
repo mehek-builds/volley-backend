@@ -1944,6 +1944,31 @@ test('a stored applicant-reviewed answer survives a failed option probe on its c
   assert.equal(merged[0]?.answer_source, 'applicant_review');
 });
 
+/* The report and the fill must agree. A failed control covered by an applicant-chosen answer is
+ * filled with that answer verbatim, so the attention sentence for it must not claim the field was
+ * "left for you rather than answered with a guess": that sends her to hand-answer a filled field.
+ * A failed control nobody answered keeps the original sentence unchanged. */
+test('the attention sentence for a probe-failed control she answered says her answer was typed', () => {
+  const failures = [
+    { controlId: 'question_67595189', reason: 'windowed at the render cap' },
+    { controlId: 'question_99', reason: 'windowed at the render cap' },
+  ];
+  const failedFields = [
+    { controlId: 'question_67595189', label: 'What is your expected graduation date?' },
+    { controlId: 'question_99', label: 'Which office are you applying to?' },
+  ];
+  const stored = [{
+    question: 'What is your expected graduation date?',
+    answer: 'Spring/Summer 2028',
+    answer_source: 'applicant_review',
+    portal_selector: '#question_67595189',
+  }];
+  const reasons = optionProbeAttentionReasons(failures, failedFields, stored);
+  assert.match(reasons[0]!, /your reviewed answer was typed exactly as you wrote it/);
+  assert.doesNotMatch(reasons[0]!, /left for you rather than answered with a guess/);
+  assert.match(reasons[1]!, /left for you rather than answered with a guess/);
+});
+
 /* Provenance follows the ANSWER. Discovery replaces a reviewed answer with the resolver's value
  * whenever the profile knows one for the label, and the record spread used to carry
  * answer_source: 'applicant_review' onto that machine value. Every applicant-override reader,

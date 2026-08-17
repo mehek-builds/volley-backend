@@ -7,6 +7,7 @@ import {
   type ManagedBrowserResult,
 } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
+import { applicantChoseStoredAnswer } from './applicantAnswer';
 import { optionBandAnswer, storedOptionAnswerIsCurrent } from './optionBand';
 import {
   classifyField,
@@ -2031,17 +2032,60 @@ function managedClosedFieldFamily(label: string): string | undefined {
  * an exemption at that width let her sponsorship answer lift the suppression off a second, machine-
  * answered sponsorship control whose list nobody read. Only identity evidence counts: the exact
  * selector, the exact control id, or the exact stored label. */
+/** The ManagedFieldTarget a reviewed question record resolves to, shared by every matcher below. */
+function reviewQuestionFieldTarget(item: SubmissionPacket['questions'][number]): ManagedFieldTarget {
+  const selector = reviewQuestionPortalSelector(item);
+  return {
+    controlId: managedOptionInventoryKeyFromSelector(selector),
+    selector,
+    label: item.question,
+  };
+}
+
+/* THE ONE MATCHING CASCADE for a failed field against a target: exact selector, exact control id,
+ * exact normalized label, and, only when the caller opts in, the closed-field family.
+ *
+ * Both directions of the failed-probe logic run through this so they cannot drift: SUPPRESSION
+ * (packetTargetFailed) matches with families, because refusing a guess costs one blocker card and
+ * a family-wide refusal is the safe direction. The applicant EXEMPTION matches without them,
+ * because a family bucket spans different controls on one form, and an exemption at that width let
+ * her sponsorship answer lift the suppression off a second, machine-answered sponsorship control
+ * whose list nobody read. The flag is the whole difference; everything else is shared. */
+function failedFieldMatchesTarget(
+  field: NonNullable<SubmissionPacket['failedFields']>[number],
+  target: ManagedFieldTarget,
+  matchFamilies: boolean,
+): boolean {
+  if (target.controlId && field.controlId === target.controlId) return true;
+  if (target.selector && field.selector && field.selector === target.selector) return true;
+  const targetLabel = normalizedFailedFieldLabel(target.label ?? '');
+  const failedLabel = normalizedFailedFieldLabel(field.label);
+  if (!targetLabel || !failedLabel) return false;
+  if (targetLabel === failedLabel) return true;
+  if (!matchFamilies) return false;
+  const targetFamily = managedClosedFieldFamily(target.label ?? '');
+  const failedFamily = managedClosedFieldFamily(field.label);
+  return Boolean(targetFamily && failedFamily && targetFamily === failedFamily);
+}
+
+/* Whether an applicant-chosen answer names EXACTLY the control this failed field records.
+ *
+ * A failed field says the run could not READ the control's option list, and the suppression built
+ * on it exists so no builder GUESSES at a list nobody read. An answer with answer_source
+ * applicant_review is not a guess: she chose it, the fill types it verbatim and clicks the option
+ * whose text matches, and none of that needs the list read in advance.
+ *
+ * Measured on Jump Trading packet 2e593ac5, 2026-08-17 late, AFTER the reviewed-answer ordering
+ * fix deployed: the graduation control's probe failed on the live run, the failed-field record
+ * suppressed her verbatim "Spring/Summer 2028" everywhere, and the speculative graduation ladder,
+ * whose own suppression needs the very list the probe failed to read, typed the profile's
+ * "May 2028" into the same control through a substring label match. The run reported
+ * `no option matched "May 2028"` on a question that was already answered correctly. */
 function applicantChosenQuestionMatchesFailedField(
   item: SubmissionPacket['questions'][number],
   field: NonNullable<SubmissionPacket['failedFields']>[number],
 ): boolean {
-  const selector = reviewQuestionPortalSelector(item);
-  if (selector && field.selector && selector === field.selector) return true;
-  const selectorId = managedOptionInventoryKeyFromSelector(selector);
-  if (selectorId && field.controlId === selectorId) return true;
-  const itemLabel = normalizedFailedFieldLabel(item.question);
-  const fieldLabel = normalizedFailedFieldLabel(field.label);
-  return Boolean(itemLabel) && itemLabel === fieldLabel;
+  return failedFieldMatchesTarget(field, reviewQuestionFieldTarget(item), false);
 }
 
 function applicantChoseAnswerForFailedField(
@@ -2053,17 +2097,7 @@ function applicantChoseAnswerForFailedField(
 }
 
 function packetTargetFailed(packet: SubmissionPacket, target: ManagedFieldTarget): boolean {
-  const targetLabel = normalizedFailedFieldLabel(target.label ?? '');
-  const targetFamily = managedClosedFieldFamily(target.label ?? '');
-  return packet.failedFields?.some((field) => {
-    if (target.controlId && field.controlId === target.controlId) return true;
-    if (target.selector && field.selector && field.selector === target.selector) return true;
-    const failedLabel = normalizedFailedFieldLabel(field.label);
-    if (!targetLabel || !failedLabel) return false;
-    if (targetLabel === failedLabel) return true;
-    const failedFamily = managedClosedFieldFamily(field.label);
-    return Boolean(targetFamily && failedFamily && targetFamily === failedFamily);
-  }) === true;
+  return packet.failedFields?.some((field) => failedFieldMatchesTarget(field, target, true)) === true;
 }
 
 function packetControlFailed(packet: SubmissionPacket, controlId: string): boolean {
@@ -2082,16 +2116,11 @@ function packetLabelFailed(packet: SubmissionPacket, label: string): boolean {
  * fixed education builder type the raw profile year into a probe-failed react-select one budget
  * position BEFORE her answer reached it; the control's one attempt went to the machine value. */
 function packetQuestionFailed(packet: SubmissionPacket, item: SubmissionPacket['questions'][number]): boolean {
-  const selector = reviewQuestionPortalSelector(item);
-  const selectorId = managedOptionInventoryKeyFromSelector(selector);
-  const binding = applicantChoseAnswer(item)
-    ? (packet.failedFields ?? []).filter((field) => !applicantChosenQuestionMatchesFailedField(item, field))
-    : packet.failedFields;
-  return packetTargetFailed({ ...packet, failedFields: binding }, {
-    controlId: selectorId,
-    selector,
-    label: item.question,
-  });
+  const target = reviewQuestionFieldTarget(item);
+  const exempt = applicantChoseAnswer(item);
+  return packet.failedFields?.some((field) =>
+    !(exempt && applicantChosenQuestionMatchesFailedField(item, field))
+    && failedFieldMatchesTarget(field, target, true)) === true;
 }
 
 function packetHasFailedReferralField(packet: SubmissionPacket): boolean {
@@ -4025,7 +4054,7 @@ function graduationYearAnswerForControl(
  * not a value she chose off a control, and it must keep going through the branches below.
  */
 function applicantChoseAnswer(item: SubmissionPacket['questions'][number]): boolean {
-  return item.answerSource?.trim() === 'applicant_review' && Boolean(item.answer.trim());
+  return applicantChoseStoredAnswer({ answer: item.answer, answer_source: item.answerSource });
 }
 
 function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][number], packet: SubmissionPacket): string {
@@ -5957,14 +5986,30 @@ function pushFixedFieldActions(
     managedComboboxFill(actions, '#country', countryForPhoneField(packet.phone, packet.country), 'phone_country');
     managedFill(actions, GREENHOUSE_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
     managedComboboxFill(actions, '#candidate-location, input[autocomplete="address-level2"]', greenhouseLocationSearch(packet), 'location');
+    /* HER REVIEWED ANSWER LEADS HERE TOO, not only in the combobox ladder PR #583 fixed.
+     *
+     * These plain label fills are the SECOND emitter of the raw profile date. fillByLabelText
+     * resolves by label substring, so "Expected Graduation Date" lands in the same control as an
+     * employer label like "Please re-confirm your expected graduation date". Measured on the live
+     * DV Trading run, packet e0a0eb84, 2026-08-18, AFTER #583 deployed: her reviewed
+     * "January 2028 - July 2028" led the ladder, and this trio still typed the profile's
+     * "May 2028" at the same react-select, whose band list refuses it, so the run reported
+     * `no option matched "May 2028", left for you to choose` about a question she had answered.
+     *
+     * Same rule as the ladder: an applicant_review answer for the education-graduation-date family
+     * replaces the derived value. One lookup covers all three labels because they share the family.
+     * A packet with no applicant answer keeps typing packet.graduationDate, and machine-resolved
+     * question records are invisible to packetApplicantAnswerForLabel, so nothing else moves. */
+    const graduationDateLabelValue = packetApplicantAnswerForLabel(packet, 'Graduation Date')
+      ?? packet.graduationDate;
     if (!packetLooksAkuna(packet)) {
       pushGreenhouseEducationComboboxActions(actions, packet);
-      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', packet.graduationDate, 'graduation_date');
-      managedFillByLabelUnlessHandled(actions, packet, 'Graduation Date', packet.graduationDate, 'graduation_date_label');
-      managedFillByLabelUnlessHandled(actions, packet, 'Expected Graduation Date', packet.graduationDate, 'graduation_date_expected');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', graduationDateLabelValue, 'graduation_date');
+      managedFillByLabelUnlessHandled(actions, packet, 'Graduation Date', graduationDateLabelValue, 'graduation_date_label');
+      managedFillByLabelUnlessHandled(actions, packet, 'Expected Graduation Date', graduationDateLabelValue, 'graduation_date_expected');
     }
     if (packetLooksDatabricks(packet)) {
-      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', packet.graduationDate, 'databricks_graduation_date');
+      managedFillByLabelUnlessHandled(actions, packet, 'What is your graduation date?', graduationDateLabelValue, 'databricks_graduation_date');
     }
     if (!packetLooksAkuna(packet)) {
       managedFillByLabelUnlessHandled(actions, packet, 'End date month', packet.graduationMonth, 'education_end_month');
