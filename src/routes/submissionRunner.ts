@@ -185,6 +185,7 @@ import { profileBackedBlockerLabels, resolveProfileField, usableOptions } from '
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
+import { applicantChoseStoredAnswer } from '../lib/applicantAnswer';
 import { jobCountry, postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
 import {
   coverLetterCandidateContext,
@@ -2104,7 +2105,7 @@ export function mergeDiscoveredPortalQuestions(
       // could not be read this run. An answer she chose herself does not need the list read; a
       // stored machine answer does, because restoring it replays a value nobody stands behind
       // against a control nobody read. Measured on Jump Trading packet 2e593ac5, 2026-08-17 late.
-      return question.answer_source === 'applicant_review' && Boolean(question.answer.trim());
+      return applicantChoseStoredAnswer(question);
     }),
   ]);
 }
@@ -2327,11 +2328,30 @@ export function describeDiscoveryFailure(error: unknown): string {
 export function optionProbeAttentionReasons(
   failures: readonly { controlId: string; reason: string }[],
   failedFields: readonly { controlId: string; label?: string }[],
+  /* The stored questions the merge will consult, so this report and the fill agree. A failed
+   * control covered by an applicant-chosen answer is no longer "left for you rather than answered
+   * with a guess": her reviewed answer IS typed at it, verbatim, and telling her otherwise sends
+   * her to hand-answer a filled field. The sentence for that case says what really happens, and
+   * still asks her to look, because the run could not read the list and cannot promise the option
+   * text matched. Coverage matches the way the merge exemption matches: by the label key or the
+   * probe control id of her stored record. */
+  storedQuestions: readonly { question: string; answer: string; answer_source?: string; portal_selector?: string }[] = [],
 ): string[] {
+  const chosen = storedQuestions.filter((question) => applicantChoseStoredAnswer(question));
+  const chosenLabels = new Set(chosen.map((question) => normalizeReviewQuestionLabel(question.question).toLowerCase()));
+  const chosenControlIds = new Set(chosen
+    .map((question) => managedOptionProbeControlId({ label: question.question, selector: question.portal_selector }))
+    .filter(Boolean));
   const labelById = new Map(failedFields.map((field) => [field.controlId, field.label?.trim()]));
   return failures.map(({ controlId, reason }) => {
     const label = labelById.get(controlId);
     const named = label ? `"${label.slice(0, 80)}"` : `the control ${controlId.slice(0, 80)}`;
+    const covered = chosenControlIds.has(controlId)
+      || (label !== undefined && chosenLabels.has(normalizeReviewQuestionLabel(label).toLowerCase()));
+    if (covered) {
+      return `Litos could not read the choices ${named} offers, so your reviewed answer was typed `
+        + `exactly as you wrote it (${reason.slice(0, 160)}). Check it landed before sending.`;
+    }
     return `Litos could not read the choices ${named} offers, so it was left for you rather than `
       + `answered with a guess (${reason.slice(0, 160)}). The other questions on this form are unaffected.`;
   });
@@ -2582,13 +2602,13 @@ async function prepareManaged(
       inputType: discoveredControlInputType(field),
     }];
   });
-  const optionProbeAttention = optionProbeAttentionReasons(optionProbe.failures, failedFields);
+  const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
+  const optionProbeAttention = optionProbeAttentionReasons(optionProbe.failures, failedFields, storedQuestions);
   const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
     .filter((field) => {
       const controlId = managedOptionProbeControlId(field);
       return !controlId || !optionProbe.failedIds.has(controlId);
     });
-  const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const resolutionCurrent = { ...current, questions: storedQuestions };
   const applicationProfile = applicationProfileForPacket(
     await loadApplicationProfileLike(row.user_id),
@@ -2688,7 +2708,7 @@ async function prepareManaged(
    * Resolver-driven invalidation keys are untouched: those branches deliberately blank an answer
    * so she re-confirms it, and this exemption is only for the read failure. */
   const storedApplicantAnswerKeys = new Set(storedQuestions
-    .filter((question) => question.answer_source === 'applicant_review' && question.answer.trim())
+    .filter((question) => applicantChoseStoredAnswer(question))
     .map((question) => normalizeReviewQuestionLabel(question.question).toLowerCase()));
   const failedQuestionKeys = failedFields
     .map((field) => normalizeReviewQuestionLabel(field.label).toLowerCase())
