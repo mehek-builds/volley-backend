@@ -267,9 +267,28 @@ export function normalizeApplicationReviewQuestions(
   return normalized;
 }
 
+/* A SUBMITTED QUESTION MAY CARRY ONE THING A STORED QUESTION NEVER DOES: the applicant's explicit
+ * word that she read this answer and let it stand.
+ *
+ * `confirmed` is a REQUEST field, not a record field. It exists because the mint rule below is
+ * deliberately deaf to an untouched Save - an answer that round-trips unchanged, or round-trips the
+ * resolver's own value, proves nothing about what she chose, and stamping it anyway is the
+ * 802-answer laundering documented at the mint site. That deafness had a cost measured on the DV
+ * Trading packet on 2026-08-17: the dashboard's CONFIRM control opens the review screen, she reads
+ * the work-eligibility answers, presses Save, and the save posts back the exact values she was
+ * shown - which is indistinguishable from a save she never looked at, so no claim was ever minted
+ * and the CONFIRM ask re-rendered forever. The flag is the distinguishing byte: the client sets it
+ * only on a question she explicitly confirmed, so "she read it and let it stand" arrives as her own
+ * statement instead of being inferred from a diff that an unedited confirmation cannot produce.
+ *
+ * It is consumed here and never stored: the merge writes the CLAIM it licenses
+ * (answer_source/answer_reviewed_at) and drops the flag itself, in both branches that touch a
+ * submitted question. */
+export type SubmittedApplicationReviewQuestion = ApplicationReviewQuestion & { confirmed?: boolean };
+
 export function mergeSubmittedApplicationReviewQuestions(
   stored: readonly ApplicationReviewQuestion[],
-  submitted: readonly ApplicationReviewQuestion[],
+  submitted: readonly SubmittedApplicationReviewQuestion[],
   questionsReviewedAt?: string,
   /**
    * What the resolver answers for a question, from questionDiscovery.knownAnswerLookup.
@@ -283,8 +302,8 @@ export function mergeSubmittedApplicationReviewQuestions(
    */
   resolverAnswerFor?: (question: ApplicationReviewQuestion) => string | undefined,
 ): ApplicationReviewQuestion[] {
-  const submittedByQuestion = new Map<string, { question: ApplicationReviewQuestion; index: number }>();
-  const submittedByUniqueId = new Map<string, { question: ApplicationReviewQuestion; index: number } | undefined>();
+  const submittedByQuestion = new Map<string, { question: SubmittedApplicationReviewQuestion; index: number }>();
+  const submittedByUniqueId = new Map<string, { question: SubmittedApplicationReviewQuestion; index: number } | undefined>();
   for (const [index, question] of submitted.entries()) {
     const key = questionKey(question.question);
     if (key) submittedByQuestion.set(key, { question, index });
@@ -411,6 +430,20 @@ export function mergeSubmittedApplicationReviewQuestions(
     const applicantSuppliedAnswer = Boolean(
       questionsReviewedAt && submittedAnswer && !answerUnchanged && !submittedIsResolverValue,
     );
+    /* HER EXPLICIT CONFIRMATION, WHICH NO DIFF CAN EXPRESS. The two tests above exist to stop an
+     * untouched Save being read as a choice, and they are right - but a CONFIRMED question is not an
+     * untouched Save. The client sets the flag only on a question she deliberately confirmed, so the
+     * request itself says what the diff cannot: she read exactly these bytes and let them stand,
+     * which is the applicant-claim's own definition. Deliberately NOT gated on answerUnchanged or on
+     * submittedIsResolverValue - the review screen displays the refreshed value rather than the
+     * stored one, so a confirmation of what she was SHOWN routinely arrives as either shape, and
+     * refusing those is the measured DV Trading loop: confirm, save, "Saved.", and the same CONFIRM
+     * ask again, indefinitely. The laundering stays shut out because the flag is per-question and
+     * absent by default: a whole-list Save with no flags mints exactly what it minted before, which
+     * is nothing. See SubmittedApplicationReviewQuestion. */
+    const applicantConfirmedAnswer = Boolean(
+      questionsReviewedAt && submittedAnswer && submittedQuestion.confirmed === true,
+    );
     /* WHAT SHE WAS OVERRIDING, so her correction cannot outlive the fact it was made against.
      *
      * The claim above is necessary and not sufficient. refreshKnownQuestionAnswers keeps an
@@ -484,8 +517,10 @@ export function mergeSubmittedApplicationReviewQuestions(
       ...(portalSelector ? { portal_selector: portalSelector } : {}),
       ...(portalInputType ? { portal_input_type: portalInputType } : {}),
       ...(atsApiField ? { ats_api_field: atsApiField } : {}),
-      // Last, so it wins over anything carriedForward brought along. See applicantSuppliedAnswer.
-      ...(applicantSuppliedAnswer
+      // Last, so it wins over anything carriedForward brought along. See applicantSuppliedAnswer
+      // and applicantConfirmedAnswer: an edit and an explicit confirmation mint the same claim,
+      // because they are the same assertion made through two different controls.
+      ...(applicantSuppliedAnswer || applicantConfirmedAnswer
         ? { answer_source: 'applicant_review' as const, answer_reviewed_at: questionsReviewedAt }
         : {}),
       /* Beside the claim and never without it, because it is only meaningful as the other half of
@@ -513,6 +548,9 @@ export function mergeSubmittedApplicationReviewQuestions(
       answer_override_of: _answerOverrideOf,
       consent_permission_granted_at: _consentGrantedAt,
       consent_permission_version: _consentVersion,
+      /* The request flag, spent above and never stored: a persisted `confirmed` would be a second,
+       * uncheckable copy of the claim answer_source already carries. */
+      confirmed: _confirmed,
       ...submittedWithoutProvenance
     } = question;
     merged.push(submittedWithoutProvenance);

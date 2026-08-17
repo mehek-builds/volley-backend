@@ -158,7 +158,7 @@ function asSent(question: ApplicationReviewQuestion, answer: string = question.a
   };
 }
 
-function saveQuestions(applicationId: string, questions: readonly ReturnType<typeof asSent>[]) {
+function saveQuestions(applicationId: string, questions: readonly (ReturnType<typeof asSent> & { confirmed?: true })[]) {
   return app.inject({
     method: 'PUT',
     url: `/applications/${applicationId}/review/answers`,
@@ -676,4 +676,80 @@ test('an unedited save claims nothing on a machine-resolved answer', async () =>
   assert.equal(machine?.answer_override_of, undefined);
   const held = persisted.questions.find((question) => question.id === HELD_QUESTION.id);
   assert.equal(held?.answer_source, 'applicant_review', 'and the one she did answer still is');
+});
+
+/* THE CONFIRM THAT CONFIRMED NOTHING, measured on the DV Trading packet e0a0eb84 on 2026-08-17.
+ *
+ * The dashboard's YOUR TURN panel holds the work-eligibility class back for the applicant and offers
+ * CONFIRM. That control opens the Review-answers screen, she reads the answers, presses Save, and the
+ * body that arrives here is byte-identical to an untouched Save - which the gate above rightly
+ * refuses to read as a choice. So no claim was ever minted, nothing on the row changed, and the same
+ * CONFIRM ask re-rendered after every save, indefinitely.
+ *
+ * The fix is the one honest byte the client can add: `confirmed: true` on exactly the question she
+ * confirmed. The claim it mints is the applicant-claim's own definition - she read this exact text
+ * and let it stand - so it is keyed to the same round an edit's claim is. */
+test('a confirmed answer mints her claim without an edit, and only on the flagged question', async () => {
+  const SPONSORSHIP_QUESTION: ApplicationReviewQuestion = {
+    id: 'sponsorship',
+    question: 'Will you now or in the future require sponsorship for an employment visa?',
+    answer: 'Yes, will require firm sponsorship',
+    kind: 'required',
+    required: true,
+    portal_selector: '#question_sponsorship',
+    portal_input_type: 'select',
+    ats_api_field: 'answers[9]',
+  };
+  const id = await applicationWith(stoppedRun({ questions: [SPONSORSHIP_QUESTION, MACHINE_ANSWERED_QUESTION] }));
+
+  const response = await saveQuestions(id, [
+    { ...asSent(SPONSORSHIP_QUESTION), confirmed: true },
+    asSent(MACHINE_ANSWERED_QUESTION),
+  ]);
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  const confirmed = persisted.questions.find((question) => question.id === SPONSORSHIP_QUESTION.id);
+  assert.equal(confirmed?.answer, SPONSORSHIP_QUESTION.answer, 'the answer she confirmed, unchanged');
+  assert.equal(confirmed?.answer_source, 'applicant_review',
+    'her confirmation is her claim, or the CONFIRM ask re-renders forever');
+  assert.equal(confirmed?.answer_reviewed_at, persisted.questions_reviewed_at,
+    'keyed to the round the row holds, like every other applicant-claim');
+  assert.equal((confirmed as Record<string, unknown> | undefined)?.confirmed, undefined,
+    'the request flag is spent, not stored: answer_source already carries the claim');
+  assert.equal(confirmed?.ats_api_field, 'answers[9]', 'still merged onto the stored record');
+  const machine = persisted.questions.find((question) => question.id === MACHINE_ANSWERED_QUESTION.id);
+  assert.equal(machine?.answer_source, undefined,
+    'the unflagged question on the same save stays unclaimed: the laundering gate is untouched');
+});
+
+/* AND THE FLAG REACHES THROUGH THE RESOLVER ROUND-TRIP, which is the exact DV shape. The review
+ * screen displays the REFRESHED value rather than the stored one, so a confirmation routinely posts
+ * back the resolver's own answer - the shape the mint gate excludes hardest, because without the
+ * flag it proves nothing. With it, the claim lands anyway. */
+test('confirming the resolver\'s own value still mints the claim', async () => {
+  const RESOLVED = 'Bachelor of Science in Computer Science';
+  const degreeQuestion: ApplicationReviewQuestion = {
+    id: 'degree--confirm',
+    question: 'What degree are you currently pursuing?',
+    answer: RESOLVED,
+    kind: 'required',
+    required: true,
+    portal_selector: '#degree',
+    portal_input_type: 'select',
+    ats_api_field: 'answers[7]',
+  };
+  const id = await applicationWith(stoppedRun({ questions: [degreeQuestion] }));
+
+  const response = await saveQuestions(id, [
+    { ...asSent(degreeQuestion), confirmed: true },
+  ]);
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, RESOLVED);
+  assert.equal(persisted.questions[0].answer_source, 'applicant_review');
+  assert.equal(persisted.questions[0].answer_reviewed_at, persisted.questions_reviewed_at);
+  assert.equal(persisted.questions[0].answer_override_of, undefined,
+    'a confirmation is not an override: she typed nothing over anything');
 });

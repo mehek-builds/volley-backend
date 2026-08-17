@@ -28,6 +28,7 @@ import {
   normalizeApplicationReviewQuestions,
   readApplicationReview,
   type ApplicationReviewQuestion,
+  type SubmittedApplicationReviewQuestion,
 } from '../lib/applicationReview';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import { connectToSession, getBrowserSession, getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
@@ -118,7 +119,13 @@ const reviewBodySchema = z.object({
  * that screen to post them back would make a round trip of the portal identity every time somebody
  * fixes a typo in an essay. Narrower body, narrower route, nothing to re-derive. */
 const reviewAnswersBodySchema = z.object({
-  questions: z.array(questionSchema).max(100),
+  /* Plus the one field only this screen can honestly send. `confirmed` is the applicant's explicit
+   * word that she read this exact answer and let it stand, which the merge turns into the
+   * applicant-claim an unedited confirmation can never earn through a diff - see
+   * applicantConfirmedAnswer in mergeSubmittedApplicationReviewQuestions, and the DV Trading CONFIRM
+   * loop it closes. `z.literal(true)` rather than boolean: absent is the only other honest state,
+   * and a stored `confirmed: false` would read as "she looked and refused", which no control says. */
+  questions: z.array(questionSchema.extend({ confirmed: z.literal(true).optional() })).max(100),
 });
 const submitBodySchema = z.object({
   questions: z.array(questionSchema).max(100),
@@ -1504,7 +1511,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       );
       const merged = mergeSubmittedApplicationReviewQuestions(
         current.questions,
-        parsed.data.questions as ApplicationReviewQuestion[],
+        parsed.data.questions as SubmittedApplicationReviewQuestion[],
         reviewedAt,
         resolverAnswerFor,
       );
