@@ -519,8 +519,28 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!row) return;
       const review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      /* awaiting_security_code is NOT past auditing, and blocking it here deadlocked the code step.
+       *
+       * POST /applications/:id/security-code gates on currentAcknowledgedPacketAudit, because
+       * entering the code performs a FRESH fill and send from this packet - the dashboard says so in
+       * as many words: "Litos fills the company form again from this packet and sends it with the
+       * code in place". So that step needs a CURRENT acknowledgement, exactly like any other send.
+       *
+       * The submit attempt that produced the code request also merges the employer questions it
+       * discovered on the live form back into the review, which changes packet_version. From that
+       * moment the stored acknowledgement was stale, the code route answered packet_stale, and this
+       * guard refused the only route that could clear it. Nothing could complete.
+       *
+       * Measured on Jane Street application 496cff97 on 2026-08-17: submitted at 16:14:01, the
+       * employer emailed an 8-character code, the stored audit and acknowledgement agreed with each
+       * other (digest cd3feb2b, version f9ed0185) and the live recompute did not, so "Finish sending"
+       * answered packet_stale with no way forward.
+       *
+       * The states that really are past auditing stay refused. Each of those has either claimed the
+       * send or completed it, so re-auditing would rewrite what an employer already received. A
+       * security code has not been accepted yet, and the send it authorizes has not happened. */
       if (review.submission_claimed_at || review.status === 'submitting' || review.status === 'submission_claimed'
-        || review.status === 'submitted' || review.status === 'awaiting_security_code') {
+        || review.status === 'submitted') {
         return reply.status(409).send({ error: 'This application can no longer be audited before submission' });
       }
       try {
