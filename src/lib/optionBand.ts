@@ -60,6 +60,32 @@ export function storedOptionAnswerIsCurrent(
   currentProfileValue: string | undefined | null,
 ): boolean {
   if (!optionBandAnswer(answer)) return false;
+  return derivationIsCurrent(derivedFrom, currentProfileValue);
+}
+
+/**
+ * Has the profile moved since this answer was chosen against it?
+ *
+ * The currency half of the rule above, on its own, because a SECOND kind of stored answer needs it
+ * and must not be allowed to disagree with the first about what "still current" means. That one is
+ * the applicant's own override of a machine-resolved answer: she edits the review screen, and the
+ * record carries her claim plus the resolver value she was overriding.
+ *
+ * ITS CALLER STILL ASKS ABOUT SHAPE, JUST THE OTHER WAY ROUND, and reading this function as
+ * shape-blind would be a mistake. Currency is all this decides; whether a shape is eligible at all is
+ * the caller's question. storedOptionAnswerIsCurrent above requires a band, because shape is its proof
+ * that the value could not have been computed by the resolver. The override branch in
+ * refreshKnownQuestionAnswers requires NOT a band, because a reviewed range is already governed by
+ * reviewedOptionBandCoversCurrentValue, which asks the stricter thing a matching derivation cannot -
+ * does the range she picked still contain the profile value.
+ *
+ * ABSENT `derivedFrom` STILL MEANS NO, for the same reason and with the same cost. See
+ * refreshKnownQuestionAnswers for the branch that reads this.
+ */
+export function derivationIsCurrent(
+  derivedFrom: string | undefined | null,
+  currentProfileValue: string | undefined | null,
+): boolean {
   const source = derivedFrom?.trim();
   const current = currentProfileValue?.trim();
   if (!source || !current) return false;

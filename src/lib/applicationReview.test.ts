@@ -551,8 +551,18 @@ test('submit merge preserves provenance only for an exact current reviewed ident
     reviewedAt,
   );
   assert.equal(changed[0].answer, 'No');
-  assert.equal(changed[0].answer_source, undefined);
-  assert.equal(changed[0].answer_reviewed_at, undefined);
+  /* A REPLACEMENT DOES NOT INHERIT THE OLD CLAIM, IT MINTS A NEW ONE, and those are different
+   * sentences about the same record. What must never happen is a claim attached to text the
+   * applicant reviewed surviving onto something she did not - which is the label-mutation half of
+   * this test below, and it still holds. Here she changed the answer herself in the current round,
+   * so the record names her and records what she overrode. See applicantSuppliedAnswer. */
+  assert.equal(changed[0].answer_source, 'applicant_review');
+  assert.equal(changed[0].answer_reviewed_at, reviewedAt);
+  /* NO OVERRIDE RECORD, because this caller passed no resolver lookup and the stored record carries no
+   * note of what it corresponds to. The recorded value has to be the RESOLVER's, and guessing it from
+   * the stored answer is what made the override silently fail on every snapped record. Absent reads as
+   * "cannot prove current" and costs one recomputation. See overriddenResolverValue. */
+  assert.equal(changed[0].answer_override_of, undefined);
 
   for (const publicQuestion of [
     '  Can you work onsite?  ',
@@ -915,6 +925,7 @@ const everyQuestionField = {
   answer_source: 'applicant_review',
   answer_reviewed_at: '2026-08-12T13:45:27.969Z',
   answer_option_source: 'May 2028',
+  answer_override_of: 'Bachelor of Science in Computer Science',
   consent_permission_granted_at: '2026-08-01T00:00:00.000Z',
   consent_permission_version: 'v1',
 } satisfies Required<ApplicationReviewQuestion>;

@@ -205,6 +205,22 @@ before(async () => {
   const [account] = await db.insert(schema.users).values({ email: 'answer-save@example.test' }).returning();
   userId = account.id;
 
+  /* A REAL PROFILE, because the route now resolves against one.
+   *
+   * The save consults what the resolver answers, to tell an edit from a round trip of the resolver's
+   * own value and to name the value an override was made against. With no profile row the resolver
+   * declines on every label, so a fixture without one cannot exercise either decision - it would
+   * assert the shape of a save that never met a resolved answer. `degree` is read from
+   * profiles.parsed_json by loadApplicationProfileLike's academicStr. */
+  await db.insert(schema.profiles).values({
+    user_id: userId,
+    parsed_json: {
+      degree: 'Bachelor of Science in Computer Science',
+      major: 'Computer Science',
+      currently_enrolled: true,
+    },
+  });
+
   token = await new SignJWT({
     userId,
     email: 'answer-save@example.test',
@@ -598,4 +614,66 @@ test('a save that landed answers 200 with no saved flag on it', async () => {
 
   assert.equal(response.statusCode, 200, response.body);
   assert.equal(response.json().saved, undefined);
+});
+
+/* THE OTHER SILENT 200, WHICH THIS ROUTE ALSO ANSWERED FOR MONTHS AFTER IT COULD SAVE.
+ *
+ * The tests above prove a BLANK gets filled. Rewriting an answer an earlier run had already resolved
+ * was a different path and a worse failure: the row took her bytes, the route answered 200, and
+ * refreshKnownQuestionAnswers - which every reader and the fill run on this output - recomputed the
+ * profile value straight back over it. Measured on the live Lever degree control, where the resolver
+ * has no options to snap onto and answers "Bachelor of Science in Computer Science" against a list
+ * offering "Bachelor Degree".
+ *
+ * The row is what this file checks, so the row is what this asserts: both halves of the record the
+ * refresh needs. That the refresh then honours them is pinned in lib/applicantAnswerOverride.test.ts,
+ * which runs the same composition the readers run. */
+test('rewriting an answer an earlier run resolved records her claim and what she overrode', async () => {
+  const RESOLVED = 'Bachelor of Science in Computer Science';
+  const machineAnswered: ApplicationReviewQuestion = {
+    id: 'degree--0',
+    question: 'What degree are you currently pursuing?',
+    answer: RESOLVED,
+    kind: 'required',
+    required: true,
+    portal_selector: '#degree',
+    portal_input_type: 'select',
+    ats_api_field: 'answers[7]',
+  };
+  const id = await applicationWith(stoppedRun({ questions: [machineAnswered] }));
+
+  const response = await saveQuestions(id, [asSent(machineAnswered, "Bachelor's Degree")]);
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  assert.equal(persisted.questions[0].answer, "Bachelor's Degree", 'her wording is on the row');
+  assert.equal(persisted.questions[0].answer_source, 'applicant_review',
+    'attributed to her, or the next refresh recomputes it away');
+  assert.equal(persisted.questions[0].answer_reviewed_at, persisted.questions_reviewed_at,
+    'against a round the row also carries, or no reader can check the claim');
+  assert.equal(persisted.questions[0].answer_override_of, RESOLVED,
+    'and what she typed over, so the override cannot outlive the profile fact underneath it');
+  assert.equal(persisted.questions[0].ats_api_field, 'answers[7]', 'still merged onto the stored record');
+});
+
+/* AND AN UNEDITED SAVE OF THAT SAME PACKET CLAIMS NOTHING. The screen posts back every question it is
+ * holding, so if "she supplied this" were keyed on the answer being non-empty rather than on this
+ * request having changed it, one Save would claim every resolved answer on the packet as hers. That is
+ * the 802-answer laundering, and it is what the gate is written to exclude. */
+test('an unedited save claims nothing on a machine-resolved answer', async () => {
+  const id = await applicationWith(stoppedRunWithMachineAnswer());
+
+  const response = await saveQuestions(id, [
+    asSent(HELD_QUESTION, 'No'),
+    asSent(MACHINE_ANSWERED_QUESTION),
+  ]);
+  assert.equal(response.statusCode, 200, response.body);
+
+  const persisted = await storedReview(id);
+  const machine = persisted.questions.find((question) => question.id === MACHINE_ANSWERED_QUESTION.id);
+  assert.equal(machine?.answer, 'Female', 'untouched, and still the resolver\'s to recompute');
+  assert.equal(machine?.answer_source, undefined, 'a question she did not touch is not her claim');
+  assert.equal(machine?.answer_override_of, undefined);
+  const held = persisted.questions.find((question) => question.id === HELD_QUESTION.id);
+  assert.equal(held?.answer_source, 'applicant_review', 'and the one she did answer still is');
 });
