@@ -188,3 +188,34 @@ test('the packet-audit route audits the refreshed questions the send gate verifi
     'the cached question sync must stay bound to the exact audited PDF',
   );
 });
+
+/* The code step needs a CURRENT acknowledgement, so awaiting_security_code cannot be past auditing.
+ *
+ * Entering the security code performs a fresh fill and send from the packet, and
+ * POST /applications/:id/security-code gates on currentAcknowledgedPacketAudit. The submit attempt
+ * that produced the code request also merges the employer questions it discovered into the review,
+ * which changes packet_version, so the stored acknowledgement is stale from that moment. While this
+ * route also refused the state, nothing could clear it and no code-gated application could ever be
+ * filed.
+ *
+ * Measured on Jane Street application 496cff97 on 2026-08-17: submitted 16:14:01, code emailed,
+ * stored audit and acknowledgement agreeing with each other and not with the live recompute, and
+ * "Finish sending" answering packet_stale with no route forward.
+ *
+ * The states that HAVE claimed or completed a send stay refused: re-auditing those would rewrite
+ * what an employer already received. */
+test('packet audit is refused after a send is claimed, but not while a security code is pending', () => {
+  const route = routeSlice("'/applications/:id/packet-audit'", "'/applications/:id/submission/extension-packet'");
+  const guard = route.slice(0, route.indexOf('can no longer be audited before submission'));
+
+  for (const status of ['submitting', 'submission_claimed', 'submitted']) {
+    assert.match(guard, new RegExp(`review\\.status === '${status}'`), `${status} must stay refused`);
+  }
+  assert.match(guard, /review\.submission_claimed_at/);
+
+  assert.doesNotMatch(
+    guard,
+    /review\.status === 'awaiting_security_code'/,
+    'awaiting_security_code must NOT be refused: the security-code route needs a current acknowledged audit and this is the only route that can produce one',
+  );
+});
