@@ -1945,3 +1945,33 @@ export type AutofillEvent = typeof autofill_events.$inferSelect;
 export type NewAutofillEvent = typeof autofill_events.$inferInsert;
 export type CompetencyVerdictRow = typeof competency_verdicts.$inferSelect;
 export type NewCompetencyVerdictRow = typeof competency_verdicts.$inferInsert;
+
+/* The account Litos holds for a portal family that shows no application form until one exists.
+ *
+ * One row per (user, family, tenant): these portals scope an account to the employer's own tenant,
+ * so an iCIMS login at one company is worthless at the next. The unique index is what makes
+ * ensurePortalAccount idempotent, and that matters more than tidiness - these portals lock an address
+ * after a few failed sign-ins, and minting a second password for an account that already has one is
+ * exactly how that happens.
+ *
+ * secret_ciphertext is AES-256-GCM via encryptField, the same primitive the application profile uses,
+ * and is nullable because a row may exist before a credential does. See portalAccountVault.ts, which
+ * owns every read and write of it.
+ *
+ * status starts 'pending' and only an OBSERVED sign-in moves it to 'active'. Creating the row is
+ * bookkeeping; claiming the account exists at the employer is a claim about the outside world. */
+export const portal_accounts = pgTable('portal_accounts', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  portal_family: text('portal_family').notNull(),
+  tenant: text('tenant').notNull(),
+  login_email: text('login_email').notNull(),
+  secret_ciphertext: text('secret_ciphertext'),
+  status: text('status').default('pending').notNull(),
+  last_verified_at: timestamp('last_verified_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  ownerIdx: index('portal_accounts_user_id_idx').on(t.user_id),
+  identity: uniqueIndex('portal_accounts_identity_idx').on(t.user_id, t.portal_family, t.tenant),
+}));
