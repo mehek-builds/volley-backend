@@ -22,7 +22,11 @@ import {
   type ReferralSourceEvidence,
 } from './referralSource';
 import { usStateScopeSkipReason } from './residenceScope';
-import { comparableOption, declineWordingForControl } from './selfIdentification';
+import {
+  comparableOption,
+  declineWordingForControl,
+  statedWordingForControl,
+} from './selfIdentification';
 import {
   availabilityWindowForPosting,
   formatWindowDate,
@@ -6910,9 +6914,21 @@ export function resolveKnownAnswer(
      * Done here rather than in a fill builder because this is where the answer is made, so every
      * path - the managed fill, the combobox ladder, the direct-Playwright option snap and the
      * card Mehek reads - all say the same thing. declineWordingForControl never touches a stated
-     * answer and never invents a refusal; it only respells one she already gave. */
+     * answer and never invents a refusal; it only respells one she already gave.
+     *
+     * A STATED ANSWER GETS THE SAME TREATMENT, for the same reason and through the mirror
+     * function, and in both directions. "Yes" and "No" are what the profile surface stores, and
+     * the two controls that name their vocabulary offer them as "I am not a protected veteran" /
+     * "I identify as one or more of the classifications of protected veteran listed above" and as
+     * "No, I do not have a disability and have not had one in the past" / "Yes, I have a
+     * disability, or have had one in the past". Respelling here rather than in a fill builder is
+     * what keeps the answer she gave from being reworded differently on each path.
+     *
+     * The two calls compose in either order and at most one of them can fire: an answer is a
+     * refusal or a statement, never both. Neither fires on an absent preference, which eeoAnswer
+     * has already turned into the decline exactly as it always did. */
     const answer = eeoAnswer(eeoPreferenceForLabel(label, ap.eeo_prefs));
-    return { value: declineWordingForControl(label, answer) };
+    return { value: declineWordingForControl(label, statedWordingForControl(label, answer)) };
   }
 
   if (isLegalConsentQuestion(label)) {

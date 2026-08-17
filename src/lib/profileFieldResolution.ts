@@ -73,7 +73,14 @@ import {
 import {
   comparableOption,
   isDeclineToState,
+  isStatedSelfIdentification,
+  isStatedSelfIdentificationAffirmative,
+  isStatedSelfIdentificationNegative,
+  selfIdentificationAffirmativeWording,
   selfIdentificationDeclineWording,
+  selfIdentificationNegativeWording,
+  selfIdentificationStatedWording,
+  statedSelfIdentification,
 } from './selfIdentification';
 
 export type ProfileFieldShape = {
@@ -124,7 +131,18 @@ export function isProfileBackedKey(key: ProfileKey | null | undefined): boolean 
 
 // comparableOption and isDeclineToState live in selfIdentification.ts, where questionDiscovery can
 // reach them too. Re-exported here because this module's public surface is what callers import.
-export { comparableOption, isDeclineToState, selfIdentificationDeclineWording };
+export {
+  comparableOption,
+  isDeclineToState,
+  isStatedSelfIdentification,
+  isStatedSelfIdentificationAffirmative,
+  isStatedSelfIdentificationNegative,
+  selfIdentificationAffirmativeWording,
+  selfIdentificationDeclineWording,
+  selfIdentificationNegativeWording,
+  selfIdentificationStatedWording,
+  statedSelfIdentification,
+};
 
 function optionTokens(value: string): string[] {
   return comparableOption(value).split(' ').filter(Boolean);
@@ -957,9 +975,43 @@ export function eeoAnswerLadder(label: string, stored: string): string[] {
   // spelling goes ahead of everything: it is the same refusal she gave, written the way the list
   // writes it, so it can only ever replace a decline with the same decline.
   const vocabulary = isDeclineToState(base) ? selfIdentificationDeclineWording(label) : undefined;
-  return vocabulary
-    ? ladder(vocabulary, base, coarser, ...DECLINE_WORDINGS)
-    : ladder(base, coarser, ...DECLINE_WORDINGS);
+  if (vocabulary) return ladder(vocabulary, base, coarser, ...DECLINE_WORDINGS);
+
+  /* A STATED ANSWER IS A STATEMENT, AND A STATEMENT NEVER FALLS THROUGH TO A REFUSAL.
+   *
+   * The opt-out is a legitimate LAST resort for an answer no option can hold, which is the case
+   * the tail of this ladder was written for and which is still right for a race value like
+   * "South Asian" against a list that names no Asian category. It is not right here, and the
+   * difference is that a yes and a no each have a counterpart on every one of these lists by law.
+   * Measured on the corpus before this branch existed, in BOTH directions:
+   *
+   *   veteran_status     "No"   ->  "I decline to self-identify for protected veteran status"
+   *   disability_status  "No"   ->  "I do not want to answer"
+   *   veteran_status     "Yes"  ->  "I decline to self-identify for protected veteran status"
+   *   disability_status  "Yes"  ->  "I do not want to answer"
+   *
+   * because chooseClosestOption correctly refuses to read "No" as "I am not a protected veteran"
+   * and "Yes" as "Yes, I have a disability, or have had one in the past", each option adding a
+   * claim the bare answer did not make, and the refusals further down the ladder then matched. So
+   * the applicant states an answer and a refusal is submitted under her name. That harm does not
+   * depend on WHICH answer she stated, so neither does this branch.
+   *
+   * The vocabulary in front puts the control's own wording for her answer first, where it matches
+   * exactly. The truncated tail is what makes the failure honest when there is no vocabulary and
+   * no option can hold a bare "Yes" or "No": nothing matches, and the question is handed back to
+   * her, which is the same outcome she would get if she had never answered and strictly better
+   * than answering for her.
+   *
+   * ONLY A STATED ANSWER REACHES THIS. statedSelfIdentification returns undefined for a refusal,
+   * for an empty value and for anything it cannot read with certainty, so an absent preference
+   * keeps the behaviour it has always had rather than acquiring an answer here. */
+  const statedKind = statedSelfIdentification(base);
+  if (statedKind) {
+    const stated = selfIdentificationStatedWording(label, statedKind);
+    return stated ? ladder(stated, base, coarser) : ladder(base, coarser);
+  }
+
+  return ladder(base, coarser, ...DECLINE_WORDINGS);
 }
 
 /**
@@ -1065,6 +1117,12 @@ export function chooseEeoOption(
   if (options.length === 0) return null;
   const stated = chooseClosestOption(eeoAnswerLadder(label, stored), options);
   if (stated) return stated;
+  /* The stand-in refusal is the second half of the same rule eeoAnswerLadder's stated branch
+   * states, and it has to be gated in both places or the gate is decorative: this stage would put
+   * the list's single opt-out on a control the moment a stated "Yes" or "No" failed to match,
+   * which is the exact substitution the ladder just refused to make. Gated on the same predicate
+   * for the same reason, so an absent answer still reaches the fallback it always did. */
+  if (isStatedSelfIdentification(stored.trim())) return null;
   const declines = options.filter((option) => isDeclineToState(option));
   return declines.length === 1 ? declines[0] : null;
 }

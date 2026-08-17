@@ -151,6 +151,159 @@ const SELF_ID_VOCABULARY_DECLINE: ReadonlyArray<{ handle: RegExp; wording: strin
 ];
 
 /**
+ * WHICH ANSWER SHE GAVE, when she gave one: the affirmative or the negative. Undefined when the
+ * text is a refusal, is empty, or is anything this file cannot read with certainty.
+ *
+ * WHOLE-STRING ONLY, AND ONLY THE FORMS THAT WERE MEASURED. Six entries, no prefix matching, no
+ * open-ended negation or affirmation grammar. The reason is the same one that made
+ * DECLINE_TO_STATE_RE stop matching bare "do not": a loose pattern reads "I do not identify with
+ * any of the above" and "Yes - I am authorized to work in the US for any employer" as
+ * self-identification answers, and everything downstream of this function writes
+ * protected-characteristic answers onto legal forms. A pattern that is too narrow costs one
+ * unmatched option, which the applicant then chooses herself. A pattern that is too wide states
+ * something about her that she never said.
+ *
+ * The six forms, and where each comes from:
+ *
+ *   "no" / "yes"
+ *       what the profile surface stores. "No" is what the applicant said on 2026-08-13.
+ *   "no i do not have a disability and have not had one in the past"
+ *   "yes i have a disability or have had one in the past"
+ *   "i am not a protected veteran"
+ *   "i identify as one or more of the classifications of protected veteran listed above"
+ *       the boards' own option strings, read out of the corpus (see SELF_ID_VOCABULARY_STATED).
+ *       They are here so that a value which has ALREADY been respelled once into the control's
+ *       wording is still recognised as the statement it is, rather than reaching the ladder as an
+ *       unrecognised string that falls through to a refusal.
+ *
+ * NOT A REFUSAL, AND THE TWO MUST NEVER CROSS. isDeclineToState is false for all six, which is
+ * asserted rather than assumed: "no" is not "no answer", and no long form carries a volition verb,
+ * so the plain-negation branch of DECLINE_TO_STATE_RE cannot reach them.
+ *
+ * AN ABSENT ANSWER IS NOT A STATED ONE. Empty, whitespace and undefined all return undefined here,
+ * never a kind, so nothing in this file can turn "she never told us" into "she said yes" or into
+ * "she said no". What an absent preference becomes is decided by eeoAnswer alone, upstream and
+ * unchanged by any of this.
+ */
+export type StatedSelfIdentification = 'affirmative' | 'negative';
+
+const SELF_ID_STATED_ANSWER_RE: ReadonlyArray<{ kind: StatedSelfIdentification; re: RegExp }> = [
+  {
+    kind: 'negative',
+    re: new RegExp(
+      [
+        '^no$',
+        '^no i do not have a disability and have not had one in the past$',
+        '^i am not a protected veteran$',
+      ].join('|'),
+    ),
+  },
+  {
+    kind: 'affirmative',
+    re: new RegExp(
+      [
+        '^yes$',
+        '^yes i have a disability or have had one in the past$',
+        '^i identify as one or more of the classifications of protected veteran listed above$',
+      ].join('|'),
+    ),
+  },
+];
+
+/** Which self-identification answer this text states, or undefined when it states none. */
+export function statedSelfIdentification(
+  text: string | null | undefined,
+): StatedSelfIdentification | undefined {
+  const key = comparableOption(text ?? '');
+  if (!key) return undefined;
+  return SELF_ID_STATED_ANSWER_RE.find((entry) => entry.re.test(key))?.kind;
+}
+
+/** Is this text a stated self-identification answer rather than a refusal to state? */
+export function isStatedSelfIdentification(text: string | null | undefined): boolean {
+  return statedSelfIdentification(text) !== undefined;
+}
+
+/** Is this text a stated negative self-identification rather than a refusal to state? */
+export function isStatedSelfIdentificationNegative(text: string | null | undefined): boolean {
+  return statedSelfIdentification(text) === 'negative';
+}
+
+/** Is this text a stated affirmative self-identification rather than a refusal to state? */
+export function isStatedSelfIdentificationAffirmative(text: string | null | undefined): boolean {
+  return statedSelfIdentification(text) === 'affirmative';
+}
+
+/**
+ * THE STATED ANSWERS IN THE CONTROL'S OWN WORDS, the exact counterpart of the decline vocabulary
+ * above and keyed the same way, on the handle rather than on the visible question text.
+ *
+ * MEASURED on 2026-08-13 against the prod packet corpus, not guessed. The option text is not
+ * persisted with a packet (optionBand.ts says so outright), so it was recovered from the discovery
+ * signature, where managed discovery concatenates a select's option text onto the label blob. Two
+ * signatures in the corpus carry a complete, untruncated list, and across 2968 recorded questions
+ * they are the ONLY option vocabularies the corpus has ever recorded for these two controls: 75
+ * recorded instances of each control, exactly ONE distinct list each.
+ *
+ *   "veteran statusselect ...i identify as one or more of the classifications of protected veteran
+ *    listed abovei am not a protected veterani decline to self-identify for protected veteran
+ *    status eeo[veteran]"
+ *   "disability statusselect ...yes, i have a disability, or have had one in the pastno, i do not
+ *    have a disability and have not had one in the pasti do not want to answer eeo[disability]"
+ *
+ * So each control offers exactly three answers: the affirmative, the negative, and the opt-out. The
+ * opt-out of each is in SELF_ID_VOCABULARY_DECLINE; the other two are here, paired on one row so
+ * that neither can be edited without seeing the other.
+ *
+ * WHY THIS HAS TO EXIST AT ALL, and it is not the failure that was predicted. A bare "No" does not
+ * merely miss these lists. chooseClosestOption refuses it, because "I am not a protected veteran"
+ * adds a claim to "No", and eeoAnswerLadder then continues into DECLINE_WORDINGS, one of which the
+ * list does carry. Measured on this corpus before the fix:
+ *
+ *   veteran_status     "No"   ->  "I decline to self-identify for protected veteran status"
+ *   disability_status  "No"   ->  "I do not want to answer"
+ *   veteran_status     "Yes"  ->  "I decline to self-identify for protected veteran status"
+ *   disability_status  "Yes"  ->  "I do not want to answer"
+ *
+ * THE HARM IS SYMMETRIC AND BOTH DIRECTIONS ARE FIXED HERE. The applicant states an answer and a
+ * refusal is submitted in her name, which is the same substitution the decline vocabulary forbids
+ * in the other direction. It is no better when the answer she stated was yes: someone who says she
+ * DOES have a disability, or IS a protected veteran, has an equal right not to have that replaced
+ * by a refusal she did not make. The affirmative was measured in the same read as the negative and
+ * from the same two signatures, so shipping only half of this would have left a known defect live
+ * on a protected-characteristic answer, reachable the moment anyone picks "Yes" on the onboarding
+ * surface that now asks the question.
+ *
+ * THREE CONTROLS ARE DELIBERATELY ABSENT. `race` and `gender` have neither: their answer is a
+ * category, not a yes or a no. `hispanic_ethnicity` has both, and the corpus records its list as
+ * ["Yes", "No", "Decline To Self Identify"], but its stated answers are the literal strings "Yes"
+ * and "No" that the ordinary exact-match stage already selects without help. An entry that restates
+ * the stored value would add a claim of measurement without adding behaviour. Anything not listed
+ * here falls through to the behaviour that shipped, which is the same failure-closed rule the
+ * decline vocabulary uses: without a handle there is nothing to be confident about.
+ *
+ * This is a substitution of one statement for the same statement, never of a statement for a
+ * refusal, never of a refusal for a statement, and never of an absent answer for any of them. Every
+ * caller checks statedSelfIdentification on the answer first, and it returns undefined for absent.
+ */
+const SELF_ID_VOCABULARY_STATED: ReadonlyArray<{
+  handle: RegExp;
+  affirmative: string;
+  negative: string;
+}> = [
+  {
+    handle: /(?:^|\s)veteran_status$/i,
+    affirmative: 'I identify as one or more of the classifications of protected veteran listed above',
+    negative: 'I am not a protected veteran',
+  },
+  {
+    handle: /(?:^|\s)disability_status$/i,
+    affirmative: 'Yes, I have a disability, or have had one in the past',
+    negative: 'No, I do not have a disability and have not had one in the past',
+  },
+];
+
+/**
  * The exact opt-out string this control offers, or undefined when the label does not say which
  * vocabulary it is using.
  *
@@ -163,6 +316,33 @@ export function selfIdentificationDeclineWording(label: string): string | undefi
 }
 
 /**
+ * The exact string this control offers for one of the two stated answers, or undefined when the
+ * label does not say which vocabulary it is using.
+ *
+ * Undefined for every employer-authored demographic question, which is the point of keying on the
+ * handle: those labels end in a numeric question id rather than a handle, so
+ * "are you a person living with a disability? 4000995002" matches nothing here and keeps the
+ * applicant's own "No", which the ordinary matcher already answers on a plain Yes/No list.
+ */
+export function selfIdentificationStatedWording(
+  label: string,
+  kind: StatedSelfIdentification,
+): string | undefined {
+  const normalized = label.trim().replace(/\s+/g, ' ');
+  return SELF_ID_VOCABULARY_STATED.find((entry) => entry.handle.test(normalized))?.[kind];
+}
+
+/** The exact negative string this control offers, or undefined. */
+export function selfIdentificationNegativeWording(label: string): string | undefined {
+  return selfIdentificationStatedWording(label, 'negative');
+}
+
+/** The exact affirmative string this control offers, or undefined. */
+export function selfIdentificationAffirmativeWording(label: string): string | undefined {
+  return selfIdentificationStatedWording(label, 'affirmative');
+}
+
+/**
  * The refusal to leave on this control, given the refusal she stored. Returns the stored wording
  * unchanged whenever the control does not name its own vocabulary, and never touches a stated
  * answer.
@@ -170,4 +350,18 @@ export function selfIdentificationDeclineWording(label: string): string | undefi
 export function declineWordingForControl(label: string, answer: string): string {
   if (!isDeclineToState(answer)) return answer;
   return selfIdentificationDeclineWording(label) ?? answer;
+}
+
+/**
+ * The stated answer to leave on this control, given the answer she stored. Returns the stored
+ * wording unchanged whenever the control does not name its own vocabulary, and never touches a
+ * refusal, an absent answer, or anything else it cannot read with certainty.
+ *
+ * The mirror of declineWordingForControl, and safe to compose with it in either order: an answer
+ * cannot be both a refusal and a statement, so at most one of the two ever rewrites anything.
+ */
+export function statedWordingForControl(label: string, answer: string): string {
+  const kind = statedSelfIdentification(answer);
+  if (!kind) return answer;
+  return selfIdentificationStatedWording(label, kind) ?? answer;
 }
