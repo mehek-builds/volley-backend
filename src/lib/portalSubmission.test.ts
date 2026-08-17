@@ -7623,3 +7623,30 @@ test('the speculative date ladder is unchanged when no applicant answer exists',
   assert.ok(dateFills.length > 0);
   assert.equal(dateFills[0].value, 'May 2028');
 });
+
+test('an applicant-reviewed GPA band leads the Akuna fixed-question ladder', () => {
+  // Same class as the graduation ladder: 'What is your GPA?' was typed as the profile's "3.89"
+  // while her reviewed band "3.6-4.0" sat on the packet, and the band list refused the number.
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    gpa: '3.89',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Akuna Capital internship',
+    questions: [
+      {
+        question: 'what is your gpa?',
+        answer: '3.6-4.0',
+        answerSource: 'applicant_review',
+      },
+    ],
+  });
+  const gpaFills = actions.filter(
+    (action) => action.type === 'fill'
+      && action.label?.startsWith('greenhouse_fixed_question')
+      && /what is your gpa/i.test(action.label ?? ''),
+  );
+  assert.ok(gpaFills.length > 0, 'the Akuna GPA ladder must still fire');
+  assert.equal(gpaFills[0].value, '3.6-4.0');
+});

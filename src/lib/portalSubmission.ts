@@ -2448,8 +2448,23 @@ function pushGreenhouseFixedQuestionComboboxActions(actions: ManagedBrowserActio
     { label: 'What is your GPA?', value: packet.gpa },
   ];
   for (const item of fixedQuestions) {
-    if (managedSpeculativeLabelFillSuppressed(packet, item.label, item.value)) continue;
-    pushGreenhouseQuestionComboboxLabelActions(actions, item.label, item.value ?? '', 'greenhouse_fixed_question', packet.jdText);
+    /* Same rule as the graduation ladder above: an answer she wrote for the same control leads,
+     * and the profile fact becomes the fallback. Measured on the live Akuna run, 2026-08-17 late:
+     * 'What is your GPA?' was typed as the profile's "3.89" while her reviewed "3.6-4.0" sat on
+     * the packet, and the band list refused the number. answerIsResolved rides along so the
+     * candidate builder keeps her wording ahead of its computed buckets. */
+    const applicantAnswer = packetApplicantAnswerForLabel(packet, item.label);
+    const value = applicantAnswer ?? item.value;
+    if (managedSpeculativeLabelFillSuppressed(packet, item.label, value)) continue;
+    pushGreenhouseQuestionComboboxLabelActions(
+      actions,
+      item.label,
+      value ?? '',
+      'greenhouse_fixed_question',
+      packet.jdText,
+      undefined,
+      Boolean(applicantAnswer),
+    );
   }
 }
 
