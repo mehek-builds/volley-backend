@@ -3396,7 +3396,29 @@ const GREENHOUSE_REFERRAL_LABEL_PREFIXES = [
 
 function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], packet: SubmissionPacket) {
   if (packetHasFailedReferralField(packet)) return;
-  const value = packet.referralSourceDefault?.trim();
+  /* THE LABEL PASS RUNS LAST, SO WHATEVER IT TYPES IS WHAT THE EMPLOYER GETS.
+   *
+   * It typed packet.referralSourceDefault unconditionally. The question-scoped pass a few hundred
+   * lines up already resolves this control from the packet question - including, since #573 and
+   * #574, an answer the applicant chose herself - and then this ran afterwards and overwrote it with
+   * the default.
+   *
+   * Measured on Five Rings packet 2231fc73 and DV Trading e0a0eb84, 2026-08-17. Neither employer's
+   * referral list carries a job-board entry (Five Rings: Coffee Chat / Conference / GitHub /
+   * Handshake / LinkedIn / Student Organization Newsletter or Event / University Career Fair /
+   * Word of Mouth / Information Session / Other), so her standing instruction lands on "Other". The
+   * packet held "Other" with answer_source applicant_review, and the run still reported
+   * `no option matched "Job board"` on a required control, because this pass typed the default over
+   * it. Both applications were otherwise complete - 22 and 25 fields filled.
+   *
+   * So the two passes now agree: her choice leads here exactly as it leads there, and a packet with
+   * no applicant referral answer still gets the default, which is every case this pass was written
+   * for. */
+  const applicantReferral = packet.questions.find((item) => {
+    const label = normalizeReviewQuestionLabel(item.question);
+    return Boolean(label) && isReferralSourceQuestion(label) && applicantChoseAnswer(item);
+  });
+  const value = applicantReferral?.answer.trim() || packet.referralSourceDefault?.trim();
   if (!value) return;
   for (const alias of GREENHOUSE_REFERRAL_LABEL_PREFIXES) {
     pushGreenhouseQuestionComboboxLabelActions(
@@ -3406,6 +3428,14 @@ function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], pa
       'greenhouse_referral',
       '',
       packet.referralSourceEvidence,
+      /* Carrying HER provenance through, not just her string.
+       *
+       * Passing the value alone was not enough: the builder this calls routes a referral question
+       * through referralSourceOptionCandidates, which reads the job-board evidence and emits the
+       * job-board wordings regardless of the value handed to it. So "Other" went in and
+       * "Job board" came out, and the measured failure was unchanged. answerIsResolved is the flag
+       * that makes her answer lead there (see #574), and it has to travel with it. */
+      Boolean(applicantReferral),
     );
   }
 }

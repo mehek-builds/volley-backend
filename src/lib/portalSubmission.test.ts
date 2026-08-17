@@ -7406,3 +7406,44 @@ test('a bare stored referral default still goes through the synonym builder alon
   assert.ok(typed.length > 0, 'a stored job-board default must still drive the control');
   assert.ok(/job\s*board/i.test(typed[0] ?? ''), `expected a job-board wording, got ${JSON.stringify(typed)}`);
 });
+
+/* The label-scoped referral pass runs LAST, so it decides what the employer receives.
+ *
+ * It typed packet.referralSourceDefault unconditionally, overwriting the question-scoped pass that
+ * had already resolved this control from her own answer. Measured on Five Rings 2231fc73 and
+ * DV Trading e0a0eb84, 2026-08-17: neither list carries a job-board entry, her answer was "Other"
+ * with answer_source applicant_review, and the run still reported no option matched "Job board" on
+ * a required control of an otherwise complete application. */
+test('the trailing referral label pass types her choice, not the stored default', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    referralSourceDefault: 'Job board',
+    questions: [{
+      question: 'How did you first hear about Five Rings?',
+      answer: 'Other',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_17808234008',
+      portalInputType: 'combobox',
+    }],
+  }));
+  const labelTyped = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_referral'))
+    .map((action) => action.value);
+
+  assert.ok(labelTyped.length > 0, 'the label pass must still drive referral labels');
+  assert.equal(labelTyped.includes('Job board'), false,
+    `the default must not be typed over her choice, got ${JSON.stringify(labelTyped.slice(0, 6))}`);
+  assert.ok(labelTyped.includes('Other'), `her choice must be typed, got ${JSON.stringify(labelTyped.slice(0, 6))}`);
+});
+
+test('with no applicant referral answer the label pass still types the stored default', () => {
+  // Every case this pass was written for: nothing she chose, so the default is what it has.
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    referralSourceDefault: 'Job board',
+    questions: [],
+  }));
+  const labelTyped = actions
+    .filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_referral'))
+    .map((action) => action.value);
+  assert.ok(labelTyped.some((value) => /job\s*board/i.test(value ?? '')),
+    `expected the default, got ${JSON.stringify(labelTyped.slice(0, 6))}`);
+});
