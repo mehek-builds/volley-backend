@@ -25,6 +25,7 @@ import { baseResumeRoutes } from './routes/baseResume';
 import { accountRoutes } from './routes/account';
 import { resumeRetentionRoutes } from './routes/resumeRetention';
 import { adapterHealthRoutes } from './routes/adapterHealth';
+import { managedReceivingCanaryRoutes } from './routes/managedReceivingCanary';
 import { targetingRoutes } from './routes/targeting';
 import { jdMatchRoutes } from './routes/jdMatch';
 import { harvestRoutes } from './routes/harvest';
@@ -415,6 +416,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(accountRoutes);
   await fastify.register(resumeRetentionRoutes);
   await fastify.register(adapterHealthRoutes);
+  await fastify.register(managedReceivingCanaryRoutes);
   await fastify.register(dashboardBootstrapRoutes);
 
   // Global error handler
