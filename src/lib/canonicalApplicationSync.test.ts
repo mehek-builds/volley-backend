@@ -45,11 +45,11 @@ test('the canonical write is keyed by packet and owner and can only move a row f
   assert.match(sync, /updated_at: new Date\(\)/);
 });
 
-/* The email confirmation path was fixed first and must stay on the shared statement rather than
- * growing its own copy back. */
-test('the email confirmation writer advances the canonical row through the shared statement', () => {
+/* The email confirmation path was fixed first and must stay on the shared wrapper rather than
+ * growing its own copy of the statement or of the swallow contract back. */
+test('the email confirmation writer advances the canonical row through the shared wrapper', () => {
   const email = readFileSync('src/lib/applicationEmail.ts', 'utf8');
-  assert.match(email, /import \{ syncCanonicalApplicationRow \} from '\.\/canonicalApplicationSync'/);
+  assert.match(email, /import \{ advanceCanonicalApplicationFromPacketSubmission \} from '\.\/canonicalApplicationSync'/);
   assert.doesNotMatch(email, /db\.update\(applications\)/);
 });
 
@@ -85,16 +85,41 @@ test('each dashboard writer that stamps a packet submitted advances the canonica
     '/applications/:id/submission/self-submitted',
     '/applications/:id/submission/unverified',
   ]) {
+    assert.ok(
+      routeSlice(path).includes('advanceCanonicalApplicationFromPacketSubmission('),
+      `${path} does not advance the canonical row`,
+    );
+  }
+  // On the unconditional arms the advance runs only after the route's own guarded update landed;
+  // a 409'd or 202'd write must not advance anything.
+  for (const path of [
+    '/applications/:id/submit-request',
+    '/applications/:id/submission/handoff-complete',
+    '/applications/:id/submission/self-submitted',
+  ]) {
     const route = routeSlice(path);
     const advance = route.indexOf('advanceCanonicalApplicationFromPacketSubmission(');
-    assert.ok(advance > 0, `${path} does not advance the canonical row`);
-    const landed = route.lastIndexOf('.length === 0', advance);
-    const refused = route.lastIndexOf('!updated.length', advance);
-    assert.ok(Math.max(landed, refused) > 0, `${path} advances the canonical row before its own write is confirmed`);
+    assert.ok(
+      route.lastIndexOf('.length === 0', advance) > 0,
+      `${path} advances the canonical row before its own write is confirmed`,
+    );
   }
-  // The confirmation-gated arms only advance on the arm that filed something.
-  const extension = routeSlice('/applications/:id/submission/extension-outcome');
-  assert.ok(extension.indexOf("outcome === 'confirmed') {") < extension.indexOf('advanceCanonicalApplicationFromPacketSubmission('));
-  const unverified = routeSlice('/applications/:id/submission/unverified');
-  assert.ok(unverified.indexOf('if (parsed.data.found) {') < unverified.indexOf('advanceCanonicalApplicationFromPacketSubmission('));
+  // The outcome-shaped routes gate on the status the persisted review actually landed on, the
+  // same predicate the runner's writeReview uses, never a re-derivation from request inputs.
+  // Their idempotent retry arms heal an already-submitted packet, which is what makes a retry
+  // the recovery path for a canonical advance that failed the first time.
+  for (const path of [
+    '/applications/:id/submission/extension-outcome',
+    '/applications/:id/submission/unverified',
+  ]) {
+    const route = routeSlice(path);
+    assert.ok(
+      route.includes("next.status === 'submitted'"),
+      `${path} does not gate the advance on the persisted status`,
+    );
+    assert.ok(
+      route.indexOf('advanceCanonicalApplicationFromPacketSubmission(') < route.indexOf("next.status === 'submitted'"),
+      `${path} does not heal the canonical row on its idempotent retry arm`,
+    );
+  }
 });

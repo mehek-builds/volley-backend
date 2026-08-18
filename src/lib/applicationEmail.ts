@@ -3,7 +3,7 @@ import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { application_email_aliases, application_email_messages, generated_resumes, users } from '../db/schema';
 import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
-import { syncCanonicalApplicationRow } from './canonicalApplicationSync';
+import { advanceCanonicalApplicationFromPacketSubmission } from './canonicalApplicationSync';
 import { applyReviewPatch } from './applicationStall';
 import { isUndefinedColumnError } from './applicationFacts';
 import {
@@ -861,21 +861,14 @@ export async function resolvePacketFromConfirmation(input: {
   if (!lookup) return { resolved: false, reason: 'packet_not_found' };
   const current = lookup.review;
   if (!current) return { resolved: false, reason: 'review_missing' };
-  /* Best-effort on both paths, by design. Before this sync existed the already-submitted branch
-   * was a pure read that could never fail a webhook delivery; a canonical write must not change
-   * that, or a degraded applications table turns every duplicate receipt into a Resend retry
+  /* Best-effort on both paths, through the shared never-throwing wrapper: a degraded applications
+   * table must not fail a webhook delivery or turn every duplicate receipt into a Resend retry
    * storm. A swallowed failure here is not lost: the packet is the source of truth and the
    * reconciler replays this exact branch until the heal lands. */
-  const syncCanonical = async () => {
-    try {
-      await (deps.syncCanonicalApplication ?? syncCanonicalApplicationRow)({
-        packetId: input.applicationId,
-        userId: input.userId,
-      });
-    } catch {
-      // The confirmation outcome must not depend on the canonical write.
-    }
-  };
+  const syncCanonical = () => advanceCanonicalApplicationFromPacketSubmission(
+    { packetId: input.applicationId, userId: input.userId },
+    { sync: deps.syncCanonicalApplication },
+  );
   if (current.status === 'submitted') {
     /* The packet already knows. The canonical row may not: every confirmation resolved before the
      * sync below existed left a submitted packet beside a still-sendable applications row, and the

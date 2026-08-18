@@ -1115,7 +1115,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!parsed.success) return reply.status(400).send({ error: 'Invalid extension submission outcome' });
       const current = readApplicationReview(row.spec);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
-      if (current.status === 'submitted') return reply.send({ application_id: row.id, review: current });
+      if (current.status === 'submitted') {
+        /* The packet already knows. The canonical row may not: an earlier outcome call whose
+         * canonical advance failed leaves this retry as the one natural heal trigger, exactly the
+         * way the email path's already-submitted branch heals on replay. */
+        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
+        return reply.send({ application_id: row.id, review: current });
+      }
       if (current.submission_claim_id !== parsed.data.claim_id || current.status !== 'submitting') {
         return reply.status(409).send({ error: 'This extension submission is no longer active' });
       }
@@ -1156,8 +1162,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
       )).returning({ id: generated_resumes.id });
       if (!updated.length) return reply.status(409).send({ error: 'The application state changed before the outcome was recorded' });
-      // The canonical row learns what the packet just did, and only on the arm that filed it.
-      if (outcome === 'confirmed') {
+      // The canonical row learns what the packet just did, gated on the status the persisted
+      // review actually landed on rather than re-deriving it from the outcome the extension sent.
+      if (next.status === 'submitted') {
         await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
       }
       return reply.send({ application_id: row.id, review: next });
@@ -2505,7 +2512,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         });
       }
       if (pending.resolution) {
-        // Idempotent rather than an error. The same answer twice is a retry, not a mistake.
+        // Idempotent rather than an error. The same answer twice is a retry, not a mistake, and a
+        // retry of a resolved 'sent' is also the heal path for a canonical advance that failed the
+        // first time.
+        if (current.status === 'submitted') {
+          await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
+        }
         return reply.status(200).send({ application_id: row.id, already_resolved: true, review: current });
       }
       const now = new Date().toISOString();
@@ -2555,8 +2567,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (updated.length === 0) {
         return reply.status(409).send({ error: 'This application was resolved somewhere else first' });
       }
-      // Only the "she found it" arm filed anything; the released claim changes nothing canonical.
-      if (parsed.data.found) {
+      // Only the arm that landed on 'submitted' filed anything; the released claim changes nothing
+      // canonical. Gated on the persisted status, the same predicate the runner's writeReview uses.
+      if (next.status === 'submitted') {
         await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
       }
       return reply.status(200).send({ application_id: row.id, review: next });

@@ -44,15 +44,20 @@ export type CanonicalApplicationSyncDeps = {
 /* Best-effort, by design, on every path that calls it. The packet write it follows is the one the
  * applicant's outcome depends on - a webhook delivery, a submit run holding a live browser, a
  * dashboard answer - and before this sync existed none of those could be failed by the applications
- * table having a bad day. A swallowed failure here is not lost: the packet is the source of truth
- * and reconcileSubmissionConfirmations replays the sync until the heal lands. */
+ * table having a bad day. The cost of the swallow is real and named: only a packet with a stored
+ * employer confirmation email can be replayed (reconcileSubmissionConfirmations, itself run by
+ * hand, not a scheduler), so for every other writer a failure here leaves the very split state
+ * this module exists to close, until a retry of the same route or a receipt for the same packet
+ * fires the advance again. The warn below is the only trace that this is happening; it must never
+ * become a throw. */
 export async function advanceCanonicalApplicationFromPacketSubmission(
   input: { packetId: string; userId: string },
   deps: CanonicalApplicationSyncDeps = {},
 ): Promise<void> {
   try {
     await (deps.sync ?? syncCanonicalApplicationRow)(input);
-  } catch {
+  } catch (error) {
     // The packet outcome must not depend on the canonical write.
+    console.warn('[canonical-sync] failed to advance the application row', { packetId: input.packetId, error });
   }
 }
