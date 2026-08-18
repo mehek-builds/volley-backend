@@ -1,9 +1,9 @@
 import { createHash, timingSafeEqual } from 'crypto';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db';
-import { application_email_aliases, application_email_messages, applications, generated_resumes, users } from '../db/schema';
+import { application_email_aliases, application_email_messages, generated_resumes, users } from '../db/schema';
 import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
-import { confirmedSubmissionLifecycle } from './canonicalApplicationLifecycle';
+import { syncCanonicalApplicationRow } from './canonicalApplicationSync';
 import { applyReviewPatch } from './applicationStall';
 import { isUndefinedColumnError } from './applicationFacts';
 import {
@@ -803,37 +803,6 @@ export type SubmissionConfirmationDeps = {
     userId: string;
   }) => Promise<void>;
 };
-
-/* THE CANONICAL ROW IS A SECOND READER OF THE SAME FACT, and it was never told.
- *
- * resolvePacketFromConfirmation predates the applications table: it stamps the packet's review
- * 'submitted' and its pipeline_stage 'applied', and until the canonical refactor those WERE the
- * dashboard. Measured on 2026-08-18: four employer receipts (DV Trading, Nuro, ForSight, Skydio)
- * each resolved their packet to submitted/applied while the applications row the tracker actually
- * renders sat at submission_state 'ready_to_submit', tracker_state 'saved' - a filed application
- * the product kept offering to send again.
- *
- * The written states are manualSubmissionTransition's 'confirmed' outcome, taken from the shared
- * constant so the two writers cannot drift. updated_at is now, never the receipt time: a reconciler
- * heal replays receipts that are weeks old, and the tracker lists rows by updated_at descending,
- * so backdating would bury a row at the exact moment its state changed. The WHERE re-checks the
- * state exactly the way savePacketReview does: two confirmations racing may both read
- * 'not submitted', and only one of them may write.
- */
-async function syncCanonicalApplicationRow(input: {
-  packetId: string;
-  userId: string;
-}): Promise<void> {
-  await db.update(applications).set({
-    submission_state: confirmedSubmissionLifecycle.submissionState,
-    tracker_state: confirmedSubmissionLifecycle.trackerState,
-    updated_at: new Date(),
-  }).where(and(
-    eq(applications.legacy_generated_resume_id, input.packetId),
-    eq(applications.user_id, input.userId),
-    sql`${applications.submission_state} <> 'submitted'`,
-  ));
-}
 
 /* Scoped by OWNER as well as by id, on both the read and the write.
  *

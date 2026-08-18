@@ -1,0 +1,100 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import { advanceCanonicalApplicationFromPacketSubmission } from './canonicalApplicationSync';
+
+const PACKET_ID = '8e29df51-09ed-4c67-b2fc-153966471473';
+const USER_ID = 'a18f774b-a306-4804-93f3-cd6020c27fb3';
+
+test('the advance hands the packet and its owner to the canonical write, unchanged', async () => {
+  const calls: Array<{ packetId: string; userId: string }> = [];
+  await advanceCanonicalApplicationFromPacketSubmission({ packetId: PACKET_ID, userId: USER_ID }, {
+    sync: async (input) => {
+      calls.push(input);
+    },
+  });
+  assert.deepEqual(calls, [{ packetId: PACKET_ID, userId: USER_ID }]);
+});
+
+/* Every caller stamps its packet first and tells the canonical row second, and the packet write is
+ * the one an applicant's outcome hangs on - a webhook delivery, a submit run holding a live
+ * browser, a dashboard answer. None of those may be failed by the tracker table having a bad day,
+ * so the advance swallows its own failure by contract rather than at nine call sites. */
+test('a canonical write failure never escapes to the packet writer', async () => {
+  await advanceCanonicalApplicationFromPacketSubmission({ packetId: PACKET_ID, userId: USER_ID }, {
+    sync: async () => {
+      throw new Error('the applications table is having a bad day');
+    },
+  });
+});
+
+// ---- the shape of the live wiring, which no fake can check ----
+
+const sync = readFileSync('src/lib/canonicalApplicationSync.ts', 'utf8');
+
+/* The one statement every writer shares. Keyed by packet AND owner, states taken from the shared
+ * lifecycle constant, updated_at stamped now rather than backdated, and guarded so a row already
+ * submitted is never rewritten - two writers racing may both read 'not submitted', and only one of
+ * them may write. */
+test('the canonical write is keyed by packet and owner and can only move a row forward', () => {
+  assert.match(sync, /eq\(applications\.legacy_generated_resume_id, input\.packetId\)/);
+  assert.match(sync, /eq\(applications\.user_id, input\.userId\)/);
+  assert.match(sync, /submission_state\} <> 'submitted'/);
+  assert.match(sync, /submission_state: confirmedSubmissionLifecycle\.submissionState/);
+  assert.match(sync, /tracker_state: confirmedSubmissionLifecycle\.trackerState/);
+  assert.match(sync, /updated_at: new Date\(\)/);
+});
+
+/* The email confirmation path was fixed first and must stay on the shared statement rather than
+ * growing its own copy back. */
+test('the email confirmation writer advances the canonical row through the shared statement', () => {
+  const email = readFileSync('src/lib/applicationEmail.ts', 'utf8');
+  assert.match(email, /import \{ syncCanonicalApplicationRow \} from '\.\/canonicalApplicationSync'/);
+  assert.doesNotMatch(email, /db\.update\(applications\)/);
+});
+
+/* All four server submit paths - ATS API, managed, retained-session, controlled - stamp 'submitted'
+ * through writeReview, so the advance lives there once instead of four times. The status check is
+ * what keeps a claim, a hold or a failure write from ever touching the canonical row. */
+test('every runner submit stamp advances the canonical row through writeReview', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const writeReview = runner.slice(runner.indexOf('async function writeReview'));
+  assert.match(writeReview.slice(0, 900), /review\.status === 'submitted'/);
+  assert.match(
+    writeReview.slice(0, 900),
+    /advanceCanonicalApplicationFromPacketSubmission\(\{ packetId: row\.id, userId: row\.user_id \}\)/,
+  );
+});
+
+/* Each dashboard route that stamps a packet submitted tells the canonical row, AFTER its own
+ * guarded update has been confirmed to land - a 409'd or 202'd write must not advance anything. */
+test('each dashboard writer that stamps a packet submitted advances the canonical row', () => {
+  const routes = readFileSync('src/routes/applications.ts', 'utf8');
+  // A route's text runs from its registration to the next one; `fastify.log` inside a handler must
+  // not end the slice early, so the boundary is the registration call itself.
+  const registrations = [...routes.matchAll(/fastify\.(?:get|post|patch|put|delete)\(\s*'([^']+)'/g)];
+  const routeSlice = (path: string) => {
+    const at = registrations.findIndex((match) => match[1] === path);
+    assert.ok(at >= 0, `${path} is not registered`);
+    return routes.slice(registrations[at].index, registrations[at + 1]?.index);
+  };
+  for (const path of [
+    '/applications/:id/submission/extension-outcome',
+    '/applications/:id/submit-request',
+    '/applications/:id/submission/handoff-complete',
+    '/applications/:id/submission/self-submitted',
+    '/applications/:id/submission/unverified',
+  ]) {
+    const route = routeSlice(path);
+    const advance = route.indexOf('advanceCanonicalApplicationFromPacketSubmission(');
+    assert.ok(advance > 0, `${path} does not advance the canonical row`);
+    const landed = route.lastIndexOf('.length === 0', advance);
+    const refused = route.lastIndexOf('!updated.length', advance);
+    assert.ok(Math.max(landed, refused) > 0, `${path} advances the canonical row before its own write is confirmed`);
+  }
+  // The confirmation-gated arms only advance on the arm that filed something.
+  const extension = routeSlice('/applications/:id/submission/extension-outcome');
+  assert.ok(extension.indexOf("outcome === 'confirmed') {") < extension.indexOf('advanceCanonicalApplicationFromPacketSubmission('));
+  const unverified = routeSlice('/applications/:id/submission/unverified');
+  assert.ok(unverified.indexOf('if (parsed.data.found) {') < unverified.indexOf('advanceCanonicalApplicationFromPacketSubmission('));
+});

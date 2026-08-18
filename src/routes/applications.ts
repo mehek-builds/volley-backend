@@ -49,6 +49,7 @@ import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, reviewAnswerSaveDisposition, submitRequestDisposition } from '../lib/submissionSafety';
 import { submissionClaimPatch } from '../lib/submissionStop';
+import { advanceCanonicalApplicationFromPacketSubmission } from '../lib/canonicalApplicationSync';
 import { extensionAuthorizationRequiresAutomaticSubmission } from '../lib/submissionAuthorization';
 import {
   detectPortal,
@@ -1155,6 +1156,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
       )).returning({ id: generated_resumes.id });
       if (!updated.length) return reply.status(409).send({ error: 'The application state changed before the outcome was recorded' });
+      // The canonical row learns what the packet just did, and only on the arm that filed it.
+      if (outcome === 'confirmed') {
+        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
+      }
       return reply.send({ application_id: row.id, review: next });
     },
   );
@@ -1861,6 +1866,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           const review = readApplicationReview(refreshed.spec);
           return reply.status(202).send({ application_id: row.id, review: review ?? current });
         }
+        // The application left as an email; the canonical row must stop offering to send it.
+        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
         const [refreshed] = await db.select().from(generated_resumes).where(and(
           eq(generated_resumes.id, row.id),
           eq(generated_resumes.user_id, request.jwtPayload!.userId),
@@ -2069,6 +2076,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           const review = readApplicationReview(refreshed.spec);
           return reply.status(202).send({ application_id: row.id, review: review ?? current });
         }
+        // The verified receipt filed the packet; the canonical row learns the same fact.
+        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
         return reply.send({ application_id: row.id, review: next, cover_letter: storedCoverLetter(row) });
       }
       const next = { ...current, status: 'ready_for_final_approval' as const, attention_reason: undefined, updated_at: now };
@@ -2175,6 +2184,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           review: readApplicationReview(refreshed.spec) ?? current,
         });
       }
+      // She sent it herself; the canonical row must stop offering to send it for her.
+      await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
       return reply.send({
         application_id: row.id,
         review: next,
@@ -2543,6 +2554,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         .returning({ id: generated_resumes.id });
       if (updated.length === 0) {
         return reply.status(409).send({ error: 'This application was resolved somewhere else first' });
+      }
+      // Only the "she found it" arm filed anything; the released claim changes nothing canonical.
+      if (parsed.data.found) {
+        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
       }
       return reply.status(200).send({ application_id: row.id, review: next });
     },
