@@ -197,6 +197,29 @@ test('application aliases are disabled until a real secret is configured', () =>
   }
 });
 
+/* Both wordings measured on 2026-08-18. Ashby (Skydio) confirms with "submitting your
+ * application" and no "for applying" anywhere; Personio (snapAddy) sends a bilingual receipt whose
+ * closing "we will invite you to an interview" used to win and file a plain receipt as an
+ * interview request. */
+test('a receipt that promises a later interview is still a receipt', () => {
+  assert.equal(
+    classifyApplicationEmail(
+      'Deine Bewerbung als Werkstudent / Your application as Werkstudent',
+      'Deine Unterlagen sind bei uns angekommen und wir werden sie zeitnah prüfen. '
+      + 'We have received your documents safely and will review them shortly. '
+      + 'If it fits, we will invite you to an interview.',
+    ),
+    'submission_confirmation',
+  );
+  assert.equal(
+    classifyApplicationEmail(
+      'Thank you for applying to Skydio!',
+      'Thank you for submitting your application. We are thrilled you would consider joining us.',
+    ),
+    'submission_confirmation',
+  );
+});
+
 test('application email classifier recognizes employer outcomes', () => {
   assert.equal(
     classifyApplicationEmail('Thank you for applying', 'We received your application.'),
