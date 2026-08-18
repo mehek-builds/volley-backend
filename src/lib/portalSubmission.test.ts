@@ -2073,7 +2073,7 @@ test('managed Greenhouse durable textarea selectors do not get live select retri
     action.type === 'fill'
     && action.selector === 'textarea[name="job_application[answers_attributes][0][text_value]"]'
     && action.value === 'Project answer 1'));
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
 });
 
 test('managed Greenhouse academic questions confirm rediscovered autocomplete selectors', () => {
@@ -2318,7 +2318,7 @@ test('Ashby reviewed essay packet stays inside the Stratus action budget', () =>
   }, true);
 
   assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
 });
 
 function nearestNonFormTextareaId(markup: string, labelText: string): string | undefined {
@@ -2528,7 +2528,7 @@ test('Greenhouse replays Faire option-style choices through React-select buckets
     action.text === 'Faire Candidate Privacy Policy acknowledgment'
     || action.label?.includes('Faire Candidate Privacy Policy acknowledgment')), true);
   assert.ok(comboFills.every((action) => (action.selector?.length ?? Infinity) <= 500));
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
 });
 
 test('Greenhouse demographic aliases keep race fallback for unrelated category questions', () => {
@@ -2551,7 +2551,7 @@ test('Greenhouse demographic aliases keep race fallback for unrelated category q
   assert.ok(actions.some((action) =>
     action.label?.startsWith('greenhouse_demographic_combo:')
     && action.value === 'White'));
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
 });
 
 test('Greenhouse trims low-priority fallbacks before exceeding the managed action budget', () => {
@@ -2596,7 +2596,7 @@ test('Greenhouse trims low-priority fallbacks before exceeding the managed actio
     ],
   }, true);
 
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
   assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
   assert.ok(actions.some((action) => action.label === 'phone_country'));
   assert.ok(actions.some((action) => action.label === 'location'));
@@ -2648,7 +2648,7 @@ test('large Greenhouse preview packets preserve core field evidence extracts ins
     })),
   });
 
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
   for (const label of ['first_name', 'last_name', 'email', 'resume']) {
     assert.ok(
       actions.some((action) => action.type === 'extract' && action.label === `filled_field:${label}`),
@@ -2693,7 +2693,7 @@ test('Greenhouse replays Jump academic and referral choices without consent', ()
   assert.ok(actions.some((action) => action.label === 'education_graduation_month' && action.value === 'May'), 'graduation month');
   assert.ok(actions.some((action) => action.label === 'education_graduation_year' && action.value === '2028'), 'graduation year');
   assert.ok(actions.every((action) => !action.selector || action.selector.length <= 500), 'selector length');
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
 });
 
 test('Greenhouse profile-backed academic questions replay through label-scoped comboboxes', () => {
@@ -3072,7 +3072,7 @@ test('Greenhouse replays Databricks React-select buckets without portal selector
   }
   assert.ok(actions.some((action) => action.type === 'press' && action.label?.startsWith('question_combo_label:') && action.value === 'Enter'));
   assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
 });
 
 test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped React-selects', () => {
@@ -3181,7 +3181,8 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.ok(topPreferenceIndex >= 0 && topPreferenceIndex < sponsorshipIndex);
   assert.equal(actions.some((action) => action.label?.startsWith('education_school_combo:')), false);
   assert.equal(actions.some((action) => action.label === 'education_graduation_year'), false);
-  for (const run of actionRuns) assert.ok(run.length <= 100, `expected at most 100 actions, got ${run.length}`);
+  // The Akuna-specific 100-action carve-out is retired; the one ceiling is the runner's real one.
+  for (const run of actionRuns) assert.ok(run.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${run.length}`);
 
   for (const action of comboFills.filter((item) => item.label?.startsWith('question_combo_label:'))) {
     const index = actions.indexOf(action);
@@ -3217,7 +3218,123 @@ test('Greenhouse promotes canonical Akuna prior-application no answers into earl
   const knownComboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_known_question_combo_label:'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you ever applied to a full time or internship position with Akuna in the past?') && action.value === 'No'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you applied to this role at Akuna previously?') && action.value === 'No'));
-  assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
+});
+
+/* Measured on Akuna packet 41f0b79d, 2026-08-18: the tail truncation dropped the five education
+ * controls, both attestations and the referral source - eight REQUIRED controls - while optional
+ * EEO questions and a "potential master's graduation date" kept their chains. When whole questions
+ * must go, the ones the form itself marks optional go first. */
+test('an over-budget Greenhouse prepare drops explicitly optional questions before required ones', () => {
+  const required = Array.from({ length: 16 }, (_, index) => ({
+    question: `required screener question number ${index} about this role?`,
+    answer: 'Yes',
+    required: true,
+    portalSelector: `#question_required_${index}`,
+    portalInputType: 'combobox',
+  }));
+  const optional = Array.from({ length: 8 }, (_, index) => ({
+    question: `optional demographic question number ${index} (mark all that apply)`,
+    answer: 'Decline to self-identify',
+    required: false,
+    portalSelector: `#question_optional_${index}`,
+    portalInputType: 'combobox',
+  }));
+  const packet = {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'A Greenhouse posting with more questions than one pass can hold',
+    questions: [...required, ...optional],
+  };
+  const actions = buildManagedPortalActions('greenhouse', packet);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
+  const dropped = budgetDroppedReviewedQuestions(packet, actions);
+  assert.ok(dropped.length > 0, 'the fixture must actually overflow the budget');
+  for (const question of dropped) {
+    assert.match(question, /^optional demographic/, `a required question was dropped while optional ones remained: ${question}`);
+  }
+});
+
+/* The measured 2026-08-18 Akuna shape (packet 41f0b79d): 34 discovery-merged questions, most of
+ * them required react-selects with exact #question_ selectors. This pins the commit's own claim:
+ * at MANAGED_ACTION_LIMIT with optionals shed first, the five custom education controls and both
+ * attestations keep an attempt, and the only required controls the budget may still drop are the
+ * arithmetic floor of the five-action react-select chain (graduation year, GPA, referral source).
+ * If an action-cost change pushes any OTHER required control back into the shortfall, this fails. */
+test('the measured Akuna question shape keeps every education control and attestation attempted', () => {
+  const combo = (question: string, answer: string, required: boolean, id: number) => ({
+    question, answer, required, portalSelector: `#question_${id}`, portalInputType: 'combobox',
+  });
+  const text = (question: string, answer: string, required: boolean, id: number) => ({
+    question, answer, required, portalSelector: `#question_${id}`, portalInputType: 'text',
+  });
+  const questions = [
+    text('what is your legal first name? (please also ensure that you input your legal first name in the first name field above)', 'Mehek', true, 1),
+    text('do you have a preferred name, other than the name indicated above? if yes, please indicate that name below', 'Mehek', true, 2),
+    combo('by submitting this application and answering yes below, i acknowledge that this role is my top preference and i will not be considered for other tech and/or quant roles at akuna for this recruiting season.', 'Yes', true, 3),
+    combo('if you are an undergraduate considering a master\'s degree following graduation, when is your potential master\'s graduation date?', 'Spring/Summer 2028', false, 4),
+    combo('to be considered for this role, you must have earned a high school diploma (or an equivalent degree). please confirm the month and year of your graduation', 'Spring/Summer 2023', true, 5),
+    combo('have you ever applied to a full time or internship position with akuna in the past?', 'No', true, 6),
+    combo('have you applied to this role at akuna previously?', 'No', true, 7),
+    combo('do you have any offer deadlines that we should be aware of?', 'No', true, 8),
+    combo('do you have prior experience working at an options market making trading firm?', 'No', true, 9),
+    text('linkedin profile', 'https://example.com/in/profile', false, 10),
+    combo('disclaimer: akuna capital is a global company which wants to attract the highest quality talent. we will sponsor any qualified candidate for us work authorization if we are legally able.', 'Yes', true, 11),
+    combo('do you now, or will you in the future, require visa sponsorship to continue working in the united states (e.g. h-1b, tn, e-3)?', 'Yes', true, 12),
+    combo('if you answered yes above to requiring visa sponsorship now or in the future for work authorization, what is your current immigration status?', 'F-1 CPT/OPT', true, 13),
+    text('if you have a current work authorization/status, when does it expire?', 'Duration of status', true, 14),
+    text('if applicable, please list any extension options for your current work authorization status.', 'F-1 CPT/OPT', true, 15),
+    text('please provide additional detail about your sponsorship needs or current work authorization status.', 'F-1 student', true, 16),
+    combo('do you live in new york or california?', 'No', true, 17),
+    text('we care about addressing everyone correctly. to help us get it right, please write out how your name is pronounced phonetically', 'MAY-hek', true, 18),
+    { question: 'we care about addressing everyone correctly. add your personal pronouns below to share with the hiring team.', answer: 'she/her', required: true, portalSelector: '#question_19\\[\\]_1', portalInputType: 'checkbox' },
+    text('if you selected self-describe, please specify your pronouns', 'she/her', false, 20),
+    combo('i certify that all information i have provided in order to apply for this position with akuna is true, complete, and accurate.', 'Yes', true, 21),
+    combo('i acknowledge that my resume must be submitted in pdf format to be considered.', 'Yes', true, 22),
+    combo('how would you describe your gender identity? (mark all that apply)', 'Female', false, 23),
+    combo('how would you describe your racial/ethnic background? (mark all that apply)', 'South Asian', false, 24),
+    combo('how would you describe your sexual orientation? (mark all that apply)', 'Heterosexual', false, 25),
+    combo('do you identify as transgender?', 'Decline to self-identify', false, 26),
+    combo('do you have a disability or chronic condition (physical, visual, auditory, cognitive, mental, emotional, or other) that substantially limits one or more of your major life activities?', 'No', false, 27),
+    combo('are you a veteran or active member of the united states armed forces?', 'No', false, 28),
+    combo('Which University do/did you attend?', 'University of Southern California', true, 29),
+    combo('What education level are you currently pursuing?', "Bachelor's Degree", true, 30),
+    combo('Graduation Month', 'May', true, 31),
+    combo('graduation year', '2028', true, 32),
+    combo('what is your gpa?', '3.8', true, 33),
+    combo('how did you hear about this job?', 'Other', true, 34),
+  ];
+  const packet = {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    phone: '+971000000000',
+    school: 'University of Southern California',
+    degree: "Bachelor's Degree",
+    graduationMonth: 'May',
+    graduationYear: '2028',
+    gpa: '3.8',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Akuna Capital Software Engineer Intern',
+    questions,
+  };
+  const actions = buildManagedPortalActions('greenhouse', packet);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
+  const dropped = budgetDroppedReviewedQuestions(packet, actions);
+  const requiredByLabel = new Map(questions.map((item) => [item.question.toLowerCase(), item.required]));
+  const arithmeticFloor = new Set(['graduation year', 'what is your gpa?', 'how did you hear about this job?']);
+  for (const question of dropped) {
+    const required = requiredByLabel.get(question.toLowerCase());
+    if (required === false) continue;
+    assert.ok(arithmeticFloor.has(question.toLowerCase()),
+      `a required control outside the react-select arithmetic floor was dropped: ${question}`);
+  }
+  for (const surviving of ['Which University do/did you attend?', 'What education level are you currently pursuing?', 'Graduation Month', 'i certify that all information', 'resume must be submitted in pdf format']) {
+    assert.ok(!dropped.some((question) => question.toLowerCase().startsWith(surviving.toLowerCase().slice(0, 30))),
+      `${surviving} lost its attempt`);
+  }
 });
 
 test('Greenhouse never invents Akuna attestations when discovery misses them', () => {
@@ -3234,7 +3351,7 @@ test('Greenhouse never invents Akuna attestations when discovery misses them', (
   assert.equal(fills.length, 0);
   assert.equal(actions.some((action) => action.selector?.includes('I certify that all information I have provided')), false);
   assert.equal(actions.some((action) => action.selector?.includes('resume must be submitted in PDF format')), false);
-  assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
 });
 
 test('Greenhouse replays fixed Akuna graduation month and year when discovery misses them', () => {
@@ -3473,7 +3590,7 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
     false,
   );
   assert.ok(actions.every((action) => (action.selector?.length ?? 0) <= 500));
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
 });
 
 test('Greenhouse replays Databricks export-control checkbox answers by exact option', () => {
@@ -4975,7 +5092,7 @@ test('Greenhouse managed actions stay inside the Stratus action budget on Reddit
     ],
   }, true);
 
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
   assert.equal(actions.some((action) => action.label?.startsWith('greenhouse_known_select:')), false);
   assert.ok(actions.some((action) =>
     action.label?.startsWith('question_combo_label:')
@@ -5025,7 +5142,7 @@ test('Greenhouse managed actions stay inside the Stratus action budget on Nuro-s
   );
   assert.equal(onsiteAliases.length, 4);
   assert.ok(onsiteAliases.every((action) => /four|4/.test(action.text ?? '')));
-  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
 });
 
 test('the QA harness routes to the three new controlled adapters, by query param and by path', () => {

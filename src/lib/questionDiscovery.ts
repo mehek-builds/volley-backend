@@ -6166,7 +6166,14 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
       indexByLabel.set(key, normalized.length);
       normalized.push(next);
     } else if (!normalized[existingIndex].answer.trim() && next.answer.trim()) {
-      normalized[existingIndex] = next;
+      /* The two records are one control rendered twice, and the blank earlier duplicate may be the
+       * only one carrying the form's required marker; the budget trim reads that flag to decide
+       * which questions may be sacrificed first. Requiredness merges as OR across duplicates, the
+       * same way normalizeApplicationReviewQuestions merges it. */
+      const replaced = normalized[existingIndex] as T & { required?: boolean };
+      normalized[existingIndex] = replaced.required === true && (next as T & { required?: boolean }).required !== true
+        ? { ...next, required: true }
+        : next;
     }
   }
   return normalized;
