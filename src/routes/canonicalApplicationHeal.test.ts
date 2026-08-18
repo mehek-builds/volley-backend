@@ -46,12 +46,12 @@ async function withEnv(
 
 const USER_ID = 'a18f774b-a306-4804-93f3-cd6020c27fb3';
 
-function dependencyHarness() {
-  const calls: Array<{ userId?: string; limit?: number }> = [];
+function dependencyHarness(outcome = { scanned: 4, healed: 3, unchanged: 1, failed: 0 }) {
+  const calls: Array<{ userId?: string; limit?: number } | undefined> = [];
   const dependencies: CanonicalApplicationHealDependencies = {
     reconcile: async (input) => {
       calls.push(input);
-      return { scanned: 4, healed: 3, unchanged: 1, failed: 0 };
+      return outcome;
     },
   };
   return { calls, dependencies };
@@ -142,7 +142,36 @@ test('the optional narrowing reaches the sweep, and bad narrowing is a 400 rathe
       headers: { 'x-internal-secret': secret },
     });
     assert.equal(zero.statusCode, 400);
+    // A typo'd KEY is the same mistake as a typo'd value: `?userId=` must refuse, not quietly
+    // drop the narrowing and heal every account.
+    const wrongKey = await app.inject({
+      method: 'POST',
+      url: `/internal/canonical-application-heal?userId=${USER_ID}`,
+      headers: { 'x-internal-secret': secret },
+    });
+    assert.equal(wrongKey.statusCode, 400);
     assert.equal(calls.length, 1);
+  } finally {
+    await app.close();
+  }
+});
+
+/* The counters ride in the body either way, but the status code is all an unattended caller
+ * reads, and a pass that left rows split must not record as success anywhere that only sees
+ * the code. */
+test('a pass that could not heal every row answers 500 with its counters intact', async () => {
+  const { dependencies } = dependencyHarness({ scanned: 3, healed: 1, unchanged: 0, failed: 2 });
+  const app = await healTestApp(dependencies);
+  try {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/internal/canonical-application-heal',
+      headers: { 'x-internal-secret': secret },
+    });
+    assert.equal(response.statusCode, 500);
+    const body = response.json() as Record<string, unknown>;
+    assert.equal(body.healed, 1);
+    assert.equal(body.failed, 2);
   } finally {
     await app.close();
   }

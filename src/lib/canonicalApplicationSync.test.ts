@@ -145,13 +145,23 @@ test('each dashboard writer that stamps a packet submitted advances the canonica
   assert.match(helper, /if \(updated\.length === 0\) return false;/);
   assert.match(helper, /input\.next\.status === 'submitted'/);
   assert.match(helper, /advanceCanonicalApplicationFromPacketSubmission\(\{ packetId: input\.packetId, userId: input\.userId \}\)/);
-  // The 'applied' pipeline stamp lives only inside the helper, so a future route that wants to
-  // mark a packet applied cannot write its own UPDATE without failing here first - which is what
-  // walks its author into the transition that carries the canonical advance.
+  // Keyed by packet AND owner in the helper itself, not delegated to the callers' guards. The
+  // routes all read through ownedResume first, which is exactly why a "simplification" could one
+  // day drop this predicate without any behavior test noticing - and a helper keyed by packet id
+  // alone would let any future caller with a wrong userId flip another user's packet terminal
+  // while the canonical advance, whose own WHERE still carries user_id, silently no-ops.
+  assert.match(helper, /eq\(generated_resumes\.id, input\.packetId\)/);
+  assert.match(helper, /eq\(generated_resumes\.user_id, input\.userId\)/);
+  // Within this file the 'applied' pipeline stamp lives only inside the helper, so a new route
+  // here that wants to mark a packet applied cannot write its own UPDATE without failing this
+  // count first - which is what walks its author into the transition that carries the canonical
+  // advance. (The stamp legitimately exists elsewhere: savePacketReview in lib/applicationEmail.ts
+  // and the student's own stage PATCH in routes/jdMatch.ts are their own writers; the reader-side
+  // sweep in canonicalApplicationSync.ts is the net for a writer this pin cannot see.)
   assert.equal(
     [...routes.matchAll(/pipeline_stage: 'applied'/g)].length,
     1,
-    "pipeline_stage 'applied' must be stamped only by persistReviewTransition",
+    "pipeline_stage 'applied' must be stamped only by persistReviewTransition in this file",
   );
   assert.match(helper, /pipeline_stage: 'applied'/);
 
@@ -170,9 +180,18 @@ test('each dashboard writer that stamps a packet submitted advances the canonica
     '/applications/:id/submission/self-submitted',
     '/applications/:id/submission/unverified',
   ]) {
+    const route = routeSlice(path);
     assert.ok(
-      routeSlice(path).includes('persistReviewTransition('),
+      route.includes('persistReviewTransition('),
       `${path} does not persist through the shared transition`,
+    );
+    // Every route still answers a lost race itself - its 409 or refreshed 202. A route that
+    // ignores the helper's false would answer 200 with a review that was never persisted, the
+    // client would stop retrying, and the packet would be stuck short of 'submitted' where even
+    // the reader-side sweep cannot see it.
+    assert.ok(
+      route.includes('if (!persisted)'),
+      `${path} does not handle the shared transition losing its race`,
     );
   }
   // The outcome-shaped routes keep their idempotent retry arms, which heal an already-submitted
@@ -202,6 +221,8 @@ test('the live sweep reads the split state by the writers’ own keys and replay
   assert.match(sync, /deps\.sync \?\? syncCanonicalApplicationRow/);
   // The healed counter is the guarded statement's own answer, not a re-read.
   assert.match(sync, /\.returning\(\{ id: applications\.id \}\)/);
+  // Deterministic order, so a backlog bigger than the limit is walked rather than re-sampled.
+  assert.match(sync, /\.orderBy\(generated_resumes\.created_at, generated_resumes\.id\)/);
 });
 
 /* Hosted, deliberately, the way reconcileSubmissionConfirmations is hosted: an exported function

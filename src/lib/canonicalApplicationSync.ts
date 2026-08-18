@@ -105,15 +105,16 @@ export async function reconcileCanonicalApplicationRows(
   } = {},
 ): Promise<CanonicalReconcileOutcome> {
   const limit = Math.max(1, Math.min(input.limit ?? 200, 1000));
+  const sync = deps.sync ?? syncCanonicalApplicationRow;
   const rows = await (deps.listSplitPackets ?? listCanonicalSplitPackets)({ userId: input.userId, limit });
   let healed = 0;
   let unchanged = 0;
   let failed = 0;
   for (const row of rows) {
-    // One failing packet must not abort the pass: the rows iterate in a stable order, so an
+    // One failing packet must not abort the pass: the rows come back in a stable order, so an
     // uncaught throw would deterministically kill every future pass at the same row.
     try {
-      if (await (deps.sync ?? syncCanonicalApplicationRow)({ packetId: row.packetId, userId: row.userId })) {
+      if (await sync(row)) {
         healed += 1;
       } else {
         // The guarded WHERE found nothing left to fix: a writer or a concurrent pass got there
@@ -131,7 +132,13 @@ export async function reconcileCanonicalApplicationRows(
 /* The split state, read exactly the way the writers describe it: the packet's _review says
  * 'submitted' and the canonical row keyed by that packet and its owner does not. The join carries
  * user_id as well as the packet id so a row can only ever be paired with its own owner's packet,
- * the same two keys the guarded UPDATE writes by. */
+ * the same two keys the guarded UPDATE writes by.
+ *
+ * Ordered oldest packet first, and the ORDER BY is load-bearing rather than cosmetic. Without it
+ * the limit selects a planner-dependent subset, so two passes over a backlog bigger than the
+ * limit can keep re-reading the same rows while never reaching the rest, and the counters stop
+ * being comparable between runs. Oldest first because the oldest split is the one that has been
+ * lying to its owner the longest. */
 async function listCanonicalSplitPackets(query: { userId?: string; limit: number }): Promise<CanonicalSplitPacket[]> {
   return db
     .select({ packetId: generated_resumes.id, userId: generated_resumes.user_id })
@@ -145,5 +152,6 @@ async function listCanonicalSplitPackets(query: { userId?: string; limit: number
       sql`${applications.submission_state} <> 'submitted'`,
       ...(query.userId ? [eq(generated_resumes.user_id, query.userId)] : []),
     ))
+    .orderBy(generated_resumes.created_at, generated_resumes.id)
     .limit(query.limit);
 }

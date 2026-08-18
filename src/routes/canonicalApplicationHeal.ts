@@ -7,7 +7,8 @@ import {
 } from '../lib/canonicalApplicationSync';
 
 export type CanonicalApplicationHealDependencies = {
-  reconcile: (input: { userId?: string; limit?: number }) => Promise<CanonicalReconcileOutcome>;
+  // The live function's own signature, so the route cannot drift from what the sweep accepts.
+  reconcile: typeof reconcileCanonicalApplicationRows;
 };
 
 type CanonicalApplicationHealRouteOptions = FastifyPluginOptions & {
@@ -17,11 +18,12 @@ type CanonicalApplicationHealRouteOptions = FastifyPluginOptions & {
 /* Optional narrowing for a hand-run pass: one account while diagnosing it, or a smaller batch
  * while watching the first run land. Bad input is a 400, not a silently widened sweep - a typo'd
  * user_id that fell back to "everyone" would heal rows the operator was deliberately not touching
- * yet. */
+ * yet. strict(), because that promise has to hold for a typo'd KEY too: a bare z.object would
+ * discard `?userId=` or `?user-id=` and run the widened pass anyway. */
 const healQuerySchema = z.object({
   user_id: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(1000).optional(),
-});
+}).strict();
 
 /* THE HOST FOR THE READER-SIDE HEAL, and nothing else.
  *
@@ -57,7 +59,9 @@ async function handleHeal(
   }
   const parsed = healQuerySchema.safeParse(request.query ?? {});
   if (!parsed.success) {
-    return reply.status(400).send({ error: 'Invalid heal query: user_id must be a uuid and limit an integer from 1 to 1000' });
+    return reply.status(400).send({
+      error: 'Invalid heal query: the only accepted parameters are user_id (a uuid) and limit (an integer from 1 to 1000)',
+    });
   }
 
   const outcome = await dependencies.reconcile({ userId: parsed.data.user_id, limit: parsed.data.limit });
@@ -67,7 +71,11 @@ async function handleHeal(
       'canonical application heal left rows unhealed: the applications table refused writes for some packets; re-run once it recovers',
     );
   }
-  return reply.send({ checked_at: new Date().toISOString(), ...outcome });
+  /* failed > 0 is a 500 with the counters still in the body. A human curling this reads the
+   * counters either way; anything unattended - including the Vercel Cron wiring the GET below
+   * exists for - reads only the status code, and a pass that left rows split must not record as
+   * success. The heals that did land are committed, and a re-run is safe by construction. */
+  return reply.status(outcome.failed > 0 ? 500 : 200).send({ checked_at: new Date().toISOString(), ...outcome });
 }
 
 export async function canonicalApplicationHealRoutes(fastify: FastifyInstance, options: CanonicalApplicationHealRouteOptions = {}) {
