@@ -4515,6 +4515,17 @@ function truncateManagedActionsToBudget(
   }
 }
 
+/** The 80-char label suffix an action label embeds for a question, shared by the protection,
+ * accounting and trim matchers so the three cannot drift. */
+function reviewQuestionBudgetSuffix(question: string): string | undefined {
+  const text = normalizeReviewQuestionLabel(question);
+  return text ? text.slice(0, 80) : undefined;
+}
+
+function actionBaseNamesQuestionSuffix(base: string, suffix: string): boolean {
+  return base === `question:${suffix}` || base.endsWith(`:${suffix}`);
+}
+
 /* WHICH QUESTIONS GO FIRST when whole questions have to go at all.
  *
  * The blunt tail truncation drops whatever sits last in the list, and the list is ordered by
@@ -4523,32 +4534,66 @@ function truncateManagedActionsToBudget(
  * eight REQUIRED controls - while an optional "potential master's graduation date" survived near the
  * head. The run then reported all eight as required-and-empty on a packet that had every answer.
  *
- * So before anything blunt runs, the questions the form itself marks optional give up their chains
- * first, tail-first among themselves. An optional question the budget drops costs the applicant
- * nothing the employer requires; a required question dropped in its place costs the whole send.
- * The matching here mirrors reviewedQuestionActionProtection and reviewedQuestionsWithoutActions:
- * a question owns every action base that names its 80-char label suffix. */
+ * So BEFORE anything blunt runs - this must precede the tail truncations, or the unprotected
+ * required chains are already gone by the time it looks - the questions the form itself marks
+ * optional give up their chains first, tail-first among themselves. An optional question the budget
+ * drops costs the applicant nothing the employer requires; a required question dropped in its place
+ * costs the whole send.
+ *
+ * Three deliberate refusals shape the matching:
+ *
+ * - A suffix any required question also names is never trimmed. The suffixes are labels cut at 80
+ *   characters, so two long questions can collide; a collision must fail safe, and `endsWith`
+ *   through a label's own colon ("Disclaimer: ...") is caught by the same per-base check.
+ * - A base is owned by WHATEVER builder produced it, not only the `question*` family: Akuna's
+ *   attestations and the referral source fill through greenhouse_known/fixed/referral chains, and
+ *   an optional question served by those labels frees no budget if only `question*` bases count.
+ *   Class-protected reads (filled_field:, captcha_, options:) are exempted through the same
+ *   isProtectedManagedAction the truncations use, so an evidence read whose label quotes a
+ *   question is never deleted with it.
+ * - The trim stands down entirely rather than remove the last question-labeled action:
+ *   budgetDroppedReviewedQuestions reads "no question* action at all" as "this family never fills
+ *   questions" and would report NOTHING, which turns a real budget drop invisible.
+ *
+ * required: false is discovery's word, and discovery's word is an asterisk scan on some providers,
+ * so a required control with an unmarked label can carry an explicit false and be sacrificed here.
+ * That is a data-quality gap this priority cannot close from below; what it changes is WHICH
+ * mistake is possible, and a mis-flagged label is a narrower failure than the old one, where any
+ * required chain could die simply for sitting at the tail. */
 function trimOptionalQuestionActionsToBudget(
   actions: ManagedBrowserAction[],
   limit: number,
   packet: SubmissionPacket,
+  coreProtection: ReadonlySet<string>,
 ) {
   if (actions.length <= limit) return;
   const optionalSuffixes: string[] = [];
+  const requiredSuffixes: string[] = [];
   for (const item of packet.questions) {
-    // Only a question the record EXPLICITLY marks optional. An absent flag is unknown, not
-    // optional, and unknown keeps the protection it has today.
-    if (item.required !== false) continue;
-    const questionText = normalizeReviewQuestionLabel(item.question);
-    if (!questionText) continue;
-    optionalSuffixes.push(questionText.slice(0, 80));
+    const suffix = reviewQuestionBudgetSuffix(item.question);
+    if (!suffix) continue;
+    // Only a question the record EXPLICITLY marks optional may be trimmed. An absent flag is
+    // unknown, not optional, and unknown keeps the protection it has today.
+    (item.required === false ? optionalSuffixes : requiredSuffixes).push(suffix);
   }
+  const removable = (action: ManagedBrowserAction, suffix: string): boolean => {
+    const base = managedActionLabelBase(action);
+    if (!base || !actionBaseNamesQuestionSuffix(base, suffix)) return false;
+    if (isProtectedManagedAction(action, coreProtection)) return false;
+    return !requiredSuffixes.some((required) => actionBaseNamesQuestionSuffix(base, required));
+  };
+  const seen = new Set<string>();
   for (let index = optionalSuffixes.length - 1; index >= 0 && actions.length > limit; index -= 1) {
     const suffix = optionalSuffixes[index]!;
+    if (seen.has(suffix)) continue;
+    seen.add(suffix);
+    const survivingQuestionActions = actions.filter((action) => {
+      const base = managedActionLabelBase(action);
+      return Boolean(base?.startsWith('question')) && !removable(action, suffix);
+    });
+    if (survivingQuestionActions.length === 0) continue;
     for (let position = actions.length - 1; position >= 0; position -= 1) {
-      const base = managedActionLabelBase(actions[position]!);
-      if (!base || !base.startsWith('question')) continue;
-      if (base === `question:${suffix}` || base.endsWith(`:${suffix}`)) actions.splice(position, 1);
+      if (removable(actions[position]!, suffix)) actions.splice(position, 1);
     }
   }
 }
@@ -4725,7 +4770,7 @@ function reviewedQuestionActionProtection(
     const bases = Array.from(new Set(actions.flatMap((action) => {
       const base = managedActionLabelBase(action);
       if (!base || !base.startsWith('question')) return [];
-      return base === `question:${suffix}` || base.endsWith(`:${suffix}`) ? [base] : [];
+      return actionBaseNamesQuestionSuffix(base, suffix) ? [base] : [];
     })));
     if (bases.length === 0) continue;
 
@@ -4772,7 +4817,7 @@ export function reviewedQuestionsWithoutActions(
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText || shouldSkipReviewedConsentQuestion(questionText)) continue;
     const suffix = questionText.slice(0, 80);
-    const hit = [...attempted].some((base) => base === `question:${suffix}` || base.endsWith(`:${suffix}`));
+    const hit = [...attempted].some((base) => actionBaseNamesQuestionSuffix(base, suffix));
     if (!hit && !missing.includes(questionText)) missing.push(questionText);
   }
   return missing;
@@ -6787,6 +6832,14 @@ export function buildManagedPortalActions(
     trimGreenhouseManagedActionsToBudget(actions, actionLimit, protectedActionBases);
   }
   trimSpeculativeManagedActionsToBudget(actions, actionLimit, protectedActionBases);
+  /* Ahead of BOTH tail truncations, or it is too late to matter: the first truncate below eats
+   * unprotected groups from the tail, and the required attestation and alias chains it would eat
+   * are exactly what the optional questions are giving up their chains to save. Never on a submit
+   * run: the submit path refuses to trade away any reviewed answer and throws instead, optional or
+   * not, and that refusal is preserved unchanged. */
+  if (!canAppendSubmit && actions.length > actionLimit) {
+    trimOptionalQuestionActionsToBudget(actions, actionLimit, packet, coreProtection);
+  }
   if (actions.length > actionLimit) {
     truncateManagedActionsToBudget(actions, actionLimit, protectedActionBases);
   }
@@ -6818,17 +6871,7 @@ export function buildManagedPortalActions(
     if (canAppendSubmit) {
       throw new ManagedActionBudgetError(portal, familyActionLimit, questionProtection.questionCount);
     }
-    /* Three grades of giving up whole questions, least costly first. Explicitly-optional questions
-     * go before anything the form requires; then the blunt pass runs with every required question's
-     * chosen chain still protected; only if the protected minimum itself does not fit does the
-     * original core-only truncation run, which is the pre-existing last resort unchanged. */
-    trimOptionalQuestionActionsToBudget(actions, actionLimit, packet);
-    if (actions.length > actionLimit) {
-      truncateManagedActionsToBudget(actions, actionLimit, protectedActionBases);
-    }
-    if (actions.length > actionLimit) {
-      truncateManagedActionsToBudget(actions, actionLimit, coreProtection);
-    }
+    truncateManagedActionsToBudget(actions, actionLimit, coreProtection);
   }
 
   if (canAppendSubmit) {

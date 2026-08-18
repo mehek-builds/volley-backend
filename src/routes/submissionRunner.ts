@@ -2796,6 +2796,9 @@ async function prepareManaged(
     answer: q.answer,
     portalSelector: q.portal_selector,
     portalInputType: q.portal_input_type,
+    // buildPacket carries this and this map silently did not, so a discovery rebuild lost the ATS
+    // API binding on every managed run. The two maps must stay field-for-field.
+    atsApiField: q.ats_api_field,
     /* Discovery rebuilds the packet immediately before the real fill. Keep the measured option
      * provenance here just as buildPacket does above, or every managed run loses the only fact
      * that distinguishes a dropdown answer from plain text at the last handoff. That made IMC's
