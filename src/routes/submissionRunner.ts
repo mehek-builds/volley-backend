@@ -116,6 +116,7 @@ import {
   unverifiedSubmissionReason,
 } from '../lib/managedSubmitOutcome';
 import { classifySubmissionStop, submissionClaimPatch, submissionStopRecord } from '../lib/submissionStop';
+import { advanceCanonicalApplicationFromPacketSubmission } from '../lib/canonicalApplicationSync';
 import { applyReviewPatch, beginStall } from '../lib/applicationStall';
 import {
   attentionCategoriesForReasons,
@@ -300,6 +301,13 @@ async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
   await db.update(generated_resumes).set({
     spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(review)}::jsonb, true)`,
   }).where(eq(generated_resumes.id, row.id));
+  /* Every submit path in this file - ATS API, managed, retained-session, controlled - stamps its
+   * packet submitted through this one statement, so this is where the canonical applications row
+   * learns the same fact. Best-effort by construction: the receipt the run just captured must not
+   * be lost to the tracker table having a bad day. */
+  if (review.status === 'submitted') {
+    await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: row.user_id });
+  }
 }
 
 async function standingAuthorization(userId: string): Promise<StandingAuthorization> {

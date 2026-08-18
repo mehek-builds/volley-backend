@@ -1,9 +1,9 @@
 import { createHash, timingSafeEqual } from 'crypto';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db';
-import { application_email_aliases, application_email_messages, applications, generated_resumes, users } from '../db/schema';
+import { application_email_aliases, application_email_messages, generated_resumes, users } from '../db/schema';
 import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
-import { confirmedSubmissionLifecycle } from './canonicalApplicationLifecycle';
+import { advanceCanonicalApplicationFromPacketSubmission } from './canonicalApplicationSync';
 import { applyReviewPatch } from './applicationStall';
 import { isUndefinedColumnError } from './applicationFacts';
 import {
@@ -804,37 +804,6 @@ export type SubmissionConfirmationDeps = {
   }) => Promise<void>;
 };
 
-/* THE CANONICAL ROW IS A SECOND READER OF THE SAME FACT, and it was never told.
- *
- * resolvePacketFromConfirmation predates the applications table: it stamps the packet's review
- * 'submitted' and its pipeline_stage 'applied', and until the canonical refactor those WERE the
- * dashboard. Measured on 2026-08-18: four employer receipts (DV Trading, Nuro, ForSight, Skydio)
- * each resolved their packet to submitted/applied while the applications row the tracker actually
- * renders sat at submission_state 'ready_to_submit', tracker_state 'saved' - a filed application
- * the product kept offering to send again.
- *
- * The written states are manualSubmissionTransition's 'confirmed' outcome, taken from the shared
- * constant so the two writers cannot drift. updated_at is now, never the receipt time: a reconciler
- * heal replays receipts that are weeks old, and the tracker lists rows by updated_at descending,
- * so backdating would bury a row at the exact moment its state changed. The WHERE re-checks the
- * state exactly the way savePacketReview does: two confirmations racing may both read
- * 'not submitted', and only one of them may write.
- */
-async function syncCanonicalApplicationRow(input: {
-  packetId: string;
-  userId: string;
-}): Promise<void> {
-  await db.update(applications).set({
-    submission_state: confirmedSubmissionLifecycle.submissionState,
-    tracker_state: confirmedSubmissionLifecycle.trackerState,
-    updated_at: new Date(),
-  }).where(and(
-    eq(applications.legacy_generated_resume_id, input.packetId),
-    eq(applications.user_id, input.userId),
-    sql`${applications.submission_state} <> 'submitted'`,
-  ));
-}
-
 /* Scoped by OWNER as well as by id, on both the read and the write.
  *
  * The application id on a message row is a foreign key the alias put there, and the alias carries
@@ -892,21 +861,14 @@ export async function resolvePacketFromConfirmation(input: {
   if (!lookup) return { resolved: false, reason: 'packet_not_found' };
   const current = lookup.review;
   if (!current) return { resolved: false, reason: 'review_missing' };
-  /* Best-effort on both paths, by design. Before this sync existed the already-submitted branch
-   * was a pure read that could never fail a webhook delivery; a canonical write must not change
-   * that, or a degraded applications table turns every duplicate receipt into a Resend retry
+  /* Best-effort on both paths, through the shared never-throwing wrapper: a degraded applications
+   * table must not fail a webhook delivery or turn every duplicate receipt into a Resend retry
    * storm. A swallowed failure here is not lost: the packet is the source of truth and the
    * reconciler replays this exact branch until the heal lands. */
-  const syncCanonical = async () => {
-    try {
-      await (deps.syncCanonicalApplication ?? syncCanonicalApplicationRow)({
-        packetId: input.applicationId,
-        userId: input.userId,
-      });
-    } catch {
-      // The confirmation outcome must not depend on the canonical write.
-    }
-  };
+  const syncCanonical = () => advanceCanonicalApplicationFromPacketSubmission(
+    { packetId: input.applicationId, userId: input.userId },
+    { sync: deps.syncCanonicalApplication },
+  );
   if (current.status === 'submitted') {
     /* The packet already knows. The canonical row may not: every confirmation resolved before the
      * sync below existed left a submitted packet beside a still-sendable applications row, and the
