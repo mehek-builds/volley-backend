@@ -150,13 +150,19 @@ test('a blank confirmation subject does not become a blank receipt', () => {
 // ---- resolving one packet from one receipt ----
 
 type SaveCall = { applicationId: string; userId: string; review: ApplicationReviewState; receivedAt: Date };
+type SyncCall = { packetId: string; userId: string };
 
-function resolverDeps(lookup: (input: { applicationId: string; userId: string }) => PacketReviewLookup) {
+function resolverDeps(
+  lookup: (input: { applicationId: string; userId: string }) => PacketReviewLookup,
+  options: { syncFails?: boolean } = {},
+) {
   const loads: Array<{ applicationId: string; userId: string }> = [];
   const saves: SaveCall[] = [];
+  const syncs: SyncCall[] = [];
   return {
     loads,
     saves,
+    syncs,
     deps: {
       loadReview: async (input: { applicationId: string; userId: string }) => {
         loads.push(input);
@@ -164,6 +170,10 @@ function resolverDeps(lookup: (input: { applicationId: string; userId: string })
       },
       saveReview: async (input: SaveCall) => {
         saves.push(input);
+      },
+      syncCanonicalApplication: async (input: SyncCall) => {
+        syncs.push(input);
+        if (options.syncFails) throw new Error('applications table is having a bad day');
       },
     },
   };
@@ -213,6 +223,96 @@ test('a packet already submitted is left exactly as it is', async () => {
   }, harness.deps);
   assert.deepEqual(outcome, { resolved: false, reason: 'already_submitted' });
   assert.equal(harness.saves.length, 0);
+});
+
+/* THE CANONICAL ROW LEARNS WHAT THE PACKET LEARNED. Measured on 2026-08-18: four employer
+ * receipts (DV Trading, Nuro, ForSight, Skydio) resolved their packets to submitted/applied while
+ * the applications row the tracker renders stayed at ready_to_submit/saved, so the dashboard kept
+ * offering to send applications the employers had already confirmed. A resolution now carries the
+ * same fact to the canonical row, and the already-submitted branch carries it too, because every
+ * receipt resolved before this sync existed left exactly that split behind for the reconciler to
+ * find. */
+test('resolving a receipt advances the canonical application row with the packet', async () => {
+  const harness = resolverDeps(() => ({ review: AWAITING_A_CODE }));
+  const outcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    subject: 'Thanks for applying',
+    receivedAt: RECEIVED_AT,
+  }, harness.deps);
+  assert.equal(outcome.resolved, true);
+  assert.deepEqual(harness.syncs, [{ packetId: APPLICATION_ID, userId: USER_ID }]);
+});
+
+test('an already-submitted packet still heals its canonical row on replay', async () => {
+  const harness = resolverDeps(() => ({
+    review: review({ status: 'submitted', submitted_at: '2026-08-10T17:20:00.000Z' }),
+  }));
+  const outcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    receivedAt: RECEIVED_AT,
+  }, harness.deps);
+  assert.deepEqual(outcome, { resolved: false, reason: 'already_submitted' });
+  assert.deepEqual(harness.syncs, [{ packetId: APPLICATION_ID, userId: USER_ID }]);
+});
+
+/* The already-submitted branch was a pure read before the sync existed, and a duplicate delivery
+ * must keep costing what it used to cost: nothing. A canonical write that throws would otherwise
+ * 500 the webhook and put a long-settled receipt into Resend's redelivery loop. */
+test('a canonical sync failure never blocks the confirmation', async () => {
+  const replay = resolverDeps(() => ({
+    review: review({ status: 'submitted', submitted_at: '2026-08-10T17:20:00.000Z' }),
+  }), { syncFails: true });
+  const replayOutcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    receivedAt: RECEIVED_AT,
+  }, replay.deps);
+  assert.deepEqual(replayOutcome, { resolved: false, reason: 'already_submitted' });
+  assert.equal(replay.syncs.length, 1);
+
+  const fresh = resolverDeps(() => ({ review: AWAITING_A_CODE }), { syncFails: true });
+  const freshOutcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    subject: 'Thanks for applying',
+    receivedAt: RECEIVED_AT,
+  }, fresh.deps);
+  assert.equal(freshOutcome.resolved, true);
+  assert.equal(fresh.saves.length, 1);
+});
+
+/* A receipt the guards refuse must not advance the canonical row either: a stale replay proves
+ * nothing about the CURRENT attempt, and an unowned or missing packet proves nothing at all. */
+test('a stale or unresolvable receipt does not touch the canonical row', async () => {
+  const stale = resolverDeps(() => ({
+    review: review({
+      status: 'awaiting_security_code',
+      submission_attempted_at: '2026-08-11T09:00:00.000Z',
+    }),
+  }));
+  const staleOutcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    receivedAt: RECEIVED_AT,
+  }, stale.deps);
+  assert.deepEqual(staleOutcome, { resolved: false, reason: 'stale_confirmation' });
+  assert.equal(stale.syncs.length, 0);
+
+  const unowned = resolverDeps(() => null);
+  await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: OTHER_USER_ID,
+    alias: ALIAS,
+    receivedAt: RECEIVED_AT,
+  }, unowned.deps);
+  assert.equal(unowned.syncs.length, 0);
 });
 
 /* THE REPLAY WINDOW the reordering opens, closed before anything can wire the reconciler.
@@ -575,6 +675,27 @@ test('reconciliation counts the packets it deliberately left alone', async () =>
     unchanged: 2,
     reasons: { already_submitted: 1, packet_not_found: 1 },
   });
+});
+
+/* The rows iterate in a stable order, so before this guard a single throwing packet did not just
+ * lose one pass's counters, it aborted every future pass at the same position and the
+ * one-pass-fixes-all heal could never complete. */
+test('one failing packet does not abort the reconciliation pass', async () => {
+  const attempted: string[] = [];
+  const outcome = await reconcileSubmissionConfirmations({}, {
+    listConfirmations: async () => [
+      { applicationId: 'a', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
+      { applicationId: 'poison', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
+      { applicationId: 'c', userId: USER_ID, alias: ALIAS, subject: null, receivedAt: RECEIVED_AT },
+    ],
+    resolve: async (input) => {
+      attempted.push(input.applicationId);
+      if (input.applicationId === 'poison') throw new Error('the applications table hiccuped');
+      return { resolved: true, review: review({ status: 'submitted' }) };
+    },
+  });
+  assert.deepEqual(attempted, ['a', 'poison', 'c']);
+  assert.deepEqual(outcome, { scanned: 3, resolved: 2, unchanged: 1, reasons: { resolver_error: 1 } });
 });
 
 test('reconciliation passes its owner filter down and clamps an absurd limit', async () => {

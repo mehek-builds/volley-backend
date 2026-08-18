@@ -1,8 +1,9 @@
 import { createHash, timingSafeEqual } from 'crypto';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db';
-import { application_email_aliases, application_email_messages, generated_resumes, users } from '../db/schema';
+import { application_email_aliases, application_email_messages, applications, generated_resumes, users } from '../db/schema';
 import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
+import { confirmedSubmissionLifecycle } from './canonicalApplicationLifecycle';
 import { applyReviewPatch } from './applicationStall';
 import { isUndefinedColumnError } from './applicationFacts';
 import {
@@ -407,7 +408,22 @@ export function classifyApplicationEmail(subject = '', text = ''): ApplicationEm
   if (/\b(verification code|security code|one[- ]?time|otp|passcode|confirm your email)\b/.test(haystack)) {
     return 'verification_code';
   }
-  if (/\b(thank you for applying|thanks for applying|application (?:has been )?received|we received your application|successfully submitted|application submitted)\b/.test(haystack)) {
+  /* The receipt wordings here are all measured, not invented. The first row is the classic
+   * Greenhouse/Lever family. The second row is the 2026-08-18 additions, each from a stored
+   * message this function got wrong that night: Ashby writes "thank you for submitting your
+   * application" (no "for applying" anywhere), and Personio's bilingual receipt says
+   * "we have received your documents" / "deine Unterlagen sind bei uns angekommen" while its
+   * closing line ("we will invite you to an interview") used to fall through to the interview
+   * matcher and file a plain receipt as an interview request. Receipts are checked before
+   * interview logistics for exactly that reason: a message that confirms receipt IS a receipt,
+   * whatever it promises about later steps.
+   *
+   * The document phrases require their affirmative subject: "we have received your documents"
+   * with the prefix mandatory, because the bare tail also lives inside "we have NOT yet received
+   * your documents", an upload reminder that must never resolve a packet. The German form accepts
+   * the compound "Bewerbungsunterlagen", which \bunterlagen alone can never match. */
+  if (/\b(thank you for applying|thanks for applying|application (?:has been )?received|we received your application|successfully submitted|application submitted)\b/.test(haystack)
+    || /\b(thank you for submitting your application|(?:we have|we've) received your documents|documents have arrived|(?:bewerbungs)?unterlagen sind (?:bei uns )?angekommen)\b/.test(haystack)) {
     return 'submission_confirmation';
   }
   const interviewStage = '(?:interview|phone screen|technical screen|onsite interview)';
@@ -782,7 +798,42 @@ export type SubmissionConfirmationDeps = {
     review: ApplicationReviewState;
     receivedAt: Date;
   }) => Promise<void>;
+  syncCanonicalApplication?: (input: {
+    packetId: string;
+    userId: string;
+  }) => Promise<void>;
 };
+
+/* THE CANONICAL ROW IS A SECOND READER OF THE SAME FACT, and it was never told.
+ *
+ * resolvePacketFromConfirmation predates the applications table: it stamps the packet's review
+ * 'submitted' and its pipeline_stage 'applied', and until the canonical refactor those WERE the
+ * dashboard. Measured on 2026-08-18: four employer receipts (DV Trading, Nuro, ForSight, Skydio)
+ * each resolved their packet to submitted/applied while the applications row the tracker actually
+ * renders sat at submission_state 'ready_to_submit', tracker_state 'saved' - a filed application
+ * the product kept offering to send again.
+ *
+ * The written states are manualSubmissionTransition's 'confirmed' outcome, taken from the shared
+ * constant so the two writers cannot drift. updated_at is now, never the receipt time: a reconciler
+ * heal replays receipts that are weeks old, and the tracker lists rows by updated_at descending,
+ * so backdating would bury a row at the exact moment its state changed. The WHERE re-checks the
+ * state exactly the way savePacketReview does: two confirmations racing may both read
+ * 'not submitted', and only one of them may write.
+ */
+async function syncCanonicalApplicationRow(input: {
+  packetId: string;
+  userId: string;
+}): Promise<void> {
+  await db.update(applications).set({
+    submission_state: confirmedSubmissionLifecycle.submissionState,
+    tracker_state: confirmedSubmissionLifecycle.trackerState,
+    updated_at: new Date(),
+  }).where(and(
+    eq(applications.legacy_generated_resume_id, input.packetId),
+    eq(applications.user_id, input.userId),
+    sql`${applications.submission_state} <> 'submitted'`,
+  ));
+}
 
 /* Scoped by OWNER as well as by id, on both the read and the write.
  *
@@ -841,7 +892,29 @@ export async function resolvePacketFromConfirmation(input: {
   if (!lookup) return { resolved: false, reason: 'packet_not_found' };
   const current = lookup.review;
   if (!current) return { resolved: false, reason: 'review_missing' };
-  if (current.status === 'submitted') return { resolved: false, reason: 'already_submitted' };
+  /* Best-effort on both paths, by design. Before this sync existed the already-submitted branch
+   * was a pure read that could never fail a webhook delivery; a canonical write must not change
+   * that, or a degraded applications table turns every duplicate receipt into a Resend retry
+   * storm. A swallowed failure here is not lost: the packet is the source of truth and the
+   * reconciler replays this exact branch until the heal lands. */
+  const syncCanonical = async () => {
+    try {
+      await (deps.syncCanonicalApplication ?? syncCanonicalApplicationRow)({
+        packetId: input.applicationId,
+        userId: input.userId,
+      });
+    } catch {
+      // The confirmation outcome must not depend on the canonical write.
+    }
+  };
+  if (current.status === 'submitted') {
+    /* The packet already knows. The canonical row may not: every confirmation resolved before the
+     * sync below existed left a submitted packet beside a still-sendable applications row, and the
+     * reconciler replays exactly this branch. Healing it here makes one reconcile pass fix them
+     * all, and the guarded UPDATE makes the heal a no-op when nothing is wrong. */
+    await syncCanonical();
+    return { resolved: false, reason: 'already_submitted' };
+  }
   if (confirmationIsStale(current, input.receivedAt)) return { resolved: false, reason: 'stale_confirmation' };
   const review = reviewFromSubmissionConfirmation(current, input);
   await (deps.saveReview ?? savePacketReview)({
@@ -850,6 +923,7 @@ export async function resolvePacketFromConfirmation(input: {
     review,
     receivedAt: input.receivedAt,
   });
+  await syncCanonical();
   return { resolved: true, review };
 }
 
@@ -1235,13 +1309,23 @@ export async function reconcileSubmissionConfirmations(
   let resolved = 0;
   let unchanged = 0;
   for (const row of newestPerPacket.values()) {
-    const outcome = await (deps.resolve ?? resolvePacketFromConfirmation)({
-      applicationId: row.applicationId,
-      userId: row.userId,
-      alias: row.alias,
-      subject: row.subject ?? undefined,
-      receivedAt: row.receivedAt,
-    });
+    // One failing packet must not abort the pass: the rows iterate in a stable order, so an
+    // uncaught throw here would not just lose this pass's counters, it would deterministically
+    // kill every future pass at the same row.
+    let outcome: SubmissionConfirmationOutcome;
+    try {
+      outcome = await (deps.resolve ?? resolvePacketFromConfirmation)({
+        applicationId: row.applicationId,
+        userId: row.userId,
+        alias: row.alias,
+        subject: row.subject ?? undefined,
+        receivedAt: row.receivedAt,
+      });
+    } catch {
+      unchanged += 1;
+      reasons.resolver_error = (reasons.resolver_error ?? 0) + 1;
+      continue;
+    }
     if (outcome.resolved) {
       resolved += 1;
       continue;

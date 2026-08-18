@@ -197,6 +197,52 @@ test('application aliases are disabled until a real secret is configured', () =>
   }
 });
 
+/* Both wordings measured on 2026-08-18. Ashby (Skydio) confirms with "submitting your
+ * application" and no "for applying" anywhere; Personio (snapAddy) sends a bilingual receipt whose
+ * closing "we will invite you to an interview" used to win and file a plain receipt as an
+ * interview request. */
+test('a receipt that promises a later interview is still a receipt', () => {
+  assert.equal(
+    classifyApplicationEmail(
+      'Deine Bewerbung als Werkstudent / Your application as Werkstudent',
+      'Deine Unterlagen sind bei uns angekommen und wir werden sie zeitnah prüfen. '
+      + 'We have received your documents safely and will review them shortly. '
+      + 'If it fits, we will invite you to an interview.',
+    ),
+    'submission_confirmation',
+  );
+  assert.equal(
+    classifyApplicationEmail(
+      'Thank you for applying to Skydio!',
+      'Thank you for submitting your application. We are thrilled you would consider joining us.',
+    ),
+    'submission_confirmation',
+  );
+  // The German compound form of the same Personio receipt: \bunterlagen alone can never match
+  // inside "Bewerbungsunterlagen", and a German-only receipt has no English line to fall back on.
+  assert.equal(
+    classifyApplicationEmail(
+      'Deine Bewerbung als Werkstudent',
+      'Deine Bewerbungsunterlagen sind bei uns angekommen und wir werden sie zeitnah prüfen.',
+    ),
+    'submission_confirmation',
+  );
+});
+
+/* The mirror image: a document phrase without its affirmative subject is a reminder, not a
+ * receipt. "received your documents" also lives inside "not yet received your documents", and an
+ * upload nag that resolves a packet would mark an application submitted that the employer says is
+ * incomplete. */
+test('a reminder that documents are missing is not a receipt', () => {
+  assert.notEqual(
+    classifyApplicationEmail(
+      'Action needed on your application',
+      'We have not yet received your documents. Please upload them to complete your application.',
+    ),
+    'submission_confirmation',
+  );
+});
+
 test('application email classifier recognizes employer outcomes', () => {
   assert.equal(
     classifyApplicationEmail('Thank you for applying', 'We received your application.'),
