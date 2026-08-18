@@ -19,6 +19,9 @@ import { canonicalCompanyScope, getEntitlementSnapshot } from '../lib/entitlemen
 import { requireAuth } from '../middleware/auth';
 import { apiBaseFor } from '../lib/apiBase';
 import { mintDownloadToken } from '../lib/resumeAccess';
+import { manualSubmissionTransition } from '../lib/canonicalApplicationLifecycle';
+
+export { manualSubmissionTransition };
 
 const createApplicationSchema = z.object({
   job_id: z.string().uuid().optional(),
@@ -67,14 +70,6 @@ export function canonicalPortalIdentity(raw: string): string {
   const normalized = canonicalPortalUrl(raw, true);
   if (!normalized) throw new Error('Application portal URL is required');
   return new URL(normalized).origin.toLowerCase();
-}
-
-export function manualSubmissionTransition(currentState: string, outcome: ManualSubmissionOutcome) {
-  if (currentState === 'submitted') return { submissionState: 'submitted', trackerState: 'applied' } as const;
-  if (outcome === 'confirmed') return { submissionState: 'submitted', trackerState: 'applied' } as const;
-  if (currentState === 'failed') return { submissionState: 'failed', trackerState: 'applying' } as const;
-  if (outcome === 'failed') return { submissionState: 'failed', trackerState: 'applying' } as const;
-  return { submissionState: 'needs_attention', trackerState: 'applying' } as const;
 }
 
 export function manualOutcomeEventDecision(existing: {

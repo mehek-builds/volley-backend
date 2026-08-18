@@ -218,6 +218,29 @@ test('a receipt that promises a later interview is still a receipt', () => {
     ),
     'submission_confirmation',
   );
+  // The German compound form of the same Personio receipt: \bunterlagen alone can never match
+  // inside "Bewerbungsunterlagen", and a German-only receipt has no English line to fall back on.
+  assert.equal(
+    classifyApplicationEmail(
+      'Deine Bewerbung als Werkstudent',
+      'Deine Bewerbungsunterlagen sind bei uns angekommen und wir werden sie zeitnah prüfen.',
+    ),
+    'submission_confirmation',
+  );
+});
+
+/* The mirror image: a document phrase without its affirmative subject is a reminder, not a
+ * receipt. "received your documents" also lives inside "not yet received your documents", and an
+ * upload nag that resolves a packet would mark an application submitted that the employer says is
+ * incomplete. */
+test('a reminder that documents are missing is not a receipt', () => {
+  assert.notEqual(
+    classifyApplicationEmail(
+      'Action needed on your application',
+      'We have not yet received your documents. Please upload them to complete your application.',
+    ),
+    'submission_confirmation',
+  );
 });
 
 test('application email classifier recognizes employer outcomes', () => {
