@@ -30,7 +30,9 @@ test('the exit is authenticated and owner-scoped, like every other route in this
      preHandler is silently public - and this one writes a terminal status. */
   assert.match(route, /preHandler: requireAuth/);
   assert.match(route, /const row = await ownedResume\(request, reply\)/);
-  assert.match(route, /eq\(generated_resumes\.user_id, request\.jwtPayload!\.userId\)/);
+  // The write is owner-scoped through the shared transition, which keys its guarded UPDATE by
+  // packet AND owner; the route's job is to hand it the authenticated owner, not a stored one.
+  assert.match(route, /userId: request\.jwtPayload!\.userId/);
 });
 
 test('it answers only for a packet that is genuinely stranded', () => {
@@ -44,7 +46,7 @@ test('it answers only for a packet that is genuinely stranded', () => {
   // And the write is conditional on the status it answered for, so a send that started somewhere
   // else in the meantime is not overwritten by an answer about the screen before it.
   assert.match(route, /'_review'->>'status' = 'ready_for_final_approval'/);
-  assert.match(route, /submitted\.length === 0[\s\S]{0,300}status\(202\)/);
+  assert.match(route, /if \(!persisted\) \{[\s\S]{0,300}status\(202\)/);
 });
 
 test('it writes an existing state through the shared merge, and never invents one', () => {
@@ -53,7 +55,8 @@ test('it writes an existing state through the shared merge, and never invents on
      reason when a route built its own review object. */
   assert.match(route, /applyReviewPatch\(current, \{/);
   assert.match(route, /status: 'submitted'/);
-  assert.match(route, /pipeline_stage: 'applied'/);
+  // The 'applied' pipeline stamp is persistReviewTransition's to write; the route asks for it.
+  assert.match(route, /appliedAt: new Date\(now\)/);
   assert.doesNotMatch(route, /status: '(?!submitted')/, 'no new status belongs to this answer');
 });
 
