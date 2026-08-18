@@ -3181,7 +3181,8 @@ test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped Re
   assert.ok(topPreferenceIndex >= 0 && topPreferenceIndex < sponsorshipIndex);
   assert.equal(actions.some((action) => action.label?.startsWith('education_school_combo:')), false);
   assert.equal(actions.some((action) => action.label === 'education_graduation_year'), false);
-  for (const run of actionRuns) assert.ok(run.length <= 100, `expected at most 100 actions, got ${run.length}`);
+  // The Akuna-specific 100-action carve-out is retired; the one ceiling is the runner's real one.
+  for (const run of actionRuns) assert.ok(run.length <= 120, `expected at most 120 actions, got ${run.length}`);
 
   for (const action of comboFills.filter((item) => item.label?.startsWith('question_combo_label:'))) {
     const index = actions.indexOf(action);
@@ -3217,7 +3218,43 @@ test('Greenhouse promotes canonical Akuna prior-application no answers into earl
   const knownComboFills = actions.filter((action) => action.type === 'fill' && action.label?.startsWith('greenhouse_known_question_combo_label:'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you ever applied to a full time or internship position with Akuna in the past?') && action.value === 'No'));
   assert.ok(knownComboFills.some((action) => action.selector?.includes('Have you applied to this role at Akuna previously?') && action.value === 'No'));
-  assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+});
+
+/* Measured on Akuna packet 41f0b79d, 2026-08-18: the tail truncation dropped the five education
+ * controls, both attestations and the referral source - eight REQUIRED controls - while optional
+ * EEO questions and a "potential master's graduation date" kept their chains. When whole questions
+ * must go, the ones the form itself marks optional go first. */
+test('an over-budget Greenhouse prepare drops explicitly optional questions before required ones', () => {
+  const required = Array.from({ length: 16 }, (_, index) => ({
+    question: `required screener question number ${index} about this role?`,
+    answer: 'Yes',
+    required: true,
+    portalSelector: `#question_required_${index}`,
+    portalInputType: 'combobox',
+  }));
+  const optional = Array.from({ length: 8 }, (_, index) => ({
+    question: `optional demographic question number ${index} (mark all that apply)`,
+    answer: 'Decline to self-identify',
+    required: false,
+    portalSelector: `#question_optional_${index}`,
+    portalInputType: 'combobox',
+  }));
+  const packet = {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'A Greenhouse posting with more questions than one pass can hold',
+    questions: [...required, ...optional],
+  };
+  const actions = buildManagedPortalActions('greenhouse', packet);
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
+  const dropped = budgetDroppedReviewedQuestions(packet, actions);
+  assert.ok(dropped.length > 0, 'the fixture must actually overflow the budget');
+  for (const question of dropped) {
+    assert.match(question, /^optional demographic/, `a required question was dropped while optional ones remained: ${question}`);
+  }
 });
 
 test('Greenhouse never invents Akuna attestations when discovery misses them', () => {
@@ -3234,7 +3271,7 @@ test('Greenhouse never invents Akuna attestations when discovery misses them', (
   assert.equal(fills.length, 0);
   assert.equal(actions.some((action) => action.selector?.includes('I certify that all information I have provided')), false);
   assert.equal(actions.some((action) => action.selector?.includes('resume must be submitted in PDF format')), false);
-  assert.ok(actions.length <= 100, `expected at most 100 actions, got ${actions.length}`);
+  assert.ok(actions.length <= 120, `expected at most 120 actions, got ${actions.length}`);
 });
 
 test('Greenhouse replays fixed Akuna graduation month and year when discovery misses them', () => {

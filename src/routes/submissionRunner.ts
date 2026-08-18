@@ -1064,6 +1064,9 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
       // And WHO wrote the answer, for the same reason. Absent option evidence means "unproven" for a
       // machine answer and "she picked it" for hers, and only this tells them apart.
       answerSource: item.answer_source,
+      // The form's own required flag rides along for the budget trim: an explicitly optional
+      // question gives up its fill chains before any required question loses its only attempt.
+      required: item.required,
     })),
   };
 }
@@ -2800,6 +2803,9 @@ async function prepareManaged(
      * read their option lists and resolved exact answers. */
     answerOptionSource: q.answer_option_source,
     answerSource: q.answer_source,
+    // The required flag rides along for the same reason as in buildPacket: the budget trim gives
+    // up an explicitly optional question's chains before a required question's only attempt.
+    required: q.required,
   }));
   // The fill run gets the same option lists, so the fixed education comboboxes type an exact option
   // instead of the profile's own phrasing. It only ever gets ONE attempt at a react-select (a second

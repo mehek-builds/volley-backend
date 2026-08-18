@@ -719,6 +719,12 @@ export type SubmissionPacket = {
   questions: Array<{
     question: string;
     answer: string;
+    /**
+     * Whether the FORM marks this control required, copied from the question record. Read by the
+     * budget trim: a question explicitly marked optional gives up its fill chains before anything
+     * required loses its only attempt. Absent means unknown, and unknown is treated as required.
+     */
+    required?: boolean;
     portalSelector?: string;
     portalInputType?: string;
     portal_selector?: string;
@@ -4509,6 +4515,44 @@ function truncateManagedActionsToBudget(
   }
 }
 
+/* WHICH QUESTIONS GO FIRST when whole questions have to go at all.
+ *
+ * The blunt tail truncation drops whatever sits last in the list, and the list is ordered by
+ * builder, not by importance. Measured on Akuna packet 41f0b79d, 2026-08-18: the tail held the five
+ * education controls discovery had finally captured, both attestations, and the referral source -
+ * eight REQUIRED controls - while an optional "potential master's graduation date" survived near the
+ * head. The run then reported all eight as required-and-empty on a packet that had every answer.
+ *
+ * So before anything blunt runs, the questions the form itself marks optional give up their chains
+ * first, tail-first among themselves. An optional question the budget drops costs the applicant
+ * nothing the employer requires; a required question dropped in its place costs the whole send.
+ * The matching here mirrors reviewedQuestionActionProtection and reviewedQuestionsWithoutActions:
+ * a question owns every action base that names its 80-char label suffix. */
+function trimOptionalQuestionActionsToBudget(
+  actions: ManagedBrowserAction[],
+  limit: number,
+  packet: SubmissionPacket,
+) {
+  if (actions.length <= limit) return;
+  const optionalSuffixes: string[] = [];
+  for (const item of packet.questions) {
+    // Only a question the record EXPLICITLY marks optional. An absent flag is unknown, not
+    // optional, and unknown keeps the protection it has today.
+    if (item.required !== false) continue;
+    const questionText = normalizeReviewQuestionLabel(item.question);
+    if (!questionText) continue;
+    optionalSuffixes.push(questionText.slice(0, 80));
+  }
+  for (let index = optionalSuffixes.length - 1; index >= 0 && actions.length > limit; index -= 1) {
+    const suffix = optionalSuffixes[index]!;
+    for (let position = actions.length - 1; position >= 0; position -= 1) {
+      const base = managedActionLabelBase(actions[position]!);
+      if (!base || !base.startsWith('question')) continue;
+      if (base === `question:${suffix}` || base.endsWith(`:${suffix}`)) actions.splice(position, 1);
+    }
+  }
+}
+
 /**
  * THE FAMILY-AGNOSTIC BUDGET TRIM, and the reason it had to stop being a Greenhouse-only concern.
  *
@@ -6720,9 +6764,14 @@ export function buildManagedPortalActions(
   // state. A truly absent phone keeps the previous behavior, so required-field confirmation on the
   // employer form remains the authority on whether the application can proceed without one.
   const canAppendSubmit = submit && portalCanAutoSubmit(portal) && workablePhoneReadyForSubmit;
-  const familyActionLimit = portalFamily(portal) === 'greenhouse' && packetLooksAkuna(packet)
-    ? 100
-    : MANAGED_ACTION_LIMIT;
+  /* The Akuna carve-out that used to sit here (100 instead of MANAGED_ACTION_LIMIT, 7891fa4) is
+   * retired. It was headroom with no measured ceiling behind it, set when Akuna's education block
+   * was invisible to discovery. The moment discovery captured those controls (2026-08-18, packet
+   * 41f0b79d: 34 reviewed questions), the smaller budget was the direct reason five required
+   * education controls, both attestations and the referral source were dropped from the fill. The
+   * runner's real ceiling is MANAGED_ACTION_LIMIT and it is enforced with HTTP 400, so the one
+   * limit is the honest one. */
+  const familyActionLimit = MANAGED_ACTION_LIMIT;
   // Submission reserves one atomic action. It resolves and retains the exact final control and its
   // closest form, confirms the form, and owns the one authorized physical click. The confirmation
   // action is required and fail-closed. It emits input/change plus blur for text and
@@ -6769,7 +6818,17 @@ export function buildManagedPortalActions(
     if (canAppendSubmit) {
       throw new ManagedActionBudgetError(portal, familyActionLimit, questionProtection.questionCount);
     }
-    truncateManagedActionsToBudget(actions, actionLimit, coreProtection);
+    /* Three grades of giving up whole questions, least costly first. Explicitly-optional questions
+     * go before anything the form requires; then the blunt pass runs with every required question's
+     * chosen chain still protected; only if the protected minimum itself does not fit does the
+     * original core-only truncation run, which is the pre-existing last resort unchanged. */
+    trimOptionalQuestionActionsToBudget(actions, actionLimit, packet);
+    if (actions.length > actionLimit) {
+      truncateManagedActionsToBudget(actions, actionLimit, protectedActionBases);
+    }
+    if (actions.length > actionLimit) {
+      truncateManagedActionsToBudget(actions, actionLimit, coreProtection);
+    }
   }
 
   if (canAppendSubmit) {
