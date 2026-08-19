@@ -132,7 +132,7 @@ import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess';
 import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
 import { PACKET_EXPIRED_REASON } from '../lib/packetResumeRestore';
-import { currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
+import { currentAcknowledgedPacketAudit, currentPacketAudit, packetAuditClientError } from '../lib/packetAuditService';
 import { createDashboardHandoffBinding } from '../lib/extensionHandoffPacket';
 import { decryptRow } from './applicationProfile';
 import { readExperienceBank } from '../db/experienceBank';
@@ -3394,7 +3394,11 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     );
     await writeReview(row, nextReview(current, {
       status: 'needs_attention',
-      attention_reason: packetAudit.reason,
+      /* The authored sentence, never the raw verdict. verifyCurrentPacketAudit's reasons are
+         developer tokens, and writing one here is how the dashboard printed the bare word
+         "packet_stale" on the live Moburst packet on 2026-08-20. packetAuditClientError is the one
+         rule for what an applicant may read; the token stays in the log line above. */
+      attention_reason: packetAuditClientError(packetAudit).error,
       /* An expired packet is not an evidence gap. It gets the category whose next step is the one
          that works, a regenerate, rather than the bucket that reads as "Litos broke, try again". */
       attention_categories: packetAudit.code === 'PACKET_RESUME_EXPIRED' ? ['packet_expired'] : ['evidence_gap'],
@@ -4019,9 +4023,11 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     );
     await writeReview(row, nextReview(current, {
       status: finishingSecurityCode ? 'awaiting_security_code' : 'needs_attention',
+      /* The authored sentence, never the raw verdict token. Same rule and same measured leak as
+         the prepare() write above; see packetAuditClientError. */
       attention_reason: finishingSecurityCode
-        ? `${securityCodeAttentionReason(current.security_code!)}\n${packetAudit.reason}`
-        : packetAudit.reason,
+        ? `${securityCodeAttentionReason(current.security_code!)}\n${packetAuditClientError(packetAudit).error}`
+        : packetAuditClientError(packetAudit).error,
       attention_categories: packetAudit.code === 'PACKET_RESUME_EXPIRED'
         ? (finishingSecurityCode ? ['security_code', 'packet_expired'] : ['packet_expired'])
         : (finishingSecurityCode ? ['security_code', 'evidence_gap'] : ['evidence_gap']),

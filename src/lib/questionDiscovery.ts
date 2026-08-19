@@ -2380,8 +2380,14 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
   });
 }
 
+/* The bare \bcountry\b alternative carries a lookahead because "country code" is telephony, not
+ * residence. Teamtailor's captured phone label embeds its placeholder ("phone number with country
+ * code +1 201-555-0123"), and before the lookahead this rule claimed that label and answered a tel
+ * control with "United Arab Emirates" - the packet_stale deadlock measured on 2026-08-20 and
+ * documented at the phone rule in classifyFieldIntent. A standalone "Country code" select is a
+ * dial-code picker and is refused for the same reason: the value it wants is not a country name. */
 const RESIDENCE_QUESTION =
-  /country of residence|which country|country you.{0,20}(based|resid|work from|located)|where are you based|based in which country|current country|country.{0,20}(residing|residence)|\bcountry\b/i;
+  /country of residence|which country|country you.{0,20}(based|resid|work from|located)|where are you based|based in which country|current country|country.{0,20}(residing|residence)|\bcountry\b(?!\s*(?:calling\s+|dial(?:l?ing)?\s+)?code\b)/i;
 const LOCATION_COMMITMENT_STEM = /\b(?:are|can|could|do|did|will|would|should|may|might|have)\s+you\b/i;
 // "in person" belongs on this list and its absence was measured, not theorised. Anduril asks
 // "Are you willing to work in-person for 12 weeks during the internship?" and, with only the
@@ -4930,6 +4936,21 @@ const SCHOOL_NOUN = /\b(school|university|college|institution)\b/i;
 const SCHOOL_ATTRIBUTE_QUALIFIER =
   /\bmajors?\b|\bminors?\b|\bdisciplines?\b|\bfields?\s+of\s+study\b|\bdegrees?\b|\bprograms?\b|\blocations?\b|\bcit(?:y|ies)\b|\bstates?\b|\bcountr(?:y|ies)\b/i;
 const PHONE_NOUN = /\b(phone|mobile)\b/i;
+/* A label that ASKS FOR a phone number, however much captured junk surrounds the ask. No word
+ * budget on purpose: the label this exists for is teamtailor's, which welds the placeholder and
+ * the control's name attributes into the captured text ("phone phone number with country code
+ * +1 201-555-0123 candidate[phone] candidate_phone"), and a budget refuses exactly the labels that
+ * need this rule most. The guards that make a bare keyword safe live at the one call site. */
+const PHONE_NUMBER_FIELD_QUESTION =
+  /\b(?:phone|mobile|cell(?:ular)?|telephone)\b[^?]{0,30}\bnumbers?\b|\bnumbers?\b[^?]{0,15}\b(?:phone|mobile|cell(?:ular)?|telephone)\b/i;
+/* A sentence that MENTIONS the number without asking for it. "I agree to receive SMS text
+ * messages at the phone number provided" is a consent, and typing her phone into it accepts a
+ * subscription she never chose. */
+const PHONE_NUMBER_CONSENT_MENTION =
+  /\b(?:agree|consent|authoriz\w*|permission|opt[\s-]?in|receive|subscribe|notif\w*|alerts?|messages?|sms|texts?)\b/i;
+/* Someone else's number is never answered with hers. */
+const SOMEONE_ELSES_PHONE_NUMBER =
+  /\bemergency\b|\breferences?\b|\brecruiters?\b|\bsupervisors?\b|\bmanagers?\b|\bemployers?\b|\bcontact\s+person\b|\bnext\s+of\s+kin\b/i;
 const STATE_NOUN = /\b(state|province|prefecture)\b(?!\s+(?:your|the|you|it|why|how|what|when|where))|state\s*\/\s*province/i;
 const CITY_NOUN = /\b(city|town)\b|\blocation\b/i;
 // Two of the six recovered shapes run to seven words - "In which state do you currently reside?"
@@ -4992,6 +5013,29 @@ function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
    * classified as a date of birth, an availability date or anything else. */
   if (AGE_ATTESTATION_QUESTION.test(l)) return null;
   if (type === 'tel') return 'phone';
+  /* A LABEL THAT ASKS FOR A PHONE NUMBER IS THE PHONE FIELD, whatever type the caller knows about.
+   *
+   * The escape above only fires for callers that saw the live control. refreshKnownQuestionAnswers
+   * and knownAnswerLookup hardcode 'text' - their contract is "answer what the refresh will
+   * serve" - so a phone label that a broad rule can claim gets resolved DIFFERENTLY by the packet
+   * audit's constructor and by the run. That divergence is not merely a wrong answer, it is a
+   * packet_stale deadlock: the audit acknowledges one value, the fill persists the other, and the
+   * send gate compares across the flip forever, with no re-audit able to clear it because each
+   * side keeps recomputing its own value. Measured live on 2026-08-20 (Fully 6ba8fe3a, Moburst
+   * 0e42235f): teamtailor's captured label embeds the placeholder "phone number with country code
+   * +1 201-555-0123", RESIDENCE_QUESTION's bare \bcountry\b matched inside "country code", and
+   * every teamtailor send was refused packet_stale while greenhouse, whose labels carry no
+   * placeholder text, sailed through the identical audit-acknowledge-send sequence.
+   *
+   * Three guards keep this off labels that only MENTION a number: a consent sentence is not
+   * asking for it, a polar question asks about the phone rather than for it, and someone else's
+   * number - an emergency contact, a reference - must never be answered with hers. */
+  if (
+    PHONE_NUMBER_FIELD_QUESTION.test(l)
+    && !isPolarQuestion(l)
+    && !PHONE_NUMBER_CONSENT_MENTION.test(l)
+    && !SOMEONE_ELSES_PHONE_NUMBER.test(l)
+  ) return 'phone';
 
   const locationCommitment = isLocationCommitmentQuestion(l);
   const locationChoice = isLocationChoiceQuestion(l);

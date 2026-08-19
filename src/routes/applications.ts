@@ -1127,12 +1127,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       const outcomeAudit = await currentAcknowledgedPacketAudit(row);
       if (!outcomeAudit.valid || current.submission_packet_version !== outcomeAudit.audit.packet_version) {
-        return reply.status(409).send({
-          error: outcomeAudit.valid
-            ? 'The audited packet no longer matches the extension submission claim.'
-            : outcomeAudit.reason,
-          code: outcomeAudit.valid ? 'PACKET_AUDIT_STALE' : outcomeAudit.code,
-        });
+        // packetAuditClientError, never the raw verdict: a failed verdict's reason can be a
+        // developer token such as packet_stale, and this reply is read by an applicant.
+        return reply.status(409).send(outcomeAudit.valid
+          ? {
+            error: 'The audited packet no longer matches the extension submission claim.',
+            code: 'PACKET_AUDIT_STALE' as const,
+          }
+          : packetAuditClientError(outcomeAudit));
       }
       const now = new Date().toISOString();
       const outcome = parsed.data.outcome === 'confirmed' && !extensionEmployerReceiptIsSufficient({
@@ -2299,7 +2301,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         questions: approvalReview.questions,
         restoreExpiredResume: 'authorizing_send',
       });
-      if (!approvalAudit.valid) approvalIssues.push(approvalAudit.reason);
+      // The authored sentence, not the raw verdict token: these issues render on the dashboard.
+      if (!approvalAudit.valid) approvalIssues.push(packetAuditClientError(approvalAudit).error);
       if (approvalIssues.length > 0) {
         return reply.status(422).send({
           error: 'Verify the complete application before sending. The current packet is not ready for final approval.',
@@ -2379,10 +2382,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!row) return;
       const securityCodeAudit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
       if (!securityCodeAudit.valid) {
-        return reply.status(409).send({
-          error: securityCodeAudit.reason,
-          code: securityCodeAudit.code,
-        });
+        // The applicant sentence, not the verdict token. This is the exact reply that printed the
+        // bare "packet_stale" on the Jane Street code step before the tokens were translated.
+        return reply.status(409).send(packetAuditClientError(securityCodeAudit));
       }
       const body = request.body as { code?: unknown } | undefined;
       const outcome = await finishSecurityCodeSubmission(row.id, body?.code, fastify);
