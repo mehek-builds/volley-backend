@@ -92,7 +92,10 @@ import {
   isAccountWalledFamily,
   isManagedAttendedAccountPortal,
   isCaptchaGatedFamily,
+  isConsentGrantConditionalFamily,
+  managedConsentTickPlan,
   portalCanAutoSubmit,
+  portalCanAutoSubmitWithConsentGrant,
   portalHandoffReason,
   readManagedReceipt,
   unattendedHandoffReason,
@@ -183,7 +186,7 @@ import {
 } from '../lib/referralSource';
 import { savedAnswerFor, type AnswerReuseContext } from '../lib/answerReuse';
 import { profileBackedBlockerLabels, resolveProfileField, usableOptions } from '../lib/profileFieldResolution';
-import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
+import { loadApplicationProfileLike, loadUnattendedConsentGrant } from '../lib/applicationProfileLike';
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { applicantChoseStoredAnswer } from '../lib/applicantAnswer';
@@ -3506,9 +3509,21 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   //
   // The same stop applies to the multi-step and CAPTCHA-gated families once standing consent is on,
   // for the same reason one step further down the funnel: see autoRunShouldPrepare.
+  //
+  // The grant-conditional families (teamtailor, pinpoint) are the one per-account exception: an
+  // account whose standing consent-acceptance permission is live CAN be carried through submit on
+  // the managed path, so an unattended prepare for it is not wasted spend. Loaded only for those
+  // families, and only on the managed provider - the direct-Playwright path builds no consent tick,
+  // so widening its prepare would buy exactly the parked spend this gate exists to avoid.
+  const prepareConsentGrant = isManagedStratusProvider() && isConsentGrantConditionalFamily(portal)
+    ? await loadUnattendedConsentGrant(row.user_id)
+    : null;
   if (
     isAccountWalledFamily(portal)
-    || !autoRunShouldPrepare({ canAutoSubmit: portalCanAutoSubmit(portal), unattended })
+    || !autoRunShouldPrepare({
+      canAutoSubmit: portalCanAutoSubmitWithConsentGrant(portal, prepareConsentGrant),
+      unattended,
+    })
   ) {
     await writeReview(row, nextReview(current, {
       status: 'needs_attention',
@@ -4191,7 +4206,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
   // Gating at the call site is the only place that covers both providers and the status write.
   {
     const portal = claimedPortal;
-    if (!portalCanAutoSubmit(portal)) {
+    /* The per-account exception to the family ceiling: a grant-conditional family (teamtailor,
+     * pinpoint) whose account holds a live standing consent-acceptance permission may proceed to
+     * the managed submit path, where buildManagedPortalActions builds the guarded consent tick and
+     * the submit press together or neither. Managed provider only: the direct-Playwright path
+     * builds no tick, and letting it through here would press submit around an unticked required
+     * consent. Everything else keeps portalCanAutoSubmit's answer byte for byte. */
+    const submitConsentGrant = isManagedStratusProvider() && isConsentGrantConditionalFamily(portal)
+      ? await loadUnattendedConsentGrant(row.user_id)
+      : null;
+    if (!portalCanAutoSubmitWithConsentGrant(portal, submitConsentGrant)) {
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
         attention_reason: portalHandoffReason(portal) ?? undefined,
@@ -4264,6 +4288,18 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     const packet = claimedReview.transcript_supported === true
       ? withCoverLetter
       : omitTranscript(withCoverLetter);
+    /* A grant-conditional family got past the gate above on the ACCOUNT's grant; whether THIS
+     * packet licenses a tick is the plan's stricter question (exactly one captured consent control,
+     * routine class, recorded consent_permission acceptance). No plan means park at the handoff
+     * now, before paying for a fill run whose submit action would never be built - the same
+     * needs_attention state the family reached before this feature, with the same sentence. */
+    if (!portalCanAutoSubmit(portal) && !managedConsentTickPlan(portal, packet)) {
+      await writeReview(row, nextReview(claimedReview, {
+        status: 'needs_attention',
+        attention_reason: portalHandoffReason(portal) ?? undefined,
+      }));
+      return;
+    }
     const verificationRequestedAt = new Date();
     /* THE FIRST HALF IS THE SAME RUN WHETHER OR NOT A CODE IS IN HAND, and that is the fix.
      *

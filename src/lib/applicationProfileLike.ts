@@ -103,6 +103,31 @@ async function selectResolverUserRow(userId: string): Promise<ResolverUserRow[]>
   }
 }
 
+/**
+ * The standing consent-acceptance licence for one account, derived EXACTLY as the resolver's
+ * profile view derives it: the tolerant user-row read, the version check in
+ * consentAcceptanceGranted, and the grantedAnswerReplay trust gate, all through the same
+ * acknowledgementPermissionsFor call loadApplicationProfileLike uses. One derivation, two readers,
+ * so the submit gate in routes/submissionRunner.ts and the packet's own profile cannot disagree
+ * about whether the grant is live.
+ *
+ * Null means "behave as today": never granted, revoked, stale version, unmigrated database, or the
+ * runner-trust gate closed. Exists for the call sites that need the answer BEFORE buildPacket has
+ * loaded the full profile (the per-portal submit gate runs ahead of the packet on purpose, so a
+ * stopped application pays for nothing).
+ */
+export async function loadUnattendedConsentGrant(
+  userId: string,
+): Promise<{ granted_at?: string; version: string } | null> {
+  const [userRow] = await selectResolverUserRow(userId);
+  return acknowledgementPermissionsFor(userRow, {
+    consent: consentAcceptanceGranted,
+    conduct: conductAcceptanceGranted,
+    consentVersion: AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
+    conductVersion: AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
+  }).consent_acknowledgement_permission ?? null;
+}
+
 export async function loadApplicationProfileLike(userId: string): Promise<ApplicationProfileLike> {
   const [appRow, [profileRow], [userRow], bankRows, submittedCompanies] = await Promise.all([
     // Tolerant read, see lib/applicationFacts.ts. This is the resolver's own profile read, so a

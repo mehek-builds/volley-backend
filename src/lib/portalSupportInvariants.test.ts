@@ -7,7 +7,10 @@ import {
   corroborateManagedCaptchaBlockers,
   isAutonomousPortalFamily,
   isCaptchaGatedFamily,
+  isConsentGrantConditionalFamily,
+  managedPortalReceiptCapability,
   portalCanAutoSubmit,
+  portalCanAutoSubmitWithConsentGrant,
   portalHandoffReason,
   type AutonomousPortalFamily,
   type PortalFamily,
@@ -113,6 +116,44 @@ test('a family denied by the researched capability table is not autonomous by om
     assert.equal(isAutonomousPortalFamily(family), false, family);
     assert.equal((AUTONOMOUS_PORTAL_FAMILIES as readonly string[]).includes(family), false, family);
   }
+});
+
+/* PER-ACCOUNT conditional autonomy, pinned on both sides.
+ *
+ * The standing consent-acceptance grant unlocks EXACTLY teamtailor and pinpoint, whose only bar is
+ * a routine consent control beside submit. It must not move the static story an inch: the jobs
+ * board, polling and coverage copy read AUTONOMOUS_PORTAL_FAMILIES / portalCanAutoSubmit with no
+ * account in hand, and an account without the grant must see today's behaviour everywhere. And the
+ * grant lifts only the consent gate - a CAPTCHA-gated, multi-step or account-walled family with a
+ * grant is exactly as blocked as without one, and personio's readiness-reader bar is not a consent.
+ */
+test('the consent grant conditionally unlocks exactly teamtailor and pinpoint, and nothing static moves', () => {
+  const grant = { granted_at: '2026-08-12T09:15:00.000Z', version: '2026-08-12' };
+  for (const family of ALL_PORTAL_FAMILIES) {
+    // No grant: byte-for-byte the account-independent answer.
+    assert.equal(portalCanAutoSubmitWithConsentGrant(family, null), portalCanAutoSubmit(family), family);
+    const conditional = family === 'teamtailor' || family === 'pinpoint';
+    assert.equal(isConsentGrantConditionalFamily(family), conditional, family);
+    assert.equal(
+      portalCanAutoSubmitWithConsentGrant(family, grant),
+      portalCanAutoSubmit(family) || conditional,
+      family,
+    );
+  }
+  for (const family of ['teamtailor', 'pinpoint'] as const) {
+    assert.equal(portalCanAutoSubmit(family), false, family);
+    assert.equal(isAutonomousPortalFamily(family), false, family);
+    assert.equal((AUTONOMOUS_PORTAL_FAMILIES as readonly string[]).includes(family), false, family);
+    // The handoff sentences the no-grant account keeps seeing.
+    assert.ok(portalHandoffReason(family), family);
+  }
+  assert.equal(portalCanAutoSubmitWithConsentGrant('personio', grant), false);
+  assert.equal(portalCanAutoSubmitWithConsentGrant('manual_recruitee', grant), false);
+  // The receipt question follows the submit question in both shapes.
+  assert.equal(managedPortalReceiptCapability('teamtailor'), 'unavailable_before_handoff');
+  assert.equal(managedPortalReceiptCapability('teamtailor', grant), 'confirmation_possible');
+  assert.equal(managedPortalReceiptCapability('pinpoint', grant), 'confirmation_possible');
+  assert.equal(managedPortalReceiptCapability('personio', grant), 'unavailable_before_handoff');
 });
 
 /* A family Litos cannot finish must never lose its CAPTCHA blocker to a page read, because losing it
