@@ -101,6 +101,21 @@ const listQuerySchema = z.object({
      it: somebody who said at onboarding that they need sponsorship cannot turn the filter off by
      omitting a query parameter. See sponsorOnlyBoardRequired in lib/sponsorship.ts. */
   sponsor_only: z.enum(['true', 'false']).optional(),
+  /* Drop the account's own PREFERENCE filters for this one request, and nothing else.
+   *
+   * Onboarding needs a guarantee the board cannot otherwise make: there is always a role to show.
+   * A student who has just picked one narrow field, one stage and two titles can legitimately
+   * match zero live postings, and an empty match screen is the one outcome that flow cannot
+   * survive - it is the payoff every screen before it was spent earning.
+   *
+   * The line this draws is preference versus constraint, and it is not negotiable in either
+   * direction. RELAXED: saved locations, remote_only, role_types, and the desired title terms.
+   * Those are things the student asked for, so showing a near miss and saying so is honest.
+   * NEVER RELAXED: is_active, the source being enabled, AUTONOMOUS_PORTAL_FAMILIES, the freshness
+   * window, and sponsor_only. A posting Litos cannot submit to, or one an applicant is not
+   * eligible for, is not a worse match - it is the wrong answer, and widening must not reach it.
+   * sponsor_only in particular is OR-ed from the account's own declaration and stays on. */
+  relax_targeting: z.enum(['true', 'false']).optional(),
   /* The five product words resolveEmploymentType emits, as an ENUM rather than free text.
      Constrained on purpose: the column also holds pass-through values from employers whose spelling
      the normalizer did not recognise, and letting a caller filter on those would expose one
@@ -1540,11 +1555,15 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     // polled before this rule existed, or one disabled rather than deleted, still has rows joined to
     // a career_page_sources row whose ats_name is whatever it was then. This is the filter that
     // keeps those out of the board and the dashboard, which both read this one route.
+    /* `jobTargeting` is still read below for preference_score even when the filters are relaxed,
+       and that is the point: a widened row should still be scored against what the student asked
+       for, so the screen can see it is a near miss rather than being told it is a perfect fit. */
+    const relaxTargeting = parsed.data.relax_targeting === 'true';
     const conditions = boardConditions({
       ...parsed.data,
       employmentType: parsed.data.employment_type,
       sponsorOnly,
-      targeting: jobTargeting,
+      targeting: relaxTargeting ? undefined : jobTargeting,
     });
 
     const selection = {
@@ -1769,9 +1788,29 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
             .from(monitored_jobs)
             .where(inArray(monitored_jobs.id, eligibleIds))
         : [];
+      /* THE SECOND TARGETING GATE, and relaxing has to reach into it too.
+       *
+       * boardConditions is not the only place the account's preferences narrow this list.
+       * recommendationTargetingEligible re-filters the ranked pool on three things, and they do
+       * NOT all sit on the same side of the preference/constraint line that relax_targeting draws:
+       *
+       *   recruiting period  preference. The student picked Summer 2027; a Spring 2027 posting is
+       *                      a near miss, which is exactly what widening is for.
+       *   title category     preference, same reasoning.
+       *   minimum degree     ELIGIBILITY. A role that requires a PhD is not a worse match for a
+       *                      bachelor's student, it is the wrong answer, and widening must no more
+       *                      reach it than it reaches an unsendable portal family.
+       *
+       * So a relaxed request empties the two preferences and keeps the degree check. Leaving this
+       * gate un-relaxed entirely would have made the widening useless in precisely the case it
+       * exists for: a student whose saved period or category excludes everything still gets an
+       * empty board, which is the one outcome the match screen cannot survive. */
+      const gateTargeting = relaxTargeting
+        ? { ...jobTargeting, primary_period: null, backup_period: null, categories: [] }
+        : jobTargeting;
       const targetingBlocked = new Set(
         gateRows
-          .filter((row) => !recommendationTargetingEligible(row, jobTargeting, candidateDegree))
+          .filter((row) => !recommendationTargetingEligible(row, gateTargeting, candidateDegree))
           .map((row) => row.id),
       );
       if (targetingBlocked.size > 0) {
