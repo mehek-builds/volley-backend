@@ -4305,6 +4305,13 @@ test('managed Workable final cookie boundary handles both a late modal and no mo
    2026-08-19: the run parked with "did not record an email field / a resume upload / the
    applicant name fields". The mapping is bounded to the two-segment posting shape, so a deeper or
    already-canonical path is left alone. */
+test('a Breezy posting URL maps to its /apply form, and an /apply URL passes through', () => {
+  const posting = 'https://transparent-hiring.breezy.hr/p/4d5a1d20f0ce-hr-assistant-intern-m-f-d-remote';
+  const application = `${posting}/apply`;
+  assert.equal(portalApplicationUrl('breezy', posting), application);
+  assert.equal(portalApplicationUrl('breezy', application), application);
+});
+
 test('a Rippling posting URL maps to its /apply form, and an /apply URL passes through', () => {
   const posting = 'https://ats.rippling.com/easy-dynamics-corporation/jobs/0eb836b2-6719-48e0-89c9-6c589063a225';
   const application = `${posting}/apply`;

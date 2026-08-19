@@ -7511,6 +7511,13 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   if (family === 'rippling' && /^\/[^/]+\/jobs\/[^/]+\/?$/i.test(url.pathname)) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
   }
+  /* Breezy has the same posting-vs-form split: the 2026-07-29 capture behind its adapter was taken
+   * at <tenant>.breezy.hr/p/<slug>/apply, and a run sent to the bare /p/<slug> JD page parked with
+   * "could not confirm it reached this company's application form", measured live 2026-08-19.
+   * Bounded to the one-segment /p/<slug> posting shape for the same reason as Rippling above. */
+  if (family === 'breezy' && /^\/p\/[^/]+\/?$/i.test(url.pathname)) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
+  }
   if (family === 'personio' && url.hostname.toLowerCase() !== 'arteus-energy.jobs.personio.de'
     && !url.pathname.endsWith('/apply')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
