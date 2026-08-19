@@ -331,6 +331,11 @@ async function onboardingFlowLedger(userId: string) {
     ]);
     return {
       available: true as const,
+      /* DELIBERATELY UNREAD, and not a substitute for replayRequired. A version bump leaves every
+         pre-existing account with an empty ledger AT THE NEW VERSION, so this is false for exactly
+         the accounts a bump means to leave alone. Gating on it once served those accounts `done`
+         and then refused to record it, which locked all of them out of the dashboard. Enrolment is
+         replay_required and nothing else. */
       exists: !!run,
       completed: run?.completed_at != null,
       replayRequired: run?.replay_required === true,
