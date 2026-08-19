@@ -131,6 +131,38 @@ const CONSENT_ACCEPTANCE_COLUMNS: ReadonlySet<string> = new Set([
  * default. So the window behaves as an account that has not turned the permission on, which is the
  * state every account is in anyway until it does.
  */
+/**
+ * The instant the card gate starts applying to newly created accounts, or null.
+ *
+ * Null -- the unset default, and also what an unparseable value gives -- means no
+ * account is gated. See THE CARD GATE in the state handler for why this reads its
+ * own env var instead of borrowing the entitlement cutover.
+ */
+export function cardGateInstant(env: NodeJS.ProcessEnv = process.env): number | null {
+  const raw = env.CARD_GATE_FROM?.trim();
+  if (!raw) return null;
+  const value = Date.parse(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Whether this account still owes us a card before the dashboard opens.
+ *
+ * Pure, exported, and separate from the route handler because it is the single
+ * sentence that decides whether a student can use the product at all, and a rule
+ * that important should be readable and testable without standing up a request.
+ */
+export function requiresPaymentMethodFor(
+  user: { billing_provider?: string | null; billing_customer_id?: string | null; created_at?: Date | null },
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const from = cardGateInstant(env);
+  if (from === null) return false;
+  if (!user.created_at || user.created_at.getTime() < from) return false;
+  const paymentMethodOnFile = user.billing_provider === 'stripe' && Boolean(user.billing_customer_id);
+  return !paymentMethodOnFile;
+}
+
 async function selectOnboardingUserRow(userId: string) {
   try {
     return await db.select().from(users).where(eq(users.id, userId));
@@ -702,18 +734,60 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
         ? applicationStepFrom(flow.acknowledged)
         : derivedStep;
     const flowCompleted = flow.available ? flow.completed : !!user.onboarding_completed_at;
-    const requiresOnboarding = flow.available
+    /* THE CARD GATE. The dashboard does not open until a payment method is on file.
+     *
+     * It is expressed as an outstanding ONBOARDING step rather than as a paywall on
+     * the data routes, and that is the only shape that works here: the card is the
+     * LAST rung of /start, after the student has uploaded a resume, built an
+     * application, answered an employer and sent it. A guard on the dashboard's
+     * data endpoints would have to allow almost every one of them to let setup run
+     * at all, and would still answer the wrong question -- the question is not "may
+     * this route be called", it is "is this account finished".
+     *
+     * `billing_customer_id` is the honest record of a card. Nothing sets it except
+     * the subscription webhook, and checkout cannot complete without a card now that
+     * payment_method_collection is always (lib/stripeBilling.ts), so its presence
+     * means Stripe took one. It survives cancellation, which is correct: someone who
+     * cancels still HAS a card on file and belongs on the dashboard on Free, not
+     * thrown back into setup.
+     *
+     * WHO IS GATED IS AN ENV DECISION, AND IT FAILS OPEN. CARD_GATE_FROM is an ISO
+     * instant; accounts created before it are never gated. Unset, the gate is off
+     * for everyone.
+     *
+     * That default is deliberate and it is not timidity. This is the one flag in the
+     * product whose wrong value locks EVERY student out of work they already own,
+     * and it cannot be inferred from the entitlement cutover: inferGrandfathered()
+     * returns false for every account carrying the current policy version, which is
+     * every account signup has created for months. Reusing it here would have read
+     * as "grandfather the old accounts" and behaved as "lock out the entire user
+     * base". So the cutover is explicit, separate, and off until someone sets it:
+     * deploy first, verify, then flip it, and set it to the deploy instant to gate
+     * only new signups or to a past date to gate everyone. */
+    const requiresPaymentMethod = requiresPaymentMethodFor(user);
+    const requiresOnboarding = requiresPaymentMethod || (flow.available
       ? !flowCompleted || derivedStep !== 'done'
-      : derivedStep !== 'done';
+      : derivedStep !== 'done');
+    /* AND THE STEP HAS TO BE THE ONE THAT TAKES A CARD, or the gate is a loop.
+       Saying "onboarding is not finished" while serving 'done' sends the student to
+       /start, which draws the finished screen, which offers no way to pay, while the
+       dashboard keeps bouncing them back to it. Every other path already resolves to
+       'plan' on its own; this covers the ones that do not -- an account whose flow
+       ledger is unavailable, and anyone who finished setup before the gate applied. */
+    const gatedStep = requiresPaymentMethod && step === 'done' ? 'plan' : step;
     /* The rail's denominator for the application half, so the client never re-derives it. Same
        rule as includes_gaps_step: the server owns which screens this student's flow contains. */
     const includesApplicationSteps = inApplicationSequence;
 
     return reply.status(200).send({
-      step,
+      step: gatedStep,
       flow_version: CURRENT_ONBOARDING_FLOW_VERSION,
       flow_completed: flowCompleted,
       requires_onboarding: requiresOnboarding,
+      /* Sent separately from requires_onboarding because the client has to tell the
+         two apart. "Finish later" may defer ordinary setup; it may not defer this,
+         or the gate is a suggestion. */
+      requires_payment_method: requiresPaymentMethod,
       completed_at: user.onboarding_completed_at,
       has_focus,
       has_sponsorship_answer,
