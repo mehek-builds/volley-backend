@@ -21,6 +21,8 @@ import {
   strongMatchForAccount,
   subscribedMatchAccounts,
 } from '../lib/strongMatchNotification';
+import { previewDigest, runDigestSweep } from '../lib/digestSweep';
+import { forgetPushSubscription, pushConfiguration, pushPublicKey, rememberPushSubscription } from '../lib/webPush';
 
 /* THE NOTIFICATION SURFACES: the two toggles, the way out, and the daily sweep.
  *
@@ -29,11 +31,33 @@ import {
  * design worth having.
  */
 
+/* The exact shape PushManager.subscribe().toJSON() produces, validated rather than trusted: these
+   values are written straight into a table the sender reads, and a row with a malformed key is a
+   device that fails on every send forever. */
+const pushSubscriptionBodySchema = z.object({
+  endpoint: z.string().url().max(2000),
+  keys: z.object({
+    p256dh: z.string().min(1).max(200),
+    auth: z.string().min(1).max(200),
+  }),
+});
+
+function isUndefinedTableError(error: unknown): boolean {
+  // Bounded, and walks the cause chain because drizzle wraps every failed statement.
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 5; depth += 1) {
+    if ((current as { code?: unknown }).code === '42P01') return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 const preferencesBodySchema = z.object({
   strong_match: z.boolean().optional(),
   employer_reply: z.boolean().optional(),
+  activity_digest: z.boolean().optional(),
 }).refine(
-  (value) => value.strong_match !== undefined || value.employer_reply !== undefined,
+  (value) => NOTIFICATION_KINDS.some((kind) => value[kind] !== undefined),
   { message: 'At least one notification preference is required' },
 );
 
@@ -138,6 +162,7 @@ function escapeHtml(value: string): string {
 const KIND_LABEL: Record<NotificationKind, string> = {
   strong_match: 'alerts when a strong match opens',
   employer_reply: 'alerts when an employer replies',
+  activity_digest: 'the daily summary of what Litos did',
 };
 
 function page(title: string, bodyHtml: string): string {
@@ -212,6 +237,8 @@ export async function notificationRoutes(fastify: FastifyInstance) {
           notify_strong_match_granted_at: users.notify_strong_match_granted_at,
           notify_employer_reply_enabled: users.notify_employer_reply_enabled,
           notify_employer_reply_granted_at: users.notify_employer_reply_granted_at,
+          notify_activity_digest_enabled: users.notify_activity_digest_enabled,
+          notify_activity_digest_granted_at: users.notify_activity_digest_granted_at,
           email_verified: users.email_verified,
         })
         .from(users)
@@ -263,6 +290,8 @@ export async function notificationRoutes(fastify: FastifyInstance) {
         notify_strong_match_granted_at: users.notify_strong_match_granted_at,
         notify_employer_reply_enabled: users.notify_employer_reply_enabled,
         notify_employer_reply_granted_at: users.notify_employer_reply_granted_at,
+        notify_activity_digest_enabled: users.notify_activity_digest_enabled,
+        notify_activity_digest_granted_at: users.notify_activity_digest_granted_at,
         email_verified: users.email_verified,
       })
       .from(users)
@@ -379,4 +408,85 @@ export async function notificationRoutes(fastify: FastifyInstance) {
   };
   fastify.get('/internal/strong-match-notifications', handleSweep);
   fastify.post('/internal/strong-match-notifications', handleSweep);
+
+  /* GET /notifications/push/key
+   *
+   * The VAPID public key the browser needs before it can mint a subscription. Public by definition:
+   * it is handed to every page that asks and is useless without the private half. Served rather
+   * than baked into the website bundle so rotating the pair does not need a website deploy, and so
+   * a deployment with no keys answers `configured: false` instead of the client failing obscurely
+   * inside PushManager.subscribe with an invalid application key. */
+  fastify.get('/notifications/push/key', async (_request: FastifyRequest, reply: FastifyReply) => {
+    const configuration = pushConfiguration();
+    return reply.status(200).send({
+      configured: configuration.ok,
+      public_key: pushPublicKey(),
+      ...(configuration.ok ? {} : { missing: configuration.missing }),
+    });
+  });
+
+  /* POST /notifications/push/subscribe
+   *
+   * One device saying it is willing to be interrupted. Authenticated, because the row is what binds
+   * a browser to an account and an unauthenticated writer could point somebody else's laptop at
+   * their own notifications. */
+  fastify.post('/notifications/push/subscribe', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = pushSubscriptionBodySchema.safeParse(request.body);
+    if (!parsed.success) return reply.status(400).send({ error: 'Invalid push subscription' });
+    try {
+      await rememberPushSubscription({
+        userId: request.jwtPayload!.userId,
+        endpoint: parsed.data.endpoint,
+        p256dh: parsed.data.keys.p256dh,
+        auth: parsed.data.keys.auth,
+        userAgent: typeof request.headers['user-agent'] === 'string' ? request.headers['user-agent'] : null,
+      });
+    } catch (error) {
+      if (!isUndefinedTableError(error)) throw error;
+      return reply.status(503).send({ error: 'Push notifications are not available yet' });
+    }
+    return reply.status(200).send({ ok: true });
+  });
+
+  /* POST /notifications/push/unsubscribe - one device withdrawing, scoped to its owner. */
+  fastify.post('/notifications/push/unsubscribe', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const endpoint = (request.body as { endpoint?: unknown } | undefined)?.endpoint;
+    if (typeof endpoint !== 'string' || !endpoint) return reply.status(400).send({ error: 'Invalid push subscription' });
+    try {
+      return reply.status(200).send({ ok: true, removed: await forgetPushSubscription(request.jwtPayload!.userId, endpoint) });
+    } catch (error) {
+      if (!isUndefinedTableError(error)) throw error;
+      return reply.status(200).send({ ok: true, removed: false });
+    }
+  });
+
+  /* GET /notifications/digest/preview - what today's digest WOULD say, sending nothing.
+   *
+   * Authenticated and scoped to the caller's own account. It exists because a digest that goes
+   * quiet is indistinguishable from a digest that is broken, and this is the only way to tell the
+   * two apart without waiting for tomorrow's cron. */
+  fastify.get('/notifications/digest/preview', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    return reply.status(200).send(await previewDigest(request.jwtPayload!.userId, new Date()));
+  });
+
+  /* The digest cron. Separate from the match sweep because they are different channels with
+     different preconditions: this one needs VAPID keys and a live device, that one needs a verified
+     address and an unsubscribe origin, and a deployment can easily have one and not the other. */
+  const handleDigest = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!isCronConfigured() || !isCronAuthorized(request)) {
+      return reply.status(401).send({ error: 'Unauthorized' });
+    }
+    const configuration = pushConfiguration();
+    if (!configuration.ok) {
+      return reply.status(503).send({
+        error: configuration.missing === 'vapid_keys'
+          ? 'VAPID keys are not configured, so no push notification can be signed'
+          : 'VAPID_SUBJECT is not set to a mailto: or https: URL',
+        missing: configuration.missing,
+      });
+    }
+    return reply.status(200).send(await runDigestSweep(new Date(), MATCH_SWEEP_ACCOUNT_LIMIT, request.log));
+  };
+  fastify.get('/internal/activity-digest', handleDigest);
+  fastify.post('/internal/activity-digest', handleDigest);
 }

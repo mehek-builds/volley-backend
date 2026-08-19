@@ -166,6 +166,12 @@ export const users = pgTable('users', {
   notify_strong_match_granted_at: timestamp('notify_strong_match_granted_at', { withTimezone: true }),
   notify_employer_reply_enabled: boolean('notify_employer_reply_enabled').default(false).notNull(),
   notify_employer_reply_granted_at: timestamp('notify_employer_reply_granted_at', { withTimezone: true }),
+  /* The daily activity digest, delivered to a browser rather than to an inbox. Its own permission
+     because it is its own bargain: the two above are one fact each, this one is Litos summarising
+     what it did on the student's behalf, and somebody can reasonably want the summary without the
+     interruptions or the reverse. */
+  notify_activity_digest_enabled: boolean('notify_activity_digest_enabled').default(false).notNull(),
+  notify_activity_digest_granted_at: timestamp('notify_activity_digest_granted_at', { withTimezone: true }),
   // ---- visa sponsorship ----
   //
   // Answered ONCE, during onboarding, and then permanent. True means the job seeker said they need
@@ -2003,6 +2009,51 @@ export const portal_accounts = pgTable('portal_accounts', {
 }, (t) => ({
   identityUnique: uniqueIndex('portal_accounts_identity_idx').on(t.user_id, t.portal_family, t.tenant),
   userIdx: index('portal_accounts_user_id_idx').on(t.user_id),
+}));
+
+// ---- push_subscriptions ----
+/* ONE BROWSER ON ONE DEVICE THAT HAS AGREED TO BE INTERRUPTED.
+ *
+ * PER DEVICE, NOT PER ACCOUNT, and that is the shape of the Web Push standard rather than a choice.
+ * A push subscription is minted by the browser, belongs to that browser profile on that machine,
+ * and carries its own encryption keys. A student who says yes on her laptop and again on her
+ * desktop has two rows; saying yes on one says nothing about the other. Any code that assumes one
+ * row per account will silently notify only whichever device happened to register last.
+ *
+ * THE ENDPOINT IS THE IDENTITY. It is a URL at the browser vendor's push service, unique per
+ * subscription, and it is what a re-registration collides on: browsers hand back the SAME endpoint
+ * when a page re-subscribes with the same key, so upserting on it is what stops a row per page
+ * load. The p256dh and auth values are the client's half of the payload encryption; without them a
+ * push can be sent but not decrypted, so a row missing either is useless and is refused on write.
+ *
+ * SUBSCRIPTIONS DIE ON THEIR OWN AND MUST BE REAPED. The push service answers 404 or 410 once a
+ * subscription is gone (permission revoked, browser data cleared, profile deleted), and that answer
+ * is the ONLY notice we get. A sender that ignores it keeps posting to a dead endpoint forever, so
+ * the send path deletes the row on those two statuses. `failure_count` covers the other kind of
+ * failure, the transient one, so a push service having a bad hour does not delete a live device.
+ *
+ * NO NOTIFICATION CONTENT IS STORED HERE. This table is an address book. What was sent, and
+ * whether the cap allowed it, lives in notification_sends exactly as it does for email. */
+export const push_subscriptions = pgTable('push_subscriptions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  /* The push service URL this device is reachable at. Long: FCM endpoints run past 200 characters
+     and there is no specified maximum, so this is unbounded text rather than a guessed varchar. */
+  endpoint: text('endpoint').notNull(),
+  p256dh: text('p256dh').notNull(),
+  auth: text('auth').notNull(),
+  /* What the student was using when they agreed, kept so an operator can tell a dead Chrome
+     profile from a dead Firefox one when reaping. Never parsed, never shown to anybody. */
+  user_agent: text('user_agent'),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  last_success_at: timestamp('last_success_at', { withTimezone: true }),
+  /* Consecutive transient failures. Reset to zero on every success, so this counts a RUN of
+     failures rather than a lifetime total: a device that failed twice last month and has worked
+     since is not one to give up on. */
+  failure_count: integer('failure_count').default(0).notNull(),
+}, (t) => ({
+  endpointUnique: uniqueIndex('push_subscriptions_endpoint_unique').on(t.endpoint),
+  userIdx: index('push_subscriptions_user_idx').on(t.user_id),
 }));
 
 // ---- notification_sends ----
