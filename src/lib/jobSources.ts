@@ -197,7 +197,11 @@ const BASE_ENTRIES: Entry[] = [
   ['Ginkgo', 'greenhouse', 'ginkgobioworks'],
   ['PagerDuty', 'greenhouse', 'pagerduty'],
   ['Trustly', 'lever', 'trustly'],
-  ['nanonets', 'greenhouse', 'nanonets'],
+  /* Greenhouse 404s as of 2026-08-19. The company is not gone, the board moved: the same roles
+     are on Ashby under the same token, and the postings name Nanonets in their own prose. A
+     404 means the token is stale, not that the employer stopped hiring - check the other
+     three boards before deleting an entry. */
+  ['nanonets', 'ashby', 'nanonets'],
   ['yugabyte', 'greenhouse', 'yugabyte'],
   ['Calendly', 'greenhouse', 'calendly'],
   ['veracode', 'greenhouse', 'veracode'],

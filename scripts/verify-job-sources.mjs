@@ -65,10 +65,15 @@ async function verify(source) {
   let jobs;
   try {
     /* Public ATS endpoints occasionally exceed their single-request timeout in GitHub Actions.
-       Retry the fetch, but keep the final failure fatal so a genuinely dead source cannot pass. */
+       Retry before reading anything into a failure; what the last one says is then classified. */
     jobs = await retryTransient(() => fetchSourceJobs(source));
   } catch (error) {
-    return { verdict: 'dead', detail: error instanceof Error ? error.message : String(error) };
+    const detail = error instanceof Error ? error.message : String(error);
+    /* Only the board saying the token does not exist is fatal. A 5xx, a 429 or a timeout is the
+       network having a bad minute, and failing the build on it means a red pull request that says
+       nothing about the pull request. Those are reported as `unreachable` and looked at by hand. */
+    const status = Number(/HTTP (\d{3})/.exec(detail)?.[1]);
+    return { verdict: status === 404 || status === 410 ? 'dead' : 'unreachable', detail };
   }
   if (jobs.length === 0) return { verdict: 'empty', detail: 'the board returned no postings' };
 
@@ -126,7 +131,7 @@ for (const row of bucket('named-mismatch')) {
   console.log(`MISLABELLED  ${row.company_name}  (${row.ats_name}/${row.board_token})`);
   console.log(`             the portal says: ${JSON.stringify(row.detail)}`);
 }
-for (const name of ['cannot-tell', 'empty', 'dead']) {
+for (const name of ['cannot-tell', 'empty', 'unreachable', 'dead']) {
   for (const row of bucket(name)) {
     console.log(`${name.toUpperCase().padEnd(12)} ${row.company_name}  (${row.ats_name}/${row.board_token})`);
     console.log(`             ${row.detail}`);
@@ -139,12 +144,22 @@ if (asJson) {
   console.log(`\nWrote ${path}`);
 }
 
-const counts = ['named-ok', 'prose-ok', 'cleared-by-hand', 'named-mismatch', 'cannot-tell', 'empty', 'dead']
+const counts = ['named-ok', 'prose-ok', 'cleared-by-hand', 'named-mismatch', 'cannot-tell', 'empty', 'unreachable', 'dead']
   .map((name) => `${bucket(name).length} ${name}`);
 console.log(`\n${results.length} sources: ${counts.join(', ')}.`);
 
-/* A mismatch fails the build. So does a dead board, which was already true of the old check.
-   `cannot-tell` and `empty` do NOT fail: Lever and Ashby publish no name, and a board that says
-   nothing about itself in three postings is common and is not evidence of anything wrong. They are
-   printed so a human can work through them, which is what the sponsor-match audit is for. */
+/* WHAT FAILS THE BUILD, and why the rest only prints.
+ *
+ * `named-mismatch` and `dead` fail. Both are statements the board itself made and neither can come
+ * back on its own: the employer published a name that is not ours, or the token does not exist.
+ *
+ * `empty`, `cannot-tell` and `unreachable` do NOT fail, because each is a state a healthy source
+ * passes through. A company with no open roles this week has an empty board and postings again next
+ * week; Lever and Ashby publish no name, so three postings that never say the brand prove nothing;
+ * a timeout is the network. Failing on any of them makes the check a weather report on 394 third-
+ * party boards, which goes red on pull requests that touched none of them - and a check that is
+ * red by default is a check nobody reads on the day it finds a real mislabelling.
+ *
+ * They still print, in full, every run. The cost of that split is that a board empty for good
+ * decays quietly rather than failing, so the printed EMPTY list is worth reading when it grows. */
 process.exit(bucket('named-mismatch').length + bucket('dead').length > 0 ? 1 : 0);
