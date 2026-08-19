@@ -948,8 +948,19 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       /* Whether the work-visa screen is in this student's flow. Its own flag rather than a client
          re-derivation of has_sponsorship_answer, for the reason #285 recorded about the gaps
          screen: the server owns which screens a flow contains, and a client that guesses gets it
-         wrong in the deploy window. */
-      includes_sponsorship_step: includesApplicationSteps && !has_sponsorship_answer,
+         wrong in the deploy window.
+
+         A SCREEN THAT WAS SHOWN STAYS IN THE FLOW, and this read `!has_sponsorship_answer` alone
+         until walking production caught it. Answering the work-visa screen is what SETS that
+         answer, so the moment a student finished it the flow it belonged to lost a step: the rail
+         went "step 5 of 10" on the visa screen and "step 5 of 9" on the very next one. The count
+         shrank underneath somebody who had just done the work, and two different screens both
+         called themselves five - the exact class of bug #285 exists for, in the other direction.
+
+         So the screen counts if it is still NEEDED or if it was already WALKED. The ledger is what
+         knows the second half, which is why this is answered here and not from a profile column. */
+      includes_sponsorship_step:
+        includesApplicationSteps && (!has_sponsorship_answer || flow.acknowledged.includes('sponsorship')),
       // Starting values for the gap questions, from the student's own resume. Never a stored
       // answer: see gapSuggestionsFrom for why offering one is not the inference schema.ts forbids.
       gap_suggestions: gapSuggestionsFrom(gaps, parsed),
