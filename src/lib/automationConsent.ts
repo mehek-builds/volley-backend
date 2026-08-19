@@ -33,12 +33,38 @@ export const AUTOMATIC_CONSENT_ACCEPTANCE_VERSION = '2026-08-12';
  */
 export const AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION = '2026-08-12';
 
+/**
+ * The words shown when the applicant grants standing permission for Litos to OPEN AN ACCOUNT for
+ * her on an employer's job platform.
+ *
+ * ITS OWN PERMISSION, AND THE MOST CONSEQUENTIAL ONE HERE, because it is the only one that creates
+ * a lasting relationship with a third party in her name rather than answering a field on a form she
+ * is already filling. She can revoke it, but the account it made does not disappear when she does,
+ * so the words she agreed to are the whole record of what she allowed.
+ *
+ * WHAT THE PERMISSION DOES NOT CARRY, and the boundary is structural rather than a promise:
+ *   - No password is ever set or stored. The only sign-in this authorises is a one-time code sent
+ *     to the applicant's own Litos routing alias, which is why accountCreationGranted is not
+ *     sufficient on its own - see portalAccountCapability.
+ *   - No human-verification challenge is attempted. A platform whose signup carries a CAPTCHA is
+ *     out of reach with this granted, exactly as it is without it.
+ *   - It is not a submission permission. Opening an account and sending an application to an
+ *     employer are different acts, and automatic_submission_enabled remains the only thing that
+ *     authorises the second.
+ *
+ * BUMP THIS whenever any line above changes, for the reason on the consent-acceptance constant: the
+ * version is the record of what she agreed to, and widening the act under an unchanged string
+ * reuses an old agreement for a new one.
+ */
+export const AUTOMATIC_ACCOUNT_CREATION_VERSION = '2026-08-19';
+
 export type AutomationPermissions = {
   automatic_submission_enabled: boolean;
   automatic_verification_enabled: boolean;
   automatic_captcha_enabled?: boolean;
   automatic_consent_acceptance_enabled?: boolean;
   automatic_conduct_acceptance_enabled?: boolean;
+  automatic_account_creation_enabled?: boolean;
 };
 
 /**
@@ -95,6 +121,26 @@ export function conductAcceptanceGranted(row: {
     && row.automatic_conduct_acceptance_consent_version === AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION;
 }
 
+/**
+ * Whether Litos may open an account for the applicant on an employer's job platform.
+ *
+ * Version-checked like every permission beside it, and for the sharpest version of the same reason:
+ * this one leaves something behind. A row carrying a superseded version agreed to different words
+ * about an act that created a third-party account in her name.
+ *
+ * NOT SUFFICIENT ON ITS OWN. This answers "did she allow it", never "can it be done here": the
+ * platform must also offer a code-to-email signup with no human-verification challenge, which is
+ * portalAccountCapability's question. Both must say yes. Granting this on a CAPTCHA-gated platform
+ * changes nothing, by construction rather than by convention.
+ */
+export function accountCreationGranted(row: {
+  automatic_account_creation_enabled?: boolean | null;
+  automatic_account_creation_consent_version?: string | null;
+} | null | undefined): boolean {
+  return row?.automatic_account_creation_enabled === true
+    && row.automatic_account_creation_consent_version === AUTOMATIC_ACCOUNT_CREATION_VERSION;
+}
+
 /** The stored shape every permission verdict is derived from. */
 export type AutomationConsentRow = {
   automatic_submission_enabled: boolean | null;
@@ -111,6 +157,9 @@ export type AutomationConsentRow = {
   automatic_conduct_acceptance_enabled?: boolean | null;
   automatic_conduct_acceptance_consented_at?: Date | null;
   automatic_conduct_acceptance_consent_version?: string | null;
+  automatic_account_creation_enabled?: boolean | null;
+  automatic_account_creation_consented_at?: Date | null;
+  automatic_account_creation_consent_version?: string | null;
 };
 
 /**
@@ -154,6 +203,9 @@ export function automationConsentState(row: AutomationConsentRow) {
     automatic_conduct_acceptance_enabled: conductAcceptanceGranted(row),
     automatic_conduct_acceptance_consented_at: row.automatic_conduct_acceptance_consented_at ?? null,
     automatic_conduct_acceptance_consent_version: AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
+    automatic_account_creation_enabled: accountCreationGranted(row),
+    automatic_account_creation_consented_at: row.automatic_account_creation_consented_at ?? null,
+    automatic_account_creation_consent_version: AUTOMATIC_ACCOUNT_CREATION_VERSION,
   };
 }
 
@@ -193,6 +245,17 @@ export function automationConsentValues(settings: AutomationPermissions, now: Da
       automatic_conduct_acceptance_consented_at: settings.automatic_conduct_acceptance_enabled ? now : null,
       automatic_conduct_acceptance_consent_version: settings.automatic_conduct_acceptance_enabled
         ? AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION
+        : null,
+    }),
+    /* Omitted when undefined for the reason on the captcha arm above, and it matters most here:
+       POST /onboarding/complete does not send this field, so defaulting it to false would revoke
+       an account-creation grant every time a student re-ran /start - silently, and for the one
+       permission whose act leaves an account behind. */
+    ...(settings.automatic_account_creation_enabled === undefined ? {} : {
+      automatic_account_creation_enabled: settings.automatic_account_creation_enabled,
+      automatic_account_creation_consented_at: settings.automatic_account_creation_enabled ? now : null,
+      automatic_account_creation_consent_version: settings.automatic_account_creation_enabled
+        ? AUTOMATIC_ACCOUNT_CREATION_VERSION
         : null,
     }),
   };

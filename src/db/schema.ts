@@ -138,6 +138,17 @@ export const users = pgTable('users', {
   automatic_conduct_acceptance_enabled: boolean('automatic_conduct_acceptance_enabled').default(false).notNull(),
   automatic_conduct_acceptance_consented_at: timestamp('automatic_conduct_acceptance_consented_at', { withTimezone: true }),
   automatic_conduct_acceptance_consent_version: text('automatic_conduct_acceptance_consent_version'),
+  /* STANDING PERMISSION TO OPEN AN ACCOUNT for her on an employer's job platform.
+   *
+   * Its own permission rather than a mode of any other, because it is the only automation here that
+   * creates a lasting relationship with a third party in her name. Revoking it does not close an
+   * account it already made, so the version column is the whole record of what she allowed.
+   *
+   * No password is stored because none is ever set: the only sign-in this authorises is a one-time
+   * code delivered to her own Litos routing alias. See AUTOMATIC_ACCOUNT_CREATION_VERSION. */
+  automatic_account_creation_enabled: boolean('automatic_account_creation_enabled').default(false).notNull(),
+  automatic_account_creation_consented_at: timestamp('automatic_account_creation_consented_at', { withTimezone: true }),
+  automatic_account_creation_consent_version: text('automatic_account_creation_consent_version'),
   /* ---- the two notification permissions (screen 08) ----
    *
    * PERMISSIONS, NOT SETTINGS, which is why each carries its own grant timestamp in the shape the
