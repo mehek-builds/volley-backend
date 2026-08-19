@@ -151,8 +151,15 @@ async function selectOnboardingUserRow(userId: string) {
 
 type Step = 'focus' | 'sponsorship' | 'resume' | 'impact' | 'base' | 'gaps' | 'done';
 
-export const CURRENT_ONBOARDING_FLOW_VERSION = 2;
-const REPLAY_STEPS_WITHOUT_GAPS = ['resume', 'impact', 'focus', 'sponsorship', 'base'] as const;
+/* Bumped to 3 by the roles-first reorder. The bump is what keeps the change off accounts that are
+   already through setup: onboardingFlowLedger only reads runs and acknowledgements AT THIS
+   VERSION, so an account carrying a completed version-2 run starts version 3 with an empty ledger
+   and `replayRequired` false (the column is only ever written false in code and defaults false).
+   Nothing replays unless a migration deliberately sets replay_required, and `onboardingStepFrom`
+   short-circuits on `completed` before it reads a single order-dependent branch. */
+export const CURRENT_ONBOARDING_FLOW_VERSION = 3;
+/* ORDER IS THE RENDER ORDER, and 'focus' leads it now. See onboardingStepFrom for why. */
+const REPLAY_STEPS_WITHOUT_GAPS = ['focus', 'resume', 'impact', 'sponsorship', 'base'] as const;
 type ReplayStep = (typeof REPLAY_STEPS_WITHOUT_GAPS)[number] | 'gaps';
 
 export function replaySteps(includesGaps: boolean): ReplayStep[] {
@@ -243,9 +250,16 @@ export function onboardingStepFrom(input: {
   gapsAsked?: boolean;
 }): Step {
   if (input.completed && input.hasImpactReview !== false) return 'done';
+  /* FOCUS LEADS. A resume upload is the heaviest act in the flow and it used to be the front door;
+     roles is three taps and it is now what a student meets first.
+     The ordering is only safe because the focus screen no longer needs a resume to draw itself.
+     It used to seed its title list from inferResumeTargeting, which is why it sat third; the
+     field-then-stage-then-titles picker derives its candidates from the chosen field instead
+     (lib/onboarding-role-inference.ts, FIELDS), so there is nothing left here to wait on.
+     The resume inference still seeds a RETURNING student's screen - it just no longer gates it. */
+  if (!input.hasFocus) return 'focus';
   if (!input.hasResume) return 'resume';
   if (input.hasImpactReview === false) return 'impact';
-  if (!input.hasFocus) return 'focus';
   if (!input.hasSponsorshipAnswer) return 'sponsorship';
   if (!input.hasBaseResume) return 'base';
   if (input.hasSetupGaps && !input.gapsAsked) return 'gaps';

@@ -123,12 +123,16 @@ describe('onboarding step order', () => {
     hasBaseResume: true,
   };
 
-  test('a new account starts with the resume before targeting', () => {
-    assert.equal(onboardingStepFrom({ ...ready, hasResume: false, hasFocus: false }), 'resume');
+  test('a new account starts with targeting before the resume', () => {
+    assert.equal(onboardingStepFrom({ ...ready, hasResume: false, hasFocus: false }), 'focus');
   });
 
-  test('the resume unlocks the inferred job and type choices', () => {
+  test('targeting no longer waits on the resume', () => {
     assert.equal(onboardingStepFrom({ ...ready, hasFocus: false }), 'focus');
+  });
+
+  test('the resume is asked for once targeting is stated', () => {
+    assert.equal(onboardingStepFrom({ ...ready, hasResume: false }), 'resume');
   });
 
   test('a new upload pauses for recent-experience review before targeting', () => {
@@ -143,8 +147,8 @@ describe('onboarding step order', () => {
   test('setup ends after the core resume and targeting decisions', () => {
     const cases: Array<[string, Parameters<typeof onboardingStepFrom>[0]]> = [
       ['done', { ...ready, completed: true, hasResume: false }],
-      ['resume', { ...ready, hasResume: false, hasFocus: false, hasSponsorshipAnswer: false }],
-      ['focus', { ...ready, hasFocus: false, hasSponsorshipAnswer: false }],
+      ['focus', { ...ready, hasResume: false, hasFocus: false, hasSponsorshipAnswer: false }],
+      ['resume', { ...ready, hasResume: false, hasSponsorshipAnswer: false }],
       ['sponsorship', { ...ready, hasSponsorshipAnswer: false, hasBaseResume: false }],
       ['base', { ...ready, hasBaseResume: false }],
       ['done', ready],
@@ -155,38 +159,38 @@ describe('onboarding step order', () => {
   });
 });
 
-describe('version 2 walkthrough replay', () => {
+describe('version 3 walkthrough replay', () => {
   test('an existing account reviews every core screen even when its data is already complete', () => {
     const steps = replaySteps(false);
-    assert.deepEqual(steps, ['resume', 'impact', 'focus', 'sponsorship', 'base']);
-    assert.equal(nextReplayStep([], false), 'resume');
-    assert.equal(nextReplayStep(['resume'], false), 'impact');
-    assert.equal(nextReplayStep(['resume', 'impact', 'focus', 'sponsorship'], false), 'base');
+    assert.deepEqual(steps, ['focus', 'resume', 'impact', 'sponsorship', 'base']);
+    assert.equal(nextReplayStep([], false), 'focus');
+    assert.equal(nextReplayStep(['focus'], false), 'resume');
+    assert.equal(nextReplayStep(['focus', 'resume', 'impact', 'sponsorship'], false), 'base');
     assert.equal(nextReplayStep(steps, false), 'done');
   });
 
   test('the existing conditional details screen stays in the account-specific flow', () => {
     const steps = replaySteps(true);
-    assert.deepEqual(steps, ['resume', 'impact', 'focus', 'sponsorship', 'base', 'gaps']);
+    assert.deepEqual(steps, ['focus', 'resume', 'impact', 'sponsorship', 'base', 'gaps']);
     assert.equal(nextReplayStep(steps.slice(0, -1), true), 'gaps');
     assert.equal(nextReplayStep(steps, true), 'done');
   });
 
   test('duplicate receipts do not move the server-owned cursor out of order', () => {
-    assert.equal(nextReplayStep(['resume', 'resume', 'impact'], false), 'focus');
-    assert.equal(nextReplayStep(['impact'], false), 'resume');
+    assert.equal(nextReplayStep(['focus', 'focus', 'resume'], false), 'impact');
+    assert.equal(nextReplayStep(['resume'], false), 'focus');
   });
 
   test('a lost acknowledgement response can be retried idempotently', () => {
-    assert.deepEqual(flowAcknowledgementDecision(['resume'], 'resume', false), {
+    assert.deepEqual(flowAcknowledgementDecision(['focus'], 'focus', false), {
       accepted: true,
       alreadyRecorded: true,
-      expected: 'impact',
+      expected: 'resume',
     });
-    assert.deepEqual(flowAcknowledgementDecision(['resume'], 'focus', false), {
+    assert.deepEqual(flowAcknowledgementDecision(['focus'], 'impact', false), {
       accepted: false,
       alreadyRecorded: false,
-      expected: 'impact',
+      expected: 'resume',
     });
   });
 });
