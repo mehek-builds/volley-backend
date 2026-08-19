@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, test } from 'node:test';
 import {
   cancelStripeSubscriptionOrThrow,
   createStripeCheckoutSessionV2,
+  retrieveStripeCheckoutForReconcile,
   parseStripeBillingEvent,
   retrieveStripeBillingAuthority,
   retrieveStripeChargeBillingContext,
@@ -26,6 +27,75 @@ afterEach(() => {
 });
 
 describe('Stripe Litos+ adapter', () => {
+  const completeSession = (over = {}) => ({
+    id: 'cs_test_reconcile', object: 'checkout.session', status: 'complete',
+    client_reference_id: 'offer-1', subscription: 'sub_reconcile',
+    metadata: { litos_user_id: 'user-1' }, ...over,
+  });
+  const trialingSub = { id: 'sub_reconcile', object: 'subscription', status: 'trialing' };
+
+  function stripeStub(session: unknown, subscription: unknown) {
+    return async (url: string | URL) => {
+      const href = String(url);
+      if (href.includes('/v1/checkout/sessions/')) return new Response(JSON.stringify(session), { status: 200 });
+      if (href.includes('/v1/subscriptions/')) return new Response(JSON.stringify(subscription), { status: 200 });
+      return new Response('{}', { status: 404 });
+    };
+  }
+
+  test('reconcile retrieves the finished session and its subscription', async () => {
+    /* The read that ends the stuck loop: the return path asks Stripe what happened
+       rather than waiting for a webhook that may lag, retry, or -- as production
+       proved on 2026-08-19 with a bad signing secret -- never arrive at all. */
+    const result = await retrieveStripeCheckoutForReconcile({
+      sessionId: 'cs_test_reconcile',
+      fetchImpl: stripeStub(completeSession(), trialingSub) as never,
+    });
+    assert.ok(result);
+    assert.equal(result.session.id, 'cs_test_reconcile');
+    assert.equal(result.subscription.status, 'trialing');
+  });
+
+  test('reconcile refuses a session that has not completed', async () => {
+    /* `open` is still in progress and `expired` never completed. Returning null
+       rather than throwing matters: an abandoned checkout is the ordinary case and
+       must not surface to the student as an error. */
+    for (const status of ['open', 'expired']) {
+      const result = await retrieveStripeCheckoutForReconcile({
+        sessionId: 'cs_test_reconcile',
+        fetchImpl: stripeStub(completeSession({ status }), trialingSub) as never,
+      });
+      assert.equal(result, null, `${status} must not reconcile`);
+    }
+  });
+
+  test('reconcile refuses an id that is not a checkout session, without calling Stripe', async () => {
+    let called = false;
+    const result = await retrieveStripeCheckoutForReconcile({
+      sessionId: 'sub_not_a_session',
+      fetchImpl: (async () => { called = true; return new Response('{}', { status: 200 }); }) as never,
+    });
+    assert.equal(result, null);
+    assert.equal(called, false, "a malformed id must not become a Stripe request");
+  });
+
+  test('reconcile refuses a session Stripe echoes back under a different id', async () => {
+    const result = await retrieveStripeCheckoutForReconcile({
+      sessionId: 'cs_test_reconcile',
+      fetchImpl: stripeStub(completeSession({ id: 'cs_test_someone_else' }), trialingSub) as never,
+    });
+    assert.equal(result, null);
+  });
+
+  test('reconcile refuses a completed session carrying no subscription', async () => {
+    const result = await retrieveStripeCheckoutForReconcile({
+      sessionId: 'cs_test_reconcile',
+      fetchImpl: stripeStub(completeSession({ subscription: null }), trialingSub) as never,
+    });
+    assert.equal(result, null);
+  });
+
+
   test('a first-time trial rides on the subscription, and Stripe is forbidden to skip the card', async () => {
     /* The two lines that make the trial card-required. trial_period_days is the
        trial itself; payment_method_collection=always is what stops Stripe from
