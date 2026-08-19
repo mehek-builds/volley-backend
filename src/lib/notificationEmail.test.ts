@@ -35,6 +35,22 @@ test('the alert says Found and never Posted, in every field it renders', () => {
   assert.match(email.html ?? '', /Found 4 hours ago/);
 });
 
+test('the plain text part keeps its paragraph breaks, with or without a location', () => {
+  /* REGRESSION. The absent location used to be dropped by filtering empty strings out of the
+     assembled array, which reads as if it only removes the location and in fact removed every
+     deliberate blank line with it: the whole text part collapsed into seven unseparated lines. The
+     blanks are content, so only the location slot may be conditional. */
+  const withLocation = matchEmail().text.split('\n');
+  assert.equal(withLocation.filter((line) => line === '').length, 2, 'both separators must survive');
+  assert.equal(withLocation[0], 'Software Engineer Intern at Ramp');
+  assert.equal(withLocation[1], 'New York, NY');
+  assert.equal(withLocation[3], '');
+
+  const withoutLocation = matchEmail({ location: null }).text.split('\n');
+  assert.equal(withoutLocation.filter((line) => line === '').length, 2);
+  assert.equal(withoutLocation[1], 'Found 4 hours ago. 87% match against your resume.', 'the location line is gone, not blanked');
+});
+
 test('the alert carries exactly one posting', () => {
   // Never a digest. Ten postings a day trains somebody to archive the sender unread, and then the
   // one that mattered is archived with them.

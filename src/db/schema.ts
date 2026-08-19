@@ -2048,11 +2048,21 @@ export const notification_sends = pgTable('notification_sends', {
      `strong_match:<job id>` and `employer_reply:<message id>`. Prefixed so two kinds can never
      collide on a shared uuid. */
   dedupe_key: text('dedupe_key').notNull(),
-  /* The posting or the inbound message this concerned, nullable because each kind fills one. Kept
-     as real references so a deleted posting or message takes its notification record with it. */
-  monitored_job_id: uuid('monitored_job_id').references(() => monitored_jobs.id, { onDelete: 'cascade' }),
+  /* The posting or the inbound message this concerned, nullable because each kind fills one.
+   *
+   * SET NULL, NEVER CASCADE, and the difference is the whole value of this table. postings are
+   * HARD DELETED on a schedule: purgeExpiredPostings drops every monitored_jobs row past
+   * PURGE_POSTINGS_OLDER_THAN_DAYS. Under a cascade that purge would silently destroy the record
+   * that a student was ever emailed, one month after the fact, taking with it the only evidence an
+   * unsubscribe complaint or a duplicate-send report has to look at, and resetting that account's
+   * place in the sweep's longest-waiting-first rotation to "never mailed".
+   *
+   * Setting null instead keeps the row, its timestamp and its dedupe_key, and the dedupe_key is
+   * what actually prevents a repeat: it carries the posting's identity as text, so it goes on
+   * working after the posting it names is gone. */
+  monitored_job_id: uuid('monitored_job_id').references(() => monitored_jobs.id, { onDelete: 'set null' }),
   application_email_message_id: uuid('application_email_message_id')
-    .references(() => application_email_messages.id, { onDelete: 'cascade' }),
+    .references(() => application_email_messages.id, { onDelete: 'set null' }),
   /* Resend's message id, and the ONLY proof the send was accepted. Null means the row is still a
      reservation: either in flight, or orphaned by a crash between the insert and the send. */
   provider_message_id: text('provider_message_id'),

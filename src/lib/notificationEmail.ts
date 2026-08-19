@@ -136,9 +136,13 @@ export function strongMatchEmail(input: StrongMatchEmailInput): OutboundEmail {
        in a subject line reads as a marketing number, and no "!" or "new", because the only claim
        worth making is the one the body can support. */
     subject: `${line}`,
+    /* The absent location is dropped by SPREADING NOTHING, not by filtering empty strings out
+       afterwards. A `.filter(part => part !== '')` reads as if it only removes the missing
+       location, and it also removes every deliberate blank line below it, which collapses the
+       whole plain-text part into seven unseparated lines. The blanks are content here. */
     text: [
       `${line}`,
-      where ? `${where}` : '',
+      ...(where ? [where] : []),
       `${found}. ${input.score}% match against your resume.`,
       ``,
       `Open the posting: ${job.posting_url}`,
@@ -146,7 +150,7 @@ export function strongMatchEmail(input: StrongMatchEmailInput): OutboundEmail {
       ``,
       `You are getting this because you asked ${PRODUCT_NAME} to tell you when a strong match opens.`,
       `Stop these alerts: ${input.unsubscribeUrl}`,
-    ].filter((part) => part !== '').join('\n'),
+    ].join('\n'),
     html: shell(
       [
         `<p style="margin:0 0 8px;color:#6b6a64;">A strong match opened.</p>`,

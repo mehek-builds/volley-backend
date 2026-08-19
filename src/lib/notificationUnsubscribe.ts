@@ -48,8 +48,33 @@ function signingSecret(): string | null {
     || null;
 }
 
+/**
+ * Whether this deployment can actually mint a working unsubscribe link.
+ *
+ * BOTH HALVES, and the second one is the half that was missing. A link needs a signing secret AND
+ * an absolute origin to live at: `unsubscribeUrl` returns null without PUBLIC_API_BASE, and a
+ * relative link in an email is not a link. Checking only the secret let the daily sweep pass its
+ * precondition, walk every subscriber, fail every send on the same missing origin, and answer 200
+ * with `sent: 0` - which is exactly what a quiet day looks like. PUBLIC_API_BASE is optional
+ * everywhere else in this codebase (apiBaseFor falls back to the inbound request's host), so the
+ * default state of a deployment that has never needed it is unset.
+ *
+ * Names the missing half rather than returning a bare false, because "the notification cron did
+ * nothing" and "PUBLIC_API_BASE is unset" are the same fact and an operator should not have to
+ * bridge them.
+ */
+export type UnsubscribeConfiguration =
+  | { ok: true }
+  | { ok: false; missing: 'signing_secret' | 'public_api_base' };
+
+export function unsubscribeConfiguration(): UnsubscribeConfiguration {
+  if (!signingSecret()) return { ok: false, missing: 'signing_secret' };
+  if (!publicApiBase()) return { ok: false, missing: 'public_api_base' };
+  return { ok: true };
+}
+
 export function unsubscribeConfigured(): boolean {
-  return signingSecret() !== null;
+  return unsubscribeConfiguration().ok;
 }
 
 function sign(secret: string, message: string): string {
@@ -112,8 +137,12 @@ export function readUnsubscribeToken(token: string): UnsubscribeClaim | null {
  * a host from, and a relative link in an email is not a link. Null when it is unset, and the send
  * path treats that the same way it treats a missing secret: no unsubscribe means no send.
  */
+function publicApiBase(): string | null {
+  return process.env.PUBLIC_API_BASE?.trim().replace(/\/+$/, '') || null;
+}
+
 export function unsubscribeUrl(token: string): string | null {
-  const base = process.env.PUBLIC_API_BASE?.trim().replace(/\/+$/, '');
+  const base = publicApiBase();
   if (!base) return null;
   try {
     const url = new URL('/notifications/unsubscribe', base);

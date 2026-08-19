@@ -386,6 +386,49 @@ test('the all scope turns off every stream, and a forged token turns off nothing
   assert.equal(forged.statusCode, 400);
 });
 
+test('the sweep refuses to run when only PUBLIC_API_BASE is missing', async () => {
+  /* REGRESSION, and the reason the test below could not catch it: that one deletes the secret AND
+     the base URL together, so it passes against a guard that checks only the secret. A link needs
+     both. PUBLIC_API_BASE is optional everywhere else in this codebase, so "secret present, base
+     unset" is the default state of a deployment that has never needed one - and under the old
+     guard the cron walked every subscriber, failed every send on the same missing origin, and
+     answered 200 with sent:0, which is exactly what a quiet day looks like. */
+  await seedBoard();
+  await seedResume();
+  delete process.env.PUBLIC_API_BASE;
+  try {
+    const response = await app.inject({
+      method: 'GET',
+      url: '/internal/strong-match-notifications',
+      headers: { 'x-internal-secret': 'notification-db-test-cron-secret' },
+    });
+    assert.equal(response.statusCode, 503);
+    assert.equal(response.json().missing, 'public_api_base', 'the operator is told which half is missing');
+    assert.equal(sent.length, 0);
+  } finally {
+    process.env.PUBLIC_API_BASE = 'https://api.trylitos.test';
+  }
+});
+
+test('a purged posting leaves the record that somebody was emailed standing', async () => {
+  /* Postings are HARD DELETED on a schedule (purgeExpiredPostings). Under a cascading foreign key
+     that purge silently destroyed the send record a month after the fact, taking with it the only
+     evidence an unsubscribe complaint has to look at and resetting the account's place in the
+     sweep's longest-waiting-first rotation to "never mailed". */
+  await seedBoard();
+  await seedResume();
+  await runStrongMatchSweep(new Date());
+  assert.equal(sent.length, 1);
+
+  await database.exec('delete from "monitored_jobs"');
+  const rows = await database.query<{ n: number; job: string | null; dedupe_key: string }>(
+    'select count(*) over ()::int as n, monitored_job_id as job, dedupe_key from "notification_sends"',
+  );
+  assert.equal(rows.rows.length, 1, 'the purge must not take the notification with it');
+  assert.equal(rows.rows[0].job, null, 'the reference is released');
+  assert.match(rows.rows[0].dedupe_key, /^strong_match:/, 'the dedupe key survives, so a repeat is still impossible');
+});
+
 test('the sweep is cron authorised and refuses to run without a way to unsubscribe', async () => {
   const unauthorized = await app.inject({ method: 'GET', url: '/internal/strong-match-notifications' });
   assert.equal(unauthorized.statusCode, 401);

@@ -3,6 +3,7 @@ import test, { afterEach } from 'node:test';
 import {
   mintUnsubscribeToken,
   readUnsubscribeToken,
+  unsubscribeConfiguration,
   unsubscribeConfigured,
   unsubscribeUrl,
 } from './notificationUnsubscribe';
@@ -99,11 +100,32 @@ test('with no secret anywhere, nothing can be minted and nothing verifies', () =
 test('the JWT secret is the fallback, so the feature works on the deploy that ships it', () => {
   delete process.env.LITOS_NOTIFICATION_UNSUBSCRIBE_SECRET;
   process.env.JWT_SIGNING_SECRET = 'jwt-fallback-secret-for-unsubscribe';
+  process.env.PUBLIC_API_BASE = 'https://api.trylitos.com';
   assert.equal(unsubscribeConfigured(), true);
   assert.deepEqual(readUnsubscribeToken(mintUnsubscribeToken(USER, 'strong_match')), {
     userId: USER,
     kind: 'strong_match',
   });
+});
+
+test('a signing secret alone is not a configured unsubscribe, and the answer names the gap', () => {
+  /* THE TWO HALVES ARE INDEPENDENT. A link needs a secret to sign it AND an origin to live at, and
+     PUBLIC_API_BASE is optional everywhere else in this codebase, so "secret present, base unset"
+     is the ordinary state of a deployment that has never needed one. Checking only the secret let
+     the daily sweep pass its precondition and mail nobody while reporting success. */
+  withSecret('unsubscribe-test-secret-one');
+  delete process.env.PUBLIC_API_BASE;
+  assert.deepEqual(unsubscribeConfiguration(), { ok: false, missing: 'public_api_base' });
+  assert.equal(unsubscribeConfigured(), false);
+
+  delete process.env.LITOS_NOTIFICATION_UNSUBSCRIBE_SECRET;
+  delete process.env.JWT_SIGNING_SECRET;
+  assert.deepEqual(unsubscribeConfiguration(), { ok: false, missing: 'signing_secret' },
+    'a missing secret is reported before a missing origin, because it is the harder one to notice');
+
+  process.env.PUBLIC_API_BASE = 'https://api.trylitos.com';
+  withSecret('unsubscribe-test-secret-one');
+  assert.deepEqual(unsubscribeConfiguration(), { ok: true });
 });
 
 test('the dedicated secret wins over the JWT fallback', () => {

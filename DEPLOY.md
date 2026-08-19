@@ -77,7 +77,7 @@ Set these for Production (and Preview if you want):
 | `LITOS_APPLICATION_EMAIL_MAILBOX` | rollback mailbox route using plus-addressed per-application aliases |
 | `LITOS_APPLICATION_EMAIL_ALIAS_SECRET` | stable secret used to mint opaque per-application alias local parts |
 | `RESEND_WEBHOOK_SECRET` | Resend `email.received` webhook signing secret, returned when the webhook is created |
-| `PUBLIC_API_BASE` | absolute origin of THIS API, for example `https://api.trylitos.com`. Required by the notification subsystem: a cron has no inbound request to read a host from, and an alert whose unsubscribe link is relative is an alert nobody can stop, so the sweep refuses to run without it |
+| `PUBLIC_API_BASE` | absolute origin of THIS API, for example `https://api.trylitos.com`. **Required by the notification subsystem** and optional for everything else, so a deployment that has never needed it will not have it set. A cron has no inbound request to read a host from, and an alert whose unsubscribe link is relative is an alert nobody can stop, so `/internal/strong-match-notifications` answers 503 `{"missing":"public_api_base"}` rather than running and mailing nobody |
 | `LITOS_NOTIFICATION_UNSUBSCRIBE_SECRET` | optional dedicated secret signing unsubscribe links. Falls back to `JWT_SIGNING_SECRET`, which is domain separated and present everywhere, so the feature works on the deploy that ships it. Rotating either invalidates every unsubscribe link already in somebody's inbox |
 | `LITOS_INBOUND_EMAIL_WEBHOOK_SECRET` | compatibility HMAC secret for signed non-Resend `POST /application-email/inbound` calls |
 | `LEMONSQUEEZY_CHECKOUT_URL` | legacy reusable product URL, retained only for real legacy subscriptions |

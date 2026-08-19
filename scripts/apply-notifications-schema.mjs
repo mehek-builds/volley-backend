@@ -45,8 +45,8 @@ try {
       kind text not null,
       daily_slot text,
       dedupe_key text not null,
-      monitored_job_id uuid references monitored_jobs(id) on delete cascade,
-      application_email_message_id uuid references application_email_messages(id) on delete cascade,
+      monitored_job_id uuid references monitored_jobs(id) on delete set null,
+      application_email_message_id uuid references application_email_messages(id) on delete set null,
       provider_message_id text,
       sent_at timestamp with time zone,
       created_at timestamp with time zone not null default now()

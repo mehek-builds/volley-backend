@@ -13,7 +13,7 @@ import {
   notificationPreferencesFrom,
   type NotificationKind,
 } from '../lib/notificationPreferences';
-import { readUnsubscribeToken, unsubscribeConfigured } from '../lib/notificationUnsubscribe';
+import { readUnsubscribeToken, unsubscribeConfiguration, unsubscribeConfigured } from '../lib/notificationUnsubscribe';
 import { sendNotification } from '../lib/notificationSend';
 import { strongMatchEmail } from '../lib/notificationEmail';
 import {
@@ -69,7 +69,7 @@ export type MatchSweepSummary = {
 async function sweepAccount(
   account: { id: string; email: string },
   now: Date,
-): Promise<'sent' | 'no_match' | { suppressed: string } | 'failed'> {
+): Promise<'sent' | 'no_match' | { suppressed: string }> {
   const match = await strongMatchForAccount(account.id, now);
   if (!match) return 'no_match';
   const outcome = await sendNotification({
@@ -109,7 +109,7 @@ export async function runStrongMatchSweep(now: Date, log?: FastifyRequest['log']
       summary.matched += 1;
       if (result === 'sent') {
         summary.sent += 1;
-      } else if (result !== 'failed') {
+      } else {
         summary.suppressed[result.suppressed] = (summary.suppressed[result.suppressed] ?? 0) + 1;
       }
     } catch (error) {
@@ -219,7 +219,16 @@ export async function notificationRoutes(fastify: FastifyInstance) {
         .limit(1) as Record<string, unknown>[];
     } catch (error) {
       if (!isUndefinedColumnError(error)) throw error;
-      row = undefined;
+      /* The preferences fail open to "nothing is on", which is what an un-migrated database
+         effectively holds. `deliverable` must NOT be manufactured the same way: reporting false
+         because the read failed tells a student with a perfectly good verified address that Litos
+         cannot mail her until she verifies it, which is both untrue and unfixable by her. So the
+         one column that has always existed is read on its own. */
+      row = (await db
+        .select({ email_verified: users.email_verified })
+        .from(users)
+        .where(eq(users.id, userId))
+        .limit(1))[0] as Record<string, unknown> | undefined;
     }
     return reply.status(200).send({
       ...notificationPreferencesFrom(row as never),
@@ -351,10 +360,19 @@ export async function notificationRoutes(fastify: FastifyInstance) {
     if (!isCronConfigured() || !isCronAuthorized(request)) {
       return reply.status(401).send({ error: 'Unauthorized' });
     }
-    /* Refused rather than run. Every send would fail on the same missing link, and a run that
-       reports 200 with nothing sent looks identical to a quiet day. */
-    if (!unsubscribeConfigured()) {
-      return reply.status(503).send({ error: 'No signing secret is configured for notification unsubscribe links' });
+    /* Refused rather than run, and BOTH halves are checked. Every send would fail on the same
+       missing link, and a run that reports 200 with nothing sent looks identical to a quiet day.
+       An earlier version tested only the signing secret, which let a deployment with no
+       PUBLIC_API_BASE - the default state, since nothing else in this codebase requires it - do
+       the whole sweep and report success while mailing nobody. */
+    const configuration = unsubscribeConfiguration();
+    if (!configuration.ok) {
+      return reply.status(503).send({
+        error: configuration.missing === 'signing_secret'
+          ? 'No signing secret is configured for notification unsubscribe links'
+          : 'PUBLIC_API_BASE is not set, so notification unsubscribe links have nowhere to point',
+        missing: configuration.missing,
+      });
     }
     const summary = await runStrongMatchSweep(new Date(), request.log);
     return reply.status(200).send(summary);
