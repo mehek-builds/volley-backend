@@ -1,22 +1,31 @@
-/* THE TWO THINGS LITOS MAY PUT IN A STUDENT'S INBOX, and the record of her saying so.
+/* THE THINGS LITOS MAY INTERRUPT A STUDENT WITH, and the record of her saying so.
  *
- * Screen 08 of the /start sequence asks exactly two questions and this module is their storage.
- * The scope is the design, not a first cut: no digest, no weekly roundup, no "tips", no
- * re-engagement mail, no streak reminder. The Guardrails ban daily-login rewards and streaks
- * outright (non-relitigable, 2026-07-27), and a notification subsystem is precisely the machinery
- * somebody reaches for when they want to build one, so the kinds are a closed list here and the
- * send path refuses anything not on it.
+ * THE DIGEST RULE WAS REVERSED DELIBERATELY, 2026-08-19, by Mehek. This file used to say "no
+ * digest, ever" and it meant it; the reasoning is kept here because the replacement has to answer
+ * it rather than forget it. A digest of EVERYTHING OPEN is still refused, and the measurement that
+ * made that call is still true: one real account holds 144 packets wanting attention, so a
+ * notification reporting the backlog reports the same number every day, is unactionable, and
+ * teaches somebody to dismiss the sender. What ships instead is a DELTA - what changed since the
+ * last one - which is silent on a quiet day and is a list of events rather than a census. See
+ * lib/activityDigest.ts, where that distinction is enforced rather than described.
+ *
+ * Still refused: weekly roundups, "tips", re-engagement mail, anything counting consecutive days.
+ * The Guardrails ban daily-login rewards and streaks outright (non-relitigable, 2026-07-27), and a
+ * notification subsystem is precisely the machinery somebody reaches for when they want to build
+ * one, so the kinds are a closed list here and the send path refuses anything not on it. "Come back
+ * to the platform" is only ever legitimate when something real is waiting, and the digest says so
+ * by naming the thing rather than by naming the absence.
  *
  * WHY THIS IS NOT PART OF automationConsent.ts, which it visibly resembles. Those permissions
  * license Litos to ACT on an employer's form in the applicant's name, so each carries a consent
- * VERSION and a grant is read as invalid when the words change. These license an email. Nothing
+ * VERSION and a grant is read as invalid when the words change. These license a message. Nothing
  * downstream depends on which wording she saw, revocation reaches back nothing because nothing was
  * done under the grant, and a version column that no reader checks is worse than no column: it
  * looks like a guarantee. The grant timestamp is kept, because "when did you subscribe me to this"
  * is a question an unsubscribe complaint actually asks.
  */
 
-export const NOTIFICATION_KINDS = ['strong_match', 'employer_reply'] as const;
+export const NOTIFICATION_KINDS = ['strong_match', 'employer_reply', 'activity_digest'] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
 export function isNotificationKind(value: string): value is NotificationKind {
@@ -38,6 +47,10 @@ export function isNotificationKind(value: string): value is NotificationKind {
  */
 export const DAILY_CAP: Record<NotificationKind, number | null> = {
   strong_match: 1,
+  /* Capped, and for a second reason on top of politeness: the digest reports what changed SINCE THE
+     LAST ONE, so two in a day would make the second one's window a few hours wide and its counts
+     meaninglessly small. One a day is what makes "since yesterday" true. */
+  activity_digest: 1,
   employer_reply: null,
 };
 
@@ -66,6 +79,8 @@ export type NotificationPreferenceRow = {
   notify_strong_match_granted_at?: Date | null;
   notify_employer_reply_enabled?: boolean | null;
   notify_employer_reply_granted_at?: Date | null;
+  notify_activity_digest_enabled?: boolean | null;
+  notify_activity_digest_granted_at?: Date | null;
 };
 
 export type NotificationPreference = { enabled: boolean; granted_at: string | null };
@@ -90,6 +105,10 @@ export function notificationPreferencesFrom(
     employer_reply: {
       enabled: row?.notify_employer_reply_enabled === true,
       granted_at: row?.notify_employer_reply_granted_at?.toISOString() ?? null,
+    },
+    activity_digest: {
+      enabled: row?.notify_activity_digest_enabled === true,
+      granted_at: row?.notify_activity_digest_granted_at?.toISOString() ?? null,
     },
   };
 }
@@ -118,6 +137,10 @@ export function notificationPreferenceUpdate(
   if (changes.employer_reply !== undefined) {
     update.notify_employer_reply_enabled = changes.employer_reply;
     update.notify_employer_reply_granted_at = changes.employer_reply ? at : null;
+  }
+  if (changes.activity_digest !== undefined) {
+    update.notify_activity_digest_enabled = changes.activity_digest;
+    update.notify_activity_digest_granted_at = changes.activity_digest ? at : null;
   }
   return update;
 }

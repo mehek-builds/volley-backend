@@ -133,6 +133,8 @@ export const MIGRATION_PENDING_COLUMNS: ReadonlySet<string> = new Set([
   'notify_strong_match_granted_at',
   'notify_employer_reply_enabled',
   'notify_employer_reply_granted_at',
+  'notify_activity_digest_enabled',
+  'notify_activity_digest_granted_at',
 ]);
 
 /**

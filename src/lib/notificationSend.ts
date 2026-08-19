@@ -62,6 +62,59 @@ export function suppressionFor(error: unknown): NotificationSuppression | null {
   return null;
 }
 
+/**
+ * Claim the right to notify, before anything is actually sent.
+ *
+ * SPLIT OUT SO EMAIL AND PUSH SHARE ONE LIMITER. The cap is a unique index, and an index only
+ * protects the writers that go through it: a second transport that recorded its own sends its own
+ * way would give every student two "one a day" allowances that neither one could see. There is one
+ * ledger, one reservation, and the channel is a detail of what happens after it is granted.
+ *
+ * Returns the reservation id to commit or release. A caller that forgets to do either leaves a row
+ * holding a daily slot for a send that never happened, which costs one notification rather than
+ * sending a duplicate: the correct side to fail on, and the same trade the email path makes.
+ */
+export async function reserveNotification(input: {
+  userId: string;
+  kind: NotificationKind;
+  dedupeKey: string;
+  at: Date;
+  monitoredJobId?: string | null;
+  applicationEmailMessageId?: string | null;
+}): Promise<{ reserved: true; id: string } | { reserved: false; reason: NotificationSuppression }> {
+  try {
+    const [row] = await db.insert(notification_sends).values({
+      user_id: input.userId,
+      kind: input.kind,
+      daily_slot: dailySlotFor(input.kind, input.at),
+      dedupe_key: input.dedupeKey,
+      monitored_job_id: input.monitoredJobId ?? null,
+      application_email_message_id: input.applicationEmailMessageId ?? null,
+      created_at: input.at,
+    }).returning({ id: notification_sends.id });
+    if (!row) return { reserved: false, reason: 'suppressed' };
+    return { reserved: true, id: row.id };
+  } catch (error) {
+    const suppression = suppressionFor(error);
+    if (suppression) return { reserved: false, reason: suppression };
+    throw error;
+  }
+}
+
+/** Stamp a reservation as actually delivered. `providerMessageId` is null for channels that
+ *  return no id of their own, which push does not. */
+export async function commitNotification(id: string, at: Date, providerMessageId: string | null): Promise<void> {
+  await db.update(notification_sends)
+    .set({ sent_at: at, provider_message_id: providerMessageId })
+    .where(eq(notification_sends.id, id));
+}
+
+/** Give the slot back, so the next run may try again. Best effort: the send error is the one worth
+ *  reporting, and a failure to release costs one notification rather than sending a duplicate. */
+export async function releaseNotification(id: string): Promise<void> {
+  await db.delete(notification_sends).where(eq(notification_sends.id, id)).catch(() => undefined);
+}
+
 export type NotificationSendDeps = {
   send?: (payload: OutboundEmail) => Promise<string>;
   now?: () => Date;
@@ -101,24 +154,8 @@ export async function sendNotification(
   }
   if (!link) return { sent: false, reason: 'unsubscribe_unavailable' };
 
-  let reservationId: string;
-  try {
-    const [row] = await db.insert(notification_sends).values({
-      user_id: input.userId,
-      kind: input.kind,
-      daily_slot: dailySlotFor(input.kind, at),
-      dedupe_key: input.dedupeKey,
-      monitored_job_id: input.monitoredJobId ?? null,
-      application_email_message_id: input.applicationEmailMessageId ?? null,
-      created_at: at,
-    }).returning({ id: notification_sends.id });
-    if (!row) return { sent: false, reason: 'suppressed' };
-    reservationId = row.id;
-  } catch (error) {
-    const suppression = suppressionFor(error);
-    if (suppression) return { sent: false, reason: suppression };
-    throw error;
-  }
+  const reservation = await reserveNotification({ ...input, at });
+  if (!reservation.reserved) return { sent: false, reason: reservation.reason };
 
   let providerMessageId: string;
   try {
@@ -126,14 +163,11 @@ export async function sendNotification(
   } catch (error) {
     /* Release, so tomorrow's run may try again. Deleting is deliberate rather than marking the row
        failed: a failure row would still hold the unique daily slot, which is the same as spending
-       it. The delete is best-effort because the send error is the one worth reporting. */
-    await db.delete(notification_sends).where(eq(notification_sends.id, reservationId)).catch(() => undefined);
+       it. */
+    await releaseNotification(reservation.id);
     throw error;
   }
 
-  await db.update(notification_sends)
-    .set({ sent_at: at, provider_message_id: providerMessageId })
-    .where(eq(notification_sends.id, reservationId));
-
-  return { sent: true, id: reservationId, provider_message_id: providerMessageId };
+  await commitNotification(reservation.id, at, providerMessageId);
+  return { sent: true, id: reservation.id, provider_message_id: providerMessageId };
 }

@@ -35,7 +35,33 @@ try {
       add column if not exists notify_strong_match_enabled boolean not null default false,
       add column if not exists notify_strong_match_granted_at timestamp with time zone,
       add column if not exists notify_employer_reply_enabled boolean not null default false,
-      add column if not exists notify_employer_reply_granted_at timestamp with time zone
+      add column if not exists notify_employer_reply_granted_at timestamp with time zone,
+      add column if not exists notify_activity_digest_enabled boolean not null default false,
+      add column if not exists notify_activity_digest_granted_at timestamp with time zone
+  `);
+
+  /* One browser on one device that has agreed to be interrupted. Per device rather than per
+     account, which is the shape of the Web Push standard: see the table comment in db/schema.ts.
+     The endpoint is the identity and the unique index on it is what stops a row per page load. */
+  await client.query(`
+    create table if not exists push_subscriptions (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid not null references users(id) on delete cascade,
+      endpoint text not null,
+      p256dh text not null,
+      auth text not null,
+      user_agent text,
+      created_at timestamp with time zone not null default now(),
+      last_success_at timestamp with time zone,
+      failure_count integer not null default 0
+    )
+  `);
+  await client.query(`
+    create unique index if not exists push_subscriptions_endpoint_unique
+      on push_subscriptions (endpoint)
+  `);
+  await client.query(`
+    create index if not exists push_subscriptions_user_idx on push_subscriptions (user_id)
   `);
 
   await client.query(`
@@ -71,7 +97,7 @@ try {
   `);
 
   await client.query('commit');
-  console.log('Notification preference columns and the notification_sends ledger are present.');
+  console.log('Notification preference columns, the notification_sends ledger and push_subscriptions are present.');
 } catch (error) {
   await client.query('rollback').catch(() => undefined);
   console.error(`Notification schema update failed: ${error instanceof Error ? error.message : 'unknown error'}`);
