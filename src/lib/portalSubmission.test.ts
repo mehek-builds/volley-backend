@@ -4319,6 +4319,21 @@ test('a Rippling posting URL maps to its /apply form, and an /apply URL passes t
   assert.equal(portalApplicationUrl('rippling', application), application);
 });
 
+/* Measured live 2026-08-20: a managed run sent to a bare Lever posting page filled nothing and
+   parked with "could not confirm it reached this company's application form". Every earlier Lever
+   send went through the extension, so the runner had never been handed this URL shape. The
+   mapping is bounded to the tenant-plus-uuid posting shape: a board root, a deeper path, or an
+   already-canonical /apply URL passes through unchanged. */
+test('a Lever posting URL maps to its /apply form, and everything else passes through', () => {
+  const posting = 'https://jobs.lever.co/dga/d93550cc-8533-4d4e-b0c1-ee6376a34843';
+  const application = `${posting}/apply`;
+  assert.equal(portalApplicationUrl('lever', posting), application);
+  assert.equal(portalApplicationUrl('lever', application), application);
+  assert.equal(portalApplicationUrl('lever', `${posting}/`), application);
+  const boardRoot = 'https://jobs.lever.co/dga';
+  assert.equal(portalApplicationUrl('lever', boardRoot), boardRoot);
+});
+
 test('Workable opens the exact application route and clears optional-cookie overlays before filling', () => {
   const posting = 'https://apply.workable.com/mercari/j/EC5A1078C4/';
   const application = 'https://apply.workable.com/mercari/j/EC5A1078C4/apply';
