@@ -3827,3 +3827,55 @@ test('a "select your school" label is classified, and its neighbours still are n
   assert.notEqual(classifyField('select your college major'), 'school');
   assert.equal(classifyField('select your college major'), 'major');
 });
+
+/* ---- one control, one answer, whatever the caller knows about its type ----
+ *
+ * Teamtailor welds the placeholder and the control's name attributes into the captured label, so
+ * its phone field arrives as "phone phone number with country code +1 201-555-0123
+ * candidate[phone] candidate_phone". Measured live on the Fully (6ba8fe3a) and Moburst (0e42235f)
+ * packets on 2026-08-20: the managed run resolves this control with its real inputType ('tel') and
+ * answers her phone, while refreshKnownQuestionAnswers and knownAnswerLookup hardcode 'text', where
+ * RESIDENCE_QUESTION's bare \bcountry\b matched inside the placeholder's "country code" and
+ * answered "United Arab Emirates". Two resolvers flipping one stored answer is the packet_stale
+ * deadlock by construction: the audit acknowledges the country, the run persists the phone, the
+ * send gate compares across the flip, and no re-audit can clear it because each side keeps
+ * recomputing its own value. Greenhouse packets sailed through the identical sequence because
+ * their labels carry no placeholder text. A label that ASKS FOR a phone number is the phone field
+ * under every type argument, which is what makes the constructor and the verifier converge.
+ */
+test('a phone-number label polluted with placeholder text is the phone field under any control type', () => {
+  const fully = 'phone phone number with country code +1 201-555-0123 candidate[phone] candidate_phone';
+  const moburst = 'phone* required phone number with country code +1 201-555-0123 candidate[phone] candidate_phone';
+  const ap: ApplicationProfileLike = { phone: '+12135746270', address_country: 'United Arab Emirates' };
+  for (const label of [fully, moburst]) {
+    assert.equal(classifyField(label), 'phone', label);
+    assert.equal(classifyField(label, 'tel'), 'phone', label);
+    assert.deepEqual(resolveKnownAnswer(label, 'text', ap, undefined), { value: '+12135746270' }, label);
+    assert.deepEqual(
+      resolveKnownAnswer(label, 'text', ap, undefined),
+      resolveKnownAnswer(label, 'tel', ap, undefined),
+      label,
+    );
+  }
+
+  /* The refresh is the audit constructor's resolver, so the answer the run wrote must SURVIVE it,
+   * or the next audit un-writes the fill. This is the exact stored shape of the live Fully row. */
+  const refreshed = refreshKnownQuestionAnswers(
+    [{ question: fully, answer: '+12135746270' }],
+    ap,
+    undefined,
+  );
+  assert.equal(refreshed[0].answer, '+12135746270');
+
+  /* What keeps this from being a bare keyword. A consent sentence MENTIONS the number without
+   * asking for it; a polar question asks ABOUT the phone rather than for it; someone else's
+   * number must never be answered with hers; a residence question is still residence; and a
+   * dial-code control asks for a code, not for the country she lives in. */
+  assert.equal(classifyField('i agree to receive sms text messages at the phone number provided'), null);
+  assert.equal(classifyField('may we contact you by phone?'), null);
+  assert.equal(classifyField("please provide your emergency contact's phone number"), null);
+  assert.equal(classifyField('country of residence'), 'address_country');
+  assert.equal(classifyField('which country do you currently reside in?'), 'address_country');
+  assert.equal(classifyField('country'), 'address_country');
+  assert.notEqual(classifyField('country code'), 'address_country');
+});

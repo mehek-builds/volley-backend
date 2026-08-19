@@ -219,3 +219,23 @@ test('packet audit is refused after a send is claimed, but not while a security 
     'awaiting_security_code must NOT be refused: the security-code route needs a current acknowledged audit and this is the only route that can produce one',
   );
 });
+
+/* ---- the raw packet_stale token never reaches an applicant surface ----
+ *
+ * Same class as the fixed banner bug: verifyCurrentPacketAudit's reasons are developer tokens
+ * (packet_stale, owner_mismatch, application_mismatch, packet_audit_invalid), and on 2026-08-20
+ * the runner wrote one into attention_reason on the live Moburst packet, so the dashboard printed
+ * the bare word "packet_stale" with nothing actionable beside it. Every surface an applicant
+ * reads goes through packetAuditClientError, which serves the authored sentence and never the
+ * token. The verdict keeps the token for logs and for the tests that pin it.
+ */
+test('packet audit failures reach applicant surfaces only as authored sentences', () => {
+  // The runner's writes into attention_reason.
+  assert.doesNotMatch(runner, /attention_reason:\s*packetAudit\.reason/);
+  assert.doesNotMatch(runner, /\$\{packetAudit\.reason\}/);
+  assert.match(runner, /attention_reason:\s*packetAuditClientError\(packetAudit\)\.error/);
+  // The three HTTP boundaries in applications.ts that replied with the raw reason.
+  assert.doesNotMatch(applications, /error:\s*outcomeAudit\.reason/);
+  assert.doesNotMatch(applications, /error:\s*securityCodeAudit\.reason/);
+  assert.doesNotMatch(applications, /approvalIssues\.push\(approvalAudit\.reason\)/);
+});
