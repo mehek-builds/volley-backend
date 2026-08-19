@@ -94,6 +94,88 @@ describe('Litos entitlement resolver', () => {
     assert.equal(expired.features.automatic_submission, false);
   });
 
+  test('a Stripe trial dates its window from the subscription, not the account', () => {
+    /* The account row carries no trial at all once signup stops granting one, so the
+       old created_at + 7 days fallback would date the window from the ACCOUNT. A
+       student who signs up, walks setup for ten days and only then enters a card would
+       be told the trial ended on day 8 -- expired two days before Stripe began it --
+       and `active` would read false while they are genuinely trialling. */
+    const snapshot = buildEntitlementSnapshot({
+      user: user({
+        trial_started_at: null,
+        trial_ends_at: null,
+        created_at: new Date('2026-08-01T00:00:00.000Z'),
+      }),
+      subscription: {
+        provider: 'stripe',
+        status: 'trialing',
+        term_code: 'month',
+        cancel_at_period_end: false,
+        current_period_start: new Date('2026-08-11T00:00:00.000Z'),
+        current_period_end: new Date('2026-08-18T00:00:00.000Z'),
+        access_ends_at: null,
+        provider_customer_id: 'cus_trialing',
+      },
+      now: new Date('2026-08-12T00:00:00.000Z'),
+    });
+    assert.equal(snapshot.access_class, 'trial_plus');
+    assert.equal(snapshot.trial?.starts_at, '2026-08-11T00:00:00.000Z');
+    assert.equal(snapshot.trial?.ends_at, '2026-08-18T00:00:00.000Z');
+    assert.equal(snapshot.trial?.active, true);
+  });
+
+  test('a Stripe trial is the metered trial, not an unmetered purchase', () => {
+    /* The trial moved onto the subscription when it started requiring a card, so
+       `trialing` is now a state a real subscription sits in. It must resolve to
+       trial_plus: plus_paid is unmetered, and reading a trialling account as paid
+       would hand it unlimited generation while the pricing page, the FAQ, and
+       every upgrade prompt still say 5 resumes, 5 cover letters, 5 applications.
+       The account row itself carries no trial any more -- signup stopped granting
+       one -- so the subscription is the only thing that can say "on trial", which
+       is exactly why this branch has to exist. */
+    const row = user({ trial_started_at: null, trial_ends_at: null });
+    const subscription = {
+      provider: 'stripe',
+      status: 'trialing',
+      term_code: 'month',
+      cancel_at_period_end: false,
+      current_period_start: new Date('2026-08-14T00:00:00.000Z'),
+      current_period_end: new Date('2026-08-21T00:00:00.000Z'),
+      access_ends_at: null,
+      provider_customer_id: 'cus_trialing',
+    };
+    assert.equal(resolveAccessClass({
+      user: row,
+      subscription,
+      now: new Date('2026-08-16T00:00:00.000Z'),
+    }), 'trial_plus');
+    // The same subscription once it converts is the unmetered product.
+    assert.equal(resolveAccessClass({
+      user: row,
+      subscription: { ...subscription, status: 'active' },
+      now: new Date('2026-08-16T00:00:00.000Z'),
+    }), 'plus_paid');
+  });
+
+  test('a trial already granted under the old signup grant still runs to its own boundary', () => {
+    /* The migration safety net. Accounts created before the card requirement hold
+       a real trial_ends_at, and removing the signup grant must not reach back and
+       cut those short: they keep trial_plus until their exact boundary, then fall
+       to Free like everyone else. Nothing new grants these columns, so this set
+       only ever shrinks. */
+    const row = user({
+      trial_started_at: new Date('2026-08-14T00:00:00.000Z'),
+      trial_ends_at: new Date('2026-08-21T00:00:00.000Z'),
+    });
+    assert.equal(resolveAccessClass({ user: row, now: new Date('2026-08-20T23:59:59.999Z') }), 'trial_plus');
+    assert.equal(resolveAccessClass({ user: row, now: new Date('2026-08-21T00:00:00.000Z') }), 'free_new');
+  });
+
+  test('a brand-new account created after the change starts on Free, not on trial', () => {
+    const row = user({ trial_started_at: null, trial_ends_at: null });
+    assert.equal(resolveAccessClass({ user: row, now: new Date('2026-08-14T00:00:01.000Z') }), 'free_new');
+  });
+
   test('never lets a stale legacy plan projection override an inactive v2 subscription', () => {
     const row = user({
       plan: 'pro',

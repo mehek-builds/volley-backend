@@ -55,6 +55,8 @@ export async function createStripeCheckoutSessionV2(input: {
   surface?: 'website' | 'dashboard' | 'extension' | 'api';
   existingCustomerId?: string | null;
   expiresAt: Date;
+  /** Days of Stripe trial to attach. Omit or pass 0 to charge immediately. */
+  trialDays?: number | null;
   fetchImpl?: typeof fetch;
 }): Promise<StripeCheckoutV2 | null> {
   const secretKey = env('STRIPE_SECRET_KEY');
@@ -119,6 +121,21 @@ export async function createStripeCheckoutSessionV2(input: {
     body.set(`subscription_data[metadata][${key}]`, value);
   }
   body.set('allow_promotion_codes', 'true');
+  /* The trial moved here from signup. It used to be seven days written onto the
+     user row by whichever route created the account, which granted Litos+
+     against no payment method; it is now a Stripe trial on a real subscription,
+     so the card is collected before the trial starts and the subscription
+     converts on its own when the trial ends.
+     `payment_method_collection=always` is the half that does the actual work:
+     without it Stripe SKIPS card collection whenever a trial makes the first
+     invoice $0, which would put us straight back to a card-free trial through a
+     different door. A first-time buyer only gets the trial days; someone who
+     already spent a trial is charged immediately, which is what the
+     once-per-account gate in routes/billing.ts decides before calling this. */
+  if (input.trialDays && input.trialDays > 0) {
+    body.set('subscription_data[trial_period_days]', String(Math.floor(input.trialDays)));
+  }
+  body.set('payment_method_collection', 'always');
   if (env('STRIPE_AUTOMATIC_TAX_ENABLED') === 'true') body.set('automatic_tax[enabled]', 'true');
   const response = await stripeFetch('https://api.stripe.com/v1/checkout/sessions', {
     method: 'POST',
