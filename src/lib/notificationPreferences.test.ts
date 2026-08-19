@@ -9,11 +9,14 @@ import {
   notificationPreferencesFrom,
 } from './notificationPreferences';
 
-test('the kinds are a closed list, and it is the two questions screen 08 asks', () => {
+test('the kinds are a closed list, and every one is a thing that happened', () => {
   /* Pinned as a value rather than as a shape. The Guardrails ban streaks and daily-login rewards
      outright, and a notification subsystem is the machinery somebody reaches for to build one, so
-     a third kind appearing here should read as a deliberate edit in a diff and not as a detail. */
-  assert.deepEqual([...NOTIFICATION_KINDS], ['strong_match', 'employer_reply']);
+     a new kind appearing here should read as a deliberate edit in a diff and not as a detail.
+     `activity_digest` was added 2026-08-19, reversing the original no-digest rule. It survives the
+     Guardrails because it is a DELTA: it reports events since the last one and is silent when
+     nothing happened, rather than counting consecutive days or restating a backlog. */
+  assert.deepEqual([...NOTIFICATION_KINDS], ['strong_match', 'employer_reply', 'activity_digest']);
   assert.equal(isNotificationKind('strong_match'), true);
   assert.equal(isNotificationKind('weekly_digest'), false);
   assert.equal(isNotificationKind(''), false);
@@ -21,6 +24,9 @@ test('the kinds are a closed list, and it is the two questions screen 08 asks', 
 
 test('one a day caps the match alert and deliberately does not cap an employer reply', () => {
   assert.equal(DAILY_CAP.strong_match, 1);
+  /* Capped for a second reason on top of politeness: the digest reports what changed SINCE THE LAST
+     ONE, so a second one in a day would cover a few hours and report almost nothing. */
+  assert.equal(DAILY_CAP.activity_digest, 1);
   assert.equal(DAILY_CAP.employer_reply, null, 'holding somebody mail because they already had an alert is not politeness');
 });
 
@@ -44,6 +50,7 @@ test('absent columns read as nothing switched on', () => {
   assert.deepEqual(preferences, {
     strong_match: { enabled: false, granted_at: null },
     employer_reply: { enabled: false, granted_at: null },
+    activity_digest: { enabled: false, granted_at: null },
   });
   assert.deepEqual(notificationPreferencesFrom({}), preferences);
 });
@@ -60,6 +67,7 @@ test('a stored grant is reported with the date it was given', () => {
     {
       strong_match: { enabled: true, granted_at: '2026-08-19T09:30:00.000Z' },
       employer_reply: { enabled: false, granted_at: null },
+      activity_digest: { enabled: false, granted_at: null },
     },
   );
 });
