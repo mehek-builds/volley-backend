@@ -607,7 +607,17 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // their monthly allowance, and paid plans retain the existing high safety ceiling.
     const ent = await getEntitlements(userId);
     const period = monthPeriod();
-    const useLegacyMonthlyCounter = usesLegacyMonthlyProductQuota(featureVerdict.snapshot);
+    /* THE GRANT CLEARS THE METERS TOO, and it has to, or it grants nothing.
+     *
+       A free account's allowance is zero, so an account that just took its one free build would be
+       refused here instead - "You've used your 0 free resume generations this month", which is a
+       sentence about a limit rather than about the build the student was promised. Measured against
+       production after the entitlement gate was opened: the flow moved from one 402 to another.
+
+       The grant is itself the allowance for this one request. It is capped at one per account by
+       the claim, so skipping the meter cannot become an unmetered path: a second build finds the
+       grant already spent and lands back on these same checks. */
+    const useLegacyMonthlyCounter = !grantClaimed && usesLegacyMonthlyProductQuota(featureVerdict.snapshot);
     if (useLegacyMonthlyCounter) {
       const usedResumes = await getCount(userId, period, 'resumes');
       if (usedResumes >= ent.monthlyResumes) {
@@ -628,13 +638,25 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       applicationId: reservationScope,
     });
     if (!entitlementReservation.allowed) {
-      return reply.status(402).send(entitlementReservation.denial);
-    }
-    if (entitlementReservation.replay) {
+      /* The grant covers the reservation as well as the feature check. A free account has no units
+         to reserve, so refusing here would take back with one hand exactly what the claim just gave
+         with the other. The one-per-account cap still holds: the claim is what is capped, and a
+         second build finds it spent and lands on this denial like anyone else. */
+      if (!grantClaimed) return reply.status(402).send(entitlementReservation.denial);
+    } else if (entitlementReservation.replay) {
       return reply.status(entitlementReservation.replay.statusCode).send(
         await refreshedResumeReplay(request, userId, entitlementReservation.replay.body),
       );
     }
+    /* THE RESERVATION ID, OR NOTHING WHEN THE GRANT PAID FOR THIS BUILD.
+     *
+       A granted build reserves no units, because a free account has none to reserve. So there is
+       nothing to release on failure and nothing to commit on success, and the calls below are
+       no-ops rather than special cases scattered through a thousand lines of handler. */
+    const reservationId = entitlementReservation.allowed ? entitlementReservation.reservationId : null;
+    const releaseReservation = async () => {
+      if (reservationId) await releaseEntitledUsage(reservationId);
+    };
     let entitlementUsageCommitted = false;
 
     try {
@@ -1161,7 +1183,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ? await claimCounterSlot(userId, period, 'resumes', ent.monthlyResumes)
       : 0;
     if (useLegacyMonthlyCounter && reservedCount === null) {
-      await releaseEntitledUsage(entitlementReservation.reservationId);
+      await releaseReservation();
       const currentCount = await getCount(userId, period, 'resumes');
       return reply.status(402).send(quotaExceededPayload(ent, currentCount, 'resumes'));
     }
@@ -1195,7 +1217,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     } catch (err) {
       fastify.log.error(err);
       if (useLegacyMonthlyCounter) await releaseCounterSlot(userId, period, 'resumes');
-      await releaseEntitledUsage(entitlementReservation.reservationId);
+      await releaseReservation();
       return reply.status(500).send({ error: 'Failed to store generated resume' });
     }
 
@@ -1386,7 +1408,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       persisted = true;
     } catch (err) {
       fastify.log.error(err);
-      await releaseEntitledUsage(entitlementReservation.reservationId);
+      await releaseReservation();
       if (useLegacyMonthlyCounter) await releaseCounterSlot(userId, period, 'resumes');
       /* `|| applicationEmail` is not decoration. The alias row is a foreign key onto this row, so a
        * lost packet means the portal identity frozen beside the PDF can never exist and employer
@@ -1503,17 +1525,22 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         created_at: now,
       } : undefined,
     };
-    await commitEntitledUsage(
-      entitlementReservation.reservationId,
-      1,
-      new Date(),
-      { statusCode: 200, body: successResponse },
-    );
+    /* Nothing to commit when the grant paid for this build: there was no reservation to draw down.
+       The grant's own record is the stamp taken at the top of the handler, which by reaching here
+       is correctly spent - this is the success path. */
+    if (reservationId) {
+      await commitEntitledUsage(
+        reservationId,
+        1,
+        new Date(),
+        { statusCode: 200, body: successResponse },
+      );
+    }
     entitlementUsageCommitted = true;
     return reply.status(200).send(successResponse);
     } finally {
       if (!entitlementUsageCommitted) {
-        await releaseEntitledUsage(entitlementReservation.reservationId);
+        await releaseReservation();
       }
     }
   });
