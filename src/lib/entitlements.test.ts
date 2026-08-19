@@ -94,6 +94,36 @@ describe('Litos entitlement resolver', () => {
     assert.equal(expired.features.automatic_submission, false);
   });
 
+  test('a Stripe trial dates its window from the subscription, not the account', () => {
+    /* The account row carries no trial at all once signup stops granting one, so the
+       old created_at + 7 days fallback would date the window from the ACCOUNT. A
+       student who signs up, walks setup for ten days and only then enters a card would
+       be told the trial ended on day 8 -- expired two days before Stripe began it --
+       and `active` would read false while they are genuinely trialling. */
+    const snapshot = buildEntitlementSnapshot({
+      user: user({
+        trial_started_at: null,
+        trial_ends_at: null,
+        created_at: new Date('2026-08-01T00:00:00.000Z'),
+      }),
+      subscription: {
+        provider: 'stripe',
+        status: 'trialing',
+        term_code: 'month',
+        cancel_at_period_end: false,
+        current_period_start: new Date('2026-08-11T00:00:00.000Z'),
+        current_period_end: new Date('2026-08-18T00:00:00.000Z'),
+        access_ends_at: null,
+        provider_customer_id: 'cus_trialing',
+      },
+      now: new Date('2026-08-12T00:00:00.000Z'),
+    });
+    assert.equal(snapshot.access_class, 'trial_plus');
+    assert.equal(snapshot.trial?.starts_at, '2026-08-11T00:00:00.000Z');
+    assert.equal(snapshot.trial?.ends_at, '2026-08-18T00:00:00.000Z');
+    assert.equal(snapshot.trial?.active, true);
+  });
+
   test('a Stripe trial is the metered trial, not an unmetered purchase', () => {
     /* The trial moved onto the subscription when it started requiring a card, so
        `trialing` is now a state a real subscription sits in. It must resolve to

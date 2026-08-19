@@ -464,6 +464,16 @@ describe('the card gate on the dashboard', () => {
     }, GATE), false);
   });
 
+  test('a guest is never gated, because a gated guest cannot pay', () => {
+    /* /billing/checkout refuses a guest outright, so gating one leaves it redirected to
+       a plan screen whose only button 409s: no way in, no way back. Guests are a
+       Free-tier session by design now, so they pass. */
+    assert.equal(requiresPaymentMethodFor({ created_at: after, is_guest: true }, GATE), false);
+    // ...and a non-guest in the same position is still gated, so this is an exemption
+    // rather than the gate quietly failing open.
+    assert.equal(requiresPaymentMethodFor({ created_at: after, is_guest: false }, GATE), true);
+  });
+
   test('a customer id without the Stripe provider is not a card', () => {
     /* Both halves are required. A stale customer id left by another provider, or a
        provider set with no customer, is not evidence that Stripe took a card. */

@@ -608,7 +608,20 @@ export async function billingRoutes(fastify: FastifyInstance) {
         portal_url: '/billing/portal',
       });
     }
-    if (snapshot.access_class === 'plus_paid' || snapshot.access_class === 'legacy_paid') {
+    /* A TRIAL ON A SUBSCRIPTION IS ALSO "already has it", and it has to be named here
+       explicitly now. This guard used to catch a trialling account for free: a Stripe
+       subscription in `trialing` satisfies subscriptionGrantsPlus, so it resolved to
+       plus_paid and fell inside the first clause. It resolves to trial_plus since the
+       trial moved onto the subscription, and without the third clause a student mid
+       trial who opens /pricing and picks a plan gets a SECOND subscription on the same
+       Stripe customer -- billed twice, while chooseCanonicalAccountSubscription shows
+       one healthy subscription and hides it.
+       Converting a trial early is a change to the subscription that already exists, not
+       a second checkout, which is what the portal link is for. */
+    const holdsLitosPlus = snapshot.access_class === 'plus_paid'
+      || snapshot.access_class === 'legacy_paid'
+      || snapshot.subscription?.status === 'trialing';
+    if (holdsLitosPlus) {
       return reply.status(409).send({ error: 'This account already has Litos+.', code: 'already_plus', portal_url: '/billing/portal' });
     }
     if (!billingCheckoutAvailable()) {

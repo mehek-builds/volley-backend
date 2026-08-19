@@ -338,8 +338,21 @@ export function buildEntitlementSnapshot(input: {
       management_available: Boolean(input.user.billing_customer_id),
     }
     : null;
-  const trialStart = input.user.trial_started_at ?? input.user.created_at ?? now;
-  const trialEnd = input.user.trial_ends_at ?? new Date(trialStart.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
+  /* WHERE THE TRIAL WINDOW COMES FROM, and it is no longer always the user row.
+     A trial granted at signup wrote trial_started_at/trial_ends_at; a trial that lives
+     on a Stripe subscription writes neither, so falling back to created_at + 7 days
+     would date the window from the ACCOUNT rather than from the trial. A student who
+     signs up, walks setup over a fortnight and enters a card on day 10 would be told
+     their trial ended on day 8 -- expired two days before Stripe started it -- and
+     `active` would read false while they are genuinely trialling and paying for it.
+     The subscription carries the true boundary: for a trialling subscription Stripe's
+     current_period_end IS the trial end, which is already what subscriptionGrantsPlus
+     measures against. */
+  const subscriptionTrial = subscription?.status === 'trialing' ? subscription : null;
+  const trialStart = subscriptionTrial?.current_period_start
+    ?? input.user.trial_started_at ?? input.user.created_at ?? now;
+  const trialEnd = subscriptionTrial?.current_period_end
+    ?? input.user.trial_ends_at ?? new Date(trialStart.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
   const companyUsage = input.companyUsage ?? [];
   return {
     schema_version: 2,

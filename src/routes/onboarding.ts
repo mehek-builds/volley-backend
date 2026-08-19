@@ -153,11 +153,24 @@ export function cardGateInstant(env: NodeJS.ProcessEnv = process.env): number | 
  * that important should be readable and testable without standing up a request.
  */
 export function requiresPaymentMethodFor(
-  user: { billing_provider?: string | null; billing_customer_id?: string | null; created_at?: Date | null },
+  user: {
+    billing_provider?: string | null;
+    billing_customer_id?: string | null;
+    created_at?: Date | null;
+    is_guest?: boolean | null;
+  },
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   const from = cardGateInstant(env);
   if (from === null) return false;
+  /* GUESTS ARE EXEMPT, because gating them is not a gate, it is a brick wall.
+     /billing/checkout refuses a guest outright ("Verify an email before starting
+     checkout"), so a gated guest is redirected to /start, handed the plan screen, and
+     the only control on it returns 409. No path forward, no way back to the dashboard,
+     and Guest mode is a button on the front of /login. Guests are a Free-tier session
+     by design now -- they get no trial either -- so letting them through is the
+     behaviour that matches the product rather than a hole in the gate. */
+  if (user.is_guest) return false;
   if (!user.created_at || user.created_at.getTime() < from) return false;
   const paymentMethodOnFile = user.billing_provider === 'stripe' && Boolean(user.billing_customer_id);
   return !paymentMethodOnFile;
@@ -777,7 +790,12 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const gatedStep = requiresPaymentMethod && step === 'done' ? 'plan' : step;
     /* The rail's denominator for the application half, so the client never re-derives it. Same
        rule as includes_gaps_step: the server owns which screens this student's flow contains. */
-    const includesApplicationSteps = inApplicationSequence;
+    /* ...and the rail has to CONTAIN the screen being drawn. `plan` is one of the
+       conditional application steps, so serving it while includes_application_steps is
+       false hands StepRail a key its list does not have; findIndex returns -1 and the
+       rail draws with no position at all, which is the exact failure #285 documents.
+       Reachable whenever the gate catches an account that already finished setup. */
+    const includesApplicationSteps = inApplicationSequence || gatedStep !== step;
 
     return reply.status(200).send({
       step: gatedStep,
