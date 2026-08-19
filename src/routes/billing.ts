@@ -10,9 +10,9 @@ import {
   pricing_offers,
   users,
 } from '../db/schema';
-import { and, eq, gt, inArray, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, lte, sql } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
-import { getEntitlements, getCount, monthPeriod, upgradeUrl } from '../middleware/quota';
+import { allowHourly, getEntitlements, getCount, monthPeriod, rateLimitedReply, upgradeUrl } from '../middleware/quota';
 import {
   buildLitosCheckoutIntent,
   eventFromPaidCheckout,
@@ -46,6 +46,7 @@ import {
   createStripeCheckoutSessionV2,
   parseStripeBillingEvent,
   retrieveStripeBillingAuthority,
+  retrieveStripeCheckoutForReconcile,
   retrieveStripeChargeBillingContext,
   secureLegacyBillingPortalUrl,
 } from '../lib/stripeBilling';
@@ -457,6 +458,93 @@ export async function billingRoutes(fastify: FastifyInstance) {
       },
       entitlements: snapshot,
       ...(upgradeLink && ent.tier !== 'pro' ? { upgrade_url: upgradeLink } : {}),
+    });
+  });
+
+  /**
+   * Reconcile a finished Stripe checkout without waiting to be told about it.
+   *
+   * THE STUCK LOOP THIS ENDS. Paid state was written only by the webhook, so the
+   * browser could easily beat it home: Stripe redirects the moment the card is
+   * accepted, the return page reads an account that still says Free, and the
+   * student who has just subscribed is shown the plan screen again. With no free
+   * escape on that screen (by design) there is no way out of the loop, and if the
+   * webhook is misconfigured rather than merely slow it never resolves at all.
+   * That is not hypothetical: production answered 503 to every Stripe event on
+   * 2026-08-19 because STRIPE_WEBHOOK_SECRET was not a whsec_ value, and nothing
+   * in the product could tell.
+   *
+   * A webhook is best effort by nature. The return path now asks Stripe what
+   * happened instead of hoping it was told, which makes the webhook a backstop
+   * rather than the only writer.
+   *
+   * IT IS STILL THE SAME WRITER. This parses the live subscription into the exact
+   * event shape the webhook produces and hands it to applyStripeSubscriptionChange,
+   * so there is one place that projects Stripe state onto an account. A second
+   * writer here would be two implementations of the most consequential update in
+   * the product, free to disagree.
+   *
+   * Ownership is proved, not assumed. The offer is looked up scoped to the caller,
+   * and the session must carry that offer as its client_reference_id and the
+   * caller as litos_user_id. A session id arriving through the browser is
+   * attacker-supplied until Stripe and our own row agree on whose it is.
+   */
+  fastify.post('/billing/reconcile', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const { userId, isGuest } = request.jwtPayload!;
+    if (isGuest) {
+      return reply.status(409).send({ error: 'Verify an email before starting checkout.', code: 'claim_required' });
+    }
+    // This calls Stripe, so it is metered. Generous enough for a real return
+    // (which reconciles once) and tight enough that it is not a free proxy.
+    if (!await allowHourly(`user:${userId}`, 'billing-reconcile', 30)) return rateLimitedReply(reply);
+
+    const body = jsonBody<{ offer_id?: unknown }>(request.body) ?? {};
+    const requestedOfferId = typeof body.offer_id === 'string' ? body.offer_id : null;
+
+    const offers = await db.select().from(pricing_offers).where(and(
+      eq(pricing_offers.user_id, userId),
+      ...(requestedOfferId ? [eq(pricing_offers.id, requestedOfferId)] : []),
+    )).orderBy(desc(pricing_offers.created_at)).limit(requestedOfferId ? 1 : 5);
+
+    const offer = offers.find((row) => typeof row.provider_checkout_id === 'string' && row.provider_checkout_id);
+    if (!offer?.provider_checkout_id) {
+      return reply.status(200).send({ reconciled: false, reason: 'no_checkout' });
+    }
+
+    const pair = await retrieveStripeCheckoutForReconcile({ sessionId: offer.provider_checkout_id });
+    // An abandoned or still-open session is the ordinary case, not a failure.
+    if (!pair) return reply.status(200).send({ reconciled: false, reason: 'not_complete' });
+
+    const sessionOfferId = typeof pair.session.client_reference_id === 'string' ? pair.session.client_reference_id : null;
+    const sessionUserId = typeof pair.session.metadata?.litos_user_id === 'string' ? pair.session.metadata.litos_user_id : null;
+    if (sessionOfferId !== offer.id || sessionUserId !== userId) {
+      fastify.log.error({ offerId: offer.id }, 'Stripe session did not match the offer it was stored on');
+      return reply.status(409).send({ error: 'Checkout did not match this account.', code: 'checkout_mismatch' });
+    }
+
+    /* The webhook's own shape, so the webhook's own applier can take it. The
+       synthetic id is namespaced and carries the subscription's status, so
+       repeating a reconcile is a no-op through the billing_webhook_events key
+       while a genuine status change still applies, and it can never collide with
+       a real Stripe event id. */
+    const parsed = parseStripeSubscriptionChanged({
+      id: `reconcile_${pair.subscription.id}_${pair.subscription.status}`,
+      type: 'customer.subscription.created',
+      created: Math.floor(Date.now() / 1000),
+      livemode: pair.subscription.livemode === true,
+      data: { object: pair.subscription },
+    });
+    if (!parsed) {
+      fastify.log.error({ offerId: offer.id }, 'live Stripe subscription did not parse into a billing event');
+      return reply.status(200).send({ reconciled: false, reason: 'unparseable' });
+    }
+
+    await applyStripeSubscriptionChange(parsed, userId);
+    const snapshot = await getEntitlementSnapshot(userId);
+    return reply.header('Cache-Control', 'private, no-store').status(200).send({
+      reconciled: true,
+      access_class: snapshot.access_class,
+      entitlements: snapshot,
     });
   });
 

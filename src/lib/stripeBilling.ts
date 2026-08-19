@@ -445,18 +445,59 @@ function invoicePaymentIntentId(object: any): string | null {
 }
 
 async function stripeRetrieveObject(input: {
-  kind: 'subscriptions' | 'invoices' | 'charges' | 'disputes';
+  kind: 'subscriptions' | 'invoices' | 'charges' | 'disputes' | 'checkout/sessions';
   id: string;
   fetchImpl: typeof fetch;
   secretKey: string;
 }): Promise<Record<string, any> | null> {
   const response = await input.fetchImpl(
-    `https://api.stripe.com/v1/${input.kind}/${encodeURIComponent(input.id)}`,
+    `https://api.stripe.com/v1/${input.kind}/${encodeURIComponent(input.id)}`,  // kind is a fixed literal, never user input
     { headers: { authorization: `Bearer ${input.secretKey}` } },
   );
   if (!response.ok) return null;
   const value = await response.json();
   return value && typeof value === 'object' ? value as Record<string, any> : null;
+}
+
+/**
+ * The authoritative read behind checkout reconciliation.
+ *
+ * WHY THIS EXISTS AT ALL. Everything that records a purchase used to arrive by
+ * webhook, and a webhook is best effort: it can lag the browser redirect by
+ * seconds, it can be retried for minutes after a 5xx, and if its signing secret
+ * is wrong it never lands at all. Meanwhile the student is already back on the
+ * site, having just handed over a card, being asked to buy the thing they just
+ * bought. So the return path stops waiting to be told and asks Stripe directly.
+ *
+ * The session is retrieved rather than trusted from the URL: `session_id` comes
+ * back through the browser, so it is attacker-supplied until Stripe confirms it.
+ * The caller still has to bind it to an account -- this returns the raw pair and
+ * refuses to guess whose they are.
+ *
+ * Null means "nothing to reconcile", not "error": an abandoned or expired
+ * session is the ordinary case and must not read as a failure.
+ */
+export async function retrieveStripeCheckoutForReconcile(input: {
+  sessionId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<{ session: Record<string, any>; subscription: Record<string, any> } | null> {
+  const secretKey = env('STRIPE_SECRET_KEY');
+  if (!secretKey || !input.sessionId.startsWith('cs_')) return null;
+  const stripeFetch = input.fetchImpl ?? fetch;
+  const session = await stripeRetrieveObject({
+    kind: 'checkout/sessions', id: input.sessionId, fetchImpl: stripeFetch, secretKey,
+  });
+  if (!session || scalar(session.id) !== input.sessionId) return null;
+  // Only a finished session may move an account. `open` is still in progress and
+  // `expired` never completed.
+  if (scalar(session.status) !== 'complete') return null;
+  const subscriptionId = scalar(session.subscription?.id) || scalar(session.subscription);
+  if (!subscriptionId?.startsWith('sub_')) return null;
+  const subscription = await stripeRetrieveObject({
+    kind: 'subscriptions', id: subscriptionId, fetchImpl: stripeFetch, secretKey,
+  });
+  if (!subscription || scalar(subscription.id) !== subscriptionId) return null;
+  return { session, subscription };
 }
 
 export async function retrieveStripeBillingAuthority(input: {
