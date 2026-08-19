@@ -5,11 +5,14 @@ import {
   buildManagedPortalActions,
   canonicalSupportedPortalUrl,
   detectPortal,
+  MANAGED_CONSENT_TICK_GUARD_LABEL,
+  MANAGED_CONSENT_TICK_LABEL_PREFIX,
   portalApplicationUrl,
   portalCanAutoSubmit,
   portalHandoffReason,
   readManagedReceipt,
 } from './portalSubmission';
+import { AUTOMATIC_CONSENT_ACCEPTANCE_VERSION } from './automationConsent';
 
 const packet = {
   fullName: 'Taylor Example',
@@ -139,6 +142,93 @@ test('discovery is fill-only and every new family is barred from automatic final
     const requestedSubmit = buildManagedPortalActions(family, packet, true);
     assert.equal(requestedSubmit.some((action) => action.type === 'click' && !action.label), false);
   }
+});
+
+/* ---- the grant-conditional consent tick, Pinpoint side ---- */
+
+const PINPOINT_CONSENT_SELECTOR = 'input[name="application_form[application][process_information]"]';
+const grantedProfile = {
+  consent_acknowledgement_permission: {
+    granted_at: '2026-08-12T09:15:00.000Z',
+    version: AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
+  },
+};
+const pinpointConsentQuestion = {
+  question: 'I consent to the processing of my personal data in accordance with the privacy policy.',
+  answer: 'Yes',
+  answerSource: 'consent_permission',
+  portalSelector: PINPOINT_CONSENT_SELECTOR,
+  portalInputType: 'checkbox',
+};
+
+test('with the grant and the recorded acceptance, Pinpoint ticks its privacy consent once, guarded, then submits', () => {
+  const actions = buildManagedPortalActions('pinpoint', {
+    ...packet,
+    applicationProfile: grantedProfile,
+    questions: [pinpointConsentQuestion],
+  }, true);
+  const ticks = actions.filter((action) => action.type === 'click'
+    && action.label?.startsWith(`${MANAGED_CONSENT_TICK_LABEL_PREFIX}:`));
+  assert.equal(ticks.length, 1);
+  assert.equal(ticks[0].selector, PINPOINT_CONSENT_SELECTOR);
+  assert.equal(ticks[0].optional, false);
+  assert.equal(ticks[0].requireUnique, true);
+  const guardIndex = actions.findIndex((action) => action.label === MANAGED_CONSENT_TICK_GUARD_LABEL);
+  const tickIndex = actions.indexOf(ticks[0]);
+  assert.ok(guardIndex >= 0 && guardIndex < tickIndex, 'honeypot guard precedes the tick');
+  assert.equal(actions[guardIndex].requireVisible, true);
+  assert.equal(actions[guardIndex].requireUnique, true);
+  assert.equal(actions[guardIndex].optional, false);
+  const submits = actions.filter((action) => action.type === 'confirmAndSubmit');
+  assert.equal(submits.length, 1);
+  assert.equal(actions.indexOf(submits[0]), tickIndex + 1);
+  // The reviewed-question loop must not also touch the control - a check plus the tick's toggle
+  // would leave it unticked under a submit.
+  assert.deepEqual(
+    actions.filter((action) => action.selector?.includes('process_information')
+      || action.text?.includes('processing of my personal data')),
+    [actions[guardIndex], ticks[0]],
+  );
+});
+
+test('Pinpoint without the grant, with a held declaration, or with two consent-shaped controls stays parked', () => {
+  // No grant: no tick, no submit - the exact behaviour the family had before the grant existed.
+  const noGrant = buildManagedPortalActions('pinpoint', { ...packet, questions: [pinpointConsentQuestion] }, true);
+  assert.doesNotMatch(JSON.stringify(noGrant), /process_information/);
+  assert.equal(noGrant.some((action) => action.type === 'confirmAndSubmit'), false);
+
+  // A held declaration wearing the consent control's name is vetoed by the classifier's law.
+  const held = buildManagedPortalActions('pinpoint', {
+    ...packet,
+    applicationProfile: grantedProfile,
+    questions: [{
+      ...pinpointConsentQuestion,
+      question: 'I certify that the information provided in this application is true and I authorize a background check.',
+    }],
+  }, true);
+  assert.equal(held.some((action) => action.label?.startsWith(`${MANAGED_CONSENT_TICK_LABEL_PREFIX}:`)), false);
+  assert.equal(held.some((action) => action.type === 'confirmAndSubmit'), false);
+
+  // Both captured name spellings present at once is two consent-shaped controls: park, not guess.
+  const ambiguous = buildManagedPortalActions('pinpoint', {
+    ...packet,
+    applicationProfile: grantedProfile,
+    questions: [
+      pinpointConsentQuestion,
+      { ...pinpointConsentQuestion, portalSelector: 'input[name="application[process_information]"]' },
+    ],
+  }, true);
+  assert.equal(ambiguous.some((action) => action.label?.startsWith(`${MANAGED_CONSENT_TICK_LABEL_PREFIX}:`)), false);
+  assert.equal(ambiguous.some((action) => action.type === 'confirmAndSubmit'), false);
+
+  // Personio's bar is not a consent, so the grant moves nothing there.
+  const personio = buildManagedPortalActions('personio', {
+    ...packet,
+    applicationProfile: grantedProfile,
+    questions: [pinpointConsentQuestion],
+  }, true);
+  assert.equal(personio.some((action) => action.label?.startsWith(`${MANAGED_CONSENT_TICK_LABEL_PREFIX}:`)), false);
+  assert.equal(personio.some((action) => action.type === 'confirmAndSubmit'), false);
 });
 
 test('receipt proof accepts provider confirmation fixtures and rejects an open form', () => {

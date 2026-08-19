@@ -3,11 +3,15 @@ import test from 'node:test';
 import {
   buildManagedPortalActions,
   detectPortal,
+  MANAGED_CONSENT_TICK_GUARD_LABEL,
+  MANAGED_CONSENT_TICK_LABEL_PREFIX,
+  managedConsentTickPlan,
   portalApplicationUrl,
   portalCanAutoSubmit,
   portalHandoffReason,
   readManagedReceipt,
 } from './portalSubmission';
+import { AUTOMATIC_CONSENT_ACCEPTANCE_VERSION } from './automationConsent';
 
 const packet = {
   fullName: 'Taylor Example',
@@ -117,6 +121,172 @@ test('detects two unrelated live Teamtailor tenants but stops before privacy con
   assert.equal(actions.some((action) => action.type === 'click' && action.selector === 'button[type="submit"], input[type="submit"]'), false);
   assert.equal(portalCanAutoSubmit('teamtailor'), false);
   assert.match(portalHandoffReason('teamtailor') ?? '', /privacy terms/i);
+});
+
+/* ---- the grant-conditional consent tick ---- */
+
+const TEAMTAILOR_CONSENT_SELECTOR = 'input[name="candidate[consent_given]"]';
+const CONSENT_GRANT = {
+  granted_at: '2026-08-12T09:15:00.000Z',
+  version: AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
+};
+const grantedProfile = { consent_acknowledgement_permission: CONSENT_GRANT };
+const consentQuestion = {
+  question: 'I agree to the applicant privacy policy and consent to processing my personal data.',
+  answer: 'Yes',
+  answerSource: 'consent_permission',
+  portalSelector: TEAMTAILOR_CONSENT_SELECTOR,
+  portalInputType: 'checkbox',
+};
+
+function consentTickClicks(actions: ReturnType<typeof buildManagedPortalActions>) {
+  return actions.filter((action) => action.type === 'click'
+    && action.label?.startsWith(`${MANAGED_CONSENT_TICK_LABEL_PREFIX}:`));
+}
+
+test('with the grant and the recorded acceptance, Teamtailor ticks once, guarded, then submits', () => {
+  const actions = buildManagedPortalActions('teamtailor', {
+    ...packet,
+    applicationProfile: grantedProfile,
+    questions: [consentQuestion],
+  }, true);
+
+  // Exactly ONE tick, on the exact captured control, required and uniqueness-asserted.
+  const ticks = consentTickClicks(actions);
+  assert.equal(ticks.length, 1);
+  assert.equal(ticks[0].selector, TEAMTAILOR_CONSENT_SELECTOR);
+  assert.equal(ticks[0].optional, false);
+  assert.equal(ticks[0].requireUnique, true);
+
+  // The honeypot guard runs BEFORE the tick: a required visible-unique read of the same control,
+  // pinned to a runner that enforces the assertions rather than dropping them.
+  const guardIndex = actions.findIndex((action) => action.label === MANAGED_CONSENT_TICK_GUARD_LABEL);
+  const tickIndex = actions.indexOf(ticks[0]);
+  assert.ok(guardIndex >= 0 && guardIndex < tickIndex);
+  const guard = actions[guardIndex];
+  assert.equal(guard.type, 'extract');
+  assert.equal(guard.selector, TEAMTAILOR_CONSENT_SELECTOR);
+  assert.equal(guard.optional, false);
+  assert.equal(guard.requireUnique, true);
+  assert.equal(guard.requireVisible, true);
+  assert.equal(guard.requireNonEmpty, true);
+  assert.ok(actions.slice(0, guardIndex).some((action) => action.type === 'requireCapability'));
+
+  // The tick sits IMMEDIATELY before the one submit action, and nothing else touches the control:
+  // the reviewed-question loop must not also fill it, or the toggle un-ticks it.
+  const submits = actions.filter((action) => action.type === 'confirmAndSubmit');
+  assert.equal(submits.length, 1);
+  assert.equal(actions.indexOf(submits[0]), tickIndex + 1);
+  const touching = actions.filter((action) =>
+    (action.selector?.includes('candidate[consent_given]') ?? false)
+    || (action.text?.includes('applicant privacy policy') ?? false));
+  assert.deepEqual(touching, [guard, ticks[0]]);
+  assert.doesNotMatch(JSON.stringify(actions), /consent_given_future_jobs/);
+});
+
+test('the audit provenance is the plan precondition: the licence rides the plan, and a non-consent_permission answer parks it', () => {
+  const planned = managedConsentTickPlan('teamtailor', {
+    ...packet,
+    applicationProfile: grantedProfile,
+    questions: [consentQuestion],
+  });
+  assert.ok(planned);
+  assert.match(planned!.licence.version, /privacy_and_terms@/);
+  assert.equal(planned!.licence.granted_at, CONSENT_GRANT.granted_at);
+
+  // Her own reviewed tick is not a machine acceptance, and an unattributed answer proves nothing:
+  // both park at today's handoff rather than being re-labelled as made under the permission.
+  for (const answerSource of ['applicant_review', undefined] as const) {
+    const actions = buildManagedPortalActions('teamtailor', {
+      ...packet,
+      applicationProfile: grantedProfile,
+      questions: [{ ...consentQuestion, answerSource }],
+    }, true);
+    assert.equal(consentTickClicks(actions).length, 0, String(answerSource));
+    assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'), false, String(answerSource));
+  }
+});
+
+test('no grant means today: no tick, no submit, hand off', () => {
+  for (const applicationProfile of [undefined, {}]) {
+    const actions = buildManagedPortalActions('teamtailor', {
+      ...packet,
+      ...(applicationProfile ? { applicationProfile } : {}),
+      questions: [consentQuestion],
+    }, true);
+    assert.doesNotMatch(JSON.stringify(actions), /consent_given/);
+    assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'), false);
+  }
+});
+
+test('a held declaration sitting in the consent control is never ticked, grant or no grant', () => {
+  for (const question of [
+    'I certify that the information provided in this application is true and complete.',
+    'I authorize a background check and reference verification.',
+    'I am legally authorized to work in the United States.',
+  ]) {
+    const actions = buildManagedPortalActions('teamtailor', {
+      ...packet,
+      applicationProfile: grantedProfile,
+      questions: [{ ...consentQuestion, question }],
+    }, true);
+    assert.equal(consentTickClicks(actions).length, 0, question);
+    assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'), false, question);
+  }
+});
+
+test('two consent-shaped controls mean park, not guess; the retention opt-in is never the tick', () => {
+  // Two records claiming the one captured control: ambiguity, so park.
+  const ambiguous = buildManagedPortalActions('teamtailor', {
+    ...packet,
+    applicationProfile: grantedProfile,
+    questions: [
+      consentQuestion,
+      { ...consentQuestion, question: 'I consent to the processing of my personal data in accordance with the privacy policy.' },
+    ],
+  }, true);
+  assert.equal(consentTickClicks(ambiguous).length, 0);
+  assert.equal(ambiguous.some((action) => action.type === 'confirmAndSubmit'), false);
+
+  // The future-jobs retention wording on the captured control is a different act: park.
+  const retention = buildManagedPortalActions('teamtailor', {
+    ...packet,
+    applicationProfile: grantedProfile,
+    questions: [{
+      ...consentQuestion,
+      question: 'I agree to the privacy policy and want you to keep my information for future jobs.',
+    }],
+  }, true);
+  assert.equal(consentTickClicks(retention).length, 0);
+  assert.equal(retention.some((action) => action.type === 'confirmAndSubmit'), false);
+
+  // The sibling retention CONTROL is not a candidate at all - the plan still fires on the real one
+  // and never touches the opt-in.
+  const bothControls = buildManagedPortalActions('teamtailor', {
+    ...packet,
+    applicationProfile: grantedProfile,
+    questions: [
+      consentQuestion,
+      {
+        question: 'I want you to keep my information for all future positions I might be fit for.',
+        answer: '',
+        portalSelector: 'input[name="candidate[consent_given_future_jobs]"]',
+        portalInputType: 'checkbox',
+      },
+    ],
+  }, true);
+  assert.equal(consentTickClicks(bothControls).length, 1);
+  assert.doesNotMatch(JSON.stringify(bothControls), /consent_given_future_jobs/);
+});
+
+test('a fill run never ticks: the consent tick exists only on the submit list', () => {
+  const actions = buildManagedPortalActions('teamtailor', {
+    ...packet,
+    applicationProfile: grantedProfile,
+    questions: [consentQuestion],
+  }, false);
+  assert.doesNotMatch(JSON.stringify(actions), /consent_given/);
+  assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'), false);
 });
 
 test('canonicalizes the verified Teamtailor detail route and rejects broad jobs pages', () => {

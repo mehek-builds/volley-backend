@@ -11,8 +11,10 @@ import { applicantChoseStoredAnswer } from './applicantAnswer';
 import { optionBandAnswer, storedOptionAnswerIsCurrent } from './optionBand';
 import {
   classifyField,
+  consentAcknowledgementLicence,
   discoveredFieldIsRequired,
   graduationYearFieldAnswer,
+  isConsentAcceptingWording,
   isLegalConsentQuestion,
   normalizeReviewQuestionLabel,
   resolveKnownAnswer,
@@ -164,6 +166,10 @@ const CAPTCHA_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
 // prove the form complete. Pinpoint puts a required privacy-processing consent directly before
 // submit. Both were confirmed on two unrelated public tenants on 2026-08-09. Keeping them out of
 // autonomous submission also keeps them out of polling through AUTONOMOUS_PORTAL_FAMILIES.
+//
+// Pinpoint's bar - and ONLY pinpoint's - is conditionally lifted per account by the standing
+// consent-acceptance permission: see ConsentGrantConditionalFamily below. Personio's bar is the
+// readiness reader, which no permission can lift, so personio stays here unconditionally.
 type ManualFinalReviewFamily = 'personio' | 'pinpoint';
 
 const MANUAL_FINAL_REVIEW_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
@@ -176,6 +182,49 @@ const MANUAL_FINAL_REVIEW_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFa
 const CONSENT_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
   ['teamtailor'] satisfies ConsentGatedFamily[],
 );
+
+/* THE FAMILIES WHOSE ONLY BAR TO AUTONOMY IS A ROUTINE CONSENT CONTROL BESIDE SUBMIT.
+ *
+ * Teamtailor's candidate[consent_given] and Pinpoint's privacy-processing consent are, on every
+ * tenant captured, the single thing standing between a completed fill and the send control. The
+ * standing consent-acceptance permission (lib/automationConsent.ts, granted once at onboarding,
+ * version-checked, and runner-trust-gated through lib/grantedAnswerReplay.ts) covers exactly that
+ * class of control, so an account holding the grant can honestly be carried through submit.
+ *
+ * WHY THIS IS NOT MEMBERSHIP IN AUTONOMOUS_PORTAL_FAMILIES, stated because the pull toward the
+ * static list is strong. That list is ACCOUNT-INDEPENDENT: the jobs board, polling and coverage
+ * copy all read it with no user in hand, and an account that never granted the permission must get
+ * exactly today's behaviour (fill, stop, hand off). Putting these two on the static list would
+ * surface postings that a no-grant account can never finish, which is the exact harm the list's
+ * own comment names as its worst. So the static story is unchanged - teamtailor stays
+ * consent-gated, pinpoint stays manual-final-review - and the CONDITIONAL story lives in
+ * portalCanAutoSubmitWithConsentGrant below, which takes the account's grant as an argument.
+ *
+ * personio is NOT here, deliberately: its bar is custom required-marking that defeats the
+ * readiness reader, which no consent permission can lift. */
+export type ConsentGrantConditionalFamily = 'teamtailor' | 'pinpoint';
+
+const CONSENT_GRANT_CONDITIONAL_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
+  ['teamtailor', 'pinpoint'] satisfies ConsentGrantConditionalFamily[],
+);
+
+/* Compile-time: every grant-conditional family is STATICALLY denied by one of the deny sets above,
+ * so AutonomousPortalFamily (and with it the jobs board's union) can never claim one. If a family
+ * is added here without being consent-gated or manual-final-review, this line stops compiling. */
+type _ConditionalFamilyIsStaticallyGated =
+  ConsentGrantConditionalFamily extends ConsentGatedFamily | ManualFinalReviewFamily ? true : never;
+const _conditionalFamilyIsStaticallyGated: _ConditionalFamilyIsStaticallyGated = true;
+void _conditionalFamilyIsStaticallyGated;
+
+export function isConsentGrantConditionalFamily(portal: SupportedPortal): boolean {
+  // manual_recruitee resolves to the recruitee family, which is not conditional; the controlled QA
+  // portals resolve to their real families the same way every other family predicate here does.
+  return CONSENT_GRANT_CONDITIONAL_FAMILIES.has(portalFamily(portal));
+}
+
+function consentGrantConditionalFamilyName(family: PortalFamily): ConsentGrantConditionalFamily | null {
+  return family === 'teamtailor' || family === 'pinpoint' ? family : null;
+}
 
 // Portals where there is no application form to fill AT ALL until a human passes a gate that only
 // they can pass: a data-consent choice, an account wall, or an emailed one-time code. This is a
@@ -426,6 +475,40 @@ export function portalCanAutoSubmit(portal: SupportedPortal): boolean {
     && !ACCOUNT_WALLED_FAMILIES.has(family);
 }
 
+/**
+ * The applicant's standing consent-acceptance permission, exactly as the profile loader derives it:
+ * present only when the grant is enabled, carries the CURRENT consent version, and has passed the
+ * grantedAnswerReplay runner-trust gate. Absent covers never-granted, revoked, stale-version, an
+ * unmigrated database, and a runner that cannot yet be trusted to hit the control it was asked
+ * about - all five read as "no grant" here, which is today's behaviour.
+ */
+export type PortalConsentGrant = { granted_at?: string; version: string };
+
+/**
+ * PER-ACCOUNT autonomy: whether THIS applicant's run may press submit on this portal.
+ *
+ * portalCanAutoSubmit above stays the account-independent floor (the jobs board, polling and the
+ * coverage sentences read it with no user in hand). This adds the one conditional case: a family
+ * whose only bar is a routine consent control beside submit, for an account whose standing
+ * consent-acceptance permission is granted and current. The grant lifts EXACTLY that one gate;
+ * every other deny set is re-checked here so a family later discovered to be multi-step,
+ * CAPTCHA-gated or account-walled does not get unlocked by a permission that says nothing about
+ * those. With no grant the answer is portalCanAutoSubmit's, byte for byte.
+ */
+export function portalCanAutoSubmitWithConsentGrant(
+  portal: SupportedPortal,
+  grant: PortalConsentGrant | null | undefined,
+): boolean {
+  if (portalCanAutoSubmit(portal)) return true;
+  if (!grant) return false;
+  if (portal === 'manual_recruitee') return false;
+  const family = portalFamily(portal);
+  if (!CONSENT_GRANT_CONDITIONAL_FAMILIES.has(family)) return false;
+  return !MULTI_STEP_FAMILIES.has(family)
+    && !CAPTCHA_GATED_FAMILIES.has(family)
+    && !ACCOUNT_WALLED_FAMILIES.has(family);
+}
+
 export type ManagedPortalReceiptCapability = 'confirmation_possible' | 'unavailable_before_handoff';
 
 /**
@@ -435,9 +518,16 @@ export type ManagedPortalReceiptCapability = 'confirmation_possible' | 'unavaila
  * its multi-step flow, while Jobvite and iCIMS stop before the application form opens. None of the
  * three can produce a backend receipt because the backend is forbidden from performing the action
  * that could create one. A later attended browser confirmation is a different channel.
+ *
+ * Takes the account's consent grant for the same reason submission does: a teamtailor or pinpoint
+ * run that was allowed to press submit under the grant can read the confirmation that press
+ * produced. Defaulted to null so every existing caller keeps the account-independent answer.
  */
-export function managedPortalReceiptCapability(portal: SupportedPortal): ManagedPortalReceiptCapability {
-  return portalCanAutoSubmit(portal) ? 'confirmation_possible' : 'unavailable_before_handoff';
+export function managedPortalReceiptCapability(
+  portal: SupportedPortal,
+  grant: PortalConsentGrant | null = null,
+): ManagedPortalReceiptCapability {
+  return portalCanAutoSubmitWithConsentGrant(portal, grant) ? 'confirmation_possible' : 'unavailable_before_handoff';
 }
 
 /* The families whose submit capability is decided by the researched capability table rather than by
@@ -2594,6 +2684,15 @@ function shouldSkipReviewedConsentQuestion(questionText: string): boolean {
   return isLegalConsentQuestion(questionText) && /demographic data survey/i.test(questionText);
 }
 
+/* A data-RETENTION opt-in ("keep my information for future jobs"), which is NOT the routine
+ * privacy acknowledgement the standing permission covers: it creates an ongoing relationship with
+ * the employer's talent pool rather than acknowledging the processing this one application needs.
+ * Named once because two rules read it: the recruitee/teamtailor fill skip below, and the consent
+ * tick plan, which must never mistake Teamtailor's candidate[consent_given_future_jobs] wording for
+ * the send-blocking acknowledgement beside it. */
+const FUTURE_JOBS_RETENTION_CONSENT_RE =
+  /\b(?:keep|retain|store|use)\b[\s\S]{0,120}\b(?:my|your)\s+(?:information|data)\b[\s\S]{0,120}\b(?:future|other)\s+(?:jobs?|positions?|vacancies|opportunities)\b/i;
+
 function shouldSkipPortalConsentQuestion(family: PortalFamily, questionText: string): boolean {
   if (family === 'zoho_recruit' || family === 'bullhorn') {
     return isLegalConsentQuestion(questionText)
@@ -2603,7 +2702,7 @@ function shouldSkipPortalConsentQuestion(family: PortalFamily, questionText: str
   if (family !== 'recruitee' && family !== 'teamtailor') return false;
   return isLegalConsentQuestion(questionText)
     || ROUTINE_APPLICANT_CONSENT_QUESTION.test(questionText)
-    || /\b(?:keep|retain|store|use)\b[\s\S]{0,120}\b(?:my|your)\s+(?:information|data)\b[\s\S]{0,120}\b(?:future|other)\s+(?:jobs?|positions?|vacancies|opportunities)\b/i.test(questionText);
+    || FUTURE_JOBS_RETENTION_CONSENT_RE.test(questionText);
 }
 
 function reviewedQuestionSafetyContext(
@@ -5208,6 +5307,166 @@ const PINPOINT_COVER_LETTER_SELECTOR = 'input[type="file"][name="application_for
 const COMEET_RESUME_SELECTOR = 'input[type="file"][name="cv"]';
 const COMEET_COVER_LETTER_SELECTOR = 'input[type="file"][name="coverLetter"]';
 
+/* THE ONE CONSENT CONTROL EACH GRANT-CONDITIONAL FAMILY IS EVER ALLOWED TO TICK.
+ *
+ * Platform-owned names from the 2026-08-09 two-tenant captures, the same source as the resume
+ * selectors above. Teamtailor renders candidate[consent_given] beside the send control;
+ * candidate[consent_given_future_jobs] is deliberately NOT here - it is the talent-pool retention
+ * opt-in, a different act that no standing permission covers, and it stays with the applicant.
+ *
+ * Pinpoint's privacy-processing consent was captured with the application_form[application] prefix
+ * every other Pinpoint control carries; the bare application[process_information] spelling appears
+ * in this file's own historical comments, so both are accepted as the control's IDENTITY. Accepting
+ * two spellings of one name is not a sweep: the tick plan below still requires exactly ONE packet
+ * question to match, and the runner-side guard still requires exactly one visible node. */
+const CONSENT_TICK_CONTROL_NAMES: Record<ConsentGrantConditionalFamily, readonly string[]> = {
+  teamtailor: ['candidate[consent_given]'],
+  pinpoint: [
+    'application_form[application][process_information]',
+    'application[process_information]',
+  ],
+};
+
+/* The name vocabulary the discovery script's isHoneypot uses, applied to the control this plan is
+ * about to tick. The fixed names above can never match it; the check exists so a name added to the
+ * table later cannot either, and so the rule "the honeypot guard runs before any tick" is written
+ * where the tick is built rather than remembered. */
+const HONEYPOT_CONTROL_NAME_RE = /\b(?:honeypot|hp_|bot[-_]?field|hidden[-_]?field)\b/i;
+
+/* A discovery-shape selector naming exactly one control: `input[name="..."]` as stableSelector
+ * writes it. Anchored end to end so an alternation, a descendant chain or anything page-wide can
+ * never qualify - the plan ticks one named control or nothing. */
+const SINGLE_NAMED_CONTROL_SELECTOR_RE = /^(?:input|textarea|select)\[name="((?:[^"\\]|\\.)*)"\]$/;
+
+function selectorControlName(selector: string | undefined): string | null {
+  const match = SINGLE_NAMED_CONTROL_SELECTOR_RE.exec(selector?.trim() ?? '');
+  return match ? match[1].replace(/\\(.)/g, '$1') : null;
+}
+
+/** Everything a grant-conditional submit run needs in order to tick the consent control: which
+ *  control, under which question wording, and under which grant the acceptance is licensed. */
+export type ManagedConsentTickPlan = {
+  family: ConsentGrantConditionalFamily;
+  question: string;
+  selector: string;
+  licence: PortalConsentGrant;
+};
+
+export const MANAGED_CONSENT_TICK_GUARD_LABEL = 'consent_tick_honeypot_guard';
+export const MANAGED_CONSENT_TICK_LABEL_PREFIX = 'question_consent_tick';
+
+/**
+ * WHETHER THIS RUN MAY TICK THE CONSENT CONTROL, and exactly which one.
+ *
+ * Null is "park": fill what the family always fills, press nothing, hand off - today's behaviour,
+ * exactly. Every condition below fails toward null, and each one is a separate fact:
+ *
+ *   1. The family is grant-conditional and the account's standing permission is present on the
+ *      packet's profile. That field is only ever set by the loader after the version check and the
+ *      grantedAnswerReplay trust gate (lib/applicationProfileLike.ts), so both come for free here.
+ *   2. EXACTLY ONE packet question names the family's captured consent control. Zero means the
+ *      prepare never saw the control this plan was written from, so the form in front of the run is
+ *      not provably the captured shape; two or more means ambiguity. Both park rather than guess.
+ *   3. The question's own wording classifies as the routine consent-acknowledgement class through
+ *      consentAcknowledgementLicence - the SAME call the review path records acceptances with, so
+ *      the held-declaration veto (HELD_DECLARATION_VOCABULARY, lib/questionDiscovery.ts) runs first
+ *      and is not reachable from here. A truth attestation, background-check authorization, EEO or
+ *      work-authorization declaration sitting in the consent control's place is never ticked,
+ *      whatever control it sits in. The licence is also re-derived from the profile buildPacket
+ *      loaded moments ago, so a permission revoked after review kills the plan at fill time.
+ *   4. The stored answer is a machine acceptance recorded under the permission: answerSource is
+ *      'consent_permission' and the value reads as an acceptance. That record - written by the
+ *      resolution loop with consent_permission_version and consent_permission_granted_at beside it
+ *      (routes/submissionRunner.ts, "THE ACCEPTANCE, WRITTEN DOWN ON THE QUESTION IT WAS MADE ON")
+ *      - is the audit trail for this tick; the run executes an acceptance the packet already says
+ *      Litos made on her behalf, rather than inventing one the audit cannot explain.
+ *   5. The wording is not the future-jobs retention opt-in, and the control's name is not
+ *      honeypot-shaped.
+ */
+export function managedConsentTickPlan(
+  portal: SupportedPortal,
+  packet: SubmissionPacket,
+): ManagedConsentTickPlan | null {
+  const family = consentGrantConditionalFamilyName(portalFamily(portal));
+  if (!family || portal === 'manual_recruitee') return null;
+  const ap = packet.applicationProfile;
+  const grant = ap?.consent_acknowledgement_permission;
+  if (!ap || !grant) return null;
+  if (!portalCanAutoSubmitWithConsentGrant(portal, grant)) return null;
+  const names = CONSENT_TICK_CONTROL_NAMES[family];
+  const candidates = packet.questions.flatMap((item) => {
+    const selector = durablePortalSelector(reviewQuestionPortalSelector(item));
+    const name = selectorControlName(selector);
+    return name && names.includes(name) && selector ? [{ item, selector, name }] : [];
+  });
+  if (candidates.length !== 1) return null;
+  const { item, selector, name } = candidates[0];
+  if (HONEYPOT_CONTROL_NAME_RE.test(name)) return null;
+  // A control whose live evidence failed is refused to every builder; the tick is no exception.
+  if (packetQuestionFailed(packet, item)) return null;
+  const questionText = normalizeReviewQuestionLabel(item.question);
+  if (!questionText || FUTURE_JOBS_RETENTION_CONSENT_RE.test(questionText)) return null;
+  const licence = consentAcknowledgementLicence(questionText, ap, packet.jdText);
+  if (!licence) return null;
+  if (item.answerSource !== 'consent_permission') return null;
+  if (!item.answer.trim() || !isConsentAcceptingWording(item.answer)) return null;
+  return { family, question: questionText, selector, licence };
+}
+
+/* TICK ONCE, GUARDED, RIGHT BEFORE THE SUBMIT ACTION.
+ *
+ * Three actions, all required (optional: false), so any one of them failing stops the list and
+ * makes the confirmAndSubmit that follows physically unreachable - the run degrades to today's
+ * fill-and-hand-off instead of submitting around a consent it could not prove it ticked.
+ *
+ *   requireCapability  an older Stratus that would silently drop the assertion fields below rejects
+ *                      the whole request during normalization, before a browser opens - the same
+ *                      device the Workable phone proof uses.
+ *   extract            the honeypot guard, and it runs BEFORE the tick: requireUnique proves the
+ *                      selector resolves to exactly one node, and requireVisible + requireNonEmpty
+ *                      demand a real layout read that returns something a person can see - a
+ *                      zero-height-ancestor honeypot (the Breezy hp_ trap this file documents)
+ *                      yields no visible entry and refuses the action. requireVisible is a field,
+ *                      not a capability, so on a runner deployed before extract-require-visible-v1
+ *                      it degrades to uniqueness alone; the capability above pins everything that
+ *                      CAN be pinned by rejection.
+ *   click              the one authorized tick. click toggles, which is exactly why there is ONE
+ *                      click behind a uniqueness guard and never a ladder - see the Cloudflare
+ *                      measurement on pushGreenhouseCheckboxOptionActions. Neither captured tenant
+ *                      pre-ticks the control (pre-ticked consent is the pattern GDPR forbids), and
+ *                      that must be re-confirmed live before widening this to any new family.
+ */
+function pushManagedConsentTickActions(actions: ManagedBrowserAction[], plan: ManagedConsentTickPlan) {
+  actions.push({
+    type: 'requireCapability',
+    value: MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
+    label: 'consent_tick_assertion_capability',
+    optional: false,
+  });
+  actions.push({
+    type: 'extract',
+    selector: plan.selector,
+    attribute: 'name',
+    label: MANAGED_CONSENT_TICK_GUARD_LABEL,
+    optional: false,
+    requireUnique: true,
+    requireVisible: true,
+    requireNonEmpty: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  actions.push({
+    type: 'click',
+    selector: plan.selector,
+    label: `${MANAGED_CONSENT_TICK_LABEL_PREFIX}:${plan.question.slice(0, 80)}`,
+    optional: false,
+    requireUnique: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+}
+
+/** The number of actions pushManagedConsentTickActions reserves out of the managed budget. */
+const CONSENT_TICK_ACTION_COUNT = 3;
+
 // Zoho Recruit renders the application inside the public detail route. Field ids are tenant data,
 // while the Candidate API names and the resume attachment marker are stable across the two live
 // tenants inspected. Consent, retention, EEO and CAPTCHA controls are deliberately absent.
@@ -6314,7 +6573,11 @@ function pushFixedFieldActions(
     managedFill(actions, 'input[name="candidate[phone]"]', packet.phone, 'phone');
     managedUpload(actions, TEAMTAILOR_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, TEAMTAILOR_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
-    // candidate[consent_given] and candidate[consent_given_future_jobs] stay with the applicant.
+    // candidate[consent_given] is never filled HERE: on a submit run holding the standing
+    // consent-acceptance permission it is ticked by the guarded consent-tick block immediately
+    // before the submit action (managedConsentTickPlan), and on every other run it stays with the
+    // applicant. candidate[consent_given_future_jobs] is the talent-pool retention opt-in and stays
+    // with the applicant unconditionally.
   } else if (family === 'personio') {
     const parts = packet.fullName.trim().split(/\s+/);
     managedFill(actions, 'input[name="first_name"]', parts[0], 'first_name');
@@ -6338,7 +6601,9 @@ function pushFixedFieldActions(
     managedUpload(actions, PINPOINT_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, PINPOINT_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
     // application[process_information] is the required privacy-processing consent. It is never
-    // checked here, even when a reviewed question happens to contain affirmative wording.
+    // checked here, even when a reviewed question happens to contain affirmative wording. On a
+    // submit run holding the standing consent-acceptance permission it is ticked by the guarded
+    // consent-tick block immediately before the submit action (managedConsentTickPlan).
   } else if (family === 'comeet') {
     const parts = packet.fullName.trim().split(/\s+/);
     managedFill(actions, 'input[name="firstName"]', parts[0], 'first_name');
@@ -6552,6 +6817,10 @@ export function buildManagedPortalActions(
   if (ACCOUNT_WALLED_FAMILIES.has(family)) return [];
   const actions: ManagedBrowserAction[] = [];
   let workablePhoneReadyForSubmit = true;
+  /* The one consent control this run may tick, or null for "park at the handoff exactly as today".
+   * Computed only for a submit run: a prepare or fill run never ticks a consent, because the tick
+   * exists solely to clear the way for the submit press that follows it in the same action list. */
+  const consentTick = submit ? managedConsentTickPlan(portal, packet) : null;
   pushFixedFieldActions(actions, portal, packet);
   // These three integrations are structurally fixed-field-only. SuccessFactors has no reachable
   // form at all, while Zoho Recruit and Bullhorn have only the exact identity and resume controls
@@ -6581,6 +6850,13 @@ export function buildManagedPortalActions(
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
     if (shouldSkipPortalConsentQuestion(portalFamily(portal), reviewedQuestionSafetyContext(item, packet))) continue;
+    /* The consent control the tick plan owns is filled by the tick plan ALONE. The runner's scoped
+     * choice handling uses check(), which is idempotent, but the tick is a click, which toggles -
+     * so a reviewed-question fill here followed by the tick would check the box and then uncheck
+     * it, submitting a consent recorded as accepted and physically absent. One control, one path. */
+    if (consentTick
+      && selectorControlName(durablePortalSelector(reviewQuestionPortalSelector(item)))
+        === selectorControlName(consentTick.selector)) continue;
     const rawPortalSelector = reviewQuestionPortalSelector(item);
     const portalInputType = reviewQuestionPortalInputType(item);
     const portalSelector = durablePortalSelector(rawPortalSelector);
@@ -6808,7 +7084,14 @@ export function buildManagedPortalActions(
   // the same as no phone on file. The runner must never reach its atomic submit action in that
   // state. A truly absent phone keeps the previous behavior, so required-field confirmation on the
   // employer form remains the authority on whether the application can proceed without one.
-  const canAppendSubmit = submit && portalCanAutoSubmit(portal) && workablePhoneReadyForSubmit;
+  /* portalCanAutoSubmit OR a live consent-tick plan. The plan is the per-account conditional case:
+   * it exists only when the family's single bar is the routine consent control, the account's
+   * standing permission is granted and current, and this packet carries the recorded acceptance for
+   * exactly one captured control. No plan means the grant-conditional families keep today's exact
+   * behaviour: fill, stop, hand off. */
+  const canAppendSubmit = submit
+    && (portalCanAutoSubmit(portal) || consentTick !== null)
+    && workablePhoneReadyForSubmit;
   /* The Akuna carve-out that used to sit here (100 instead of MANAGED_ACTION_LIMIT, 7891fa4) is
    * retired. It was headroom with no measured ceiling behind it, set when Akuna's education block
    * was invisible to discovery. The moment discovery captured those controls (2026-08-18, packet
@@ -6824,7 +7107,14 @@ export function buildManagedPortalActions(
   // exact associated control or label for radio, checkbox and custom controls. It then rescans
   // only affected required fields once. The managed runner must stop the list if any confirmation
   // fails, which makes the submit click physically unreachable.
-  const actionLimit = canAppendSubmit ? familyActionLimit - 1 : familyActionLimit;
+  //
+  // A grant-conditional submit also reserves the consent tick's three actions (capability pin,
+  // honeypot guard, the one click), for the same reason the submit reserves its one: they are
+  // appended after the trims, so the budget has to leave room for them or the runner rejects the
+  // whole list with HTTP 400 before a browser opens.
+  const actionLimit = canAppendSubmit
+    ? familyActionLimit - 1 - (consentTick ? CONSENT_TICK_ACTION_COUNT : 0)
+    : familyActionLimit;
   const questionProtection = reviewedQuestionActionProtection(actions, packet);
   const coreProtection = coreActionProtection(actions, portal);
   const protectedActionBases = new Set([...coreProtection, ...questionProtection.actionBases]);
@@ -6874,6 +7164,10 @@ export function buildManagedPortalActions(
     truncateManagedActionsToBudget(actions, actionLimit, coreProtection);
   }
 
+  // The tick precedes the submit action IMMEDIATELY, after every trim, so nothing can be inserted
+  // between the acceptance and the press it licenses and no trim can take the guard while keeping
+  // the click.
+  if (canAppendSubmit && consentTick) pushManagedConsentTickActions(actions, consentTick);
   if (canAppendSubmit) {
     actions.push({
       type: 'confirmAndSubmit',
