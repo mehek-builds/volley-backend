@@ -210,3 +210,53 @@ test('an account that already finished onboarding is never handed the sequence',
   assert.notEqual(current.step, 'notifications');
   assert.equal(current.includes_application_steps, false);
 });
+
+/* THE COUNT MUST NOT SHRINK UNDERNEATH SOMEBODY WHO JUST DID THE WORK.
+ *
+ * Found by walking production 2026-08-19. The work-visa screen printed "step 5 of 10", the student
+ * answered it, and the next screen printed "step 5 of 9": answering is what sets the column the
+ * flag was derived from, so finishing the screen removed it from the flow it belonged to. Two
+ * different screens both called themselves five, and the total moved backwards.
+ *
+ * A DATABASE TEST because the fix reads the acknowledgement LEDGER, which is a table. The rule is
+ * that a screen counts while it is still needed OR once it has been walked, and only the ledger
+ * knows the second half.
+ */
+test('a walked work-visa screen stays in the flow, so the total never shrinks', async () => {
+  // beforeEach already seeded this student.
+  await database.exec(`update "users" set "sponsorship_answer" = null where "id" = '${STUDENT}'`);
+
+  const before = await app.inject({ method: 'GET', url: '/onboarding/state', headers: { authorization } });
+  const beforeBody = before.json();
+  assert.equal(beforeBody.includes_sponsorship_step, true, 'the screen was not in the flow before it was answered');
+
+  // Walk it the way the student does: acknowledge the step, then answer it.
+  const ackReply = await app.inject({
+    method: 'POST',
+    url: '/onboarding/flow/steps',
+    headers: { authorization },
+    payload: { step: 'sponsorship', disposition: 'continued', flow_version: beforeBody.flow_version },
+  });
+  assert.equal(ackReply.statusCode, 200, `the acknowledgement was refused: ${ackReply.body.slice(0, 120)}`);
+  await database.exec(`update "users" set "sponsorship_answer" = 'no' where "id" = '${STUDENT}'`);
+
+  const after = await app.inject({ method: 'GET', url: '/onboarding/state', headers: { authorization } });
+  assert.equal(
+    after.json().includes_sponsorship_step,
+    true,
+    'answering the work-visa screen removed it from the flow, so the rail total shrank underneath the student',
+  );
+});
+
+test('a student whose employer answered it never gets the screen in their flow at all', async () => {
+  // The measured ~40%: the posting asked both halves, so the declaration exists and nothing was
+  // ever shown. No acknowledgement, an answer on file, and therefore no step.
+  await database.exec(`update "users" set "sponsorship_answer" = 'no' where "id" = '${STUDENT}'`);
+
+  const state = await app.inject({ method: 'GET', url: '/onboarding/state', headers: { authorization } });
+  assert.equal(
+    state.json().includes_sponsorship_step,
+    false,
+    'a screen nobody was shown and nobody needs is being counted in the rail',
+  );
+});
