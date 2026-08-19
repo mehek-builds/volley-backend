@@ -87,7 +87,7 @@ import {
 import { resolveFrozenApplicantEmail } from '../lib/applicationEmail';
 import { findComposioVerificationCode } from '../lib/emailVerification';
 import { registerWorkdayVerificationRoute } from './workdayVerification';
-import { createAndPersistPacketAudit, currentAcknowledgedPacketAudit, currentPacketAudit } from '../lib/packetAuditService';
+import { createAndPersistPacketAudit, currentAcknowledgedPacketAudit, currentPacketAudit, packetAuditClientError } from '../lib/packetAuditService';
 import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
 import { resumeEmailOfRecord, resumePacketEmailIsCurrent } from '../lib/resumeEmail';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
@@ -689,7 +689,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
          a machine-written one. A rebuild here therefore leaves the digests she submitted stale and
          answers 409, which sends her back to re-audit the file that now exists. */
       const verdict = await currentPacketAudit(row, { restoreExpiredResume: 'review_only' });
-      if (!verdict.valid) return reply.status(409).send({ error: verdict.reason, code: verdict.code });
+      if (!verdict.valid) return reply.status(409).send(packetAuditClientError(verdict));
       const audit = verdict.audit;
       if (parsed.data.audit_digest !== audit.audit_digest
         || parsed.data.packet_version !== audit.packet_version
@@ -740,7 +740,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // currentAcknowledgedPacketAudit revalidates the exact PDF/spec/JD/answers, current personal
       // resume email, and active owner/application Litos alias before any company URL is disclosed.
       const audit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
-      if (!audit.valid) return reply.status(409).send({ error: audit.reason, code: audit.code });
+      if (!audit.valid) return reply.status(409).send(packetAuditClientError(audit));
 
       // PDF and alias verification perform external reads. Re-read the owner-scoped row after
       // those awaits and reject unless the complete saved packet is still byte-for-byte the one
@@ -826,7 +826,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       const auditVerdict = await currentAcknowledgedPacketAudit(row);
       if (!auditVerdict.valid) {
-        return reply.status(409).send({ error: auditVerdict.reason, code: auditVerdict.code });
+        return reply.status(409).send(packetAuditClientError(auditVerdict));
       }
 
       const contact = (stored._contact ?? {}) as StoredContact;
@@ -954,7 +954,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
         const auditVerdict = await currentAcknowledgedPacketAudit(precheckRow, { restoreExpiredResume: 'authorizing_send' });
         if (!auditVerdict.valid) {
-          return reply.status(409).send({ error: auditVerdict.reason, code: auditVerdict.code });
+          return reply.status(409).send(packetAuditClientError(auditVerdict));
         }
         precheckPacketVersion = auditVerdict.audit.packet_version;
         const verdict = await refuseDuplicateApplication(precheckRow, precheckReview, userId, fastify.log);
@@ -1759,7 +1759,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         restoreExpiredResume: 'authorizing_send',
       });
       if (!submitAudit.valid) {
-        return reply.status(409).send({ error: submitAudit.reason, code: submitAudit.code });
+        return reply.status(409).send(packetAuditClientError(submitAudit));
       }
       /* REMEMBER THE ANSWERS THAT TRAVEL, so she is asked for each of them exactly once.
        *
@@ -2006,10 +2006,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       const handoffAudit = await currentAcknowledgedPacketAudit(row);
       if (!handoffAudit.valid) {
-        return reply.status(409).send({
-          error: handoffAudit.reason,
-          code: handoffAudit.code,
-        });
+        return reply.status(409).send(packetAuditClientError(handoffAudit));
       }
       const now = new Date().toISOString();
       /* Unchanged in meaning, narrowed to the case it was always describing. This route's

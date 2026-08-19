@@ -4,7 +4,9 @@ import { createPacketAudit } from './packetAudit';
 import {
   currentAcknowledgedPacketAudit,
   monthsOfExperienceFromSpec,
+  packetAuditClientError,
   scoreAuditEvidence,
+  tokenisedPacketAuditFailure,
   verifyCurrentPacketEmailIdentities,
   validStoredPdf,
 } from './packetAuditService';
@@ -1026,4 +1028,35 @@ test('provenance stripped by the submitted-answer merge does not spend the ackno
     'valid',
     'the merge door produces the same packet, so it must not produce packet_stale either',
   );
+});
+
+/* On 2026-08-19 the dashboard printed the bare word `packet_stale` in a red banner to a student
+   watching the autopilot row, because the route replied `{ error: verdict.reason }` and that reason
+   is a developer token. These pin the boundary, not the wording. */
+test('a failed verdict never replies with a developer token', () => {
+  for (const reason of ['packet_stale', 'owner_mismatch', 'application_mismatch', 'packet_audit_invalid']) {
+    const { error, code } = packetAuditClientError(tokenisedPacketAuditFailure('PACKET_AUDIT_STALE', reason));
+    assert.equal(code, 'PACKET_AUDIT_STALE', 'the machine-readable half stays machine-readable');
+    assert.ok(!error.includes(reason), `${reason} reached the applicant verbatim`);
+    assert.ok(/^[A-Z].*\.$/u.test(error), `${reason} produced something that is not a sentence: ${error}`);
+  }
+});
+
+test('a reason bindingIssues wrote is not passed through either', () => {
+  // "jdText is required" has spaces and reads like English, which is exactly why the boundary
+  // cannot decide by looking at the string.
+  const { error } = packetAuditClientError(tokenisedPacketAuditFailure('PACKET_AUDIT_STALE', 'jdText is required'));
+  assert.ok(!error.includes('jdText'), 'an internal field name reached the applicant');
+  assert.ok(/^[A-Z].*\.$/u.test(error));
+});
+
+test('prose this file authored on purpose is kept, because it names the recovery', () => {
+  const authored = 'Audit this exact packet before submitting.';
+  const { error } = packetAuditClientError({ valid: false, code: 'PACKET_AUDIT_REQUIRED', reason: authored });
+  assert.equal(error, authored);
+});
+
+test('the token survives for the logs even though it is never replied', () => {
+  const failure = tokenisedPacketAuditFailure('PACKET_AUDIT_STALE', 'packet_stale');
+  assert.equal(failure.reason, 'packet_stale', 'the suite above pins this token and it must not move');
 });
