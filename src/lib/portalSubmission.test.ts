@@ -4300,6 +4300,18 @@ test('managed Workable final cookie boundary handles both a late modal and no mo
   assert.deepEqual(replay(false), ['optional-miss', 'cleared', 'country-open']);
 });
 
+/* The 2026-07-29 Rippling capture was taken at .../jobs/<id>/apply; a posting saved from the JD
+   page lacks the suffix, and a runner sent there finds no controls at all. Measured live
+   2026-08-19: the run parked with "did not record an email field / a resume upload / the
+   applicant name fields". The mapping is bounded to the two-segment posting shape, so a deeper or
+   already-canonical path is left alone. */
+test('a Rippling posting URL maps to its /apply form, and an /apply URL passes through', () => {
+  const posting = 'https://ats.rippling.com/easy-dynamics-corporation/jobs/0eb836b2-6719-48e0-89c9-6c589063a225';
+  const application = `${posting}/apply`;
+  assert.equal(portalApplicationUrl('rippling', posting), application);
+  assert.equal(portalApplicationUrl('rippling', application), application);
+});
+
 test('Workable opens the exact application route and clears optional-cookie overlays before filling', () => {
   const posting = 'https://apply.workable.com/mercari/j/EC5A1078C4/';
   const application = 'https://apply.workable.com/mercari/j/EC5A1078C4/apply';
