@@ -142,12 +142,15 @@ describe('onboarding step order', () => {
     assert.equal(onboardingStepFrom({ ...ready, hasResume: false }), 'resume');
   });
 
-  test('a new upload pauses for recent-experience review before targeting', () => {
-    assert.equal(onboardingStepFrom({ ...ready, hasImpactReview: false }), 'impact');
+  test('the impact review no longer derives a step of its own', () => {
+    /* It is part of the resume screen now: reviewing the strongest bullet from a resume is part of
+       handing over that resume, not a separate errand with its own number on the rail. */
+    assert.equal(onboardingStepFrom({ ...ready, hasImpactReview: false }), 'done');
   });
 
-  test('completed accounts return only when a new upload has an unfinished review', () => {
-    assert.equal(onboardingStepFrom({ ...ready, completed: true, hasImpactReview: false }), 'impact');
+  test('a completed account is done, full stop', () => {
+    // Nothing holds it open now that the impact review is part of the resume screen.
+    assert.equal(onboardingStepFrom({ ...ready, completed: true, hasImpactReview: false }), 'done');
     assert.equal(onboardingStepFrom({ ...ready, completed: true }), 'done');
   });
 
@@ -452,19 +455,19 @@ describe('five-role resume contract', () => {
 describe('the application sequence', () => {
   test('it runs in order and ends at done', () => {
     assert.equal(applicationStepFrom([]), 'match');
-    assert.equal(applicationStepFrom(['match']), 'build');
-    assert.equal(applicationStepFrom(['match', 'build']), 'questions');
+    // build is folded into match: one screen, two phases, one step number.
+    assert.equal(applicationStepFrom(['match']), 'questions');
     // sponsorship sits here, and only for a student nothing has answered it for yet.
-    assert.equal(applicationStepFrom(['match', 'build', 'questions']), 'sponsorship');
+    assert.equal(applicationStepFrom(['match', 'questions']), 'sponsorship');
     assert.equal(
-      applicationStepFrom(['match', 'build', 'questions'], { hasSponsorshipAnswer: true }),
+      applicationStepFrom(['match', 'questions'], { hasSponsorshipAnswer: true }),
       'review',
       'a declaration already on file must skip the screen entirely',
     );
-    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'sponsorship']), 'review');
-    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'sponsorship', 'review']), 'trial');
-    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'sponsorship', 'review', 'trial']), 'notifications');
-    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'sponsorship', 'review', 'trial', 'notifications']), 'plan');
+    assert.equal(applicationStepFrom(['match', 'questions', 'sponsorship']), 'review');
+    assert.equal(applicationStepFrom(['match', 'questions', 'sponsorship', 'review']), 'trial');
+    assert.equal(applicationStepFrom(['match', 'questions', 'sponsorship', 'review', 'trial']), 'notifications');
+    assert.equal(applicationStepFrom(['match', 'questions', 'sponsorship', 'review', 'trial', 'notifications']), 'plan');
     assert.equal(applicationStepFrom([...APPLICATION_STEPS]), 'done');
   });
 
@@ -489,7 +492,7 @@ describe('the application sequence', () => {
      * people never arrive. */
     assert.deepEqual(
       [...APPLICATION_STEPS],
-      ['match', 'build', 'questions', 'sponsorship', 'review', 'trial', 'notifications', 'plan'],
+      ['match', 'questions', 'sponsorship', 'review', 'trial', 'notifications', 'plan'],
     );
   });
 
@@ -497,8 +500,8 @@ describe('the application sequence', () => {
     /* Declining a match, or saving a packet to send later, still means the screen was SEEN, and
        the flow must not put the student back on it forever. Same distinction setup_gaps_asked_at
        makes one screen earlier. */
-    assert.equal(applicationStepFrom(['build']), 'match');
-    assert.equal(applicationStepFrom(['match', 'questions']), 'build');
+    assert.equal(applicationStepFrom(['questions']), 'match');
+    assert.equal(applicationStepFrom(['match', 'review']), 'questions');
   });
 
   test('setup steps are replay steps, and the application steps added since are not', () => {

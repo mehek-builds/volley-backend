@@ -230,6 +230,10 @@ type Step =
      ledger already records for every other screen. */
   | 'match' | 'build' | 'questions' | 'review' | 'trial' | 'notifications' | 'plan'
   | 'done';
+/* 'build', 'impact', 'base' and 'gaps' stay in the union although nothing derives them any more.
+   impact and base are still walked by a version-2 REPLAY, and a client already mid-sequence when
+   this deploys can still acknowledge 'build'. Removing them would turn a harmless late
+   acknowledgement into a 400 in the one window where a student is mid-flow. */
 
 /* Bumped to 3 by the roles-first reorder. The bump is what keeps the change off accounts that are
    already through setup: onboardingFlowLedger only reads runs and acknowledgements AT THIS
@@ -254,7 +258,16 @@ const REPLAY_STEPS_WITHOUT_GAPS = ['focus', 'resume', 'impact', 'sponsorship', '
  * a client that has no case for it renders a blank screen in the middle of onboarding. The website
  * change ships FIRST; this one follows it. The reverse order is not a degraded experience, it is
  * an empty page on the flow that ends in a real application. */
-export const APPLICATION_STEPS = ['match', 'build', 'questions', 'sponsorship', 'review', 'trial', 'notifications', 'plan'] as const;
+/* THE SEQUENCE, capped at what a person will actually walk.
+ *
+ * `build` is gone as a step and lives inside `match`: that screen already showed the posting, asked
+ * "shall I build this", and then handed off. Two step numbers for one continuous action was the
+ * rail counting a transition rather than a decision. The build phases still exist inside the
+ * screen, which is where the deck always drew them.
+ *
+ * `impact` is likewise folded into `resume` on the setup side: reviewing the strongest bullet from
+ * a resume is part of handing over that resume, not a separate errand. */
+export const APPLICATION_STEPS = ['match', 'questions', 'sponsorship', 'review', 'trial', 'notifications', 'plan'] as const;
 export type ApplicationStep = (typeof APPLICATION_STEPS)[number];
 
 /**
@@ -400,7 +413,10 @@ export function onboardingStepFrom(input: {
   /** The screen has been PUT IN FRONT OF the student before, answered or skipped. */
   gapsAsked?: boolean;
 }): Step {
-  if (input.completed && input.hasImpactReview !== false) return 'done';
+  /* The impact review no longer derives a step of its own: it is part of the resume screen now,
+     because reviewing the strongest bullet from a resume is part of handing over that resume. The
+     completed short-circuit therefore no longer has to hold it open either. */
+  if (input.completed) return 'done';
   /* FOCUS LEADS. A resume upload is the heaviest act in the flow and it used to be the front door;
      roles is three taps and it is now what a student meets first.
      The ordering is only safe because the focus screen no longer needs a resume to draw itself.
@@ -410,7 +426,6 @@ export function onboardingStepFrom(input: {
      The resume inference still seeds a RETURNING student's screen - it just no longer gates it. */
   if (!input.hasFocus) return 'focus';
   if (!input.hasResume) return 'resume';
-  if (input.hasImpactReview === false) return 'impact';
   /* BASE, GAPS AND SPONSORSHIP ARE NO LONGER DERIVED HERE, each for its own measured reason.
    *
    * base: the one-page review was never a question, it was an artifact review. The packet is built
@@ -919,6 +934,11 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // that look identical from the gap list alone.
       includes_gaps_step: includesGaps,
       includes_application_steps: includesApplicationSteps,
+      /* Whether the work-visa screen is in this student's flow. Its own flag rather than a client
+         re-derivation of has_sponsorship_answer, for the reason #285 recorded about the gaps
+         screen: the server owns which screens a flow contains, and a client that guesses gets it
+         wrong in the deploy window. */
+      includes_sponsorship_step: includesApplicationSteps && !has_sponsorship_answer,
       // Starting values for the gap questions, from the student's own resume. Never a stored
       // answer: see gapSuggestionsFrom for why offering one is not the inference schema.ts forbids.
       gap_suggestions: gapSuggestionsFrom(gaps, parsed),
