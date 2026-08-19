@@ -62,6 +62,7 @@
     "db:indexes": "node scripts/apply-performance-indexes.mjs",
     "db:job-monitor": "node scripts/apply-job-monitor-schema.mjs",
     "schema:apply-automation-consent": "node scripts/apply-automation-consent-schema.mjs",
+    "db:onboarding-build-grant": "node scripts/apply-onboarding-build-grant-migration.mjs",
     "db:automatic-verification": "node scripts/apply-automatic-verification-migration.mjs",
     "db:google-auth": "node scripts/apply-google-auth-migration.mjs",
     "db:password-auth": "node scripts/apply-password-auth-migration.mjs",
