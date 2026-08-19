@@ -55,6 +55,38 @@ describe('hard recommendation requirements', () => {
     ), true);
   });
 
+  /* The whole reason "immediately" exists: it must not behave like one more season in the allowed
+     set. A student who can start now and keeps Summer 2027 as a backup would otherwise have every
+     Fall 2026 posting hidden by the same gate that is supposed to be off for them. */
+  test('immediately turns the period gate off, even beside a seasonal choice', () => {
+    const anyTime = normalizeTargeting({ ...SUMMER_2027, primary_period: 'immediately' });
+    assert.equal(anyTime.primary_period, 'immediately');
+    assert.equal(hasTargeting(anyTime), true);
+    assert.equal(recommendationTargetingEligible(
+      { title: 'Software Engineer Intern (Fall 2026) - Austin, TX' },
+      anyTime,
+      'Bachelor of Science in Computer Science',
+    ), true);
+
+    const summerWithImmediateBackup = normalizeTargeting({ ...SUMMER_2027, backup_period: 'immediately' });
+    assert.equal(recommendationTargetingEligible(
+      { title: 'Software Engineer Intern (Fall 2026) - Austin, TX' },
+      summerWithImmediateBackup,
+      'Bachelor of Science in Computer Science',
+    ), true);
+  });
+
+  /* Turning the period gate off is not turning the OTHER gates off. Degree is eligibility, not a
+     preference, and "I can start now" says nothing about holding a PhD. */
+  test('immediately does not relax the degree gate', () => {
+    const anyTime = normalizeTargeting({ ...SUMMER_2027, primary_period: 'immediately' });
+    assert.equal(recommendationTargetingEligible(
+      { title: 'PhD Research Intern' },
+      anyTime,
+      'Bachelor of Science in Computer Science',
+    ), false);
+  });
+
   test('a title with no explicit season stays visible', () => {
     assert.equal(recommendationTargetingEligible(
       { title: 'Campus Software Engineer Intern' },
