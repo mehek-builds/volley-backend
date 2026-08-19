@@ -224,6 +224,18 @@ export function resolveAccessClass(input: {
   const legacyPaid = user.grandfather_policy === 'legacy_paid_v1';
   if (overrideActive(user, 'plus_paid', now)) return legacyPaid ? 'legacy_paid' : 'plus_paid';
   if (subscription && subscriptionGrantsPlus(subscription, now)) {
+    /* A Stripe subscription sitting in `trialing` is the trial, not a purchase.
+       It has to land on `trial_plus` and not `plus_paid`, because those two
+       classes hand out different products: plus_paid is unmetered, trial_plus is
+       the 5/5/5 + 2-per-company meter that the pricing page, the FAQ, and every
+       contextual upgrade prompt describe. Reading `trialing` as paid would
+       silently give a trialling account unlimited generation and make all of that
+       copy wrong.
+       legacyPaid still wins, and a non-Stripe provider still falls to
+       legacy_paid: neither of those can be a Stripe trial by definition. */
+    if (subscription.provider === 'stripe' && subscription.status === 'trialing' && !legacyPaid) {
+      return 'trial_plus';
+    }
     return legacyPaid || subscription.provider !== 'stripe' ? 'legacy_paid' : 'plus_paid';
   }
   // Preserve old Pro and Plus rows only until a classified subscription exists. Once v2 owns the
