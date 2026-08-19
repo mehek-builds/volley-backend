@@ -5145,6 +5145,32 @@ export function isOpenEndedQuestion(label: string): boolean {
   return l.includes('?') && l.length >= 40;
 }
 
+/* A text control whose label IS the cover letter, not a sentence that happens to mention one.
+ *
+ * Measured live on Quandela (Workable, 2026-08-20): a required textarea labelled "Cover letter"
+ * parked the run with '"Cover letter" is required and is still empty' while the SAME product's
+ * attachment path writes and attaches a letter even when the control is optional. This matcher is
+ * what lets the resolution loop hand that textarea the letter Litos already has.
+ *
+ * Deliberately exact-match after stripping decoration, never a substring test. "Cover the cost of
+ * relocation", "letter grade", "recommendation letter" and "why is a cover letter important to
+ * you?" must never match: the first two would type a whole letter into an unrelated field, and the
+ * last is a real essay prompt that belongs to the drafter. The whole label, minus asterisks,
+ * punctuation and an (optional)/(required) marker, has to BE one of the known cover-letter names.
+ * JazzHR ("resumator-coverletter-value") and Breezy also take the letter as TEXT, so this is the
+ * shared-discovery-path fix for those families too, not a Workable special case. */
+const COVER_LETTER_TEXT_LABEL =
+  /^(?:cover\s+letter|motivation\s+letter|letter\s+of\s+motivation|anschreiben)$/i;
+
+export function isCoverLetterTextQuestion(label: string): boolean {
+  const stripped = (label ?? '')
+    .replace(/\((?:optional|required)\)/gi, ' ')
+    .replace(/[*:;,.!?"'`]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return COVER_LETTER_TEXT_LABEL.test(stripped);
+}
+
 // The largest whole-sentence prefix of `text` that fits `maxLen`, or null when no real sentence
 // does (never clip mid-word/mid-clause - ported from fitToBudget, R-029).
 export function fitToBudget(text: string, maxLen: number): string | null {

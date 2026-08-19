@@ -158,6 +158,7 @@ import {
   discoveredFieldIsRequired,
   consentAcknowledgementLicence,
   isCoreIdentityField,
+  isCoverLetterTextQuestion,
   isOpenEndedQuestion,
   isRefusedQuestion,
   normalizeDiscoveredLabel,
@@ -1968,6 +1969,53 @@ export async function discoverAndResolveQuestions(
         attentionReasons.push(selfDeclarationSkipReason(label));
         if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
         continue;
+      }
+    }
+    /* A COVER-LETTER TEXT BOX GETS THE LETTER LITOS ALREADY WRITES.
+     *
+     * Measured live on Quandela (Workable, 2026-08-20): discovery stored a required "cover letter"
+     * textarea as a question with an empty answer, and the run parked with '"Cover letter" is
+     * required and is still empty'. But the product's own disclosed behaviour for cover-letter
+     * ATTACHMENT controls is to write a letter and attach it even when the control is optional, and
+     * the packet already carries that letter as a rendered PDF. Same product, same form, same
+     * letter: the only difference is that this employer asked for the letter as text instead of a
+     * file. So the text control gets the SAME stored body the attachment path uses, generated
+     * through the same generateStoredCoverLetter gate (grounding validation included) when none is
+     * stored yet. The discovered textarea is itself the proof this form takes a cover letter, which
+     * is what capabilityConfirmed means to that gate. This is the shared discovery-to-review path,
+     * so JazzHR and Breezy, whose cover-letter controls are also TEXT, are covered by the same
+     * branch, not just Workable.
+     *
+     * An answer she wrote herself is never overwritten: applicant_review provenance with a
+     * non-empty answer skips this branch entirely and is replayed by the existing-answer arm below,
+     * exactly as the duplicate-question merge keeps her answer. A profile-known or remembered value
+     * also wins, because those are her declarations. And when no letter can be produced - missing
+     * jd_text, a body that fails the grounding gate, a maxLength no whole sentence fits - the field
+     * falls through and parks exactly as it did before this branch existed, never crashing the run. */
+    const coverLetterTextControl = isCoverLetterTextQuestion(label)
+      && /^(?:text|textarea)$/i.test(controlType)
+      && usableOptions(field.options).length === 0;
+    const applicantWroteExisting = existing?.answer_source === 'applicant_review'
+      && existing.answer.trim().length > 0;
+    if (coverLetterTextControl && !(known && 'value' in known) && !applicantWroteExisting) {
+      try {
+        const body = storedCoverLetter(row)?.body.trim()
+          || (await generateStoredCoverLetter(row, false, true)).cover_letter.body;
+        const fitted = fitToBudget(body, field.maxLength ?? 100_000);
+        if (fitted) {
+          questions.push({
+            id: existing?.id ?? randomUUID(),
+            question: reviewLabel,
+            answer: fitted,
+            kind: 'essay',
+            required: fieldIsRequired,
+            portal_selector: portalSelectorForField(field),
+            portal_input_type: controlType,
+          });
+          continue;
+        }
+      } catch (error) {
+        if (isBillingOrAuthFailure(error)) throw error; // a real outage, not a per-field skip
       }
     }
     /* THE DRAFTER NEVER WRITES PROSE INTO A CONTROL THAT OFFERS A LIST.
