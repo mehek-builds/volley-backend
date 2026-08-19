@@ -1788,9 +1788,29 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
             .from(monitored_jobs)
             .where(inArray(monitored_jobs.id, eligibleIds))
         : [];
+      /* THE SECOND TARGETING GATE, and relaxing has to reach into it too.
+       *
+       * boardConditions is not the only place the account's preferences narrow this list.
+       * recommendationTargetingEligible re-filters the ranked pool on three things, and they do
+       * NOT all sit on the same side of the preference/constraint line that relax_targeting draws:
+       *
+       *   recruiting period  preference. The student picked Summer 2027; a Spring 2027 posting is
+       *                      a near miss, which is exactly what widening is for.
+       *   title category     preference, same reasoning.
+       *   minimum degree     ELIGIBILITY. A role that requires a PhD is not a worse match for a
+       *                      bachelor's student, it is the wrong answer, and widening must no more
+       *                      reach it than it reaches an unsendable portal family.
+       *
+       * So a relaxed request empties the two preferences and keeps the degree check. Leaving this
+       * gate un-relaxed entirely would have made the widening useless in precisely the case it
+       * exists for: a student whose saved period or category excludes everything still gets an
+       * empty board, which is the one outcome the match screen cannot survive. */
+      const gateTargeting = relaxTargeting
+        ? { ...jobTargeting, primary_period: null, backup_period: null, categories: [] }
+        : jobTargeting;
       const targetingBlocked = new Set(
         gateRows
-          .filter((row) => !recommendationTargetingEligible(row, jobTargeting, candidateDegree))
+          .filter((row) => !recommendationTargetingEligible(row, gateTargeting, candidateDegree))
           .map((row) => row.id),
       );
       if (targetingBlocked.size > 0) {

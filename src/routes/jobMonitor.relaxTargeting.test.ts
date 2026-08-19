@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { and } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
-import { normalizeTargeting } from '../lib/jobPreferences';
+import { normalizeTargeting, recommendationTargetingEligible } from '../lib/jobPreferences';
 import { boardConditions } from './jobMonitor';
 
 /* The widening the onboarding match screen depends on.
@@ -96,4 +96,36 @@ test('an explicit caller filter still applies while preferences are relaxed', ()
   const relaxed = boardConditions({ targeting: undefined, employmentType: 'Internship' });
   assert.equal(relaxed.length, BASELINE.length + 1);
   assert.match(render(relaxed), /employment_type/i);
+});
+
+/* The SECOND gate. boardConditions is not the only place preferences narrow the list:
+ * recommendationTargetingEligible re-filters the ranked pool, and relaxing has to reach the two
+ * preferences in it without touching the one eligibility rule. */
+
+test('the second gate relaxes period and category but never the degree requirement', () => {
+  const held = "bachelor's";
+  const saved = normalizeTargeting({
+    primary_period: 'summer-2027',
+    categories: ['software-engineering'],
+    titles: ['Software Engineer'],
+    role_types: ['internship'],
+  });
+  // How the route builds the relaxed gate: the two preferences emptied, everything else kept.
+  const relaxedGate = { ...saved, primary_period: null, backup_period: null, categories: [] };
+
+  const wrongPeriod = { title: 'Software Engineer Intern, Spring 2027' };
+  const wrongCategory = { title: 'Quantitative Trader Intern' };
+  const needsPhd = { title: 'Research Scientist, PhD' };
+
+  // Both preferences block while targeted, and stop blocking once relaxed.
+  assert.equal(recommendationTargetingEligible(wrongPeriod, saved, held), false);
+  assert.equal(recommendationTargetingEligible(wrongPeriod, relaxedGate, held), true);
+  assert.equal(recommendationTargetingEligible(wrongCategory, saved, held), false);
+  assert.equal(recommendationTargetingEligible(wrongCategory, relaxedGate, held), true);
+
+  /* The degree rule holds on BOTH sides. A PhD-required role is not a worse match for a
+     bachelor's student, it is the wrong answer, and widening must no more reach it than it
+     reaches an unsendable portal family. */
+  assert.equal(recommendationTargetingEligible(needsPhd, saved, held), false);
+  assert.equal(recommendationTargetingEligible(needsPhd, relaxedGate, held), false);
 });
