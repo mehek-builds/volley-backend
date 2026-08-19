@@ -19,6 +19,7 @@ import {
   requiresPaymentMethodFor,
   flowAcknowledgementDecision,
   nextReplayStep,
+  replayBlockingStep,
   replaySteps,
 } from './onboarding';
 import { encryptField } from '../lib/fieldCrypto';
@@ -185,6 +186,38 @@ describe('version 3 walkthrough replay', () => {
   test('duplicate receipts do not move the server-owned cursor out of order', () => {
     assert.equal(nextReplayStep(['focus', 'focus', 'resume'], false), 'impact');
     assert.equal(nextReplayStep(['resume'], false), 'focus');
+  });
+
+  /* The version-3 bump shipped without a migration enrolling anyone, which is what it was for.
+     Completion read an absent run row as an unfinished replay, so every account that finished
+     setup before the bump was served `done` and then refused when it tried to record it: the
+     dashboard redirected to /start, and /start's only button 409'd with "Review focus". */
+  test('a bump alone does not hold an account that was never enrolled in a replay', () => {
+    const neverEnrolled = { replayRequired: false, acknowledged: [] as string[] };
+    assert.equal(replayBlockingStep(neverEnrolled, false), null);
+    assert.equal(replayBlockingStep(neverEnrolled, true), null);
+  });
+
+  test('an account a migration did enroll is still held to every screen in order', () => {
+    assert.equal(replayBlockingStep({ replayRequired: true, acknowledged: [] }, false), 'focus');
+    assert.equal(replayBlockingStep({ replayRequired: true, acknowledged: ['focus'] }, false), 'resume');
+    assert.equal(
+      replayBlockingStep({ replayRequired: true, acknowledged: ['focus', 'resume', 'impact', 'sponsorship'] }, false),
+      'base',
+    );
+    assert.equal(replayBlockingStep({ replayRequired: true, acknowledged: replaySteps(false) }, false), null);
+    // The conditional screen is part of the walk when the account has gaps, so it blocks too.
+    assert.equal(replayBlockingStep({ replayRequired: true, acknowledged: replaySteps(false) }, true), 'gaps');
+  });
+
+  /* The screen a student is served and the screen completion demands read the same condition.
+     They disagreed once and the product was unreachable; this is the pin, not a restatement. */
+  test('the step a student is served is the step completion asks for', () => {
+    for (const acknowledged of [[], ['focus'], ['focus', 'resume'], replaySteps(false)]) {
+      const served = nextReplayStep(acknowledged, false);
+      const demanded = replayBlockingStep({ replayRequired: true, acknowledged }, false);
+      assert.equal(demanded ?? 'done', served);
+    }
   });
 
   test('a lost acknowledgement response can be retried idempotently', () => {
