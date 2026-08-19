@@ -284,6 +284,25 @@ export function nextReplayStep(acknowledged: readonly string[], includesGaps: bo
   return replaySteps(includesGaps).find((step) => !seen.has(step)) ?? 'done';
 }
 
+/* WHICH STEP, IF ANY, BLOCKS COMPLETION. `replayRequired` is the only thing that can hold an
+ * account in the walkthrough, and that is the same condition the step resolver reads, so the
+ * screen a student is served and the screen completion demands can never disagree.
+ *
+ * An ABSENT run row must not stand in for a required replay. A version bump starts every existing
+ * account on an empty ledger at the new version, so `exists` is false for precisely the accounts
+ * the bump is meant to leave alone (see CURRENT_ONBOARDING_FLOW_VERSION). Reading it as "has not
+ * replayed yet" served those accounts `done` and then refused to record it, which locked every
+ * pre-existing account out of the dashboard behind a button that could not work. Only a migration
+ * that deliberately sets replay_required enrolls anyone in a replay. */
+export function replayBlockingStep(
+  flow: { replayRequired: boolean; acknowledged: readonly string[] },
+  includesGaps: boolean,
+): ReplayStep | null {
+  if (!flow.replayRequired) return null;
+  const seen = new Set(flow.acknowledged);
+  return replaySteps(includesGaps).find((step) => !seen.has(step)) ?? null;
+}
+
 export function flowAcknowledgementDecision(
   acknowledged: readonly string[],
   submitted: ReplayStep,
@@ -312,6 +331,11 @@ async function onboardingFlowLedger(userId: string) {
     ]);
     return {
       available: true as const,
+      /* DELIBERATELY UNREAD, and not a substitute for replayRequired. A version bump leaves every
+         pre-existing account with an empty ledger AT THE NEW VERSION, so this is false for exactly
+         the accounts a bump means to leave alone. Gating on it once served those accounts `done`
+         and then refused to record it, which locked all of them out of the dashboard. Enrolment is
+         replay_required and nothing else. */
       exists: !!run,
       completed: run?.completed_at != null,
       replayRequired: run?.replay_required === true,
@@ -980,13 +1004,9 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     if (!flow.available) return reply.status(503).send({ error: 'The onboarding update is still being prepared. Try again shortly.' });
     if (flow.completed) return reply.status(200).send({ ok: true, flow_version: CURRENT_ONBOARDING_FLOW_VERSION });
 
-    if (!flow.exists || flow.replayRequired) {
-      const required = replaySteps(includesGapsStepFrom(gapsFrom(appProfile), appProfile));
-      const seen = new Set(flow.acknowledged);
-      const missing = required.filter((step) => !seen.has(step));
-      if (missing.length > 0) {
-        return reply.status(409).send({ error: `Review ${missing[0]} before finishing this walkthrough.` });
-      }
+    const blocking = replayBlockingStep(flow, includesGapsStepFrom(gapsFrom(appProfile), appProfile));
+    if (blocking) {
+      return reply.status(409).send({ error: `Review ${blocking} before finishing this walkthrough.` });
     }
 
     const now = new Date();
