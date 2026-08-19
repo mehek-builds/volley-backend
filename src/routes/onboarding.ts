@@ -1,5 +1,5 @@
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { eq, getTableColumns, sql } from 'drizzle-orm';
+import { and, eq, getTableColumns, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index';
 import {
@@ -27,12 +27,15 @@ import {
   consentAcceptanceGranted,
 } from '../lib/automationConsent';
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
-import { generated_resumes } from '../db/schema';
+import { generated_resumes, monitored_jobs } from '../db/schema';
 import { isComposioConfigured } from '../lib/composioConnections';
 import { isUndefinedColumnError, selectApplicationProfileRow, upsertApplicationProfile } from '../lib/applicationFacts';
 import { verificationEmailSource } from '../lib/verificationEmailSource';
 import { countryEligibilityForRead } from '../lib/workEligibility';
 import { requireFeature } from '../lib/entitlements';
+import { rememberReusableAnswers } from '../lib/savedAnswerStore';
+import { accountSponsorshipAnswer, declarationFromEmployerAnswers } from '../lib/declarationFromEmployerAnswers';
+import { persistProfileWithCountryEligibility } from '../lib/countryEligibilityPersistence';
 
 /**
  * How many submissions has this student personally approved AND seen reach the employer?
@@ -251,7 +254,7 @@ const REPLAY_STEPS_WITHOUT_GAPS = ['focus', 'resume', 'impact', 'sponsorship', '
  * a client that has no case for it renders a blank screen in the middle of onboarding. The website
  * change ships FIRST; this one follows it. The reverse order is not a degraded experience, it is
  * an empty page on the flow that ends in a real application. */
-export const APPLICATION_STEPS = ['match', 'build', 'questions', 'review', 'trial', 'notifications', 'plan'] as const;
+export const APPLICATION_STEPS = ['match', 'build', 'questions', 'sponsorship', 'review', 'trial', 'notifications', 'plan'] as const;
 export type ApplicationStep = (typeof APPLICATION_STEPS)[number];
 
 /**
@@ -269,9 +272,20 @@ export function isReplayStep(step: string): step is ReplayStep {
   return step === 'gaps' || (REPLAY_STEPS_WITHOUT_GAPS as readonly string[]).includes(step);
 }
 
-export function applicationStepFrom(acknowledged: readonly string[]): Step {
+export function applicationStepFrom(
+  acknowledged: readonly string[],
+  options: { hasSponsorshipAnswer?: boolean } = {},
+): Step {
   const seen = new Set(acknowledged);
-  return APPLICATION_STEPS.find((step) => !seen.has(step)) ?? 'done';
+  return APPLICATION_STEPS.find((step) => {
+    /* The one conditional member. It sits AFTER the questions screen on purpose: if the employer
+       asked, POST /onboarding/answers has already written the declaration by the time this is
+       evaluated, and the screen is skipped without the student ever seeing it. If they did not
+       ask, nothing else on the account can answer it and the board's sponsor-only filter depends
+       on it, so it is asked here rather than left unset. */
+    if (step === 'sponsorship' && options.hasSponsorshipAnswer) return false;
+    return !seen.has(step);
+  }) ?? 'done';
 }
 type ReplayStep = (typeof REPLAY_STEPS_WITHOUT_GAPS)[number] | 'gaps';
 
@@ -397,9 +411,22 @@ export function onboardingStepFrom(input: {
   if (!input.hasFocus) return 'focus';
   if (!input.hasResume) return 'resume';
   if (input.hasImpactReview === false) return 'impact';
-  if (!input.hasSponsorshipAnswer) return 'sponsorship';
-  if (!input.hasBaseResume) return 'base';
-  if (input.hasSetupGaps && !input.gapsAsked) return 'gaps';
+  /* BASE, GAPS AND SPONSORSHIP ARE NO LONGER DERIVED HERE, each for its own measured reason.
+   *
+   * base: the one-page review was never a question, it was an artifact review. The packet is built
+   * behind the match screen now and the ATS gate still runs and still fails closed; what went away
+   * is a screen asking a student to approve a document before they had seen a single job.
+   *
+   * gaps: only 21.7% of applications ask for a GPA at all (measured, 318 real packets), and the
+   * questions screen collects it from the employer's own banded list when they do. That is also
+   * the answer that actually persists, where a cold text box produced the `no option matched
+   * "3.89"` class of stuck packet.
+   *
+   * sponsorship: MOVED into the application sequence rather than removed. 39.9% of first
+   * applications ask both halves themselves and POST /onboarding/answers records those as the
+   * declaration, so the screen derives only for the ~60% whose first employer did not ask.
+   * Deriving it here would ask everybody before the employer ever got the chance, which is the
+   * screen this change exists to remove. */
   return 'done';
 }
 
@@ -570,6 +597,15 @@ const completeBodySchema = z.object({
   // The code-of-conduct permission, asked and stored separately. See db/schema.ts.
   automatic_conduct_acceptance_enabled: z.boolean().optional(),
 });
+const onboardingAnswersBodySchema = z.object({
+  job_id: z.string().trim().min(1).max(200).optional().nullable(),
+  company: z.string().trim().max(200).optional().nullable(),
+  answers: z.array(z.object({
+    question: z.string().trim().min(1).max(2000),
+    answer: z.string().trim().min(1).max(10000),
+  })).max(50),
+});
+
 const flowStepBodySchema = z.object({
   flow_version: z.literal(CURRENT_ONBOARDING_FLOW_VERSION),
   step: z.enum(['resume', 'impact', 'focus', 'sponsorship', 'base', 'gaps', ...APPLICATION_STEPS]),
@@ -802,7 +838,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const step = flow.available && flow.replayRequired && !flow.completed
       ? nextReplayStep(flow.acknowledged, includesGaps)
       : derivedStep === 'done' && inApplicationSequence
-        ? applicationStepFrom(flow.acknowledged)
+        ? applicationStepFrom(flow.acknowledged, { hasSponsorshipAnswer: has_sponsorship_answer })
         : derivedStep;
     const flowCompleted = flow.available ? flow.completed : !!user.onboarding_completed_at;
     /* THE CARD GATE. The dashboard does not open until a payment method is on file.
@@ -929,6 +965,93 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
      It stops being harmless if that seed write ever starts failing silently (profile.ts catches and
      only logs it), or if the parse gains a later-populated academic field. If either happens, seed
      the row here from the parse rather than inserting it bare. */
+  /**
+   * POST /onboarding/answers
+   *
+   * What the student typed on the "what the job asks" screen, kept.
+   *
+   * WITHOUT THIS THAT SCREEN DISCARDS EVERYTHING. It asks a student real questions from a real
+   * employer, in the employer's own words, and until this existed the client counted the answers,
+   * advanced the flow, and threw them away. The screen's own promise - answer once and Litos
+   * carries them into every application after this - was false.
+   *
+   * ACCOUNT-SCOPED, and deliberately routed through rememberReusableAnswers rather than written
+   * here. That helper applies answerReuseScope, which classifies a SELF-DECLARATION as
+   * posting_specific and refuses to store it: a sponsorship answer, an EEO answer or a
+   * commitment made to one employer is not a fact about the account and must not be replayed to
+   * the next one. This route inherits that rule rather than restating it, so the two can never
+   * drift apart.
+   *
+   * The application-scoped copy is NOT written here. PUT /applications/:id/review/answers owns
+   * that and refuses unless a review exists, which it does not until a fill has run; an onboarding
+   * packet has been generated but never filled. Writing the reusable half now is what makes the
+   * next application shorter, and the fill picks these up through loadSavedAnswers when it runs.
+   */
+  fastify.post('/onboarding/answers', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const parsed = onboardingAnswersBodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) return reply.status(400).send({ error: 'Invalid answers', detail: parsed.error.issues });
+    const userId = request.jwtPayload!.userId;
+    const stored = await rememberReusableAnswers(
+      userId,
+      parsed.data.answers,
+      { company: parsed.data.company ?? undefined, jobId: parsed.data.job_id ?? null },
+    );
+
+    /* THE WORK-VISA DECLARATION, WHEN THE EMPLOYER ALREADY ASKED FOR IT.
+     *
+     * Measured across 318 real packets: 39.9% ask BOTH the authorization and the sponsorship
+     * question. For those students the work-visa screen asks a second time what they have just
+     * answered in the employer's own words, so this records it as the account's declaration for
+     * that posting's country and the screen never derives.
+     *
+     * declarationFromEmployerAnswers refuses unless the answers genuinely support a complete
+     * record, so the common outcome here is null and the screen still appears. That refusal is the
+     * safety: a guessed declaration is a false legal statement made on the applicant's behalf.
+     *
+     * FIRST WRITE WINS, matching POST /onboarding/sponsorship exactly. The `isNull` guard on the
+     * update is what enforces it, so an employer answer can only ever FILL an empty declaration
+     * and can never overwrite one the student made herself. */
+    let declaredCountry: string | null = null;
+    if (parsed.data.job_id) {
+      /* Read fresh rather than threaded in: this route is called once per onboarding and the read
+         is what makes the first-write-wins check honest about what is already on file. */
+      const appProfileRow = await selectApplicationProfileRow(userId);
+      const [job] = await db
+        .select({ country: monitored_jobs.job_country })
+        .from(monitored_jobs)
+        .where(eq(monitored_jobs.id, parsed.data.job_id))
+        .limit(1);
+      const record = declarationFromEmployerAnswers(parsed.data.answers, job?.country ?? null);
+      if (record) {
+        const existing = countryEligibilityForRead({ stored: appProfileRow?.work_eligibility_by_country });
+        const already = (existing ?? []).some((row) => row.country_code === record.country_code);
+        if (!already) {
+          await persistProfileWithCountryEligibility(userId, {}, [...(existing ?? []), record]);
+          await db
+            .update(users)
+            .set({
+              sponsorship_required_at_onboarding: accountSponsorshipAnswer(record) === 'yes',
+              sponsorship_declared_at: new Date(),
+              sponsorship_answer: accountSponsorshipAnswer(record) === 'yes' ? 'needs_now' : 'no',
+            })
+            .where(and(eq(users.id, userId), isNull(users.sponsorship_declared_at)));
+          declaredCountry = record.country_code;
+        }
+      }
+    }
+    /* `remembered` is what was actually kept, not what was sent, and the difference is the point:
+       a screen that reported "3 saved" after storing 1 would be describing a promise it did not
+       keep for the two declarations the store correctly refused. */
+    return reply.status(200).send({
+      ok: true,
+      remembered: stored.length,
+      submitted: parsed.data.answers.length,
+      /* Which country, if any, now carries a declaration because of these answers. The client uses
+         it to say so on screen rather than silently changing what the board shows. */
+      declared_country: declaredCountry,
+    });
+  });
+
   fastify.post('/onboarding/gaps-asked', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
     try {
