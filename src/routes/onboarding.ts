@@ -157,20 +157,23 @@ export function requiresPaymentMethodFor(
     billing_provider?: string | null;
     billing_customer_id?: string | null;
     created_at?: Date | null;
-    is_guest?: boolean | null;
   },
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
   const from = cardGateInstant(env);
   if (from === null) return false;
-  /* GUESTS ARE EXEMPT, because gating them is not a gate, it is a brick wall.
-     /billing/checkout refuses a guest outright ("Verify an email before starting
-     checkout"), so a gated guest is redirected to /start, handed the plan screen, and
-     the only control on it returns 409. No path forward, no way back to the dashboard,
-     and Guest mode is a button on the front of /login. Guests are a Free-tier session
-     by design now -- they get no trial either -- so letting them through is the
-     behaviour that matches the product rather than a hole in the gate. */
-  if (user.is_guest) return false;
+  /* GUESTS ARE NOT EXEMPT. Mehek's call 2026-08-19, and it reverses the exemption
+     that shipped a few hours earlier in this same file.
+     The exemption was added for a real reason: /billing/checkout refuses a guest
+     outright ("Verify an email before starting checkout"), so a gated guest was
+     redirected to /start, handed the plan screen, and 409ed by the only control on
+     it. But exempting them fixed the brick wall by opening a door instead -- Guest
+     mode is a button on the front of /login, so anyone could walk around the payment
+     gate by using it, which is the opposite of what the gate is for.
+     So the gate applies to everyone and the WAY OUT is what changed: a guest who
+     hits checkout now gets sent to claim an email (components/start/PlanStep.tsx
+     reads the claim_required code), and a claimed account can pay like any other.
+     Guests are gated; they are simply gated one step earlier. */
   if (!user.created_at || user.created_at.getTime() < from) return false;
   const paymentMethodOnFile = user.billing_provider === 'stripe' && Boolean(user.billing_customer_id);
   return !paymentMethodOnFile;
