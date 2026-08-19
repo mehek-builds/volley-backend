@@ -11,6 +11,35 @@ import {
 } from './billingCatalog';
 
 describe('Litos+ billing catalog', () => {
+  test('checkout and webhook readiness are answered separately', () => {
+    /* THE 68-DAY BUG THIS MAKES VISIBLE. STRIPE_WEBHOOK_SECRET stopped being a valid
+       whsec_ value at some point, /billing/stripe-webhook answered 503 to every event
+       Stripe sent, and nothing said so: checkout still worked, the site still sold, and
+       the only symptom was a number nobody watched -- 58 accounts, 7 started checkouts,
+       0 subscriptions ever recorded.
+
+       The two must stay SEPARATE answers. "Checkout configured, webhook not" is exactly
+       the state that sells without being able to deliver, and it is the state production
+       was in; one combined flag would have hidden its shape. /health reports both. */
+    const configured = {
+      LITOS_BILLING_ENABLED: 'true',
+      STRIPE_SECRET_KEY: 'sk_test_abc123',
+      STRIPE_WEBHOOK_SECRET: 'whsec_abc123',
+      STRIPE_PLUS_WEEKLY_PRICE_ID: 'price_w',
+      STRIPE_PLUS_MONTHLY_PRICE_ID: 'price_m',
+      STRIPE_PLUS_QUARTERLY_PRICE_ID: 'price_q',
+    } as NodeJS.ProcessEnv;
+    assert.equal(billingCheckoutAvailable(configured), true);
+    assert.equal(stripeWebhookAvailable(configured), true);
+
+    // Production's exact shape: able to sell, unable to hear back.
+    for (const broken of ['', '   ', 'sk_live_wrong_kind_of_secret', 'pk_test_publishable']) {
+      const env = { ...configured, STRIPE_WEBHOOK_SECRET: broken } as NodeJS.ProcessEnv;
+      assert.equal(billingCheckoutAvailable(env), true, 'checkout must stay available: that is what makes this failure invisible');
+      assert.equal(stripeWebhookAvailable(env), false, `a webhook secret of "${broken}" must not read as configured`);
+    }
+  });
+
   test('publishes the exact three approved recurring terms', () => {
     assert.deepEqual(BILLING_CATALOG.map((plan) => ({
       id: plan.id,
