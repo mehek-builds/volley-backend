@@ -143,7 +143,7 @@ beforeEach(async () => {
   await seedStudentThroughSetup();
 });
 
-test('a new student is walked through all seven application screens, notifications included', async () => {
+test('a new student is walked through every application screen, notifications included', async () => {
   /* THE WHOLE POINT. Not "the array is in this order" - that is unit tested - but "a real account
      reaching the end of setup is handed these seven, in this order, by the real route, and can get
      past every one of them". */
@@ -162,7 +162,13 @@ test('a new student is walked through all seven application screens, notificatio
 
   assert.deepEqual(
     walked,
-    ['match', 'build', 'questions', 'review', 'trial', 'notifications', 'plan'],
+    /* No 'sponsorship' here, and its absence is the conditional working: this fixture's account
+       already carries a work-eligibility declaration, so the screen is skipped exactly as it is for
+       the ~40% of students whose first employer asked both halves itself. An account WITHOUT a
+       declaration is served it between 'questions' and 'review'; that path is pinned in
+       onboarding.test.ts against applicationStepFrom directly, where the flag can be varied without
+       a database. */
+    ['match', 'questions', 'review', 'trial', 'notifications', 'plan'],
     'the served walk must match the designed order, with notifications between the trial and the price',
   );
   assert.equal((await state()).step, 'done');
@@ -173,7 +179,7 @@ test('the notifications screen can actually be acknowledged, and it advances to 
      route refuses, which parks a student on screen 08 with a Continue button that 400s. It is a
      separate risk from ordering because the two are decided by different code - one by
      APPLICATION_STEPS, the other by the route's zod enum and its replay-ordering branch. */
-  for (const step of ['match', 'build', 'questions', 'review', 'trial']) await acknowledge(step);
+  for (const step of ['match', 'questions', 'review', 'trial']) await acknowledge(step);
   assert.equal((await state()).step, 'notifications');
 
   await acknowledge('notifications');
@@ -183,7 +189,7 @@ test('the notifications screen can actually be acknowledged, and it advances to 
 test('a student who skips the screen is not parked on it forever', async () => {
   // Acknowledged means SEEN, not answered. Declining both permissions is a real answer and so is
   // walking past without touching them; neither may put the student back on the screen.
-  for (const step of ['match', 'build', 'questions', 'review', 'trial']) await acknowledge(step);
+  for (const step of ['match', 'questions', 'review', 'trial']) await acknowledge(step);
   const response = await app.inject({
     method: 'POST',
     url: '/onboarding/flow/steps',

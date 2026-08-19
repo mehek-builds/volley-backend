@@ -142,22 +142,32 @@ describe('onboarding step order', () => {
     assert.equal(onboardingStepFrom({ ...ready, hasResume: false }), 'resume');
   });
 
-  test('a new upload pauses for recent-experience review before targeting', () => {
-    assert.equal(onboardingStepFrom({ ...ready, hasImpactReview: false }), 'impact');
+  test('the impact review no longer derives a step of its own', () => {
+    /* It is part of the resume screen now: reviewing the strongest bullet from a resume is part of
+       handing over that resume, not a separate errand with its own number on the rail. */
+    assert.equal(onboardingStepFrom({ ...ready, hasImpactReview: false }), 'done');
   });
 
-  test('completed accounts return only when a new upload has an unfinished review', () => {
-    assert.equal(onboardingStepFrom({ ...ready, completed: true, hasImpactReview: false }), 'impact');
+  test('a completed account is done, full stop', () => {
+    // Nothing holds it open now that the impact review is part of the resume screen.
+    assert.equal(onboardingStepFrom({ ...ready, completed: true, hasImpactReview: false }), 'done');
     assert.equal(onboardingStepFrom({ ...ready, completed: true }), 'done');
   });
 
-  test('setup ends after the core resume and targeting decisions', () => {
+  test('setup ends after roles, the resume and the impact review, and nothing else', () => {
+    /* base, gaps and sponsorship no longer derive here. The first two are gone as screens; the
+       third moved into the application sequence so the EMPLOYER gets the chance to ask it first
+       (39.9% of first applications do, measured across 318 packets). A setup step that still
+       derived here would ask everybody before that chance existed. */
     const cases: Array<[string, Parameters<typeof onboardingStepFrom>[0]]> = [
       ['done', { ...ready, completed: true, hasResume: false }],
       ['focus', { ...ready, hasResume: false, hasFocus: false, hasSponsorshipAnswer: false }],
       ['resume', { ...ready, hasResume: false, hasSponsorshipAnswer: false }],
-      ['sponsorship', { ...ready, hasSponsorshipAnswer: false, hasBaseResume: false }],
-      ['base', { ...ready, hasBaseResume: false }],
+      // Undeclared sponsorship no longer holds setup open.
+      ['done', { ...ready, hasSponsorshipAnswer: false }],
+      // Nor does a missing one-page or a missing GPA.
+      ['done', { ...ready, hasBaseResume: false }],
+      ['done', { ...ready, hasSetupGaps: true, gapsAsked: false }],
       ['done', ready],
     ];
     for (const [expected, input] of cases) {
@@ -248,10 +258,12 @@ describe('the setup gaps step', () => {
     hasBaseResume: true,
   };
 
-  test('an unasked student with a missing academic fact is routed to it, after the one-page review', () => {
-    assert.equal(onboardingStepFrom({ ...ready, hasSetupGaps: true, gapsAsked: false }), 'gaps');
-    // Strictly after base: the screen is the last thing before Done, not a detour from the payoff.
-    assert.equal(onboardingStepFrom({ ...ready, hasBaseResume: false, hasSetupGaps: true, gapsAsked: false }), 'base');
+  test('the gaps screen no longer derives, because the employer asks when it matters', () => {
+    /* Measured: only 21.7% of applications ask for a GPA. The questions screen collects it from
+       the employer's own banded list when they do, which is also the answer that persists. */
+    assert.equal(onboardingStepFrom({ ...ready, hasSetupGaps: true, gapsAsked: false }), 'done');
+    // And a missing one-page no longer holds setup open either: it is built behind the match screen.
+    assert.equal(onboardingStepFrom({ ...ready, hasBaseResume: false, hasSetupGaps: true, gapsAsked: false }), 'done');
   });
 
   /* THE #116 REGRESSION, stated as directly as it can be. Skipping saves nothing, so the fields are
@@ -380,9 +392,12 @@ describe('the setup gaps step', () => {
        when the parse produced a seed - so they are counted and the route does send them. */
     test('no row is counted, matching the step the route derives for them', () => {
       assert.equal(includesGapsStepFrom(OPEN, undefined), true);
+      /* The ROUTE no longer derives 'gaps' for anyone: the screen is cut and the employer asks
+         when it matters. includesGapsStepFrom still answers truthfully for a version-2 REPLAY,
+         which can still walk that screen, which is why the counting assertions above stand. */
       assert.equal(
         onboardingStepFrom({ ...ready, hasSetupGaps: hasSetupGapsFrom(OPEN), gapsAsked: gapsAskedFrom(undefined) }),
-        'gaps',
+        'done',
       );
     });
   });
@@ -440,22 +455,36 @@ describe('five-role resume contract', () => {
 describe('the application sequence', () => {
   test('it runs in order and ends at done', () => {
     assert.equal(applicationStepFrom([]), 'match');
-    assert.equal(applicationStepFrom(['match']), 'build');
-    assert.equal(applicationStepFrom(['match', 'build']), 'questions');
-    assert.equal(applicationStepFrom(['match', 'build', 'questions']), 'review');
-    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review']), 'trial');
-    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review', 'trial']), 'notifications');
-    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review', 'trial', 'notifications']), 'plan');
+    // build is folded into match: one screen, two phases, one step number.
+    assert.equal(applicationStepFrom(['match']), 'questions');
+    // sponsorship sits here, and only for a student nothing has answered it for yet.
+    assert.equal(applicationStepFrom(['match', 'questions']), 'sponsorship');
+    assert.equal(
+      applicationStepFrom(['match', 'questions'], { hasSponsorshipAnswer: true }),
+      'review',
+      'a declaration already on file must skip the screen entirely',
+    );
+    assert.equal(applicationStepFrom(['match', 'questions', 'sponsorship']), 'review');
+    assert.equal(applicationStepFrom(['match', 'questions', 'sponsorship', 'review']), 'trial');
+    assert.equal(applicationStepFrom(['match', 'questions', 'sponsorship', 'review', 'trial']), 'notifications');
+    assert.equal(applicationStepFrom(['match', 'questions', 'sponsorship', 'review', 'trial', 'notifications']), 'plan');
     assert.equal(applicationStepFrom([...APPLICATION_STEPS]), 'done');
   });
 
   test('the order is pinned as a value, because the website has to ship each screen first', () => {
     /* TWO REASONS THIS IS A VALUE ASSERTION rather than a shape one.
      *
-     * The website's /start switch has NO DEFAULT CASE, so a backend serving a step name the client
-     * has no case for renders a blank screen in the middle of the flow that ends in a real
-     * application. Adding, renaming or reordering anything here is a deploy-order decision, and it
-     * should arrive in a diff as a deliberate edit to this line rather than as a passing test.
+     * The website's /start switch now HAS a default arm (role-quick-website #355), so an unknown
+     * step lands on the done screen rather than a blank page. That removes the blast radius, not
+     * the decision: adding, renaming or reordering anything here still changes what a student
+     * walks, and it should arrive in a diff as a deliberate edit to this line rather than as a
+     * passing test.
+     *
+     * `sponsorship` sits AFTER `questions` for a measured reason. 39.9% of first applications ask
+     * both the authorization and the sponsorship question themselves (318 real packets), and
+     * POST /onboarding/answers turns those into the account's declaration, so the screen is skipped
+     * for those students entirely. Placing it before `questions` would ask everybody before the
+     * employer ever got the chance.
      *
      * And the position of `notifications` is itself an argument: permission is asked AFTER the
      * seven free days are given and BEFORE the price, while nothing is being sold. Moving it after
@@ -463,7 +492,7 @@ describe('the application sequence', () => {
      * people never arrive. */
     assert.deepEqual(
       [...APPLICATION_STEPS],
-      ['match', 'build', 'questions', 'review', 'trial', 'notifications', 'plan'],
+      ['match', 'questions', 'sponsorship', 'review', 'trial', 'notifications', 'plan'],
     );
   });
 
@@ -471,17 +500,20 @@ describe('the application sequence', () => {
     /* Declining a match, or saving a packet to send later, still means the screen was SEEN, and
        the flow must not put the student back on it forever. Same distinction setup_gaps_asked_at
        makes one screen earlier. */
-    assert.equal(applicationStepFrom(['build']), 'match');
-    assert.equal(applicationStepFrom(['match', 'questions']), 'build');
+    assert.equal(applicationStepFrom(['questions']), 'match');
+    assert.equal(applicationStepFrom(['match', 'review']), 'questions');
   });
 
-  test('setup steps are replay steps and application steps are not', () => {
-    // Replay exists to walk an EXISTING account back through setup, and no existing account has an
-    // application sequence to replay, so the ordering check must not apply to these.
+  test('setup steps are replay steps, and the application steps added since are not', () => {
+    /* Replay exists to walk an EXISTING account back through the version-2 setup screens, and no
+       existing account has an application sequence to replay.
+       `sponsorship` is deliberately BOTH: it is a version-2 setup screen that an old account can
+       still be replayed through, and it is a conditional member of the new sequence. So it is
+       excluded from the second loop rather than the rule being weakened for everything. */
     for (const step of ['resume', 'impact', 'focus', 'sponsorship', 'base', 'gaps']) {
       assert.equal(isReplayStep(step), true, `${step} should be a replay step`);
     }
-    for (const step of APPLICATION_STEPS) {
+    for (const step of APPLICATION_STEPS.filter((step) => step !== 'sponsorship')) {
       assert.equal(isReplayStep(step), false, `${step} must not be a replay step`);
     }
   });
