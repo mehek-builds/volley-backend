@@ -896,7 +896,7 @@ export function rankedMatchEligible(score: number | null | undefined, hasResumeS
  * cached: this is the one filter where serving a stale `false` puts someone in front of jobs they
  * cannot take, and the row is already the cheapest kind of lookup this route makes.
  */
-async function accountRequiresSponsor(userId: string | undefined): Promise<boolean> {
+export async function accountRequiresSponsor(userId: string | undefined): Promise<boolean> {
   if (!userId) return false;
   const [row] = await db
     .select({
@@ -910,7 +910,7 @@ async function accountRequiresSponsor(userId: string | undefined): Promise<boole
   return sponsorOnlyBoardRequired({ declaredAtOnboarding: row.declared, settingEnabled: row.setting });
 }
 
-async function accountJobTargeting(userId: string | undefined): Promise<JobTargeting> {
+export async function accountJobTargeting(userId: string | undefined): Promise<JobTargeting> {
   if (!userId) return normalizeTargeting(null);
   const [row] = await db.select().from(targeting).where(eq(targeting.user_id, userId)).limit(1);
   return normalizeTargeting(row as unknown as Record<string, unknown> | undefined);
@@ -924,7 +924,7 @@ function evidenceFor(row: { sponsorship_status: string | null; employer_sponsors
   }).evidence;
 }
 
-async function studentResumeFacts(userId: string | undefined): Promise<{ resumeText: string | null; degree: string | null }> {
+export async function studentResumeFacts(userId: string | undefined): Promise<{ resumeText: string | null; degree: string | null }> {
   if (!userId) return { resumeText: null, degree: null };
   const [profile] = await db
     .select({ base_resume_json: profiles.base_resume_json, parsed_json: profiles.parsed_json })
@@ -949,7 +949,7 @@ async function studentResumeFacts(userId: string | undefined): Promise<{ resumeT
  * Null when there is nothing on file, and null must never gate: a student who has not finished
  * their profile gets the whole board, not an empty one.
  */
-async function studentGradDate(userId: string | undefined): Promise<string | null> {
+export async function studentGradDate(userId: string | undefined): Promise<string | null> {
   if (!userId) return null;
   const [profile] = await db
     .select({ base_resume_json: profiles.base_resume_json, parsed_json: profiles.parsed_json })

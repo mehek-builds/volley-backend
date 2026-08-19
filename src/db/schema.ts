@@ -138,6 +138,34 @@ export const users = pgTable('users', {
   automatic_conduct_acceptance_enabled: boolean('automatic_conduct_acceptance_enabled').default(false).notNull(),
   automatic_conduct_acceptance_consented_at: timestamp('automatic_conduct_acceptance_consented_at', { withTimezone: true }),
   automatic_conduct_acceptance_consent_version: text('automatic_conduct_acceptance_consent_version'),
+  /* ---- the two notification permissions (screen 08) ----
+   *
+   * PERMISSIONS, NOT SETTINGS, which is why each carries its own grant timestamp in the shape the
+   * automation permissions above use and application_profile.application_attestations_consented_at
+   * uses. Litos putting mail in somebody's inbox is a thing done TO them, so the record has to say
+   * when they said yes and be revocable without an argument. A boolean alone cannot be audited.
+   *
+   * NO CONSENT VERSION, and that is the one place this departs from the triples above. Those
+   * license Litos to ACT on an employer's form on the applicant's behalf, so which words she agreed
+   * to is load-bearing evidence and has to be pinned to a version. These license an email. There is
+   * no downstream act whose legitimacy depends on the exact wording, and a version column nobody
+   * ever reads is a column that goes stale and misleads the next reader into thinking it is
+   * checked. Revocation is one click and reaches back nothing, because nothing was done under it.
+   *
+   * TWO COLUMNS AND NOT ONE, for the same reason the consent and conduct permissions are separate:
+   * they are different bargains. "Tell me when a strong match opens" is Litos deciding, on its own
+   * schedule, that something is worth interrupting her for. "Tell me when an employer replies" is
+   * relaying a fact somebody else created about an application she already sent. Someone can
+   * reasonably want the second and not the first, and a single toggle would make refusing the
+   * first cost her the second.
+   *
+   * Default false on both. An account that has never seen screen 08 is not subscribed to anything,
+   * and that includes every account that predates this column. Opt-in is the only honest default
+   * for mail, and it is what makes the unsubscribe link a formality rather than a repair. */
+  notify_strong_match_enabled: boolean('notify_strong_match_enabled').default(false).notNull(),
+  notify_strong_match_granted_at: timestamp('notify_strong_match_granted_at', { withTimezone: true }),
+  notify_employer_reply_enabled: boolean('notify_employer_reply_enabled').default(false).notNull(),
+  notify_employer_reply_granted_at: timestamp('notify_employer_reply_granted_at', { withTimezone: true }),
   // ---- visa sponsorship ----
   //
   // Answered ONCE, during onboarding, and then permanent. True means the job seeker said they need
@@ -1970,4 +1998,81 @@ export const portal_accounts = pgTable('portal_accounts', {
 }, (t) => ({
   identityUnique: uniqueIndex('portal_accounts_identity_idx').on(t.user_id, t.portal_family, t.tenant),
   userIdx: index('portal_accounts_user_id_idx').on(t.user_id),
+}));
+
+// ---- notification_sends ----
+/* EVERY notification Litos has ever put in somebody's inbox, and the reservation that let it.
+ *
+ * THIS TABLE IS THE LIMITER. It is not a log that a limiter consults; the limiter IS the unique
+ * index below, and the send path writes the row BEFORE it calls Resend. A read-then-send check
+ * ("have we mailed this student today?") is a time-of-check-to-time-of-use race, and the two
+ * writers that exist can genuinely overlap: a Vercel cron retry can start while the first attempt
+ * is still in Resend's 10 second timeout, and both would read zero rows and both would send. The
+ * database refusing the second insert is the only version of "at most one a day" that survives
+ * concurrency, and it survives it without a lock.
+ *
+ * `daily_slot` is how one table carries two different limits without a second table or a
+ * kind-specific index. A rate-limited kind writes `<kind>:<yyyy-mm-dd>` and collides with itself
+ * for the rest of the day. A transactional kind writes NULL, and Postgres never collides NULLs in
+ * a unique index, so an employer reply is never held back by a match alert or by another reply.
+ * That is deliberate: a daily cap on a strong-match alert is politeness, and the same cap on
+ * "someone replied to your application" would be Litos sitting on the student's mail.
+ *
+ * `dedupe_key` is the second, independent guard and it is about REPEATS rather than rate: one
+ * posting is announced to one student exactly once ever, and one inbound message produces exactly
+ * one notification however many times the webhook redelivers it. The daily slot alone would let
+ * the same posting come back tomorrow.
+ *
+ * WHY THE ROW SURVIVES A FAILED SEND ONLY IF IT SUCCEEDED. The reservation is deleted when the
+ * send throws, so a Resend outage costs the student nothing and the next run may try again. It is
+ * kept, with `sent_at` stamped, the moment Resend returns an id. The window between the two is the
+ * only place a crash can lose a day's slot, and losing a slot means one fewer email, which is the
+ * side to fail on.
+ *
+ * NO MESSAGE BODY, EVER. The subject line a student was sent is not stored either. What is worth
+ * keeping is that a notification of this kind about this thing went out at this time, which is
+ * everything an unsubscribe complaint or a duplicate report needs, and nothing that turns this
+ * table into a second copy of the student's mail. */
+export const notification_sends = pgTable('notification_sends', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }).notNull(),
+  /* 'strong_match' | 'employer_reply'. Text rather than an enum, matching every other vocabulary
+     column in this file (monitored_jobs.sponsorship_status, application_email_messages.direction),
+     because schema-push handles a text value without a type migration. */
+  kind: text('kind').notNull(),
+  /* The rate reservation, or null for a kind that has no rate limit. See the note above: the NULL
+     is not "unknown", it is "this kind is not rate limited", and Postgres's treatment of NULL in a
+     unique index is what encodes that. */
+  daily_slot: text('daily_slot'),
+  /* What this notification was ABOUT, so the same thing is never announced twice. Two shapes:
+     `strong_match:<job id>` and `employer_reply:<message id>`. Prefixed so two kinds can never
+     collide on a shared uuid. */
+  dedupe_key: text('dedupe_key').notNull(),
+  /* The posting or the inbound message this concerned, nullable because each kind fills one.
+   *
+   * SET NULL, NEVER CASCADE, and the difference is the whole value of this table. postings are
+   * HARD DELETED on a schedule: purgeExpiredPostings drops every monitored_jobs row past
+   * PURGE_POSTINGS_OLDER_THAN_DAYS. Under a cascade that purge would silently destroy the record
+   * that a student was ever emailed, one month after the fact, taking with it the only evidence an
+   * unsubscribe complaint or a duplicate-send report has to look at, and resetting that account's
+   * place in the sweep's longest-waiting-first rotation to "never mailed".
+   *
+   * Setting null instead keeps the row, its timestamp and its dedupe_key, and the dedupe_key is
+   * what actually prevents a repeat: it carries the posting's identity as text, so it goes on
+   * working after the posting it names is gone. */
+  monitored_job_id: uuid('monitored_job_id').references(() => monitored_jobs.id, { onDelete: 'set null' }),
+  application_email_message_id: uuid('application_email_message_id')
+    .references(() => application_email_messages.id, { onDelete: 'set null' }),
+  /* Resend's message id, and the ONLY proof the send was accepted. Null means the row is still a
+     reservation: either in flight, or orphaned by a crash between the insert and the send. */
+  provider_message_id: text('provider_message_id'),
+  sent_at: timestamp('sent_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  /* THE LIMITER. One row per (student, kind, day) for any kind that fills daily_slot. */
+  dailySlotUnique: uniqueIndex('notification_sends_daily_slot_unique').on(t.user_id, t.daily_slot),
+  /* THE REPEAT GUARD, global rather than per user: a dedupe key already carries the identity of
+     the thing it is about, and an inbound message belongs to exactly one account. */
+  dedupeKeyUnique: uniqueIndex('notification_sends_dedupe_key_unique').on(t.dedupe_key),
+  userCreatedIdx: index('notification_sends_user_created_idx').on(t.user_id, t.created_at),
 }));

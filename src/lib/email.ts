@@ -42,6 +42,12 @@ export type OutboundEmail = {
   text: string;
   html?: string;
   reply_to?: string;
+  /* Extra RFC 5322 headers, passed straight through to Resend. Added for List-Unsubscribe and
+     List-Unsubscribe-Post, which are the only reason this exists: a bulk-ish message without them
+     gives Gmail no machine-readable way to offer its own unsubscribe control, so the only way a
+     recipient can stop the mail is the spam button, and that costs the sending domain the
+     deliverability every student's application mail depends on. Not a general escape hatch. */
+  headers?: Record<string, string>;
   attachments?: Array<{
     filename: string;
     content: string;

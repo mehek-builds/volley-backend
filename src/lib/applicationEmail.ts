@@ -1013,6 +1013,20 @@ export type StoredEmployerMessageDeps = {
   markForwarded: (messageId: string) => Promise<void>;
   recordForwardFailure: (input: { messageId: string; error: string }) => Promise<void>;
   onResolutionError?: (error: unknown) => void;
+  /**
+   * Tell the applicant that mail arrived, for the classes the forward deliberately keeps internal.
+   *
+   * OPTIONAL, and it must stay optional. Every existing test builds these deps by hand, and a
+   * required member would have made this change a rewrite of a dozen unrelated fixtures for no
+   * behavioural reason. Absent means the message is handled exactly as it is today.
+   *
+   * IT MUST NOT THROW AND IT MUST NOT BE AWAITED FOR ITS VALUE. A throw here would reach the
+   * webhook, which reads any throw as "not handled, redeliver" - so a Resend hiccup on a courtesy
+   * alert would replay a message whose forwarding and packet resolution had already succeeded. See
+   * lib/employerReplyNotification.ts, which returns a reason rather than raising, and the live
+   * implementation below, which swallows whatever still escapes.
+   */
+  notifyReply?: (input: { messageId: string; classification: ApplicationEmailClassification; receivedAt: Date }) => Promise<void>;
 };
 
 /* WHAT HAPPENS TO AN EMPLOYER MESSAGE ONCE IT IS SAFELY IN THE LEDGER, and why resolution comes
@@ -1037,6 +1051,19 @@ export type StoredEmployerMessageDeps = {
  * itself is idempotent. If the FORWARD also throws, that error wins and the resolution error is only
  * logged - the caller can act on one error, and the forward is the one with a claim to release.
  */
+/* The swallow, in one place rather than at each call site.
+ *
+ * A notification is strictly secondary to storing and routing the mail, so its failure must not
+ * change what the webhook is told. Nothing is logged here because the callers that care already
+ * log: the live dep wraps its own error reporting, and a second line would double every entry. */
+async function notifyReplyQuietly(
+  deps: StoredEmployerMessageDeps,
+  input: { messageId: string; classification: ApplicationEmailClassification; receivedAt: Date },
+): Promise<void> {
+  if (!deps.notifyReply) return;
+  await deps.notifyReply(input).catch(() => undefined);
+}
+
 export async function handleStoredEmployerMessage(input: {
   aliasRow: { alias: string; user_id: string; generated_resume_id: string | null; forward_to: string };
   message: StoredInboundMessage | null;
@@ -1082,6 +1109,12 @@ export async function handleStoredEmployerMessage(input: {
 
   const forwardingDecision = applicationEmailForwardingDecision(classification);
   if (!forwardingDecision.forward) {
+    /* THE ONLY PLACE THE REPLY ALERT FIRES, and it is this branch precisely because this branch is
+       the mail the applicant would otherwise never hear about. Every path below ends with the
+       message itself in her inbox, and an alert beside it would announce the same event twice.
+       Gated on `message` because the alert is deduplicated by the stored row's id: with no row
+       there is no key, and a redelivery would send a second copy. */
+    if (message) await notifyReplyQuietly(deps, { messageId: message.id, classification, receivedAt });
     return done({ ...base, forwarded: false, reason: forwardingDecision.reason });
   }
   if (!message) return done({ ...base, forwarded: false, reason: 'message_not_stored' });
@@ -1115,8 +1148,15 @@ export async function handleStoredEmployerMessage(input: {
   return done({ ...base, forwarded: true });
 }
 
-/** The live collaborators for handleStoredEmployerMessage. Nothing here decides anything. */
-function storedEmployerMessageDeps(): StoredEmployerMessageDeps {
+/** The live collaborators for handleStoredEmployerMessage. Nothing here decides anything.
+ *
+ * Takes the alias row because the reply alert needs the two facts only the alias carries: WHO the
+ * account is, and WHICH packet this thread belongs to. Passing them here rather than widening
+ * handleStoredEmployerMessage's dep signature keeps that function's collaborators shaped by what
+ * it does, not by what one of them happens to need. */
+function storedEmployerMessageDeps(
+  aliasRow: { user_id: string; generated_resume_id: string | null },
+): StoredEmployerMessageDeps {
   return {
     resolveConfirmation: (confirmation) => resolvePacketFromConfirmation(confirmation),
     claimForwarding: async (messageId) => {
@@ -1143,6 +1183,22 @@ function storedEmployerMessageDeps(): StoredEmployerMessageDeps {
       await db.update(application_email_messages)
         .set({ forwarding_claimed_at: null, forward_error: error })
         .where(eq(application_email_messages.id, messageId));
+    },
+    /* Imported lazily so this module keeps no load-time edge to the notification subsystem. That
+       matters here specifically: employerReplyNotification pulls in the send ledger and the email
+       templates, and this file is imported by the packet planner, the submission runner and the
+       verification reader, none of which send a notification. A static import would put all of it
+       in their cold start for nothing. */
+    notifyReply: async ({ messageId, classification, receivedAt }) => {
+      const { notifyEmployerReply } = await import('./employerReplyNotification');
+      await notifyEmployerReply({
+        userId: aliasRow.user_id,
+        messageId,
+        applicationId: aliasRow.generated_resume_id,
+        classification,
+        receivedAt,
+        forwarded: false,
+      });
     },
   };
 }
@@ -1228,7 +1284,7 @@ export async function processInboundApplicationEmail(input: InboundApplicationEm
     message: message ?? null,
     classification: storedClassification,
     receivedAt,
-  }, storedEmployerMessageDeps());
+  }, storedEmployerMessageDeps(aliasRow));
 }
 
 /* THE WAY BACK FOR CONFIRMATIONS THAT ARE ALREADY IN THE LEDGER.

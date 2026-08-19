@@ -1,7 +1,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   APPLICATION_STEPS,
+  MIGRATION_PENDING_COLUMNS,
   applicationStepFrom,
   isReplayStep,
   gapSuggestionsFrom,
@@ -399,7 +401,7 @@ describe('five-role resume contract', () => {
   });
 });
 
-/* The application sequence: six ledger-driven screens between finishing setup and finishing
+/* The application sequence: seven ledger-driven screens between finishing setup and finishing
  * onboarding. Ledger-driven rather than derived, because "has this student seen the match screen"
  * is a fact about their session and not about their profile. */
 describe('the application sequence', () => {
@@ -409,8 +411,27 @@ describe('the application sequence', () => {
     assert.equal(applicationStepFrom(['match', 'build']), 'questions');
     assert.equal(applicationStepFrom(['match', 'build', 'questions']), 'review');
     assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review']), 'trial');
-    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review', 'trial']), 'plan');
+    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review', 'trial']), 'notifications');
+    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review', 'trial', 'notifications']), 'plan');
     assert.equal(applicationStepFrom([...APPLICATION_STEPS]), 'done');
+  });
+
+  test('the order is pinned as a value, because the website has to ship each screen first', () => {
+    /* TWO REASONS THIS IS A VALUE ASSERTION rather than a shape one.
+     *
+     * The website's /start switch has NO DEFAULT CASE, so a backend serving a step name the client
+     * has no case for renders a blank screen in the middle of the flow that ends in a real
+     * application. Adding, renaming or reordering anything here is a deploy-order decision, and it
+     * should arrive in a diff as a deliberate edit to this line rather than as a passing test.
+     *
+     * And the position of `notifications` is itself an argument: permission is asked AFTER the
+     * seven free days are given and BEFORE the price, while nothing is being sold. Moving it after
+     * `plan` would put a consent question on the far side of a checkout redirect, where most
+     * people never arrive. */
+    assert.deepEqual(
+      [...APPLICATION_STEPS],
+      ['match', 'build', 'questions', 'review', 'trial', 'notifications', 'plan'],
+    );
   });
 
   test('a screen acknowledged out of order still counts as seen', () => {
@@ -433,6 +454,63 @@ describe('the application sequence', () => {
   });
 });
 
+
+/* THE DEPLOY-WINDOW SEATBELT, checked against the migrations themselves rather than against a list
+ * somebody remembered to update.
+ *
+ * `db.select().from(users)` compiles to an EXPLICIT column list built from schema.ts, so a deploy
+ * that lands before its migration makes the whole read fail with 42703 rather than just the new
+ * field. GET /onboarding/state is the first call /start makes, which turns that into a blank setup
+ * flow for every account in the window, and selectOnboardingUserRow's fallback only rescues the
+ * columns it has been told about.
+ *
+ * So this reads the apply-*.mjs scripts and requires every `users` column they add to be named in
+ * MIGRATION_PENDING_COLUMNS. Adding a users column without a seatbelt now fails here instead of in
+ * production, which is the whole point: the notification columns nearly shipped without one. */
+describe('the migration window', () => {
+  const SCRIPTS = [
+    'scripts/apply-consent-acceptance-schema.mjs',
+    'scripts/apply-notifications-schema.mjs',
+  ];
+
+  function usersColumnsAddedBy(source: string): string[] {
+    /* Only the `alter table users` statement, so a script that also touches another table does not
+       contribute that table's columns to a set about `users`. */
+    const statement = /alter table users([\s\S]*?)`/.exec(source);
+    if (!statement) return [];
+    return [...statement[1].matchAll(/add column if not exists\s+([a-z0-9_]+)/g)].map((m) => m[1]);
+  }
+
+  test('every users column a migration script adds is covered by the fallback', () => {
+    let checked = 0;
+    for (const script of SCRIPTS) {
+      const columns = usersColumnsAddedBy(readFileSync(script, 'utf8'));
+      assert.ok(columns.length > 0, `${script} declared no users columns, so this guard is reading it wrong`);
+      for (const column of columns) {
+        assert.ok(
+          MIGRATION_PENDING_COLUMNS.has(column),
+          `${column} is added by ${script} but is not in MIGRATION_PENDING_COLUMNS, so a deploy that leads that migration 500s /onboarding/state`,
+        );
+        checked += 1;
+      }
+    }
+    // Guard the guard: a regex that silently matched nothing would report success forever.
+    assert.ok(checked >= 10, `only ${checked} columns were checked, which means the parser broke`);
+  });
+
+  test('the notification columns are in it by name', () => {
+    // Pinned separately from the parse above, so renaming the migration script cannot quietly take
+    // the newest and least-proven columns out of the seatbelt.
+    for (const column of [
+      'notify_strong_match_enabled',
+      'notify_strong_match_granted_at',
+      'notify_employer_reply_enabled',
+      'notify_employer_reply_granted_at',
+    ]) {
+      assert.ok(MIGRATION_PENDING_COLUMNS.has(column), `${column} must survive the migration window`);
+    }
+  });
+});
 
 describe('the card gate on the dashboard', () => {
   const GATE = { CARD_GATE_FROM: '2026-08-19T00:00:00.000Z' } as NodeJS.ProcessEnv;
