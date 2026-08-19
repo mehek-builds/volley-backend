@@ -928,16 +928,33 @@ const everyQuestionField = {
   answer_override_of: 'Bachelor of Science in Computer Science',
   consent_permission_granted_at: '2026-08-01T00:00:00.000Z',
   consent_permission_version: 'v1',
+  options: ['Female', 'Male', 'Decline To Self Identify'],
 } satisfies Required<ApplicationReviewQuestion>;
 
-test('every question field is classified as packet-visible or provenance, exactly once', () => {
+/* DISPLAY-ONLY FIELDS ARE THE THIRD KIND, named here so the runtime check agrees with the
+   compile-time partition in applicationReview.ts. `options` is what the employer's control OFFERS;
+   the employer receives the value she chose and never the menu, so it is neither packet identity
+   nor a claim about how the answer got there. */
+const DISPLAY_ONLY_QUESTION_FIELDS = ['options'] as const;
+
+test('every question field is classified as packet-visible, provenance or display, exactly once', () => {
   const provenance = new Set<string>([...APPLICANT_CLAIM_FIELDS, ...ANSWER_CLAIM_FIELDS]);
-  const classified = new Set<string>([...PACKET_VISIBLE_QUESTION_FIELDS, ...provenance]);
+  const classified = new Set<string>([
+    ...PACKET_VISIBLE_QUESTION_FIELDS, ...provenance, ...DISPLAY_ONLY_QUESTION_FIELDS,
+  ]);
 
   assert.deepEqual(
     Object.keys(everyQuestionField).filter((field) => !classified.has(field)),
     [],
-    'a question field belongs to packet identity or to provenance, and someone has to say which',
+    'a question field belongs to packet identity, to provenance or to display, and someone has to say which',
+  );
+  /* THE ONE THAT MATTERS. Hashing the option list would spend every stored acknowledgement the
+     first time a board reordered its own menu - a change nobody outside the employer can observe,
+     which is exactly the deadlock PACKET_VISIBLE_QUESTION_FIELDS was narrowed to prevent. */
+  assert.deepEqual(
+    DISPLAY_ONLY_QUESTION_FIELDS.filter((field) => (PACKET_VISIBLE_QUESTION_FIELDS as readonly string[]).includes(field)),
+    [],
+    'a display-only field must never enter packet identity',
   );
   assert.deepEqual(
     PACKET_VISIBLE_QUESTION_FIELDS.filter((field) => provenance.has(field)),

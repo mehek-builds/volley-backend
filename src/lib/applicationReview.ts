@@ -14,6 +14,26 @@ export type ApplicationReviewQuestion = {
   portal_selector?: string;
   portal_input_type?: string;
   ats_api_field?: string;
+  /**
+   * THE OPTIONS THE EMPLOYER'S OWN CONTROL OFFERS, so the answers screen can show her a list to
+   * pick from instead of an empty box.
+   *
+   * Discovery reads these already - it is how "3.89" resolves against a band reading
+   * "3.81 - 3.9" - and then dropped them, so a question Litos could not answer arrived at the
+   * applicant as a bare textarea with no hint of what the control accepts. Measured on a live
+   * Optiver Greenhouse form 2026-08-19: the acknowledgement rows offer "I consent to the above."
+   * and "Yes, I have read and agree to Optiver's privacy policies, notices and disclaimers.", and
+   * a person handed a blank box types "Yes", which matches neither and fails silently. The
+   * pre-script path already carried options for exactly this reason (lib/api.ts); this is the same
+   * field on the path a managed run produces.
+   *
+   * DISPLAY ONLY, AND THEREFORE NOT PACKET IDENTITY. The employer receives the value she chose,
+   * never the menu it came from, so hashing this would spend every stored acknowledgement the
+   * first time a board reordered its own list - the deadlock PACKET_VISIBLE_QUESTION_FIELDS was
+   * narrowed to prevent. It is classified below as its own kind rather than squeezed into the
+   * provenance list, because it is not a claim about how the answer got there.
+   */
+  options?: string[] | null;
   /* WHO PUT THIS ANSWER HERE, when it was not simply resolved from the profile.
    *
    * 'applicant_review' is her, typing on the review screen. 'consent_permission' is Litos accepting
@@ -157,7 +177,21 @@ assertEveryProvenanceFieldIsClassifiedExactlyOnce(true);
  * names the field and states the decision the next person has to make. Putting it on both lists is
  * caught the same way from the other direction. */
 type PacketVisibleQuestionField = (typeof PACKET_VISIBLE_QUESTION_FIELDS)[number];
-type QuestionFieldClassification = PacketVisibleQuestionField | AnswerProvenanceField;
+/* A THIRD KIND, and it is a third kind rather than a convenience.
+ *
+ * The partition below used to read "either the employer receives it, or it records how the answer
+ * got there". `options` is neither: it is what the employer's control OFFERS, carried so the
+ * answers screen can render a list instead of a blank box. Filing it under provenance would have
+ * forced it into APPLICANT_CLAIM_FIELDS or ANSWER_CLAIM_FIELDS, which key staleness - and a menu
+ * changing is not the applicant's claim going stale.
+ *
+ * Kept OUT of PACKET_VISIBLE_QUESTION_FIELDS deliberately: the employer receives the value she
+ * chose, never the list, so hashing it would spend every stored acknowledgement the first time a
+ * board reordered its own options. That is precisely the deadlock the allow-list was narrowed to
+ * prevent, and a test in packetAudit.test.ts pins it. */
+type QuestionDisplayField = 'options';
+type QuestionFieldClassification =
+  PacketVisibleQuestionField | AnswerProvenanceField | QuestionDisplayField;
 type UnclassifiedQuestionField =
   | Exclude<keyof ApplicationReviewQuestion, QuestionFieldClassification>
   | Exclude<QuestionFieldClassification, keyof ApplicationReviewQuestion>
