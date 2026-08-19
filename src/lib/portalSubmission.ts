@@ -10819,9 +10819,22 @@ export async function readReceipt(page: Page): Promise<{ confirmationText: strin
    * (`page.content()`, an `evaluate`) would silently reintroduce the stale-read bug: the form would
    * be scraped instead of the confirmation, and a submitted application would be reported as
    * unverified. Measured before the barrier existed: 10 stale reads in 15 runs. */
-  const body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
-  if (!RECEIPT_PROOF_RE.test(body)) {
-    throw new Error('The company never showed a confirmation we could check');
+  /* AND THE READ IS A WATCH, NOT A GLANCE. Workable submits over XHR and renders its confirmation
+   * as a client-side transition, so the page that exists the instant after networkidle can still be
+   * the form; measured live 2026-08-19, a genuinely pressed Send was reported as "never showed a
+   * confirmation it could read". Employers do not reliably email either, so the screen is the only
+   * proof there is. Poll the same page for up to thirty seconds and accept the first read that
+   * carries a receipt; only a full window with no receipt in any read is a failure. Each pass keeps
+   * the auto-waiting innerText read for the reason above. */
+  const deadline = Date.now() + 30_000;
+  let body = '';
+  for (;;) {
+    body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
+    if (RECEIPT_PROOF_RE.test(body)) break;
+    if (Date.now() >= deadline) {
+      throw new Error('The company never showed a confirmation we could check');
+    }
+    await page.waitForTimeout(1_000).catch(() => undefined);
   }
   return { confirmationText: body.slice(0, 1000), finalUrl: page.url(), referenceId: receiptReference(body) };
 }
