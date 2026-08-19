@@ -860,12 +860,35 @@ export async function profileRoutes(fastify: FastifyInstance) {
       });
     }
 
+    /* THE SKILLS THE STUDENT ACTUALLY LISTED, into the column that is authoritative for them.
+     *
+     * `profiles.skills` is the only source the SKILLS line may come from (R-015), and nothing was
+     * writing it. The parse has always carried the list; it went into `parsed_json` and stopped
+     * there, so `declaredSkills` was empty on every account created through onboarding, the
+     * validator's hard prune never ran, and the model was free to write the field itself.
+     *
+     * Measured on production 2026-08-20 across ten students: only 17 of 77 skills they listed
+     * survived onto their tailored resume, and 18 labels appeared that they never wrote - "API
+     * Design", "Payment Systems", "Quantitative Analysis". One student applying to an operations
+     * role had "Excel" on her resume, lost it, and the match panel then told her Excel was asked
+     * for and not on her resume. That is precisely the failure this column's own comment describes
+     * as the reason it exists.
+     *
+     * PRESERVE BEATS SEED, the same order resume_email uses. A list the student curated is their
+     * statement about themselves and must outlive their next upload; the parse only fills a column
+     * that is empty. A parse with no skills writes nothing rather than clearing one, because NULL
+     * here means "never told us" and [] would mean "told us: none". */
+    const parsedSkills = (parsedProfile.skills ?? [])
+      .map((skill) => (typeof skill === 'string' ? skill.trim() : ''))
+      .filter((skill) => skill.length > 0);
+
     try {
       await db
         .insert(profiles)
         .values({
           user_id: userId,
           parsed_json: parsedProfile,
+          ...(parsedSkills.length > 0 ? { skills: parsedSkills } : {}),
           // The uploaded bytes are parsing input, not account storage. A new row starts with no
           // pointers. Conflict updates omit these fields until legacy Blob deletion succeeds.
           resume_object_key: null,
@@ -877,6 +900,11 @@ export async function profileRoutes(fastify: FastifyInstance) {
           target: profiles.user_id,
           set: {
             parsed_json: parsedProfile,
+            /* Only when the column is still empty. COALESCE rather than a read-then-write so a
+               concurrent upload cannot overwrite a list the student curated between the two. */
+            ...(parsedSkills.length > 0
+              ? { skills: sql`coalesce(${profiles.skills}, ${JSON.stringify(parsedSkills)}::jsonb)` }
+              : {}),
             voice_pref: voice_pref ?? null,
             updated_at: new Date(),
           },
