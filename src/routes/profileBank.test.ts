@@ -196,6 +196,17 @@ describe('targeting schema', () => {
     assert.equal(targetingBodySchema.safeParse({ primary_period: 'whenever' }).success, false);
   });
 
+  /* "immediately" is the only non-seasonal period the column accepts, and it has to be accepted on
+     BOTH fields: the onboarding screen offers the same chip row for the main period and the backup,
+     so a body carrying it in backup_period is a body a student can produce in two clicks. */
+  test('immediately is a valid period on either field, and nothing else non-seasonal is', () => {
+    assert.equal(targetingBodySchema.safeParse({ primary_period: 'immediately' }).success, true);
+    assert.equal(targetingBodySchema.safeParse({ backup_period: 'immediately' }).success, true);
+    assert.equal(targetingBodySchema.safeParse({ primary_period: 'Immediately' }).success, false);
+    assert.equal(targetingBodySchema.safeParse({ primary_period: 'immediate' }).success, false);
+    assert.equal(targetingBodySchema.safeParse({ primary_period: 'asap' }).success, false);
+  });
+
   test('role_types is a closed set', () => {
     assert.equal(targetingBodySchema.safeParse({ role_types: ['internship'] }).success, true);
     assert.equal(targetingBodySchema.safeParse({ role_types: ['contract'] }).success, false);

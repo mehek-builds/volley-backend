@@ -1,6 +1,16 @@
 export const ROLE_TYPES = ['internship', 'co-op', 'new-grad', 'full-time'] as const;
 export type RoleType = (typeof ROLE_TYPES)[number];
 
+/* The one recruiting period that is not a season and year: "I can start now."
+ *
+ * Stored in primary_period/backup_period like any other slug, and routes/targeting.ts builds its
+ * validator from this constant. It is NOT the same as null. Null means the question was never
+ * answered, and the gate below stays off for it because we know nothing. This means the student
+ * answered, and what they answered is that no cycle constrains them - so the gate stays off for
+ * this too, but deliberately, and it is a saved answer the profile can show back to them.
+ */
+export const IMMEDIATE_PERIOD = 'immediately';
+
 export type JobTargeting = {
   categories: string[];
   titles: string[];
@@ -85,9 +95,16 @@ export function recommendationTargetingEligible(
   targeting: JobTargeting,
   candidateDegree?: string | null,
 ): boolean {
-  const allowedPeriods = unique([targeting.primary_period, targeting.backup_period].filter((value): value is string => Boolean(value)));
+  /* "Immediately" on either field turns the period gate OFF rather than adding a term to the
+   * allowed set, and the asymmetry is the point. A student who says they can start now is
+   * telling us the cycle is not a constraint; keeping the other selection as a hard filter would
+   * then hide every posting outside it, which is the opposite of what they said. The gate exists
+   * to drop contradictions, and against "any time" nothing in a title contradicts. */
+  const chosenPeriods = [targeting.primary_period, targeting.backup_period].filter((value): value is string => Boolean(value));
+  const startsImmediately = chosenPeriods.includes(IMMEDIATE_PERIOD);
+  const allowedPeriods = unique(chosenPeriods.filter((value) => value !== IMMEDIATE_PERIOD));
   const postingPeriod = explicitPeriod(job.title);
-  if (allowedPeriods.length > 0 && postingPeriod && !allowedPeriods.includes(postingPeriod)) return false;
+  if (!startsImmediately && allowedPeriods.length > 0 && postingPeriod && !allowedPeriods.includes(postingPeriod)) return false;
 
   const specialist = explicitTitleCategory(job.title);
   if (targeting.categories.length > 0 && specialist && !targeting.categories.includes(specialist)) return false;
@@ -134,6 +151,7 @@ function degreeRank(degree: string): number | null {
 function period(value: unknown): string | null {
   if (typeof value !== 'string') return null;
   const normalized = value.trim().toLowerCase();
+  if (normalized === IMMEDIATE_PERIOD) return normalized;
   return /^(spring|summer|fall|winter)-20\d{2}$/.test(normalized) ? normalized : null;
 }
 

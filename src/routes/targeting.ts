@@ -4,7 +4,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/index';
 import { targeting } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
-import { ROLE_TYPES } from '../lib/jobPreferences';
+import { IMMEDIATE_PERIOD, ROLE_TYPES } from '../lib/jobPreferences';
 
 // The five questions /start asks last. Nothing here is identity-sensitive - it is a stated
 // preference about future postings - so unlike application_profile this is plaintext and IS
@@ -14,8 +14,16 @@ import { ROLE_TYPES } from '../lib/jobPreferences';
 // valid set slides forward every term, and an enum would need a migration each year to say
 // nothing new. The regex is the only real contract - it keeps a free-text field from becoming
 // a junk drawer without pretending to know which terms exist.
-const PERIOD_RE = /^(spring|summer|fall|winter)-20\d{2}$/;
-const period = z.string().regex(PERIOD_RE, 'period must look like "summer-2027"');
+//
+// IMMEDIATE_PERIOD is the one non-seasonal answer, and it is a real answer rather than a blank:
+// a student who can start now is saying the cycle does not constrain them, which is not what a
+// null says (null is "never asked"). It widens the regex instead of getting its own column
+// because every reader of these two fields already treats them as an opaque slug, and the one
+// place the value changes behaviour - the recommendation gate in lib/jobPreferences.ts - has to
+// branch on it either way. The constant lives in lib/jobPreferences.ts, which this file already
+// imports and which must not import back from it.
+const PERIOD_RE = new RegExp(`^(${IMMEDIATE_PERIOD}|(?:spring|summer|fall|winter)-20\\d{2})$`);
+const period = z.string().regex(PERIOD_RE, 'period must look like "summer-2027" or "immediately"');
 
 // Categories and role types are NO LONGER CAPPED (Mehek, 2026-08-02). They used to be 3 and 2,
 // on the argument that "interested in everything" and "hasn't chosen" produce the same unusable
