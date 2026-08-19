@@ -7812,6 +7812,16 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   if (family === 'breezy' && /^\/p\/[^/]+\/?$/i.test(url.pathname)) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
   }
+  /* Lever has the same posting-vs-form split: jobs.lever.co/<tenant>/<posting-uuid> is the JD page
+   * whose only affordance is an "Apply for this job" link, and the form lives at /apply. Measured
+   * live 2026-08-20 on a real tenant: the runner sent to the bare posting page filled nothing and
+   * parked with "could not confirm it reached this company's application form". Every prior Lever
+   * send on this account went through the extension path, so the managed runner had never
+   * exercised this URL shape. Bounded to the tenant-plus-uuid posting shape so an already-canonical
+   * /apply URL, a board root, or any deeper path passes through unchanged. */
+  if (family === 'lever' && /^\/[^/]+\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/?$/i.test(url.pathname)) {
+    url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
+  }
   if (family === 'personio' && url.hostname.toLowerCase() !== 'arteus-energy.jobs.personio.de'
     && !url.pathname.endsWith('/apply')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
