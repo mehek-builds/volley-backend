@@ -161,5 +161,26 @@ console.log(`\n${results.length} sources: ${counts.join(', ')}.`);
  * red by default is a check nobody reads on the day it finds a real mislabelling.
  *
  * They still print, in full, every run. The cost of that split is that a board empty for good
- * decays quietly rather than failing, so the printed EMPTY list is worth reading when it grows. */
-process.exit(bucket('named-mismatch').length + bucket('dead').length > 0 ? 1 : 0);
+ * decays quietly rather than failing, so the printed EMPTY list is worth reading when it grows.
+ *
+ * UNREACHABLE IS CAPPED, because "not fatal" one board at a time is not the same as "not fatal" 394
+ * at a time. Nothing above distinguishes a bad minute from the check not running at all: a runner
+ * with no egress, or a provider changing its response envelope so every normalizer throws (those
+ * errors carry no HTTP status, so they land here too), would put every source in this bucket and
+ * exit 0 having verified nothing. That is the silent zero this file was written to end - the
+ * sources table sat empty in production for months because an empty board and a working board
+ * looked identical to every check we had. Past the ceiling the run is not a pass, it is a
+ * non-result, and it says so. The floor keeps a handful of flaky boards on a short --only run from
+ * tripping it. */
+const unreachable = bucket('unreachable').length;
+const unreachableCeiling = Math.max(5, Math.floor(selected.length * 0.1));
+if (unreachable > unreachableCeiling) {
+  console.log(`\nNOT A RESULT: ${unreachable} of ${selected.length} boards were unreachable, over the `
+    + `ceiling of ${unreachableCeiling}. That is the check failing to run, not the sources failing.`);
+}
+
+process.exit(
+  bucket('named-mismatch').length + bucket('dead').length > 0 || unreachable > unreachableCeiling
+    ? 1
+    : 0,
+);
