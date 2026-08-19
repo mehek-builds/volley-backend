@@ -1794,6 +1794,11 @@ export async function discoverAndResolveQuestions(
     required: true,
     portal_selector: portalSelectorForField(field),
     portal_input_type: discoveredControlInputType(field),
+    /* THE MENU, CARRIED TO HER. This is the branch that says "you answer this", so it is exactly the
+       branch that must not hand her a blank box: discovery already read the control's options and
+       nothing kept them, so a required question arrived with no hint of what it accepts. Display
+       only - see the field's comment in applicationReview.ts for why it is not packet identity. */
+    ...(field.options?.length ? { options: [...field.options] } : {}),
   });
 
   for (const field of discovered) {
