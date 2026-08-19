@@ -273,6 +273,12 @@ export function normalizeApplicationReviewQuestions(
     const portalSelector = preferredPortalSelector(existing.portal_selector, question.portal_selector);
     const portalInputType = question.portal_input_type ?? existing.portal_input_type;
     const atsApiField = question.ats_api_field ?? existing.ats_api_field;
+    /* The employer's option list rides across the collision the same way the portal metadata does,
+     * whichever side wins the answer. mergeDiscoveredPortalQuestions puts her reviewed row FIRST so
+     * her answer survives - and her row was stored before options existed, so first-wins on the
+     * whole object dropped the menu on exactly the questions she is being asked to answer. The
+     * later read is the fresher read of the employer's own control, so it wins when present. */
+    const options = question.options?.length ? question.options : existing.options;
     if ((question.required && !existing.required) || (!existing.answer.trim() && question.answer.trim())) {
       const next = {
         ...existing,
@@ -284,17 +290,20 @@ export function normalizeApplicationReviewQuestions(
         ...(portalSelector ? { portal_selector: portalSelector } : {}),
         ...(portalInputType ? { portal_input_type: portalInputType } : {}),
         ...(atsApiField ? { ats_api_field: atsApiField } : {}),
+        ...(options?.length ? { options } : {}),
       };
     } else if (
       (portalSelector && portalSelector !== existing.portal_selector)
       || (portalInputType && portalInputType !== existing.portal_input_type)
       || (atsApiField && atsApiField !== existing.ats_api_field)
+      || (options?.length && options !== existing.options)
     ) {
       normalized[existingIndex] = {
         ...existing,
         ...(portalSelector ? { portal_selector: portalSelector } : {}),
         ...(portalInputType ? { portal_input_type: portalInputType } : {}),
         ...(atsApiField ? { ats_api_field: atsApiField } : {}),
+        ...(options?.length ? { options } : {}),
       };
     }
   }

@@ -243,6 +243,30 @@ describe('application review metadata', () => {
     );
   });
 
+  /* The reviewed row leads the collision so her answer wins (see mergeDiscoveredPortalQuestions),
+     and it was stored before `options` existed - so first-wins on the whole object dropped the
+     employer's menu on exactly the questions she is being asked to answer. */
+  test('normalization carries the employer option list across the duplicate merge, in both directions', () => {
+    assert.deepEqual(
+      normalizeApplicationReviewQuestions([
+        { id: 'reviewed-consent', question: 'Do you consent to the processing described above?', answer: 'I consent to the above.', kind: 'required', required: true },
+        { id: 'rediscovered-consent', question: 'do you consent to the processing described above?', answer: '', kind: 'required', required: true, options: ['I consent to the above.'] },
+      ]),
+      [
+        { id: 'reviewed-consent', question: 'Do you consent to the processing described above?', answer: 'I consent to the above.', kind: 'required', required: true, options: ['I consent to the above.'] },
+      ],
+    );
+    assert.deepEqual(
+      normalizeApplicationReviewQuestions([
+        { id: 'discovered-consent', question: 'Do you consent to the processing described above?', answer: '', kind: 'required', required: true, options: ['I consent to the above.'] },
+        { id: 'stored-consent', question: 'do you consent to the processing described above?', answer: 'I consent to the above.', kind: 'required', required: false },
+      ]),
+      [
+        { id: 'discovered-consent', question: 'Do you consent to the processing described above?', answer: 'I consent to the above.', kind: 'required', required: true, options: ['I consent to the above.'] },
+      ],
+    );
+  });
+
   test('submit-request answer updates keep stored portal selectors', () => {
     assert.deepEqual(
       mergeSubmittedApplicationReviewQuestions(
