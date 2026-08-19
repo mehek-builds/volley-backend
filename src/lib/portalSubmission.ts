@@ -6974,9 +6974,22 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   // marketing site, so a mistyped portal_url became a "supported portal" and got a fill run against
   // a page with no application on it.
   workable: /^apply\.workable\.com$/i,
-  // Only the two tenants inspected live are trusted. The shared applytojob.com suffix is not proof
-  // that an arbitrary subdomain exposes the same application controls.
-  jazzhr: /^(?:utilidata|foundationai)\.applytojob\.com$/i,
+  /* ANY TENANT, and the two-tenant pin it replaces was costing real postings for no safety.
+   *
+   * The old comment said the applytojob.com suffix "is not proof that an arbitrary subdomain
+   * exposes the same application controls", which is true and is not the question. The question is
+   * what Litos DOES on a tenant it guessed wrong about, and for this family the answer is bounded
+   * by something stronger than a host list: jazzhr is in CAPTCHA_GATED_FAMILIES, so
+   * portalCanAutoSubmit is false for every tenant that ever matches here. Widening this cannot
+   * produce an unattended send; the worst case is a fill that finds nothing and hands back.
+   *
+   * Measured 2026-08-19 against 562 live 2027 internship postings: five sit on JazzHR, on five
+   * tenants (blackcape, foxconnggroup, gulfmanagement, hiebing, prospectequities) and NONE of the
+   * two pinned ones. The pin was rejecting every JazzHR posting a student could actually find.
+   *
+   * The path rule below is what does the real work, and it stays strict. `www.` is excluded because
+   * it is JazzHR's own marketing site. */
+  jazzhr: /^(?!www\.)[a-z0-9-]+\.applytojob\.com$/i,
   // Tenant subdomains are arbitrary (2000recruiting.paylocity.com), so the host cannot be pinned the
   // way Workable's can - but it MUST exclude access.paylocity.com, which is Paylocity's employee
   // login. Litos filling an identity into a credential form is not a thing that should be reachable
@@ -7050,7 +7063,16 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   // Either a public posting or the separate one-click form. No API, company-listing, or account
   // route on the same host is allowed through.
   smartrecruiters: /^\/(?:[a-z0-9._-]+\/\d{6,}(?:-[^/]+)?|oneclick-ui\/company\/[a-z0-9._-]+\/publication\/[0-9a-f-]{36})\/?$/i,
-  jazzhr: /^\/apply\/jobs\/details\/[A-Za-z0-9]{10}\/?$/,
+  /* TWO SHAPES, because JazzHR publishes two and only one was here.
+   *
+   * `/apply/jobs/details/{code}` is the board's own detail route. `/apply/{code}/{slug}` is the
+   * direct apply link, and it is the one every JazzHR posting in the 2026-08-19 survey used - so
+   * the single-shape rule rejected all five of them even once the host matched.
+   *
+   * The 10-character code is what keeps this narrow: it is required in both branches, so a bare
+   * `/apply`, a careers index, or a login route on the same host still cannot match. The optional
+   * slug is untrusted display text and is matched loosely on purpose. */
+  jazzhr: /^\/apply\/(?:jobs\/details\/[A-Za-z0-9]{10}|[A-Za-z0-9]{10}(?:\/[^/]*)?)\/?$/,
   // access.paylocity.com is an employee login on the same host space. Litos filling an identity into
   // a credential form is not a thing that should be reachable from a bad URL.
   paylocity: /^\/recruiting\/jobs\/(apply|details)\//i,
