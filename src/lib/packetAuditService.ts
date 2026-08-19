@@ -85,8 +85,50 @@ export type PacketAuditFailure = {
        recoveries: an invalid PDF is a defect to look at, this is the retention policy working, and
        only a regenerate clears it. */
     | 'PACKET_RESUME_EXPIRED';
+  /** The machine token. Pinned by this suite's tests and worth reading in logs; never replied. */
   reason: string;
+  /** Set ONLY by tokenisedPacketAuditFailure, and the sentence an applicant is allowed to read. */
+  message?: string;
 };
+
+/* WHAT A FAILED VERDICT IS ALLOWED TO SAY TO AN APPLICANT.
+ *
+ * `reason` is not uniformly a sentence. Most of the failures in this file carry one, but the ones
+ * that come back through verifyCurrentPacketAudit are DEVELOPER TOKENS - `packet_stale`,
+ * `owner_mismatch`, `application_mismatch`, `packet_audit_invalid` - and bindingIssues adds strings
+ * like "jdText is required". Routes used to reply `{ error: verdict.reason }` verbatim, so on
+ * 2026-08-19 the dashboard printed the bare word **packet_stale** in a red banner to a student on
+ * the autopilot row, with nothing on screen naming what to do about it.
+ *
+ * Translate at the HTTP boundary and nowhere earlier. The token is what the tests in this suite
+ * pin and what the logs are worth reading, so the verdict keeps it; only the reply is rewritten.
+ * An unrecognised reason resolves to the generic sentence rather than being passed through, because
+ * the whole point is that this route cannot leak a string it did not choose. */
+const PACKET_AUDIT_SENTENCES: Readonly<Record<string, string>> = {
+  packet_stale: 'This application changed after you approved the exact packet Litos prepared, so it was not sent. Open it to review the current one and send from there.',
+  owner_mismatch: 'This packet was prepared for a different account, so it was not sent. Open it to review and send from there.',
+  application_mismatch: 'This packet was prepared for a different application, so it was not sent. Open it to review and send from there.',
+  packet_audit_invalid: 'Litos could not confirm the packet it prepared for this application, so it was not sent. Open it to review and send from there.',
+};
+const PACKET_AUDIT_GENERIC = 'Litos could not confirm this packet still matches the application you approved, so it was not sent. Open it to review and send from there.';
+
+export function packetAuditClientError(verdict: PacketAuditFailure): { error: string; code: PacketAuditFailure['code'] } {
+  /* `message` when the verdict carries one, and NOT a guess about which strings look like prose.
+     Whether a reason is a token is knowledge the site that built it has and a regex does not:
+     "jdText is required" has a space and reads like English, and shipping it to an applicant is
+     the same defect as shipping `packet_stale`. Only tokenisedFailure sets `message`, so every
+     reason without one is prose this file authored on purpose. */
+  return { error: verdict.message ?? verdict.reason, code: verdict.code };
+}
+
+/* The one place a verifyCurrentPacketAudit reason becomes a verdict, so the one place that has to
+   attach the sentence. Kept next to the table it reads from. */
+export function tokenisedPacketAuditFailure(
+  code: PacketAuditFailure['code'],
+  reason: string,
+): PacketAuditFailure {
+  return { valid: false, code, reason, message: PACKET_AUDIT_SENTENCES[reason] ?? PACKET_AUDIT_GENERIC };
+}
 
 export type PacketAuditSuccess = {
   valid: true;
@@ -662,7 +704,7 @@ export async function currentPacketAudit(
   const verification = verifyCurrentPacketAudit({ ...input, audit: review.packet_audit });
   return verification.valid
     ? { valid: true, audit: review.packet_audit, pdfBytes: loaded.bytes, row }
-    : { valid: false, code: 'PACKET_AUDIT_STALE', reason: verification.reason };
+    : tokenisedPacketAuditFailure('PACKET_AUDIT_STALE', verification.reason);
 }
 
 export async function currentAcknowledgedPacketAudit(
