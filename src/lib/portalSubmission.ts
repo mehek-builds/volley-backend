@@ -13,6 +13,7 @@ import {
   classifyField,
   consentAcknowledgementLicence,
   discoveredFieldIsRequired,
+  frozenJobEmployerContext,
   graduationYearFieldAnswer,
   isConsentAcceptingWording,
   isLegalConsentQuestion,
@@ -768,6 +769,15 @@ export type SubmissionPacket = {
   applicationProfile?: ApplicationProfileLike;
   /** Exact applicant facts frozen with the prepared packet for attended clients. */
   applicantSnapshot?: AutofillApplicantSnapshot;
+  /* WHO THIS PACKET APPLIES TO, the job_context company copied on by buildPacket. Metadata, never
+   * typed into a form. It exists because a tenant's consent wording can embed the employer's own
+   * name mid-sentence (Teamtailor's platform default: "confirm that Fully store my personal
+   * details..."), and the consent grammar's coverage accounting absorbs exactly the one proper
+   * noun the caller can prove belongs there. jdText below is the raw posting prose and does not
+   * carry the frozen employer line the resolver's composed context does, so without this the
+   * fill-time licence re-derivation held every such sentence. Absent means no name is accounted
+   * for and the label holds, which is the fail-closed direction. */
+  employerName?: string;
   jdText?: string;
   resume: Buffer;
   resumeName: string;
@@ -5406,7 +5416,16 @@ export function managedConsentTickPlan(
   if (packetQuestionFailed(packet, item)) return null;
   const questionText = normalizeReviewQuestionLabel(item.question);
   if (!questionText || FUTURE_JOBS_RETENTION_CONSENT_RE.test(questionText)) return null;
-  const licence = consentAcknowledgementLicence(questionText, ap, packet.jdText);
+  /* THE SAME CONTEXT SHAPE THE RESOLVER USED, recomposed rather than trusted. packet.jdText is the
+   * raw posting prose; the frozen employer line lives only in the discovery pass's composed
+   * context, and Teamtailor's platform-default sentence writes the tenant's name mid-clause
+   * ("confirm that Fully store my personal details..."). Without the line, the grammar's coverage
+   * accounting cannot place that name and this re-derivation held a licence the resolver had
+   * already granted. A packet with no employerName composes no line and parks, fail-closed. */
+  const licenceContext = [frozenJobEmployerContext(packet.employerName ?? ''), packet.jdText ?? '']
+    .filter(Boolean)
+    .join('\n');
+  const licence = consentAcknowledgementLicence(questionText, ap, licenceContext || undefined);
   if (!licence) return null;
   if (item.answerSource !== 'consent_permission') return null;
   if (!item.answer.trim() || !isConsentAcceptingWording(item.answer)) return null;
