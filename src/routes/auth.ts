@@ -122,8 +122,30 @@ export async function verifyGoogleCredential(
 
 const CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
-function trialEnd(now = new Date()): Date {
-  return new Date(now.getTime() + TRIAL_DAYS * 24 * 60 * 60 * 1000);
+/**
+ * What a brand-new account is granted at signup.
+ *
+ * Nothing, now. The 7-day Litos+ trial used to be written straight onto the row
+ * here, which meant every way of creating an account -- Google, email code,
+ * guest, and the break-glass path -- minted full Litos+ for a week against no
+ * payment method at all. The trial still exists, but it is now a Stripe
+ * subscription in `trialing`, opened from checkout with a card attached
+ * (`subscription_data[trial_period_days]` in lib/stripeBilling.ts), so it is
+ * granted by the subscription webhook rather than by the act of signing up.
+ *
+ * This is deliberately a function returning both columns rather than five
+ * scattered `null`s: the grant is one decision, and the next person to add a
+ * sixth signup path should have exactly one thing to call. Returning the pair
+ * also keeps `trial_started_at` and `trial_ends_at` from drifting apart, which
+ * is the failure mode that would show up as an account that is on trial with no
+ * record of when the trial began.
+ *
+ * Accounts that ALREADY hold a trial keep it: resolveAccessClass still honours
+ * any `trial_ends_at` in the future, so this changes who can start a trial and
+ * never shortens one already running.
+ */
+function signupTrialGrant(): { trial_started_at: null; trial_ends_at: null } {
+  return { trial_started_at: null, trial_ends_at: null };
 }
 function guestExpiry(now = new Date()): Date {
   return new Date(now.getTime() + (TRIAL_DAYS + 30) * 24 * 60 * 60 * 1000);
@@ -154,8 +176,7 @@ export function googleRegistrationValues(
     google_subject: identity.subject,
     plan: 'free',
     entitlement_policy_version: ENTITLEMENT_POLICY_VERSION,
-    trial_started_at: now,
-    trial_ends_at: trialEnd(now),
+    ...signupTrialGrant(),
     created_at: now,
     onboarding_completed_at: null,
   };
@@ -367,7 +388,10 @@ export async function authRoutes(fastify: FastifyInstance) {
       if (!ipAllowed) return rateLimitedReply(reply);
 
       const now = new Date();
-      const trial_ends_at = trialEnd(now);
+      /* A guest has no email and no card, so a guest cannot start a trial at
+         all any more. The guest session itself is unchanged -- it still lasts
+         guestExpiry() and still fills applications, which is the whole free
+         tier -- it simply starts on Free instead of on Litos+. */
       const guest_expires_at = guestExpiry(now);
       const created = await db
         .insert(users)
@@ -378,8 +402,7 @@ export async function authRoutes(fastify: FastifyInstance) {
           is_guest: true,
           guest_key_hash: keyHash,
           entitlement_policy_version: ENTITLEMENT_POLICY_VERSION,
-          trial_started_at: now,
-          trial_ends_at,
+          ...signupTrialGrant(),
           guest_expires_at,
           created_at: now,
         })
@@ -863,8 +886,7 @@ export async function authRoutes(fastify: FastifyInstance) {
           id: newUserId,
           email,
           entitlement_policy_version: ENTITLEMENT_POLICY_VERSION,
-          trial_started_at: createdAt,
-          trial_ends_at: trialEnd(createdAt),
+          ...signupTrialGrant(),
           created_at: createdAt,
         });
         user = await db.select().from(users).where(eq(users.email, email)).limit(1);
@@ -1047,8 +1069,7 @@ export async function authRoutes(fastify: FastifyInstance) {
                 email,
                 email_verified: true,
                 entitlement_policy_version: ENTITLEMENT_POLICY_VERSION,
-                trial_started_at: createdAt,
-                trial_ends_at: trialEnd(createdAt),
+                ...signupTrialGrant(),
                 created_at: createdAt,
               })
               .returning({ id: users.id, email: users.email, session_version: users.session_version });

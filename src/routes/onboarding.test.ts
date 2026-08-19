@@ -14,6 +14,7 @@ import {
   hasFocusTargeting,
   hasWorkEligibilityDeclaration,
   onboardingStepFrom,
+  requiresPaymentMethodFor,
   flowAcknowledgementDecision,
   nextReplayStep,
   replaySteps,
@@ -429,5 +430,70 @@ describe('the application sequence', () => {
     for (const step of APPLICATION_STEPS) {
       assert.equal(isReplayStep(step), false, `${step} must not be a replay step`);
     }
+  });
+});
+
+
+describe('the card gate on the dashboard', () => {
+  const GATE = { CARD_GATE_FROM: '2026-08-19T00:00:00.000Z' } as NodeJS.ProcessEnv;
+  const after = new Date('2026-08-20T00:00:00.000Z');
+  const before = new Date('2026-08-18T00:00:00.000Z');
+
+  test('is off entirely when CARD_GATE_FROM is unset', () => {
+    /* The default, and the one that matters most. This flag's wrong value locks every
+       student out of work they already own, so an unset or unparseable env has to mean
+       "gate nobody" rather than "gate everybody". Deploy is therefore inert until
+       someone deliberately sets it. */
+    assert.equal(requiresPaymentMethodFor({ created_at: after }, {} as NodeJS.ProcessEnv), false);
+    assert.equal(requiresPaymentMethodFor({ created_at: after }, { CARD_GATE_FROM: '   ' } as NodeJS.ProcessEnv), false);
+    assert.equal(requiresPaymentMethodFor({ created_at: after }, { CARD_GATE_FROM: 'not-a-date' } as NodeJS.ProcessEnv), false);
+  });
+
+  test('never gates an account created before the cutover', () => {
+    // Existing students keep the dashboard whatever their billing looks like.
+    assert.equal(requiresPaymentMethodFor({ created_at: before }, GATE), false);
+    assert.equal(requiresPaymentMethodFor({ created_at: null }, GATE), false);
+  });
+
+  test('gates a new account with no card, and opens once Stripe has one', () => {
+    assert.equal(requiresPaymentMethodFor({ created_at: after }, GATE), true);
+    assert.equal(requiresPaymentMethodFor({
+      created_at: after,
+      billing_provider: 'stripe',
+      billing_customer_id: 'cus_123',
+    }, GATE), false);
+  });
+
+  test('a guest is never gated, because a gated guest cannot pay', () => {
+    /* /billing/checkout refuses a guest outright, so gating one leaves it redirected to
+       a plan screen whose only button 409s: no way in, no way back. Guests are a
+       Free-tier session by design now, so they pass. */
+    assert.equal(requiresPaymentMethodFor({ created_at: after, is_guest: true }, GATE), false);
+    // ...and a non-guest in the same position is still gated, so this is an exemption
+    // rather than the gate quietly failing open.
+    assert.equal(requiresPaymentMethodFor({ created_at: after, is_guest: false }, GATE), true);
+  });
+
+  test('a customer id without the Stripe provider is not a card', () => {
+    /* Both halves are required. A stale customer id left by another provider, or a
+       provider set with no customer, is not evidence that Stripe took a card. */
+    assert.equal(requiresPaymentMethodFor({ created_at: after, billing_customer_id: 'cus_123' }, GATE), true);
+    assert.equal(requiresPaymentMethodFor({ created_at: after, billing_provider: 'stripe' }, GATE), true);
+    assert.equal(requiresPaymentMethodFor({
+      created_at: after,
+      billing_provider: 'lemonsqueezy',
+      billing_customer_id: 'cus_123',
+    }, GATE), true);
+  });
+
+  test('cancelling does not throw a student back into setup', () => {
+    /* billing_customer_id survives cancellation, and that is the intended reading:
+       someone who cancelled still has a card on file and belongs on the dashboard on
+       Free, not back in the setup flow being asked for a card they already gave. */
+    assert.equal(requiresPaymentMethodFor({
+      created_at: after,
+      billing_provider: 'stripe',
+      billing_customer_id: 'cus_cancelled',
+    }, GATE), false);
   });
 });

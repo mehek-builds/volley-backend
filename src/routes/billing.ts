@@ -40,7 +40,7 @@ import {
   verifyLemonSqueezyAccountToken,
 } from '../lib/lemonSqueezy';
 import { billingCheckoutAvailable, billingPlan, stripeWebhookAvailable } from '../lib/billingCatalog';
-import { ENTITLEMENT_POLICY_VERSION, getEntitlementSnapshot } from '../lib/entitlements';
+import { ENTITLEMENT_POLICY_VERSION, TRIAL_DAYS, getEntitlementSnapshot } from '../lib/entitlements';
 import {
   cancelStripeSubscriptionOrThrow,
   createStripeCheckoutSessionV2,
@@ -578,9 +578,27 @@ export async function billingRoutes(fastify: FastifyInstance) {
         billing_provider: users.billing_provider,
         billing_customer_id: users.billing_customer_id,
         billing_status: users.billing_status,
+        trial_started_at: users.trial_started_at,
+        trial_ends_at: users.trial_ends_at,
       }).from(users).where(eq(users.id, userId)).limit(1),
     ]);
     const account = accountRows[0];
+    /* The trial is once per account, and this is the only place that decides it.
+       Signup no longer grants one (routes/auth.ts), so the trial days now ride on
+       the Stripe subscription -- which means the question "has this account
+       already had its trial?" has to be answered HERE, before checkout is
+       created, or a student could spend a trial, cancel, and open a second free
+       week from the same pricing page.
+       The two gates cover the two eras, and neither covers both. The trial
+       columns catch accounts created BEFORE the card requirement, which is the
+       only thing that ever wrote them; nothing writes them now. Everyone who
+       starts a trial from here on is caught by `billing_customer_id` instead,
+       which the subscription webhook stamps on the first lifecycle event
+       (routes/billing.ts, the canonical-projection update) and never clears --
+       so cancelling a trial does not restore eligibility for another one. */
+    const hadTrialBefore = Boolean(account?.trial_started_at || account?.trial_ends_at);
+    const returningCustomer = account?.billing_provider === 'stripe' && Boolean(account?.billing_customer_id);
+    const trialDays = hadTrialBefore || returningCustomer ? 0 : TRIAL_DAYS;
     const billingProvider = snapshot.subscription?.provider ?? account?.billing_provider;
     const billingStatus = snapshot.subscription?.status ?? account?.billing_status;
     if (billingProvider && subscriptionNeedsPortalRecovery(billingStatus)) {
@@ -590,7 +608,20 @@ export async function billingRoutes(fastify: FastifyInstance) {
         portal_url: '/billing/portal',
       });
     }
-    if (snapshot.access_class === 'plus_paid' || snapshot.access_class === 'legacy_paid') {
+    /* A TRIAL ON A SUBSCRIPTION IS ALSO "already has it", and it has to be named here
+       explicitly now. This guard used to catch a trialling account for free: a Stripe
+       subscription in `trialing` satisfies subscriptionGrantsPlus, so it resolved to
+       plus_paid and fell inside the first clause. It resolves to trial_plus since the
+       trial moved onto the subscription, and without the third clause a student mid
+       trial who opens /pricing and picks a plan gets a SECOND subscription on the same
+       Stripe customer -- billed twice, while chooseCanonicalAccountSubscription shows
+       one healthy subscription and hides it.
+       Converting a trial early is a change to the subscription that already exists, not
+       a second checkout, which is what the portal link is for. */
+    const holdsLitosPlus = snapshot.access_class === 'plus_paid'
+      || snapshot.access_class === 'legacy_paid'
+      || snapshot.subscription?.status === 'trialing';
+    if (holdsLitosPlus) {
       return reply.status(409).send({ error: 'This account already has Litos+.', code: 'already_plus', portal_url: '/billing/portal' });
     }
     if (!billingCheckoutAvailable()) {
@@ -632,6 +663,7 @@ export async function billingRoutes(fastify: FastifyInstance) {
         surface: expectedOffer.surface,
         existingCustomerId: account?.billing_provider === 'stripe' ? account.billing_customer_id : null,
         expiresAt: offer.expires_at,
+        trialDays,
       });
       if (!session) return null;
       return persistStripeCheckoutSession({ offer, pendingActionId: action?.id, session });

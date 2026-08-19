@@ -59,7 +59,14 @@ describe('Google identity claims', () => {
     );
   });
 
-  test('builds a complete first-time registration with trial and onboarding defaults', () => {
+  test('builds a first-time registration that starts on Free, with no trial granted', () => {
+    /* THE CONTRACT CHANGED, on Mehek's call 2026-08-19, and this test changed with
+       it rather than being deleted. It used to require trial_started_at and a
+       trial_ends_at seven days out, because signing up WAS how you got the trial.
+       The trial now requires a card and lives on a Stripe subscription, so the
+       columns a new row carries are the thing worth pinning: both null, and
+       nulled together. A regression here is not cosmetic -- one non-null column
+       is an account that resolveAccessClass reads as on-trial forever. */
     const now = new Date('2026-07-26T08:00:00.000Z');
     const registration = googleRegistrationValues(
       { subject: 'google-new-user', email: 'new.user@gmail.com', hostedDomain: null },
@@ -74,8 +81,8 @@ describe('Google identity claims', () => {
       google_subject: 'google-new-user',
       plan: 'free',
       entitlement_policy_version: 'litos-entitlements-v2',
-      trial_started_at: now,
-      trial_ends_at: new Date('2026-08-02T08:00:00.000Z'),
+      trial_started_at: null,
+      trial_ends_at: null,
       created_at: now,
       onboarding_completed_at: null,
     });

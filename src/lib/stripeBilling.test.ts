@@ -26,6 +26,88 @@ afterEach(() => {
 });
 
 describe('Stripe Litos+ adapter', () => {
+  test('a first-time trial rides on the subscription, and Stripe is forbidden to skip the card', async () => {
+    /* The two lines that make the trial card-required. trial_period_days is the
+       trial itself; payment_method_collection=always is what stops Stripe from
+       helpfully skipping card entry because a trialling subscription's first
+       invoice is $0. Losing the second one silently restores the card-free trial
+       this whole change exists to remove, and nothing user-visible would look
+       wrong, so it is pinned here on the request body. */
+    const expiresAt = new Date(Date.now() + 31 * 60 * 1000);
+    let checkoutBody: URLSearchParams | null = null;
+    const result = await createStripeCheckoutSessionV2({
+      offerId: '6d58c1f5-e885-41f7-a16a-dac37f98ab17',
+      userId: '7e8de6fb-236b-4e9b-863a-7b4f2952e1a7',
+      email: 'student@example.com',
+      planId: 'litos_plus_month',
+      idempotencyKey: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+      expiresAt,
+      trialDays: 7,
+      fetchImpl: async (url, init) => {
+        if (String(url).includes('/v1/prices/')) {
+          return new Response(JSON.stringify({
+            id: 'price_month',
+            active: true,
+            currency: 'usd',
+            unit_amount: 3999,
+            recurring: { interval: 'month', interval_count: 1 },
+          }), { status: 200 });
+        }
+        checkoutBody = new URLSearchParams(String(init?.body));
+        return new Response(JSON.stringify({
+          id: 'cs_test_trial',
+          url: 'https://checkout.stripe.com/c/pay/cs_test_trial',
+          customer: 'cus_new',
+          subscription: null,
+          expires_at: Math.floor(expiresAt.getTime() / 1000),
+        }), { status: 200 });
+      },
+    });
+    assert.ok(result);
+    assert.equal(checkoutBody!.get('subscription_data[trial_period_days]'), '7');
+    assert.equal(checkoutBody!.get('payment_method_collection'), 'always');
+  });
+
+  test('a second trial is refused: no trial days, still card-required', async () => {
+    /* trialDays 0 is what the route sends once an account has spent its trial.
+       The absence of trial_period_days is the assertion that matters: present
+       with any value would be a second free week for someone who already had
+       one, which is the exact hole the once-per-account gate closes. */
+    const expiresAt = new Date(Date.now() + 31 * 60 * 1000);
+    let checkoutBody: URLSearchParams | null = null;
+    const result = await createStripeCheckoutSessionV2({
+      offerId: '6d58c1f5-e885-41f7-a16a-dac37f98ab17',
+      userId: '7e8de6fb-236b-4e9b-863a-7b4f2952e1a7',
+      email: 'student@example.com',
+      planId: 'litos_plus_week',
+      idempotencyKey: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+      expiresAt,
+      trialDays: 0,
+      fetchImpl: async (url, init) => {
+        if (String(url).includes('/v1/prices/')) {
+          return new Response(JSON.stringify({
+            id: 'price_week',
+            active: true,
+            currency: 'usd',
+            unit_amount: 1999,
+            recurring: { interval: 'week', interval_count: 1 },
+          }), { status: 200 });
+        }
+        checkoutBody = new URLSearchParams(String(init?.body));
+        return new Response(JSON.stringify({
+          id: 'cs_test_no_trial',
+          url: 'https://checkout.stripe.com/c/pay/cs_test_no_trial',
+          customer: 'cus_new',
+          subscription: null,
+          expires_at: Math.floor(expiresAt.getTime() / 1000),
+        }), { status: 200 });
+      },
+    });
+    assert.ok(result);
+    assert.equal(checkoutBody!.get('subscription_data[trial_period_days]'), null);
+    assert.equal(checkoutBody!.get('payment_method_collection'), 'always');
+  });
+
   test('creates quarterly Checkout with server-owned price and complete metadata', async () => {
     const expiresAt = new Date(Date.now() + 31 * 60 * 1000);
     const result = await createStripeCheckoutSessionV2({
