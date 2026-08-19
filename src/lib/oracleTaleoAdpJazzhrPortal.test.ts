@@ -69,9 +69,26 @@ test('JazzHR fills only exact factual controls and never replays packet question
   assert.equal(detectPortal('https://utilidata.applytojob.com/apply/jobs/details/VSeisrJblO?source=test'), 'jazzhr');
   assert.equal(detectPortal('https://foundationai.applytojob.com/apply/jobs/details/ZBfHaf2Nv9'), 'jazzhr');
   assert.equal(canonicalSupportedPortalUrl('https://utilidata.applytojob.com/apply/jobs/details/VSeisrJblO/?source=test'), 'https://utilidata.applytojob.com/apply/jobs/details/VSeisrJblO');
+  /* ANY TENANT, deliberately, and the two-tenant pin this replaces was rejecting every JazzHR
+     posting a student could actually find: all five in the 2026-08-19 survey of 562 live 2027
+     internship postings sit on tenants that were not the two pinned ones. Widening is bounded by
+     something stronger than a host list - jazzhr is CAPTCHA_GATED, so portalCanAutoSubmit is false
+     for every tenant that matches here and no widening can produce an unattended send. */
+  assert.equal(detectPortal('https://blackcape.applytojob.com/apply/7o6mmAYryt/Software-Engineer'), 'jazzhr');
+  assert.equal(detectPortal('https://prospectequities.applytojob.com/apply/XTbzSAcNtg'), 'jazzhr');
+  assert.equal(portalCanAutoSubmit('jazzhr'), false, 'a widened host must never gain an unattended send');
+
+  /* The DIRECT APPLY shape, which is the one every real posting used and which the single-shape
+     rule rejected even once the host matched. */
+  assert.equal(detectPortal('https://utilidata.applytojob.com/apply/VSeisrJblO/engineer'), 'jazzhr');
+
+  // The 10-character code is what keeps this narrow, and the path rule still does the real work.
   assert.throws(() => detectPortal('https://utilidata.applytojob.com/apply/jobs'));
-  assert.throws(() => detectPortal('https://evil.applytojob.com/apply/jobs/details/VSeisrJblO'));
-  assert.throws(() => detectPortal('https://utilidata.applytojob.com/apply/VSeisrJblO/engineer'));
+  assert.throws(() => detectPortal('https://utilidata.applytojob.com/apply'));
+  assert.throws(() => detectPortal('https://utilidata.applytojob.com/careers/VSeisrJblO'));
+  // www is JazzHR's own marketing site and has no application on it.
+  assert.throws(() => detectPortal('https://www.applytojob.com/apply/VSeisrJblO/engineer'));
+  // The detail route stays EXACT: an extra segment after the code is still not a posting.
   assert.throws(() => detectPortal('https://utilidata.applytojob.com/apply/jobs/details/VSeisrJblO/engineer'));
   const actions = buildManagedPortalActions('jazzhr', packet, true);
   assert.deepEqual(actions.filter((action) => action.type === 'fill').map((action) => action.selector), [
