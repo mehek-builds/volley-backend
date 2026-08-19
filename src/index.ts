@@ -25,6 +25,7 @@ import { baseResumeRoutes } from './routes/baseResume';
 import { accountRoutes } from './routes/account';
 import { resumeRetentionRoutes } from './routes/resumeRetention';
 import { adapterHealthRoutes } from './routes/adapterHealth';
+import { billingCheckoutAvailable, stripeWebhookAvailable } from './lib/billingCatalog';
 import { managedReceivingCanaryRoutes } from './routes/managedReceivingCanary';
 import { targetingRoutes } from './routes/targeting';
 import { jdMatchRoutes } from './routes/jdMatch';
@@ -318,6 +319,22 @@ export async function buildApp(options: BuildAppOptions = {}) {
       model: model.status,
       ...(model.status === 'unavailable' ? { model_reason: model.reason } : {}),
       model_ms: model.ms,
+      /* WHETHER STRIPE CAN ACTUALLY REACH US, because for 68 days it could not and
+         nothing said so.
+         STRIPE_WEBHOOK_SECRET stopped being a valid whsec_ value at some point and
+         /billing/stripe-webhook answered 503 to every event Stripe sent. Checkout
+         still worked, the marketing site still sold, and the only visible symptom
+         was a number nobody was watching: 58 accounts, 7 started checkouts, 0
+         subscriptions ever recorded. A student could hand over a card and the
+         product would never learn of it.
+         Two booleans, never the values, so this stays safe to expose publicly. They
+         are deliberately separate: checkout configured while the webhook is not is
+         exactly the state that sells without being able to deliver, and collapsing
+         them into one flag would hide the shape of that failure. */
+      billing: {
+        checkout_configured: billingCheckoutAvailable(),
+        webhook_configured: stripeWebhookAvailable(),
+      },
       ...(database.status === 'ok' ? {} : { database_reason: database.reason }),
       database_ms: database.ms,
       service: 'litos-api',
