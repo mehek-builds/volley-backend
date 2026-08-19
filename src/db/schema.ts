@@ -202,6 +202,10 @@ export const users = pgTable('users', {
   // It reads as "never asked", which leaves the board whole.
   sponsorship_required_at_onboarding: boolean('sponsorship_required_at_onboarding'),
   sponsorship_declared_at: timestamp('sponsorship_declared_at', { withTimezone: true }),
+  /* The one tailored build a new account gets before the card. Null is unused, a timestamp is
+     spent, and it is spent exactly once because the claim is a conditional UPDATE. See
+     src/lib/onboardingBuildGrant.ts. */
+  onboarding_build_granted_at: timestamp('onboarding_build_granted_at', { withTimezone: true }),
   // The exact answer given, kept for the record and for the settings screen to explain itself.
   sponsorship_answer: text('sponsorship_answer'),
   // The settings toggle. Independent of the declaration and strictly additive: someone who did not

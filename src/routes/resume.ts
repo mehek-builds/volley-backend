@@ -4,6 +4,7 @@ import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
+import { claimOnboardingBuildGrant, releaseOnboardingBuildGrant } from '../lib/onboardingBuildGrant';
 import {
   applications,
   application_artifacts,
@@ -427,7 +428,30 @@ export const autofillEventSchema = z.object({
 
 export async function resumeRoutes(fastify: FastifyInstance) {
   // POST /resume/generate - tailor a resume to a specific JD from the student's experience bank
-  fastify.post('/resume/generate', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
+  /* GIVING THE FREE BUILD BACK WHEN IT DID NOT PRODUCE ANYTHING.
+   *
+   * The grant is claimed BEFORE generation, because the claim is what decides whether generation is
+   * allowed to start at all and a read-then-write would let two concurrent builds each see it
+   * unspent. That ordering means a model timeout, a render failure or any of this handler's many
+   * early returns would otherwise cost a student their one free build for something that produced
+   * no resume.
+   *
+   * onSend rather than a try/catch around the generation: this handler answers from a dozen places
+   * and throws from more, and a hook sees every one of them, including the error responses Fastify
+   * serialises on its own. Anything from 400 up means nothing was delivered, so the stamp goes
+   * back. The flag is cleared as it is read, so a retried send cannot release twice.
+   */
+  fastify.post('/resume/generate', {
+    preHandler: requireAuth,
+    onSend: async (request: FastifyRequest, reply: FastifyReply, payload: unknown) => {
+      const claimed = (request as FastifyRequest & { onboardingBuildGrantClaimed?: boolean }).onboardingBuildGrantClaimed;
+      if (claimed && reply.statusCode >= 400) {
+        (request as FastifyRequest & { onboardingBuildGrantClaimed?: boolean }).onboardingBuildGrantClaimed = false;
+        await releaseOnboardingBuildGrant(request.jwtPayload!.userId);
+      }
+      return payload;
+    },
+  }, async (request: FastifyRequest, reply: FastifyReply) => {
     const reqStart = Date.now(); // wall-clock anchor for the whole-request time budget (see budgetLeftMs)
     const userId = request.jwtPayload!.userId;
 
@@ -474,16 +498,43 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // precedes posting reads, quotas, reservations, profile decryption, model calls, and rendering.
     // An explicit click during a trial still checks only ai_resume_tailoring below.
     let tailoringVerdict: Awaited<ReturnType<typeof requireFeature>> | undefined;
+    /* THE ONE FREE BUILD A NEW ACCOUNT GETS, and it is claimed here rather than granted anywhere
+       else, because this is the only place that knows a tailoring request was refused.
+     *
+       Onboarding builds a real application at step 3 and takes the card at step 10; tailoring is a
+       Litos+ feature and a new account has no trial, so without this the flow stopped dead at step
+       3 for everybody (measured on production 2026-08-19). The grant is one per account and only
+       while the account is still IN setup - both conditions are in the WHERE clause of the claim,
+       so it cannot be taken twice or taken by a finished account. See lib/onboardingBuildGrant.ts.
+     *
+       It is claimed only on a DENIAL. An entitled account never touches it, which is what keeps a
+       paying student's build from silently consuming a grant they did not need. */
+    let grantClaimed = false;
     for (const feature of resumeGenerationFeatureSequence(body.initiation)) {
       const initiationVerdict = await requireFeature(
         userId,
         feature,
         feature === 'hover_generation' ? 'hover_resume_tailor' : 'resume_tailor',
       );
-      if (!initiationVerdict.allowed) return reply.status(402).send(initiationVerdict.denial);
+      if (!initiationVerdict.allowed) {
+        /* Hover generation is a paid convenience and is NOT what onboarding does. Letting it spend
+           the grant would burn a student's one free build on a mouse movement they never asked to
+           pay for, which is the opposite of what the grant is for. */
+        if (feature !== 'ai_resume_tailoring' || !(await claimOnboardingBuildGrant(userId))) {
+          return reply.status(402).send(initiationVerdict.denial);
+        }
+        grantClaimed = true;
+        (request as FastifyRequest & { onboardingBuildGrantClaimed?: boolean }).onboardingBuildGrantClaimed = true;
+        /* The DENIED verdict is still kept, and it has to be: it carries the entitlement snapshot
+           the quota block below reads to decide which meter this account is on. Only `allowed`
+           was false, and the grant is what answers that question instead. */
+        tailoringVerdict = initiationVerdict;
+        continue;
+      }
       if (feature === 'ai_resume_tailoring') tailoringVerdict = initiationVerdict;
     }
-    if (!tailoringVerdict?.allowed) throw new Error('Tailoring entitlement preflight did not run');
+    if (!tailoringVerdict) throw new Error('Tailoring entitlement preflight did not run');
+    if (!grantClaimed && !tailoringVerdict.allowed) throw new Error('Tailoring entitlement preflight did not run');
     const featureVerdict = tailoringVerdict;
 
     /* THE POSTING, IN FULL, and not the preview the caller almost certainly sent.
