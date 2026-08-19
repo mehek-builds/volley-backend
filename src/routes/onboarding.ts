@@ -106,19 +106,37 @@ async function reviewedSubmitCount(userId: string): Promise<number> {
 //                                                different facts and only the second can end the step.
 //                                                See SETUP_GAP_FIELDS and gapsAskedFrom below.
 
-/* The three columns scripts/apply-consent-acceptance-schema.mjs adds, named here so the read below
- * can drop them when the deploy has landed ahead of the migration. */
-const CONSENT_ACCEPTANCE_COLUMNS: ReadonlySet<string> = new Set([
+/* EVERY users COLUMN WHOSE MIGRATION MAY NOT HAVE LANDED YET, named here so the read below can drop
+ * them in the window where the deploy leads the migration.
+ *
+ * THE LIST GROWS WITH EACH MIGRATION AND IS NOT PRUNED ON A SCHEDULE. A column that has been in
+ * production for months costs nothing by staying here: the fallback only ever runs after a 42703,
+ * which a migrated database never raises. Removing entries is therefore all risk and no benefit,
+ * and the risk is the one this set exists to prevent.
+ *
+ * WHY EVERY NEW users COLUMN HAS TO BE ADDED HERE. `db.select().from(users)` compiles to an
+ * EXPLICIT column list built from schema.ts, so the moment schema.ts names a column the database
+ * has not got, the whole read fails rather than just the new field. This route is the first call
+ * /start makes, so that failure is a blank setup flow for every account in the window. The
+ * notification columns were the second set to land in this shape and were very nearly the first
+ * to land without a seatbelt. */
+export const MIGRATION_PENDING_COLUMNS: ReadonlySet<string> = new Set([
+  // scripts/apply-consent-acceptance-schema.mjs
   'automatic_consent_acceptance_enabled',
   'automatic_consent_acceptance_consented_at',
   'automatic_consent_acceptance_consent_version',
   'automatic_conduct_acceptance_enabled',
   'automatic_conduct_acceptance_consented_at',
   'automatic_conduct_acceptance_consent_version',
+  // scripts/apply-notifications-schema.mjs
+  'notify_strong_match_enabled',
+  'notify_strong_match_granted_at',
+  'notify_employer_reply_enabled',
+  'notify_employer_reply_granted_at',
 ]);
 
 /**
- * The user row, tolerating a database that has not run the consent-acceptance migration.
+ * The user row, tolerating a database that has not run the most recent users migrations.
  *
  * SAME REASON THE PROFILE READ BELOW IT IS TOLERANT, and the comment there states the stake:
  * /onboarding/state is the first call /start makes, and a 500 here is a blank setup flow for every
@@ -139,7 +157,7 @@ async function selectOnboardingUserRow(userId: string) {
     const all = getTableColumns(users);
     const legacy: Record<string, unknown> = {};
     for (const [name, column] of Object.entries(all)) {
-      if (!CONSENT_ACCEPTANCE_COLUMNS.has(name)) legacy[name] = column;
+      if (!MIGRATION_PENDING_COLUMNS.has(name)) legacy[name] = column;
     }
     const rows = await db
       .select(legacy as Partial<typeof users._.columns>)
