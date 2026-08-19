@@ -1,6 +1,9 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  APPLICATION_STEPS,
+  applicationStepFrom,
+  isReplayStep,
   gapSuggestionsFrom,
   gapsAskedFrom,
   gapsFrom,
@@ -392,5 +395,39 @@ describe('five-role resume contract', () => {
     assert.equal(hasFiveTargetRoles({ target_roles: ['One', 'Two', 'Three', 'Four', 'one'] }), false);
     assert.equal(hasFiveTargetRoles({ target_roles: ['One', 'Two', 'Three', 'Four', 'Five'] }), true);
     assert.equal(hasFiveTargetRoles(null), false);
+  });
+});
+
+/* The application sequence: six ledger-driven screens between finishing setup and finishing
+ * onboarding. Ledger-driven rather than derived, because "has this student seen the match screen"
+ * is a fact about their session and not about their profile. */
+describe('the application sequence', () => {
+  test('it runs in order and ends at done', () => {
+    assert.equal(applicationStepFrom([]), 'match');
+    assert.equal(applicationStepFrom(['match']), 'build');
+    assert.equal(applicationStepFrom(['match', 'build']), 'questions');
+    assert.equal(applicationStepFrom(['match', 'build', 'questions']), 'review');
+    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review']), 'trial');
+    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review', 'trial']), 'plan');
+    assert.equal(applicationStepFrom([...APPLICATION_STEPS]), 'done');
+  });
+
+  test('a screen acknowledged out of order still counts as seen', () => {
+    /* Declining a match, or saving a packet to send later, still means the screen was SEEN, and
+       the flow must not put the student back on it forever. Same distinction setup_gaps_asked_at
+       makes one screen earlier. */
+    assert.equal(applicationStepFrom(['build']), 'match');
+    assert.equal(applicationStepFrom(['match', 'questions']), 'build');
+  });
+
+  test('setup steps are replay steps and application steps are not', () => {
+    // Replay exists to walk an EXISTING account back through setup, and no existing account has an
+    // application sequence to replay, so the ordering check must not apply to these.
+    for (const step of ['resume', 'impact', 'focus', 'sponsorship', 'base', 'gaps']) {
+      assert.equal(isReplayStep(step), true, `${step} should be a replay step`);
+    }
+    for (const step of APPLICATION_STEPS) {
+      assert.equal(isReplayStep(step), false, `${step} must not be a replay step`);
+    }
   });
 });

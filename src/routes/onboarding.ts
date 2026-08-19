@@ -149,7 +149,16 @@ async function selectOnboardingUserRow(userId: string) {
   }
 }
 
-type Step = 'focus' | 'sponsorship' | 'resume' | 'impact' | 'base' | 'gaps' | 'done';
+type Step =
+  | 'focus' | 'sponsorship' | 'resume' | 'impact' | 'base' | 'gaps'
+  /* The application sequence. These six are LEDGER-DRIVEN rather than derived from profile facts,
+     and that separation is deliberate: every step above answers "is this fact on the account yet",
+     which is a question the database can always answer. "Has this student seen the match screen"
+     is not a fact about their profile, it is a fact about their session, and inventing a profile
+     column for each would put six booleans on the account to record what the acknowledgement
+     ledger already records for every other screen. */
+  | 'match' | 'build' | 'questions' | 'review' | 'trial' | 'plan'
+  | 'done';
 
 /* Bumped to 3 by the roles-first reorder. The bump is what keeps the change off accounts that are
    already through setup: onboardingFlowLedger only reads runs and acknowledgements AT THIS
@@ -160,6 +169,31 @@ type Step = 'focus' | 'sponsorship' | 'resume' | 'impact' | 'base' | 'gaps' | 'd
 export const CURRENT_ONBOARDING_FLOW_VERSION = 3;
 /* ORDER IS THE RENDER ORDER, and 'focus' leads it now. See onboardingStepFrom for why. */
 const REPLAY_STEPS_WITHOUT_GAPS = ['focus', 'resume', 'impact', 'sponsorship', 'base'] as const;
+
+/* The application sequence, in render order. Reached only once every profile-derived step is
+ * satisfied, so it is what a student walks between finishing setup and finishing onboarding. */
+export const APPLICATION_STEPS = ['match', 'build', 'questions', 'review', 'trial', 'plan'] as const;
+export type ApplicationStep = (typeof APPLICATION_STEPS)[number];
+
+/**
+ * The next application screen this student has not acknowledged, or 'done'.
+ *
+ * ACKNOWLEDGEMENTS, NOT PROFILE FACTS. A student who declines a match, or saves a packet to send
+ * later, has still SEEN the screen, and the flow must not put them back on it forever; the ledger
+ * records having been shown, which is exactly the distinction setup_gaps_asked_at exists to make
+ * one screen earlier. Anything they actually produced lives in the tracker either way.
+ */
+/** Whether a submitted step belongs to the version-2 replay walk. The application sequence does
+ *  not: replay exists to walk an EXISTING account back through the setup screens, and no existing
+ *  account has an application sequence to replay. */
+export function isReplayStep(step: string): step is ReplayStep {
+  return step === 'gaps' || (REPLAY_STEPS_WITHOUT_GAPS as readonly string[]).includes(step);
+}
+
+export function applicationStepFrom(acknowledged: readonly string[]): Step {
+  const seen = new Set(acknowledged);
+  return APPLICATION_STEPS.find((step) => !seen.has(step)) ?? 'done';
+}
 type ReplayStep = (typeof REPLAY_STEPS_WITHOUT_GAPS)[number] | 'gaps';
 
 export function replaySteps(includesGaps: boolean): ReplayStep[] {
@@ -435,7 +469,7 @@ const completeBodySchema = z.object({
 });
 const flowStepBodySchema = z.object({
   flow_version: z.literal(CURRENT_ONBOARDING_FLOW_VERSION),
-  step: z.enum(['resume', 'impact', 'focus', 'sponsorship', 'base', 'gaps']),
+  step: z.enum(['resume', 'impact', 'focus', 'sponsorship', 'base', 'gaps', ...APPLICATION_STEPS]),
   disposition: z.enum(['continued', 'skipped']),
 });
 const flowCompleteBodySchema = z.object({
@@ -653,13 +687,27 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
        A separate acknowledgement ledger makes them review each version 2 screen without deleting
        those facts. If the migration has not landed, fail open to the legacy derived route rather
        than blanking /start for every account. */
+    /* THE APPLICATION SEQUENCE, and the one guard that keeps it off accounts it does not belong to.
+     *
+     * It runs only once every profile-derived step is satisfied (derivedStep === 'done') AND the
+     * account has never completed onboarding. That second half is load-bearing. Flow version 3 is
+     * new, so every existing account has an empty version-3 ledger; without the completed_at check
+     * a student who finished setup months ago would be handed the match screen on their next visit
+     * to /start, which is a flow they never opted into and, worse, one that ends in sending a real
+     * application. `onboarding_completed_at` is the stored consent boundary and is read as one. */
+    const inApplicationSequence = flow.available && !flow.completed && !user.onboarding_completed_at;
     const step = flow.available && flow.replayRequired && !flow.completed
       ? nextReplayStep(flow.acknowledged, includesGaps)
-      : derivedStep;
+      : derivedStep === 'done' && inApplicationSequence
+        ? applicationStepFrom(flow.acknowledged)
+        : derivedStep;
     const flowCompleted = flow.available ? flow.completed : !!user.onboarding_completed_at;
     const requiresOnboarding = flow.available
       ? !flowCompleted || derivedStep !== 'done'
       : derivedStep !== 'done';
+    /* The rail's denominator for the application half, so the client never re-derives it. Same
+       rule as includes_gaps_step: the server owns which screens this student's flow contains. */
+    const includesApplicationSteps = inApplicationSequence;
 
     return reply.status(200).send({
       step,
@@ -684,6 +732,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // client must not re-derive this from `gaps`: see includesGapsStepFrom for the two states
       // that look identical from the gap list alone.
       includes_gaps_step: includesGaps,
+      includes_application_steps: includesApplicationSteps,
       // Starting values for the gap questions, from the student's own resume. Never a stored
       // answer: see gapSuggestionsFrom for why offering one is not the inference schema.ts forbids.
       gap_suggestions: gapSuggestionsFrom(gaps, parsed),
@@ -760,7 +809,9 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
 
     const flow = await onboardingFlowLedger(userId);
     if (!flow.available) return reply.status(503).send({ error: 'The onboarding update is still being prepared. Try again shortly.' });
-    if (flow.replayRequired) {
+    /* The replay ordering check applies to the setup screens only. An application step arriving
+       here is not out of order, it is simply not part of the walk replay describes. */
+    if (flow.replayRequired && isReplayStep(parsed.data.step)) {
       const decision = flowAcknowledgementDecision(
         flow.acknowledged,
         parsed.data.step,
