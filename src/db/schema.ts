@@ -1414,9 +1414,14 @@ export const targeting = pgTable('targeting', {
   // stored in application_profile, so they stay plaintext and may safely steer job discovery.
   locations: jsonb('locations'),
   remote_only: boolean('remote_only').default(false).notNull(),
-  // Season slugs, e.g. 'summer-2027'. Free text rather than an enum: the set is derived from
-  // grad_year at render time and slides forward every term, so pinning it in the DB would need
-  // a migration each year to say nothing new.
+  // Season slugs, e.g. 'summer-2027', OR the literal 'immediately'. Free text rather than an enum:
+  // the seasonal set is derived from grad_year at render time and slides forward every term, so
+  // pinning it in the DB would need a migration each year to say nothing new.
+  //
+  // DO NOT ASSUME THIS SPLITS INTO A SEASON AND A YEAR. 'immediately' is a real stored value - the
+  // student saying no cycle constrains them - and it is not null, which means "never asked".
+  // routes/targeting.ts holds the accepted set (PERIOD_RE) and lib/jobPreferences.ts is the one
+  // reader whose behaviour changes on it.
   primary_period: text('primary_period'),
   // Where they'd go if the main one doesn't land. Stored separately rather than as an ordered
   // array so "main" and "backup" keep their meaning - a ranked list would lose the distinction
