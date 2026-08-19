@@ -87,6 +87,7 @@
     "db:standardized-test-scores": "node scripts/apply-standardized-test-scores-schema.mjs",
     "db:restrictive-agreements": "node scripts/apply-restrictive-agreements-schema.mjs",
     "db:consent-acceptance": "node scripts/apply-consent-acceptance-schema.mjs",
+    "db:notifications": "node scripts/apply-notifications-schema.mjs",
     "logo:check": "node --import tsx scripts/check-logo-coverage.mjs",
     "logo:resolve": "node --import tsx scripts/resolve-company-domains.mjs",
     "db:job-pay": "node scripts/apply-job-pay-schema.mjs",

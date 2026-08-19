@@ -157,7 +157,7 @@ type Step =
      is not a fact about their profile, it is a fact about their session, and inventing a profile
      column for each would put six booleans on the account to record what the acknowledgement
      ledger already records for every other screen. */
-  | 'match' | 'build' | 'questions' | 'review' | 'trial' | 'plan'
+  | 'match' | 'build' | 'questions' | 'review' | 'trial' | 'notifications' | 'plan'
   | 'done';
 
 /* Bumped to 3 by the roles-first reorder. The bump is what keeps the change off accounts that are
@@ -172,7 +172,18 @@ const REPLAY_STEPS_WITHOUT_GAPS = ['focus', 'resume', 'impact', 'sponsorship', '
 
 /* The application sequence, in render order. Reached only once every profile-derived step is
  * satisfied, so it is what a student walks between finishing setup and finishing onboarding. */
-export const APPLICATION_STEPS = ['match', 'build', 'questions', 'review', 'trial', 'plan'] as const;
+/* NOTIFICATIONS SITS BETWEEN TRIAL AND PLAN, which is where screen 08 sits in the design, and the
+ * position is an argument rather than an ordering. Permission is asked AFTER the seven free days
+ * are given and BEFORE the price: a student who has just been handed something is being asked to
+ * let Litos write to her, and she is asked while nothing is being sold. Moving it after `plan`
+ * would put a consent question after a checkout redirect, where most people never arrive.
+ *
+ * ADDING A STEP HERE IS A DEPLOY-ORDER HAZARD, and it is the one thing to check before merging.
+ * The website's /start switch has no default case, so a backend serving `step: "notifications"` to
+ * a client that has no case for it renders a blank screen in the middle of onboarding. The website
+ * change ships FIRST; this one follows it. The reverse order is not a degraded experience, it is
+ * an empty page on the flow that ends in a real application. */
+export const APPLICATION_STEPS = ['match', 'build', 'questions', 'review', 'trial', 'notifications', 'plan'] as const;
 export type ApplicationStep = (typeof APPLICATION_STEPS)[number];
 
 /**

@@ -398,7 +398,7 @@ describe('five-role resume contract', () => {
   });
 });
 
-/* The application sequence: six ledger-driven screens between finishing setup and finishing
+/* The application sequence: seven ledger-driven screens between finishing setup and finishing
  * onboarding. Ledger-driven rather than derived, because "has this student seen the match screen"
  * is a fact about their session and not about their profile. */
 describe('the application sequence', () => {
@@ -408,8 +408,27 @@ describe('the application sequence', () => {
     assert.equal(applicationStepFrom(['match', 'build']), 'questions');
     assert.equal(applicationStepFrom(['match', 'build', 'questions']), 'review');
     assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review']), 'trial');
-    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review', 'trial']), 'plan');
+    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review', 'trial']), 'notifications');
+    assert.equal(applicationStepFrom(['match', 'build', 'questions', 'review', 'trial', 'notifications']), 'plan');
     assert.equal(applicationStepFrom([...APPLICATION_STEPS]), 'done');
+  });
+
+  test('the order is pinned as a value, because the website has to ship each screen first', () => {
+    /* TWO REASONS THIS IS A VALUE ASSERTION rather than a shape one.
+     *
+     * The website's /start switch has NO DEFAULT CASE, so a backend serving a step name the client
+     * has no case for renders a blank screen in the middle of the flow that ends in a real
+     * application. Adding, renaming or reordering anything here is a deploy-order decision, and it
+     * should arrive in a diff as a deliberate edit to this line rather than as a passing test.
+     *
+     * And the position of `notifications` is itself an argument: permission is asked AFTER the
+     * seven free days are given and BEFORE the price, while nothing is being sold. Moving it after
+     * `plan` would put a consent question on the far side of a checkout redirect, where most
+     * people never arrive. */
+    assert.deepEqual(
+      [...APPLICATION_STEPS],
+      ['match', 'build', 'questions', 'review', 'trial', 'notifications', 'plan'],
+    );
   });
 
   test('a screen acknowledged out of order still counts as seen', () => {

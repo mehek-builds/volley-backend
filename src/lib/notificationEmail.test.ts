@@ -1,0 +1,123 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { employerReplyEmail, foundPhrase, strongMatchEmail } from './notificationEmail';
+
+const NOW = new Date('2026-08-19T12:00:00.000Z');
+const UNSUBSCRIBE = 'https://api.trylitos.com/notifications/unsubscribe?token=v1.strong_match.abc.def';
+
+function matchEmail(over: Partial<Parameters<typeof strongMatchEmail>[0]['job']> = {}, score = 87) {
+  return strongMatchEmail({
+    to: 'student@example.edu',
+    unsubscribeUrl: UNSUBSCRIBE,
+    now: NOW,
+    score,
+    job: {
+      company_name: 'Ramp',
+      title: 'Software Engineer Intern',
+      location: 'New York, NY',
+      first_seen_at: new Date('2026-08-19T08:00:00.000Z'),
+      posting_url: 'https://job-boards.greenhouse.io/ramp/jobs/1234',
+      ...over,
+    },
+  });
+}
+
+test('the alert says Found and never Posted, in every field it renders', () => {
+  /* THE RULE THIS PINS. monitored_jobs.posted_at is nullable and null on a large share of the
+     board, so a claim about when an employer published a posting is a claim we frequently cannot
+     support. first_seen_at is when OUR poll saw it, and that is what the copy is allowed to say.
+     Asserted over the whole payload rather than over one line, because the failure mode is
+     somebody adding a sentence, not somebody editing this one. */
+  const email = matchEmail();
+  const everything = `${email.subject}\n${email.text}\n${email.html ?? ''}`;
+  assert.doesNotMatch(everything, /posted/i);
+  assert.match(email.text, /Found 4 hours ago/);
+  assert.match(email.html ?? '', /Found 4 hours ago/);
+});
+
+test('the alert carries exactly one posting', () => {
+  // Never a digest. Ten postings a day trains somebody to archive the sender unread, and then the
+  // one that mattered is archived with them.
+  const email = matchEmail();
+  assert.equal(email.subject, 'Software Engineer Intern at Ramp');
+  assert.equal((email.text.match(/greenhouse\.io/g) ?? []).length, 1);
+  assert.match(email.text, /87% match against your resume/);
+});
+
+test('every alert carries a way out, in the body and in the headers', () => {
+  for (const email of [
+    matchEmail(),
+    employerReplyEmail({
+      to: 'student@example.edu',
+      unsubscribeUrl: UNSUBSCRIBE,
+      company: 'Ramp',
+      role: 'Software Engineer Intern',
+      receivedAt: NOW,
+    }),
+  ]) {
+    assert.ok(email.text.includes(UNSUBSCRIBE), 'the plain text part must carry the link too');
+    assert.ok((email.html ?? '').includes(UNSUBSCRIBE));
+    /* List-Unsubscribe-Post is what makes a mail client offer its own Unsubscribe control instead
+       of leaving the spam button as the only exit, and a spam complaint costs the sending domain
+       the deliverability every student's application mail depends on. */
+    assert.equal(email.headers?.['List-Unsubscribe'], `<${UNSUBSCRIBE}>`);
+    assert.equal(email.headers?.['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
+  }
+});
+
+test('a posting with no location renders without one rather than inventing a place', () => {
+  const email = matchEmail({ location: null });
+  assert.doesNotMatch(email.text, /New York/);
+  assert.match(email.text, /Software Engineer Intern at Ramp/);
+});
+
+test('company and title are escaped into the HTML', () => {
+  const email = matchEmail({ company_name: 'Ramp & Co <script>', title: 'Intern "2027"' });
+  assert.doesNotMatch(email.html ?? '', /<script>/);
+  assert.match(email.html ?? '', /Ramp &amp; Co/);
+});
+
+test('the reply alert says mail arrived and never says what it said', () => {
+  /* Employer mail that Litos is willing to hand over already leaves by the forwarding path, in
+     full. This alert exists for the classes that path deliberately keeps internal, so copying
+     contents in here would route around that decision. It also refuses to imply the news is good:
+     the classifier behind it is regexes over a subject line. */
+  const email = employerReplyEmail({
+    to: 'student@example.edu',
+    unsubscribeUrl: UNSUBSCRIBE,
+    company: 'Ramp',
+    role: 'Software Engineer Intern',
+    receivedAt: NOW,
+  });
+  assert.equal(email.subject, 'Ramp replied to your application');
+  assert.match(email.text, /Mail arrived for Software Engineer Intern at Ramp/);
+  assert.match(email.text, /dashboard\/applications/);
+  assert.doesNotMatch(`${email.subject}\n${email.text}`, /interview|congratulations|good news|offer/i);
+});
+
+test('the reply alert names no employer rather than guessing at one', () => {
+  const email = employerReplyEmail({
+    to: 'student@example.edu',
+    unsubscribeUrl: UNSUBSCRIBE,
+    company: null,
+    role: null,
+    receivedAt: NOW,
+  });
+  assert.equal(email.subject, 'An employer replied to your application');
+  assert.match(email.text, /one of your applications/);
+});
+
+test('the found phrase is coarse at the top end and never dates the employer', () => {
+  const seen = (iso: string) => foundPhrase(new Date(iso), NOW);
+  assert.equal(seen('2026-08-19T11:59:30.000Z'), 'Found just now');
+  assert.equal(seen('2026-08-19T11:20:00.000Z'), 'Found 40 minutes ago');
+  assert.equal(seen('2026-08-19T11:00:00.000Z'), 'Found 1 hour ago');
+  assert.equal(seen('2026-08-19T02:00:00.000Z'), 'Found 10 hours ago');
+  assert.equal(seen('2026-08-18T09:00:00.000Z'), 'Found yesterday');
+  assert.equal(seen('2026-08-16T09:00:00.000Z'), 'Found 3 days ago');
+  /* Past a week the elapsed form stops being worth saying and starts being an argument for opening
+     something stale, so it becomes a date. */
+  assert.equal(seen('2026-08-01T09:00:00.000Z'), 'Found on 1 August');
+  // A clock skew that puts first_seen_at in the future must not render a negative age.
+  assert.equal(seen('2026-08-19T12:05:00.000Z'), 'Found just now');
+});
