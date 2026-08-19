@@ -986,6 +986,138 @@ test('discovered US work authorization and sponsorship become reviewed Yes answe
   );
 });
 
+/* The Quandela park, measured live 2026-08-20: a required Workable textarea labelled "cover letter"
+ * was stored as a question with an empty answer and the run parked on '"Cover letter" is required
+ * and is still empty', while the packet already carried a finished cover letter for the attachment
+ * path. These pin the fix: the text control gets the SAME stored body the attachment path uses, an
+ * answer the applicant wrote herself is never overwritten, and when no letter can be produced the
+ * field parks exactly as before instead of crashing the run. */
+
+const coverLetterReviewState = (): ApplicationReviewState => ({
+  jd_text: 'Build quantum photonic software in Paris.',
+  role: 'Software Engineering Intern',
+  portal_url: 'https://apply.workable.com/quandela/j/ABC123/',
+  ats_name: 'workable',
+  status: 'ready_to_submit',
+  edited_terms: [],
+  questions: [],
+  skipped_reasons: [],
+  updated_at: new Date().toISOString(),
+});
+
+const COVER_LETTER_TEXTAREA = {
+  label: 'Cover letter *',
+  selector: '#cover_letter',
+  inputType: 'textarea',
+  maxLength: null,
+  required: true,
+};
+
+test('a required cover-letter textarea gets the stored cover-letter body as its answer', async () => {
+  const body = 'Dear Quandela team, I build photonic tooling. I would like to keep doing that with you.';
+  const row = {
+    user_id: 'user-1',
+    job_context: { company: 'Quandela', role: 'Software Engineering Intern' },
+    spec: {
+      _cover_letter: {
+        body,
+        word_count: 17,
+        warnings: [],
+        generated_at: new Date().toISOString(),
+        object_key: 'users/user-1/resumes/cl.pdf',
+        file_name: 'Cover Letter.pdf',
+      },
+    },
+  } as ResumeRow;
+
+  const result = await discoverAndResolveQuestions(
+    [COVER_LETTER_TEXTAREA],
+    row,
+    coverLetterReviewState(),
+    {},
+    true,
+    'workable',
+  );
+
+  assert.equal(result.questions.length, 1);
+  const question = result.questions[0];
+  assert.equal(question.question, 'Cover letter');
+  assert.equal(question.answer, body);
+  assert.equal(question.required, true);
+  assert.equal(question.portal_selector, '#cover_letter');
+  assert.equal(question.portal_input_type, 'textarea');
+  assert.deepEqual(result.attentionReasons, []);
+});
+
+test('an applicant-written cover-letter answer is never overwritten by the stored letter', async () => {
+  const hers = 'I wrote this one myself and it says what I want it to say.';
+  const current = coverLetterReviewState();
+  current.questions = [{
+    id: 'her-question',
+    question: 'Cover letter',
+    answer: hers,
+    kind: 'essay',
+    required: true,
+    answer_source: 'applicant_review',
+  }];
+  const row = {
+    user_id: 'user-1',
+    job_context: { company: 'Quandela', role: 'Software Engineering Intern' },
+    spec: {
+      _cover_letter: {
+        body: 'A machine-written letter that must not replace hers.',
+        word_count: 9,
+        warnings: [],
+        generated_at: new Date().toISOString(),
+        object_key: 'users/user-1/resumes/cl.pdf',
+        file_name: 'Cover Letter.pdf',
+      },
+    },
+  } as ResumeRow;
+
+  const result = await discoverAndResolveQuestions(
+    [COVER_LETTER_TEXTAREA],
+    row,
+    current,
+    {},
+    true,
+    'workable',
+  );
+
+  assert.equal(result.questions.length, 1);
+  assert.equal(result.questions[0].answer, hers);
+  assert.equal(result.questions[0].answer_source, 'applicant_review');
+  assert.equal(result.questions[0].id, 'her-question');
+});
+
+test('when no letter is stored and generation fails, the cover-letter field parks exactly as before', async () => {
+  // No _cover_letter and no stored review, so generateStoredCoverLetter throws its
+  // "missing something we need" error before touching any external service. The field must fall
+  // through to the ordinary unanswered-required record: empty answer, required, never a crash.
+  const row = {
+    user_id: 'user-1',
+    job_context: {},
+    spec: {},
+  } as ResumeRow;
+
+  const result = await discoverAndResolveQuestions(
+    [COVER_LETTER_TEXTAREA],
+    row,
+    coverLetterReviewState(),
+    {},
+    true,
+    'workable',
+  );
+
+  assert.equal(result.questions.length, 1);
+  const question = result.questions[0];
+  assert.equal(question.question, 'Cover letter');
+  assert.equal(question.answer, '');
+  assert.equal(question.required, true);
+  assert.equal(question.portal_selector, '#cover_letter');
+  assert.equal(question.portal_input_type, 'textarea');
+});
+
 test('portal country metadata reaches managed send resolution without borrowing another country', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship is based in London.',

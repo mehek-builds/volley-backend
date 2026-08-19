@@ -6,6 +6,7 @@ import {
   discoveredFieldIsRequired,
   eeoAnswer,
   isCoreIdentityField,
+  isCoverLetterTextQuestion,
   labelMarksRequired,
   fitToBudget,
   frozenJobEmployerContext,
@@ -1926,6 +1927,33 @@ test('isOpenEndedQuestion recognizes prose asks and rejects short field labels',
   assert.equal(isOpenEndedQuestion('Tell us about a project you are proud of'), true);
   assert.equal(isOpenEndedQuestion('First Name'), false);
   assert.equal(isOpenEndedQuestion('LinkedIn URL'), false);
+});
+
+// The whole label, minus asterisks, punctuation and (optional)/(required) markers, has to BE one of
+// the known cover-letter names. A label that merely mentions the words must never match: matching
+// "cover the cost..." would type an entire letter into an unrelated field, and a prose question
+// ABOUT cover letters belongs to the essay drafter, not to letter substitution.
+test('isCoverLetterTextQuestion matches only labels that are the cover letter itself', () => {
+  assert.equal(isCoverLetterTextQuestion('cover letter'), true);
+  assert.equal(isCoverLetterTextQuestion('Cover Letter'), true);
+  assert.equal(isCoverLetterTextQuestion('Cover letter *'), true);
+  assert.equal(isCoverLetterTextQuestion('Cover letter:'), true);
+  assert.equal(isCoverLetterTextQuestion('Cover Letter (optional)'), true);
+  assert.equal(isCoverLetterTextQuestion('Motivation letter'), true);
+  assert.equal(isCoverLetterTextQuestion('Letter of Motivation'), true);
+  assert.equal(isCoverLetterTextQuestion('Anschreiben'), true);
+});
+
+test('isCoverLetterTextQuestion never fires on labels that merely contain the words', () => {
+  assert.equal(isCoverLetterTextQuestion('Will the company cover the cost of relocation?'), false);
+  assert.equal(isCoverLetterTextQuestion('cover the cost'), false);
+  assert.equal(isCoverLetterTextQuestion('Letter grade'), false);
+  assert.equal(isCoverLetterTextQuestion('What is your expected letter grade?'), false);
+  assert.equal(isCoverLetterTextQuestion('Recommendation letter'), false);
+  assert.equal(isCoverLetterTextQuestion('Offer letter date'), false);
+  assert.equal(isCoverLetterTextQuestion('Why is a cover letter important to you?'), false);
+  assert.equal(isCoverLetterTextQuestion('Please describe your motivation for applying'), false);
+  assert.equal(isCoverLetterTextQuestion(''), false);
 });
 
 test('a link question resolves via classifyField, so callers never reach the essay drafter', () => {
