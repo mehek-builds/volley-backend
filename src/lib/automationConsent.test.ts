@@ -3,12 +3,14 @@ import test from 'node:test';
 import { getTableColumns } from 'drizzle-orm';
 import { users } from '../db/schema';
 import {
+  AUTOMATIC_ACCOUNT_CREATION_VERSION,
   AUTOMATIC_CAPTCHA_CONSENT_VERSION,
   AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
   AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
   AUTOMATIC_SUBMISSION_CONSENT_VERSION,
   automationConsentState,
   automationConsentValues,
+  accountCreationGranted,
   captchaResumeGranted,
 } from './automationConsent';
 
@@ -138,6 +140,9 @@ test('the users table still carries the consent dates this rule is about', () =>
     'automatic_captcha_consented_at',
     'automatic_consent_acceptance_consented_at',
     'automatic_conduct_acceptance_consented_at',
+    // Joined the set 2026-08-19. The rule below - every stored consent date is sent by the state
+    // response, no exemptions - is what makes a granted permission legible with a date beside it.
+    'automatic_account_creation_consented_at',
   ]));
 });
 
@@ -191,4 +196,98 @@ test('the state response sends the current version constants, never the row valu
   assert.equal(sent.automatic_consent_acceptance_consent_version, AUTOMATIC_CONSENT_ACCEPTANCE_VERSION);
   assert.equal(sent.automatic_conduct_acceptance_consent_version, AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION);
   assert.equal('automatic_captcha_consent_version' in sent, false);
+});
+
+
+/* THE PERMISSION WHOSE ACT LEAVES SOMETHING BEHIND.
+ *
+ * Every other permission here answers a field on a form the applicant is already filling. This one
+ * opens an account with a third party in her name, and revoking it does not close that account, so
+ * the version column is the whole record of what she allowed. These pin the two properties that
+ * make the record trustworthy: a superseded version is not consent, and a writer that does not
+ * mention the field must not revoke it.
+ */
+test('an account-creation grant is consent only at the version she was shown', () => {
+  assert.equal(accountCreationGranted({
+    automatic_account_creation_enabled: true,
+    automatic_account_creation_consent_version: AUTOMATIC_ACCOUNT_CREATION_VERSION,
+  }), true);
+  assert.equal(accountCreationGranted({
+    automatic_account_creation_enabled: true,
+    automatic_account_creation_consent_version: '2026-01-01',
+  }), false, 'a superseded wording is not consent to what ships now');
+  assert.equal(accountCreationGranted({
+    automatic_account_creation_enabled: true,
+    automatic_account_creation_consent_version: null,
+  }), false);
+  assert.equal(accountCreationGranted({
+    automatic_account_creation_enabled: false,
+    automatic_account_creation_consent_version: AUTOMATIC_ACCOUNT_CREATION_VERSION,
+  }), false);
+  assert.equal(accountCreationGranted(null), false);
+  assert.equal(accountCreationGranted(undefined), false);
+});
+
+/* POST /onboarding/complete does not send this field. If the writer defaulted it to false, re-running
+   /start would silently revoke an account-creation grant with no user-visible act - for the one
+   permission a student would most want to have been asked about again. */
+test('a writer that does not mention account creation leaves it alone', () => {
+  const values = automationConsentValues({
+    automatic_submission_enabled: true,
+    automatic_verification_enabled: false,
+  }, new Date('2026-08-19T12:00:00.000Z'));
+  assert.equal('automatic_account_creation_enabled' in values, false);
+  assert.equal('automatic_account_creation_consented_at' in values, false);
+  assert.equal('automatic_account_creation_consent_version' in values, false);
+});
+
+test('an explicit revocation clears the date and the version with it', () => {
+  const now = new Date('2026-08-19T12:00:00.000Z');
+  const granted = automationConsentValues({
+    automatic_submission_enabled: false,
+    automatic_verification_enabled: false,
+    automatic_account_creation_enabled: true,
+  }, now);
+  assert.equal(granted.automatic_account_creation_enabled, true);
+  assert.deepEqual(granted.automatic_account_creation_consented_at, now);
+  assert.equal(granted.automatic_account_creation_consent_version, AUTOMATIC_ACCOUNT_CREATION_VERSION);
+
+  const revoked = automationConsentValues({
+    automatic_submission_enabled: false,
+    automatic_verification_enabled: false,
+    automatic_account_creation_enabled: false,
+  }, now);
+  assert.equal(revoked.automatic_account_creation_enabled, false);
+  assert.equal(revoked.automatic_account_creation_consented_at, null);
+  assert.equal(revoked.automatic_account_creation_consent_version, null);
+});
+
+test('the state route sends the verdict, the raw date, and the live wording', () => {
+  const sent = automationConsentState({
+    automatic_submission_enabled: false,
+    automatic_submission_consented_at: null,
+    automatic_submission_consent_version: null,
+    automatic_verification_enabled: false,
+    automatic_account_creation_enabled: true,
+    automatic_account_creation_consented_at: new Date('2026-08-19T12:00:00.000Z'),
+    // Stale on purpose: the verdict must be false while the DATE still arrives, which is the
+    // pairing that stops a superseded grant being displayed as a live one.
+    automatic_account_creation_consent_version: '2026-01-01',
+  });
+  assert.equal(sent.automatic_account_creation_enabled, false);
+  assert.deepEqual(sent.automatic_account_creation_consented_at, new Date('2026-08-19T12:00:00.000Z'));
+  assert.equal(sent.automatic_account_creation_consent_version, AUTOMATIC_ACCOUNT_CREATION_VERSION);
+});
+
+/* The migration seatbelt. A deploy that leads its migration makes /onboarding/state 42703 for every
+   account, which is what locked every existing user out on 2026-08-19. */
+test('every account-creation column the migration adds is covered by the fallback', () => {
+  const columns = Object.keys(getTableColumns(users));
+  for (const column of [
+    'automatic_account_creation_enabled',
+    'automatic_account_creation_consented_at',
+    'automatic_account_creation_consent_version',
+  ]) {
+    assert.ok(columns.includes(column), `${column} must be declared in schema.ts`);
+  }
 });

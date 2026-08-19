@@ -17,9 +17,11 @@ import { decryptField } from '../lib/fieldCrypto';
 import { decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
 import {
   AUTOMATIC_CAPTCHA_CONSENT_VERSION,
+  AUTOMATIC_ACCOUNT_CREATION_VERSION,
   AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION,
   AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
   AUTOMATIC_SUBMISSION_CONSENT_VERSION,
+  accountCreationGranted,
   automationConsentState,
   automationConsentValues,
   captchaResumeGranted,
@@ -138,6 +140,10 @@ export const MIGRATION_PENDING_COLUMNS: ReadonlySet<string> = new Set([
   'notify_employer_reply_granted_at',
   'notify_activity_digest_enabled',
   'notify_activity_digest_granted_at',
+  // scripts/apply-account-creation-schema.mjs
+  'automatic_account_creation_enabled',
+  'automatic_account_creation_consented_at',
+  'automatic_account_creation_consent_version',
 ]);
 
 /**
@@ -611,6 +617,9 @@ const completeBodySchema = z.object({
   automatic_consent_acceptance_enabled: z.boolean().optional(),
   // The code-of-conduct permission, asked and stored separately. See db/schema.ts.
   automatic_conduct_acceptance_enabled: z.boolean().optional(),
+  /* The account-creation permission. Optional like the two above, and for the reason
+     automationConsentValues states: a writer that does not mention it must not revoke it. */
+  automatic_account_creation_enabled: z.boolean().optional(),
 });
 const onboardingAnswersBodySchema = z.object({
   job_id: z.string().trim().min(1).max(200).optional().nullable(),
@@ -635,12 +644,14 @@ const automationBodySchema = z.object({
   automatic_captcha_enabled: z.boolean().optional(),
   automatic_consent_acceptance_enabled: z.boolean().optional(),
   automatic_conduct_acceptance_enabled: z.boolean().optional(),
+  automatic_account_creation_enabled: z.boolean().optional(),
 }).refine((value) => (
   value.automatic_submission_enabled !== undefined
   || value.automatic_verification_enabled !== undefined
   || value.automatic_captcha_enabled !== undefined
   || value.automatic_consent_acceptance_enabled !== undefined
   || value.automatic_conduct_acceptance_enabled !== undefined
+  || value.automatic_account_creation_enabled !== undefined
 ), {
   message: 'At least one automation permission is required',
 });
@@ -1271,6 +1282,16 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
         ? AUTOMATIC_CONDUCT_ACCEPTANCE_VERSION
         : null;
     }
+    /* Its own arm for the same reason the two above have theirs, and the stakes are higher: this
+       is the permission whose act leaves a third-party account behind, so granting or revoking a
+       neighbouring one must never touch its date or version. */
+    if (parsed.data.automatic_account_creation_enabled !== undefined) {
+      patch.automatic_account_creation_enabled = parsed.data.automatic_account_creation_enabled;
+      patch.automatic_account_creation_consented_at = parsed.data.automatic_account_creation_enabled ? now : null;
+      patch.automatic_account_creation_consent_version = parsed.data.automatic_account_creation_enabled
+        ? AUTOMATIC_ACCOUNT_CREATION_VERSION
+        : null;
+    }
     const [updated] = await db.update(users).set(patch).where(eq(users.id, userId)).returning({
       automatic_submission_enabled: users.automatic_submission_enabled,
       automatic_submission_consent_version: users.automatic_submission_consent_version,
@@ -1287,6 +1308,9 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       automatic_conduct_acceptance_enabled: users.automatic_conduct_acceptance_enabled,
       automatic_conduct_acceptance_consented_at: users.automatic_conduct_acceptance_consented_at,
       automatic_conduct_acceptance_consent_version: users.automatic_conduct_acceptance_consent_version,
+      automatic_account_creation_enabled: users.automatic_account_creation_enabled,
+      automatic_account_creation_consented_at: users.automatic_account_creation_consented_at,
+      automatic_account_creation_consent_version: users.automatic_account_creation_consent_version,
     });
     if (!updated) return reply.status(404).send({ error: 'No such user' });
     // The VERDICT, matching /onboarding/state exactly. Returning the raw column here would give the
@@ -1298,6 +1322,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       automatic_captcha_enabled: captchaResumeGranted(updated),
       automatic_consent_acceptance_enabled: consentAcceptanceGranted(updated),
       automatic_conduct_acceptance_enabled: conductAcceptanceGranted(updated),
+      automatic_account_creation_enabled: accountCreationGranted(updated),
     });
   });
 }
