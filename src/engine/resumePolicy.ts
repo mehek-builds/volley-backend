@@ -390,6 +390,51 @@ function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: Experi
     .sort((a, b) => b.score - a.score || b.source.org.length - a.source.org.length)[0]?.source;
 }
 
+/**
+ * The student's own sentence, when the model has only paraphrased one they already wrote.
+ *
+ * WHAT THIS IS FOR. Tailoring earns its keep by SELECTING which of a student's bullets to show and
+ * in what order. It does not earn anything by rewriting a sentence they already wrote, and measured
+ * across ten real generations on 2026-08-20 that rewriting only ever lost ground:
+ *
+ *   "Backtested a mean-reversion signal..."   ->  "Tested a mean-reversion signal..."
+ *   "Resequenced a pick path with OR-Tools"   ->  "Optimized a pick path with OR-Tools"
+ *
+ * The first is on a QUANTITATIVE TRADING application. "Backtested" is the precise term a quant
+ * screener looks for and "Tested" is not, so the paraphrase made the resume worse for the exact
+ * posting it was being tailored to, and dropped a keyword on the way. Nothing was fabricated - the
+ * numbers and the employer survived every time - but a swap that can only lose specificity is a
+ * trade with no upside.
+ *
+ * THE RULE, and it is deliberately narrow: when a generated bullet is a NEAR-COPY of one of the
+ * student's own, the student's wording wins verbatim. A near-copy is the case where the model
+ * changed the words and nothing else, so restoring costs no selection and no ordering - the bullet
+ * chosen is still the bullet shown. A genuinely different sentence is left alone, because that is
+ * the model doing the job it is here for rather than editing the student's prose.
+ *
+ * Threshold is on CONTENT overlap rather than string distance so that a verb swap reads as
+ * near-identical (which it is) while a real rewrite does not.
+ */
+export function keepStudentWording(bullet: string, sourceBullets: readonly string[]): string {
+  const generated = tokens(bullet);
+  if (generated.size === 0) return bullet;
+  let best: { text: string; score: number } | null = null;
+  for (const candidate of sourceBullets) {
+    const source = tokens(candidate);
+    if (source.size === 0) continue;
+    let shared = 0;
+    for (const token of generated) if (source.has(token)) shared += 1;
+    /* Against the LARGER side, so a generated bullet that merely drops words from a longer source
+       cannot score a perfect match on the strength of being a subset of it. */
+    const score = shared / Math.max(generated.size, source.size);
+    if (!best || score > best.score) best = { text: candidate, score };
+  }
+  /* 0.7 keeps verb swaps and small reorderings ("Found and corrected" / "Identified and corrected"
+     scores 0.75; "Backtested"/"Tested" scores 0.9) and leaves a real rewrite, which shares far less
+     than two thirds of its content words, to stand as written. */
+  return best && best.score >= 0.7 ? best.text : bullet;
+}
+
 /** Deterministic backstop for the three-bullet contract. */
 export function enforceExperienceBulletFloor(
   spec: ResumeSpec,
@@ -451,9 +496,16 @@ export function applyResumePolicy(
   const experience = rawSpec.experience
     .map((entry) => {
       const source = matchingBankEntry(entry, bank);
+      /* The student's own phrasings for THIS entry, so a paraphrase can be put back. Scoped to the
+         matched bank row rather than the whole bank: restoring one job's sentence onto another
+         job's bullet would be a factual error, not a wording one. */
+      const ownWording = (Array.isArray(source?.bullet_variants) ? source.bullet_variants : [])
+        .filter((variant): variant is string => typeof variant === 'string' && variant.trim().length > 0)
+        .map((variant) => variant.trim());
       const seen = new Set<string>();
       const bullets = entry.bullets
         .map((bullet) => bullet.trim())
+        .map((bullet) => (ownWording.length > 0 ? keepStudentWording(bullet, ownWording) : bullet))
         .filter((bullet) => bullet.length > 0)
         .filter((bullet) => {
           const key = bullet.toLowerCase().replace(/\s+/g, ' ');
