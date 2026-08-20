@@ -6165,13 +6165,38 @@ test('a measured option answer stays a dropdown when an older runner stored text
     ],
   }));
   const group = actions.filter((action) => /anticipated graduation date/i.test(action.label ?? ''));
-  assert.ok(group.some((action) => action.type === 'click' && action.label?.endsWith('_open')));
-  assert.ok(group.some((action) => action.type === 'press' && action.value === 'Enter'));
+  assert.deepEqual(group.map((action) => action.type), ['fillByLabelText']);
   assert.equal(group.some((action) => action.type === 'fill' && action.label?.startsWith('question:')), false,
     'measured option provenance must bypass the plain text replay path');
   const privacyGroup = actions.filter((action) => /privacy statement/i.test(action.label ?? ''));
   assert.ok(privacyGroup.some((action) => action.type === 'click' && action.label?.endsWith('_open')));
   assert.ok(privacyGroup.some((action) => action.type === 'press' && action.value === 'Enter'));
+});
+
+test('measured Greenhouse choices fit as one verified semantic action each', () => {
+  const questionCount = 33;
+  const packet = andurilPacket({
+    fieldOptions: Object.fromEntries(Array.from({ length: questionCount }, (_, index) => [
+      `question_${90000000 + index}`,
+      ['Yes', 'No'],
+    ])),
+    questions: Array.from({ length: questionCount }, (_, index) => ({
+      question: `Employer choice ${'x'.repeat(index + 1)}`,
+      answer: index % 2 === 0 ? 'Yes' : 'No',
+      answerOptionSource: index % 2 === 0 ? 'true' : 'false',
+      portalSelector: `#question_${90000000 + index}`,
+      portalInputType: 'combobox',
+      required: true,
+    })),
+  });
+
+  const actions = buildManagedPortalActions('greenhouse', packet, false);
+  assert.ok(actions.length <= MANAGED_ACTION_LIMIT);
+  assert.deepEqual(budgetDroppedReviewedQuestions(packet, actions), []);
+  assert.equal(
+    actions.filter((action) => action.type === 'fillByLabelText' && action.label?.startsWith('question:')).length,
+    questionCount,
+  );
 });
 
 test('Greenhouse demographics use durable label replay after stateless discovery', () => {
@@ -7568,8 +7593,10 @@ test('a speculative alias never fires at a control the resolver has already answ
   assert.deepEqual(answered.filter((action) => /^(?:gpa|gpa_question|graduation_date)/.test(action.label ?? '')), []);
   assert.deepEqual(answered.filter((action) => action.label?.startsWith('education_graduation_date_combo')), []);
   // The resolver's own attempts are untouched: suppressing the guess must not suppress the answer.
-  assert.ok(answered.some((action) => action.selector === '#question_9176667101'));
-  assert.ok(answered.some((action) => action.selector === '#question_5550001'));
+  assert.ok(answered.some((action) => action.selector === '#question_9176667101'
+    || (action.type === 'fillByLabelText' && action.text === 'Expected graduation date')));
+  assert.ok(answered.some((action) => action.selector === '#question_5550001'
+    || (action.type === 'fillByLabelText' && action.text === 'What is your GPA?')));
 });
 
 test('the alias ladder still fires at a control the resolver did not answer', () => {
@@ -8033,7 +8060,8 @@ test('an applicant-reviewed option leads the combobox, ahead of the computed buc
   // Scoped to the control bound to this question's own selector. The education_* chain alongside it
   // is a label-scoped fallback aimed at differently-labelled controls and is not this field.
   const typed = actions
-    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo:'))
+    .filter((action) => (action.type === 'fill' && action.label?.startsWith('question_combo:'))
+      || (action.type === 'fillByLabelText' && action.label?.startsWith('question:')))
     .map((action) => action.value);
 
   assert.ok(typed.length > 0, 'the control must be driven at all');
@@ -8182,7 +8210,8 @@ test('a machine answer with no option evidence still leads with the computed buc
     }],
   }));
   const typed = actions
-    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo:'))
+    .filter((action) => (action.type === 'fill' && action.label?.startsWith('question_combo:'))
+      || (action.type === 'fillByLabelText' && action.label?.startsWith('question:')))
     .map((action) => action.value);
 
   assert.equal(typed[0], 'Spring 2028',
@@ -8267,7 +8296,8 @@ test('an applicant-chosen referral answer is typed even when the synonym table d
     }],
   }));
   const typed = actions
-    .filter((action) => action.type === 'fill' && action.label?.startsWith('question_combo:'))
+    .filter((action) => (action.type === 'fill' && action.label?.startsWith('question_combo:'))
+      || (action.type === 'fillByLabelText' && action.label?.startsWith('question:')))
     .map((action) => action.value);
 
   assert.ok(typed.length > 0, 'the referral control must be driven at all');

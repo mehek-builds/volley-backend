@@ -2410,7 +2410,14 @@ function managedSpeculativeLabelFillSuppressed(
 
 function managedActionTargetsFailedField(action: ManagedBrowserAction, packet: SubmissionPacket): boolean {
   if (!packet.failedFields?.length) return false;
-  if (action.text && packetLabelFailed(packet, action.text)) return true;
+  if (action.text) {
+    const matchingFailedFields = packet.failedFields.filter((field) =>
+      failedFieldMatchesTarget(field, { label: action.text }, true));
+    /* A semantic question fill has no selector, so this label check is its last-line guard. Keep
+     * the existing per-control exception for an answer the applicant chose herself. A failed probe
+     * means Litos could not read the menu, not that her exact reviewed choice must be erased. */
+    if (matchingFailedFields.some((field) => !applicantChoseAnswerForFailedField(packet, field))) return true;
+  }
   if (packetHasFailedReferralField(packet) && action.label?.startsWith('greenhouse_referral')) return true;
   const fixedEducation: Array<[string, RegExp]> = [
     ['school--0', /^education_school/],
@@ -7135,6 +7142,14 @@ export function buildManagedPortalActions(
     // Whether that answer is the resolver's own, and therefore already snapped against this
     // control's real option texts. It decides whether a computed bucket leads or follows it.
     const answerIsResolved = greenhouseReviewedAnswerIsResolved(item, packet);
+    /* The current run's option inventory is the strongest proof that this exact answer belongs to
+     * this exact control. Applicant provenance is the other exact source. Either can use the
+     * runner's one-action semantic choice commit. A historical answerOptionSource alone is not
+     * enough because the profile may have changed since that option was derived. */
+    const currentOptions = packetReadOptionsForQuestion(packet, item);
+    const hasExactChoiceEvidence = answerIsResolved
+      || applicantChoseAnswer(item)
+      || currentOptions?.some((option) => option.trim().toLowerCase() === answer.trim().toLowerCase()) === true;
     const questionText = normalizeReviewQuestionLabel(item.question);
     if (!questionText) continue;
     if (shouldSkipReviewedConsentQuestion(questionText)) continue;
@@ -7161,6 +7176,21 @@ export function buildManagedPortalActions(
     if (portalSelector) {
       if (portalFamily(portal) === 'greenhouse'
         && (/^combobox$/i.test(portalInputType ?? '') || measuredClosedOption)) {
+        /* A current option or an applicant-reviewed choice can use the managed runner's semantic
+         * question fill. The runner resolves this question's own block, detects React Select, picks
+         * the exact option, and verifies the committed value inside one bounded action. Keeping the
+         * older five-action selector ladder for these proven values made large Greenhouse forms
+         * exhaust the 120-action ceiling and leave reviewed answers untouched. */
+        if (hasExactChoiceEvidence) {
+          pushScopedQuestionChoiceActions(
+            actions,
+            questionText,
+            answer,
+            'question',
+            { includeSelectFallbacks: false },
+          );
+          continue;
+        }
         pushGreenhouseQuestionComboboxActions(
           actions,
           portalSelector,
@@ -7288,9 +7318,16 @@ export function buildManagedPortalActions(
         continue;
       }
       const isReactSelectQuestion = isGreenhouseReactSelectQuestion(questionText);
-      if (!isReactSelectQuestion) {
-        pushScopedQuestionChoiceActions(actions, questionText, answer, 'question');
+      if (!isReactSelectQuestion || hasExactChoiceEvidence) {
+        pushScopedQuestionChoiceActions(
+          actions,
+          questionText,
+          answer,
+          'question',
+          hasExactChoiceEvidence ? { includeSelectFallbacks: false } : {},
+        );
       }
+      if (isReactSelectQuestion && hasExactChoiceEvidence) continue;
       pushGreenhouseQuestionComboboxLabelActions(
         actions,
         questionText,

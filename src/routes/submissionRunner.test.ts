@@ -2672,7 +2672,9 @@ test('one control that could not be read does not silence the questions that rea
    * ONE fill, and it carries the resolved answer. The count matters as much as the value: the limit
    * is still 1 on purpose (see comboboxValueLimit), because a second candidate would reopen a
    * correctly committed react-select and click option-0 of whatever menu it found. */
-  const graduationFills = actions.filter((action) => action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill');
+  const graduationFills = actions.filter((action) =>
+    (action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill')
+    || (action.type === 'fillByLabelText' && action.label?.startsWith('question:') && action.text === graduation?.question));
   assert.deepEqual(graduationFills.map((action) => action.value), ['January 2028 - July 2028'],
     'the control is attempted with its resolved answer');
   assert.equal(graduationFills.every((action) => action.value === graduation?.answer), true,
@@ -2742,7 +2744,8 @@ function submitRunFills(input: {
     })),
   } as Parameters<typeof buildManagedPortalActions>[1]);
   return actions
-    .filter((action) => action.selector === input.selector && action.type === 'fill')
+    .filter((action) => (action.selector === input.selector && action.type === 'fill')
+      || (action.type === 'fillByLabelText' && action.label?.startsWith('question:') && action.text === input.label))
     .map((action) => action.value);
 }
 
@@ -2803,7 +2806,8 @@ test('a band-shaped stale record loses to a profile that has moved', () => {
       }],
     } as Parameters<typeof buildManagedPortalActions>[1],
   )
-    .filter((action) => action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill')
+    .filter((action) => (action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill')
+      || (action.type === 'fillByLabelText' && action.label?.startsWith('question:') && action.text === 'Expected graduation date'))
     .map((action) => action.value);
 
   assert.deepEqual(prepareFills('January 2027 - July 2027', 'May 2027'), ['Spring 2028'],
@@ -3368,6 +3372,46 @@ test('a current-round reviewed option stands when the profile value matches noth
   assert.equal(question?.answer, 'GPA 3.5-3.8');
   assert.equal(question?.answer_source, 'applicant_review');
   assert.deepEqual(result.attentionReasons, []);
+});
+
+test('a stored answered choice keeps the employer options discovered on the current run', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'Software engineering internship.',
+    role: 'Software Engineer Intern',
+    portal_url: 'https://job-boards.greenhouse.io/optiver/jobs/1',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'pronouns',
+      question: 'What are your preferred pronouns?',
+      answer: 'She/her',
+      kind: 'required',
+      required: true,
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const options = ['He/him', 'She/her', 'They/them', 'Prefer not to say'];
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'What are your preferred pronouns?*',
+      selector: '#question_12345678',
+      durableSelector: '#question_12345678',
+      inputType: 'select-one',
+      maxLength: null,
+      required: true,
+      options,
+    }],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { pronouns: 'She/her' },
+    true,
+    'greenhouse',
+  );
+
+  assert.equal(result.questions[0]?.answer, 'She/her');
+  assert.deepEqual(result.questions[0]?.options, options);
 });
 
 test('the profile still wins when it can name an offered option itself', async () => {
