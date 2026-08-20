@@ -2203,6 +2203,73 @@ const PROD_OWNER_PROFILE = {
   major: 'Computer Science',
 };
 
+// ---------------------------------------------------------------------------
+// GPA: a plain ask gets the raw stored number; a UK-style percentage or honours
+// classification ask gets the number stated on its own scale rather than a fabricated
+// conversion. MEASURED gap (2026-08-21): the owner's standing answering rule states
+// "3.89/4.00 (US 4.0 scale)" for exactly this shape of question, and nothing in this
+// module read the label at all before this fix - every GPA-classified control got the
+// bare "3.89" regardless of what it asked for.
+// ---------------------------------------------------------------------------
+test('a plain GPA control gets the raw stored number', () => {
+  for (const label of ['What is your GPA?', 'GPA', 'Cumulative GPA', 'Grade Point Average']) {
+    assert.deepEqual(
+      resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, undefined),
+      { value: '3.89' },
+      label,
+    );
+  }
+});
+
+test('a UK-style percentage or classification GPA control states the US scale rather than inventing a percentage', () => {
+  for (const label of [
+    'GPA (e.g. 68% or First/2:1)',
+    'What was your degree classification? (First, 2:1, 2:2, Third)',
+    'Grade percentage',
+    'Degree classification',
+  ]) {
+    assert.deepEqual(
+      resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, undefined),
+      { value: '3.89/4.00 (US 4.0 scale)' },
+      label,
+    );
+  }
+});
+
+/* MEASURED regression (2026-08-21, this GPA fix's own code review): the first cut of
+ * GPA_CLASSIFICATION_VOCABULARY matched a bare "first class"/"third class"/"1st class" anywhere in
+ * the label, which is ordinary English on questions that have nothing to do with academics. Both
+ * labels below were misclassified as 'gpa' and answered with a fabricated GPA sentence instead of
+ * their real answer (a travel-preference question resolves to null on this profile; a seniority
+ * question about the org chart is not a profile-backed fact either). Locked here as null so the
+ * vocabulary cannot regain the bare band words without breaking a test. */
+test('an ordinary "first/third class" question outside academic context is not answered as a GPA', () => {
+  for (const label of [
+    'Do you prefer to fly first class for work travel?',
+    'Is this a first-class position within the org chart?',
+    'Would you rather travel third class or economy?',
+  ]) {
+    assert.equal(resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, undefined), null, label);
+  }
+});
+
+/* MEASURED regression (2026-08-21, same review): gpa_scale is a free-text column, not a validated
+ * number - a value like "4.0 (unweighted)" is plausible off a resume parse. The first cut of
+ * gpaAnswer reformatted it into BOTH halves of the sentence, which is only safe for a value
+ * Number() can parse; a non-numeric scale came out doubled and garbled:
+ * "3.89/4.0 (unweighted) (US 4.0 (unweighted) scale)". It must be stated once. */
+test('a GPA scale that is not a clean number is stated once, not doubled into a garbled repeat', () => {
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'GPA (e.g. 68% or First/2:1)',
+      'text',
+      { ...PROD_OWNER_PROFILE, gpa_scale: '4.0 (unweighted)' },
+      undefined,
+    ),
+    { value: '3.89/4.0 (unweighted) (US GPA scale)' },
+  );
+});
+
 test('IMC begin-working and future sponsorship questions use their separate declarations', () => {
   assert.deepEqual(
     resolveKnownAnswer(
