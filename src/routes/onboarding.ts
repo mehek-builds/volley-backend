@@ -543,9 +543,34 @@ const GAP_FIELDS = [
  */
 const SETUP_GAP_FIELDS: readonly (typeof GAP_FIELDS)[number][] = ['gpa', 'gpa_scale', 'major'];
 
+/* THE FOURTH FIELD, AND WHY IT IS NOT ON THE LIST ABOVE.
+ *
+ * standardized_test_type is real evidence for the same reason gpa/gpa_scale/major are: no form can
+ * teach Litos a value it never asked her for, and standardizedTestAnswer (questionDiscovery.ts)
+ * already implements the never-fabricate rule correctly - it just has nothing to read, because
+ * nothing has ever asked. Gating on it unconditionally would repeat exactly the desired_salary
+ * mistake this file's own comment above warns about: SAT/ACT questions are measured, so far, on
+ * ONLY early-career-recruiting forms (IMC Trading, DRW, Optiver - quant-trading internship
+ * pipelines), never on a senior or general job posting. Showing this screen to every account with
+ * years of work experience would be the "fires for everybody" failure a second time, on a field
+ * even less universal than salary.
+ *
+ * Mehek's explicit scope (2026-08-20): only for an applicant Litos can already tell is a current
+ * student or recent grad targeting internship/co-op/new-grad roles - not identity alone
+ * (currently_enrolled), but what she is actually applying for, which is the self-declared,
+ * already-collected 'Your roles' answer this flow asks before it ever reaches gaps. */
+const STUDENT_ROLE_TYPES = new Set(['internship', 'co-op', 'new-grad']);
+
+/** Whether this applicant's own declared role targets are the early-career population the
+ *  standardized-test question is measured to appear for. */
+export function targetsStudentRoles(roleTypes: unknown): boolean {
+  return Array.isArray(roleTypes) && roleTypes.some((value) => STUDENT_ROLE_TYPES.has(value as string));
+}
+
 /** Whether the setup gaps screen has something to ask THIS student. */
-export function hasSetupGapsFrom(gaps: readonly string[]): boolean {
-  return SETUP_GAP_FIELDS.some((f) => gaps.includes(f));
+export function hasSetupGapsFrom(gaps: readonly string[], roleTypes?: unknown): boolean {
+  if (SETUP_GAP_FIELDS.some((f) => gaps.includes(f))) return true;
+  return targetsStudentRoles(roleTypes) && gaps.includes('standardized_test_type');
 }
 
 /* Has the screen been put in front of this student before?
@@ -597,9 +622,13 @@ export function gapsAskedColumnPresent(row: Record<string, unknown> | undefined)
  * a flow that contained the screen goes on containing it. That is also why this is not simply
  * `step === 'gaps'`: the rail has to count the screen from 'base', one step BEFORE they reach it.
  */
-export function includesGapsStepFrom(gaps: readonly string[], row: Record<string, unknown> | undefined): boolean {
+export function includesGapsStepFrom(
+  gaps: readonly string[],
+  row: Record<string, unknown> | undefined,
+  roleTypes?: unknown,
+): boolean {
   if (!gapsAskedColumnPresent(row)) return false;
-  return hasSetupGapsFrom(gaps) || gapsAskedFrom(row);
+  return hasSetupGapsFrom(gaps, roleTypes) || gapsAskedFrom(row);
 }
 
 const completeBodySchema = z.object({
@@ -841,12 +870,13 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       hasFocus: has_focus,
       hasSponsorshipAnswer: has_sponsorship_answer,
       hasBaseResume: has_base_resume,
-      // The academic three only, and only until the screen has been shown once. See
-      // SETUP_GAP_FIELDS and gapsAskedFrom for why each half is needed.
-      hasSetupGaps: hasSetupGapsFrom(gaps),
+      // The academic three, plus the standardized-test question for the early-career population
+      // it is measured to appear for. See SETUP_GAP_FIELDS, targetsStudentRoles and gapsAskedFrom
+      // for why each part is needed.
+      hasSetupGaps: hasSetupGapsFrom(gaps, target?.role_types),
       gapsAsked: gapsAskedFrom(appProfile),
     });
-    const includesGaps = includesGapsStepFrom(gaps, appProfile);
+    const includesGaps = includesGapsStepFrom(gaps, appProfile, target?.role_types);
     const flow = await onboardingFlowLedger(userId);
     /* Existing accounts already contain the facts that normally derive every setup step as done.
        A separate acknowledgement ledger makes them review each version 2 screen without deleting
@@ -1116,9 +1146,10 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const parsed = flowStepBodySchema.safeParse(request.body ?? {});
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid onboarding step acknowledgement' });
     const userId = request.jwtPayload!.userId;
-    const [[user], appProfile] = await Promise.all([
+    const [[user], appProfile, [target]] = await Promise.all([
       db.select({ onboarding_completed_at: users.onboarding_completed_at }).from(users).where(eq(users.id, userId)).limit(1),
       selectApplicationProfileRow(userId),
+      db.select().from(targeting).where(eq(targeting.user_id, userId)),
     ]);
     if (!user) return reply.status(404).send({ error: 'No such user' });
 
@@ -1130,7 +1161,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       const decision = flowAcknowledgementDecision(
         flow.acknowledged,
         parsed.data.step,
-        includesGapsStepFrom(gapsFrom(appProfile), appProfile),
+        includesGapsStepFrom(gapsFrom(appProfile), appProfile, target?.role_types),
       );
       if (decision.alreadyRecorded) return reply.status(200).send({ ok: true, ...parsed.data });
       if (!decision.accepted) {
@@ -1158,9 +1189,10 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const parsed = flowCompleteBodySchema.safeParse(request.body ?? {});
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid onboarding flow version' });
     const userId = request.jwtPayload!.userId;
-    const [[user], appProfile] = await Promise.all([
+    const [[user], appProfile, [target]] = await Promise.all([
       db.select({ onboarding_completed_at: users.onboarding_completed_at }).from(users).where(eq(users.id, userId)).limit(1),
       selectApplicationProfileRow(userId),
+      db.select().from(targeting).where(eq(targeting.user_id, userId)),
     ]);
     if (!user) return reply.status(404).send({ error: 'No such user' });
     if (!user.onboarding_completed_at) {
@@ -1171,7 +1203,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     if (!flow.available) return reply.status(503).send({ error: 'The onboarding update is still being prepared. Try again shortly.' });
     if (flow.completed) return reply.status(200).send({ ok: true, flow_version: CURRENT_ONBOARDING_FLOW_VERSION });
 
-    const blocking = replayBlockingStep(flow, includesGapsStepFrom(gapsFrom(appProfile), appProfile));
+    const blocking = replayBlockingStep(flow, includesGapsStepFrom(gapsFrom(appProfile), appProfile, target?.role_types));
     if (blocking) {
       return reply.status(409).send({ error: `Review ${blocking} before finishing this walkthrough.` });
     }

@@ -306,13 +306,31 @@ describe('the setup gaps step', () => {
       assert.equal(hasSetupGapsFrom([]), false);
     });
 
-    /* The 2026-08-11 additions RENDER on the screen but must never OPEN it, which is the same
-       distinction desired_salary draws above. Test scores are asked by trading and quant firms and
-       by almost nobody else; gating on them would put a whole screen in front of every account
-       forever, which is exactly the pre-#116 defect. They are shown to someone already routed here
-       for a missing GPA or major. */
-    test('the measured 2026-08-11 additions render but never gate', () => {
+    /* The 2026-08-11 additions RENDER on the screen but do not gate it FOR EVERYONE, which is the
+       same distinction desired_salary draws above. Test scores are asked by trading and quant
+       firms and by almost nobody else; gating on them unconditionally would put a whole screen in
+       front of every account forever, which is exactly the pre-#116 defect. Absent a role-types
+       signal (the pre-existing caller shape, and every account not targeting internship/co-op/
+       new-grad roles), they are shown only to someone already routed here for a missing GPA or
+       major - never open the screen on their own. */
+    test('the measured 2026-08-11 additions render but never gate, absent a student-roles signal', () => {
       assert.equal(hasSetupGapsFrom(['standardized_test_type', 'sat_score', 'act_score']), false);
+      assert.equal(hasSetupGapsFrom(['standardized_test_type', 'sat_score', 'act_score'], ['full-time']), false);
+    });
+
+    /* Reversed 2026-08-20, scoped exactly the way the comment above warns against widening: not
+       identity (currently_enrolled) but what she is actually applying for, since SAT/ACT questions
+       are measured, so far, only on internship/co-op/new-grad recruiting forms (IMC Trading, DRW,
+       Optiver). A student's own 'Your roles' answer already exists by the time this runs. */
+    test('standardized_test_type gates it, but only for a declared internship/co-op/new-grad target', () => {
+      assert.equal(hasSetupGapsFrom(['standardized_test_type'], ['internship']), true);
+      assert.equal(hasSetupGapsFrom(['standardized_test_type'], ['co-op']), true);
+      assert.equal(hasSetupGapsFrom(['standardized_test_type'], ['new-grad']), true);
+      assert.equal(hasSetupGapsFrom(['standardized_test_type'], ['full-time', 'internship']), true, 'any qualifying role in a multi-select target is enough');
+      assert.equal(hasSetupGapsFrom(['sat_score', 'act_score'], ['internship']), false, 'the type question gates; the two score fields alone do not');
+      assert.equal(hasSetupGapsFrom(['standardized_test_type'], ['full-time']), false);
+      assert.equal(hasSetupGapsFrom(['standardized_test_type'], []), false);
+      assert.equal(hasSetupGapsFrom(['standardized_test_type'], null), false);
     });
 
     test('a full gap list still opens it, because the academic three are in it', () => {
