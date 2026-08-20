@@ -8304,6 +8304,30 @@ test('an applicant-chosen referral answer is typed even when the synonym table d
   assert.equal(typed[0], 'Other', `her choice must lead, got ${JSON.stringify(typed)}`);
 });
 
+test('a truthful machine-resolved referral Other survives both Greenhouse fill passes', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    referralSourceDefault: 'Job board',
+    questions: [{
+      question: 'How did you hear about Optiver?',
+      answer: 'Other',
+      answerOptionSource: 'Job board',
+      portalSelector: '#question_referral_optiver',
+      portalInputType: 'combobox',
+    }],
+  }));
+  const direct = actions.filter((action) => action.type === 'fillByLabelText'
+    && action.label?.startsWith('question:'));
+  const trailing = actions.filter((action) => action.type === 'fill'
+    && action.label?.startsWith('greenhouse_referral'));
+
+  assert.ok(direct.some((action) => action.value === 'Other'),
+    `the exact resolved choice must drive the question, got ${JSON.stringify(direct.map((action) => action.value))}`);
+  assert.ok(trailing.some((action) => action.value === 'Other'),
+    `the final referral pass must keep the resolved choice, got ${JSON.stringify(trailing.map((action) => action.value))}`);
+  assert.equal(trailing.some((action) => /job\s*board/i.test(action.value ?? '')), false,
+    `the trailing pass must not overwrite Other, got ${JSON.stringify(trailing.map((action) => action.value))}`);
+});
+
 test('a bare stored referral default still goes through the synonym builder alone', () => {
   // The relay-never-generate rule: without provenance the stored value is not treated as a choice
   // she made about THIS list, so the job-board wordings are what get offered.
