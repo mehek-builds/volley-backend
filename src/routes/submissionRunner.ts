@@ -2109,6 +2109,12 @@ export async function discoverAndResolveQuestions(
         portal_selector: portalSelectorForField(field),
         portal_input_type: controlType,
         answer_option_source: answerOptionSource,
+        /* THE MENU RIDES WITH THE RECORD, display-only, exactly as R-096 carries it for the
+           unanswered mint. The option-mismatch branch above warns her an answer matched nothing
+           the control offers; without the list beside it the Review answers screen hands her a
+           bare box and no hint of what the employer accepts (measured on Rippling's pronouns
+           list, 2026-08-20: "she/her" matched nothing and nothing showed her what would). */
+        ...(usableOptions(field.options).length > 0 ? { options: usableOptions(field.options) } : {}),
         ...consentTrail,
       });
       continue;
