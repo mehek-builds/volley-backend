@@ -664,22 +664,59 @@ function eeoActions(pairs: Array<[question: string, answer: string]>): ManagedBr
   return picked;
 }
 
-/* THE ASHBY SUBMIT LIST, STRAIGHT OUT OF THE PRODUCTION BUILDER, both with and without the click.
+/* THE ASHBY SUBMIT LIST, STRAIGHT OUT OF THE PRODUCTION BUILDER, both with and without the final action.
  *
  * `buildManagedPortalActions('controlled_ashby', packet, true)` is byte for byte what production
- * queued for packet 13bccb2d: eight fills and uploads, then one click on
- * `button[type="submit"], input[type="submit"]`, which is what isFinalSubmitAction recognises as the
- * final submit. Nine actions in total against a MANAGED_ACTION_LIMIT of 120, and no action is added
- * by anything in this fix - the outcome read is a page evaluation inside the runner, not an action.
+ * queues for packet 13bccb2d: eight fills and uploads, then one `confirmAndSubmit`. Nine actions in
+ * total against a MANAGED_ACTION_LIMIT of 120, and no action is added by anything in this fix - the
+ * outcome read is a page evaluation inside the runner, not an action.
  *
- * The fill list is the same nine minus the click, taken by dropping the LAST action rather than by
- * calling the builder with `false`, so the two lists cannot drift into being different runs.
+ * It used to end in a plain `click` on `button[type="submit"], input[type="submit"]`. It does not
+ * any more: the contract-v2 migration (see browserbase.ts's ManagedBrowserAction.contractVersion doc
+ * and stratus-browser-cloud's README, "Use one `confirmAndSubmit` action for an authorized final
+ * submit") folded the submit click into one atomic action that also owns the required-field
+ * confirmation, carrying the full `litos-final-submit` chooser policy (contractVersion 2,
+ * submitKind 'application', the pinned MANAGED_SUBMIT_CHOOSER_POLICY). This is asserted structurally
+ * below rather than by type alone, because a real regression here (a stale or missing chooser policy,
+ * or the wrong submitKind) would otherwise pass this check and only surface as a blocked or
+ * mis-targeted click deep inside the sandbox.
+ *
+ * The fill list is the same nine minus the final action, taken by dropping the LAST action rather
+ * than by calling the builder with `false`, so the two lists cannot drift into being different runs.
  */
 function submittingAshbyActions(): ManagedBrowserAction[] {
   const all = buildManagedPortalActions('controlled_ashby', packetFor(), true);
   const last = all[all.length - 1];
-  if (last?.type !== 'click') {
-    throw new Error(`the production Ashby builder no longer ends in a submit click, it ends in ${last?.type}`);
+  if (last?.type !== 'confirmAndSubmit') {
+    throw new Error(
+      `the production Ashby builder's final action changed shape: expected type "confirmAndSubmit", `
+      + `got ${JSON.stringify(last?.type ?? null)}. Either production regressed to a bare click (or `
+      + `something else), or this trial's expectation is stale again - check `
+      + `buildManagedPortalActions in src/lib/portalSubmission.ts and update this assertion to match `
+      + `what it now emits, do not just widen the check.`,
+    );
+  }
+  if (last.contractVersion !== 2) {
+    throw new Error(
+      `the production Ashby builder's confirmAndSubmit carries contractVersion `
+      + `${JSON.stringify(last.contractVersion ?? null)}, not 2. The runner pins the submit-readiness `
+      + `and chooser-policy grammar to contract v2; a different version here means either a real `
+      + `production migration to v3+ (update this trial to match) or a stale/dropped field.`,
+    );
+  }
+  if (last.submitKind !== 'application') {
+    throw new Error(
+      `the production Ashby builder's confirmAndSubmit carries submitKind `
+      + `${JSON.stringify(last.submitKind ?? null)}, not "application". This is the employer send, `
+      + `not an emailed-code verification continuation - the two must never be confused.`,
+    );
+  }
+  if (!last.chooserPolicy || last.chooserPolicy.name !== 'litos-final-submit') {
+    throw new Error(
+      `the production Ashby builder's confirmAndSubmit is missing the "litos-final-submit" chooser `
+      + `policy (got ${JSON.stringify(last.chooserPolicy ?? null)}). Without it the sandbox runner's `
+      + `own boot check rejects the action before a browser opens.`,
+    );
   }
   return all;
 }
