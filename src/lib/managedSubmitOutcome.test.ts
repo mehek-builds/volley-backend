@@ -1074,3 +1074,49 @@ describe('what the verdict refuses to call a submission', () => {
     assert.equal(managedSubmitVerdict(ASHBY_CONFIRMED).kind, 'confirmed');
   });
 });
+
+/* THE PRESS-WINDOW NETWORK RECORD, measured need on the live Easy Dynamics Rippling form
+ * (2026-08-20, twice): Send pressed, the page said nothing either way, and nothing recorded what
+ * the submit request returned. The parse is defensive because the record crosses the wire from a
+ * runner on a different deploy cadence. */
+describe('the submit network record', () => {
+  test('valid entries are kept, with the query string stripped again on this side', () => {
+    const outcome = readManagedSubmitOutcome({
+      submitOutcome: {
+        pressed: true, state: 'unknown', source: null, evidence: null, message: null,
+        formStillPresent: true,
+        network: [
+          { method: 'POST', url: 'https://ats.rippling.com/api/apply?token=SECRET', status: 422 },
+          { method: 'POST', url: 'https://ats.rippling.com/api/apply', status: null, failure: 'net::ERR_ABORTED' },
+        ],
+      },
+    });
+    assert.deepEqual(outcome?.network, [
+      { method: 'POST', url: 'https://ats.rippling.com/api/apply', status: 422 },
+      { method: 'POST', url: 'https://ats.rippling.com/api/apply', status: null, failure: 'net::ERR_ABORTED' },
+    ]);
+  });
+
+  test('a malformed or absent record degrades to null, never to a throw', () => {
+    const base = {
+      pressed: true, state: 'unknown', source: null, evidence: null, message: null,
+      formStillPresent: true,
+    };
+    assert.equal(readManagedSubmitOutcome({ submitOutcome: base })?.network, null);
+    assert.equal(readManagedSubmitOutcome({ submitOutcome: { ...base, network: 'nope' } })?.network, null);
+    assert.equal(readManagedSubmitOutcome({
+      submitOutcome: { ...base, network: [{ method: 42, url: null }, 'junk', null] },
+    })?.network, null);
+  });
+
+  test('the record is bounded at twenty entries on this side too', () => {
+    const outcome = readManagedSubmitOutcome({
+      submitOutcome: {
+        pressed: true, state: 'unknown', source: null, evidence: null, message: null,
+        formStillPresent: true,
+        network: Array.from({ length: 30 }, (_, i) => ({ method: 'POST', url: 'https://x.test/' + i, status: 200 })),
+      },
+    });
+    assert.equal(outcome?.network?.length, 20);
+  });
+});

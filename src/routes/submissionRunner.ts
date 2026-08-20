@@ -4983,6 +4983,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * folded into the same "we cannot tell" bucket as a run that died mid-click.
      */
     const verdict = managedSubmitVerdict(receiptResult);
+    // The press-window network record, for the unverified arms below. Read once, next to the
+    // verdict it annotates, so the two cannot come from different readings of the result.
+    const pressNetwork = readManagedSubmitOutcome(receiptResult)?.network ?? undefined;
     if (verdict.kind === 'refused') {
       const refusedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'rejected'
         ? 'rejected' as const
@@ -5042,6 +5045,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           at: capturedAt,
           cause: 'no_confirmation_state',
           previewUrl: blob.url,
+          network: pressNetwork,
         }),
         ...(enteredCode ? { security_code: recordEnteredCodeOutcome(unverifiedCodeOutcome, capturedAt) } : {}),
       }));
@@ -5071,6 +5075,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
             at: capturedAt,
             cause: 'no_confirmation_state',
             previewUrl: blob.url,
+            network: pressNetwork,
           }),
           security_code: recordEnteredCodeOutcome(
             codeOutcome === 'rejected' ? 'rejected'
@@ -5490,7 +5495,14 @@ export function delayedSecurityCodeHandoffReview(
  */
 function unverifiedSubmissionPatch(
   review: ApplicationReviewState,
-  input: { at: string; cause: NonNullable<ApplicationReviewState['unverified_submission']>['cause']; previewUrl?: string },
+  input: {
+    at: string;
+    cause: NonNullable<ApplicationReviewState['unverified_submission']>['cause'];
+    previewUrl?: string;
+    /* The runner's record of what the submit request came back with. Carried on the record so the
+     * person (or session) resolving it has the one fact the page refused to show. */
+    network?: NonNullable<ApplicationReviewState['unverified_submission']>['network'];
+  },
 ): Partial<ApplicationReviewState> {
   return {
     status: 'needs_attention',
@@ -5501,6 +5513,7 @@ function unverifiedSubmissionPatch(
       cause: input.cause,
       ...(review.portal_url ? { portal_url: review.portal_url } : {}),
       ...(review.submission_run_id ? { submission_run_id: review.submission_run_id } : {}),
+      ...(input.network && input.network.length > 0 ? { network: input.network } : {}),
     },
     attention_reason: unverifiedSubmissionReason({
       atsName: review.ats_name,

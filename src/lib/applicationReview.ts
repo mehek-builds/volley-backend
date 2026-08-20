@@ -1076,6 +1076,11 @@ export type ApplicationReviewState = {
     /* Where she has to look. Carried here so the message and the link cannot drift apart. */
     portal_url?: string;
     submission_run_id?: string;
+    /* What the submit request itself came back with, recorded by the runner around the press.
+     * Origin plus path, method, and a status or a failure text. Evidence for the person (or the
+     * next session) resolving this record: a 200 on the board's submit path reads very differently
+     * from a 422 or a request that never returned. Never used to decide anything automatically. */
+    network?: { method: string; url: string; status: number | null; failure?: string }[];
     resolution?: 'sent' | 'not_sent';
     resolved_at?: string;
   };
