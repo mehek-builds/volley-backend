@@ -39,6 +39,40 @@ export type ManagedSubmitOutcome = {
   /** The sentence the employer showed. Evidence for a person, never the thing the verdict rests on. */
   message: string | null;
   formStillPresent: boolean | null;
+  /* What the submit request itself came back with, recorded by the runner from the moment before
+   * the final press: method, origin plus path, and a status, or a failure text when the request
+   * never returned. Measured need on the live Easy Dynamics Rippling form (2026-08-20, twice): Send
+   * pressed, the page said nothing either way, and without this the same press could fail the same
+   * way forever with nobody able to learn why. Evidence for a person resolving an unverified
+   * press; never the thing a verdict rests on, because analytics POSTs are write-shaped too. */
+  network: SubmitNetworkEntry[] | null;
+};
+
+export type SubmitNetworkEntry = {
+  method: string;
+  /* Origin plus path only. The runner strips query strings before this ever leaves the sandbox,
+   * because submit URLs carry tokens; the parse below cannot inherit that guarantee across the
+   * wire, so it re-applies it, fragments included. */
+  url: string;
+  status: number | null;
+  failure?: string;
+};
+
+const readSubmitNetwork = (raw: unknown): SubmitNetworkEntry[] | null => {
+  if (!Array.isArray(raw)) return null;
+  const entries: SubmitNetworkEntry[] = [];
+  for (const item of raw.slice(0, 20)) {
+    if (!item || typeof item !== 'object') continue;
+    const value = item as Record<string, unknown>;
+    if (typeof value.method !== 'string' || typeof value.url !== 'string') continue;
+    entries.push({
+      method: value.method.slice(0, 10),
+      url: value.url.split(/[?#]/)[0].slice(0, 300),
+      status: typeof value.status === 'number' ? value.status : null,
+      ...(typeof value.failure === 'string' ? { failure: value.failure.slice(0, 120) } : {}),
+    });
+  }
+  return entries.length > 0 ? entries : null;
 };
 
 type MaybeOutcome = { submitOutcome?: unknown };
@@ -67,6 +101,7 @@ export function readManagedSubmitOutcome(result: MaybeOutcome | null | undefined
     evidence: typeof value.evidence === 'string' ? value.evidence.slice(0, 200) : null,
     message: typeof value.message === 'string' ? value.message.slice(0, 1000) : null,
     formStillPresent: typeof value.formStillPresent === 'boolean' ? value.formStillPresent : null,
+    network: readSubmitNetwork(value.network),
   };
 }
 
