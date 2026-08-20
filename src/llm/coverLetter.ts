@@ -18,6 +18,38 @@ export type CoverLetterDraft = {
   warnings: string[];
 };
 
+function normalizeAcademicPhrase(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Return degree or major phrases the letter assigns to the applicant but the saved source never
+ * states. Academic programs are identity facts, so a plausible neighboring field is still an
+ * invention. The narrow student-claim shape avoids treating role phrases or employer requirements
+ * as applicant education.
+ */
+export function ungroundedAcademicPrograms(body: string, candidateSource: string): string[] {
+  const source = normalizeAcademicPhrase(candidateSource);
+  const claims = new Set<string>();
+  const pattern = /\ban?\s+([a-z][a-z&./-]*(?:\s+[a-z&./-]+){0,7})\s+student\b/gi;
+  for (const match of body.matchAll(pattern)) {
+    const raw = match[1]?.trim();
+    if (!raw) continue;
+    const normalized = normalizeAcademicPhrase(raw)
+      .replace(/^(?:current|currently|undergraduate|graduate)\s+/, '')
+      .replace(/\s+(?:undergraduate|graduate)$/, '')
+      .trim();
+    if (!normalized || source.includes(normalized)) continue;
+    claims.add(raw);
+  }
+  return [...claims];
+}
+
 /* THE TWO RULES THAT ARE NOT STYLE.
  *
  * "Never state where the candidate is" and "never promise" are one rule with two halves, and they
@@ -65,6 +97,10 @@ export function validateCoverLetter(
   }
   const fabricatedNumbers = ungroundedNumbers(cleaned, numberSignatures(candidateSource));
   if (fabricatedNumbers.length > 0) issues.push(`cover letter contains ungrounded numbers: ${fabricatedNumbers.join(', ')}`);
+  const academicPrograms = ungroundedAcademicPrograms(cleaned, candidateSource);
+  if (academicPrograms.length > 0) {
+    issues.push(`cover letter states academic programs not found in the candidate source: ${academicPrograms.join(', ')}`);
+  }
   const promises = unsupportedCommitments(cleaned);
   for (const sentence of promises) {
     issues.push(
