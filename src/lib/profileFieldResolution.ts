@@ -53,6 +53,7 @@ import {
   classifyField,
   consentAcknowledgementAnswer,
   EEO_QUESTION,
+  gpaWantsPercentageOrClassification,
   isConsentAcceptingWording,
   isConsentRefusingWording,
   isConsentAcknowledgementQuestion,
@@ -774,17 +775,51 @@ export function disciplineLadder(major: string | undefined, degree?: string | un
   return ladder(...subjects, ...families, source);
 }
 
-export function gpaLadder(gpa: string | undefined, gpaScale?: string | undefined): string[] {
+/**
+ * The UK HONOURS BAND HER STORED GPA ACTUALLY EARNS, and nothing else.
+ *
+ * This is deliberately not a GPA-to-classification converter: there is no institution-agnostic
+ * formula from a US 4.0 GPA to a UK honours class (gpaAnswer's own comment makes the same call for
+ * the text-answer side), and building a full 2:1/2:2/Third ladder here would offer a fabricated
+ * classification nobody measured. It states the one fact that IS true - a GPA at or above 3.7 on a
+ * 4.0 scale sits inside First-class honours under every published UK/US equivalency table, which is
+ * exactly where her stored 3.89/4.0 falls - and returns nothing for a GPA below that line or for
+ * any scale other than 4.0, rather than guess at a lower band.
+ */
+function ukHonoursClassificationBand(value: number, scale: string | undefined): string | undefined {
+  if (scale && Number(scale) !== 4) return undefined;
+  return value >= 3.7 ? 'First' : undefined;
+}
+
+/**
+ * `wantsClassificationBand` is true exactly when the CONTROL'S OWN LABEL is what asked for a
+ * classification or percentage instead of a plain number - the same
+ * gpaWantsPercentageOrClassification gate gpaAnswer uses for the text answer, imported from
+ * questionDiscovery.ts so the two cannot drift apart.
+ *
+ * Threading it through is what makes a closed-list GPA control resolvable at all when the list
+ * offers ONLY classification-band options (First/2:1/2:2/Third, no plain numeric choice):
+ * chooseClosestOption has nothing else in this ladder to match against those rows. Gated this
+ * narrowly on purpose - offering "First" as a candidate on an ordinary numeric-only GPA select
+ * (no classification wording on the label at all) risks matching it against some unrelated option
+ * that happens to contain the word "First", which is exactly the false-positive shape this whole
+ * PR's review has been finding and fixing all the way down.
+ */
+export function gpaLadder(gpa: string | undefined, gpaScale?: string | undefined, wantsClassificationBand?: boolean): string[] {
   const trimmed = gpa?.trim();
   if (!trimmed) return [];
   const value = numericValueOf(trimmed);
   const scale = gpaScale?.trim();
+  const classificationBand = wantsClassificationBand && value !== null
+    ? ukHonoursClassificationBand(value, scale)
+    : undefined;
   return ladder(
     trimmed,
     value !== null ? value.toFixed(2) : undefined,
     value !== null ? String(Math.round(value * 10) / 10) : undefined,
     value !== null && scale ? `${trimmed}/${scale}` : undefined,
     value !== null && scale ? `${trimmed} / ${scale}` : undefined,
+    classificationBand,
   );
 }
 
@@ -1089,6 +1124,12 @@ export function profileFieldCandidates(
   key: ProfileKey | null,
   ap: ApplicationProfileLike,
   base: string,
+  /* The control's own label, when the caller has it. Only consulted for 'gpa', to decide whether
+   * gpaLadder should offer a UK honours classification-band candidate - see gpaLadder's own
+   * comment. Optional so every existing caller that has no label to hand (there was none before
+   * this parameter existed) keeps compiling unchanged; omitting it just means that one candidate
+   * is never added. */
+  label?: string,
 ): string[] {
   switch (key) {
     case 'school':
@@ -1098,7 +1139,7 @@ export function profileFieldCandidates(
     case 'major':
       return ladder(base, ...disciplineLadder(ap.major ?? base, ap.degree));
     case 'gpa':
-      return ladder(base, ...gpaLadder(ap.gpa ?? base, ap.gpa_scale));
+      return ladder(base, ...gpaLadder(ap.gpa ?? base, ap.gpa_scale, label !== undefined && gpaWantsPercentageOrClassification(label)));
     case 'gpa_scale':
       return ladder(base, base.replace(/\.0+$/, ''));
     case 'graduation_month':
@@ -1161,7 +1202,7 @@ export function profileAnswerAliases(label: string, answer: string): string[] {
     case 'referral_source_default': synthetic.referral_source_default = base; break;
     default: break;
   }
-  return profileFieldCandidates(key, synthetic, base);
+  return profileFieldCandidates(key, synthetic, base, label);
 }
 
 /**
@@ -1259,7 +1300,7 @@ export function resolveProfileField(
       matchedOption: usableOptions(shape.options).length === 0 ? false : chosen !== null,
     };
   }
-  const candidates = eeo ? eeoAnswerLadder(label, base) : profileFieldCandidates(key, ap, base);
+  const candidates = eeo ? eeoAnswerLadder(label, base) : profileFieldCandidates(key, ap, base, label);
   let matched = eeo ? chooseEeoOption(label, base, shape.options) : chooseClosestOption(candidates, shape.options);
   if (key === 'referral_source_default' && matched === null) {
     // The employer's own site, under the employer's own name for it. Only reached once the standard
