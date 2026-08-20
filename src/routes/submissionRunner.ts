@@ -5040,6 +5040,21 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           : receiptResult.securityCodeAttempt?.outcome === 'not_entered'
             ? 'not_entered' as const
             : 'error' as const;
+      /* THE RAW READ, LOGGED RATHER THAN DROPPED. managedSubmitVerdict never reads outcome.message
+       * on this branch - it cannot promote an unverified send to a claim - but the page Stratus
+       * actually saw is exactly the evidence a real confirmation arm for breezy.hr or workable.com
+       * would be built from, and no such arm exists yet for either (measured 2026-08-20: no real
+       * post-submit DOM has ever been captured). Logging it here, at the one place every unverified
+       * outcome already passes through, means the next real send to either produces that evidence
+       * instead of another silent dead end. */
+      const rawOutcome = readManagedSubmitOutcome(receiptResult);
+      if (rawOutcome?.source === 'unmatched_page_text') {
+        fastify.log.warn({
+          applicationId: row.id,
+          portalUrl: rawOutcome.evidence,
+          pageText: rawOutcome.message,
+        }, 'Unrecognised post-submit page: no confirmation arm exists for this ATS shape yet');
+      }
       await writeReview(row, nextReview(claimedReview, {
         ...unverifiedSubmissionPatch(claimedReview, {
           at: capturedAt,
