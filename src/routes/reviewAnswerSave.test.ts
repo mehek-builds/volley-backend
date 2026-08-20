@@ -559,6 +559,52 @@ for (const [name, evidence] of SEND_EVIDENCE) {
   });
 }
 
+/* HER LOOK IS THE RELEASE. The resolution route records 'not_sent' only after she has opened the
+ * employer page and answered, releases the claim, and promises "Litos can send it again whenever
+ * you are ready". Measured on the Easy Dynamics Rippling packet (2026-08-20): the promise was
+ * unfulfillable, because the save gate read the RESOLVED record and the same press's
+ * submission_attempted_at as an employer hold, and the review screen's save-then-audit sequence
+ * aborted at the 409 before the audit ever ran. A resolved not_sent neutralises exactly those two
+ * facts; a receipt or a security code still refuses, and a resolution of 'sent' still refuses. */
+test('a press she looked into and answered "not there" is editable again', async () => {
+  const id = await applicationWith(stoppedRun({
+    submission_attempted_at: STOPPED_AT,
+    unverified_submission: {
+      at: STOPPED_AT, cause: 'no_confirmation_state', portal_url: PORTAL_URL,
+      resolution: 'not_sent', resolved_at: STOPPED_AT,
+    },
+  }));
+
+  const response = await saveAnswers(id, 'No');
+  assert.equal(response.statusCode, 200, response.body);
+});
+
+test('a resolution of "sent" keeps the row locked: the employer has it', async () => {
+  const id = await applicationWith(stoppedRun({
+    submission_attempted_at: STOPPED_AT,
+    unverified_submission: {
+      at: STOPPED_AT, cause: 'no_confirmation_state', portal_url: PORTAL_URL,
+      resolution: 'sent', resolved_at: STOPPED_AT,
+    },
+  }));
+
+  const response = await saveAnswers(id, 'No');
+  assert.equal(response.statusCode, 409, response.body);
+});
+
+test('a resolved not_sent beside a security code still refuses: the wall is the employer\u2019s record', async () => {
+  const id = await applicationWith(stoppedRun({
+    unverified_submission: {
+      at: STOPPED_AT, cause: 'no_confirmation_state', portal_url: PORTAL_URL,
+      resolution: 'not_sent', resolved_at: STOPPED_AT,
+    },
+    security_code: { digits: 6, requested_at: STOPPED_AT, submit_was_authorized: true },
+  }));
+
+  const response = await saveAnswers(id, 'No');
+  assert.equal(response.statusCode, 409, response.body);
+});
+
 /* THE SAVE THAT LOST THE RACE, AND THE ONE BYTE THAT LETS THE SCREEN KNOW.
  *
  * The 202 body was shape-identical to the 200's, and the client resolves on any res.ok and returns
