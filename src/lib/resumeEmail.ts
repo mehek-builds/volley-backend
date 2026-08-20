@@ -32,8 +32,24 @@ export function resumeEmailOfRecord(parsedProfile: unknown, _accountEmail?: stri
 export function resumeEmailForUpload(
   existingParsedProfile: unknown,
   accountEmail?: string,
+  /** The address printed on the resume just uploaded. See the third rung below. */
+  parsedEmail?: string,
 ): string | undefined {
-  return resumeEmailOfRecord(existingParsedProfile) ?? email(accountEmail);
+  /* THREE RUNGS, in the order of who is most entitled to decide the address.
+   *
+   * 1. what the student typed themselves - their correction, and it outlives every upload
+   * 2. the verified login email - the address they signed up with
+   * 3. THE ADDRESS ON THE RESUME THEY JUST HANDED OVER, which is new here.
+   *
+   * The third rung is what a guest has and the other two are not. A guest account carries no email
+   * at all, so onboarding stopped dead at the build with "Add the email address that should appear
+   * on your resume" and pointed at an Account page that had none to add. Their resume prints one,
+   * under their name, and the parser reads it now. It is the applicant's own published address on
+   * their own document, which is exactly what a resume header is for.
+   *
+   * Below the login email deliberately: a verified address Litos can route replies through beats a
+   * transcription, and a resume can carry a stale university address the student has moved off. */
+  return resumeEmailOfRecord(existingParsedProfile) ?? email(accountEmail) ?? email(parsedEmail);
 }
 
 export function resumePacketEmailIsCurrent(storedEmail: unknown, currentResumeEmail: unknown): boolean {

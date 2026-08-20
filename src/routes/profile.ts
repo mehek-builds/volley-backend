@@ -4,6 +4,7 @@ import { profiles, experience_bank, application_profile, targeting } from '../db
 import { eq, sql } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { encryptField } from '../lib/fieldCrypto';
+import { ENCRYPTED_FIELDS } from './applicationProfile';
 import { decryptRow } from './applicationProfile';
 import {
   parseResumeWithClaude,
@@ -646,6 +647,61 @@ export function academicSeedFrom(
   return seed;
 }
 
+/**
+ * The applicant's own contact block, from their resume, into the row the resume header reads.
+ *
+ * WHY THIS EXISTS. `engine/resumeRender.ts` has always had a header for location, email, phone and
+ * three links, and the only thing that ever filled it was the Settings form. So a student who had
+ * just handed Litos a resume with their email and city printed under their name got a generated
+ * resume with neither - the facts were on the page and had nowhere to go. That file's own comment
+ * measures the result: not one of 158 stored packets carried a location.
+ *
+ * SEED, NEVER OVERWRITE, the same rule academicSeedFrom keeps one function up and resume_email
+ * keeps in lib/resumeEmail.ts. A value the student typed in Settings is their correction and must
+ * outlive their next upload; the parse only fills what is empty.
+ *
+ * The city/state split is deliberate and narrow: "Austin, TX" is two fields in this table and one
+ * line on a resume. Only a clean single comma is split. Anything else goes in whole as the city,
+ * because the header prints `address_city` first and a header reading "Austin" is right where
+ * "Austin, TX 78701" parsed into the wrong columns is wrong on every form that reads them.
+ */
+export function contactSeedFrom(
+  parsed: Pick<ParsedProfile, 'phone' | 'location' | 'linkedin_url' | 'github_url' | 'portfolio_url'>,
+  existing: Record<string, unknown> | undefined,
+): Record<string, string> {
+  const seed: Record<string, string> = {};
+  const held = (key: string) => {
+    const value = existing?.[key];
+    return typeof value === 'string' && value.trim().length > 0;
+  };
+  const put = (column: string, value: string | undefined) => {
+    const text = (value ?? '').trim();
+    if (!text || held(column)) return;
+    // phone and the address columns are in ENCRYPTED_FIELDS; the three links are plaintext there
+    // on purpose, being things the student publishes rather than identity facts.
+    seed[column] = ENCRYPTED_FIELDS.includes(column as (typeof ENCRYPTED_FIELDS)[number])
+      ? encryptField(text)
+      : text;
+  };
+
+  put('phone', parsed.phone);
+  put('linkedin_url', parsed.linkedin_url);
+  put('github_url', parsed.github_url);
+  put('portfolio_url', parsed.portfolio_url);
+
+  const location = (parsed.location ?? '').trim();
+  if (location) {
+    const parts = location.split(',').map((part) => part.trim()).filter(Boolean);
+    if (parts.length === 2) {
+      put('address_city', parts[0]);
+      put('address_state', parts[1]);
+    } else {
+      put('address_city', location);
+    }
+  }
+  return seed;
+}
+
 interface ExistingBankEntry {
   id: string;
   type: string;
@@ -811,7 +867,6 @@ export async function profileRoutes(fastify: FastifyInstance) {
       .from(profiles)
       .where(eq(profiles.user_id, userId))
       .limit(1);
-    const resumeEmail = resumeEmailForUpload(existingProfile?.parsed_json, request.jwtPayload!.email);
 
     // Annotated rather than inferred: an evolving `let` takes its type from every later use, so the
     // narrow Pick that academicSeedFrom accepts would otherwise become this variable's type and
@@ -824,6 +879,14 @@ export async function profileRoutes(fastify: FastifyInstance) {
       // Carried on the parse rather than in its own column: it is a fact ABOUT this parse of this
       // file, so it should be replaced wholesale when a student re-uploads, which is exactly what
       // parsed_json already does.
+      /* Resolved AFTER the parse, because the resume itself is now the last rung: a guest has no
+         typed value and no login email, and the address printed under their own name is the only
+         one that exists. See lib/resumeEmail.ts for why it sits below the verified login email. */
+      const resumeEmail = resumeEmailForUpload(
+        existingProfile?.parsed_json,
+        request.jwtPayload!.email,
+        parsedProfile.email,
+      );
       parsedProfile = {
         ...parsedProfile,
         full_name: normalizeDisplayName(parsedProfile.full_name ?? ''),
@@ -1010,7 +1073,13 @@ export async function profileRoutes(fastify: FastifyInstance) {
     try {
       const existing = await selectApplicationProfileRow(userId);
       seedRowExists = Boolean(existing);
-      const seed = academicSeedFrom(parsedProfile, existing as Record<string, unknown> | undefined);
+      const seed = {
+        ...academicSeedFrom(parsedProfile, existing as Record<string, unknown> | undefined),
+        /* The contact block, same row and same never-overwrite rule. Merged into this write rather
+           than given its own so a resume fills the header and the academic gaps in one statement,
+           and so a failure of either is the same non-fatal warning below. */
+        ...contactSeedFrom(parsedProfile, existing as Record<string, unknown> | undefined),
+      };
       if (Object.keys(seed).length > 0) {
         await db
           .insert(application_profile)

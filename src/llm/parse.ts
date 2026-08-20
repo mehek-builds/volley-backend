@@ -5,6 +5,23 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 export interface ParsedProfile {
   full_name: string;
+  /* THE CONTACT BLOCK THE RESUME ALREADY PRINTS, transcribed rather than inferred.
+   *
+   * The rendered PDF has always had a header for these - engine/resumeRender.ts's ContactHeader
+   * carries location, email, phone and three links - and nothing ever filled them from the resume.
+   * They came only from the Settings form, so a student who had just uploaded a resume with their
+   * email and city right under their name got a resume header with neither. Measured 2026-08-11 in
+   * that file's own comment: not one of 158 stored packets carried a location.
+   *
+   * Optional throughout, because every parse predating this lacks them and an older profile is not
+   * malformed for it. */
+  email?: string;
+  phone?: string;
+  /** Where the APPLICANT is, from their own header, e.g. "Austin, TX". Not a job's location. */
+  location?: string;
+  linkedin_url?: string;
+  github_url?: string;
+  portfolio_url?: string;
   experience: Array<{
     company: string;
     title: string;
@@ -102,6 +119,12 @@ export const SYSTEM_PROMPT = `You are a resume parser. Extract structured inform
 The JSON must match this exact shape:
 {
   "full_name": string,
+  "email": string,
+  "phone": string,
+  "location": string,
+  "linkedin_url": string,
+  "github_url": string,
+  "portfolio_url": string,
   "experience": [{"company": string, "title": string, "location": string, "start": string, "end": string, "description": string}],
   "skills": [string],
   "languages": [string],
@@ -123,6 +146,17 @@ The JSON must match this exact shape:
 
 Rules:
 - "full_name" is the applicant's name from the resume header, not a company or school name
+- "email", "phone", "location", "linkedin_url", "github_url" and "portfolio_url" are the applicant's
+  OWN contact details, from the header block under their name. TRANSCRIBE, NEVER INFER, exactly as
+  the "location" rule below requires. Copy each one character for character as printed, and use an
+  empty string for anything the resume does not show. Specifically:
+  - "location" is where the APPLICANT is, from their header, e.g. "Austin, TX". It is not a job's
+    location and never the school's city. If the header prints no place, it is an empty string.
+  - never build an email from their name and their school's domain, never format a phone number
+    differently from how it is printed, and never expand a shortened link.
+  - a link is only one of these if the resume prints it. Do not guess a LinkedIn URL from the name.
+  These end up in the header of the resume Litos generates and on employer forms, so a guessed
+  address is a wrong address on a real application rather than a cosmetic error.
 - "end" should be "Present" if the role is current
 - "location" is the place printed beside that role, copied verbatim, e.g. "Los Angeles, CA" or
   "London, United Kingdom". TRANSCRIBE, NEVER INFER. Do not derive it from the company's
