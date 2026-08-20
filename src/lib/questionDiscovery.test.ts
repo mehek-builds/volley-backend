@@ -1522,6 +1522,27 @@ test('stored academic and onsite facts answer repeated select-shaped live questi
     resolveKnownAnswer('If you were to join us for a technical interview, what is your preferred coding language when answering general coding questions?', 'select', {}, undefined),
     null,
   );
+  // The proficiency shape (IMC Trading, measured live 2026-08-20): every stored language that
+  // matches, comma-joined, never collapsed to one - and never answered from spoken languages, which
+  // is what LANGUAGE_QUESTION would have done with the bare word "languages ... proficient".
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Please indicate which of the following programming languages you are proficient in (select all that apply)',
+      'checkbox',
+      { skills: ['Python', 'SQL', 'Swift'], languages: ['English', 'Hindi'] },
+      undefined,
+    ),
+    { value: 'Python, Swift, SQL' },
+  );
+  assert.equal(
+    resolveKnownAnswer(
+      'Please indicate which of the following programming languages you are proficient in (select all that apply)',
+      'checkbox',
+      {},
+      undefined,
+    ),
+    null,
+  );
   assert.deepEqual(resolveKnownAnswer('Do you speak English fluently?', 'select', profile, undefined), { value: 'Yes' });
 });
 

@@ -2529,6 +2529,16 @@ const LANGUAGE_QUESTION =
   /\bspoken\s+languages?\b|\blanguages?\s+(?:do\s+you\s+|are\s+you\s+)?(?:speak|know|fluent|proficient)|\b(?:speak|fluent|proficient)\b[^?]{0,40}\blanguages?\b|\b(?:speak|fluent|proficient)\b[^?]{0,40}\b(?:english|hindi|arabic|spanish|french|german|portuguese|mandarin|chinese|cantonese|tamil|punjabi|urdu)\b/i;
 const PROGRAMMING_LANGUAGE_QUESTION =
   /\bpreferred\s+coding\s+language\b|\bcoding\s+language\b[^?]{0,160}\b(?:preference|preferred|interview)\b|\binterview\b[^?]{0,160}\bcoding\s+language\b|\bpreferred\s+programming\s+language\b/i;
+/* THE OTHER SHAPE THIS QUESTION TAKES: "which of these are you proficient in", never a preference.
+ * Kept as its own pattern rather than folded into PROGRAMMING_LANGUAGE_QUESTION above because the
+ * two need different answers - one language chosen for an interview, every language she actually
+ * knows for a skills checklist - and a single shared regex would give programmingLanguageAnswer no
+ * way to tell which one it is looking at. Anchored on "programming languages" together, not just
+ * "languages": the bare word collides with LANGUAGE_QUESTION's spoken-language phrasing
+ * ("languages ... proficient"), and "programming languages ... proficient in" (IMC Trading, measured
+ * live 2026-08-20) would otherwise answer with English/Hindi instead of Python/SQL/Swift. */
+const PROGRAMMING_LANGUAGE_PROFICIENCY_QUESTION =
+  /\bprogramming\s+languages?\b[^?]{0,120}\b(?:proficient|familiar|experience[d]?|skilled|comfortable)\b|\b(?:proficient|familiar|experience[d]?|skilled|comfortable)\b[^?]{0,120}\bprogramming\s+languages?\b/i;
 const TERM_QUESTION =
   /(length|duration|term)\b.*\bavailab|availab.*\b(length|duration|term)\b|how long.*(available|intern|stay|commit)|(weeks|months).*\b(available|internship|commit)|\bterm\s*\/?\s*length/i;
 const SALARY_QUESTION = /salary|compensat|desired pay|expected pay|pay expectation/i;
@@ -5870,6 +5880,7 @@ const PROGRAMMING_LANGUAGE_ALIASES: Array<{ value: string; patterns: RegExp[] }>
   { value: 'Ruby', patterns: [/\bruby\b/i] },
   { value: 'Swift', patterns: [/\bswift\b/i] },
   { value: 'Lua', patterns: [/\blua\b/i] },
+  { value: 'SQL', patterns: [/\bsql\b/i] },
 ];
 
 function normalizedStoredSkills(ap: ApplicationProfileLike): string[] {
@@ -5878,7 +5889,27 @@ function normalizedStoredSkills(ap: ApplicationProfileLike): string[] {
     .filter(Boolean);
 }
 
+/* EVERY ALIAS HER STORED SKILLS MATCH, in table order, comma-joined per profileFieldResolution's
+ * own contract for a checkbox multi-select ("the comma-joined sequence of ... texts to check").
+ * Table order rather than stored-skill order so the same profile always answers identically
+ * regardless of how she ordered her own skills list. */
+function programmingLanguageProficiencyAnswer(ap: ApplicationProfileLike): { value: string } | null {
+  const stored = normalizedStoredSkills(ap);
+  if (stored.length === 0) return null;
+  const joined = stored.join(' ');
+  const matched = PROGRAMMING_LANGUAGE_ALIASES
+    .filter((item) => item.patterns.some((pattern) => pattern.test(joined)))
+    .map((item) => item.value);
+  return matched.length > 0 ? { value: matched.join(', ') } : null;
+}
+
 function programmingLanguageAnswer(label: string, ap: ApplicationProfileLike): { value: string } | null {
+  // Checked first: "programming languages ... proficient in" would also satisfy the interview-
+  // preference pattern below on some phrasings, and a skills checklist must never collapse to the
+  // single language an interview-preference question would have chosen.
+  if (PROGRAMMING_LANGUAGE_PROFICIENCY_QUESTION.test(label)) {
+    return programmingLanguageProficiencyAnswer(ap);
+  }
   if (!PROGRAMMING_LANGUAGE_QUESTION.test(label)) return null;
   const stored = normalizedStoredSkills(ap);
   if (stored.length === 0) return null;
