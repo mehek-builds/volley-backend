@@ -129,6 +129,26 @@ const reviewAnswersBodySchema = z.object({
    * and a stored `confirmed: false` would read as "she looked and refused", which no control says. */
   questions: z.array(questionSchema.extend({ confirmed: z.literal(true).optional() })).max(100),
 });
+/* ONE TICK ON THE "Your turn" PANEL. item_id is the dashboard's checklist row id, derived from the
+ * attention sentence the row prints, and label is that sentence as she saw it - stored beside the
+ * timestamp so the record still names what was acknowledged after the sentence leaves the report.
+ * `acknowledged: false` is the same tick withdrawn. The caps are the panel's own scale: a review
+ * carries a handful of blocker lines, never hundreds. */
+const attentionAcknowledgementBodySchema = z.object({
+  /* THE CHARSET IS A SECURITY DECISION, not tidiness. item_id becomes a KEY on a plain object, and
+   * a client-supplied "__proto__" assigned by bracket write re-parents the map instead of creating
+   * an own property: the tick vanishes, the route answers 200, and the checkbox is dead again with
+   * a success status behind it. The dashboard's keyFor only ever emits lowercase alphanumerics and
+   * hyphens, so that is the whole alphabet accepted. The length cap follows the longest sentence
+   * the runner itself composes (blocker lines run to ~450 characters before slugging; the whole
+   * report is sliced at 1200): a cap tighter than the server's own prose would 400 the tick on the
+   * longest rows, which are exactly the ones that matter. */
+  item_id: z.string().min(1).max(1200).regex(/^[a-z0-9][a-z0-9-]*$/),
+  label: z.string().min(1).max(1300),
+  acknowledged: z.boolean(),
+});
+/** More keys than any real panel has rows. Hitting this means a client is looping, not ticking. */
+const ATTENTION_ACKNOWLEDGEMENT_CAP = 100;
 const submitBodySchema = z.object({
   questions: z.array(questionSchema).max(100),
   /* "Throw away the form you already filled and fill it again."
@@ -247,6 +267,11 @@ export function freshSubmitRequestReview(
     updated_at: new Date().toISOString(),
     submission_run_id: randomUUID(),
     attention_reason: undefined,
+    /* Her ticks annotate the attention_reason being cleared on the line above, so they go with it.
+     * A fresh run writes a fresh report, and a tick carried onto it would claim she acknowledged
+     * sentences that have not been written yet. See attention_acknowledgements in
+     * applicationReview.ts. */
+    attention_acknowledgements: undefined,
     handoff_expires_at: undefined,
     browser_context_id: undefined,
     browser_session_id: undefined,
@@ -1664,6 +1689,84 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     },
   );
 
+  /* TICK ONE ROW OF THE "Your turn" PANEL, AND PERSIST THE TICK. NOTHING ELSE MOVES.
+   *
+   * THE DEFECT THIS EXISTS FOR. The panel's per-row checkbox ("Mark ... done") had no handler, no
+   * state and no request behind it - the same dead-control class as the styled-span action pills
+   * this file already repaired. Ticking a box changed nothing, and the next poll re-rendered the
+   * panel with the box cleared. Measured on the Easy Dynamics rippling packet, 2026-08-20.
+   *
+   * WHY A ROUTE OF ITS OWN. PUT /review rewrites the status and refuses a claimed stopped run, and
+   * PUT /review/answers writes question answers, which a blocker line does not have: the rows this
+   * checkbox sits on are the ones whose only resolution is on the employer's own page. What a tick
+   * stores is the applicant's word that she handled that line herself - a claim, never a
+   * measurement, which is why it is DISPLAY-ONLY: the send gate keeps reading the run's own
+   * measurements, and a required-and-empty field blocks a send whether or not its row is ticked.
+   * The status, the claim, the run id and attention_reason are all left exactly where they are.
+   *
+   * NO DISPOSITION GATE, DELIBERATELY. Every gated route here either starts a run or rewrites what
+   * a run measured, and the gates exist to stop those happening twice. This writes an annotation
+   * the send path never reads, so there is no state it is unsafe in; a run writing concurrently is
+   * handled by the same whole-spec compare-and-swap the sibling routes use, and the runner's own
+   * fresh report drops the map anyway (see applyReviewPatch). */
+  fastify.post(
+    '/applications/:id/review/attention-acks',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+      const parsed = attentionAcknowledgementBodySchema.safeParse(request.body);
+      if (!parsed.success) return reply.status(400).send({ error: 'We could not read this checklist tick', detail: parsed.error.issues });
+      const current = readApplicationReview(row.spec as StoredSpec);
+      if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      const acknowledgements = { ...(current.attention_acknowledgements ?? {}) };
+      /* Object.hasOwn, never `in`: `in` walks the prototype chain, so inherited names like
+       * "constructor" would read as already present and slip past the cap. */
+      const alreadyTicked = Object.hasOwn(acknowledgements, parsed.data.item_id);
+      if (parsed.data.acknowledged) {
+        if (!alreadyTicked && Object.keys(acknowledgements).length >= ATTENTION_ACKNOWLEDGEMENT_CAP) {
+          return reply.status(400).send({ error: 'This application already carries more checklist ticks than the panel can hold' });
+        }
+        acknowledgements[parsed.data.item_id] = { label: parsed.data.label, acknowledged_at: new Date().toISOString() };
+      } else {
+        /* Unticking a row that holds no tick is a no-op, and a no-op must not write: it would bump
+         * updated_at and rewrite the whole spec for zero semantic change, and its CAS churn could
+         * fail a real concurrent save for nothing. */
+        if (!alreadyTicked) return reply.send({ application_id: row.id, review: current });
+        delete acknowledgements[parsed.data.item_id];
+      }
+      /* Through applyReviewPatch like every other writer - its own-property expiry rule does not
+       * fire here, because this patch names attention_acknowledgements and never attention_reason,
+       * and going around it would skip settleStall and withTerminalCause, the checks the shared
+       * merge exists to make unskippable. Empty collapses to absent so an untick of the last row
+       * leaves the review byte-identical to one never ticked, which the whole-spec CAS every write
+       * in this file uses depends on. */
+      const next = applyReviewPatch(current, {
+        attention_acknowledgements: Object.keys(acknowledgements).length > 0 ? acknowledgements : undefined,
+      });
+      const saved = await db.update(generated_resumes)
+        .set({ spec: reviewSpec(next) })
+        .where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, request.jwtPayload!.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+          sql`${generated_resumes.spec}->'_review'->>'status' = ${current.status}`,
+        ))
+        .returning({ id: generated_resumes.id });
+      if (saved.length === 0) {
+        /* A run wrote to the packet under this tick, so the tick did not land - and must not be
+         * retried blind, because the run's fresh report may have replaced the sentence she ticked.
+         * Same 202 + `saved: false` discriminator as the answers route above, same reason: the
+         * client's fetch wrapper resolves any res.ok and discards the status. */
+        const refreshed = await ownedResume(request, reply);
+        if (!refreshed) return;
+        const review = readApplicationReview(refreshed.spec);
+        return reply.status(202).send({ application_id: row.id, review: review ?? current, saved: false });
+      }
+      return reply.send({ application_id: row.id, review: next });
+    },
+  );
+
   fastify.post(
     '/applications/:id/submit-request',
     { preHandler: requireAuth },
@@ -2159,6 +2262,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           status: 'submitted' as const,
           submitted_at: now,
           attention_reason: undefined,
+          /* This spread bypasses applyReviewPatch, so the report's ticks are cleared by hand where
+             the report itself is: they annotate the attention_reason on the line above and must not
+             outlive it. */
+          attention_acknowledgements: undefined,
           submission_error: undefined,
           updated_at: now,
           receipt: {
@@ -2193,7 +2300,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
         return reply.send({ application_id: row.id, review: next, cover_letter: storedCoverLetter(row) });
       }
-      const next = { ...current, status: 'ready_for_final_approval' as const, attention_reason: undefined, updated_at: now };
+      /* attention_acknowledgements goes with attention_reason: this spread bypasses
+         applyReviewPatch's expiry rule, and ticks must not outlive the report they annotate. */
+      const next = { ...current, status: 'ready_for_final_approval' as const, attention_reason: undefined, attention_acknowledgements: undefined, updated_at: now };
       const completed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(

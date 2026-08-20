@@ -426,7 +426,11 @@ test('an employer field label named Resume is not read as a retention deletion',
 test('the terminal-cause check sits inside the shared merge, not at the call sites', async () => {
   const stall = await readFile('src/lib/applicationStall.ts', 'utf8');
   assert.match(stall, /import \{ withTerminalCause \} from '\.\/submissionTerminalCause'/);
-  assert.match(stall, /return withTerminalCause\(settleStall\(\{ \.\.\.current, \.\.\.patch, updated_at: now\(\) \}, now\)\)/);
+  /* The merge now carries a third spread (the acknowledgement expiry decided beside it) and lands
+     in a const the expiry's second half inspects before returning. What this test holds is
+     unchanged: the whole merged review passes through withTerminalCause inside applyReviewPatch,
+     so no caller can persist a terminal state without a cause. */
+  assert.match(stall, /const merged = withTerminalCause\(settleStall\(\{ \.\.\.current, \.\.\.patch, \.\.\.acknowledgements, updated_at: now\(\) \}, now\)\)/);
 });
 
 test('no route writes a terminal review state around the shared merge', async () => {
