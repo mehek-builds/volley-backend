@@ -123,24 +123,97 @@ export function reviewedOptionBandCoversCurrentValue(
   answer: string | undefined | null,
   currentProfileValue: string | undefined | null,
 ): boolean {
+  return reviewedOptionBandVerdict(answer, currentProfileValue) === 'covers';
+}
+
+/* THE THIRD VERDICT, AND WHY TWO WERE NOT ENOUGH.
+ *
+ * Measured on the live jobs.lever.co Mytos form, 2026-08-20 (packet 16f1c744). The degree
+ * classification control offers UK honours rows and GPA rows; the applicant reviewed and chose
+ * "GPA 3.5-3.8" through PUT /review/answers, the route returned 200, and the row genuinely held
+ * her value with her claim. The resolver's answer for that label is "Bachelor's Degree" - a value
+ * that is not on the control's list at all - so the boolean rule above asked "does GPA 3.5-3.8
+ * contain Bachelor's Degree", could not parse the question, said false, and the refresh replaced
+ * her review with the resolver value on the very next read. Three fill runs then each reported
+ * "no option matched Bachelor's Degree, left for you to choose" about a choice she had already
+ * made: the supported edit path could not move this answer, ever, which is the same defect the
+ * override branch below the band rule was built to close for non-band answers.
+ *
+ * The band rule's job is to let the profile CONTRADICT a reviewed range: a graduation window of
+ * "August 2028 - December 2028" beside a stated May 2028 is her range against her own fact, and
+ * it must lose. That verdict is only pronounceable when the two are in the same dimension. When
+ * the resolver's value does not parse into the band's dimension at all, it is answering a
+ * different question than the option list poses, and its value can neither confirm nor refute the
+ * range - so the caller keeps the reviewed answer instead of replacing it with a string that was
+ * never an option. 'incomparable' is that finding, said honestly instead of rounded to false.
+ *
+ * The endpoints are read by dimension, dates first: a month-year endpoint contains a year, so a
+ * numeric read of "January 2028" would call a date band a number band. A bare year band
+ * ("2027-2028") compares against the year inside a dated current value, because "May 2028" does
+ * carry the fact a year range is about. A labelled numeric endpoint ("GPA 3.5") is its number. */
+export type ReviewedBandVerdict = 'covers' | 'contradicts' | 'incomparable';
+
+export function reviewedOptionBandVerdict(
+  answer: string | undefined | null,
+  currentProfileValue: string | undefined | null,
+): ReviewedBandVerdict {
   const band = answer?.trim();
   const current = currentProfileValue?.trim();
-  if (!band || !current) return false;
+  if (!band || !current) return 'incomparable';
   const separator = /\s*(?:[-\u2010-\u2015]|\bto\b|\bthrough\b)\s*/i;
   const parts = band.split(separator);
-  if (parts.length !== 2) return false;
+  if (parts.length !== 2) return 'incomparable';
 
-  const currentNumber = Number(current);
-  const lowNumber = Number(parts[0]);
-  const highNumber = Number(parts[1]);
-  if ([currentNumber, lowNumber, highNumber].every(Number.isFinite)) {
-    return currentNumber >= Math.min(lowNumber, highNumber)
-      && currentNumber <= Math.max(lowNumber, highNumber);
-  }
+  const within = (value: number, low: number, high: number): ReviewedBandVerdict => (
+    value >= Math.min(low, high) && value <= Math.max(low, high) ? 'covers' : 'contradicts'
+  );
 
-  const currentDate = monthYearValue(current);
   const lowDate = monthYearValue(parts[0]);
   const highDate = monthYearValue(parts[1]);
-  if (currentDate === undefined || lowDate === undefined || highDate === undefined) return false;
-  return currentDate >= Math.min(lowDate, highDate) && currentDate <= Math.max(lowDate, highDate);
+  if (lowDate !== undefined && highDate !== undefined) {
+    const currentDate = monthYearValue(current);
+    if (currentDate !== undefined) return within(currentDate, lowDate, highDate);
+    /* A profile that states only a year still carries the fact a month-year window is about, so a
+     * bare-year current value is judged at year granularity rather than rounded to incomparable:
+     * "January 2028 - July 2028" beside a stated "2027" is a window her own fact sits outside. */
+    const bareYear = /^\s*((?:19|20)\d{2})\s*$/.exec(current);
+    if (bareYear) {
+      const year = Number(bareYear[1]);
+      return within(year, Math.floor((Math.min(lowDate, highDate) - 1) / 12), Math.floor((Math.max(lowDate, highDate) - 1) / 12));
+    }
+    return 'incomparable';
+  }
+
+  const yearOf = (value: string): number | undefined => {
+    const match = /^\s*((?:19|20)\d{2})\s*$/.exec(value);
+    return match ? Number(match[1]) : undefined;
+  };
+  const lowYear = yearOf(parts[0]);
+  const highYear = yearOf(parts[1]);
+  if (lowYear !== undefined && highYear !== undefined) {
+    const currentYear = yearOf(current)
+      ?? (/\b((?:19|20)\d{2})\b/.exec(current) ? Number(/\b((?:19|20)\d{2})\b/.exec(current)![1]) : undefined);
+    if (currentYear === undefined) return 'incomparable';
+    return within(currentYear, lowYear, highYear);
+  }
+
+  const endpointNumber = (value: string): number => {
+    const bare = Number(value);
+    if (Number.isFinite(bare)) return bare;
+    // A thousands separator means a figure this parser would truncate ("$50,000" is not 50).
+    if (/\d,\d/.test(value)) return Number.NaN;
+    /* A labelled endpoint ("GPA 3.5") is its FIRST number: an endpoint that trails its scale
+     * ("3.8 out of 4.0") names its bound first, and taking the last number read that band as
+     * [3.5, 4.0] and called a value the true band contradicts covered. */
+    const match = /(\d+(?:\.\d+)?)/.exec(value.trim());
+    return match ? Number(match[1]) : Number.NaN;
+  };
+  const lowNumber = endpointNumber(parts[0]);
+  const highNumber = endpointNumber(parts[1]);
+  if (Number.isFinite(lowNumber) && Number.isFinite(highNumber)) {
+    const currentNumber = Number(current);
+    if (!Number.isFinite(currentNumber)) return 'incomparable';
+    return within(currentNumber, lowNumber, highNumber);
+  }
+  return 'incomparable';
 }

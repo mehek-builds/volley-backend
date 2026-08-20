@@ -3984,3 +3984,83 @@ test('a phone-number label polluted with placeholder text is the phone field und
   assert.equal(classifyField('country'), 'address_country');
   assert.notEqual(classifyField('country code'), 'address_country');
 });
+
+/* THE REVIEWED BAND THE RESOLVER CANNOT JUDGE, measured on the live jobs.lever.co Mytos form
+ * (packet 16f1c744, 2026-08-20). The degree-classification control offers UK honours rows and GPA
+ * rows; she reviewed and chose "GPA 3.5-3.8". The resolver's value for that label is "Bachelor's
+ * Degree", a string not on the control's list, and the old boolean band rule rounded "cannot
+ * parse" down to false - so every refresh replaced her review and three fill runs asked her the
+ * same question she had already answered. */
+test('a reviewed band the resolver cannot judge is kept, and one it contradicts is not', () => {
+  const reviewedAt = '2026-08-20T18:30:00.000Z';
+  const reviewed = (question: string, answer: string) => ({
+    question,
+    answer,
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+  });
+  const refreshed = refreshKnownQuestionAnswers([
+    // Incomparable dimensions: the resolver says a degree, the band is a GPA range. Hers stands.
+    reviewed('what was your degree classification? ✱', 'GPA 3.5-3.8'),
+    // Same dimension, contained: May 2028 sits inside the reviewed window. Hers stands.
+    reviewed('expected graduation date', 'January 2028 - July 2028'),
+    // Same dimension, contradicted: her own profile fact sits outside the window. Recomputed.
+    reviewed('expected graduation date', 'August 2029 - December 2029'),
+  ], { degree: "Bachelor's Degree", grad_date: 'May 2028', grad_year: 2028 }, undefined, reviewedAt);
+  assert.equal(refreshed[0].answer, 'GPA 3.5-3.8');
+  assert.equal(refreshed[0].answer_source, 'applicant_review');
+  assert.equal(refreshed[1].answer, 'January 2028 - July 2028');
+  assert.equal(refreshed[2].answer, 'May 2028');
+  assert.equal(refreshed[2].answer_source, undefined);
+});
+
+test('the incomparable keep is for bands only: a plain reviewed answer keeps the override rules', () => {
+  const reviewedAt = '2026-08-20T18:30:00.000Z';
+  const refreshed = refreshKnownQuestionAnswers([
+    /* No band shape, no answer_override_of: the override branch's own requirements still decide,
+       and they refuse an unproven claim, exactly as before this change. */
+    {
+      question: 'what degree did you complete at the above university? ✱',
+      answer: 'Some Other Degree',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+  ], { degree: 'Bachelor of Science in Computer Science' }, undefined, reviewedAt);
+  assert.equal(refreshed[0].answer, 'Bachelor of Science in Computer Science');
+});
+
+test('the covers arm still keeps any parseable reviewed range, band-shaped or not', () => {
+  const reviewedAt = '2026-08-20T18:30:00.000Z';
+  const refreshed = refreshKnownQuestionAnswers([
+    /* Multi-digit numeric range: NUMBER_BAND does not recognise it, but the boolean rule always
+       kept a covered range like this, and it must go on being kept. */
+    {
+      question: 'expected graduation year',
+      answer: '2027 through 2029',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+  ], { grad_date: 'May 2028', grad_year: 2028 }, undefined, reviewedAt);
+  assert.equal(refreshed[0].answer, '2027 through 2029');
+});
+
+test('an endpoint that trails its scale is read by its bound, and a contradicted band still loses', () => {
+  const reviewedAt = '2026-08-20T18:30:00.000Z';
+  const refreshed = refreshKnownQuestionAnswers([
+    {
+      question: 'what is your gpa?',
+      answer: '3.5 - 3.8 out of 4.0',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+    /* A month-year window judged against a bare-year profile fact: 2027 sits outside it. */
+    {
+      question: 'expected graduation date',
+      answer: 'January 2028 - July 2028',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+  ], { gpa: '3.9', grad_date: '2027', grad_year: 2027 }, undefined, reviewedAt);
+  assert.notEqual(refreshed[0].answer, '3.5 - 3.8 out of 4.0');
+  assert.notEqual(refreshed[1].answer, 'January 2028 - July 2028');
+});
