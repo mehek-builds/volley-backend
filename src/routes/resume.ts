@@ -4,6 +4,7 @@ import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { put } from '@vercel/blob';
 import { db } from '../db/index';
+import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { claimOnboardingBuildGrant, releaseOnboardingBuildGrant } from '../lib/onboardingBuildGrant';
 import {
   applications,
@@ -974,9 +975,20 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         groundingRemoved = pruned.removed;
       }
     }
+    /* WHAT FELL UNDER THE FLOOR, so the student is told rather than left to notice an absence.
+     *
+     * A job dropped for being short used to vanish with nothing said. The resume showed one entry
+     * where they had handed over two, and the fix - one more bullet on that entry - was something
+     * only the code knew. These ride the same `omissions` channel the renderer already uses for
+     * what it trimmed to make the page fit. */
+    const droppedForLength: string[] = [];
     spec = enforceExperienceBulletFloor(spec, bank, {
       priorityEntryId: priorityEntry?.id,
       allowSparsePriority: recentReview?.continue_with_found === true,
+      onDropped: ({ org, bullets }) =>
+        droppedForLength.push(
+          `Left ${org} off: it has ${bullets === 1 ? 'one bullet' : `${bullets} bullets`} and we recommend at least ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Add another and it goes on.`,
+        ),
     });
     /* Grounding and the bullet-floor repair can remove or add evidence after the first selection.
      * Recompute from the exact pre-render document so a citation can never survive after its
@@ -1033,7 +1045,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       spec = rendered.spec;
       trimmedForFit = rendered.trimmed;
       sparse = rendered.sparse;
-      layoutOmissions = rendered.omissions;
+      /* The entries the floor removed lead the list, ahead of what the layout trimmed. They are the
+         only omission the student can act on, and the sentence says how. */
+      layoutOmissions = [...droppedForLength, ...rendered.omissions];
       visualLayout = rendered.layout;
       const visualValidation = validateResumeVisualLayout(visualLayout);
       visualWarnings = visualValidation.warnings;

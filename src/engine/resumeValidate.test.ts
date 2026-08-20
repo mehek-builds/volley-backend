@@ -11,6 +11,7 @@ import {
 } from './resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import type { ExperienceBankEntry } from '../db/schema';
+import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
 
 function bankEntry(partial: Partial<ExperienceBankEntry>): ExperienceBankEntry {
   return {
@@ -148,7 +149,14 @@ test('content rules make short, long, and unsupported one-bullet entries hard fa
     '',
     [source],
   );
-  assert.ok(oneBullet.issues.some((issue) => /1 bullet selected \(min 3\)/.test(issue)));
+  /* One is still never enough, and the message states the floor rather than a fixed 3, which moved
+     to 2 on 2026-08-20. The subject of this case is that a single-bullet entry is a HARD failure. */
+  assert.ok(
+    oneBullet.issues.some((issue) =>
+      new RegExp(`1 bullet selected \\(min ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}\\)`).test(issue),
+    ),
+    oneBullet.issues.join('; '),
+  );
 });
 
 test('a source-limited priority role may keep its only grounded bullet without invention', () => {
