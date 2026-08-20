@@ -119,6 +119,28 @@ test('a classification-only GPA select resolves to the honours band her GPA actu
   );
 });
 
+/* REGRESSION (2026-08-21, this review's item 4): profileAnswerAliases builds a synthetic profile
+ * from an already-resolved ANSWER STRING for callers that hold the answer but not the profile - the
+ * managed action builders, reached from pushGreenhouseQuestionComboboxActions on the live Akuna
+ * combobox path. For a classification/percentage-worded label the resolved answer is now gpaAnswer's
+ * composite "3.89/4.00 (US 4.0 scale)" string rather than a plain "3.89". gpaLadder's numericValueOf
+ * cannot parse that composite (it is anchored to a bare number or a bare "number/number"), so the
+ * candidate ladder collapsed to just the one unmatchable composite string - losing the plain "3.89",
+ * "3.9" and "3.89/4.00" candidates a closed list's numeric options are actually written in. Fails on
+ * origin/main (the ladder holds only the composite string); passes once the leading value/scale are
+ * extracted back out before building the synthetic profile. */
+test('profileAnswerAliases recovers plain numeric GPA candidates from a classification-composite answer', () => {
+  const label = 'What was your degree classification?';
+  const composite = '3.89/4.00 (US 4.0 scale)';
+  const ladder = profileAnswerAliases(label, composite);
+  assert.ok(ladder.includes('3.89'), `expected "3.89" in ${JSON.stringify(ladder)}`);
+  assert.ok(ladder.includes('3.9'), `expected "3.9" in ${JSON.stringify(ladder)}`);
+  assert.ok(ladder.includes('3.89/4.00'), `expected "3.89/4.00" in ${JSON.stringify(ladder)}`);
+  // The real fill path: a Greenhouse combobox offering exact numeric options must still be
+  // matchable by the runner off this ladder, not just the composite head.
+  assert.equal(ladder.some((candidate) => runnerWouldMatch(candidate, ['3.89'])), true);
+});
+
 test('Class A: which university do/did you attend (Akuna, Virtu)', () => {
   // Free text keeps the resume's full phrasing.
   assert.equal(
