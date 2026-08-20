@@ -667,11 +667,10 @@ export function unverifiedSubmissionReason(input: {
       : 'Litos pressed Send, but the page ran a human-verification check instead of submitting: '
         + 'the only requests it made went to the verification service, and none reached the '
         + 'employer, so this application very likely did not go through.';
-    return `${how} This form will only accept a Send `
-      + `pressed by a person. ${where} ${looksLike} Then tell Litos which you found: if it is `
-      + 'there, Litos will record it as sent and will not apply again; if it is not, please finish '
-      + 'this one yourself on the employer’s page, because Litos cannot complete a '
-      + 'human-verification check for you.';
+    return `${how} Litos cannot complete a human-verification check or claim a receipt that the `
+      + 'employer did not show. Choose “It is not there” below to record that nothing was sent and '
+      + 'release this saved application. The filled-form proof and every next action stay in this '
+      + 'dashboard.';
   }
   const what = input.cause === 'run_timed_out'
     ? 'Litos pressed Send and the secure browser was cut off before the employer’s answer came back, '
