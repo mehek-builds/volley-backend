@@ -1,0 +1,77 @@
+# Finds and queues the next best match for every account with automatic submission on, on a
+# schedule - the half of autopilot that used to only run while a real browser had the Applications
+# page open.
+#
+# Measured live 2026-08-20: automatic_submission_enabled true for three hours produced zero
+# submit-requests, because the only code that ever creates one is NextMatchCard's client-side
+# countdown, and nothing else in this codebase ever queues anything. submission-runner.yml has run
+# every 15 minutes the whole time and had nothing to process on any pass.
+#
+# Offset 5 minutes AHEAD of submission-runner's :00/:15/:30/:45 schedule, so a packet this workflow
+# queues has a chance to be picked up on the SAME cycle rather than waiting a full 15 minutes
+# behind it.
+#
+# Same Hobby-plan reasoning as submission-runner.yml: a sub-daily vercel.json cron fails the build
+# at deploy time, not at run time, so the daily entry stays as the floor and this workflow is the
+# cadence on top of it.
+#
+# Safe to run against a fully-caught-up account list: a user with nothing ready to send, or who
+# already has something queued, is skipped and counted, never retried into a duplicate
+# submit-request. See autopilotMatcher.ts's own hasQueuedWork guard.
+name: autopilot-matcher
+
+on:
+  schedule:
+    - cron: '5,20,35,50 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: autopilot-matcher
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Call the autopilot matcher
+        env:
+          INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
+          API_BASE: ${{ vars.LITOS_API_BASE || 'https://student-outreach-backend.vercel.app' }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${INTERNAL_CRON_SECRET}" ]; then
+            echo "::error::INTERNAL_CRON_SECRET is not set on this repository."
+            echo "Add it with: gh secret set INTERNAL_CRON_SECRET"
+            echo "It must match INTERNAL_CRON_SECRET in the Vercel project's production env."
+            exit 1
+          fi
+
+          # --fail-with-body is deliberate: a 401 or 503 must fail the run loudly, the same reason
+          # submission-runner.yml insists on it. A scheduler that reports success while the endpoint
+          # refuses every call is how a daily job goes silently dead.
+          HTTP_STATUS=$(curl -sS --fail-with-body \
+            --max-time 300 \
+            --retry 2 --retry-delay 10 --retry-connrefused \
+            -o response.json \
+            -w '%{http_code}' \
+            -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
+            "${API_BASE}/internal/autopilot-matcher") || {
+              echo "::error::Matcher call failed with status ${HTTP_STATUS:-unknown}"
+              cat response.json 2>/dev/null || true
+              exit 1
+            }
+
+          echo "status=${HTTP_STATUS}"
+          cat response.json
+          echo
+
+          {
+            echo "### Autopilot matcher"
+            echo ""
+            echo '```json'
+            cat response.json
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
