@@ -78,6 +78,11 @@ import {
   chooseSubmitControl,
   type SubmissionPacket,
 } from '../src/lib/portalSubmission';
+// The mailbox stand-in URL builder, straight out of the one other place this repo already reads the
+// harness's fake inbox (the security-code e2e harness). Reusing it rather than re-deriving the path
+// here is the same "no second reader" rule the file banner states: two builders of the same URL that
+// drift apart is exactly the kind of bug this trial exists to catch, not commit.
+import { securityCodeMailboxUrl } from './qa-guest-submissions-lib.mjs';
 
 const require = createRequire(import.meta.url);
 const BASE = process.env.BASE ?? 'http://localhost:3999';
@@ -356,6 +361,36 @@ const CASES: Case[] = [
     id: 'security-code',
     defect: '9. an emailed security code and a two-phase submit',
     engine: 'direct',
+    /* THE FIRST PRESS DEFINITELY WORKED. clickFinalSubmit is production's own control-selection,
+       required-field bind and readiness gate, called against a real Chromium exactly as
+       submitControlled calls it - the earlier fix in this branch (983b272) already proved that
+       part clean, down to "security-code now runs cleanly past the bind failure and reports a
+       real, substantive result: only 1 submit press recorded". What was never proven is why a
+       SECOND press never happened, and reading production for the answer settles it: neither
+       clickFinalSubmit nor submitControlled (submissionRunner.ts) contains one line that looks for
+       a security-code field, reads a code, or presses submit twice. The only place in this
+       codebase that drives a security-code continuation at all is the MANAGED path (submit() in
+       submissionRunner.ts, securityCode.ts's securityCodeContinuationActions), and that path is
+       architecturally async by necessity: a real employer's code arrives by real email, so
+       production parks the row at status 'awaiting_security_code' and finishes on a SEPARATE run,
+       potentially minutes or hours later, once a human or the inbox watcher supplies the code.
+       There is no missing synchronous call in production to add here - a synchronous "press,
+       detect, enter, press again" loop cannot exist for a real Greenhouse code, because the code
+       does not exist anywhere until the email actually lands.
+
+       So the two presses this case wants are not something clickFinalSubmit forgot to do; they are
+       something THIS SCRIPT forgot to do. The fixture (role-quick-website's shape-form.tsx,
+       onSubmit's shape==='security-code' branch) exists precisely to let an automated trial stand
+       in for the wait-for-the-email step: phase 1 flips a client-side `phase` flag to "security"
+       instead of navigating anywhere, and the code that phase expects is available synchronously,
+       without an inbox, from the QA-only mailbox stand-in
+       (/qa/portal-submission/security-code?case=..., securityCodeMailboxUrl in
+       qa-guest-submissions-lib.mjs - the same helper the security-code E2E harness already reads
+       it through, imported above rather than re-derived here). A trial that never calls that
+       endpoint can only ever press once, no matter what production does, which is exactly the
+       failure recorded. Driving phase 2 here - fetch the code, type it into the field the fixture
+       renders, and call PRODUCTION'S clickFinalSubmit a second time so the second press is still
+       real production code and not a re-implementation of it - is the fix. */
     async run(ctx) {
       return ctx.direct('security-code', async (page) => {
         await fillPortal(page, 'controlled_test', packetFor());
@@ -365,9 +400,33 @@ const CASES: Case[] = [
         } catch (error) {
           submitError = (error as Error).message.split('\n')[0];
         }
+        const codeFieldAppeared = (await page.locator('#security_code').count()) > 0;
+        if (codeFieldAppeared && !submitError) {
+          const mailboxUrl = securityCodeMailboxUrl(BASE, 'security-code')
+            + (QA_KEY ? `&${QA_KEY_PARAM}=${encodeURIComponent(QA_KEY)}` : '');
+          const mailboxResponse = await page.request.get(mailboxUrl);
+          if (!mailboxResponse.ok()) {
+            submitError = `security-code mailbox stand-in answered ${mailboxResponse.status()}`;
+          } else {
+            const { code } = await mailboxResponse.json() as { code: string };
+            await page.locator('#security_code').fill(code);
+            try {
+              await clickFinalSubmit(page);
+            } catch (error) {
+              submitError = (error as Error).message.split('\n')[0];
+            }
+          }
+        }
         const received = await page.getByText('Your application was received').count();
         const codeFieldShown = await page.locator('#security_code').count();
-        const attempts = await page.locator('#litos-qa-log')
+        /* NOT #litos-qa-log. That element only exists in the "form"/"security" phases - the
+           fixture's "done" render (shape-form.tsx) is a wholly separate JSX branch that drops
+           <QaLog /> and puts the SAME data-litos-qa-submit-attempts attribute directly on its own
+           <section> instead. A pass reaches "done", so a read pinned to #litos-qa-log would find
+           nothing there and silently report 0 on every success - which is exactly what the first
+           version of this fix did. The plain attribute selector finds whichever element is
+           currently carrying the count, in every phase. */
+        const attempts = await page.locator('[data-litos-qa-submit-attempts]').first()
           .getAttribute('data-litos-qa-submit-attempts').catch(() => null);
         return {
           pass: received > 0 && Number(attempts ?? 0) >= 2,

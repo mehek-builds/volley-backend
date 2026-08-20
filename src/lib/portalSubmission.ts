@@ -298,7 +298,11 @@ export function managedAttendedAccountUrlIsSupported(portal: SupportedPortal, ra
 const JOBVITE_DATA_CONSENT_SELECTOR = 'select#jv-country-select';
 const ICIMS_LOGIN_EMAIL_SELECTOR = 'input#email[name="css_loginName"]';
 const ICIMS_HCAPTCHA_SELECTOR = 'textarea[name="h-captcha-response"]';
-const ICIMS_SECURITY_CODE_SELECTOR =
+/* Not iCIMS-only despite the constant's original name-until-2026-08-20: readReceipt below reuses
+   it verbatim to recognise an emailed-security-code wall on the direct-Playwright path, and the
+   controlled_test QA fixture's own code field (autoComplete="one-time-code") matches it the same
+   way a real iCIMS or Greenhouse one does. One selector, not two that can drift apart. */
+const SECURITY_CODE_FIELD_SELECTOR =
   'input[autocomplete="one-time-code"], input[name*="verification" i], input[name*="securityCode" i]';
 const ORACLE_PRIMARY_EMAIL_SELECTOR = 'input#primary-email-1[name="primary-email"]';
 const ORACLE_LEGAL_DISCLAIMER_SELECTOR = 'input#legal-disclaimer-checkbox';
@@ -341,7 +345,7 @@ export function buildManagedAttendedAccountProbeActions(portal: SupportedPortal)
       },
       {
         type: 'extract',
-        selector: ICIMS_SECURITY_CODE_SELECTOR,
+        selector: SECURITY_CODE_FIELD_SELECTOR,
         attribute: 'name',
         label: 'icims_security_code_gate',
         optional: true,
@@ -11252,6 +11256,33 @@ export async function readReceipt(page: Page): Promise<{ confirmationText: strin
   for (;;) {
     body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
     if (RECEIPT_PROOF_RE.test(body)) break;
+    /* FAIL FAST ON A SECURITY-CODE WALL, RATHER THAN RIDING OUT THE REST OF THE DEADLINE.
+     *
+     * clickFinalSubmit (both callers: submitControlled's controlled_test path and the plain
+     * browserbase-session path) presses submit exactly ONCE and has no idea a second press could
+     * ever be required - unlike the managed path, which was given a full two-phase model
+     * (securityCodeContinuationActions, status 'awaiting_security_code') after three real
+     * Greenhouse runs on 2026-08-08 each got exactly this far and stopped. Nothing built for the
+     * managed path reaches this direct-Playwright one, and nothing here can complete a second
+     * phase either: a genuine employer code arrives by real email, on nobody's schedule, and this
+     * function only ever has the ONE open page in front of it.
+     *
+     * So a security-code field appearing here is not a page that is merely slow to confirm - it is
+     * proof the employer refused the press and is waiting on a code this call can never supply.
+     * Riding out the rest of the 30-second wait for a confirmation that cannot come turns that into
+     * the exact same generic "never showed a confirmation" message a page that is simply broken
+     * gets, which is indistinguishable from the real defect: trial case 'security-code' (regression
+     * test below) measured this directly as one submit press, no receipt, and the code field still
+     * on screen, with nothing in the error to say why. Checking on every poll, not only once, is
+     * deliberate too - the field can render at any point inside the window, not only up front. */
+    if (await page.locator(SECURITY_CODE_FIELD_SELECTOR).first().isVisible().catch(() => false)) {
+      throw new Error(
+        'Litos pressed submit, and the employer is now holding this application behind an emailed '
+        + 'security code. This browser has no inbox to read that code from and cannot press submit '
+        + 'a second time on its own, so the application was not completed. Open the portal, enter '
+        + 'the code from the confirmation email, and finish the application there.',
+      );
+    }
     if (Date.now() >= deadline) {
       throw new Error('The company never showed a confirmation we could check');
     }
