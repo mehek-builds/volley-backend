@@ -1325,6 +1325,23 @@ export function reconcileManagedProviderBlockers(
 export const FORM_NOT_REACHED_REASON =
   'Litos could not confirm it reached this company\u2019s application form. Nothing was filled in and nothing has been sent. Open it when you have a minute and finish it off.';
 
+/* THE POSTING THE EMPLOYER TOOK DOWN, recognised by the page's own words. Measured on the live
+ * moburst.teamtailor.com PR Account Coordinator posting, 2026-08-20: behind the cookie dialog the
+ * page says "This position is no longer active - Either the position was filled, or the ad has
+ * expired", there is no form anywhere, and the not-reached sentence told the applicant to "open
+ * it when you have a minute and finish it off" - homework on a job that no longer exists. The
+ * vocabulary is each board's own closed-posting sentence, matched only on the no-evidence path,
+ * so a live form whose job description happens to contain similar words can never trip it. */
+const POSTING_CLOSED_RE = /this (?:position|posting|job(?: posting)?|role) is no longer (?:active|open|available|accepting applications)|no longer accepting applications|position was filled, or the ad has expired|this job is not available anymore|job (?:has been|was) (?:filled|closed)/i;
+
+export function postingClosedReason(text: string | undefined): string | null {
+  const match = POSTING_CLOSED_RE.exec(text ?? '');
+  if (!match) return null;
+  return 'The employer has taken this posting down: the page says "' + match[0].trim() + '". '
+    + 'There is no application form any more, nothing was filled in and nothing was sent. '
+    + 'There is nothing left to do on this one.';
+}
+
 /**
  * Whether the run has POSITIVE evidence it was looking at the application form.
  *
@@ -1393,6 +1410,8 @@ export function preparationEvidenceBlockers(
     text: result.text,
     email: packet.email,
   })) {
+    const closed = postingClosedReason(result.text);
+    if (closed) return [closed];
     return [FORM_NOT_REACHED_REASON];
   }
   return filledFieldBlockers(result.filledFields, packet, result.extracted);

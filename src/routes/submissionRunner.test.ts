@@ -18,6 +18,7 @@ import {
   coveredOptionProbeFailureIds,
   optionProbeAttentionReasons,
   packetUsesControlledResumeFixture,
+  FORM_NOT_REACHED_REASON,
   preparationEvidenceBlockers,
   reconcileManagedProviderBlockers,
   readMostRecentRole,
@@ -3364,4 +3365,34 @@ test('the profile still wins when it can name an offered option itself', async (
   );
   const question = result.questions.find((q) => q.question.toLowerCase().startsWith('expected graduation date'));
   assert.equal(question?.answer, 'January 2028 - July 2028');
+});
+
+
+/* THE POSTING THE EMPLOYER TOOK DOWN, measured on the live moburst.teamtailor.com posting
+ * (2026-08-20): "This position is no longer active - Either the position was filled, or the ad
+ * has expired", no form anywhere, and the not-reached sentence assigned homework on a job that no
+ * longer exists. */
+test('a closed posting on the no-evidence path is said in the employer\u2019s own words', () => {
+  const packet = { email: 'a@b.c' } as SubmissionPacket;
+  const closedPage = {
+    text: 'Skip to main content CAREER MENU Share page PR Account Coordinator '
+      + 'This position is no longer active Either the position was filled, or the ad has expired. Home Jobs',
+    filledFields: [], blockers: [], discovered: [], extracted: [],
+  };
+  const blockers = preparationEvidenceBlockers(closedPage, packet);
+  assert.equal(blockers.length, 1);
+  assert.match(blockers[0], /taken this posting down/);
+  assert.match(blockers[0], /This position is no longer active/);
+  assert.doesNotMatch(blockers[0], /finish it off/);
+
+  // An unreachable form with no closed-posting sentence keeps the honest not-reached sentence.
+  const blank = preparationEvidenceBlockers({ text: 'A branded careers page.', filledFields: [], blockers: [], discovered: [], extracted: [] }, packet);
+  assert.deepEqual(blank, [FORM_NOT_REACHED_REASON]);
+
+  // A REACHED form is never scanned for the vocabulary: a job description may carry the words.
+  const reached = preparationEvidenceBlockers({
+    text: 'We are no longer accepting applications for our 2025 cohort, but 2026 is open below.',
+    filledFields: ['email'], blockers: [], discovered: [], extracted: [],
+  }, packet);
+  assert.doesNotMatch(reached.join(' '), /taken this posting down/);
 });
