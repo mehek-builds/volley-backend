@@ -5116,21 +5116,30 @@ const EXPLICIT_CITY_QUESTION =
   /where are you (currently )?(located|living|based)|current location|where do you live/i;
 
 /**
- * A UK degree-classification vocabulary: "degree classification", "honours classification", or the
- * classification bands themselves (First/2:1/2:2/Third). Scoped to those compounds, never to the
- * bare word "classification" alone, so an unrelated "job classification" or "employee
- * classification" field on the same form is untouched.
+ * A UK degree-classification vocabulary: "degree classification", "honours classification", "class
+ * of degree", or the band notation itself (2:1, 2:2). Every pattern names the DEGREE or the
+ * notation explicitly, never a bare "first class"/"third class"/"1st class" on their own - those
+ * ordinary English phrases show up on real job-application forms with nothing to do with academics
+ * ("Do you prefer to fly first class for work travel?", "Is this a first-class position within the
+ * org chart?"), and MEASURED (2026-08-21, this PR's own review) matched both of them to 'gpa' and
+ * answered a travel-preference and a seniority question with a fabricated GPA sentence. This
+ * vocabulary drops those bare band words entirely and keeps only the compounds that name the
+ * degree or its classification directly: "class of degree", "degree classification" and its kin,
+ * plus the 2:1/2:2 notation, which is not ordinary English and carries no comparable risk.
+ *
+ * Scoped to those compounds, never to the bare word "classification" alone either, so an unrelated
+ * "job classification" or "employee classification" field on the same form is untouched.
  *
  * This is an ACADEMIC-PERFORMANCE question written in UK vocabulary - the same fact US forms ask
  * for as "GPA" - so it classifies as 'gpa', not 'degree'. Without this the bare word "degree" inside
  * "degree classification" reached the degree branch first (that branch's own regex has run by the
- * time gpa's `\bgpa\b` fails to match, since neither "classification" nor "First/2:1" contain the
- * literal string "gpa"), and the control was answered "Bachelor of Science in Computer Science"
- * instead of her GPA - a real wrong answer, not a blank, on the one family of question this
- * vocabulary exists to name.
+ * time gpa's `\bgpa\b` fails to match, since neither "classification" nor "2:1" contain the literal
+ * string "gpa"), and the control was answered "Bachelor of Science in Computer Science" instead of
+ * her GPA - a real wrong answer, not a blank, on the one family of question this vocabulary exists
+ * to name.
  */
 const GPA_CLASSIFICATION_VOCABULARY =
-  /\b(?:degree|honou?rs?)\s+classification\b|\bclassification\s+of\s+(?:your\s+)?degree\b|\b(?:first|upper\s+second|lower\s+second|third)[- ]class\b|\b2:[12]\b|\b1st\s+class\b/i;
+  /\b(?:degree|honou?rs?)\s+classification\b|\bclassification\s+of\s+(?:your\s+)?degree\b|\bclass\s+of\s+(?:your\s+)?degree\b|\b2:[12]\b/i;
 
 // Ported verbatim from generic.ts's classifyField (see that file for the full rationale on
 // ordering - refusals first, citizenship before residence, term before start date, state before
@@ -5873,15 +5882,25 @@ function gpaWantsPercentageOrClassification(label: string): boolean {
  * A plain GPA ask gets the raw stored number, exactly as before. A percentage/classification ask
  * gets the number AND its scale, spelled out, so the answer is legible as "not what you asked for,
  * but the truth, on its own terms" rather than looking like a percentage that happens to be low.
+ *
+ * gpa_scale is a free-text column (nothing enforces "4.0"; it can be seeded from a resume parse as
+ * something like "4.0 (unweighted)"), so it is only reformatted to two decimals when it parses as a
+ * clean number - `Number("4.0 (unweighted)")` is NaN, and stamping NaN's input back into BOTH the
+ * fraction and the parenthetical would print the messy string twice: MEASURED (2026-08-21, this
+ * PR's own review), the naive version produced "3.89/4.0 (unweighted) (US 4.0 (unweighted) scale)".
+ * A scale that does not parse is stated once, as written, with a plain "(US GPA scale)" tag rather
+ * than repeating it.
  */
 function gpaAnswer(label: string, ap: ApplicationProfileLike): string | null {
   const trimmed = ap.gpa?.trim();
   if (!trimmed) return null;
   if (!gpaWantsPercentageOrClassification(label)) return trimmed;
   const scale = ap.gpa_scale?.trim();
-  const scaleNumber = scale ? Number(scale) : NaN;
-  const denominator = Number.isFinite(scaleNumber) ? scaleNumber.toFixed(2) : scale;
-  return denominator ? `${trimmed}/${denominator} (US ${scale} scale)` : `${trimmed} (US GPA scale)`;
+  if (!scale) return `${trimmed} (US GPA scale)`;
+  const scaleNumber = Number(scale);
+  return Number.isFinite(scaleNumber)
+    ? `${trimmed}/${scaleNumber.toFixed(2)} (US ${scale} scale)`
+    : `${trimmed}/${scale} (US GPA scale)`;
 }
 
 function degreeAnswer(label: string, inputType: string | undefined, degree: string | undefined): string | null {
