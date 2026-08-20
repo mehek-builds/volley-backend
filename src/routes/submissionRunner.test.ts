@@ -22,6 +22,7 @@ import {
   preparationEvidenceBlockers,
   reconcileManagedProviderBlockers,
   readMostRecentRole,
+  resolveApplicantClosedChoiceFallbacks,
   resumeBytesForPacket,
   sanitizeEeoPrefs,
   shouldUseLocalControlledBrowser,
@@ -30,6 +31,7 @@ import {
   unansweredRequiredBlockerLabels,
   type ResumeRow,
   packetQuestionsForFill,
+  truthfulOtherChoice,
 } from './submissionRunner';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
 import { savedAnswerKey } from '../lib/answerReuse';
@@ -65,6 +67,100 @@ test('a profile with no usable experience yields undefined rather than throwing'
   assert.equal(readMostRecentRole({ experience: [] }), undefined);
   assert.equal(readMostRecentRole({ experience: 'Traeco' }), undefined);
   assert.equal(readMostRecentRole({ experience: {} }), undefined);
+});
+
+test('closed taxonomies use Other only for truthful referral and recent-experience fallbacks', () => {
+  assert.equal(truthfulOtherChoice(
+    'How did you hear about Optiver?',
+    'Job board',
+    ['Indeed', 'LinkedIn', 'Other'],
+  ), 'Other');
+  assert.equal(truthfulOtherChoice(
+    'Where did you complete your most recent internship or research experience?',
+    'Cinematica Labs',
+    ['Amazon', 'Anduril Industries', 'Other'],
+  ), 'Other');
+  assert.equal(truthfulOtherChoice(
+    'Which programming language do you prefer?',
+    'Rust',
+    ['Python', 'TypeScript', 'Other'],
+  ), undefined);
+  assert.equal(truthfulOtherChoice(
+    'How did you hear about Optiver?',
+    'LinkedIn',
+    ['LinkedIn', 'Other'],
+  ), undefined);
+});
+
+test('managed choice fallback carries the job-board detail and preserves the original fact as provenance', () => {
+  const discovered = [
+    {
+      label: 'How did you hear about Optiver?* question_1',
+      selector: '#source',
+      inputType: 'combobox',
+      maxLength: null,
+      options: ['Indeed', 'LinkedIn', 'Other'],
+    },
+    {
+      label: 'If other, please explain question_2',
+      selector: '#source-detail',
+      inputType: 'text',
+      maxLength: 100,
+    },
+    {
+      label: 'Where did you complete your most recent internship or research experience?* question_3',
+      selector: '#experience',
+      inputType: 'combobox',
+      maxLength: null,
+      options: ['Amazon', 'Anduril Industries', 'Other'],
+    },
+  ];
+  const resolved = resolveApplicantClosedChoiceFallbacks(discovered, [
+    {
+      id: 'source',
+      question: 'How did you hear about Optiver?',
+      answer: 'Job board',
+      kind: 'required',
+      required: true,
+      options: discovered[0]!.options,
+      answer_source: 'applicant_review',
+    },
+    {
+      id: 'detail',
+      question: 'If other, please explain',
+      answer: 'N/A',
+      kind: 'required',
+      required: false,
+      answer_source: 'applicant_review',
+    },
+    {
+      id: 'experience',
+      question: 'Where did you complete your most recent internship or research experience?',
+      answer: 'Cinematica Labs, Los Angeles, CA',
+      kind: 'required',
+      required: true,
+      options: discovered[2]!.options,
+      answer_source: 'applicant_review',
+    },
+  ]);
+
+  assert.deepEqual(
+    resolved.map(({ answer, answer_source, answer_option_source }) => ({ answer, answer_source, answer_option_source })),
+    [
+      { answer: 'Other', answer_source: undefined, answer_option_source: 'Job board' },
+      { answer: 'Litos', answer_source: undefined, answer_option_source: undefined },
+      { answer: 'Other', answer_source: undefined, answer_option_source: 'Cinematica Labs, Los Angeles, CA' },
+    ],
+  );
+  assert.deepEqual(
+    refreshKnownQuestionAnswers(
+      resolved,
+      { referral_source_default: 'Job board' },
+      'Optiver Software Engineer Intern',
+    ).map((question) => question.answer),
+    ['Other', 'Litos', 'Other'],
+    'the exact reviewed packet and the submit packet must keep the same truthful choices',
+  );
 });
 
 test('the compact packet preselects only unresolved open prose controls', () => {

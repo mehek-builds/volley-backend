@@ -2260,6 +2260,27 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
       && typeof withProvenance.answer_reviewed_at === 'string'
       && withProvenance.answer_reviewed_at === questionsReviewedAt,
     );
+    const derivedFrom = typeof withProvenance.answer_option_source === 'string'
+      ? withProvenance.answer_option_source
+      : undefined;
+    /* A LIVE CLOSED LIST OMITTED THE APPLICANT'S JOB-BOARD WORDING AND OFFERED "OTHER".
+     *
+     * This proof does not depend on the employer-specific referral parser succeeding again during
+     * packet rebuild. The managed run already read the live list, selected its literal Other, and
+     * recorded the applicant's original Job board declaration beside it. Requiring a second parse
+     * made employer-named labels such as "How did you hear about Optiver?" blank the exact packet
+     * before submit. Both the recorded derivation and the profile's current source must still state
+     * the same job-board fact, and the label must still be a referral question. */
+    const currentReferralSource = referralSourceForApplication(
+      ap.referral_source_default,
+      ap.referral_source_evidence,
+    );
+    if (label
+      && parseReferralQuestion(label, jdText)
+      && !REFERRAL_SOURCE_DETAIL_QUESTION.test(label)
+      && /^other\b/i.test(question.answer.trim())
+      && isJobBoardReferralClaim(derivedFrom)
+      && isJobBoardReferralClaim(currentReferralSource)) return question;
     /* answer_option_source goes with the answer it describes, and only ever with that answer.
      *
      * Every branch below that CHANGES the answer drops it, because a derivation left beside a value
@@ -2353,9 +2374,6 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
         if (isConsentAcceptingWording(question.answer)
           && comparableOption(question.answer) !== comparableOption(known.value)) return question;
       }
-      const derivedFrom = typeof withProvenance.answer_option_source === 'string'
-        ? withProvenance.answer_option_source
-        : undefined;
       if (storedOptionAnswerIsCurrent(question.answer, derivedFrom, known.value)) return question;
       /* 'covers' keeps the reviewed range because the profile still sits inside it, exactly as
        * the boolean rule always did and for any parseable two-part range. 'incomparable' keeps it
