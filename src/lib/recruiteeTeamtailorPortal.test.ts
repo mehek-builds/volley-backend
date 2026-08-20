@@ -279,6 +279,57 @@ test('two consent-shaped controls mean park, not guess; the retention opt-in is 
   assert.doesNotMatch(JSON.stringify(bothControls), /consent_given_future_jobs/);
 });
 
+/* THE PLATFORM'S OWN DEFAULT WORDING, measured live 2026-08-20 on two unrelated tenants (Fully,
+ * Uproar by Moburst). Teamtailor's stock candidate[consent_given] sentence embeds the TENANT'S
+ * NAME mid-clause, so the fill-time licence re-derivation can only account for it when the packet
+ * says who the employer is. packet.jdText is the raw posting prose and carries no frozen employer
+ * line; packet.employerName is the job_context company buildPacket copies on, and the plan
+ * composes the same frozen line the discovery resolver already used. No employer name on the
+ * packet means the tenant name is unexplained and the plan parks, which is the direction this
+ * feature fails in. */
+test("Teamtailor's platform-default consent sentence plans the tick when the packet names the employer", () => {
+  const liveDefault = (company: string) => ({
+    ...consentQuestion,
+    question: `By submitting this application, I agree that I have read the Privacy Policy and confirm that ${company} store my personal details to be able to process my job application.`,
+  });
+  for (const company of ['Fully', 'Uproar by Moburst']) {
+    const planned = managedConsentTickPlan('teamtailor', {
+      ...packet,
+      employerName: company,
+      jdText: 'Own the books. Ship the close.',
+      applicationProfile: grantedProfile,
+      questions: [liveDefault(company)],
+    });
+    assert.ok(planned, company);
+    assert.equal(planned!.selector, TEAMTAILOR_CONSENT_SELECTOR);
+    assert.equal(planned!.question, liveDefault(company).question);
+    assert.match(planned!.licence.version, /privacy_and_terms@/);
+    assert.equal(planned!.licence.granted_at, CONSENT_GRANT.granted_at);
+  }
+
+  // And the whole submit list follows: one guarded tick on the captured control, then the submit.
+  const actions = buildManagedPortalActions('teamtailor', {
+    ...packet,
+    employerName: 'Fully',
+    applicationProfile: grantedProfile,
+    questions: [liveDefault('Fully')],
+  }, true);
+  const ticks = consentTickClicks(actions);
+  assert.equal(ticks.length, 1);
+  assert.equal(ticks[0].selector, TEAMTAILOR_CONSENT_SELECTOR);
+  assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1);
+
+  // Fail-closed: a packet that cannot say who the employer is cannot account for the tenant name
+  // sitting inside the sentence, so it parks at today's handoff rather than guessing.
+  const anonymous = managedConsentTickPlan('teamtailor', {
+    ...packet,
+    jdText: 'Own the books. Ship the close.',
+    applicationProfile: grantedProfile,
+    questions: [liveDefault('Fully')],
+  });
+  assert.equal(anonymous, null);
+});
+
 test('a fill run never ticks: the consent tick exists only on the submit list', () => {
   const actions = buildManagedPortalActions('teamtailor', {
     ...packet,

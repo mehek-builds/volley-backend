@@ -1044,6 +1044,10 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     roleCountryCode: postingCountryCodeFromJobContext(row.job_context),
     applicationProfile,
     applicantSnapshot,
+    // The one proper noun the consent grammar may account for. Teamtailor's platform-default
+    // consent sentence embeds the tenant's name, and the fill-time licence re-derivation in
+    // managedConsentTickPlan can only place it when the packet says who the employer is.
+    ...(jobContextCompany(row) ? { employerName: jobContextCompany(row) } : {}),
     jdText: review.jd_text,
     resume,
     resumeName: resumeFileNameForRole(fullName, roleTitle),

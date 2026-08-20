@@ -3050,3 +3050,63 @@ test('a discovered answer still fills a blank applicant-reviewed row', () => {
   );
   assert.equal(merged.find((q) => /hear about/i.test(q.question))!.answer, 'Job board');
 });
+
+/* The other half of the Teamtailor default-consent fix, measured live 2026-08-20 (Fully, Uproar by
+ * Moburst): the managed discovery pass reports the stock candidate[consent_given] checkbox with
+ * the platform's own sentence as its label, and the packet must come out of resolution carrying
+ * the machine acceptance with its provenance, because managedConsentTickPlan refuses any record
+ * whose answerSource is not consent_permission. Before the grammar knew "personal details" and
+ * the "to be able to" clause, this produced no consent question at all and every send parked. */
+test("Teamtailor's default consent checkbox becomes the consent_permission question on the packet", async () => {
+  const sentence = 'By submitting this application, I agree that I have read the Privacy Policy and confirm that Fully store my personal details to be able to process my job application.';
+  const current: ApplicationReviewState = {
+    jd_text: 'Own the books. Ship the close.',
+    role: 'Group Financial Controller',
+    portal_url: 'https://career.teamtailor.com/jobs/8124573-group-financial-controller',
+    ats_name: 'teamtailor',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const resolve = (ap: ApplicationProfileLike) => discoverAndResolveQuestions(
+    [
+      {
+        label: sentence,
+        selector: '[data-litos-discovered-1]',
+        durableSelector: 'input[name="candidate[consent_given]"]',
+        inputType: 'checkbox',
+        maxLength: null,
+        required: true,
+      },
+    ],
+    { user_id: 'user-1', job_context: { company: 'Fully' } } as ResumeRow,
+    current,
+    ap,
+    true,
+    'teamtailor',
+  );
+
+  const granted = await resolve({
+    consent_acknowledgement_permission: { granted_at: '2026-08-12T09:15:00.000Z', version: '2026-08-12' },
+  });
+  assert.equal(granted.questions.length, 1);
+  const question = granted.questions[0];
+  assert.equal(question.question, sentence);
+  assert.equal(question.answer, 'Yes');
+  assert.equal(question.answer_source, 'consent_permission');
+  assert.equal(question.consent_permission_version, 'privacy_and_terms@2026-08-12');
+  assert.equal(question.consent_permission_granted_at, '2026-08-12T09:15:00.000Z');
+  assert.equal(question.portal_selector, 'input[name="candidate[consent_given]"]');
+  assert.equal(question.portal_input_type, 'checkbox');
+  assert.deepEqual(granted.attentionReasons, []);
+
+  // No grant means main's behaviour: the required checkbox surfaces as HER question, unanswered,
+  // never as a machine acceptance.
+  const ungranted = await resolve({});
+  assert.equal(ungranted.questions.length, 1);
+  assert.equal(ungranted.questions[0].answer, '');
+  assert.notEqual(ungranted.questions[0].answer_source, 'consent_permission');
+});

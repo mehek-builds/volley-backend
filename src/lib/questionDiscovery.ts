@@ -4191,12 +4191,22 @@ const TERMS_DOCUMENT =
   String.raw`terms\s+(?:and|&)\s+conditions|terms\s+of\s+(?:use|service|application)|applicant\s+terms`;
 const CONDUCT_DOCUMENT =
   String.raw`code\s+of\s+conduct|code\s+of\s+ethics|acceptable\s+use\s+policy|conduct\s+(?:agreement|policy|guidelines)`;
+/* THE NOUN THE EMPLOYER USES FOR HER DATA, one spelling class for every data-handling alternative.
+ *
+ * "details" is here because of Teamtailor's PLATFORM-DEFAULT consent sentence, measured live on
+ * 2026-08-20 on two unrelated tenants (Fully, Uproar by Moburst): "...confirm that <Company> store
+ * my personal details to be able to process my job application." The vocabulary knew only personal
+ * data and personal information, so a tenant wording that names no document at all classified as
+ * nothing and every Teamtailor send parked one step from completion. The word is only ever read
+ * inside the two-word phrase, so this widens no alternative beyond the exact spelling employers
+ * ship, and the veto above it still runs first. */
+const PERSONAL_DATA_NOUN = String.raw`personal\s+(?:data|information|details)`;
 /* The acts, for the consents that name no document: what the employer proposes to do with her
  * personal data, and the legal regime it names while doing it. */
-const DATA_HANDLING_SUBJECT = String.raw`process(?:ing)?\s+of\s+(?:my\s+|your\s+|the\s+)?personal\s+(?:data|information)`
-  + String.raw`|personal\s+(?:data|information)\s+process(?:ing|ed)?`
-  + String.raw`|(?:collect\w*|stor\w*|retain\w*|retention|transfer\w*|shar\w*|process\w*|us(?:e|ing))[\s\S]{0,80}\bpersonal\s+(?:data|information)\b`
-  + String.raw`|\bpersonal\s+(?:data|information)\b[\s\S]{0,80}(?:collect\w*|stor\w*|retain\w*|retention|transfer\w*|shar\w*|process\w*)`
+const DATA_HANDLING_SUBJECT = String.raw`process(?:ing)?\s+of\s+(?:my\s+|your\s+|the\s+)?${PERSONAL_DATA_NOUN}`
+  + String.raw`|${PERSONAL_DATA_NOUN}\s+process(?:ing|ed)?`
+  + String.raw`|(?:collect\w*|stor\w*|retain\w*|retention|transfer\w*|shar\w*|process\w*|us(?:e|ing))[\s\S]{0,80}\b${PERSONAL_DATA_NOUN}\b`
+  + String.raw`|\b${PERSONAL_DATA_NOUN}\b[\s\S]{0,80}(?:collect\w*|stor\w*|retain\w*|retention|transfer\w*|shar\w*|process\w*)`
   + String.raw`|gdpr|general\s+data\s+protection\s+regulation`
   + String.raw`|recruit(?:ment|ing)\s+purposes`;
 const CONSENT_SUBJECT = `${PRIVACY_DOCUMENT}|${TERMS_DOCUMENT}|${CONDUCT_DOCUMENT}|${DATA_HANDLING_SUBJECT}`;
@@ -4213,8 +4223,8 @@ const DOCUMENT_SPAN_SUBJECT = [
   PRIVACY_DOCUMENT,
   TERMS_DOCUMENT,
   CONDUCT_DOCUMENT,
-  String.raw`process(?:ing)?\s+of\s+(?:my\s+|your\s+|the\s+)?personal\s+(?:data|information)`,
-  String.raw`personal\s+(?:data|information)\s+process(?:ing|ed)?`,
+  String.raw`process(?:ing)?\s+of\s+(?:my\s+|your\s+|the\s+)?${PERSONAL_DATA_NOUN}`,
+  String.raw`${PERSONAL_DATA_NOUN}\s+process(?:ing|ed)?`,
   String.raw`gdpr|general\s+data\s+protection\s+regulation`,
   String.raw`recruit(?:ment|ing)\s+purposes`,
 ].join('|');
@@ -4258,6 +4268,25 @@ const CONSENT_ACT = String.raw`agree(?:s|d|ing)?|consent(?:s|ed|ing)?|accept(?:s
 const CONSENT_PURPOSE_CLAUSE =
   String.raw`(?:to|for)\s+(?:learn|understand|see|find\s+out|read|review)(?:\s+more)?(?:\s+about)?`
   + String.raw`(?:\s+(?:how|what|why|when|whether|which))?`;
+
+/* WHY THE DATA IS HANDLED, the second scaffolding construction, and the same safety argument as
+ * CONSENT_PURPOSE_CLAUSE above word for word.
+ *
+ * Teamtailor's PLATFORM-DEFAULT consent sentence, measured live on 2026-08-20 on two unrelated
+ * tenants (Fully, Uproar by Moburst), ends "...store my personal details to be able to process my
+ * job application." Every word of that clause is already structural filler except one: "able".
+ * Not a document name, not a fact about her, just the capability idiom English wraps a purpose in,
+ * and one unexplained token is enough to hold, so the platform's own default wording parked every
+ * Teamtailor send one step from completion.
+ *
+ * ACCOUNTED FOR AS A SPAN, NOT AS ONE MORE FILLER WORD. Added to CONSENT_STRUCTURAL_FILLER, "able"
+ * would be absorbed anywhere in any label; matched here it is absorbed only inside the literal
+ * three-word idiom. The span is a fixed phrase of closed-class words with no wildcard in it, so it
+ * deliberately stays out of the wide [\s\S]{0,80} shape the DOCUMENT_SPAN_SUBJECT comment forbids:
+ * nothing can be smuggled through a match that admits no variable content. Used ONLY by
+ * consentLabelIsFullyAccountedFor, so it can widen no label into a consent that was not already
+ * one, and the veto still runs first regardless. */
+const CONSENT_CAPABILITY_CLAUSE = String.raw`be(?:ing)?\s+able\s+to`;
 
 /**
  * A label that IS a consent document and nothing else: "Privacy Statement", "Interview Code of
@@ -4572,7 +4601,7 @@ function consentLabelIsFullyAccountedFor(
    * cosmetic. The clause's own verb list contains `read` and `review`, which CONSENT_ACT also
    * matches; letting CONSENT_ACT run first would blank the verb out of "to read more about how" and
    * leave the clause unmatchable, stranding `how` exactly as before. */
-  for (const source of [CONSENT_PURPOSE_CLAUSE, CONSENT_ACT, CONSENT_DOCUMENT_QUALIFIER]) {
+  for (const source of [CONSENT_PURPOSE_CLAUSE, CONSENT_CAPABILITY_CLAUSE, CONSENT_ACT, CONSENT_DOCUMENT_QUALIFIER]) {
     residue = residue.replace(new RegExp(String.raw`\b(?:${source})\b`, 'gi'), ' ');
   }
   /* A genitive is a determiner wearing a noun's clothes: "cloudflare's candidate privacy policy"

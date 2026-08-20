@@ -411,3 +411,78 @@ describe('an option that joins two accepting verbs', () => {
     );
   });
 });
+
+describe("Teamtailor's platform-default consent sentence", () => {
+  /* MEASURED LIVE, 2026-08-20, on the account's real Teamtailor rows (Fully, and Uproar by
+   * Moburst). The run filled everything and parked on "This company asks you to confirm its
+   * applicant privacy terms before sending" because this exact sentence, the platform's own
+   * default wording on the candidate[consent_given] control, classified as nothing.
+   *
+   * Two grammar facts sit inside it. "personal details" is the noun Teamtailor uses where the
+   * data-handling vocabulary knew only personal data and personal information, so a tenant whose
+   * label names no document at all needs the classifier to know the spelling. And the purpose
+   * clause "to be able to process my job application" carries "able", which no filler word and no
+   * scaffolding span accounted for, so coverage held the label even when the Privacy Policy had
+   * already classified it.
+   *
+   * The employer's own name sits mid-clause ("confirm that Fully store..."), so every test here
+   * passes employerContext the way the resolvers do: the frozen employer line composed by
+   * applicationContextForQuestionResolution, with the ordinary prose around it. */
+  const TEAMTAILOR_DEFAULT = (company: string) =>
+    `By submitting this application, I agree that I have read the Privacy Policy and confirm that ${company} store my personal details to be able to process my job application.`;
+  const employerContext = (company: string) =>
+    `Group Financial Controller\nBuild the finance function.\n[LITOS FROZEN JOB EMPLOYER] ${company}`;
+
+  test('the exact live sentence classifies as a privacy consent, for both live tenants', () => {
+    for (const company of ['Fully', 'Uproar by Moburst']) {
+      assert.deepEqual(
+        consentAcknowledgementClasses(TEAMTAILOR_DEFAULT(company), employerContext(company)),
+        ['privacy_and_terms'],
+        company,
+      );
+    }
+  });
+
+  test('the close tenant variant "so that <Company> can process my job application" classifies too', () => {
+    const label = 'By submitting this application, I agree that I have read the Privacy Policy and confirm that Fully store my personal details so that Fully can process my job application.';
+    assert.deepEqual(consentAcknowledgementClasses(label, employerContext('Fully')), ['privacy_and_terms']);
+  });
+
+  test('"personal details" is a data-handling subject in its own right, with no document named', () => {
+    // The vocabulary half on its own: a tenant wording that never says Privacy Policy still has to
+    // classify off the data-handling act, and before the fix this returned [].
+    assert.deepEqual(
+      consentAcknowledgementClasses(
+        'I confirm that Fully store my personal details to be able to process my job application.',
+        employerContext('Fully'),
+      ),
+      ['privacy_and_terms'],
+    );
+  });
+
+  test('without the employer context the tenant name is unaccounted and the label holds', () => {
+    // Fail-closed pin: the company name is absorbed only because the caller proves it belongs
+    // here. No context, no proof, hold. This is the same direction the rule has always failed in.
+    assert.deepEqual(consentAcknowledgementClasses(TEAMTAILOR_DEFAULT('Fully')), []);
+  });
+
+  test('the veto still runs first: welding a truth attestation onto the same sentence holds it', () => {
+    const welded = `${TEAMTAILOR_DEFAULT('Fully').slice(0, -1)} and certify that the information provided is true.`;
+    assert.deepEqual(consentAcknowledgementClasses(welded, employerContext('Fully')), []);
+  });
+
+  test('a second document smuggled into the clause still holds the label', () => {
+    // The coverage rule must place the WHOLE clause, not stop reading it. A conduct-family stray
+    // inside the same sentence survives to be counted, exactly as the boundary tests demand.
+    const smuggled = 'By submitting this application, I agree that I have read the Privacy Policy and the employee handbook and confirm that Fully store my personal details to be able to process my job application.';
+    assert.deepEqual(consentAcknowledgementClasses(smuggled, employerContext('Fully')), []);
+  });
+
+  test('with the standing permission the licence covers the live sentence; without it, null', () => {
+    const licence = consentAcknowledgementLicence(TEAMTAILOR_DEFAULT('Fully'), GRANTED, employerContext('Fully'));
+    assert.ok(licence);
+    assert.equal(licence.version, `privacy_and_terms@${AUTOMATIC_CONSENT_ACCEPTANCE_VERSION}`);
+    assert.equal(licence.granted_at, '2026-08-12T09:15:00.000Z');
+    assert.equal(consentAcknowledgementLicence(TEAMTAILOR_DEFAULT('Fully'), {}, employerContext('Fully')), null);
+  });
+});
