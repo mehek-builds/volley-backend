@@ -1139,7 +1139,9 @@ describe('the human-verification press sentence', () => {
       atsName: 'rippling', portalUrl: PORTAL, cause: 'no_confirmation_state', network: MEASURED,
     });
     assert.match(reason, /human-verification check instead of submitting/);
-    assert.match(reason, /finish this one yourself/);
+    assert.match(reason, /Choose “It is not there”/);
+    assert.match(reason, /stay in this dashboard/);
+    assert.doesNotMatch(reason, /Open https:\/\//);
     assert.doesNotMatch(reason, /Litos will send this one for you/);
   });
 
@@ -1192,7 +1194,9 @@ describe('the challenge-on-screen sentence', () => {
       network: LEVER_PRESS, challengeOnScreen: true,
     });
     assert.match(reason, /put up a human-verification challenge/);
-    assert.match(reason, /finish this one yourself/);
+    assert.match(reason, /Choose “It is not there”/);
+    assert.match(reason, /stay in this dashboard/);
+    assert.doesNotMatch(reason, /Open https:\/\//);
     assert.doesNotMatch(reason, /Litos will send this one for you/);
   });
 
