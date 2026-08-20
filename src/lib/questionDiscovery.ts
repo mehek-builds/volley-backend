@@ -5115,6 +5115,23 @@ const EXPLICIT_CITY_RESIDENCE_QUESTION = new RegExp(
 const EXPLICIT_CITY_QUESTION =
   /where are you (currently )?(located|living|based)|current location|where do you live/i;
 
+/**
+ * A UK degree-classification vocabulary: "degree classification", "honours classification", or the
+ * classification bands themselves (First/2:1/2:2/Third). Scoped to those compounds, never to the
+ * bare word "classification" alone, so an unrelated "job classification" or "employee
+ * classification" field on the same form is untouched.
+ *
+ * This is an ACADEMIC-PERFORMANCE question written in UK vocabulary - the same fact US forms ask
+ * for as "GPA" - so it classifies as 'gpa', not 'degree'. Without this the bare word "degree" inside
+ * "degree classification" reached the degree branch first (that branch's own regex has run by the
+ * time gpa's `\bgpa\b` fails to match, since neither "classification" nor "First/2:1" contain the
+ * literal string "gpa"), and the control was answered "Bachelor of Science in Computer Science"
+ * instead of her GPA - a real wrong answer, not a blank, on the one family of question this
+ * vocabulary exists to name.
+ */
+const GPA_CLASSIFICATION_VOCABULARY =
+  /\b(?:degree|honou?rs?)\s+classification\b|\bclassification\s+of\s+(?:your\s+)?degree\b|\b(?:first|upper\s+second|lower\s+second|third)[- ]class\b|\b2:[12]\b|\b1st\s+class\b/i;
+
 // Ported verbatim from generic.ts's classifyField (see that file for the full rationale on
 // ordering - refusals first, citizenship before residence, term before start date, state before
 // city). `label` must already be lowercased by the caller.
@@ -5252,7 +5269,7 @@ function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
   if (START_DATE_QUESTION.test(l)) return 'availability_date';
   if (LOCATION_PREFERENCE_QUESTION.test(l)) return null;
 
-  if (/\bgpa\b|grade average|grade point|academic performance/i.test(l)) return 'gpa';
+  if (/\bgpa\b|grade average|grade point|academic performance|grade percentage|percentage grade|academic percentage/i.test(l) || GPA_CLASSIFICATION_VOCABULARY.test(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
   if (/\bhigh school\b/i.test(l) && /graduat|when|date|year/i.test(l)) return null;
   if (LANGUAGE_QUESTION.test(l)) return 'languages';
@@ -5827,6 +5844,44 @@ function locationStatusAnswer(
   // delegated to onsiteCommitmentAnswer, which now answers from the stored standing preference: a
   // promise to work in an office is not a statement about where she will be LIVING.
   return { skipReason: `where you will be living is yours to answer: "${label.slice(0, 60)}"` };
+}
+
+/**
+ * A GPA control asking for a PERCENTAGE or a UK HONOURS CLASSIFICATION instead of a US 4.0-scale
+ * number: "GPA (e.g. 68% or First/2:1)", "Degree classification", "Grade percentage".
+ *
+ * A US 4.0 GPA does not convert to either vocabulary. There is no honest formula from "3.89" to a
+ * percentage, and none from "3.89" to First/2:1/2:2/Third - the mapping is institution-specific and
+ * inventing one puts a fabricated academic record on a real application. See owner's standing
+ * answering rule: state the real number on its real scale instead of guessing a percentage.
+ *
+ * Deliberately does not match a bare "first" or "percent" without its GPA/classification context -
+ * a GPA-classified label is common enough ("what was your first year GPA?") that the word alone is
+ * not evidence of a percentage/classification ask. Reuses GPA_CLASSIFICATION_VOCABULARY above, the
+ * same compounds classifyFieldIntent routes to 'gpa' by, so the two cannot drift: whatever gets this
+ * control classified as a GPA question in the first place is exactly what asks for the UK format
+ * here, plus the plain "%"/"percent(age)" a form adds once it is already known to be a GPA field
+ * ("What is your GPA? (e.g. 68%)" carries "gpa" and reaches this function by the ordinary route).
+ */
+function gpaWantsPercentageOrClassification(label: string): boolean {
+  return /%|\bpercent(?:age)?\b/i.test(label) || GPA_CLASSIFICATION_VOCABULARY.test(label);
+}
+
+/**
+ * The GPA value to put on a control, honest about which scale it is answering.
+ *
+ * A plain GPA ask gets the raw stored number, exactly as before. A percentage/classification ask
+ * gets the number AND its scale, spelled out, so the answer is legible as "not what you asked for,
+ * but the truth, on its own terms" rather than looking like a percentage that happens to be low.
+ */
+function gpaAnswer(label: string, ap: ApplicationProfileLike): string | null {
+  const trimmed = ap.gpa?.trim();
+  if (!trimmed) return null;
+  if (!gpaWantsPercentageOrClassification(label)) return trimmed;
+  const scale = ap.gpa_scale?.trim();
+  const scaleNumber = scale ? Number(scale) : NaN;
+  const denominator = Number.isFinite(scaleNumber) ? scaleNumber.toFixed(2) : scale;
+  return denominator ? `${trimmed}/${denominator} (US ${scale} scale)` : `${trimmed} (US GPA scale)`;
 }
 
 function degreeAnswer(label: string, inputType: string | undefined, degree: string | undefined): string | null {
@@ -7284,8 +7339,10 @@ export function resolveKnownAnswer(
       const value = graduationYearFieldAnswer(ap.grad_date, ap.grad_year, inputType);
       return value ? { value } : null;
     }
-    case 'gpa':
-      return ap.gpa ? { value: ap.gpa } : null;
+    case 'gpa': {
+      const value = gpaAnswer(label, ap);
+      return value ? { value } : null;
+    }
     case 'gpa_scale':
       return ap.gpa_scale ? { value: ap.gpa_scale } : null;
     case 'major':
