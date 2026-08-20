@@ -5022,6 +5022,8 @@ test('the blocker naming the tick-covered consent control is excused, and only t
   assert.deepEqual(consentTickCoveredBlockers([welded], plan!), [welded]);
   // No plan, no excusal: fail-closed.
   assert.deepEqual(consentTickCoveredBlockers([consentBlocker], null), []);
+  // Both faces of one control arriving together are one identity, and both are excused.
+  assert.deepEqual(consentTickCoveredBlockers([consentBlocker, welded], plan!), [consentBlocker, welded]);
 });
 
 test("Breezy replays HER OWN reviewed acceptance onto the control, recorded as hers, never relabelled", () => {

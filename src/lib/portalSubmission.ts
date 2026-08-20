@@ -1207,7 +1207,7 @@ export function ashbyControlWithinFieldPath(selector: string): string {
   return descended.length <= MANAGED_SELECTOR_MAX_LENGTH ? descended : selector;
 }
 
-function durablePortalSelector(selector: string | undefined): string | undefined {
+export function durablePortalSelector(selector: string | undefined): string | undefined {
   const trimmed = selector?.trim();
   if (!trimmed || trimmed.length > 500 || trimmed.startsWith('[data-litos-discovered-')) return undefined;
   return ashbyControlWithinFieldPath(trimmed);
@@ -1299,11 +1299,20 @@ export function reactSelectListboxSelector(inputId: string): string {
   return `[id="react-select-${quoteAttr(inputId)}-listbox"]`;
 }
 
+/* Rippling names the popup after its control: '<div role="combobox" id="field-90">' opens
+ * '<div role="listbox" id="field-90-list">' (measured live on ats.rippling.com, Easy Dynamics,
+ * 2026-08-20). The id is the join key back to the control, exactly as react-select's is: the
+ * provider echoes {selector, value} and drops label, so the selector must carry the id. */
+export function ripplingListboxSelector(inputId: string): string {
+  return `[id="${quoteAttr(inputId)}-list"]`;
+}
+
 function optionProbeIdForSelector(selector: string | undefined): string | undefined {
   // Matched on the SELECTOR as well as the label because the provider echoes `{selector, value}`
   // and drops `label` entirely (managed-browser.js), so the selector is the only key that is
   // guaranteed to come back.
   return selector?.match(/^\[id="react-select-(.+)-listbox"\]$/)?.[1]
+    ?? selector?.match(/^\[id="(.+)-list"\]$/)?.[1]
     ?? selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_-]*)"\]:is\(select\)$/)?.[1];
 }
 
@@ -1693,7 +1702,12 @@ export function managedOptionProbeTargets(
   alreadyRead: Record<string, string[]> = {},
   discoveryRoleCapability = false,
 ): string[] {
-  if (portalFamily(portal) !== 'greenhouse') return [];
+  /* Greenhouse, and now Rippling. Rippling's bare div comboboxes ship no options in the DOM
+   * until opened, so every one of them reached resolution blind and the fill sent vocabulary the
+   * employer does not offer ('No' into a list reading 'I am not a protected veteran' - measured
+   * on Easy Dynamics, 2026-08-20). The probe machinery is family-agnostic; only the popup's id
+   * shape differs, and ripplingListboxSelector carries it. */
+  if (portalFamily(portal) !== 'greenhouse' && portalFamily(portal) !== 'rippling') return [];
   // A hardcoded education probe is only "already read" when it returned a usable list. Loading,
   // empty and windowed reads are absent from alreadyRead and must enter this fail-closed stage.
   const seen = new Set<string>();
@@ -1735,7 +1749,7 @@ function nativeSelectSelector(controlId: string): string {
   return `[id="${quoteAttr(controlId)}"]:is(select)`;
 }
 
-function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: ManagedOptionProbeTarget) {
+function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: ManagedOptionProbeTarget, portal?: SupportedPortal) {
   if (target.kind === 'native') {
     actions.push({
       type: 'extract',
@@ -1757,7 +1771,15 @@ function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: Mana
   });
   for (const round of [1, 2] as const) {
     actions.push({ type: 'click', selector, label: `option_probe_open:${target.controlId}:${round}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
-    actions.push({ type: 'extract', selector: reactSelectListboxSelector(target.controlId), label: `${MANAGED_OPTION_EXTRACT_PREFIX}${target.controlId}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+    actions.push({
+      type: 'extract',
+      selector: portal && portalFamily(portal) === 'rippling'
+        ? ripplingListboxSelector(target.controlId)
+        : reactSelectListboxSelector(target.controlId),
+      label: `${MANAGED_OPTION_EXTRACT_PREFIX}${target.controlId}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
     actions.push({ type: 'press', selector, value: 'Escape', label: `option_probe_close:${target.controlId}:${round}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
   }
 }
@@ -1775,7 +1797,7 @@ export function buildManagedDiscoveredOptionProbeBatches(
   let actions: ManagedBrowserAction[] = [];
   for (const target of targets) {
     const next: ManagedBrowserAction[] = [];
-    pushDiscoveredOptionProbe(next, target);
+    pushDiscoveredOptionProbe(next, target, portal);
     if (actions.length > 0 && actions.length + next.length > MANAGED_ACTION_LIMIT) {
       batches.push(actions);
       actions = [];
@@ -5587,6 +5609,13 @@ export function consentTickCoveredBlockers(
   if (!planKey) return [];
   const name = selectorControlName(plan.selector);
   const weldedKey = name ? comparable(plan.question + ' ' + name) : null;
+  /* Both faces of ONE control's label are one identity, and both are excused. A count-based
+     ambiguity rule was tried here and measured off: sanitizeProviderBlockers dedupes identical
+     strings upstream, so two controls wearing one sentence arrive as one blocker anyway (nothing
+     to count), while a raw face and a welded face of the SAME control arriving together would
+     trip the count and re-open the exact deadlock this excusal exists to clear. A tenant twin
+     control sharing the sentence therefore parks at submit on the employer's own validation -
+     the fail direction is a stall, never a wrong send. */
   return blockers.filter((blocker) => {
     const match = blocker.match(/^"(.+)" is required and is still empty$/);
     if (!match) return false;

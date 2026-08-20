@@ -95,6 +95,7 @@ import {
   isConsentGrantConditionalFamily,
   managedConsentTickPlan,
   managedImpliedConsentSubmitLicence,
+  durablePortalSelector,
   consentTickCoveredBlockers,
   portalCanAutoSubmit,
   portalCanAutoSubmitWithConsentGrant,
@@ -2861,10 +2862,56 @@ async function prepareManaged(
   const failedQuestionKeys = failedFields
     .map((field) => normalizeReviewQuestionLabel(field.label).toLowerCase())
     .filter((key) => !storedApplicantAnswerKeys.has(key));
+  /* OLD JUNK RETIRES WHEN ITS CONTROL IS RE-CAPTURED UNDER ITS REAL NAME.
+   *
+   * A discovery defect mints a question under a wrong label ("Type your response",
+   * "B1 (Intermediate) or below"); the defect gets fixed; the next discovery captures the same
+   * control under the employer's actual words - and the old row used to stay forever, a required
+   * question nobody can act on, sitting NEXT TO its clean twin and holding the review loop open
+   * (measured on Transparent Hiring and Mytos, 2026-08-19/20). Retired only under three proofs,
+   * because a transient miss must not eat real questions: the stale label was NOT re-discovered,
+   * its selector WAS re-discovered (form reached, control present) under a DIFFERENT label, and
+   * the applicant never touched the row - an answer she chose herself is never retired by a label
+   * rename, exactly as the option-probe exemption above keeps hers. */
+  const discoveredLabelKeys = new Set(discoveredQuestions
+    .map((question) => normalizeReviewQuestionLabel(question.question).toLowerCase()));
+  /* DURABLE selectors only, on both sides. A [data-litos-discovered-N] marker is stamped per
+     discovery page load, so run A's marker 3 and run B's marker 3 are the same STRING for
+     potentially different controls - an ordinal coincidence that would satisfy the
+     "selector re-discovered" proof and retire a legitimate row on a transient miss.
+     durablePortalSelector already refuses markers for exactly this reason. */
+  const discoveredLabelBySelector = new Map(discoveredQuestions
+    .flatMap((question) => {
+      const durable = durablePortalSelector(question.portal_selector);
+      return durable ? [[durable, normalizeReviewQuestionLabel(question.question).toLowerCase()] as const] : [];
+    }));
+  const staleRelabeledKeys = storedQuestions
+    .filter((stored) => {
+      if (applicantChoseStoredAnswer(stored)) return false;
+      /* ANY standing answer keeps the row, whatever wrote it. The label-flap class (X one run,
+         Y the next, one stable control) would otherwise retire and re-mint on every flip, and a
+         drafted essay or resolver answer riding the retired row would be spent each time. The
+         junk this exists to clear is the UNANSWERED machine-labelled row that blocks the review
+         loop, and empty is the only shape that row has. */
+      if (stored.answer?.trim()) return false;
+      const selector = durablePortalSelector(stored.portal_selector);
+      if (!selector) return false;
+      const key = normalizeReviewQuestionLabel(stored.question).toLowerCase();
+      if (discoveredLabelKeys.has(key)) return false;
+      const rediscovered = discoveredLabelBySelector.get(selector);
+      return Boolean(rediscovered && rediscovered !== key);
+    })
+    .map((stored) => normalizeReviewQuestionLabel(stored.question).toLowerCase());
+  if (staleRelabeledKeys.length > 0) {
+    fastify.log.info(
+      { applicationId: row.id, portal, retired: staleRelabeledKeys },
+      'Stored machine-labelled questions retired: their controls re-discovered under real labels',
+    );
+  }
   const mergedQuestions = mergeDiscoveredPortalQuestions(
     discoveredQuestions,
     storedQuestions,
-    [...invalidatedQuestionKeys, ...failedQuestionKeys],
+    [...invalidatedQuestionKeys, ...failedQuestionKeys, ...staleRelabeledKeys],
     optionProbe.failedIds,
   );
   packet.questions = mergedQuestions.map((q) => ({
