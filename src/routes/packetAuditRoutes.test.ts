@@ -189,6 +189,38 @@ test('the packet-audit route audits the refreshed questions the send gate verifi
   );
 });
 
+/* A THIRD DEADLOCK IN THE SAME FAMILY, on the seam between two HTTP requests rather than inside one.
+ *
+ * The route above already hashes auditQuestions - refreshed and persisted - rather than the raw
+ * stored row, which is what closed the 2026-08-13 deadlock. That fixed the SERVER side agreeing with
+ * itself. It did nothing for the CLIENT: the response below carried packet_audit and pdf but not
+ * auditQuestions itself, so a caller had no way to learn the audit it just took, and the acknowledgement
+ * it is about to give, describe a question set that can differ from whatever it still holds locally.
+ *
+ * Measured with a synthetic packet on 2026-08-20: a question the resolver holds (no attributed
+ * "she supplied this" claim) round-trips through PUT /review/answers unchanged, so no claim is
+ * minted for it there. This route's own refreshKnownQuestionAnswers call then blanks it - correctly,
+ * nothing here proves she supplied it - and persists that. A caller that goes on to POST
+ * /submit-request with its own older, still non-blank copy of that same answer hands it back through
+ * a SECOND merge, which - comparing against the now-blanked row - reads the difference as a fresh
+ * edit and mints a claim for it, reinstating the value THIS audit just removed. Two computations of
+ * one unedited packet, three seconds apart, disagree, and the acknowledgement this audit produces is
+ * spent by a submit-request that should never have diverged from it.
+ *
+ * THE FIX IS THE RESPONSE, not the merge or refresh rules: handing the caller the questions this
+ * audit actually hashed lets it resubmit exactly those, closing the gap the two merges would
+ * otherwise disagree across. Narrowing the merge or refresh logic instead would either reopen the
+ * 802-answer laundering incident (minting claims on an unedited resubmission) or the 2026-08-12 IMC
+ * hold (trusting an unattributed answer with no claim at all). */
+test('the packet-audit response hands back the questions it hashed, or the client cannot stay in sync', () => {
+  const route = routeSlice("'/applications/:id/packet-audit'", "'/applications/:id/packet-audit/acknowledge'");
+  assert.match(
+    route,
+    /questions:\s*auditQuestions,?\s*\n\s*\};/,
+    'the response must return the exact refreshed set this audit hashed and persisted',
+  );
+});
+
 /* The code step needs a CURRENT acknowledgement, so awaiting_security_code cannot be past auditing.
  *
  * Entering the security code performs a fresh fill and send from the packet, and
