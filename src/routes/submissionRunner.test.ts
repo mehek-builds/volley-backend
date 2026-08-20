@@ -3271,3 +3271,97 @@ test('every route verifier names the questions it hashes', async () => {
     assert.deepEqual(bare, [], name + ' has a verifier hashing raw stored rows: ' + bare.join(' | '));
   }
 });
+
+/* THE REVIEWED OPTION THE PROFILE CANNOT EXPRESS, measured live on the Mytos Lever form
+ * (packet 16f1c744, 2026-08-20). The degree-classification select offers UK honours rows and GPA
+ * rows; she reviewed and chose "GPA 3.5-3.8", byte for byte an offered option, and the profile's
+ * own answer for that label ("Bachelor's Degree") matches nothing on the list. The old precedence
+ * required the profile to be silent, so her choice was discarded on every rebuild and the run
+ * re-minted "none of the options match your saved answer" about a choice she had already made. */
+test('a current-round reviewed option stands when the profile value matches nothing on the list', async () => {
+  const reviewedAt = '2026-08-20T18:30:00.000Z';
+  const current: ApplicationReviewState = {
+    jd_text: 'Junior software engineer in London.',
+    role: 'Junior/Mid Software Engineer',
+    portal_url: 'https://jobs.lever.co/mytos/abc',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: '94905a8f-baf7-42ca-824a-7bfb6f15bc26',
+      question: 'what was your degree classification? ✱',
+      answer: 'GPA 3.5-3.8',
+      kind: 'required',
+      required: true,
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    }],
+    questions_reviewed_at: reviewedAt,
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'What was your degree classification? ✱',
+      selector: '[data-litos-discovered-1]',
+      inputType: 'select',
+      maxLength: null,
+      required: true,
+      options: [
+        'First-Class Honours (First or 1st) (70% and above)',
+        'Upper Second-Class Honours (2:1, 2.i) (60-70%)',
+        'GPA 3.0-3.4', 'GPA 3.5-3.8', 'GPA 3.9+', 'Other',
+      ],
+    }],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { degree: "Bachelor's Degree" },
+    true,
+    'lever',
+  );
+  const question = result.questions.find((q) => q.question.toLowerCase().startsWith('what was your degree classification'));
+  assert.equal(question?.answer, 'GPA 3.5-3.8');
+  assert.equal(question?.answer_source, 'applicant_review');
+  assert.deepEqual(result.attentionReasons, []);
+});
+
+test('the profile still wins when it can name an offered option itself', async () => {
+  const reviewedAt = '2026-08-20T18:30:00.000Z';
+  const current: ApplicationReviewState = {
+    jd_text: 'Junior software engineer in London.',
+    role: 'Junior/Mid Software Engineer',
+    portal_url: 'https://jobs.lever.co/mytos/abc',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'q-1',
+      question: 'expected graduation date ✱',
+      answer: 'January 2027 - July 2027',
+      kind: 'required',
+      required: true,
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    }],
+    questions_reviewed_at: reviewedAt,
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'Expected graduation date ✱',
+      selector: '[data-litos-discovered-1]',
+      inputType: 'select',
+      maxLength: null,
+      required: true,
+      options: ['January 2027 - July 2027', 'January 2028 - July 2028'],
+    }],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { grad_date: 'May 2028', grad_year: 2028 },
+    true,
+    'lever',
+  );
+  const question = result.questions.find((q) => q.question.toLowerCase().startsWith('expected graduation date'));
+  assert.equal(question?.answer, 'January 2028 - July 2028');
+});
