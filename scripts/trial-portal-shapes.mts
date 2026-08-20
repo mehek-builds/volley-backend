@@ -72,6 +72,10 @@ import {
   buildManagedPortalActions,
   clickFinalSubmit,
   fillPortal,
+  COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT,
+  SUBMIT_CANDIDATE_SELECTOR,
+  READ_CONTROL_LABEL,
+  chooseSubmitControl,
   type SubmissionPacket,
 } from '../src/lib/portalSubmission';
 
@@ -827,6 +831,21 @@ async function main() {
       try {
         await page.goto(shapeUrl(shape, query), { waitUntil: 'domcontentloaded', timeout: 30_000 });
         await page.waitForTimeout(500);
+        /* READ_SUBMIT_READINESS_SCRIPT only trusts a form once `data-litos-submit-scope-v1="active"`
+           is on it, and in production that attribute is set by COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT,
+           called on the chosen submit control inside clickFinalSubmit, immediately before the gate
+           runs. Evaluating the readiness script on its own - as this engine did before - never binds
+           the scope, so scanRoot is always null and every case here failed on "Litos could not bind
+           required-field validation to the selected application form" regardless of the actual
+           defect being measured. Reproducing clickFinalSubmit's own control-selection here, rather
+           than calling the gate a beat too early, is what makes this a faithful replay of the
+           production sequence instead of a shortcut around it. */
+        const handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
+        const labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
+        const chosen = chooseSubmitControl(labels);
+        if (chosen !== null) {
+          await handles[chosen]!.evaluate(COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT).catch(() => null);
+        }
         return await page.evaluate(READ_SUBMIT_READINESS_SCRIPT) as { blocking: string[]; stale: string[] };
       } finally {
         await page.close();
