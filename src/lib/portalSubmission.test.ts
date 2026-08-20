@@ -5016,6 +5016,45 @@ test("Breezy replays HER OWN reviewed acceptance onto the control, recorded as h
   }
 });
 
+test('a bare [name="..."] selector still names its one control, and the anchoring still refuses everything wider', () => {
+  /* Measured live 2026-08-20, second Transparent Hiring run after the plan shipped: the STORED
+   * packet question carries portal_selector `[name="gdprAgreement"]` with no element prefix, the
+   * prefixed regex answered null, the plan saw zero candidates, and the run parked on the very
+   * consent the grant licenses. The bare attribute selector, anchored end to end, names exactly
+   * one control by its name attribute, which is all the rule guarantees. */
+  const bare = {
+    ...capturePacket,
+    employerName: 'Transparent Hiring',
+    applicationProfile: breezyGrantedProfile,
+    questions: [{
+      ...breezyConsentQuestion,
+      answerSource: 'applicant_review',
+      portalSelector: '[name="gdprAgreement"]',
+    }],
+  };
+  const plan = managedConsentTickPlan('breezy', bare);
+  assert.ok(plan, 'the live stored selector shape must produce the plan');
+  assert.equal(plan!.selector, '[name="gdprAgreement"]');
+  assert.equal(plan!.answerProvenance, 'applicant_review');
+  const ticks = breezyTickClicks(buildManagedPortalActions('breezy', bare, true));
+  assert.equal(ticks.length, 1);
+  assert.equal(ticks[0].selector, '[name="gdprAgreement"]');
+
+  // The widening admits ONLY the missing prefix. Everything the anchor refused stays refused.
+  for (const wider of [
+    'div [name="gdprAgreement"]',
+    'form input[name="gdprAgreement"]',
+    'input[name="gdprAgreement"], input[name="smsConsent"]',
+    '[name="gdprAgreement"] input',
+    '[data-x="1"][name="gdprAgreement"]',
+  ]) {
+    assert.equal(managedConsentTickPlan('breezy', {
+      ...bare,
+      questions: [{ ...breezyConsentQuestion, answerSource: 'applicant_review', portalSelector: wider }],
+    }), null, wider);
+  }
+});
+
 test('Breezy without the grant, with two consent-shaped controls, or on the wrong wording never ticks, and the static story never moves', () => {
   // No grant: no tick and gdprAgreement untouched, but the submit press is NOT the grant's to
   // withhold - breezy is statically autonomous, and the run parks on the tenant's own validation

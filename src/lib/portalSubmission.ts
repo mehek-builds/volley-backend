@@ -5375,9 +5375,15 @@ const CONSENT_TICK_CONTROL_NAMES: Record<ConsentGrantConditionalFamily, readonly
 const HONEYPOT_CONTROL_NAME_RE = /\b(?:honeypot|hp_|bot[-_]?field|hidden[-_]?field)\b/i;
 
 /* A discovery-shape selector naming exactly one control: `input[name="..."]` as stableSelector
- * writes it. Anchored end to end so an alternation, a descendant chain or anything page-wide can
- * never qualify - the plan ticks one named control or nothing. */
-const SINGLE_NAMED_CONTROL_SELECTOR_RE = /^(?:input|textarea|select)\[name="((?:[^"\\]|\\.)*)"\]$/;
+ * writes it, or the bare `[name="..."]` an earlier capture wrote without the element prefix.
+ * Measured live 2026-08-20 on the Transparent Hiring (breezy) packet: the stored consent question
+ * carries portal_selector `[name="gdprAgreement"]`, the element-prefixed regex returned null, the
+ * plan saw zero candidates, and the run parked on the very consent the grant licenses. A bare
+ * attribute selector anchored end to end still names exactly one control by its name attribute,
+ * which is the only property this rule exists to guarantee. Anchoring is unchanged, so an
+ * alternation, a descendant chain or anything page-wide can still never qualify - the plan ticks
+ * one named control or nothing. */
+const SINGLE_NAMED_CONTROL_SELECTOR_RE = /^(?:input|textarea|select)?\[name="((?:[^"\\]|\\.)*)"\]$/;
 
 function selectorControlName(selector: string | undefined): string | null {
   const match = SINGLE_NAMED_CONTROL_SELECTOR_RE.exec(selector?.trim() ?? '');
