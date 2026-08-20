@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { planResumeLayout } from './resumeRender';
+import { validateResumeSpec } from './resumeValidate';
 import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
@@ -123,5 +124,29 @@ describe('what it refuses to add', () => {
     const before = bulletCount(dense);
     const plan = planResumeLayout(dense, CONTACT, '', bank(OWN, 'Employer 0'));
     assert.equal(bulletCount(plan.spec), before, 'a page spacing can fill was expanded anyway');
+  });
+});
+
+describe('the validator accepts what the expand pass produces', () => {
+  test('a five-bullet entry is legal, because a full page is not a defect', () => {
+    /* THE REGRESSION THIS EXISTS FOR, found on the first production run after the expand pass
+     * shipped: "Stripe: 5 bullets (max 3)" - a hard quality hold on a resume whose only sin was
+     * being full. The validator was gating on the SELECTION target while the renderer was legally
+     * printing up to the EXPANDED one. */
+    const spec = specWith(OWN.slice(0, RESUME_CONTENT_LIMITS.expandedBulletsPerEntry));
+    const result = validateResumeSpec(spec, '', bank(OWN));
+    assert.ok(
+      !result.issues.some((issue) => /bullets \(max/.test(issue)),
+      `a legal expanded entry was refused: ${result.issues.join('; ')}`,
+    );
+  });
+
+  test('and one bullet past that ceiling is still refused', () => {
+    const tooMany = [...OWN, 'Documented the on-call rotation and cut escalation time by a third.'];
+    const result = validateResumeSpec(specWith(tooMany), '', bank(tooMany));
+    assert.ok(
+      result.issues.some((issue) => /bullets \(max/.test(issue)),
+      'the ceiling is not enforced at all any more',
+    );
   });
 });

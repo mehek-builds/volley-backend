@@ -860,9 +860,20 @@ export function validateResumeSpec(
   const kw = jdKeywords(jdText);
 
   for (const entry of spec.experience) {
-    if (entry.bullets.length > RESUME_CONTENT_LIMITS.maxBulletsPerEntry) {
+    /* THE EXPANDED CEILING, not the selection target, and the difference matters here.
+     *
+     * `maxBulletsPerEntry` is what the model is asked to SELECT - three, because the strongest three
+     * lines are what a reader gets through. `expandedBulletsPerEntry` is what a legal resume may
+     * PRINT, because a page that spacing cannot fill is topped up from the student's own unused
+     * bank evidence (see planResumeLayout's expand pass).
+     *
+     * Validating against the selection target refused those resumes outright: measured on the first
+     * production run after that pass shipped, "Stripe: 5 bullets (max 3)" - a hard quality hold on
+     * a document whose only sin was being full. The selection discipline is kept by the prompt and
+     * by the floor's own slice, not by this gate. */
+    if (entry.bullets.length > RESUME_CONTENT_LIMITS.expandedBulletsPerEntry) {
       issues.push(
-        `${entry.org}: ${entry.bullets.length} bullets (max ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry})`,
+        `${entry.org}: ${entry.bullets.length} bullets (max ${RESUME_CONTENT_LIMITS.expandedBulletsPerEntry})`,
       );
     }
     if (entry.bullets.length === 0) {
