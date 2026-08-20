@@ -108,6 +108,23 @@ test('screenshot kinds reject each other object keys before storage', async () =
   assert.equal(requested, false);
 });
 
+test('identity-provider subject ids remain valid screenshot path segments', async () => {
+  const subjectKey = 'users/google-oauth2|mehek.mandal+jobs@example.com/submission-runs/run-1/filled.png';
+  let storedKey = '';
+  await storeFilledPreviewScreenshot(subjectKey, png, {
+    blobPut: async (objectKey) => {
+      storedKey = objectKey;
+      return { url: 'https://blob.example/filled.png' };
+    },
+  });
+  assert.equal(storedKey, subjectKey);
+
+  await assert.rejects(
+    storeFilledPreviewScreenshot('users/google/../../escape/submission-runs/run-1/filled.png', png),
+    /Filled preview screenshot object key is invalid/,
+  );
+});
+
 test('controlled QA capture rejects a remote endpoint before making a request', async () => {
   enableCapture('https://qa.example/receipts');
   let requested = false;

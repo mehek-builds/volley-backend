@@ -57,7 +57,12 @@ function screenshotBytes(body: Buffer): { bytes: number; sha256: string } {
 
 function objectKeyPattern(kind: SubmissionScreenshotKind): RegExp {
   const filename = kind === 'filled_preview' ? 'filled' : 'receipt';
-  return new RegExp(`^users/[A-Za-z0-9_-]+/submission-runs/[A-Za-z0-9_-]+/${filename}\\.png$`);
+  /* Identity-provider subject ids are opaque path segments. Auth0-style subjects contain `|`,
+   * email-derived subjects can contain `@`, `.` or `+`, and none of those characters can escape a
+   * Blob path segment. Continue excluding slashes, backslashes and whitespace so traversal and
+   * malformed keys still fail before storage. */
+  const safeSegment = '[A-Za-z0-9._@|+\\-]+';
+  return new RegExp(`^users/${safeSegment}/submission-runs/${safeSegment}/${filename}\\.png$`);
 }
 
 export async function storeSubmissionScreenshot(

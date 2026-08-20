@@ -2672,7 +2672,9 @@ test('one control that could not be read does not silence the questions that rea
    * ONE fill, and it carries the resolved answer. The count matters as much as the value: the limit
    * is still 1 on purpose (see comboboxValueLimit), because a second candidate would reopen a
    * correctly committed react-select and click option-0 of whatever menu it found. */
-  const graduationFills = actions.filter((action) => action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill');
+  const graduationFills = actions.filter((action) =>
+    (action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill')
+    || (action.type === 'fillByLabelText' && action.label?.startsWith('question:') && action.text === graduation?.question));
   assert.deepEqual(graduationFills.map((action) => action.value), ['January 2028 - July 2028'],
     'the control is attempted with its resolved answer');
   assert.equal(graduationFills.every((action) => action.value === graduation?.answer), true,
@@ -2742,7 +2744,8 @@ function submitRunFills(input: {
     })),
   } as Parameters<typeof buildManagedPortalActions>[1]);
   return actions
-    .filter((action) => action.selector === input.selector && action.type === 'fill')
+    .filter((action) => (action.selector === input.selector && action.type === 'fill')
+      || (action.type === 'fillByLabelText' && action.label?.startsWith('question:') && action.text === input.label))
     .map((action) => action.value);
 }
 
@@ -2803,7 +2806,8 @@ test('a band-shaped stale record loses to a profile that has moved', () => {
       }],
     } as Parameters<typeof buildManagedPortalActions>[1],
   )
-    .filter((action) => action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill')
+    .filter((action) => (action.selector === `#${IMC_GRADUATION_ID}` && action.type === 'fill')
+      || (action.type === 'fillByLabelText' && action.label?.startsWith('question:') && action.text === 'Expected graduation date'))
     .map((action) => action.value);
 
   assert.deepEqual(prepareFills('January 2027 - July 2027', 'May 2027'), ['Spring 2028'],
