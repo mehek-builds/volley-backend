@@ -5461,6 +5461,33 @@ export const MANAGED_CONSENT_TICK_GUARD_LABEL = 'consent_tick_honeypot_guard';
 export const MANAGED_CONSENT_TICK_LABEL_PREFIX = 'question_consent_tick';
 
 /**
+ * THE SAME CONTEXT SHAPE resolveKnownAnswer'S CALLERS RESOLVE AGAINST, recomposed from the packet
+ * rather than trusted, and the ONE place in this file that does the recomposing. packet.jdText is
+ * the raw posting prose; the frozen employer line lives only in the discovery pass's composed
+ * context (applicationContextForQuestionResolution, lib/questionDiscovery.ts), and several
+ * resolveKnownAnswer branches - a bare "Source" label, "have you applied here before", Teamtailor's
+ * platform-default consent sentence embedding the tenant's name - are gated on that marker line,
+ * not on jdText alone.
+ *
+ * Every fill-time call in this file that re-resolves a control against the profile (as opposed to
+ * replaying an already-resolved packet.questions answer) MUST go through this rather than passing
+ * packet.jdText bare. It used to be two independent inline copies of this exact composition
+ * (managedConsentTickPlan, managedImpliedConsentSubmitLicence) and one call site
+ * (fillResolvedRequiredField) that had no copy at all and passed packet.jdText bare - reproduced
+ * live 2026-08-20 (CBS Consulting / recruitee) as the same packet_stale false positive PR #649 was
+ * meant to close everywhere. One function means the three can never again diverge into three
+ * different literal strings for one packet.
+ *
+ * A packet with no employerName composes no employer line and the gates that need it hold,
+ * fail-closed, exactly as before this function existed.
+ */
+function packetResolverContext(packet: SubmissionPacket): string {
+  return [frozenJobEmployerContext(packet.employerName ?? ''), packet.jdText ?? '']
+    .filter(Boolean)
+    .join('\n');
+}
+
+/**
  * WHETHER THIS RUN MAY TICK THE CONSENT CONTROL, and exactly which one.
  *
  * Null is "park": fill what the family always fills, press nothing, hand off - today's behaviour,
@@ -5528,15 +5555,13 @@ export function managedConsentTickPlan(
     name,
   );
   if (!questionText || FUTURE_JOBS_RETENTION_CONSENT_RE.test(questionText)) return null;
-  /* THE SAME CONTEXT SHAPE THE RESOLVER USED, recomposed rather than trusted. packet.jdText is the
-   * raw posting prose; the frozen employer line lives only in the discovery pass's composed
-   * context, and Teamtailor's platform-default sentence writes the tenant's name mid-clause
-   * ("confirm that Fully store my personal details..."). Without the line, the grammar's coverage
-   * accounting cannot place that name and this re-derivation held a licence the resolver had
-   * already granted. A packet with no employerName composes no line and parks, fail-closed. */
-  const licenceContext = [frozenJobEmployerContext(packet.employerName ?? ''), packet.jdText ?? '']
-    .filter(Boolean)
-    .join('\n');
+  /* THE SAME CONTEXT SHAPE THE RESOLVER USED, recomposed rather than trusted. See
+   * packetResolverContext's own comment above for the mechanism: Teamtailor's platform-default
+   * sentence writes the tenant's name mid-clause ("confirm that Fully store my personal
+   * details..."), and without the frozen employer line the grammar's coverage accounting cannot
+   * place that name, so this re-derivation held a licence the resolver had already granted. A
+   * packet with no employerName composes no line and parks, fail-closed. */
+  const licenceContext = packetResolverContext(packet);
   const licence = consentAcknowledgementLicence(questionText, ap, licenceContext || undefined);
   if (!licence) return null;
   // Condition 4 of the block comment above: whose acceptance this is. Machine acceptance
@@ -5606,7 +5631,7 @@ export function managedImpliedConsentSubmitLicence(
   });
   if (consentShaped) return null;
   const sentence = `By submitting this application, I agree that I have read the Privacy Policy and confirm that ${employer} store my personal details to be able to process my job application.`;
-  const licenceContext = [frozenJobEmployerContext(employer), packet.jdText ?? ''].filter(Boolean).join('\n');
+  const licenceContext = packetResolverContext(packet);
   const licence = consentAcknowledgementLicence(sentence, ap, licenceContext || undefined);
   return licence ? { licence, sentence } : null;
 }
@@ -8775,10 +8800,15 @@ async function fillResolvedRequiredField(
   const options = tag === 'select'
     ? await field.locator('option').allTextContents().catch(() => [] as string[])
     : [];
+  /* THE ENRICHED CONTEXT, NOT packet.jdText BARE. See packetResolverContext's own comment above for
+   * the mechanism and the 2026-08-20 CBS Consulting / recruitee production measurement: this was
+   * the one live call site PR #649 left unswitched, and resolveKnownAnswer (reached through
+   * resolveProfileField below) gates several branches - a bare "Source" label, "have you applied
+   * here before" - on the frozen employer marker line only this composition carries. */
   const resolved = resolveProfileField(
     { label, inputType: tag === 'select' ? 'select' : type, options },
     packet.applicationProfile,
-    packet.jdText,
+    packetResolverContext(packet),
     packet.roleCountry ?? postingCountryFromJobContext({ location: packet.roleLocation, locations: packet.roleLocations }),
     packet.roleCountryCode ?? postingCountryCodeFromJobContext({ location: packet.roleLocation, locations: packet.roleLocations }),
   );

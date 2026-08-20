@@ -983,6 +983,72 @@ function oneWorkableLocator(overrides: Record<string, unknown> = {}): any {
   return locator;
 }
 
+/**
+ * ONE UNDISCOVERED REQUIRED FIELD, present as `input[required]` and named only by aria-label - the
+ * shape fillResolvedRequiredField exists for, and the shape the direct-Playwright generic scan at
+ * the end of fillPortal reaches for every family except the account-walled ones.
+ */
+function requiredFieldFixture(label: string) {
+  let filledValue: string | undefined;
+  const field = oneWorkableLocator({
+    getAttribute: async (name: string) => (name === 'type' ? 'text' : name === 'aria-label' ? label : null),
+    evaluate: async () => 'INPUT',
+    fill: async (value: string) => { filledValue = value; },
+  });
+  const requiredLocator: any = {
+    count: async () => 1,
+    first: () => field,
+    nth: (index: number) => (index === 0 ? field : absentWorkableLocator()),
+  };
+  const page: any = {
+    locator: (selector: string) =>
+      (selector === 'input[required], textarea[required], select[required]' ? requiredLocator : absentWorkableLocator()),
+  };
+  return { page, filledValue: () => filledValue };
+}
+
+/* THE 7TH CALL SITE, flagged by code review on PR #649 and left as a fast-follow: this is the one
+ * live resolveKnownAnswer call in this file that still passed packet.jdText bare instead of the
+ * enriched context managedConsentTickPlan and managedImpliedConsentSubmitLicence already recompose.
+ * Reproduced live 2026-08-20 (CBS Consulting / recruitee, real account) as a packet_stale-class
+ * false positive on a bare "Source" field: referralAnswer's parseReferralQuestion only answers a
+ * bare "Source" label when frozenJobEmployerFromContext(jdText) finds the marker line, which
+ * packet.jdText alone never carries. See packetResolverContext's own comment in portalSubmission.ts. */
+test('fillResolvedRequiredField resolves a bare "Source" field once the packet can name the employer', async () => {
+  const fixture = requiredFieldFixture('Source');
+  const result = await fillPortal(fixture.page, 'recruitee', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+    applicationProfile: { referral_source_default: 'LinkedIn' },
+    employerName: 'CBS Consulting',
+    jdText: 'We build compliance software for regulated industries.',
+  });
+  assert.equal(fixture.filledValue(), 'LinkedIn');
+  assert.ok(result.filledFields.includes('required:Source'));
+  assert.equal(result.blockers.some((blocker) => /source/i.test(blocker)), false);
+});
+
+test('fillResolvedRequiredField still holds a bare "Source" field when the packet cannot name the employer', async () => {
+  // Fail-closed control: no employerName means no frozen marker, so the field is correctly left for
+  // the applicant, exactly as before this fix - a genuinely unnamed employer must still refuse.
+  const fixture = requiredFieldFixture('Source');
+  const result = await fillPortal(fixture.page, 'recruitee', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+    applicationProfile: { referral_source_default: 'LinkedIn' },
+    jdText: 'We build compliance software for regulated industries.',
+  });
+  assert.equal(fixture.filledValue(), undefined);
+  assert.equal(result.filledFields.includes('required:Source'), false);
+  assert.ok(result.blockers.some((blocker) => /source/i.test(blocker)));
+});
+
 function workablePhoneUploadFixture(
   countryOptionCount = 1,
   overwritePhoneAfterMs?: number,
