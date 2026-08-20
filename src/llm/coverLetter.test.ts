@@ -206,14 +206,29 @@ const TRUVETA_CONTESTED = { labels: ['0.1', '2.3'], signatures: new Set(['0.1', 
 test('the Greater Seattle promise is an issue, not a warning', () => {
   const result = validateCoverLetter(TRUVETA_LETTER, 'Truveta', 'Software Engineering Intern', TRUVETA_SOURCE);
 
-  /* The whole of defect 1. The letter DID come back with a signal: the stored packet carries
-   * "Review names not found in candidate data: Greater Seattle". A warning is written into the
-   * artifact and the letter is persisted anyway, so the signal annotated a promise instead of
-   * stopping it. The assertion that matters is which list it lands in. */
+  /* The whole of defect 1. The letter DID come back with a signal: the stored packet carries a
+   * warning naming "Greater Seattle" as a name not found in her background. A warning is written
+   * into the artifact and the letter is persisted anyway, so the signal annotated a promise instead
+   * of stopping it. The assertion that matters is which list it lands in. */
   const promise = result.issues.find((issue) => issue.includes('promises something'));
   assert.ok(promise, `expected a blocking issue, got issues=${JSON.stringify(result.issues)}`);
   assert.match(promise!, /I am based in Los Angeles but able to work from the Greater Seattle area/);
   assert.equal(result.warnings.some((warning) => warning.includes('promises something')), false);
+});
+
+// The leak this pins: an internal-sounding diagnostic ("Review names not found in candidate
+// data: X") reached the applicant-facing "Needs your input" panel verbatim, because the warning
+// text itself was never written for her to read. The mechanism (an advisory warning on the
+// artifact) is correct and stays; only the copy has to be honest and human-appropriate. Measured
+// live in production on two applications, 2026-08-20.
+test('the unfamiliar-name warning reads like a note to the applicant, not an internal diagnostic', () => {
+  const result = validateCoverLetter(TRUVETA_LETTER, 'Truveta', 'Software Engineering Intern', TRUVETA_SOURCE);
+
+  const nameWarning = result.warnings.find((warning) => warning.includes('Greater Seattle'));
+  assert.ok(nameWarning, `expected an unfamiliar-name warning, got warnings=${JSON.stringify(result.warnings)}`);
+  assert.match(nameWarning!, /^Names\/orgs not found in your background, Truveta, or Software Engineering Intern \(verify before sending\): /);
+  assert.doesNotMatch(nameWarning!, /candidate data/i);
+  assert.doesNotMatch(nameWarning!, /^Review /);
 });
 
 test('the letter with the promise deleted is accepted, and nothing is written in its place', () => {

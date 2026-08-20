@@ -96,7 +96,16 @@ export function validateCoverLetter(
    * unfamiliar name stays a warning because an unfamiliar name is worth a glance and nothing more.
    */
   const properNouns = ungroundedProperNouns(cleaned, wordSet(`${candidateSource} ${company} ${role}`));
-  if (properNouns.length > 0) warnings.push(`Review names not found in candidate data: ${properNouns.join(', ')}`);
+  /* USER-FACING, so it reads like a note to the applicant reviewing her own letter, not like the
+   * internal diagnostic it used to be. The old text, "Review names not found in candidate data:
+   * X", is written for whoever maintains the grounding check: "candidate data" names an internal
+   * corpus and "review" with no object reads as an imperative aimed at a developer. It shipped
+   * verbatim into the applicant-facing panel because nothing between here and the screen was ever
+   * meant to translate it, the same shape of leak documented in fieldLabel.ts. Phrased to match the
+   * identical check's already-shipped applicant-facing wording in applicationAnswer.ts. */
+  if (properNouns.length > 0) {
+    warnings.push(`Names/orgs not found in your background, ${company}, or ${role} (verify before sending): ${properNouns.join(', ')}`);
+  }
   if (/\bI am writing to (?:apply|express)|\bI believe I would be a great fit\b/i.test(cleaned)) {
     warnings.push('Opening uses generic cover-letter language');
   }
