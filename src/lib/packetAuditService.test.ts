@@ -12,6 +12,8 @@ import {
 } from './packetAuditService';
 import { createPdfGenerationBinding, pdfGenerationBindingIsCurrent } from './pdfGenerationBinding';
 import { mergeSubmittedApplicationReviewQuestions } from './applicationReview';
+import { resolveSubmittedApplicationAnswers } from './submittedAnswers';
+import { refreshKnownQuestionAnswers } from './questionDiscovery';
 
 test('stored packet PDF requires an exact PDF signature', () => {
   assert.equal(validStoredPdf({ bytes: Buffer.from('%PDF-1.7\npacket') }), true);
@@ -1027,6 +1029,81 @@ test('provenance stripped by the submitted-answer merge does not spend the ackno
     verdict.valid ? 'valid' : verdict.reason,
     'valid',
     'the merge door produces the same packet, so it must not produce packet_stale either',
+  );
+});
+
+/* THE RETRY-LOOP MEASURED ON 2026-08-20: "Review and fill" audits clean, "Fill company form"
+ * immediately answers packet_stale, every time, on a packet nothing the applicant touched.
+ *
+ * THE SHAPE. A question the resolver holds - no profile fact answers it, so nothing but her own
+ * review can - carries a non-blank answer with no answer_source, exactly like the 130 packets in
+ * submittedAnswers.test.ts that had never been through a review round. Reviewing and filling the
+ * packet posts that same unedited answer back through PUT /applications/:id/review/answers, whose
+ * merge (mergeSubmittedApplicationReviewQuestions) sees the answer is UNCHANGED and mints no claim
+ * for it - correctly, an untouched Save is not a choice. POST /applications/:id/packet-audit then
+ * refreshes the row: refreshKnownQuestionAnswers finds a resolver-held question with nothing proving
+ * she supplied it, and blanks it. That refreshed, blanked set is what gets hashed and acknowledged.
+ *
+ * If the caller now presses "Fill company form" with its OWN, still non-blank copy of that same
+ * answer - the one the audit above just blanked, never returned to it - POST /submit-request's own
+ * merge (inside resolveSubmittedApplicationAnswers) compares that non-blank submission against the
+ * NOW-BLANK row, reads a difference, and mints a fresh applicant_review claim for it: the very value
+ * the audit just removed reappears. Two merges, three seconds apart, computing two different answers
+ * for one question nobody edited - so the packet_version submit-request recomputes can never equal
+ * the one it just acknowledged, by construction, on every retry.
+ *
+ * THE FIX IS NOT IN EITHER MERGE. Both are individually correct: an unedited round-trip should not
+ * mint a claim (802-answer laundering), and an unattributed held answer should not survive a refresh
+ * (the 2026-08-12 IMC hold). The gap is between the TWO REQUESTS - the caller has no way to learn
+ * what the audit actually hashed, so its next request feeds the audit's own gate a packet the audit
+ * never produced. See POST /applications/:id/packet-audit's response. */
+test('a packet the audit blanked stays blank on the very next submit, once the caller resubmits what the audit returned', async () => {
+  const heldQuestion = {
+    id: 'q-visa', question: 'do you require visa sponsorship?', answer: 'No',
+    kind: 'required' as const, required: true,
+  };
+  const stalledQuestions = [heldQuestion];
+  const reviewedAt = '2026-08-20T13:45:27.969Z';
+
+  // "Review and fill": PUT /review/answers merges her (unedited) screen back onto the stored row.
+  const afterAnswersSave = mergeSubmittedApplicationReviewQuestions(stalledQuestions, stalledQuestions, reviewedAt);
+
+  // POST /applications/:id/packet-audit refreshes and persists - this is auditQuestions.
+  const auditQuestions = refreshKnownQuestionAnswers(
+    afterAnswersSave, {}, 'Build reliable systems.', reviewedAt, undefined, undefined,
+  );
+  assert.equal(
+    auditQuestions[0]?.answer, '',
+    'precondition: the resolver holds this question and nothing here proves she supplied it, so the audit blanks it',
+  );
+
+  const audit = auditOverQuestions(auditQuestions);
+  const row = provenanceRow(auditQuestions, audit, acknowledgementOf(audit));
+
+  // BEFORE THE FIX: "Fill company form" resubmits the caller's own pre-audit copy, which still
+  // carries the answer the audit just blanked.
+  const staleResubmit = await resolveSubmittedApplicationAnswers({
+    current: { questions: auditQuestions, questions_reviewed_at: reviewedAt, jd_text: 'Build reliable systems.' },
+    submitted: stalledQuestions, profile: {}, now: () => reviewedAt,
+  });
+  const staleVerdict = await currentAcknowledgedPacketAudit(row as never, {
+    questions: staleResubmit.questions as never, loadPdf: loadPacketPdf, validateApplicantEmail: skipEmailCheck,
+  });
+  assert.equal(staleVerdict.valid, false, 'resubmitting the pre-audit copy reproduces the deadlock');
+  assert.equal(staleVerdict.valid ? null : staleVerdict.reason, 'packet_stale');
+
+  // AFTER THE FIX: the caller adopted auditQuestions from the audit response and resubmits that.
+  const freshResubmit = await resolveSubmittedApplicationAnswers({
+    current: { questions: auditQuestions, questions_reviewed_at: reviewedAt, jd_text: 'Build reliable systems.' },
+    submitted: auditQuestions, profile: {}, now: () => reviewedAt,
+  });
+  const freshVerdict = await currentAcknowledgedPacketAudit(row as never, {
+    questions: freshResubmit.questions as never, loadPdf: loadPacketPdf, validateApplicantEmail: skipEmailCheck,
+  });
+  assert.equal(
+    freshVerdict.valid ? 'valid' : freshVerdict.reason,
+    'valid',
+    'resubmitting exactly what the audit returned must clear the same packet it just acknowledged',
   );
 });
 

@@ -722,6 +722,19 @@ export async function applicationRoutes(fastify: FastifyInstance) {
             size_bytes: result.audit.bindings.pdf.sizeBytes,
             download_url: downloadUrl,
           },
+          /* THE QUESTIONS THE AUDIT ABOVE ACTUALLY HASHED, not the ones the client walked in with.
+           *
+           * Without this the client had no way to learn that auditQuestions - refreshed and, per the
+           * persist block above, WRITTEN to the row - differs from whatever it still holds locally.
+           * Its next request (POST /submit-request) merges its own stale copy back onto the row and
+           * re-refreshes, which is a second, independent computation of "the same" packet: on a
+           * question the resolver holds with no attributed claim, refreshKnownQuestionAnswers blanks
+           * it here (nothing proves she supplied it) but the submit-side merge sees the client's
+           * still-original, non-blank copy as a fresh, different answer and reinstates it - two
+           * requests, three seconds apart, disagreeing about the same unedited packet. The audit and
+           * the acknowledgement it produces are for auditQuestions specifically, so handing them back
+           * is what lets a caller keep its local state the packet actually agrees with. */
+          questions: auditQuestions,
         };
         return reply.status(200).send(response);
       } catch (error) {
