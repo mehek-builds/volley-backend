@@ -183,6 +183,9 @@ import {
 } from '../lib/conditionalFollowUp';
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from '../lib/selfDeclaration';
 import {
+  isJobBoardReferralClaim,
+  otherReferralOption,
+  REFERRAL_OTHER_DETAIL,
   referralSourceForApplication,
   type ReferralSourceEvidence,
 } from '../lib/referralSource';
@@ -2307,6 +2310,82 @@ function applicationProfileForPacket(
   };
 }
 
+const RECENT_EXPERIENCE_EMPLOYER_QUESTION =
+  /\bwhere\s+did\s+you\s+complete\s+your\s+most\s+recent\b[^?]{0,80}\b(?:internship|research\s+experience)\b/i;
+const REFERRAL_SOURCE_CHOICE_QUESTION =
+  /\b(?:how\s+did\s+you\s+hear|how\s+did\s+you\s+find|where\s+did\s+you\s+hear|referral\s+source|source\s+of\s+(?:your\s+|the\s+)?application)\b/i;
+const GENERIC_OTHER_DETAIL_QUESTION =
+  /^if\s+other\b[^?]{0,80}\b(?:explain|specify|describe|provide|tell)\b/i;
+
+/**
+ * The literal "Other" option that truthfully carries an answer the employer omitted from a closed
+ * taxonomy. This is deliberately not a general fuzzy fallback. It covers only two facts the
+ * applicant already supplied:
+ *
+ * - a job-board referral when the source list has no generic job-board entry;
+ * - the named employer of the applicant's most recent internship or research experience when that
+ *   employer is absent from the employer's company list.
+ *
+ * In both cases selecting a neighbouring named option would change the fact, while "Other" is the
+ * exact branch the control reserves for it. Every other option mismatch remains applicant work.
+ */
+export function truthfulOtherChoice(
+  question: string,
+  answer: string,
+  options: readonly string[] | null | undefined,
+): string | undefined {
+  const offered = usableOptions(options);
+  const value = answer.trim();
+  if (!value || offered.length === 0) return undefined;
+  if (offered.some((option) => option.trim().toLowerCase() === value.toLowerCase())) return undefined;
+  const other = otherReferralOption(offered);
+  if (!other) return undefined;
+  if (REFERRAL_SOURCE_CHOICE_QUESTION.test(question) && isJobBoardReferralClaim(value)) return other;
+  if (RECENT_EXPERIENCE_EMPLOYER_QUESTION.test(question)) return other;
+  return undefined;
+}
+
+export function resolveApplicantClosedChoiceFallbacks(
+  discovered: readonly DiscoveredQuestion[],
+  questions: readonly ApplicationReviewQuestion[],
+): ApplicationReviewQuestion[] {
+  const referralDetailLabels = new Set<string>();
+  for (let index = 0; index < discovered.length - 1; index += 1) {
+    const source = discovered[index];
+    const detail = discovered[index + 1];
+    if (!source || !detail) continue;
+    const sourceLabel = normalizeReviewQuestionLabel(source.label);
+    const detailLabel = normalizeReviewQuestionLabel(detail.label);
+    const existing = questions.find((item) => normalizeReviewQuestionLabel(item.question).toLowerCase() === sourceLabel.toLowerCase());
+    if (!existing || !GENERIC_OTHER_DETAIL_QUESTION.test(detailLabel)) continue;
+    if (truthfulOtherChoice(sourceLabel, existing.answer, source.options)) {
+      referralDetailLabels.add(detailLabel.toLowerCase());
+    }
+  }
+
+  return questions.map((question) => {
+    const normalized = normalizeReviewQuestionLabel(question.question);
+    if (referralDetailLabels.has(normalized.toLowerCase())) {
+      return {
+        ...question,
+        answer: REFERRAL_OTHER_DETAIL,
+        answer_source: undefined,
+        answer_reviewed_at: undefined,
+        answer_option_source: undefined,
+      };
+    }
+    const fallback = truthfulOtherChoice(normalized, question.answer, question.options);
+    if (!fallback) return question;
+    return {
+      ...question,
+      answer: fallback,
+      answer_source: undefined,
+      answer_reviewed_at: undefined,
+      answer_option_source: question.answer.trim(),
+    };
+  });
+}
+
 export function mergeDiscoveredPortalQuestions(
   discovered: readonly ApplicationReviewQuestion[],
   stored: readonly ApplicationReviewQuestion[],
@@ -2970,7 +3049,7 @@ async function prepareManaged(
   packet = transcriptOutcome.packet;
   const {
     questions: discoveredQuestions,
-    attentionReasons: discoveryAttention,
+    attentionReasons: discoveredAttentionReasons,
     optionalAttentionReasons: discoveryOptionalAttention,
     invalidatedQuestionKeys,
   } = await discoverAndResolveQuestions(
@@ -3045,12 +3124,24 @@ async function prepareManaged(
       'Stored machine-labelled questions retired: their controls re-discovered under real labels',
     );
   }
-  const mergedQuestions = mergeDiscoveredPortalQuestions(
-    discoveredQuestions,
-    storedQuestions,
-    [...invalidatedQuestionKeys, ...failedQuestionKeys, ...staleRelabeledKeys],
-    optionProbe.failedIds,
+  const mergedQuestions = resolveApplicantClosedChoiceFallbacks(
+    discoveredFields,
+    mergeDiscoveredPortalQuestions(
+      discoveredQuestions,
+      storedQuestions,
+      [...invalidatedQuestionKeys, ...failedQuestionKeys, ...staleRelabeledKeys],
+      optionProbe.failedIds,
+    ),
   );
+  const automaticallyResolvedOtherPrefixes = mergedQuestions.flatMap((question) => {
+    const other = otherReferralOption(usableOptions(question.options));
+    if (!question.answer_option_source?.trim() || !other || question.answer.trim().toLowerCase() !== other.toLowerCase()) return [];
+    return [normalizeReviewQuestionLabel(question.question).slice(0, 60).toLowerCase()];
+  });
+  const discoveryAttention = discoveredAttentionReasons.filter((reason) => {
+    const normalized = reason.toLowerCase();
+    return !automaticallyResolvedOtherPrefixes.some((prefix) => prefix && normalized.includes(prefix));
+  });
   packet.questions = mergedQuestions.map((q) => ({
     question: q.question,
     answer: q.answer,
