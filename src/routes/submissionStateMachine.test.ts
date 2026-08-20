@@ -50,6 +50,11 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
     'final_approved_at',
     'verification',
     'stall',
+    'unverified_submission',
+    // The press the (cleared) unverified record was about: leaving it minted a row no code path
+    // could exit once the not_sent answer was consumed - the orphaned-attempted_at lock, measured
+    // on the Easy Dynamics Rippling packet, 2026-08-20.
+    'submission_attempted_at',
   ]) {
     assert.match(helper, new RegExp(`${field}:\\s*undefined`), `${field} must be cleared`);
   }

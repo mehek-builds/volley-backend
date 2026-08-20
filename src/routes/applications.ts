@@ -296,6 +296,15 @@ export function freshSubmitRequestReview(
      * The route's own comment says the packet is "re-runnable exactly once". This is the line that
      * makes that true. */
     unverified_submission: undefined,
+    /* AND SO DOES THE PRESS THE ANSWER WAS ABOUT. submission_attempted_at describes the same
+     * attempt the unverified record (cleared above) recorded, and it is the other half of the
+     * evidence pair employerMayHoldApplication reads. Clearing one without the other minted a row
+     * no code path could exit - measured on the Easy Dynamics Rippling packet, 2026-08-20: her
+     * not_sent answer was consumed by this reset, the refused re-run left the row at
+     * needs_attention, and the ORPHANED attempted_at held every send-adjacent surface shut with
+     * no resolution record left to excuse it. A fresh round starts with clean evidence; a new
+     * press writes a fresh attempted_at beside a fresh unverified record. */
+    submission_attempted_at: undefined,
     /* AND THE TYPED STOP EXPIRES WITH IT, for the same reason and with more force. "This run stopped
      * before the click" is a fact about the run that just ended; left on the row it would still be
      * answering yes after the NEXT run pressed Send, so submissionProvablyNotSent would reopen a
