@@ -62,6 +62,30 @@ import { deriveCandidateContext, resumeSafeTargetRole, type CandidateEducation }
  *    Weak verbs stay out, and none of these is weak: every one is a specific form of a verb the
  *    list already calls strong.
  *
+ * 5. IT WAS REWRITING VERBS THE POSTING NEVER ASKED FOR, measured on ten generations 2026-08-20.
+ *    Of seven openers the gate replaced, only two of the replacements appeared anywhere in the job
+ *    description, and one of those was a spelling change. The worst case ran the other way: a
+ *    student wrote "Mapped a 14-step assembly process", the posting itself says "map", and the gate
+ *    replaced it with "Documented", which the posting does not say. The prompt is explicit that
+ *    "action verbs are writing guidance, not candidate evidence", so these rewrites buy no keyword
+ *    alignment at all - they only cost the applicant their own words.
+ *
+ *    NOT `found`, deliberately. A code review already ruled on it - "founded" is on the list
+ *    because founding a company is a real act, and "Found and fixed 12 defects" is not that, so
+ *    `found` must not ride in on the derivation. That judgment stands: identified, uncovered and
+ *    diagnosed are the strong forms of the same idea, and rewriting "Found" to "Identified" is an
+ *    upgrade rather than an arbitrary swap. It is the one of the seven that was worth making.
+ *
+ *    Added against their admitted twins, same discipline as every addition above:
+ *      mapped     <- catalogued, surveyed, structured
+ *      cleaned    <- refined, standardized
+ *      annotated  <- catalogued, classified, documented
+ *      defined    <- established, formalized, specified
+ *      prioritized <- structured, sequenced, ranked the same work
+ *
+ *    The Commonwealth-spelling half of that finding is handled in pastTenseCandidates rather than
+ *    here, because it is a rule about spelling and not a set of new verbs.
+ *
  *    First batch, against the verb each one twins: performed/conducted, operated/ran,
  *    assessed/evaluated, simulated/modeled, prototyped/built, fabricated and machined against
  *    constructed and assembled, programmed and coded against developed, debugged/diagnosed,
@@ -99,7 +123,8 @@ performed operated assessed simulated tested prototyped fabricated machined prog
 debugged refactored migrated
 recorded logged compiled wrote installed reviewed tuned estimated computed soldered welded iterated
 characterized
-rewrote backtested resequenced reordered restructured`
+rewrote backtested resequenced reordered restructured
+mapped cleaned annotated defined prioritized`
     .split(/\s+/)
     .filter(Boolean),
 );
@@ -184,6 +209,38 @@ function pastTenseCandidates(word: string): string[] {
    * ship, plan, stop and map are four - leaving the branch dead while its own comment named "plan"
    * as the example. Verified: "Ship weekly releases" was rejected while `shipped` sat on the list. */
   if (/^[a-z]{0,4}[^aeiou][aeiou][^aeiouwxy]$/.test(word)) out.push(`${word}${word.slice(-1)}ed`);
+
+  /* COMMONWEALTH SPELLINGS OF THE SAME VERB, because this list is written in American English and
+   * a student who writes British English is not writing a weak bullet.
+   *
+   * Measured 2026-08-20: `modeled` was admitted and `modelled` rejected; so were `analysed`,
+   * `organised`, `standardised`, `formalised`, `optimised` and `synthesised`, every one of them a
+   * spelling of a verb already on the list. A rejected opener is not merely flagged - the bullet is
+   * regenerated until it passes - so the gate was rewriting the prose of every applicant outside
+   * the US, which is most of the market Litos sells into.
+   *
+   * BRITISH SPELLING IS ALLOWED, FULL STOP, and it is not conditional on where the student is
+   * applying. Mehek's call 2026-08-20. A student applying in London, Dublin, Sydney, Singapore or
+   * Toronto is spelling it correctly for the employer reading it, and one applying to a US firm
+   * from a British-schooled background is spelling their own history the way they always have.
+   * Neither is a bullet that needs rewriting, so this gate accepts both spellings everywhere rather
+   * than trying to guess a market from a posting's location. The generators are told the same thing
+   * in words: see "KEEP THE APPLICANT'S OWN SPELLING" in llm/resumeSpec.ts and llm/baseResume.ts,
+   * which stops the model normalising on its own even though this gate would accept the result.
+   *
+   * Generated rather than enumerated: a list of pairs drifts the moment a verb is added, and these
+   * are only ever EXTRA candidates. `some()` decides the answer, so a variant that is not a word
+   * simply never matches and nothing is admitted that was not already on the list. */
+  for (const variant of [
+    word.replace(/ised$/, 'ized'),
+    word.replace(/isation$/, 'ization'),
+    word.replace(/ysed$/, 'yzed'),
+    word.replace(/lled$/, 'led'),
+    word.replace(/logued$/, 'loged'),
+    word.replace(/lling$/, 'ling'),
+  ]) {
+    if (variant !== word) out.push(variant);
+  }
   return out;
 }
 
