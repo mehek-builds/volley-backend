@@ -3225,3 +3225,25 @@ test("Breezy's welded default consent label becomes the consent_permission quest
   assert.equal(ungranted.questions[0].answer, '');
   assert.notEqual(ungranted.questions[0].answer_source, 'consent_permission');
 });
+
+/* THE RUNNER'S TWO PACKET VERIFIERS HASH THE RESOLVED QUESTIONS, the same reading the audit
+ * route and the submit-request gate hash. Verified in source because the skew this pins against
+ * is a call-shape defect: prepare() and submit() used to call the packet verifiers with no
+ * `questions` option, so they hashed the RAW stored rows while the audit bound the RESOLVED
+ * reading, and any resolver-answered merge-minted blank made every audit-acknowledge-send round
+ * end in packet_stale - measured four rounds in a row on the Easy Dynamics Rippling packet,
+ * 2026-08-20. One helper, both call sites, same recipe as the audit route. */
+test('prepare and submit verify the packet against the resolved questions, via one helper', () => {
+  const source = readFileSync(new URL('./submissionRunner.ts', import.meta.url), 'utf8');
+  const helper = source.indexOf('async function resolvedPacketAuditQuestions');
+  assert.notEqual(helper, -1, 'the shared resolver helper must exist');
+  const helperBody = source.slice(helper, source.indexOf('\n}', helper));
+  assert.match(helperBody, /refreshKnownQuestionAnswers\(/);
+  assert.match(helperBody, /applicationContextForQuestionResolution\(row, review\)/);
+  assert.match(helperBody, /postingCountryFromJobContext\(row\.job_context\)/);
+  const calls = source.match(/questions: await resolvedPacketAuditQuestions\(row, current\)/g) ?? [];
+  assert.equal(calls.length, 2, 'both prepare() and submit() must hash the resolved reading');
+  assert.doesNotMatch(source,
+    /current(?:Acknowledged)?PacketAudit\(row, \{ restoreExpiredResume: 'authorizing_send' \}\)/,
+    'no runner verifier may fall back to hashing the raw stored rows');
+});
