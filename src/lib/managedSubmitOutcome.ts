@@ -443,17 +443,29 @@ export type StoredSendEvidence = Pick<
  * is right for reopening a SEND and wrong for a save, which would then refuse the ordinary stopped
  * run whose only remaining ask is the answer the save exists to store.
  *
- * ANY unverified_submission counts, resolved or not. A resolution of 'not_sent' is the applicant's
- * own "I looked and it is not there", and submitRequestDisposition already reopens the send path on
- * it - but unverifiedSubmissionPatch writes submission_attempted_at beside every unverified record
- * it creates, so the resolution never decides this on its own, and reading the narrower rule in here
- * would be a distinction with no row behind it.
+ * HER LOOK IS THE RELEASE, and this predicate has to read it. An earlier version counted ANY
+ * unverified_submission, resolved or not, reasoning that submission_attempted_at is written beside
+ * every unverified record so "the resolution never decides this on its own" - a distinction with
+ * no row behind it. The Easy Dynamics Rippling packet put a row behind it, measured live on
+ * 2026-08-20: press recorded, no readable confirmation, she answered "not there", the resolution
+ * route released the claim and promised "Litos can send it again whenever you are ready" - and
+ * every send-adjacent surface stayed refused, because this predicate read the RESOLVED record and
+ * the SAME press's attempted_at as an employer hold. The resolution route's own comment names her
+ * look as "the single fact that makes another run safe"; a predicate that cannot see that fact
+ * makes the promise unfulfillable.
+ *
+ * So a resolution of 'not_sent' neutralises exactly the two facts that describe the press she
+ * looked into: the unverified record itself and its sibling submission_attempted_at. It touches
+ * nothing else. A receipt is a confirmation somebody captured, a security_code is the employer's
+ * own record that an application arrived, and a LATER press overwrites unverified_submission with
+ * a fresh unresolved record, so both facts hold again by construction.
  */
 export function employerMayHoldApplication(evidence: StoredSendEvidence): boolean {
-  if (evidence.submission_attempted_at) return true;
+  const lookedAndNotThere = evidence.unverified_submission?.resolution === 'not_sent';
   if (evidence.receipt) return true;
-  if (evidence.unverified_submission) return true;
   if (evidence.security_code) return true;
+  if (evidence.unverified_submission && !lookedAndNotThere) return true;
+  if (evidence.submission_attempted_at && !lookedAndNotThere) return true;
   return false;
 }
 
