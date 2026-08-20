@@ -15,6 +15,7 @@ import {
   mergeDiscoveredPortalQuestions,
   managedExtensionHandoffUrl,
   measuredRequiredDocuments,
+  coveredOptionProbeFailureIds,
   optionProbeAttentionReasons,
   packetUsesControlledResumeFixture,
   preparationEvidenceBlockers,
@@ -2115,6 +2116,39 @@ test('the attention sentence for a probe-failed control she answered says her an
   assert.match(reasons[1]!, /left for you rather than answered with a guess/);
 });
 
+/* THE SENTENCE AND THE WALL MUST BE THE SAME JUDGEMENT. coveredOptionProbeFailureIds is the one
+ * derivation both readers share: the sentence chooser above, and the `safe` term that decides
+ * whether a probe failure parks the send. A covered failure's control was typed with her reviewed
+ * answer verbatim by the same run, so it is an advisory, not a wall - measured on the Easy
+ * Dynamics Rippling packet (2026-08-20), where the phone number's dial-code list read back
+ * conflicting windows on every run, the number itself was typed, verified and recorded in
+ * filled_fields, and the row re-parked on the same sentence forever. An uncovered failure is a
+ * question knowingly left blank and must keep holding the send. */
+test('a probe failure covered by her reviewed answer is excused from the wall, an uncovered one is not', () => {
+  const failures = [
+    { controlId: 'question_67595189', reason: 'conflicting option lists across bounded reads' },
+    { controlId: 'question_99', reason: 'windowed at the render cap' },
+  ];
+  const failedFields = [
+    { controlId: 'question_67595189', label: 'phone number*' },
+    { controlId: 'question_99', label: 'Which office are you applying to?' },
+  ];
+  const stored = [{
+    question: 'phone number',
+    answer: '+1 213 574 6270',
+    answer_source: 'applicant_review',
+    portal_selector: '#question_67595189',
+  }];
+  const covered = coveredOptionProbeFailureIds(failures, failedFields, stored);
+  assert.deepEqual([...covered], ['question_67595189']);
+  // And it is the same judgement the sentences render, case for case.
+  const reasons = optionProbeAttentionReasons(failures, failedFields, stored);
+  assert.match(reasons[0]!, /your reviewed answer was typed exactly as you wrote it/);
+  assert.match(reasons[1]!, /left for you rather than answered with a guess/);
+  // Nobody answered anything: nothing is excused, every failure keeps its wall.
+  assert.equal(coveredOptionProbeFailureIds(failures, failedFields, []).size, 0);
+});
+
 /* Provenance follows the ANSWER. Discovery replaces a reviewed answer with the resolver's value
  * whenever the profile knows one for the label, and the record spread used to carry
  * answer_source: 'applicant_review' onto that machine value. Every applicant-override reader,
@@ -2416,8 +2450,11 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   assert.match(runner, /attentionCount:[^\n]*\+ discoveryFailures\.length/);
   // The per-control failure keeps both halves of that same contract at its own scope: it reaches her
   // attention list, and it holds the send off the failure ARRAY rather than off the rendered prose.
+  // The wall reads the UNCOVERED failures: one whose control her reviewed answer already typed is
+  // an advisory, not a hold - see coveredOptionProbeFailureIds and the covered-excusal test above.
   assert.match(runner, /\.\.\.optionProbeAttention,/);
-  assert.match(runner, /&& optionProbe\.failures\.length === 0/);
+  assert.match(runner, /&& uncoveredProbeFailures\.length === 0/);
+  assert.match(runner, /coveredOptionProbeFailureIds\(optionProbe\.failures, failedFields, storedQuestions\)/);
 });
 
 /* THE IMC FIXTURE. Packet 920a6751, read off the live form on 2026-08-11.

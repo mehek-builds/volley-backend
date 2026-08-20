@@ -2475,6 +2475,40 @@ export function describeDiscoveryFailure(error: unknown): string {
  * The label is preferred over the durable id because it is the only half of the pair she can find on
  * the page; the id is the fallback for a control discovery reported without one.
  */
+/* THE FAILED READS WHOSE CONTROLS HER OWN REVIEWED ANSWER ALREADY COVERS, as one set both readers
+ * share. optionProbeAttentionReasons uses it to choose the sentence ("typed exactly as you wrote
+ * it" vs "left for you"), and the `safe` gate uses it to decide whether the failure is a WALL.
+ * One derivation, because the day the sentence and the gate disagree about which case a control
+ * is, the applicant is told her answer was typed while the send is held for a blank - or the
+ * reverse, which is worse. Coverage matches the way the merge exemption matches: by the label key
+ * or the probe control id of her stored record. */
+export function coveredOptionProbeFailureIds(
+  failures: readonly { controlId: string; reason: string }[],
+  failedFields: readonly { controlId: string; label?: string }[],
+  storedQuestions: readonly { question: string; answer: string; answer_source?: string; portal_selector?: string }[] = [],
+): Set<string> {
+  const chosen = storedQuestions.filter((question) => applicantChoseStoredAnswer(question));
+  const chosenLabels = new Set(chosen.map((question) => normalizeReviewQuestionLabel(question.question).toLowerCase()));
+  /* SELECTOR-DERIVED IDS ONLY, deliberately narrower than managedOptionProbeControlId's full
+   * reading. The id fallback that mines handles out of the LABEL text can cover a failure whose
+   * label does not otherwise match her stored question - and the fill builder's own exemption
+   * (reviewQuestionFieldTarget) derives ids from the selector alone, so that is exactly the case
+   * where coverage here would excuse a wall while the fill stays suppressed. Coverage that the
+   * builder cannot honour is not coverage; the label-TEXT arm below stays, because the builder's
+   * label match is coarser than it, never finer. */
+  const chosenControlIds = new Set(chosen
+    .map((question) => managedOptionProbeControlId({ selector: question.portal_selector }))
+    .filter(Boolean));
+  const labelById = new Map(failedFields.map((field) => [field.controlId, field.label?.trim()]));
+  return new Set(failures
+    .filter(({ controlId }) => {
+      const label = labelById.get(controlId);
+      return chosenControlIds.has(controlId)
+        || (label !== undefined && chosenLabels.has(normalizeReviewQuestionLabel(label).toLowerCase()));
+    })
+    .map(({ controlId }) => controlId));
+}
+
 export function optionProbeAttentionReasons(
   failures: readonly { controlId: string; reason: string }[],
   failedFields: readonly { controlId: string; label?: string }[],
@@ -2487,18 +2521,12 @@ export function optionProbeAttentionReasons(
    * probe control id of her stored record. */
   storedQuestions: readonly { question: string; answer: string; answer_source?: string; portal_selector?: string }[] = [],
 ): string[] {
-  const chosen = storedQuestions.filter((question) => applicantChoseStoredAnswer(question));
-  const chosenLabels = new Set(chosen.map((question) => normalizeReviewQuestionLabel(question.question).toLowerCase()));
-  const chosenControlIds = new Set(chosen
-    .map((question) => managedOptionProbeControlId({ label: question.question, selector: question.portal_selector }))
-    .filter(Boolean));
+  const coveredIds = coveredOptionProbeFailureIds(failures, failedFields, storedQuestions);
   const labelById = new Map(failedFields.map((field) => [field.controlId, field.label?.trim()]));
   return failures.map(({ controlId, reason }) => {
     const label = labelById.get(controlId);
     const named = label ? `"${label.slice(0, 80)}"` : `the control ${controlId.slice(0, 80)}`;
-    const covered = chosenControlIds.has(controlId)
-      || (label !== undefined && chosenLabels.has(normalizeReviewQuestionLabel(label).toLowerCase()));
-    if (covered) {
+    if (coveredIds.has(controlId)) {
       return `Litos could not read the choices ${named} offers, so your reviewed answer was typed `
         + `exactly as you wrote it (${reason.slice(0, 160)}). Check it landed before sending.`;
     }
@@ -2754,6 +2782,13 @@ async function prepareManaged(
   });
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
   const optionProbeAttention = optionProbeAttentionReasons(optionProbe.failures, failedFields, storedQuestions);
+  /* The failed reads that are NOT excused by a reviewed answer. These are the ones that hold the
+   * send; see the `safe` term below and coveredOptionProbeFailureIds for the one shared
+   * derivation. */
+  const uncoveredProbeFailures = (() => {
+    const covered = coveredOptionProbeFailureIds(optionProbe.failures, failedFields, storedQuestions);
+    return optionProbe.failures.filter(({ controlId }) => !covered.has(controlId));
+  })();
   const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
     .filter((field) => {
       const controlId = managedOptionProbeControlId(field);
@@ -3223,17 +3258,26 @@ async function prepareManaged(
   // path. Not safe means ready_for_final_approval, where she is shown the blank question and can
   // answer it - which is exactly the loop the run gate had no exit from.
   //
-  // The optionProbe term holds the send for exactly as long as it did while a per-control read
-  // failure was promoted to the run level. Narrowing the blast radius of the MESSAGE is not
-  // permission to send a form carrying a question Litos knowingly left blank. It reads the failure
-  // ARRAY rather than the rendered prose, for the reason the direct path's comment below gives: a
-  // sentence that renders to nothing must never be able to restore `safe`.
+  // The optionProbe term holds the send ONLY for the failures whose control was genuinely left
+  // blank. Narrowing the blast radius of the MESSAGE is not permission to send a form carrying a
+  // question Litos knowingly left blank - and a COVERED failure is not that form. Its control was
+  // typed with her reviewed answer, verbatim, by this same run (see optionProbeAttentionReasons:
+  // the covered sentence says exactly this), so what the wall was protecting is protected by the
+  // machinery that watches the typing itself: a required value that did not stay trips the
+  // employer's own required-empty blocker in `blockers`, and an unconfirmable choice commit trips
+  // the unverified-choice mark the pre-submit gate reads. Measured on the Easy Dynamics Rippling
+  // packet (2026-08-20): the phone number's dial-code list read back conflicting windows on every
+  // run, the number itself was typed, verified, and sat in filled_fields - and the row re-parked
+  // on the same sentence forever, with the dashboard's only affordance a checkbox that writes
+  // nothing. It reads the failure ARRAY rather than the rendered prose, for the reason the direct
+  // path's comment below gives: a sentence that renders to nothing must never be able to restore
+  // `safe`.
   const unansweredRequiredQuestions = blankRequiredQuestionLabels(mergedQuestions);
   const safe = blockers.length === 0
     && discoveryAttention.length === 0
     && evidenceBlockers.length === 0
     && discoveryFailures.length === 0
-    && optionProbe.failures.length === 0
+    && uncoveredProbeFailures.length === 0
     && coverLetterAttention.length === 0
     // A question the run never attempted is an answer she gave Litos and Litos did not use. The
     // submit path refuses outright rather than trade one away; this is the same refusal on the path
