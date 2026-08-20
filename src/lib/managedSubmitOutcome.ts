@@ -32,8 +32,11 @@ export type ManagedSubmitOutcome = {
   /** Whether a final submit action was actually pressed. Recorded before the post-click wait. */
   pressed: boolean;
   state: 'confirmed' | 'rejected' | 'unknown' | 'not_attempted';
-  /** ATS state is strong evidence. The other sources remain useful context, but cannot promote a receipt-only continuation. */
-  source: 'ats_state' | 'ats_route' | 'ats_state_unconfirmed' | 'live_region' | 'page_text' | null;
+  /** ATS state is strong evidence. The other sources remain useful context, but cannot promote a receipt-only continuation.
+   * 'unmatched_page_text' is the weakest of all: no arm recognised the page. It carries the raw text
+   * Stratus actually saw so a genuinely new ATS shape (breezy.hr, workable.com - no arm exists for
+   * either) leaves evidence instead of nothing; the verdict logic below never treats it as a claim. */
+  source: 'ats_state' | 'ats_route' | 'ats_state_unconfirmed' | 'live_region' | 'page_text' | 'unmatched_page_text' | null;
   /** The selector or role that proved it, so a verdict can be argued with. */
   evidence: string | null;
   /** The sentence the employer showed. Evidence for a person, never the thing the verdict rests on. */
@@ -44,7 +47,7 @@ export type ManagedSubmitOutcome = {
 type MaybeOutcome = { submitOutcome?: unknown };
 
 const STATES = new Set(['confirmed', 'rejected', 'unknown', 'not_attempted']);
-const SOURCES = new Set(['ats_state', 'ats_route', 'ats_state_unconfirmed', 'live_region', 'page_text']);
+const SOURCES = new Set(['ats_state', 'ats_route', 'ats_state_unconfirmed', 'live_region', 'page_text', 'unmatched_page_text']);
 
 /**
  * Normalise what came back over the wire. Returns null when the runner said nothing at all, which
