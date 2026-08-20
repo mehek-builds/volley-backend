@@ -5777,6 +5777,38 @@ test('READ_CONTROL_LABEL reads the element, and the tag gate is the load-bearing
   assert.equal(READ_CONTROL_LABEL(node({ innerText: 'Submit application' })), 'Submit application');
 });
 
+/* READ_CONTROL_LABEL is handed to Playwright's elementHandle.evaluate() exactly like
+ * COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT was before the fix in requiredFieldConfirmation.test.ts:
+ * evaluate() serialises it with Function.prototype.toString() and re-parses the source INSIDE the
+ * page. That fix's class of bug - a bundler's esbuild `keepNames` transform wrapping a NAMED helper
+ * declared inside the function body in a `__name(...)` call that only exists in the bundle's own
+ * module scope - only bites when such an inner named binding exists to wrap. READ_CONTROL_LABEL has
+ * none today (confirmed by bundling it with esbuild's --bundle --keep-names and inspecting the
+ * reserialized source directly), which is why it is still a plain arrow function rather than the
+ * String.raw + new Function form used for COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT and
+ * READ_SUBMIT_READINESS_SCRIPT. This test is the tripwire: a future edit that adds so much as one
+ * `const helper = (...) => ...` inside this function would still pass every direct call above and
+ * only fail here, exactly as it would in a real browser. */
+test('READ_CONTROL_LABEL survives being serialized and re-parsed, the way Playwright actually runs it', () => {
+  // eslint-disable-next-line no-new-func -- reproducing exactly what Playwright's elementHandle.evaluate() does internally
+  const reparsed = new Function(
+    'return (' + READ_CONTROL_LABEL.toString() + ');',
+  )() as typeof READ_CONTROL_LABEL;
+
+  const node = {
+    innerText: 'Submit application', value: '', title: '', disabled: false, type: '', tagName: 'BUTTON',
+    getAttribute: () => null,
+    getClientRects: () => ({ length: 1 }),
+    parentElement: null,
+    ownerDocument: {
+      defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+      getElementById: () => null,
+    },
+  };
+  assert.equal(reparsed(node), 'Submit application',
+    'a reparsed copy must still behave exactly like the original');
+});
+
 test('a legitimate submit label is not rejected as a handoff', () => {
   /* The widened handoff verbs (submit, send) turned "<verb> ... with|using|via" into a rejection,
      which caught perfectly ordinary buttons. None of these appear on the four portals we poll
