@@ -1525,19 +1525,26 @@ async function packetForCoverLetterCapability(
   supported: boolean,
   fastify: FastifyInstance,
   controlledTest: boolean,
-): Promise<{ packet: SubmissionPacket; coverLetterIssue?: string }> {
-  if (!supported) return { packet: omitCoverLetter(await buildPacket(row, controlledTest)) };
-  if (!storedCoverLetter(row)) {
-    try {
-      await generateStoredCoverLetter(row, false, true);
-    } catch (error) {
-      // Raw message to the log, fixed sentence to the applicant. See the note above the function.
-      fastify.log.warn({ error, applicationId: row.id }, 'Cover letter generation failed, continuing without it');
-      return {
-        packet: omitCoverLetter(await buildPacket(row, controlledTest)),
-        coverLetterIssue: 'We could not write your cover letter for this one, so it is not attached. Everything else is filled in, and you can write or retry a cover letter from your dashboard.',
-      };
-    }
+): Promise<{ packet: SubmissionPacket; row: ResumeRow; coverLetterIssue?: string }> {
+  if (!supported) {
+    const strippedRow = { ...row, spec: strippedCoverLetterSpec(row.spec) } as ResumeRow;
+    return { packet: omitCoverLetter(await buildPacket(row, controlledTest)), row: strippedRow };
+  }
+  /* Always enter the generator gate, including when a letter is already stored. That function now
+     revalidates historical artifacts against every current grounding rule and returns immediately
+     for a still-valid letter. Skipping it on `storedCoverLetter(row)` is how pre-rule artifacts
+     reached live employer controls indefinitely. */
+  try {
+    await generateStoredCoverLetter(row, false, true);
+  } catch (error) {
+    // Raw message to the log, fixed sentence to the applicant. See the note above the function.
+    fastify.log.warn({ error, applicationId: row.id }, 'Cover letter generation or revalidation failed, continuing without it');
+    const strippedRow = { ...row, spec: strippedCoverLetterSpec(row.spec) } as ResumeRow;
+    return {
+      packet: omitCoverLetter(await buildPacket(strippedRow, controlledTest)),
+      row: strippedRow,
+      coverLetterIssue: 'We could not safely prepare your cover letter for this one, so it is not attached. Everything else is filled in, and you can write or retry a cover letter from your dashboard.',
+    };
   }
   const rows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
   if (!rows[0]) throw new Error('This application went missing while we wrote the cover letter');
@@ -1551,7 +1558,7 @@ async function packetForCoverLetterCapability(
      sentence, because "we could not write it" and "we wrote it and could not attach it" are
      different facts and the second one is ours to fix rather than hers to retry. */
   try {
-    return { packet: await buildPacket(rows[0], controlledTest) };
+    return { packet: await buildPacket(rows[0], controlledTest), row: rows[0] };
   } catch (error) {
     /* THE RESUME IS NOT THE COVER LETTER'S PROBLEM TO DEGRADE.
        buildPacket loads both documents, so an expired RESUME lands in this catch too. Degrading it
@@ -1562,11 +1569,10 @@ async function packetForCoverLetterCapability(
        is the whole point of typing it. */
     if (error instanceof PacketDocumentExpiredError && error.document === 'resume') throw error;
     fastify.log.warn({ error, applicationId: row.id }, 'Cover letter file could not be attached, continuing without it');
+    const strippedRow = { ...rows[0], spec: strippedCoverLetterSpec(rows[0].spec) } as ResumeRow;
     return {
-      packet: omitCoverLetter(await buildPacket(
-        { ...rows[0], spec: strippedCoverLetterSpec(rows[0].spec) },
-        controlledTest,
-      )),
+      packet: omitCoverLetter(await buildPacket(strippedRow, controlledTest)),
+      row: strippedRow,
       coverLetterIssue: 'Your cover letter is written but we could not attach the file to this form. Everything else is filled in. Open the application and send it again, and if it keeps happening the cover letter is the part to retry.',
     };
   }
@@ -2935,7 +2941,7 @@ async function prepareManaged(
     invalidatedQuestionKeys,
   } = await discoverAndResolveQuestions(
     discoveredFields,
-    row,
+    coverLetterOutcome.row,
     resolutionCurrent,
     applicationProfile,
     authorization.enabled,
@@ -3969,7 +3975,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     } =
       await discoverAndResolveQuestions(
         discovered,
-        row,
+        builtOutcome.row,
         resolutionCurrent,
         applicationProfileForPacket(await loadApplicationProfileLike(row.user_id), packet),
         authorization.enabled,
