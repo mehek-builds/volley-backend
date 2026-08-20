@@ -8,6 +8,7 @@ import {
   isCoreIdentityField,
   isCoverLetterTextQuestion,
   labelMarksRequired,
+  applicationContextForQuestionResolution,
   fitToBudget,
   frozenJobEmployerContext,
   frozenJobLocationContext,
@@ -1348,6 +1349,61 @@ test('referral source is relayed when stored and refused when it is not', () => 
   const unstored = resolveKnownAnswer('How did you first hear about Five Rings?', 'text', {}, undefined);
   assert.ok(unstored && 'skipReason' in unstored);
   assert.match(unstored.skipReason, /how you heard about this role is yours to answer/);
+});
+
+/* THE PACKET_STALE FALSE POSITIVE, measured on production 2026-08-20 on two unrelated employers
+ * (Mytos/Lever, Davies-Keoghs/pinpoint), reproduced twice in one day with no edit and no elapsed
+ * time between the audit she acknowledged and the send that refused it.
+ *
+ * A bare "Source" or "Application Referral" label - both real Greenhouse/Lever field names, not
+ * synthetic - is gated in parseReferralQuestion on `Boolean(frozenJobEmployerFromContext(jdText))`.
+ * That marker line exists ONLY inside applicationContextForQuestionResolution's output; a real job
+ * description's prose is never going to contain the literal string
+ * "[LITOS FROZEN JOB EMPLOYER] ". So the SAME label, against the SAME stored profile, on the SAME
+ * packet, is DETERMINISTICALLY held (skipReason, answer withheld) when resolved from jd_text bare
+ * and DETERMINISTICALLY answered when resolved from applicationContextForQuestionResolution's
+ * output - not a flaky edge case, but every packet whose portal has a bare "Source" field, on every
+ * run.
+ *
+ * Before this fix, POST /applications/:id/packet-audit (and several other audit/acknowledgement
+ * call sites in routes/applications.ts, routes/resume.ts and lib/submittedAnswers.ts) resolved
+ * known answers against review.jd_text alone, while the actual fill - buildPacket and
+ * discoverAndResolveQuestions in routes/submissionRunner.ts - has always resolved against
+ * applicationContextForQuestionResolution's richer context. Two different literal answers for one
+ * unedited question, hashed into two different packet_version values: the audit an applicant
+ * acknowledged carried the held answer, the send gate a moment later recomputed the filled one, and
+ * verifyCurrentPacketAudit answered packet_stale with no way to re-audit past it, because every
+ * re-audit kept recomputing on the same poorer context.
+ *
+ * The fix is not in this file: it is that every audit/acknowledgement call site now builds its
+ * `questions` argument through applicationContextForQuestionResolution instead of jd_text alone -
+ * see the wiring pinned in routes/packetAuditRoutes.test.ts. This test pins the MECHANISM: that the
+ * two contexts really do produce two different answers for a real, common employer field, so a
+ * regression that reintroduces jd_text bare anywhere in that chain reintroduces the deadlock. */
+test('a bare "Source" question is unanswerable from jd_text alone and answerable once the frozen employer marker is present', () => {
+  const profile: ApplicationProfileLike = { referral_source_default: 'LinkedIn' };
+  const jdText = 'We are looking for a Software Engineering Intern to join our team for Summer 2027.';
+
+  for (const label of ['Source', 'Application Referral']) {
+    const heldOnBareJdText = resolveKnownAnswer(label, 'text', profile, jdText);
+    assert.ok(
+      heldOnBareJdText && 'skipReason' in heldOnBareJdText,
+      `"${label}" must be held, not answered, from jd_text alone - it needs the frozen employer marker`,
+    );
+
+    // applicationContextForQuestionResolution(row, current) is what every live fill has always
+    // resolved against (buildPacket, discoverAndResolveQuestions). Same label, same profile,
+    // different jdText-shaped input - and now a real value.
+    const enrichedContext = applicationContextForQuestionResolution(
+      { job_context: { company: 'Anduril', location: 'Costa Mesa, California, United States' } },
+      { role: 'Software Engineering Intern', jd_text: jdText },
+    );
+    assert.deepEqual(
+      resolveKnownAnswer(label, 'text', profile, enrichedContext),
+      { value: 'LinkedIn' },
+      `"${label}" must resolve once the packet's frozen employer is in context`,
+    );
+  }
 });
 
 /* "Legal Name" - the WHOLE name in one control, which Roblox asks for and Greenhouse required.

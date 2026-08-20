@@ -170,9 +170,7 @@ import {
   refreshKnownQuestionAnswers,
   resolveKnownAnswer,
   fitToBudget,
-  frozenJobEmployerContext,
-  frozenJobLocationContext,
-  frozenJobRelocationLocationContext,
+  applicationContextForQuestionResolution,
   WORK_ELIGIBILITY_QUESTION,
   workEligibilitySkipReason,
   discoveredFieldIsNotAQuestion,
@@ -194,7 +192,7 @@ import { loadApplicationProfileLike, loadUnattendedConsentGrant } from '../lib/a
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { applicantChoseStoredAnswer } from '../lib/applicantAnswer';
-import { jobCountry, postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
+import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
 import {
   coverLetterCandidateContext,
   generateStoredCoverLetter,
@@ -1614,31 +1612,22 @@ export function jobContextCompany(row: ResumeRow): string {
   return typeof company === 'string' ? company.trim() : '';
 }
 
-export function applicationContextForQuestionResolution(row: ResumeRow, current: ApplicationReviewState): string {
-  const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
-  /* SPLIT ON THE SEMICOLON BEFORE CLASSIFYING, because a multi-office posting writes its offices
-   * into ONE string: Anduril's 2027 intern posting stores `job_context.location` as
-   * "Atlanta, Georgia, United States; Boston, Massachusetts, United States; ..." and five more.
-   *
-   * Classifying the composite is wrong in both directions. It reached jobCountry as a single value
-   * and passed the every-one-is-US test on the strength of the American cities in it, so a posting
-   * mixing Chicago with London would have frozen as safe; and it was then frozen as ONE location,
-   * which is the shape the resolver could not read at all. One city per entry makes the every-one
-   * test mean what it says and gives the resolver something it can check. */
-  const locationValues = [
-    typeof context.location === 'string' ? context.location : '',
-    ...(Array.isArray(context.locations) ? context.locations.filter((value): value is string => typeof value === 'string') : []),
-  ].flatMap((value) => value.split(';')).map((value) => value.trim()).filter(Boolean);
-  const classifiedLocations = [...new Set(locationValues)].map((value) => ({ value, country: jobCountry(value) }));
-  const safeLocations = classifiedLocations.length > 0 && classifiedLocations.every((item) => item.country === 'us')
-    ? frozenJobLocationContext(classifiedLocations.map((item) => item.value))
-    : '';
-  const packetEmployer = frozenJobEmployerContext(jobContextCompany(row));
-  const relocationLocations = frozenJobRelocationLocationContext(locationValues);
-  return [current.role, current.jd_text, packetEmployer, relocationLocations, safeLocations]
-    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-    .join('\n');
-}
+/* MOVED TO lib/questionDiscovery.ts on 2026-08-20, re-exported here for every existing import of
+ * this name (this file's own three call sites below, and submissionRunner.test.ts).
+ *
+ * It moved because it needed to stop being an export ONLY this file's two "canonical" resolution
+ * call sites (discoverAndResolveQuestions, buildPacket) used. Six other call sites across
+ * routes/applications.ts, routes/resume.ts and lib/submittedAnswers.ts were independently
+ * recomputing "the packet's current questions" against review.jd_text bare, which is a materially
+ * POORER context than this function's output - it carries no job_context.company, no job_context
+ * location, and none of the frozen-marker lines several resolveKnownAnswer branches key off. Two
+ * different literal inputs for what was meant to be one packet identity produced two different
+ * literal answers for the same stored question, hashed into two different packet_version values,
+ * and no re-audit could ever converge because the audit side kept recomputing on the poorer
+ * context. See the function's own comment in lib/questionDiscovery.ts for the mechanism and the
+ * production measurement. A lib module is where every one of those callers can reach it without a
+ * route file importing another route file. */
+export { applicationContextForQuestionResolution } from '../lib/questionDiscovery';
 
 // R-055 fix: the dashboard flow used to send only whatever `review.questions` the client already
 // supplied (empty on a fresh dashboard-only run), so a real posting's custom questions - GPA,
