@@ -1875,8 +1875,21 @@ export async function discoverAndResolveQuestions(
     const reviewedAnswerStillFits = existing?.answer_source === 'applicant_review'
       && existing.answer_reviewed_at === current.questions_reviewed_at
       && existing.answer.trim().length > 0
-      && !(known && 'value' in known)
-      && (offeredOptions.length === 0 || reviewedOption !== undefined);
+      && (
+        (!(known && 'value' in known) && (offeredOptions.length === 0 || reviewedOption !== undefined))
+        /* HER CURRENT-ROUND CHOICE OF AN OFFERED OPTION OUTRANKS A PROFILE VALUE THE CONTROL
+         * CANNOT EXPRESS. Measured on the live jobs.lever.co Mytos form, 2026-08-20 (packet
+         * 16f1c744): the degree-classification select offers UK honours rows and GPA rows, she
+         * reviewed and chose "GPA 3.5-3.8" - byte for byte an offered option - and the profile's
+         * answer for that label is "Bachelor's Degree", which matches nothing on the list. The
+         * old rule required the profile to be SILENT, so her choice was discarded on every
+         * rebuild, resolveProfileField snapped onto nothing, and the run re-minted "none of the
+         * options match your saved answer" about a choice she had already made: a required
+         * select no save could ever answer. When the resolver itself can name an offered option
+         * (matchedOption), the profile still wins, which is what keeps a review that contradicts
+         * her own corrected facts from riding a stale round. */
+        || (reviewedOption !== undefined && resolvedField !== null && !resolvedField.matchedOption)
+      );
     if (reviewedAnswerStillFits && existing) {
       questions.push({
         ...existing,
