@@ -253,7 +253,17 @@ export async function submittedApplicationCompanies(userId: string): Promise<str
   const companies = rows
     .map((row) => row.company?.trim() ?? '')
     .filter((company) => company.length > 0);
-  return [...new Set(companies)];
+  /* SORTED, because this array's ORDER is hashed and its order used to be the query planner's.
+   *
+   * The select above has no ORDER BY, so Postgres owes it nothing: on the live Neon database the
+   * row order flipped between two plans, the Set dedupe baked whichever order arrived into the
+   * array, and the array rides applicantSnapshot.application_profile into applicantSnapshotSha256
+   * (canonicalValue sorts object KEYS and rightly preserves array order). Measured on Quandela
+   * f9022b36, 2026-08-20: packet_version alternated between two values across consecutive audits,
+   * so every acknowledge-then-send compare refused with "This application changed after you
+   * approved the exact packet" - forever, on a packet nothing had changed. This is a membership
+   * set; its order carries no meaning, so the canonical order is the sorted one. */
+  return [...new Set(companies)].sort();
 }
 
 function companyRoleOf(jobContext: unknown): { company: string; role: string } {
