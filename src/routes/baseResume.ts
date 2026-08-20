@@ -40,6 +40,7 @@ import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
 import { selectApplicationProfileRow } from '../lib/applicationFacts';
 import { resumeEmailForUpload } from '../lib/resumeEmail';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
+import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 
 /* GET /resume/base        - the stored base resume, or 404 if never built.
  * POST /resume/base/stream - build it, streaming each piece as it is decided (SSE).
@@ -492,11 +493,19 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       // one a student is most likely to send unread, so an ungrounded claim here is more dangerous
       // than in a tailored resume they at least glanced at.
       const pruned = pruneUngroundedContent(policiedSpec, bank, declaredSkills);
+      /* SAME REPORT AS THE TAILORED PATH, from the same helper. A job dropped for being short is
+         the one omission the student can act on, and the sentence says how - one more bullet. The
+         two generators must not differ in whether they tell them. */
+      const droppedForLength: string[] = [];
       const spec = enforceExperienceBulletFloor(pruned.spec, bank, {
         priorityEntryId: selectedEntryId,
         allowSparsePriority: recentReview?.continue_with_found === true,
+        onDropped: ({ org, bullets }) =>
+          droppedForLength.push(
+            `Left ${org} off: it has ${bullets === 1 ? 'one bullet' : `${bullets} bullets`} and we recommend at least ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Add another and it goes on.`,
+          ),
       });
-      const removed = pruned.removed;
+      const removed = [...droppedForLength, ...pruned.removed];
       /* The base resume has no posting, so its keyword coverage is scored against the roles the
        * student says they are chasing (targeting titles and categories, plus the target_roles the
        * parse inferred). That number is ADVISORY and never gates: a synthetic JD is a guess at what

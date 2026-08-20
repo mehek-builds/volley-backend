@@ -6,6 +6,7 @@ import { extractPdfText } from '../lib/pdfText';
 import { validatePdfLayout, validateResumeSpec } from './resumeValidate';
 import { applyResumePolicy, deriveCandidateContext, educationGpaLine, enforceExperienceBulletFloor, orgScore, SAME_EMPLOYER_SCORE } from './resumePolicy';
 import { planResumeLayout, renderResumePdf } from './resumeRender';
+import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
 
 function bankEntry(
   id: string,
@@ -238,14 +239,19 @@ test('policy preserves a generated target role when the route has no role contex
   assert.equal(result.spec.target_role, 'Analytics Engineer');
 });
 
-test('three-bullet backstop fills from grounded variants and drops unsupported sparse entries', () => {
+test('the backstop fills from grounded variants and drops entries under the floor', () => {
+  /* The floor moved from three to two on 2026-08-20 (see resumeContentPolicy), so this asserts the
+     two behaviours that did NOT change: an entry is topped up from the student's OWN bank rather
+     than padded, and an entry that still cannot reach the floor is dropped. The entry here holds a
+     single bullet with no other evidence, and one is still never enough. */
   const input = rawSpec();
   const sourceBullets = BANK[0].bullet_variants as string[];
-  input.experience[0].bullets = [sourceBullets[0], sourceBullets[1]];
+  input.experience[0].bullets = [sourceBullets[0]];
   input.experience[1].bullets = ['Built one grounded line for a project that has no additional evidence'];
   const sparseBank = BANK.map((entry) => entry.id === '2' ? { ...entry, bullet_variants: input.experience[1].bullets } : entry);
   const result = enforceExperienceBulletFloor(input, sparseBank);
-  assert.equal(result.experience[0].bullets.length, 3);
+  // Topped up from the bank to the floor rather than left short or dropped.
+  assert.equal(result.experience[0].bullets.length, RESUME_CONTENT_LIMITS.minBulletsPerEntry);
   assert.equal(result.experience.some((entry) => entry.org === 'Campus Search'), false);
 });
 
@@ -274,8 +280,11 @@ test('ATS validation checks the exact post-backstop resume, not unused source-ba
     skills: [],
   };
 
+  /* Two bullets MEETS the floor now, so the backstop leaves them alone rather than topping up to
+     three. The point of this case is unchanged and is about what the ATS gate reads: the resume as
+     printed, not the unused fourth bullet sitting in the source bank. */
   const finalResume = enforceExperienceBulletFloor(streamed, [source]);
-  assert.deepEqual(finalResume.experience[0].bullets, printedBullets);
+  assert.deepEqual(finalResume.experience[0].bullets, printedBullets.slice(0, 2));
 
   const validation = validateResumeSpec(finalResume, '', [source]);
   assert.equal(
@@ -290,7 +299,7 @@ test('ATS validation checks the exact post-backstop resume, not unused source-ba
   );
 });
 
-test('three-bullet backstop uses the matching role when one organization has multiple roles', () => {
+test('the backstop uses the matching role when one organization has multiple roles', () => {
   const analyst = bankEntry('analyst', 'job', 'Acme Labs', 'Data Analyst', [
     'Analyzed customer cohorts and identified three activation opportunities',
     'Built weekly dashboards for product and revenue leaders',
@@ -310,8 +319,16 @@ test('three-bullet backstop uses the matching role when one organization has mul
     date_range: '2025 - Present',
     bullets: [managerBullets[0]],
   }];
+  /* The subject here is WHOSE bullets get used, not how many: the top-up must come from the
+     Engineering Manager row and never from the Data Analyst row at the same organisation. It fills
+     to the floor, which is two. */
   const result = enforceExperienceBulletFloor(input, [analyst, manager]);
-  assert.deepEqual(result.experience[0].bullets, managerBullets);
+  assert.deepEqual(result.experience[0].bullets, managerBullets.slice(0, RESUME_CONTENT_LIMITS.minBulletsPerEntry));
+  assert.equal(
+    result.experience[0].bullets.some((bullet) => bullet.includes('cohorts')),
+    false,
+    "the top-up reached into the other role at the same organisation",
+  );
 });
 
 test('only an explicitly continued recent entry may remain sparse', () => {

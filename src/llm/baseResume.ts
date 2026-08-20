@@ -67,12 +67,16 @@ Selection rules (these differ from tailored generation - read them carefully):
  - When two stored variants for the same entry describe a clear cause and its result, you may combine
    those exact facts into one stronger bullet. Never combine unrelated accomplishments or move facts
    between entries.
-- Give every entry exactly ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} grounded bullets. Within an entry, lead with the bullet carrying the clearest outcome.
+- Give every entry up to ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} grounded bullets, and prefer ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} where the
+  evidence supports it. Within an entry, lead with the bullet carrying the clearest outcome.
 - NEVER give an entry fewer than ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} bullets. A single-bullet entry looks like an afterthought and weakens the
   whole page. If an entry cannot support ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}, it does not belong on the resume: choose a different entry
   from the bank instead. The only exception is an entry named in the REQUIRED PRIORITY ENTRIES
-  block whose source contains fewer than three bullets because the applicant explicitly continued
+  block whose source contains fewer than ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} bullets because the applicant explicitly continued
   with the evidence found. Include all of its grounded bullets and never invent or duplicate one.
+- An entry that supports ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} and not ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} STAYS ON THE RESUME. Do not drop a
+  real job for being short: a short entry costs a line of the page, and leaving the job off reads as
+  a gap in the applicant's history that nothing on the document explains.
 - Copy each entry's type from the experience bank. Do not turn a project into a job or a job into leadership.
 - "skills": 8-10 entries, EVERY one copied EXACTLY as written in the applicant's Skills list, character for
   character. Order them most broadly useful first. Never add a skill that is not on that list; if the list

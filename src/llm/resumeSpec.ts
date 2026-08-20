@@ -111,7 +111,7 @@ Rules:
 - Treat this resume as a proof document for THIS application, not a generic career summary.
 - Set "target_role" to the exact role named in the Job line. It is a targeting headline only.
 - Pick up to ${RESUME_CONTENT_LIMITS.maxEntries} entries across jobs, projects, and leadership that best match the JD, most relevant first.
-- Select exactly ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} grounded bullets per entry. If an entry cannot support three, choose another entry instead. Reduce the number of entries rather than reducing bullet counts when one-page space is tight. Reuse a stored bullet_variant verbatim when one already fits well;
+- Select up to ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} grounded bullets per entry, and never fewer than ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Prefer ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} where the evidence supports it. An entry whose grounded evidence cannot reach ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} does not belong on the resume: choose a different entry rather than padding it. Do NOT drop an entry merely because it supports ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} and not ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} - a real job printed short beats a real job left off, which reads as a gap the applicant cannot explain. Reduce the number of entries rather than reducing bullet counts when one-page space is tight. Reuse a stored bullet_variant verbatim when one already fits well;
   only lightly rewrite (never fabricate achievements) when no stored variant surfaces the JD's language.
 - When two stored variants for the same entry describe a clear cause and its result, you may combine
   those exact facts into one stronger bullet. Never combine unrelated accomplishments or move facts
@@ -395,7 +395,7 @@ How to use it:
    * the applicant's time getting that entry's bullets right. Both are answered by the entry being
    * ON the page. Neither requires it to be at the top of a posting it does not fit. */
   const priorityBlock = priorityEntry
-    ? `\n\nREQUIRED EXPERIENCE. This entry must APPEAR on every resume: leaving the applicant's current or most recent work off reads as a gap. Its POSITION is not fixed - order it against this posting like any other entry, and lead with it only when it proves what this posting asks for. Use only its grounded bank evidence. If the bank holds fewer than three bullets because the applicant explicitly continued with sparse evidence, include every grounded bullet and invent nothing:\n${JSON.stringify(priorityEntry)}`
+    ? `\n\nREQUIRED EXPERIENCE. This entry must APPEAR on every resume: leaving the applicant's current or most recent work off reads as a gap. Its POSITION is not fixed - order it against this posting like any other entry, and lead with it only when it proves what this posting asks for. Use only its grounded bank evidence. If the bank holds fewer than ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} bullets because the applicant explicitly continued with sparse evidence, include every grounded bullet and invent nothing:\n${JSON.stringify(priorityEntry)}`
     : '';
 
   const feedbackBlock = feedback?.length

@@ -11,6 +11,7 @@ import {
   sameApplicationPacketSpec,
 } from './applications';
 import { runnerLeadAlignmentIssues } from './submissionRunner';
+import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 
 const source: ExperienceBankEntry = {
   id: 'recent-role',
@@ -73,8 +74,23 @@ test('the sparse exception requires the recorded continue decision and selected 
     recent_experience_review: { selected_entry_id: 'another-entry', continue_with_found: true },
   }, [source]), []);
 
-  const validation = validate(resume, {});
-  assert.ok(validation.issues.some((issue) => issue.includes('2 bullet selected (min 3)')));
+  /* And the consequence of not being granted it: the entry is short and the validator says so.
+   *
+   * A ONE-bullet resume, not the two-bullet fixture above. The floor moved to two on 2026-08-20, so
+   * two now passes on its own and would prove nothing about the exception. One is still never
+   * enough, which is exactly what the exception exists to let through when the student has
+   * explicitly chosen to continue with the evidence they have. */
+  const singleBullet: ResumeSpec = {
+    ...resume,
+    experience: [{ ...resume.experience[0], bullets: [(source.bullet_variants as string[])[0]] }],
+  };
+  const validation = validate(singleBullet, {});
+  assert.ok(
+    validation.issues.some((issue) =>
+      issue.includes(`1 bullet selected (min ${RESUME_CONTENT_LIMITS.minBulletsPerEntry})`),
+    ),
+    validation.issues.join('; '),
+  );
 });
 
 test('real content errors remain blocking even when sparse source content is allowed', () => {

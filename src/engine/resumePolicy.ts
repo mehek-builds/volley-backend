@@ -450,7 +450,17 @@ export function keepStudentWording(
 export function enforceExperienceBulletFloor(
   spec: ResumeSpec,
   bank: ExperienceBankEntry[],
-  options: { priorityEntryId?: string | null; allowSparsePriority?: boolean } = {},
+  options: {
+    priorityEntryId?: string | null;
+    allowSparsePriority?: boolean;
+    /* NAMES WHAT WAS LEFT OFF, and why, so a dropped job is told rather than silently gone.
+     *
+     * An entry below the floor used to disappear with nothing said about it. The student read a
+     * resume showing one job when they had handed over two, and the only signal was its absence.
+     * Whatever the floor is, the honest behaviour when something falls under it is to say so and
+     * to say what would fix it, which is one more bullet on that entry. */
+    onDropped?: (entry: { org: string; bullets: number }) => void;
+  } = {},
 ): ResumeSpec {
   const experience = spec.experience.flatMap((entry) => {
     const source = matchingBankEntry(entry, bank);
@@ -469,7 +479,10 @@ export function enforceExperienceBulletFloor(
     const sparsePriority = Boolean(
       options.allowSparsePriority && source?.id && source.id === options.priorityEntryId,
     );
-    if (bullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry && !sparsePriority) return [];
+    if (bullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry && !sparsePriority) {
+      options.onDropped?.({ org: entry.org, bullets: bullets.length });
+      return [];
+    }
     return [{ ...entry, bullets: bullets.slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry) }];
   });
   return { ...spec, experience };
