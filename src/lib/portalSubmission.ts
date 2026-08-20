@@ -1207,7 +1207,7 @@ export function ashbyControlWithinFieldPath(selector: string): string {
   return descended.length <= MANAGED_SELECTOR_MAX_LENGTH ? descended : selector;
 }
 
-function durablePortalSelector(selector: string | undefined): string | undefined {
+export function durablePortalSelector(selector: string | undefined): string | undefined {
   const trimmed = selector?.trim();
   if (!trimmed || trimmed.length > 500 || trimmed.startsWith('[data-litos-discovered-')) return undefined;
   return ashbyControlWithinFieldPath(trimmed);
@@ -1299,11 +1299,20 @@ export function reactSelectListboxSelector(inputId: string): string {
   return `[id="react-select-${quoteAttr(inputId)}-listbox"]`;
 }
 
+/* Rippling names the popup after its control: '<div role="combobox" id="field-90">' opens
+ * '<div role="listbox" id="field-90-list">' (measured live on ats.rippling.com, Easy Dynamics,
+ * 2026-08-20). The id is the join key back to the control, exactly as react-select's is: the
+ * provider echoes {selector, value} and drops label, so the selector must carry the id. */
+export function ripplingListboxSelector(inputId: string): string {
+  return `[id="${quoteAttr(inputId)}-list"]`;
+}
+
 function optionProbeIdForSelector(selector: string | undefined): string | undefined {
   // Matched on the SELECTOR as well as the label because the provider echoes `{selector, value}`
   // and drops `label` entirely (managed-browser.js), so the selector is the only key that is
   // guaranteed to come back.
   return selector?.match(/^\[id="react-select-(.+)-listbox"\]$/)?.[1]
+    ?? selector?.match(/^\[id="(.+)-list"\]$/)?.[1]
     ?? selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_-]*)"\]:is\(select\)$/)?.[1];
 }
 
@@ -1693,7 +1702,12 @@ export function managedOptionProbeTargets(
   alreadyRead: Record<string, string[]> = {},
   discoveryRoleCapability = false,
 ): string[] {
-  if (portalFamily(portal) !== 'greenhouse') return [];
+  /* Greenhouse, and now Rippling. Rippling's bare div comboboxes ship no options in the DOM
+   * until opened, so every one of them reached resolution blind and the fill sent vocabulary the
+   * employer does not offer ('No' into a list reading 'I am not a protected veteran' - measured
+   * on Easy Dynamics, 2026-08-20). The probe machinery is family-agnostic; only the popup's id
+   * shape differs, and ripplingListboxSelector carries it. */
+  if (portalFamily(portal) !== 'greenhouse' && portalFamily(portal) !== 'rippling') return [];
   // A hardcoded education probe is only "already read" when it returned a usable list. Loading,
   // empty and windowed reads are absent from alreadyRead and must enter this fail-closed stage.
   const seen = new Set<string>();
@@ -1735,7 +1749,7 @@ function nativeSelectSelector(controlId: string): string {
   return `[id="${quoteAttr(controlId)}"]:is(select)`;
 }
 
-function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: ManagedOptionProbeTarget) {
+function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: ManagedOptionProbeTarget, portal?: SupportedPortal) {
   if (target.kind === 'native') {
     actions.push({
       type: 'extract',
@@ -1757,7 +1771,15 @@ function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: Mana
   });
   for (const round of [1, 2] as const) {
     actions.push({ type: 'click', selector, label: `option_probe_open:${target.controlId}:${round}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
-    actions.push({ type: 'extract', selector: reactSelectListboxSelector(target.controlId), label: `${MANAGED_OPTION_EXTRACT_PREFIX}${target.controlId}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
+    actions.push({
+      type: 'extract',
+      selector: portal && portalFamily(portal) === 'rippling'
+        ? ripplingListboxSelector(target.controlId)
+        : reactSelectListboxSelector(target.controlId),
+      label: `${MANAGED_OPTION_EXTRACT_PREFIX}${target.controlId}`,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
     actions.push({ type: 'press', selector, value: 'Escape', label: `option_probe_close:${target.controlId}:${round}`, optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
   }
 }
@@ -1775,7 +1797,7 @@ export function buildManagedDiscoveredOptionProbeBatches(
   let actions: ManagedBrowserAction[] = [];
   for (const target of targets) {
     const next: ManagedBrowserAction[] = [];
-    pushDiscoveredOptionProbe(next, target);
+    pushDiscoveredOptionProbe(next, target, portal);
     if (actions.length > 0 && actions.length + next.length > MANAGED_ACTION_LIMIT) {
       batches.push(actions);
       actions = [];
@@ -5517,6 +5539,91 @@ export function managedConsentTickPlan(
   return { family, question: questionText, selector, licence, answerProvenance };
 }
 
+/* THE BLOCKER THE TICK PLAN ALREADY COVERS IS NOT A BLOCKER AT PREPARE TIME.
+ *
+ * Measured live on Transparent Hiring (breezy, 2026-08-20): the fill run cannot tick the consent
+ * checkbox - no captured tenant pre-ticks, and GDPR forbids a pre-ticked consent, so the tick is
+ * planned for the instant before submit (pushManagedConsentTickActions) and NOWHERE else. The
+ * readiness gate then read the untouched checkbox back as '"..." is required and is still empty',
+ * `safe` went false, the row parked at needs_attention, and the Send button that would have run the
+ * tick could never be offered: the design deadlocked itself one screen early.
+ *
+ * Fail-closed on the plan itself: no standing plan, no excusal, and the plan already demands the
+ * grant, the licence, exactly one captured control and an accepting recorded answer. The comparison
+ * is against the plan's own question text (welded control name stripped), with the raw label and
+ * the label-plus-control-name both accepted, because the gate names the control by whichever label
+ * face it recovered. Everything else in the list is untouched.
+ */
+/* CONSENT THE TENANT BINDS TO THE PRESS ITSELF, measured on fully.teamtailor.com, 2026-08-20.
+ *
+ * Teamtailor's platform default renders candidate[consent_given] as <input type="hidden"> with no
+ * checkbox anywhere: the only consent surface is the sentence under the submit button, "By
+ * submitting this application, I agree that I have read the Privacy Policy and confirm that
+ * {tenant} store my personal details to be able to process my job application." On such a tenant
+ * there is nothing to tick, managedConsentTickPlan rightly returns null (no captured control), and
+ * the plan-or-park gate parked a form whose consent the account's standing permission already
+ * licenses - the same sentence, the same grammar, one rendering over.
+ *
+ * Fail-closed four ways: teamtailor only (the family this rendering was measured on); the standing
+ * grant must be live and the family submit-eligible under it; the packet must carry NO
+ * consent-shaped capture at all (a known consent control name, or any checkbox whose question
+ * reads as privacy/consent/GDPR - if one was captured, the TICK path owns it and this licence
+ * refuses); and the platform sentence recomposed with this employer's name must pass the same
+ * consentAcknowledgementLicence grammar the tick plan uses. A tenant that configured a REAL
+ * checkbox that discovery then missed is caught by the employer's own required-field validation:
+ * the submit is refused on the form and the run parks, exactly as the breezy measurement showed.
+ */
+export function managedImpliedConsentSubmitLicence(
+  portal: SupportedPortal,
+  packet: SubmissionPacket,
+): { licence: { version: string; granted_at?: string }; sentence: string } | null {
+  if (portalFamily(portal) !== 'teamtailor' || portal === 'manual_recruitee') return null;
+  const ap = packet.applicationProfile;
+  const grant = ap?.consent_acknowledgement_permission;
+  if (!ap || !grant) return null;
+  if (!portalCanAutoSubmitWithConsentGrant(portal, grant)) return null;
+  const employer = (packet.employerName ?? '').trim();
+  if (!employer) return null;
+  const names = CONSENT_TICK_CONTROL_NAMES.teamtailor;
+  const consentShaped = packet.questions.some((item) => {
+    const selector = durablePortalSelector(reviewQuestionPortalSelector(item));
+    const name = selectorControlName(selector);
+    if (name && names.includes(name)) return true;
+    const inputType = reviewQuestionPortalInputType(item) ?? '';
+    return inputType === 'checkbox' && /\b(?:privacy|consent|gdpr|data protection)\b/i.test(item.question ?? '');
+  });
+  if (consentShaped) return null;
+  const sentence = `By submitting this application, I agree that I have read the Privacy Policy and confirm that ${employer} store my personal details to be able to process my job application.`;
+  const licenceContext = [frozenJobEmployerContext(employer), packet.jdText ?? ''].filter(Boolean).join('\n');
+  const licence = consentAcknowledgementLicence(sentence, ap, licenceContext || undefined);
+  return licence ? { licence, sentence } : null;
+}
+
+export function consentTickCoveredBlockers(
+  blockers: readonly string[],
+  plan: ManagedConsentTickPlan | null,
+): string[] {
+  if (!plan) return [];
+  const comparable = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const planKey = comparable(plan.question);
+  if (!planKey) return [];
+  const name = selectorControlName(plan.selector);
+  const weldedKey = name ? comparable(plan.question + ' ' + name) : null;
+  /* Both faces of ONE control's label are one identity, and both are excused. A count-based
+     ambiguity rule was tried here and measured off: sanitizeProviderBlockers dedupes identical
+     strings upstream, so two controls wearing one sentence arrive as one blocker anyway (nothing
+     to count), while a raw face and a welded face of the SAME control arriving together would
+     trip the count and re-open the exact deadlock this excusal exists to clear. A tenant twin
+     control sharing the sentence therefore parks at submit on the employer's own validation -
+     the fail direction is a stall, never a wrong send. */
+  return blockers.filter((blocker) => {
+    const match = blocker.match(/^"(.+)" is required and is still empty$/);
+    if (!match) return false;
+    const blockerKey = comparable(match[1]!);
+    return blockerKey === planKey || (weldedKey !== null && blockerKey === weldedKey);
+  });
+}
+
 /* TICK ONCE, GUARDED, RIGHT BEFORE THE SUBMIT ACTION.
  *
  * Three actions, all required (optional: false), so any one of them failing stops the list and
@@ -7205,7 +7312,10 @@ export function buildManagedPortalActions(
    * exactly one captured control. No plan means the grant-conditional families keep today's exact
    * behaviour: fill, stop, hand off. */
   const canAppendSubmit = submit
-    && (portalCanAutoSubmit(portal) || consentTick !== null)
+    && (portalCanAutoSubmit(portal) || consentTick !== null
+      // The press-bound consent case: nothing to tick, the sentence under the button is the
+      // consent, and the standing grant licenses it. See managedImpliedConsentSubmitLicence.
+      || managedImpliedConsentSubmitLicence(portal, packet) !== null)
     && workablePhoneReadyForSubmit;
   /* The Akuna carve-out that used to sit here (100 instead of MANAGED_ACTION_LIMIT, 7891fa4) is
    * retired. It was headroom with no measured ceiling behind it, set when Akuna's education block

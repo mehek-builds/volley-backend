@@ -507,6 +507,13 @@ function sensitiveQuestionFor(
   postingCountryCode?: string,
 ): ApplicationReviewQuestion | undefined {
   return normalizeApplicationReviewQuestions(questions)
+    /* An OPTIONAL sensitive question with no answer is an offer, not a blocker. R-096 now mints
+       answerless records for refused questions the employer left voluntary (the normal case for
+       an EEO section) so she can answer them in the product; an empty answer generates no fill
+       action, so there is nothing here a send could disclose, and refusing the send over it would
+       hold a complete application hostage to a section the employer itself marked optional. A
+       REQUIRED sensitive question keeps the gate exactly as it stands, answered or not. */
+    .filter((question) => question.required || question.answer.trim().length > 0)
     .find((question) => sensitiveQuestionRequiresAttention(
       question.question, question.answer, 'text', profile, jdText, postingCountry, postingCountryCode,
     ));

@@ -94,6 +94,9 @@ import {
   isCaptchaGatedFamily,
   isConsentGrantConditionalFamily,
   managedConsentTickPlan,
+  managedImpliedConsentSubmitLicence,
+  durablePortalSelector,
+  consentTickCoveredBlockers,
   portalCanAutoSubmit,
   portalCanAutoSubmitWithConsentGrant,
   portalHandoffReason,
@@ -1792,6 +1795,12 @@ export async function discoverAndResolveQuestions(
     reviewLabel: string,
     existing: ApplicationReviewQuestion | undefined,
     preserveExistingAnswer = false,
+    /* False when the employer left the control optional. The record is still minted on the
+       left-for-you branches - a question Litos refuses to answer must reach her as something she
+       CAN answer inside the product (R-096), whether or not the employer demands it - but an
+       optional blank must never enter blankRequiredQuestionLabels, or the send gate would hold a
+       complete application over a field the employer does not require. */
+    required = true,
   ): ApplicationReviewQuestion => ({
     id: existing?.id ?? randomUUID(),
     question: reviewLabel,
@@ -1799,7 +1808,7 @@ export async function discoverAndResolveQuestions(
     // an old value may have been created by a superseded unsafe resolver and must be re-confirmed.
     answer: preserveExistingAnswer ? (existing?.answer ?? '') : '',
     kind: 'required',
-    required: true,
+    required,
     portal_selector: portalSelectorForField(field),
     portal_input_type: discoveredControlInputType(field),
     /* THE MENU, CARRIED TO HER. This is the branch that says "you answer this", so it is exactly the
@@ -1950,13 +1959,13 @@ export async function discoverAndResolveQuestions(
       && usableOptions(field.options).length > 0) {
       invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
       attentionReasons.push(`none of the options exactly match your remembered answer, so this one is left for you: "${label.slice(0, 60)}"`);
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
       continue;
     }
     if (known && 'skipReason' in known) {
       invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
       attentionReasons.push(known.skipReason);
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
       continue;
     }
     if (!known && isRefusedQuestion(label)) {
@@ -1964,7 +1973,7 @@ export async function discoverAndResolveQuestions(
       attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
         ? workEligibilitySkipReason(label)
         : `sensitive question left for you: "${label.slice(0, 60)}"`);
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
       continue;
     }
     if (isSelfDeclarationQuestion(label)) {
@@ -2853,10 +2862,56 @@ async function prepareManaged(
   const failedQuestionKeys = failedFields
     .map((field) => normalizeReviewQuestionLabel(field.label).toLowerCase())
     .filter((key) => !storedApplicantAnswerKeys.has(key));
+  /* OLD JUNK RETIRES WHEN ITS CONTROL IS RE-CAPTURED UNDER ITS REAL NAME.
+   *
+   * A discovery defect mints a question under a wrong label ("Type your response",
+   * "B1 (Intermediate) or below"); the defect gets fixed; the next discovery captures the same
+   * control under the employer's actual words - and the old row used to stay forever, a required
+   * question nobody can act on, sitting NEXT TO its clean twin and holding the review loop open
+   * (measured on Transparent Hiring and Mytos, 2026-08-19/20). Retired only under three proofs,
+   * because a transient miss must not eat real questions: the stale label was NOT re-discovered,
+   * its selector WAS re-discovered (form reached, control present) under a DIFFERENT label, and
+   * the applicant never touched the row - an answer she chose herself is never retired by a label
+   * rename, exactly as the option-probe exemption above keeps hers. */
+  const discoveredLabelKeys = new Set(discoveredQuestions
+    .map((question) => normalizeReviewQuestionLabel(question.question).toLowerCase()));
+  /* DURABLE selectors only, on both sides. A [data-litos-discovered-N] marker is stamped per
+     discovery page load, so run A's marker 3 and run B's marker 3 are the same STRING for
+     potentially different controls - an ordinal coincidence that would satisfy the
+     "selector re-discovered" proof and retire a legitimate row on a transient miss.
+     durablePortalSelector already refuses markers for exactly this reason. */
+  const discoveredLabelBySelector = new Map(discoveredQuestions
+    .flatMap((question) => {
+      const durable = durablePortalSelector(question.portal_selector);
+      return durable ? [[durable, normalizeReviewQuestionLabel(question.question).toLowerCase()] as const] : [];
+    }));
+  const staleRelabeledKeys = storedQuestions
+    .filter((stored) => {
+      if (applicantChoseStoredAnswer(stored)) return false;
+      /* ANY standing answer keeps the row, whatever wrote it. The label-flap class (X one run,
+         Y the next, one stable control) would otherwise retire and re-mint on every flip, and a
+         drafted essay or resolver answer riding the retired row would be spent each time. The
+         junk this exists to clear is the UNANSWERED machine-labelled row that blocks the review
+         loop, and empty is the only shape that row has. */
+      if (stored.answer?.trim()) return false;
+      const selector = durablePortalSelector(stored.portal_selector);
+      if (!selector) return false;
+      const key = normalizeReviewQuestionLabel(stored.question).toLowerCase();
+      if (discoveredLabelKeys.has(key)) return false;
+      const rediscovered = discoveredLabelBySelector.get(selector);
+      return Boolean(rediscovered && rediscovered !== key);
+    })
+    .map((stored) => normalizeReviewQuestionLabel(stored.question).toLowerCase());
+  if (staleRelabeledKeys.length > 0) {
+    fastify.log.info(
+      { applicationId: row.id, portal, retired: staleRelabeledKeys },
+      'Stored machine-labelled questions retired: their controls re-discovered under real labels',
+    );
+  }
   const mergedQuestions = mergeDiscoveredPortalQuestions(
     discoveredQuestions,
     storedQuestions,
-    [...invalidatedQuestionKeys, ...failedQuestionKeys],
+    [...invalidatedQuestionKeys, ...failedQuestionKeys, ...staleRelabeledKeys],
     optionProbe.failedIds,
   );
   packet.questions = mergedQuestions.map((q) => ({
@@ -2984,13 +3039,31 @@ async function prepareManaged(
    * Read before every other use of `blockers`, so the send gate, the unanswerable count and the
    * applicant's attention_reason cannot disagree about which sentences this run stands behind. */
   const unmetFollowUps = unmetConditionalFollowUpBlockers(providerBlockers, discoveredFields, mergedQuestions);
-  const blockers = unmetFollowUps.length > 0
+  const afterFollowUps = unmetFollowUps.length > 0
     ? providerBlockers.filter((blocker) => !unmetFollowUps.includes(blocker))
     : providerBlockers;
   if (unmetFollowUps.length > 0) {
     fastify.log.info(
       { applicationId: row.id, portal, blockers: unmetFollowUps },
       'Conditional follow-up reported required on a field the employer marked optional, and its condition is unmet',
+    );
+  }
+  /* The consent control the submit-time tick plan already covers is not a prepare-time blocker.
+   *
+   * The fill run leaves it untouched BY DESIGN (no pre-ticked consent, ever), the tick runs as the
+   * action immediately before submit, and the plan below is the same fail-closed licence the submit
+   * path demands. Without this excusal the readiness gate reads the deliberately-untouched checkbox
+   * as required-and-still-empty, `safe` goes false, and the Send press that would run the tick can
+   * never be offered - measured live on Transparent Hiring (breezy), 2026-08-20. */
+  const prepareConsentTickPlan = managedConsentTickPlan(portal, packet);
+  const consentTickExcused = consentTickCoveredBlockers(afterFollowUps, prepareConsentTickPlan);
+  const blockers = consentTickExcused.length > 0
+    ? afterFollowUps.filter((blocker) => !consentTickExcused.includes(blocker))
+    : afterFollowUps;
+  if (consentTickExcused.length > 0) {
+    fastify.log.info(
+      { applicationId: row.id, portal, blockers: consentTickExcused },
+      'Consent control covered by the standing submit-time tick plan excused from prepare blockers',
     );
   }
   const networkAccessRestriction = managedNetworkAccessRestrictionReason(portal, result.text, result.title, result);
@@ -4351,7 +4424,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * routine class, recorded consent_permission acceptance). No plan means park at the handoff
      * now, before paying for a fill run whose submit action would never be built - the same
      * needs_attention state the family reached before this feature, with the same sentence. */
-    if (!portalCanAutoSubmit(portal) && !managedConsentTickPlan(portal, packet)) {
+    if (!portalCanAutoSubmit(portal) && !managedConsentTickPlan(portal, packet)
+      && !managedImpliedConsentSubmitLicence(portal, packet)) {
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
         attention_reason: portalHandoffReason(portal) ?? undefined,
