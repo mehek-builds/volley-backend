@@ -5532,6 +5532,51 @@ export function managedConsentTickPlan(
  * the label-plus-control-name both accepted, because the gate names the control by whichever label
  * face it recovered. Everything else in the list is untouched.
  */
+/* CONSENT THE TENANT BINDS TO THE PRESS ITSELF, measured on fully.teamtailor.com, 2026-08-20.
+ *
+ * Teamtailor's platform default renders candidate[consent_given] as <input type="hidden"> with no
+ * checkbox anywhere: the only consent surface is the sentence under the submit button, "By
+ * submitting this application, I agree that I have read the Privacy Policy and confirm that
+ * {tenant} store my personal details to be able to process my job application." On such a tenant
+ * there is nothing to tick, managedConsentTickPlan rightly returns null (no captured control), and
+ * the plan-or-park gate parked a form whose consent the account's standing permission already
+ * licenses - the same sentence, the same grammar, one rendering over.
+ *
+ * Fail-closed four ways: teamtailor only (the family this rendering was measured on); the standing
+ * grant must be live and the family submit-eligible under it; the packet must carry NO
+ * consent-shaped capture at all (a known consent control name, or any checkbox whose question
+ * reads as privacy/consent/GDPR - if one was captured, the TICK path owns it and this licence
+ * refuses); and the platform sentence recomposed with this employer's name must pass the same
+ * consentAcknowledgementLicence grammar the tick plan uses. A tenant that configured a REAL
+ * checkbox that discovery then missed is caught by the employer's own required-field validation:
+ * the submit is refused on the form and the run parks, exactly as the breezy measurement showed.
+ */
+export function managedImpliedConsentSubmitLicence(
+  portal: SupportedPortal,
+  packet: SubmissionPacket,
+): { licence: { version: string; granted_at?: string }; sentence: string } | null {
+  if (portalFamily(portal) !== 'teamtailor' || portal === 'manual_recruitee') return null;
+  const ap = packet.applicationProfile;
+  const grant = ap?.consent_acknowledgement_permission;
+  if (!ap || !grant) return null;
+  if (!portalCanAutoSubmitWithConsentGrant(portal, grant)) return null;
+  const employer = (packet.employerName ?? '').trim();
+  if (!employer) return null;
+  const names = CONSENT_TICK_CONTROL_NAMES.teamtailor;
+  const consentShaped = packet.questions.some((item) => {
+    const selector = durablePortalSelector(reviewQuestionPortalSelector(item));
+    const name = selectorControlName(selector);
+    if (name && names.includes(name)) return true;
+    const inputType = reviewQuestionPortalInputType(item) ?? '';
+    return inputType === 'checkbox' && /\b(?:privacy|consent|gdpr|data protection)\b/i.test(item.question ?? '');
+  });
+  if (consentShaped) return null;
+  const sentence = `By submitting this application, I agree that I have read the Privacy Policy and confirm that ${employer} store my personal details to be able to process my job application.`;
+  const licenceContext = [frozenJobEmployerContext(employer), packet.jdText ?? ''].filter(Boolean).join('\n');
+  const licence = consentAcknowledgementLicence(sentence, ap, licenceContext || undefined);
+  return licence ? { licence, sentence } : null;
+}
+
 export function consentTickCoveredBlockers(
   blockers: readonly string[],
   plan: ManagedConsentTickPlan | null,
@@ -7238,7 +7283,10 @@ export function buildManagedPortalActions(
    * exactly one captured control. No plan means the grant-conditional families keep today's exact
    * behaviour: fill, stop, hand off. */
   const canAppendSubmit = submit
-    && (portalCanAutoSubmit(portal) || consentTick !== null)
+    && (portalCanAutoSubmit(portal) || consentTick !== null
+      // The press-bound consent case: nothing to tick, the sentence under the button is the
+      // consent, and the standing grant licenses it. See managedImpliedConsentSubmitLicence.
+      || managedImpliedConsentSubmitLicence(portal, packet) !== null)
     && workablePhoneReadyForSubmit;
   /* The Akuna carve-out that used to sit here (100 instead of MANAGED_ACTION_LIMIT, 7891fa4) is
    * retired. It was headroom with no measured ceiling behind it, set when Akuna's education block

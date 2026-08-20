@@ -94,6 +94,7 @@ import {
   isCaptchaGatedFamily,
   isConsentGrantConditionalFamily,
   managedConsentTickPlan,
+  managedImpliedConsentSubmitLicence,
   consentTickCoveredBlockers,
   portalCanAutoSubmit,
   portalCanAutoSubmitWithConsentGrant,
@@ -4376,7 +4377,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * routine class, recorded consent_permission acceptance). No plan means park at the handoff
      * now, before paying for a fill run whose submit action would never be built - the same
      * needs_attention state the family reached before this feature, with the same sentence. */
-    if (!portalCanAutoSubmit(portal) && !managedConsentTickPlan(portal, packet)) {
+    if (!portalCanAutoSubmit(portal) && !managedConsentTickPlan(portal, packet)
+      && !managedImpliedConsentSubmitLicence(portal, packet)) {
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
         attention_reason: portalHandoffReason(portal) ?? undefined,

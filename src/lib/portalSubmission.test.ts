@@ -47,6 +47,7 @@ import {
   MANAGED_CONSENT_TICK_LABEL_PREFIX,
   managedConsentTickPlan,
   consentTickCoveredBlockers,
+  managedImpliedConsentSubmitLicence,
   ManagedActionBudgetError,
   budgetDroppedReviewedQuestions,
   reviewedQuestionsWithoutActions,
@@ -4957,6 +4958,42 @@ test('with the grant and the recorded machine acceptance, Breezy ticks once, gua
       || action.text?.includes('privacy notice below')),
     [actions[guardIndex], ticks[0]],
   );
+});
+
+test('a teamtailor tenant that binds consent to the press submits under the grant, and only then', () => {
+  /* fully.teamtailor.com, 2026-08-20: candidate[consent_given] is <input type="hidden">, no
+   * checkbox exists, and the only consent surface is the sentence under the submit button. */
+  const impliedPacket = {
+    ...capturePacket,
+    employerName: 'Fully',
+    applicationProfile: breezyGrantedProfile,
+    questions: [{
+      question: 'phone phone number with country code candidate[phone] candidate_phone',
+      answer: '+12135746270',
+      portalSelector: '#candidate_phone',
+      portalInputType: 'tel',
+    }],
+  };
+  const granted = managedImpliedConsentSubmitLicence('teamtailor', impliedPacket);
+  assert.ok(granted, 'the press-bound consent is licensed under the standing grant');
+  assert.match(granted!.sentence, /confirm that Fully store my personal details/);
+  const actions = buildManagedPortalActions('teamtailor', impliedPacket, true);
+  assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1);
+  // A captured consent CONTROL hands the question back to the tick path: this licence refuses.
+  assert.equal(managedImpliedConsentSubmitLicence('teamtailor', {
+    ...impliedPacket,
+    questions: [...impliedPacket.questions, {
+      question: 'I consent to the processing of my personal data as described in the privacy policy.',
+      answer: '',
+      portalSelector: 'input[name="candidate[custom_consent]"]',
+      portalInputType: 'checkbox',
+    }],
+  }), null, 'a captured consent checkbox refuses the implied path');
+  // Family-bound: breezy renders a real checkbox and keeps the tick path.
+  assert.equal(managedImpliedConsentSubmitLicence('breezy', impliedPacket), null);
+  // No grant, no licence; no employer name, no sentence, no licence.
+  assert.equal(managedImpliedConsentSubmitLicence('teamtailor', { ...impliedPacket, applicationProfile: {} }), null);
+  assert.equal(managedImpliedConsentSubmitLicence('teamtailor', { ...impliedPacket, employerName: '' }), null);
 });
 
 test('the blocker naming the tick-covered consent control is excused, and only that one', () => {
