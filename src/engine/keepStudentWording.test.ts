@@ -29,8 +29,16 @@ describe('a paraphrase of the student\'s own bullet gives way to the original', 
   });
 
   test('a neutral synonym swap is restored too, because the original is never worse', () => {
-    const paraphrased = 'Identified and resolved a survivorship bias inflating reported Sharpe by 0.4.';
+    // Opener only: "Found" -> "Identified", every other word untouched. Exactly what production did.
+    const paraphrased = 'Identified and corrected a survivorship bias inflating reported Sharpe by 0.4.';
     assert.equal(keepStudentWording(paraphrased, OWN), OWN[1]);
+  });
+
+  test('a two-word rewrite is NOT an opening-verb swap and stands', () => {
+    /* "Found and corrected" -> "Identified and resolved" changes the body as well as the opener, so
+       it is the model editing the sentence rather than satisfying the verb gate. Out of scope. */
+    const rewritten = 'Identified and resolved a survivorship bias inflating reported Sharpe by 0.4.';
+    assert.equal(keepStudentWording(rewritten, OWN), rewritten);
   });
 
   test('an untouched bullet comes back unchanged, not merely equal', () => {
@@ -38,7 +46,43 @@ describe('a paraphrase of the student\'s own bullet gives way to the original', 
   });
 });
 
-describe('it refuses to touch anything that is not a near-copy', () => {
+describe('it leaves the JD-terminology alignment the prompt asks for alone', () => {
+  /* THE DEFECT IN THE FIRST VERSION OF THIS, caught before it reached production but after it was
+   * written. That one restored on content overlap, so it reverted every one of these - and the
+   * prompt explicitly asks for them: "copy the JD's exact multi-word terminology into the bullet"
+   * when the student's evidence supports the same idea. Reverting keyword alignment is undoing the
+   * tailoring, which is the opposite of the point.
+   *
+   * All three change the BODY of the bullet. Only the opener is this function's business. */
+  const OWN_LONG = ['Shipped a Kafka consumer processing 2.1M events per day at p99 under 120ms.'];
+
+  test('a JD term swapped inside the bullet is kept', () => {
+    const aligned = 'Shipped a Kafka streaming pipeline processing 2.1M events per day at p99 under 120ms.';
+    assert.equal(keepStudentWording(aligned, OWN_LONG, startsWithStrongVerb), aligned);
+  });
+
+  test('a one-word terminology change in a short bullet is kept', () => {
+    const own = ['Cut PostgreSQL query time 60% by adding covering indexes.'];
+    const aligned = 'Cut PostgreSQL query latency 60% by adding covering indexes.';
+    assert.equal(keepStudentWording(aligned, own, startsWithStrongVerb), aligned);
+  });
+
+  test('a JD phrase adopted for the same idea is kept', () => {
+    const own = ['Built a TypeScript and React dashboard used by 40 researchers.'];
+    const aligned = 'Built a TypeScript and React analytics dashboard used by 40 researchers.';
+    assert.equal(keepStudentWording(aligned, own, startsWithStrongVerb), aligned);
+  });
+
+  test('a changed number is never restored away either, because that is not a verb question', () => {
+    /* Grounding owns fabricated metrics (engine/grounding.ts) and rejects them outright. This must
+       not quietly paper over one by swapping the sentence back and hiding that it happened. */
+    const own = ['Cut nightly runtime from 4h to 38m across the reconciliation job.'];
+    const wrong = 'Cut nightly runtime from 4h to 12m across the reconciliation job.';
+    assert.equal(keepStudentWording(wrong, own, startsWithStrongVerb), wrong);
+  });
+});
+
+describe('it refuses to touch anything that is not an opening-verb swap', () => {
   test('a genuinely different sentence stands as the model wrote it', () => {
     /* The model doing its actual job. This shares a few words with the bank and must not be
        replaced by one of them, or selection would be silently undone. */
@@ -59,9 +103,9 @@ describe('it refuses to touch anything that is not a near-copy', () => {
     assert.equal(keepStudentWording(OWN[0], []), OWN[0]);
   });
 
-  test('a shorter bullet cannot match a longer one just by being a subset of it', () => {
-    /* Scoring against the larger side is what stops "Tested a signal." scoring 1.0 against a full
-       sentence it merely dropped half of. That would restore on far too little evidence. */
+  test('a shortened bullet is not an opening-verb swap and is left alone', () => {
+    /* Same opener family, half the sentence gone. Restoring here would be putting back words the
+       model deliberately cut, which is a length decision rather than a verb one. */
     assert.equal(keepStudentWording('Tested a signal.', OWN), 'Tested a signal.');
   });
 });
@@ -81,11 +125,11 @@ describe('the restored sentence still has to pass the gate the model was satisfy
     }
   });
 
-  /* A near-copy whose only real difference IS the opener, so the two cases below differ by the gate
-     alone rather than by the similarity score. "Helped" is deliberately absent from STRONG_VERBS,
-     and that flag is correct: it is a genuinely weak opener. */
-  const WEAK = ['Helped migrate twelve services to Kubernetes across two quarters.'];
-  const REWRITTEN = 'Migrated twelve services to Kubernetes across two quarters.';
+  /* An opener-only swap where the student's own opener is genuinely weak, so these two cases differ
+     by the GATE alone rather than by anything about the sentence. "Assisted" is one of the verbs
+     resumeValidate deliberately keeps out, and that rejection is correct: the bullet is weak. */
+  const WEAK = ['Assisted twelve researchers collecting samples across three sites.'];
+  const REWRITTEN = 'Coordinated twelve researchers collecting samples across three sites.';
 
   test('a genuinely weak opener keeps the model\'s rewrite rather than losing the resume', () => {
     // A bullet nobody can attach helps no one, so here the gate wins and the student keeps a resume.
