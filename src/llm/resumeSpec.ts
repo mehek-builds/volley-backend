@@ -179,6 +179,13 @@ Rules:
   keeping every fact, number and noun exactly as the source has them. A bullet that starts with
   Assisted, Supported, Helped, Performed, Participated, Attended, Worked or Engaged must be recast
   around what the applicant actually did.
+- KEEP THE APPLICANT'S OWN SPELLING. If their resume writes "optimised", "analysed", "modelled",
+  "organisation" or "programme", the resume Litos generates writes it that way too. Never convert
+  between British and American spelling in either direction, and never treat a Commonwealth spelling
+  as an error to fix. A student applying in London, Dublin, Sydney, Singapore or Toronto is spelling
+  it correctly for the employer reading it, and one applying in the US from a British-schooled
+  background is spelling their own history the way they have always spelt it. This applies to every
+  word on the page, not only to verbs.
 - Every bullet starts with a strong action verb, one of: ${[...STRONG_VERBS].join(', ')}.
 - Every bullet is 8-30 words, one sentence, no more than two "and"s (prefer ; : or - over a run-on).
 - Include a real number, percent, dollar amount, or multiplier in a bullet whenever the source material
