@@ -17,9 +17,12 @@ import { readUnsubscribeToken, unsubscribeConfiguration, unsubscribeConfigured }
 import { sendNotification } from '../lib/notificationSend';
 import { strongMatchEmail } from '../lib/notificationEmail';
 import {
+  breachesStrongFitSla,
+  STRONG_FIT_SLA_HOURS,
   strongMatchDedupeKey,
   strongMatchForAccount,
   subscribedMatchAccounts,
+  VERY_STRONG_FIT_SCORE,
 } from '../lib/strongMatchNotification';
 import { previewDigest, runDigestSweep } from '../lib/digestSweep';
 import { forgetPushSubscription, pushConfiguration, pushPublicKey, rememberPushSubscription } from '../lib/webPush';
@@ -79,6 +82,13 @@ export type MatchSweepSummary = {
   suppressed: Record<string, number>;
   failed: number;
   truncated: boolean;
+  /** How many of this run's sends were themselves the SLA breach: a very-strong fit
+   *  (score >= very_strong_fit_score) that had already sat past sla_hours before this sweep
+   *  finally reached it. Echoed on every run, not only on a breach, for the same reason
+   *  surfaced_postings is on jobMonitor's payload: a promise erodes before it snaps. */
+  sla_breaches: number;
+  sla_hours: number;
+  very_strong_fit_score: number;
 };
 
 /**
@@ -93,7 +103,7 @@ export type MatchSweepSummary = {
 async function sweepAccount(
   account: { id: string; email: string },
   now: Date,
-): Promise<'sent' | 'no_match' | { suppressed: string }> {
+): Promise<{ sent: true; slaBreach: boolean } | 'no_match' | { suppressed: string }> {
   const match = await strongMatchForAccount(account.id, now);
   if (!match) return 'no_match';
   const outcome = await sendNotification({
@@ -109,7 +119,7 @@ async function sweepAccount(
       score: match.score,
     }),
   }, { now: () => now });
-  if (outcome.sent) return 'sent';
+  if (outcome.sent) return { sent: true, slaBreach: breachesStrongFitSla(match, now) };
   return { suppressed: outcome.reason };
 }
 
@@ -124,6 +134,9 @@ export async function runStrongMatchSweep(now: Date, log?: FastifyRequest['log']
     suppressed: {},
     failed: 0,
     truncated,
+    sla_breaches: 0,
+    sla_hours: STRONG_FIT_SLA_HOURS,
+    very_strong_fit_score: VERY_STRONG_FIT_SCORE,
   };
 
   for (const account of considered) {
@@ -131,8 +144,15 @@ export async function runStrongMatchSweep(now: Date, log?: FastifyRequest['log']
       const result = await sweepAccount(account, now);
       if (result === 'no_match') continue;
       summary.matched += 1;
-      if (result === 'sent') {
+      if (typeof result === 'object' && 'sent' in result) {
         summary.sent += 1;
+        if (result.slaBreach) {
+          summary.sla_breaches += 1;
+          log?.error(
+            { userId: account.id, sla_hours: STRONG_FIT_SLA_HOURS },
+            'a very-strong-fit match was not emailed within the SLA window',
+          );
+        }
       } else {
         summary.suppressed[result.suppressed] = (summary.suppressed[result.suppressed] ?? 0) + 1;
       }
@@ -404,6 +424,29 @@ export async function notificationRoutes(fastify: FastifyInstance) {
       });
     }
     const summary = await runStrongMatchSweep(new Date(), request.log);
+    /* THE HARD BARRIER. A cron that always answers 200 is a cron nobody reads - see
+       MINIMUM_SURFACED_JOBS in jobMonitor.ts, the same pattern applied here. The fix for a breach
+       is a sweep that runs often enough to catch very-strong fits sooner (see
+       .github/workflows/strong-match-sla.yml, the sub-daily cadence Vercel's Hobby-tier cron
+       cannot run on its own), never a wider STRONG_FIT_SLA_HOURS. */
+    if (summary.sla_breaches > 0) {
+      request.log.error(
+        {
+          sla_breaches: summary.sla_breaches,
+          sla_hours: summary.sla_hours,
+          very_strong_fit_score: summary.very_strong_fit_score,
+        },
+        'Strong-match SLA breached',
+      );
+      return reply.status(500).send({
+        ...summary,
+        error: `${summary.sla_breaches} very-strong-fit match(es) (score >= ${summary.very_strong_fit_score}) `
+          + `reached a student more than ${summary.sla_hours} hours after Litos found them. Check that the `
+          + 'sub-daily sweep cadence is actually firing (GitHub Actions, not vercel.json - Vercel Hobby '
+          + 'rejects sub-daily crons at deploy time) before assuming this run is the anomaly. '
+          + 'Do not raise sla_hours to clear this.',
+      });
+    }
     return reply.status(200).send(summary);
   };
   fastify.get('/internal/strong-match-notifications', handleSweep);

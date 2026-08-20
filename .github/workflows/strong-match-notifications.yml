@@ -1,0 +1,86 @@
+# Calls the strong-match sweep on a sub-daily cadence, so a very strong fit reaches a student
+# within Mehek's 3-hour hard barrier (STRONG_FIT_SLA_HOURS in lib/strongMatchNotification.ts).
+#
+# Why this exists instead of a vercel.json cron: the Vercel account is on Hobby, which allows
+# DAILY crons only and enforces it at deploy time - see job-monitor.yml for the same constraint on
+# the sibling poll. vercel.json's own daily strong-match-notifications cron stays as the floor;
+# this workflow is the cadence on top of it.
+#
+# Offset 30 minutes after each job-monitor.yml run (":10" vs ":40" past the even hour), so a
+# posting job-monitor just found has already landed in monitored_jobs.first_seen_at before this
+# sweep goes looking for it.
+#
+# A 500 here is not necessarily a transport failure: /internal/strong-match-notifications answers
+# 500 on purpose when it just sent a very-strong-fit match LATE, past the 3-hour window (see
+# routes/notifications.ts). That is still a genuine failure of the barrier this workflow exists to
+# keep, so it is still treated as one - the run goes red and the breach is unmissable, rather than
+# quietly logging a warning nobody scheduled to read.
+name: strong-match-notifications
+
+on:
+  schedule:
+    - cron: '40 */2 * * *'
+  workflow_dispatch:
+
+# One run at a time. The endpoint's own daily_slot unique index makes overlapping runs safe against
+# double-sending, but serialising them keeps each run's report legible - two interleaved sweeps
+# would each report a confusing partial picture of who was mailed.
+concurrency:
+  group: strong-match-notifications
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Call the strong-match sweep
+        env:
+          INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
+          API_BASE: ${{ vars.LITOS_API_BASE || 'https://student-outreach-backend.vercel.app' }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${INTERNAL_CRON_SECRET}" ]; then
+            echo "::error::INTERNAL_CRON_SECRET is not set on this repository."
+            echo "Add it with: gh secret set INTERNAL_CRON_SECRET"
+            echo "It must match INTERNAL_CRON_SECRET in the Vercel project's production env."
+            exit 1
+          fi
+
+          http_status=$(curl -sS \
+            --max-time 300 \
+            --retry 2 --retry-delay 10 --retry-connrefused \
+            -o response.json \
+            -w '%{http_code}' \
+            -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
+            "${API_BASE}/internal/strong-match-notifications")
+
+          echo "status=${http_status}"
+          cat response.json
+          echo
+
+          {
+            echo "### Strong-match sweep"
+            echo ""
+            echo '```json'
+            cat response.json
+            echo ""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${http_status}" = 401 ] || [ "${http_status}" = 503 ]; then
+            echo "::error::Sweep refused to run (HTTP ${http_status}) - check the cron secret and PUBLIC_API_BASE / unsubscribe signing secret in the Vercel project."
+            exit 1
+          fi
+
+          sla_breaches=$(jq -r '.sla_breaches // "unknown"' response.json)
+          if [ "${http_status}" = 500 ] && [ "${sla_breaches}" != "unknown" ] && [ "${sla_breaches}" != "0" ]; then
+            echo "::error::${sla_breaches} very-strong-fit match(es) were emailed past the 3-hour SLA. Confirm this workflow's schedule is actually firing every two hours - a missed or delayed run is the most likely cause."
+            exit 1
+          fi
+
+          if [ "${http_status}" != 200 ]; then
+            echo "::error::Sweep call failed with unexpected status ${http_status}."
+            exit 1
+          fi

@@ -489,6 +489,35 @@ test('the sweep mails one posting, above the floor, and never the same one twice
   assert.equal(sent.length, 1);
 });
 
+test('a very strong fit found within the SLA window sends clean, no breach reported', async () => {
+  // Found under three hours ago: the barrier is met, so the run reports zero breaches.
+  await seedBoard(undefined, "now() - interval '2 hours'");
+  await seedResume();
+  const summary = await runStrongMatchSweep(new Date());
+  assert.equal(summary.sent, 1);
+  assert.equal(summary.sla_breaches, 0);
+});
+
+test('a very strong fit found past the SLA window is a reported breach, and the cron answers 500', async () => {
+  /* THE HARD BARRIER. Found five hours ago - past STRONG_FIT_SLA_HOURS - so sending it now, however
+     correct the send itself is, is the exact failure this exists to surface loudly rather than
+     silently. Asserted through the real HTTP route, not runStrongMatchSweep directly, because the
+     500 is wired into the route handler and a unit-level call would never prove it fires. */
+  await seedBoard(undefined, "now() - interval '5 hours'");
+  await seedResume();
+  const response = await app.inject({
+    method: 'GET',
+    url: '/internal/strong-match-notifications',
+    headers: { 'x-internal-secret': 'notification-db-test-cron-secret' },
+  });
+  assert.equal(response.statusCode, 500, 'a cron that always answers 200 is a cron nobody reads');
+  const body = response.json();
+  assert.equal(body.sla_breaches, 1);
+  assert.equal(body.sent, 1, 'the match still goes out - late is not a reason to withhold it');
+  assert.match(body.error, /very-strong-fit/);
+  assert.equal(sent.length, 1, 'the student is still mailed even though the run reports the breach');
+});
+
 test('a posting below the floor is not called a strong match', async () => {
   /* The floor is MIN_RANKED_MATCH_SCORE, the SAME number the board hides rows under. A second
      definition of "strong" would mean the email and the board disagreed about the same posting,

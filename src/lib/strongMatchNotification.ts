@@ -66,6 +66,41 @@ export function matchLookbackSince(now: Date): Date {
   return new Date(now.getTime() - MATCH_LOOKBACK_HOURS * 60 * 60 * 1000);
 }
 
+/**
+ * THE 3-HOUR HARD BARRIER, and the second, higher bar it is written against.
+ *
+ * MIN_RANKED_MATCH_SCORE (25, in routes/jobMonitor.ts) is the floor for "worth telling somebody
+ * about at all" - the ordinary strong-match alert. Mehek's instruction (2026-08-20) is narrower and
+ * absolute: a fit THIS strong must reach the student's inbox within STRONG_FIT_SLA_HOURS of
+ * monitored_jobs.first_seen_at, the moment Litos found it, never the employer's publish date - see
+ * the "Found, never Posted" note in notificationEmail.ts for why that is the only fact Litos can
+ * vouch for. 70 is not a new number invented for this: it is the same bar notificationEmail.ts
+ * already draws between a score worth printing and one that undercuts its own claim, kept here as
+ * its own named constant rather than imported, because eligibility and display are different
+ * questions that happen to agree today and must not be forced to agree tomorrow.
+ *
+ * THE BARRIER IS ENFORCED BY BEING LOUD, NOT BY BEING UNBREAKABLE. Nothing in this file can force a
+ * cron to fire on time; what it can do is refuse to stay quiet when one didn't. See
+ * routes/notifications.ts, which answers 500 on any breach the same way jobMonitor.ts answers 500
+ * on a surfaced-jobs floor breach - a cron that always returns 200 is a cron nobody reads.
+ */
+export const VERY_STRONG_FIT_SCORE = 70;
+export const STRONG_FIT_SLA_HOURS = 3;
+
+export function hoursSinceFound(firstSeenAt: Date, now: Date): number {
+  return (now.getTime() - firstSeenAt.getTime()) / (60 * 60 * 1000);
+}
+
+/** Whether THIS SEND, happening now, is itself the SLA breach - a very strong fit that sat past its
+ *  window before this sweep finally reached it. A weak match sent late is not a breach: the barrier
+ *  is a promise about strong fits, not about every posting on the board. */
+export function breachesStrongFitSla(
+  candidate: Pick<StrongMatchCandidate, 'score' | 'first_seen_at'>,
+  now: Date,
+): boolean {
+  return candidate.score >= VERY_STRONG_FIT_SCORE && hoursSinceFound(candidate.first_seen_at, now) > STRONG_FIT_SLA_HOURS;
+}
+
 export type StrongMatchCandidate = {
   id: string;
   company_name: string;

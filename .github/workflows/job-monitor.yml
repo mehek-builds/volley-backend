@@ -1,4 +1,5 @@
-# Adds bounded follow-up passes to the daily Vercel job-monitor cron.
+# Runs the job-monitor poll on a sub-daily cadence, and drains bounded follow-up passes within
+# each run.
 #
 # The endpoint stops starting polls after three minutes and keeps another 30 seconds for the final
 # batch, leaving at least one minute before Vercel's hard limit. If the
@@ -8,9 +9,15 @@ name: job-monitor
 
 on:
   schedule:
-    # Ten minutes after the Vercel floor run. The two schedules are intentionally independent: the
-    # application still gets one daily poll if GitHub Actions is delayed or unavailable.
-    - cron: '10 6 * * *'
+    # Every two hours, offset ten minutes past the Vercel floor run's own slot (0/2/4/.../22:10
+    # UTC). Widened from a single 6:10 daily pass on 2026-08-20: strong-match-notifications.yml now
+    # promises a very-strong-fit posting reaches a student within 3 hours of being FOUND, and
+    # "found" means monitored_jobs.first_seen_at, which this job is what sets. A posting can only be
+    # emailed within 3 hours of being found if it is FOUND within a couple of hours of going live,
+    # so the barrier in the notifications workflow is hollow unless this one also runs sub-daily.
+    # The two schedules stay intentionally independent: the application still gets its one Vercel-
+    # native daily poll (see vercel.json) if GitHub Actions is delayed or unavailable that day.
+    - cron: '10 */2 * * *'
   workflow_dispatch:
 
 concurrency:
