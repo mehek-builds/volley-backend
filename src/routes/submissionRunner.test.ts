@@ -163,6 +163,50 @@ test('managed choice fallback carries the job-board detail and preserves the ori
   );
 });
 
+test('managed choice fallback carries the job-board detail when options survive only on the review question', () => {
+  const resolved = resolveApplicantClosedChoiceFallbacks(
+    [
+      {
+        label: 'How did you hear about Optiver?* question_1',
+        selector: '#source',
+        inputType: 'combobox',
+        maxLength: null,
+      },
+      {
+        label: 'If other, please explain question_2',
+        selector: '#source-detail',
+        inputType: 'text',
+        maxLength: 100,
+      },
+    ],
+    [
+      {
+        id: 'source',
+        question: 'How did you hear about Optiver?',
+        answer: 'Job board',
+        kind: 'required',
+        required: true,
+        options: ['LinkedIn', 'Other'],
+      },
+      {
+        id: 'detail',
+        question: 'If other, please explain',
+        answer: 'N/A',
+        kind: 'required',
+        required: false,
+      },
+    ],
+  );
+
+  assert.deepEqual(
+    resolved.map(({ answer, answer_option_source }) => ({ answer, answer_option_source })),
+    [
+      { answer: 'Other', answer_option_source: 'Job board' },
+      { answer: 'Litos', answer_option_source: undefined },
+    ],
+  );
+});
+
 test('the compact packet preselects only unresolved open prose controls', () => {
   const current: ApplicationReviewState = {
     jd_text: 'Build Python services.',

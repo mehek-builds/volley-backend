@@ -2349,31 +2349,8 @@ export function resolveApplicantClosedChoiceFallbacks(
   discovered: readonly DiscoveredQuestion[],
   questions: readonly ApplicationReviewQuestion[],
 ): ApplicationReviewQuestion[] {
-  const referralDetailLabels = new Set<string>();
-  for (let index = 0; index < discovered.length - 1; index += 1) {
-    const source = discovered[index];
-    const detail = discovered[index + 1];
-    if (!source || !detail) continue;
-    const sourceLabel = normalizeReviewQuestionLabel(source.label);
-    const detailLabel = normalizeReviewQuestionLabel(detail.label);
-    const existing = questions.find((item) => normalizeReviewQuestionLabel(item.question).toLowerCase() === sourceLabel.toLowerCase());
-    if (!existing || !GENERIC_OTHER_DETAIL_QUESTION.test(detailLabel)) continue;
-    if (truthfulOtherChoice(sourceLabel, existing.answer, source.options)) {
-      referralDetailLabels.add(detailLabel.toLowerCase());
-    }
-  }
-
-  return questions.map((question) => {
+  const resolved = questions.map((question) => {
     const normalized = normalizeReviewQuestionLabel(question.question);
-    if (referralDetailLabels.has(normalized.toLowerCase())) {
-      return {
-        ...question,
-        answer: REFERRAL_OTHER_DETAIL,
-        answer_source: undefined,
-        answer_reviewed_at: undefined,
-        answer_option_source: undefined,
-      };
-    }
     const fallback = truthfulOtherChoice(normalized, question.answer, question.options);
     if (!fallback) return question;
     return {
@@ -2382,6 +2359,44 @@ export function resolveApplicantClosedChoiceFallbacks(
       answer_source: undefined,
       answer_reviewed_at: undefined,
       answer_option_source: question.answer.trim(),
+    };
+  });
+
+  const resolvedByLabel = new Map(resolved.map((question) => [
+    normalizeReviewQuestionLabel(question.question).toLowerCase(),
+    question,
+  ] as const));
+  const referralDetailLabels = new Set<string>();
+  const collectAdjacentReferralDetail = (items: readonly { label: string }[]) => {
+    for (let index = 0; index < items.length - 1; index += 1) {
+      const sourceLabel = normalizeReviewQuestionLabel(items[index]?.label ?? '');
+      const detailLabel = normalizeReviewQuestionLabel(items[index + 1]?.label ?? '');
+      const source = resolvedByLabel.get(sourceLabel.toLowerCase());
+      if (!source
+        || !REFERRAL_SOURCE_CHOICE_QUESTION.test(sourceLabel)
+        || !GENERIC_OTHER_DETAIL_QUESTION.test(detailLabel)) continue;
+      const expectedOther = truthfulOtherChoice(
+        sourceLabel,
+        source.answer_option_source ?? '',
+        source.options,
+      );
+      if (expectedOther?.toLowerCase() === source.answer.trim().toLowerCase()) {
+        referralDetailLabels.add(detailLabel.toLowerCase());
+      }
+    }
+  };
+  collectAdjacentReferralDetail(discovered);
+  collectAdjacentReferralDetail(resolved.map((question) => ({ label: question.question })));
+
+  return resolved.map((question) => {
+    const normalized = normalizeReviewQuestionLabel(question.question);
+    if (!referralDetailLabels.has(normalized.toLowerCase())) return question;
+    return {
+      ...question,
+      answer: REFERRAL_OTHER_DETAIL,
+      answer_source: undefined,
+      answer_reviewed_at: undefined,
+      answer_option_source: undefined,
     };
   });
 }

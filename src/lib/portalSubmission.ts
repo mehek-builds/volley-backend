@@ -45,6 +45,8 @@ import {
   SUBMIT_READINESS_REQUIRED_CLASS_MARKERS,
 } from './submitReadinessGrammar';
 import {
+  isJobBoardReferralClaim,
+  otherReferralOption,
   referralSourceForApplication,
   referralSourceOptionCandidates,
   type ReferralSourceEvidence,
@@ -3776,14 +3778,16 @@ function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], pa
    * `no option matched "Job board"` on a required control, because this pass typed the default over
    * it. Both applications were otherwise complete - 22 and 25 fields filled.
    *
-   * So the two passes now agree: her choice leads here exactly as it leads there, and a packet with
-   * no applicant referral answer still gets the default, which is every case this pass was written
-   * for. */
-  const applicantReferral = packet.questions.find((item) => {
+   * So the two passes now agree: an applicant choice or a live-list Other resolution leads here
+   * exactly as it leads there, and a packet with neither still gets the default, which is every
+   * remaining case this pass was written for. */
+  const exactReferral = packet.questions.find((item) => {
     const label = normalizeReviewQuestionLabel(item.question);
-    return Boolean(label) && isReferralSourceQuestion(label) && applicantChoseAnswer(item);
+    return Boolean(label)
+      && isReferralSourceQuestion(label)
+      && (applicantChoseAnswer(item) || truthfulResolvedReferralAnswer(item, packet));
   });
-  const value = applicantReferral?.answer.trim() || packet.referralSourceDefault?.trim();
+  const value = exactReferral?.answer.trim() || packet.referralSourceDefault?.trim();
   if (!value) return;
   for (const alias of GREENHOUSE_REFERRAL_LABEL_PREFIXES) {
     pushGreenhouseQuestionComboboxLabelActions(
@@ -3800,7 +3804,7 @@ function pushGreenhouseReferralSourceAliases(actions: ManagedBrowserAction[], pa
        * job-board wordings regardless of the value handed to it. So "Other" went in and
        * "Job board" came out, and the measured failure was unchanged. answerIsResolved is the flag
        * that makes her answer lead there (see #574), and it has to travel with it. */
-      Boolean(applicantReferral),
+      Boolean(exactReferral),
     );
   }
 }
@@ -4262,6 +4266,28 @@ function applicantChoseAnswer(item: SubmissionPacket['questions'][number]): bool
   return applicantChoseStoredAnswer({ answer: item.answer, answer_source: item.answerSource });
 }
 
+/* A REFERRAL OPTION LITOS READ FROM THIS EMPLOYER'S CONTROL, still backed by the same applicant fact.
+ *
+ * `answerOptionSource: Job board` records why discovery chose the literal Other, while the current
+ * packet default proves that declaration has not changed since the choice was made. Both are
+ * required. Without the first, an arbitrary stored Other could bypass referral recomputation;
+ * without the second, a stale choice could outlive a profile correction. This is the same proof
+ * refreshKnownQuestionAnswers uses before it preserves the value across packet rebuilds. */
+function truthfulResolvedReferralAnswer(
+  item: SubmissionPacket['questions'][number],
+  packet: SubmissionPacket,
+): boolean {
+  const question = normalizeReviewQuestionLabel(item.question);
+  if (!question || !isReferralSourceQuestion(question)) return false;
+  const other = otherReferralOption([item.answer]);
+  if (!other || other.toLowerCase() !== item.answer.trim().toLowerCase()) return false;
+  if (!isJobBoardReferralClaim(item.answerOptionSource)) return false;
+  return isJobBoardReferralClaim(referralSourceForApplication(
+    packet.referralSourceDefault,
+    packet.referralSourceEvidence,
+  ));
+}
+
 function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][number], packet: SubmissionPacket): string {
   const questionText = normalizeReviewQuestionLabel(item.question);
   /* AN ANSWER SHE WROTE IS THE ANSWER, and every branch below would otherwise recompute over it.
@@ -4287,6 +4313,7 @@ function greenhouseReviewedQuestionAnswer(item: SubmissionPacket['questions'][nu
    * for every other answer she edits. */
   if (applicantChoseAnswer(item)) return item.answer.trim();
   if (isReferralSourceQuestion(questionText)) {
+    if (truthfulResolvedReferralAnswer(item, packet)) return item.answer.trim();
     return referralSourceForApplication(
       packet.referralSourceDefault ?? item.answer,
       packet.referralSourceEvidence,
@@ -4392,6 +4419,7 @@ function greenhouseReviewedAnswerIsResolved(
    * evidence still puts the bucket first, which is the Cloudflare, Databricks and Akuna case the
    * bucket was written for. Only an answer with a human behind it moves ahead of it. */
   if (applicantChoseAnswer(item)) return true;
+  if (truthfulResolvedReferralAnswer(item, packet)) return true;
 
   const stored = greenhouseCurrentOptionAnswer(item, packet);
   if (!stored) return false;
