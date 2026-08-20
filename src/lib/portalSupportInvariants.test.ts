@@ -120,19 +120,24 @@ test('a family denied by the researched capability table is not autonomous by om
 
 /* PER-ACCOUNT conditional autonomy, pinned on both sides.
  *
- * The standing consent-acceptance grant unlocks EXACTLY teamtailor and pinpoint, whose only bar is
- * a routine consent control beside submit. It must not move the static story an inch: the jobs
- * board, polling and coverage copy read AUTONOMOUS_PORTAL_FAMILIES / portalCanAutoSubmit with no
- * account in hand, and an account without the grant must see today's behaviour everywhere. And the
- * grant lifts only the consent gate - a CAPTCHA-gated, multi-step or account-walled family with a
- * grant is exactly as blocked as without one, and personio's readiness-reader bar is not a consent.
- */
-test('the consent grant conditionally unlocks exactly teamtailor and pinpoint, and nothing static moves', () => {
+ * The standing consent-acceptance grant unlocks SUBMIT on exactly teamtailor and pinpoint, whose
+ * only bar is a routine consent control beside submit. It must not move the static story an inch:
+ * the jobs board, polling and coverage copy read AUTONOMOUS_PORTAL_FAMILIES / portalCanAutoSubmit
+ * with no account in hand, and an account without the grant must see today's behaviour everywhere.
+ * And the grant lifts only the consent gate - a CAPTCHA-gated, multi-step or account-walled family
+ * with a grant is exactly as blocked as without one, and personio's readiness-reader bar is not a
+ * consent.
+ *
+ * breezy is grant-conditional for the TICK only (2026-08-20, measured on Transparent Hiring): it
+ * was autonomous before the grant existed and must answer the same with or without one, which the
+ * loop below asserts because portalCanAutoSubmit('breezy') is already true on both sides of the
+ * equality. */
+test('the consent grant conditionally unlocks submit on exactly teamtailor and pinpoint, and nothing static moves', () => {
   const grant = { granted_at: '2026-08-12T09:15:00.000Z', version: '2026-08-12' };
   for (const family of ALL_PORTAL_FAMILIES) {
     // No grant: byte-for-byte the account-independent answer.
     assert.equal(portalCanAutoSubmitWithConsentGrant(family, null), portalCanAutoSubmit(family), family);
-    const conditional = family === 'teamtailor' || family === 'pinpoint';
+    const conditional = family === 'teamtailor' || family === 'pinpoint' || family === 'breezy';
     assert.equal(isConsentGrantConditionalFamily(family), conditional, family);
     assert.equal(
       portalCanAutoSubmitWithConsentGrant(family, grant),
@@ -140,6 +145,13 @@ test('the consent grant conditionally unlocks exactly teamtailor and pinpoint, a
       family,
     );
   }
+  // Breezy's static story does not move in either direction: autonomous with no grant, and the
+  // grant changes nothing about submit - it licenses only the guarded consent tick.
+  assert.equal(portalCanAutoSubmit('breezy'), true);
+  assert.equal(isAutonomousPortalFamily('breezy'), true);
+  assert.equal((AUTONOMOUS_PORTAL_FAMILIES as readonly string[]).includes('breezy'), true);
+  assert.equal(portalCanAutoSubmitWithConsentGrant('breezy', null), true);
+  assert.equal(portalCanAutoSubmitWithConsentGrant('breezy', grant), true);
   for (const family of ['teamtailor', 'pinpoint'] as const) {
     assert.equal(portalCanAutoSubmit(family), false, family);
     assert.equal(isAutonomousPortalFamily(family), false, family);
