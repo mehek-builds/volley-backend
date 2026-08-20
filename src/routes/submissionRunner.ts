@@ -3573,7 +3573,7 @@ async function prepareManagedAttendedAccountGate(
  * Same loader, same context builder, same country reads as the audit route, deliberately: the
  * constructor and the verifier must be looking at one packet, and this helper is the one place
  * that says what that packet's questions are. */
-async function resolvedPacketAuditQuestions(row: ResumeRow, review: ApplicationReviewState) {
+export async function resolvedPacketAuditQuestions(row: ResumeRow, review: ApplicationReviewState) {
   return refreshKnownQuestionAnswers(
     review.questions,
     await loadApplicationProfileLike(row.user_id),

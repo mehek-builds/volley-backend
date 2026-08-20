@@ -41,7 +41,8 @@ import { mintDownloadToken } from '../lib/resumeAccess';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
-import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication } from './submissionRunner';
+import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication, resolvedPacketAuditQuestions,
+} from './submissionRunner';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
 import { applicationContextForQuestionResolution, knownAnswerLookup, refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
@@ -800,7 +801,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
          applicant's own, checked against the digests she was shown, so it must never be preceded by
          a machine-written one. A rebuild here therefore leaves the digests she submitted stale and
          answers 409, which sends her back to re-audit the file that now exists. */
-      const verdict = await currentPacketAudit(row, { restoreExpiredResume: 'review_only' });
+      const verdict = await currentPacketAudit(row, {
+        questions: await resolvedPacketAuditQuestions(row, review),
+        restoreExpiredResume: 'review_only',
+      });
       if (!verdict.valid) return reply.status(409).send(packetAuditClientError(verdict));
       const audit = verdict.audit;
       if (parsed.data.audit_digest !== audit.audit_digest
@@ -851,7 +855,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // repeats every live packet check instead of trusting the audit object or URL held in React:
       // currentAcknowledgedPacketAudit revalidates the exact PDF/spec/JD/answers, current personal
       // resume email, and active owner/application Litos alias before any company URL is disclosed.
-      const audit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
+      const audit = await currentAcknowledgedPacketAudit(row, {
+        questions: await resolvedPacketAuditQuestions(row, review),
+        restoreExpiredResume: 'authorizing_send',
+      });
       if (!audit.valid) return reply.status(409).send(packetAuditClientError(audit));
 
       // PDF and alias verification perform external reads. Re-read the owner-scoped row after
@@ -936,7 +943,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         && !review.applicant_snapshot) {
         return reply.status(409).send({ error: 'This application must be prepared again before Chrome can fill it' });
       }
-      const auditVerdict = await currentAcknowledgedPacketAudit(row);
+      const auditVerdict = await currentAcknowledgedPacketAudit(row, {
+        questions: await resolvedPacketAuditQuestions(row, review),
+      });
       if (!auditVerdict.valid) {
         return reply.status(409).send(packetAuditClientError(auditVerdict));
       }
@@ -1238,7 +1247,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (current.submission_claim_id !== parsed.data.claim_id || current.status !== 'submitting') {
         return reply.status(409).send({ error: 'This extension submission is no longer active' });
       }
-      const outcomeAudit = await currentAcknowledgedPacketAudit(row);
+      const outcomeAudit = await currentAcknowledgedPacketAudit(row, {
+        questions: await resolvedPacketAuditQuestions(row, current),
+      });
       if (!outcomeAudit.valid || current.submission_packet_version !== outcomeAudit.audit.packet_version) {
         // packetAuditClientError, never the raw verdict: a failed verdict's reason can be a
         // developer token such as packet_stale, and this reply is read by an applicant.
@@ -2178,7 +2189,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       let handoff_url: string | undefined;
       let handoff_packet_valid = true;
       if ((review.status === 'filling' || review.status === 'needs_attention') && review.browser_session_id) {
-        const audit = await currentAcknowledgedPacketAudit(row);
+        const audit = await currentAcknowledgedPacketAudit(row, {
+          questions: await resolvedPacketAuditQuestions(row, review),
+        });
         handoff_packet_valid = audit.valid;
         if (audit.valid) {
           try {
@@ -2216,7 +2229,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!current || current.status !== 'needs_attention') {
         return reply.status(409).send({ error: 'This application is not waiting on you' });
       }
-      const handoffAudit = await currentAcknowledgedPacketAudit(row);
+      const handoffAudit = await currentAcknowledgedPacketAudit(row, {
+        questions: await resolvedPacketAuditQuestions(row, current),
+      });
       if (!handoffAudit.valid) {
         return reply.status(409).send(packetAuditClientError(handoffAudit));
       }
@@ -2605,7 +2620,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     async (request: FastifyRequest, reply: FastifyReply) => {
       const row = await ownedResume(request, reply);
       if (!row) return;
-      const securityCodeAudit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
+      const securityCodeReview = readApplicationReview(row.spec);
+      if (!securityCodeReview) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      const securityCodeAudit = await currentAcknowledgedPacketAudit(row, {
+        questions: await resolvedPacketAuditQuestions(row, securityCodeReview),
+        restoreExpiredResume: 'authorizing_send',
+      });
       if (!securityCodeAudit.valid) {
         // The applicant sentence, not the verdict token. This is the exact reply that printed the
         // bare "packet_stale" on the Jane Street code step before the tokens were translated.
