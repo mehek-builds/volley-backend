@@ -109,7 +109,9 @@ test('every employer-bound path names the current packet audit gate', () => {
   const securityCode = routeSlice("'/applications/:id/security-code'", "'/applications/:id/status'");
   assert.match(securityCode, /currentAcknowledgedPacketAudit/);
   const runnerSubmit = runner.slice(runner.indexOf('async function submit('), runner.indexOf('export async function finishSecurityCodeSubmission'));
-  const runnerAudit = runnerSubmit.indexOf('currentAcknowledgedPacketAudit(row');
+  // submit() verifies through verifiedPacketForRun, which names currentAcknowledgedPacketAudit as
+  // its authority; the claim still has to come after the verification.
+  const runnerAudit = runnerSubmit.indexOf('verifiedPacketForRun(row, current, currentAcknowledgedPacketAudit)');
   const employerClaim = runnerSubmit.indexOf('claimSubmission(');
   assert.ok(runnerAudit >= 0 && employerClaim > runnerAudit);
 });

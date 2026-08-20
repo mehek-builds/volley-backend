@@ -3244,8 +3244,13 @@ test('prepare and submit verify the packet against the resolved questions, via o
   assert.match(helperBody, /refreshKnownQuestionAnswers\(/);
   assert.match(helperBody, /applicationContextForQuestionResolution\(row, review\)/);
   assert.match(helperBody, /postingCountryFromJobContext\(row\.job_context\)/);
-  const calls = source.match(/questions: await resolvedPacketAuditQuestions\(row, current\)/g) ?? [];
-  assert.equal(calls.length, 2, 'both prepare() and submit() must hash the resolved reading');
+  const calls = source.match(/verifiedPacketForRun\(row, current, current(?:Acknowledged)?PacketAudit\)/g) ?? [];
+  assert.equal(calls.length, 2, 'both prepare() and submit() must verify through the two-reading helper');
+  const twoReadings = source.slice(source.indexOf('async function verifiedPacketForRun'), source.indexOf('async function prepare('));
+  assert.match(twoReadings, /questions: await resolvedPacketAuditQuestions\(row, current\)/,
+    'the resolved reading is tried first');
+  assert.match(twoReadings, /questions: current\.questions/,
+    'the raw stored rows - the set the gate verified and persisted - are the second reading');
   assert.doesNotMatch(source,
     /current(?:Acknowledged)?PacketAudit\(row, \{ restoreExpiredResume: 'authorizing_send' \}\)/,
     'no runner verifier may fall back to hashing the raw stored rows');
