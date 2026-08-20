@@ -60,6 +60,7 @@
  * form has no action attribute and makes no network write of any kind.
  */
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -640,12 +641,64 @@ function uploadActions(packet: SubmissionPacket): ManagedBrowserAction[] {
 
 /* ─── the managed engine: the real SANDBOX_RUNNER, not a copy of it ─────────────────────────── */
 
+/* THE SUBMIT READINESS GRAMMAR, PULLED OUT BY THE SAME RULE AS THE RUNNER ITSELF.
+ *
+ * SANDBOX_RUNNER stopped being interpolation-free on 2026-08-13 (0bac311, "The readiness gate gets
+ * the guard the submit chooser already had"): seven spots inside it now read
+ * `${SUBMIT_READINESS_POLICY.<field>}`, pulled from the small Object.freeze declared earlier in the
+ * same file so the runner's gate and the backend's own copy of the gate cannot silently diverge again
+ * the way they did in incident PR #527. A plain text slice of the template no longer equals what
+ * ships to the sandbox: it would carry the literal eight characters "${SUBMIT_READINESS_POLICY.
+ * errorText}" instead of the pattern that string stands for. So this extracts SUBMIT_READINESS_POLICY
+ * the same way it extracts SANDBOX_RUNNER - text out of the checkout, not an import, for the same
+ * @vercel/sandbox reason - and performs the substitution ourselves.
+ *
+ * Trusting our own extraction of the policy object would just move the "second reader" problem one
+ * file up. So this does not take the object on faith: it re-runs the exact boot check
+ * managed-browser.js runs on itself (hash the seven grammar fragments in the fixed order, compare to
+ * the policy's own pinned grammarHash) against the values this function pulled out. If stratus's own
+ * boot check would fail against these bytes, this throws first and says so; if it passes, the values
+ * about to be substituted are provably the ones production's require() would have produced, without
+ * ever loading @vercel/sandbox to get them. */
+function submitReadinessPolicy(source: string): Record<string, string> {
+  const open = 'export const SUBMIT_READINESS_POLICY = Object.freeze({';
+  const start = source.indexOf(open);
+  if (start < 0) throw new Error('SUBMIT_READINESS_POLICY not found in managed-browser.js');
+  const objectStart = start + open.length - 1; // back up onto the '{' so the slice below is a full object literal
+  const objectEnd = source.indexOf('\n});', objectStart);
+  if (objectEnd < 0) throw new Error('SUBMIT_READINESS_POLICY is not terminated in managed-browser.js');
+  const objectLiteral = source.slice(objectStart, objectEnd + 2); // '{ ... }'
+
+  // The literal is String.raw string fields plus a version number and a hash, nothing that reaches
+  // outside itself, so evaluating it standalone (no access to the module's other bindings) is safe -
+  // and the hash check right below refuses to trust the result if that stops being true.
+  // eslint-disable-next-line no-new-func -- data literal only, verified against its own hash below
+  const policy = new Function(`return Object.freeze(${objectLiteral});`)() as Record<string, string>;
+
+  const grammar = [
+    policy.requiredAttributes,
+    policy.requiredClassMarkers,
+    policy.asteriskMark,
+    policy.asteriskLegend,
+    policy.errorText,
+    policy.legendText,
+    policy.ownQuestionSkip,
+  ].join('\n');
+  const hash = createHash('sha256').update(grammar).digest('hex');
+  if (hash !== policy.grammarHash) {
+    throw new Error('extracted SUBMIT_READINESS_POLICY does not match its own grammarHash; extraction is wrong');
+  }
+  return policy;
+}
+
 /* Extracted as TEXT from the stratus checkout rather than imported. Importing the module would drag
  * in @vercel/sandbox and the rest of that service's dependency tree, which this repo does not have;
  * copying the script into this repo would create the second reader this codebase has already had to
- * delete once. The runner is a String.raw template with no interpolation, so the text between the
- * delimiters IS the script, byte for byte, and the assertion below fails loudly the day that stops
- * being true. */
+ * delete once. The runner is a String.raw template, and its only interpolation is the seven
+ * `${SUBMIT_READINESS_POLICY.*}` reads resolved by submitReadinessPolicy() above, so once those are
+ * substituted back in, the text between the delimiters IS the script, byte for byte, and the
+ * assertion below fails loudly the day any OTHER interpolation shows up that this function does not
+ * yet know how to resolve. */
 function sandboxRunnerSource(): string {
   const file = join(STRATUS_REPO, 'src', 'managed-browser.js');
   const source = readFileSync(file, 'utf8');
@@ -655,7 +708,14 @@ function sandboxRunnerSource(): string {
   const body = source.slice(start + open.length);
   const end = body.indexOf('`;');
   if (end < 0) throw new Error(`SANDBOX_RUNNER is not terminated in ${file}`);
-  const script = body.slice(0, end);
+  let script = body.slice(0, end);
+
+  const policy = submitReadinessPolicy(source);
+  for (const [key, value] of Object.entries(policy)) {
+    if (typeof value !== 'string') continue;
+    script = script.split(`\${SUBMIT_READINESS_POLICY.${key}}`).join(value);
+  }
+
   if (script.includes('${')) {
     throw new Error('SANDBOX_RUNNER now interpolates, so this text extraction is no longer exact');
   }
