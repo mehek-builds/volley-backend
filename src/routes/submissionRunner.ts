@@ -2394,6 +2394,7 @@ export function resolveApplicantClosedChoiceFallbacks(
     return {
       ...question,
       answer: REFERRAL_OTHER_DETAIL,
+      kind: 'required',
       answer_source: undefined,
       answer_reviewed_at: undefined,
       answer_option_source: undefined,

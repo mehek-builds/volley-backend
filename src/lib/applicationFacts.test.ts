@@ -89,6 +89,11 @@ describe('stored application facts reach the control on the real employer questi
       filled(label, { pronouns: 'she/her' }, { inputType: 'select', options: ['He/Him', 'She/Her', 'They/Them', 'Prefer not to say'] }),
       'She/Her',
     );
+    assert.equal(
+      filled(label, { pronouns: 'she/her' }, { inputType: 'select', options: ['He/him/his', 'She/her/hers', 'They/them/theirs'] }),
+      'She/her/hers',
+      'the employer may include the possessive form of the same stored pronoun declaration',
+    );
     // Prefer-not-to-say is a real declaration, not an absence, and must survive as one.
     assert.equal(
       filled(label, { pronouns: 'Prefer not to say' }, { inputType: 'select', options: ['He/Him', 'She/Her', 'Prefer not to say'] }),

@@ -59,6 +59,7 @@ import {
   isConsentRefusingWording,
   isConsentAcknowledgementQuestion,
   normalizeDiscoveredLabel,
+  PRONOUNS_QUESTION,
   resolveKnownAnswer,
   type ApplicationProfileLike,
   type ProfileKey,
@@ -921,6 +922,7 @@ const DECLINE_WORDINGS = [
 const EEO_RACE_QUESTION = /\brace\b|racial|ethnicit|ethnic\b/i;
 /** Asked as its own yes/no on nearly every US form, and answered from its own stored preference. */
 const EEO_HISPANIC_QUESTION = /hispanic|latin/i;
+const EEO_GENDER_IDENTITY_QUESTION = /\bgender\s+identity\b/i;
 
 /**
  * THE MAPPING RULE, and it is deliberately the narrowest one that works.
@@ -989,13 +991,33 @@ export function eeoAnswerLadder(label: string, stored: string): string[] {
   const coarser = EEO_RACE_QUESTION.test(label) && !EEO_HISPANIC_QUESTION.test(label)
     ? eeoFederalRaceCategory(base)
     : undefined;
+  const equivalentGender = EEO_GENDER_IDENTITY_QUESTION.test(label) && /^female$/i.test(base)
+    ? 'Woman'
+    : undefined;
   // When the answer is a refusal AND the control names its vocabulary, the vocabulary's own
   // spelling goes ahead of everything: it is the same refusal she gave, written the way the list
   // writes it, so it can only ever replace a decline with the same decline.
   const vocabulary = isDeclineToState(base) ? selfIdentificationDeclineWording(label) : undefined;
   return vocabulary
-    ? ladder(vocabulary, base, coarser, ...DECLINE_WORDINGS)
-    : ladder(base, coarser, ...DECLINE_WORDINGS);
+    ? ladder(vocabulary, base, equivalentGender, coarser, ...DECLINE_WORDINGS)
+    : ladder(base, equivalentGender, coarser, ...DECLINE_WORDINGS);
+}
+
+const PRONOUN_OPTION_FAMILIES: readonly (readonly string[])[] = [
+  ['she/her', 'she/her/hers'],
+  ['he/him', 'he/him/his'],
+  ['they/them', 'they/them/theirs'],
+];
+
+function equivalentPronounOption(
+  stored: string,
+  rawOptions: readonly string[] | null | undefined,
+): string | null {
+  const key = comparableOption(stored);
+  const family = PRONOUN_OPTION_FAMILIES.find((forms) => forms.includes(key));
+  if (!family) return null;
+  const matches = usableOptions(rawOptions).filter((option) => family.includes(comparableOption(option)));
+  return matches.length === 1 ? matches[0] : null;
 }
 
 /**
@@ -1329,6 +1351,9 @@ export function resolveProfileField(
   }
   const candidates = eeo ? eeoAnswerLadder(label, base) : profileFieldCandidates(key, ap, base, label);
   let matched = eeo ? chooseEeoOption(label, base, shape.options) : chooseClosestOption(candidates, shape.options);
+  if (matched === null && PRONOUNS_QUESTION.test(label)) {
+    matched = equivalentPronounOption(base, shape.options);
+  }
   if (key === 'referral_source_default' && matched === null) {
     // The employer's own site, under the employer's own name for it. Only reached once the standard
     // wordings have all missed, and only when the evidenced source really is the career site; the

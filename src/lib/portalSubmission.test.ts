@@ -3486,7 +3486,7 @@ test('the measured Akuna question shape keeps every education control and attest
     combo('What education level are you currently pursuing?', "Bachelor's Degree", true, 30),
     combo('Graduation Month', 'May', true, 31),
     combo('graduation year', '2028', true, 32),
-    combo('what is your gpa?', '3.8', true, 33),
+    { ...combo('what is your gpa?', '3.9', true, 33), answerOptionSource: '3.89' },
     combo('how did you hear about this job?', 'Other', true, 34),
   ];
   const packet = {
@@ -3497,7 +3497,14 @@ test('the measured Akuna question shape keeps every education control and attest
     degree: "Bachelor's Degree",
     graduationMonth: 'May',
     graduationYear: '2028',
-    gpa: '3.8',
+    gpa: '3.89',
+    applicationProfile: { gpa: '3.89' },
+    fieldOptions: Object.fromEntries(questions.flatMap((item) => {
+      const selector = item.portalSelector;
+      return item.portalInputType === 'combobox' && selector?.startsWith('#question_')
+        ? [[selector.slice(1), [item.answer]]]
+        : [];
+    })),
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
     jdText: 'Akuna Capital Software Engineer Intern',
@@ -3507,14 +3514,14 @@ test('the measured Akuna question shape keeps every education control and attest
   assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
   const dropped = budgetDroppedReviewedQuestions(packet, actions);
   const requiredByLabel = new Map(questions.map((item) => [item.question.toLowerCase(), item.required]));
-  const arithmeticFloor = new Set(['graduation year', 'what is your gpa?', 'how did you hear about this job?']);
+  const arithmeticFloor = new Set<string>();
   for (const question of dropped) {
     const required = requiredByLabel.get(question.toLowerCase());
     if (required === false) continue;
     assert.ok(arithmeticFloor.has(question.toLowerCase()),
       `a required control outside the react-select arithmetic floor was dropped: ${question}`);
   }
-  for (const surviving of ['Which University do/did you attend?', 'What education level are you currently pursuing?', 'Graduation Month', 'i certify that all information', 'resume must be submitted in pdf format']) {
+  for (const surviving of ['Which University do/did you attend?', 'What education level are you currently pursuing?', 'Graduation Month', 'what is your gpa?', 'i certify that all information', 'resume must be submitted in pdf format']) {
     assert.ok(!dropped.some((question) => question.toLowerCase().startsWith(surviving.toLowerCase().slice(0, 30))),
       `${surviving} lost its attempt`);
   }
@@ -6199,6 +6206,40 @@ test('measured Greenhouse choices fit as one verified semantic action each', () 
   );
 });
 
+test('current profile option provenance earns one semantic action without a repeated live option read', () => {
+  const current = buildManagedPortalActions('greenhouse', andurilPacket({
+    applicationProfile: { gpa: '3.89' },
+    questions: [{
+      question: 'What is your GPA?',
+      answer: '3.9',
+      answerOptionSource: '3.89',
+      portalSelector: '#question_akuna_gpa',
+      portalInputType: 'combobox',
+      required: true,
+    }],
+  }));
+  const currentGroup = current.filter((action) => /what is your gpa/i.test(action.label ?? ''));
+  assert.deepEqual(currentGroup.map((action) => action.type), ['fillByLabelText']);
+  assert.equal(currentGroup[0]?.value, '3.9');
+
+  const stale = buildManagedPortalActions('greenhouse', andurilPacket({
+    gpa: '4.0',
+    applicationProfile: { gpa: '4.0' },
+    questions: [{
+      question: 'What is your GPA?',
+      answer: '3.9',
+      answerOptionSource: '3.89',
+      portalSelector: '#question_akuna_gpa',
+      portalInputType: 'combobox',
+      required: true,
+    }],
+  }));
+  const staleGroup = stale.filter((action) => /what is your gpa/i.test(action.label ?? ''));
+  assert.equal(staleGroup.some((action) => action.type === 'fillByLabelText'), false,
+    'provenance from an older profile value must not bypass live option verification');
+  assert.ok(staleGroup.some((action) => action.type === 'fill'));
+});
+
 test('Greenhouse demographics use durable label replay after stateless discovery', () => {
   const actions = buildManagedPortalActions('greenhouse', andurilPacket({
     jdText: 'IMC Software Engineer Intern - Summer 2027',
@@ -7183,6 +7224,41 @@ test('the backend consumes the real Stratus text-plus-combobox-role wire shape',
     'role metadata without the advertised runner capability cannot activate dynamic probing');
   assert.deepEqual(managedOptionProbeTargets('greenhouse', [{ ...fromStratus, role: null }], {}, true), [],
     'a dynamic text input is not closed unless the deployed runner reports its DOM role');
+});
+
+test('recognized Greenhouse choice questions are probed when the provider omits the role', () => {
+  assert.deepEqual(
+    managedOptionProbeTargets('greenhouse', [{
+      label: 'What degree are you currently pursuing?* question_67595191',
+      selector: '#question_67595191',
+      inputType: 'text',
+      role: null,
+      required: true,
+    }], {}, true),
+    ['question_67595191'],
+  );
+  assert.deepEqual(
+    managedOptionProbeTargets('greenhouse', [{
+      label: 'Tell us about a project* question_67595192',
+      selector: '#question_67595192',
+      inputType: 'text',
+      role: null,
+      required: true,
+    }], {}, true),
+    [],
+    'an arbitrary Greenhouse text question must not be reclassified as a closed list',
+  );
+  assert.deepEqual(
+    managedOptionProbeTargets('rippling', [{
+      label: 'What degree are you currently pursuing?* question_67595191',
+      selector: '#question_67595191',
+      inputType: 'text',
+      role: null,
+      required: true,
+    }], {}, true),
+    [],
+    'the Greenhouse question grammar must not widen Rippling probing',
+  );
 });
 
 test('the probe keeps plain end-year text open while retaining its normal final fill', () => {
