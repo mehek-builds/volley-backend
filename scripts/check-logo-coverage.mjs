@@ -42,7 +42,7 @@
  * worth of distinct rows, and a read that is genuinely incomplete still fails.
  */
 
-import { companyDomainFor } from '../src/lib/companyDomains.ts';
+import { companyDomainFor, FAVICON_ENDPOINT, FAVICON_PX } from '../src/lib/companyDomains.ts';
 import { logoCoverageFloor, tallyCoverage } from '../src/lib/logoCoverage.ts';
 import { scanBoard } from '../src/lib/boardScan.ts';
 import { createHash } from 'node:crypto';
@@ -52,7 +52,6 @@ const FLOOR = logoCoverageFloor(process.env.MIN_LOGO_COVERAGE);
 const PAGE_SIZE = 100;
 const MAX_ROWS = 100_000;
 const FAVICON_CONCURRENCY = 12;
-const FAVICON_ENDPOINT = 'https://www.google.com/s2/favicons';
 
 async function readPage(offset, limit = PAGE_SIZE) {
   const res = await fetch(`${API}/jobs?limit=${limit}&offset=${offset}`);
@@ -80,7 +79,7 @@ async function faviconResponse(domain) {
   let lastError;
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const response = await fetch(`${FAVICON_ENDPOINT}?domain=${encodeURIComponent(domain)}&sz=64`);
+      const response = await fetch(`${FAVICON_ENDPOINT}?domain=${encodeURIComponent(domain)}&sz=${FAVICON_PX}`);
       const bytes = Buffer.from(await response.arrayBuffer());
       if (response.status !== 404 && !response.ok) throw new Error(`favicon answered ${response.status} for ${domain}`);
       if (!response.headers.get('content-type')?.startsWith('image/')) {

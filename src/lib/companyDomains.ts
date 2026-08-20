@@ -422,5 +422,18 @@ export function companyDomainFor(companyName: string | null | undefined): string
   return BY_NORMALIZED.get(normalize(companyName)) ?? null;
 }
 
+/**
+ * The single source for how a resolved domain becomes an image URL, so every backend consumer of
+ * companyDomainFor draws its favicon from the same place with the same size. Kept alongside the
+ * resolver rather than in each caller because the two are only ever used together.
+ *
+ * role-quick-website's components/app/CompanyLogo.tsx (a separate repo, TSX, client-rendered) keeps
+ * its own copy of these same two values by necessity - it cannot import from this backend - so it
+ * is the one place this constant cannot reach. If either value here ever changes, that file has to
+ * be updated by hand to match.
+ */
+export const FAVICON_ENDPOINT = 'https://www.google.com/s2/favicons';
+export const FAVICON_PX = 64;
+
 /** Exported for the test that keeps the map honest. */
 export { COMPANY_DOMAINS };

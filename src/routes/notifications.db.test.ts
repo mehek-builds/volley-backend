@@ -417,8 +417,13 @@ test('a purged posting leaves the record that somebody was emailed standing', as
      sweep's longest-waiting-first rotation to "never mailed". */
   await seedBoard();
   await seedResume();
-  await runStrongMatchSweep(new Date());
+  const summary = await runStrongMatchSweep(new Date());
   assert.equal(sent.length, 1);
+  /* seedBoard()'s default first_seen (4h ago) is already past STRONG_FIT_SLA_HOURS (3h), and this
+     account's resume is an intentionally strong match for it - a review caught that this makes
+     every test using these defaults silently exercise the SLA-breach path, unasserted. Documented
+     here rather than left implicit, so a future change to either default has to update this. */
+  assert.equal(summary.sla_breaches, 1);
 
   await database.exec('delete from "monitored_jobs"');
   const rows = await database.query<{ n: number; job: string | null; dedupe_key: string }>(
@@ -472,6 +477,10 @@ test('the sweep mails one posting, above the floor, and never the same one twice
   assert.equal(first.failed, 0, 'a thrown account must not be able to pass as a quiet day');
   assert.equal(first.matched, 1);
   assert.equal(first.sent, 1);
+  // Same default-fixture note as above: 4h old, scored above VERY_STRONG_FIT_SCORE, so this run
+  // is itself a documented SLA breach rather than the clean case (see the two tests below that
+  // control first_seen explicitly for the clean-vs-breach comparison).
+  assert.equal(first.sla_breaches, 1);
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].to, ['student@example.edu']);
   assert.equal(sent[0].subject, 'Software Engineer Intern at Ramp');
@@ -487,6 +496,130 @@ test('the sweep mails one posting, above the floor, and never the same one twice
   assert.equal(second.sent, 0);
   assert.equal(second.matched, 0, 'the announced posting is excluded before the pool is even chosen');
   assert.equal(sent.length, 1);
+});
+
+test('a very strong fit found within the SLA window sends clean, no breach reported', async () => {
+  // Found under three hours ago: the barrier is met, so the run reports zero breaches.
+  await seedBoard(undefined, "now() - interval '2 hours'");
+  await seedResume();
+  const summary = await runStrongMatchSweep(new Date());
+  assert.equal(summary.sent, 1);
+  assert.equal(summary.sla_breaches, 0);
+});
+
+test('a very strong fit found past the SLA window is a reported breach, and the cron answers 500', async () => {
+  /* THE HARD BARRIER. Found five hours ago - past STRONG_FIT_SLA_HOURS - so sending it now, however
+     correct the send itself is, is the exact failure this exists to surface loudly rather than
+     silently. Asserted through the real HTTP route, not runStrongMatchSweep directly, because the
+     500 is wired into the route handler and a unit-level call would never prove it fires. */
+  await seedBoard(undefined, "now() - interval '5 hours'");
+  await seedResume();
+  const response = await app.inject({
+    method: 'GET',
+    url: '/internal/strong-match-notifications',
+    headers: { 'x-internal-secret': 'notification-db-test-cron-secret' },
+  });
+  assert.equal(response.statusCode, 500, 'a cron that always answers 200 is a cron nobody reads');
+  const body = response.json();
+  assert.equal(body.sla_breaches, 1);
+  assert.equal(body.sent, 1, 'the match still goes out - late is not a reason to withhold it');
+  assert.match(body.error, /very-strong-fit/);
+  assert.equal(sent.length, 1, 'the student is still mailed even though the run reports the breach');
+});
+
+test('a very strong fit blocked by the daily cap is still counted as a breach, not silently dropped', async () => {
+  /* THE GAP A REVIEW CAUGHT. Before this fix, breachesStrongFitSla was only ever evaluated inside
+     sendNotification's success branch, so a very-strong fit that strongMatchForAccount correctly
+     picked as the best available posting - but that then lost the day's single send slot to an
+     earlier, weaker match - produced zero signal. It would just sit there, unannounced, until it
+     aged out of MATCH_LOOKBACK_HOURS with sla_breaches staying 0 and the route answering 200 the
+     whole time. This proves the fix: the daily cap suppresses the SEND, but not the BREACH report. */
+  await seedBoard(undefined, "now() - interval '1 hour'");
+  await seedResume();
+  const first = await runStrongMatchSweep(new Date());
+  assert.equal(first.sent, 1);
+  assert.equal(first.sla_breaches, 0, 'the first posting was found recently, so sending it is not a breach');
+
+  // A second, distinct posting on the same board, already well past the SLA window. Same
+  // description text as seedBoard's default, so it scores just as strongly against the same resume.
+  const description = [
+    'About the role',
+    'We are a small team shipping quickly.',
+    '',
+    'Requirements',
+    '- Strong TypeScript and React experience\n- Familiarity with Next.js and Tailwind CSS\n- Comfort with PostgreSQL and REST APIs\n- Experience with CI/CD and Git',
+    '',
+    'Benefits',
+    'Unlimited vacation, great coffee, a passionate team.',
+  ].join('\n').replace(/'/g, "''");
+  await database.exec(`
+    insert into "monitored_jobs"
+      ("source_id", "external_id", "company_name", "title", "location", "description", "description_digest", "apply_url", "posting_url", "posted_at", "first_seen_at")
+    values (
+      'c4f0e4a2-7c1f-4a4c-9c53-9c2b7f1a2b3c', 'job-2', 'Ramp', 'Senior Software Engineer Intern', 'New York, NY',
+      '${description}', '${description}',
+      'https://job-boards.greenhouse.io/ramp/jobs/2', 'https://job-boards.greenhouse.io/ramp/jobs/2',
+      now() - interval '6 hours', now() - interval '6 hours'
+    )
+  `);
+
+  const second = await runStrongMatchSweep(new Date());
+  assert.equal(second.sent, 0, 'the daily cap already spent by the first send blocks this one');
+  assert.equal(second.suppressed.daily_cap, 1);
+  assert.equal(
+    second.sla_breaches,
+    1,
+    'the very-strong fit that could not be sent is still counted as a breach, not dropped silently',
+  );
+  assert.equal(sent.length, 1, 'only the first email actually went out');
+});
+
+test('a stale very strong fit that loses the single-slot pick to a fresher one, same run, is still a counted breach', async () => {
+  /* A NARROWER version of the same gap, caught by a second review pass. strongMatchForAccount only
+     ever RETURNS the single best-ranked candidate - rankByFit sorts strictly by score, so a second
+     eligible very-strong fit in the SAME run, that lost the pick to a higher (or tied-and-fresher)
+     one, used to never even reach sweepAccount. Not sent, not suppressed-and-counted, not checked
+     against the SLA at all - it would just silently age out of MATCH_LOOKBACK_HOURS. This is
+     distinct from the daily-cap test above: here both postings are live in ONE sweep call, and
+     neither the daily cap nor a second sweep run is what strands the older one - losing the ranked
+     pick alone does. */
+  await seedBoard(undefined, "now() - interval '1 hour'"); // job-1: fresh, wins the tie on index.
+  await seedResume();
+
+  // job-2: identical description (so an identical score - a genuine tie, not just "also above the
+  // floor"), found 6 hours ago - past STRONG_FIT_SLA_HOURS on its own. Query order is oldest-last
+  // (first_seen_at desc), so job-1 sorts first into the pool and wins the score tie by index,
+  // leaving job-2 eligible, tied, and stranded in the same ranked list.
+  const description = [
+    'About the role',
+    'We are a small team shipping quickly.',
+    '',
+    'Requirements',
+    '- Strong TypeScript and React experience\n- Familiarity with Next.js and Tailwind CSS\n- Comfort with PostgreSQL and REST APIs\n- Experience with CI/CD and Git',
+    '',
+    'Benefits',
+    'Unlimited vacation, great coffee, a passionate team.',
+  ].join('\n').replace(/'/g, "''");
+  await database.exec(`
+    insert into "monitored_jobs"
+      ("source_id", "external_id", "company_name", "title", "location", "description", "description_digest", "apply_url", "posting_url", "posted_at", "first_seen_at")
+    values (
+      'c4f0e4a2-7c1f-4a4c-9c53-9c2b7f1a2b3c', 'job-2', 'Ramp', 'Software Engineer Intern', 'New York, NY',
+      '${description}', '${description}',
+      'https://job-boards.greenhouse.io/ramp/jobs/2', 'https://job-boards.greenhouse.io/ramp/jobs/2',
+      now() - interval '6 hours', now() - interval '6 hours'
+    )
+  `);
+
+  const summary = await runStrongMatchSweep(new Date());
+  assert.equal(summary.sent, 1, 'only the picked candidate is sent');
+  assert.deepEqual(sent[0]?.to, ['student@example.edu']);
+  assert.match(sent[0]?.text ?? '', /job-boards\.greenhouse\.io\/ramp\/jobs\/1/, 'the fresher posting is the one actually sent');
+  assert.equal(
+    summary.sla_breaches,
+    1,
+    'the stranded sibling is counted as a breach even though it was never sent or suppressed-and-counted',
+  );
 });
 
 test('a posting below the floor is not called a strong match', async () => {
@@ -527,6 +660,8 @@ test('an employer-reply row in the ledger does not suppress every match', async 
   const summary = await runStrongMatchSweep(new Date());
   assert.equal(summary.failed, 0);
   assert.equal(summary.sent, 1, 'a reply row must not hide the whole board');
+  // Same default-fixture note as the other tests above.
+  assert.equal(summary.sla_breaches, 1);
 });
 
 test('an unsubscribed account is not even considered', async () => {

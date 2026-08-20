@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { employerReplyEmail, foundPhrase, strongMatchEmail } from './notificationEmail';
+import { EMAIL_MATCH_DISPLAY_FLOOR, employerReplyEmail, foundPhrase, strongMatchEmail } from './notificationEmail';
 
 const NOW = new Date('2026-08-19T12:00:00.000Z');
 const UNSUBSCRIBE = 'https://api.trylitos.com/notifications/unsubscribe?token=v1.strong_match.abc.def';
@@ -17,6 +17,8 @@ function matchEmail(over: Partial<Parameters<typeof strongMatchEmail>[0]['job']>
       location: 'New York, NY',
       first_seen_at: new Date('2026-08-19T08:00:00.000Z'),
       posting_url: 'https://job-boards.greenhouse.io/ramp/jobs/1234',
+      company_domain: 'ramp.com',
+      required_coverage: null,
       ...over,
     },
   });
@@ -91,6 +93,76 @@ test('company and title are escaped into the HTML', () => {
   const email = matchEmail({ company_name: 'Ramp & Co <script>', title: 'Intern "2027"' });
   assert.doesNotMatch(email.html ?? '', /<script>/);
   assert.match(email.html ?? '', /Ramp &amp; Co/);
+});
+
+test('a score below the display floor drops the percentage but keeps the found phrase', () => {
+  /* MIN_RANKED_MATCH_SCORE (the board's own floor) is 25, so "strong match" alone already promises
+     more than a 31% score backs up. The email must not print a number that undercuts its own claim
+     in the same sentence. */
+  const weak = matchEmail({}, 31);
+  assert.doesNotMatch(weak.text, /\d+% match/);
+  assert.doesNotMatch(weak.html ?? '', /\d+% match/);
+  assert.match(weak.text, /Found 4 hours ago\./);
+  assert.match(weak.html ?? '', /Found 4 hours ago\./);
+
+  const strong = matchEmail({}, EMAIL_MATCH_DISPLAY_FLOOR);
+  assert.match(strong.text, /70% match against your resume/);
+  assert.match(strong.html ?? '', /70% match/);
+});
+
+test('the email never claims "strong" for a score the board itself would not call strong', () => {
+  /* The board's own scoreBand() draws "Strong match" at 40, not at MIN_RANKED_MATCH_SCORE's 25 -
+     the floor this alert sends on. A score of 31 clears the send floor but not the board's own bar,
+     so the email must not say "A strong match opened" for it: a student who clicks through from
+     that claim to a board that labels the same posting "Solid match" is the exact failure this
+     file's own docstring warns against - the score stops being a measurement and becomes copy. */
+  const belowBoardBar = matchEmail({}, 31);
+  assert.doesNotMatch(belowBoardBar.html ?? '', /A strong match opened/);
+  assert.match(belowBoardBar.html ?? '', /A new match opened/);
+
+  const atBoardBar = matchEmail({}, 40);
+  assert.match(atBoardBar.html ?? '', /A strong match opened/);
+  assert.doesNotMatch(atBoardBar.html ?? '', /A new match opened/);
+});
+
+test('a high score with most hard requirements unmet is also not claimed "strong"', () => {
+  /* scoreBand's SECOND gate, independent of the score threshold: less than half the requirements
+     block covered caps the band at "Missing key requirements" even at a score that clears 40. A
+     review caught that the first version of this fix called scoreBand(score) alone, so this gate
+     could never fire from the email and the board/email disagreement just moved from the score
+     axis to the coverage axis instead of actually closing. required_coverage has to reach here for
+     the gate to work at all. */
+  const highScoreLowCoverage = matchEmail({ required_coverage: 0.25 }, 61);
+  assert.doesNotMatch(highScoreLowCoverage.html ?? '', /A strong match opened/);
+  assert.match(highScoreLowCoverage.html ?? '', /A new match opened/);
+
+  // Same score, requirements mostly covered: the gate must not fire when it should not.
+  const highScoreGoodCoverage = matchEmail({ required_coverage: 0.9 }, 61);
+  assert.match(highScoreGoodCoverage.html ?? '', /A strong match opened/);
+});
+
+test('the CTA sends a student to the Litos dashboard, not straight to the employer', () => {
+  const email = matchEmail();
+  assert.match(email.html ?? '', /Open your Litos dashboard/);
+  assert.match(email.text, /Open your Litos dashboard: https:\/\/trylitos\.com\/dashboard\/jobs/);
+  // The original posting is still reachable, but only as the secondary link.
+  assert.match(email.html ?? '', /Prefer the original listing\?/);
+  assert.match(email.text, /Prefer the original listing\? https:\/\/job-boards\.greenhouse\.io/);
+});
+
+test('the company logo renders from the resolved domain, and falls back to an initial without one', () => {
+  const withDomain = matchEmail({ company_domain: 'ramp.com' });
+  assert.match(withDomain.html ?? '', /google\.com\/s2\/favicons\?domain=ramp\.com/);
+
+  const withoutDomain = matchEmail({ company_domain: null });
+  assert.doesNotMatch(withoutDomain.html ?? '', /google\.com\/s2\/favicons/);
+  assert.match(withoutDomain.html ?? '', /email-logo-fallback/);
+});
+
+test('the shell declares a dark palette so the email is legible in both color schemes', () => {
+  const email = matchEmail();
+  assert.match(email.html ?? '', /name="color-scheme" content="light dark"/);
+  assert.match(email.html ?? '', /prefers-color-scheme: dark/);
 });
 
 test('the reply alert says mail arrived and never says what it said', () => {

@@ -1,4 +1,6 @@
+import { FAVICON_ENDPOINT, FAVICON_PX } from './companyDomains';
 import { emailSender, type OutboundEmail } from './email';
+import { scoreBand } from '../engine/jdMatch';
 import { PRODUCT_LINKS, PRODUCT_NAME } from './product';
 
 /* THE TWO MESSAGES, and the two rules that decide every word in them.
@@ -27,6 +29,33 @@ function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+/**
+ * Below this, a percentage reads as damning rather than informative. MIN_RANKED_MATCH_SCORE (the
+ * board's own floor) is 25, so "strong match" alone already promises more than a 31% score backs
+ * up. Rather than print a number that undercuts the claim in the same sentence, the email drops the
+ * number and lets the found phrase carry the line alone.
+ */
+export const EMAIL_MATCH_DISPLAY_FLOOR = 70;
+
+/**
+ * The 48px circle beside the job title: the employer's favicon when we have a verified domain for
+ * them, otherwise their initial. No onerror fallback exists in email the way it does on the
+ * dashboard, so a domain we are not confident in must not reach this function at all: the caller
+ * passes the same `company_domain` the board itself renders, resolved server-side by
+ * `companyDomainFor`, never guessed here.
+ */
+function companyLogoHtml(companyName: string, companyDomain: string | null): string {
+  const initial = escapeHtml(companyName.trim().charAt(0).toUpperCase() || '?');
+  const circleStyle =
+    'display:table-cell;width:48px;height:48px;border-radius:999px;border:1px solid #e8e6e1;' +
+    'background-color:#f7f7f5;text-align:center;vertical-align:middle;';
+  if (!companyDomain) {
+    return `<td class="email-logo-fallback" style="${circleStyle}"><span class="email-muted" style="color:#6b6a64;font-family:monospace;font-size:15px;font-weight:600;">${initial}</span></td>`;
+  }
+  const src = `${FAVICON_ENDPOINT}?domain=${encodeURIComponent(companyDomain)}&sz=${FAVICON_PX}`;
+  return `<td class="email-logo" style="${circleStyle}padding:0;"><img src="${src}" width="24" height="24" alt="" style="display:inline-block;vertical-align:middle;border:0;width:24px;height:24px;" /></td>`;
 }
 
 /**
@@ -65,20 +94,53 @@ function unsubscribeHeaders(url: string): Record<string, string> {
   };
 }
 
+/*
+ * DARK MODE, and why it is class-based rather than only a media query on the shell.
+ *
+ * The shell's own chrome (page background, card, header band, footer band) is styled here. The
+ * body content each email type builds separately (headings, muted lines, links, the CTA button) is
+ * given the same class names at the call site so one stylesheet governs the whole message, not just
+ * the frame around it: a card that goes dark around text that stays light-mode black is worse than
+ * doing nothing. Every override carries !important because it must beat the inline style that keeps
+ * the email legible in clients with no dark-mode support at all (Outlook desktop chief among them),
+ * which is why the light values are still written inline rather than only in this stylesheet.
+ */
+const DARK_MODE_STYLE = `
+    <style>
+      @media (prefers-color-scheme: dark) {
+        .email-bg { background-color: #0f0f12 !important; }
+        .email-card { background-color: #1b1b20 !important; border-color: #2c2c33 !important; }
+        .email-header { background-color: #20223a !important; border-color: #2c2c33 !important; }
+        .email-footer { background-color: #17171b !important; border-color: #2c2c33 !important; }
+        .email-text { color: #f2f2ef !important; }
+        .email-muted { color: #a7a6a1 !important; }
+        .email-link { color: #9fb2f5 !important; }
+        .email-button { background-color: #8da0f5 !important; color: #111119 !important; }
+        .email-logo, .email-logo-fallback { background-color: #26262d !important; border-color: #33333c !important; }
+        .email-badge { background-color: #262a4a !important; color: #b9c4fb !important; }
+      }
+    </style>`;
+
 function shell(bodyHtml: string, unsubscribeHtml: string): string {
   const iconUrl = new URL('/icon.png', PRODUCT_LINKS.website).toString();
   return `<!doctype html>
 <html lang="en">
-  <body style="margin:0;padding:0;background-color:#f7f7f5;color:#12120f;">
-    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="supported-color-schemes" content="light dark" />${DARK_MODE_STYLE}
+  </head>
+  <body class="email-bg" style="margin:0;padding:0;background-color:#f7f7f5;color:#12120f;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" class="email-bg" style="background-color:#f7f7f5;">
       <tr>
         <td align="center" style="padding:32px 16px;">
-          <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:600px;background-color:#ffffff;border:1px solid #e8e6e1;border-radius:20px;overflow:hidden;">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" class="email-card" style="width:100%;max-width:600px;background-color:#ffffff;border:1px solid #e8e6e1;border-radius:20px;overflow:hidden;">
             <tr>
-              <td style="padding:24px 32px;background-color:#eef1fe;border-bottom:1px solid #e8e6e1;">
+              <td class="email-header" style="padding:24px 32px;background-color:#eef1fe;border-bottom:1px solid #e8e6e1;">
                 <p style="margin:0;">
                   <img src="${iconUrl}" width="40" height="40" alt="${PRODUCT_NAME}" style="display:inline-block;vertical-align:middle;border:0;" />
-                  <strong style="vertical-align:middle;color:#12120f;">${PRODUCT_NAME}</strong>
+                  <strong class="email-text" style="vertical-align:middle;color:#12120f;">${PRODUCT_NAME}</strong>
                 </p>
               </td>
             </tr>
@@ -86,7 +148,7 @@ function shell(bodyHtml: string, unsubscribeHtml: string): string {
               <td style="padding:36px 32px;">${bodyHtml}</td>
             </tr>
             <tr>
-              <td style="padding:20px 32px;background-color:#f7f7f5;border-top:1px solid #e8e6e1;">${unsubscribeHtml}</td>
+              <td class="email-footer" style="padding:20px 32px;background-color:#f7f7f5;border-top:1px solid #e8e6e1;">${unsubscribeHtml}</td>
             </tr>
           </table>
         </td>
@@ -106,6 +168,15 @@ export type StrongMatchEmailInput = {
     location: string | null;
     first_seen_at: Date;
     posting_url: string;
+    /** The employer's verified domain, resolved by `companyDomainFor` the same way the board
+     *  resolves it. Null renders the initial-letter fallback rather than guessing at a logo. */
+    company_domain: string | null;
+    /** From the same scoreJdMatch call that produced `score`, threaded through rankByFit rather
+     *  than discarded. Required so scoreBand's requirements gate (below) can agree with the board's
+     *  own /jobs/:id route, which passes this same value - without it, a high-scoring posting
+     *  missing most of its hard requirements would read as "strong" here and "Missing key
+     *  requirements" there. */
+    required_coverage: number | null;
   };
   /** The fit percentage from the same scorer the board ranks with. Null is never sent: a match
    *  alert with no score behind it is not a match alert, and the matcher refuses to build one. */
@@ -127,6 +198,24 @@ export function strongMatchEmail(input: StrongMatchEmailInput): OutboundEmail {
   const boardUrl = new URL('/dashboard/jobs', PRODUCT_LINKS.website).toString();
   const settingsUrl = new URL('/dashboard/settings#automation', PRODUCT_LINKS.website).toString();
   const line = `${job.title} at ${job.company_name}`;
+  /* Below EMAIL_MATCH_DISPLAY_FLOOR the number undercuts the "strong match" claim in the same
+     sentence, so the sentence is written to work with or without it rather than blanking a slot. */
+  const showScore = input.score >= EMAIL_MATCH_DISPLAY_FLOOR;
+  const metaLine = showScore ? `${found}. ${input.score}% match against your resume.` : `${found}.`;
+  /* The board's OWN bar for the word "strong" is scoreBand's 40, not MIN_RANKED_MATCH_SCORE's 25 -
+     the eligibility floor this alert sends on. Left as-is, a posting scoring 26-39 clears the send
+     floor and gets emailed "A strong match opened," then the student clicks through and the same
+     posting is labelled "Solid match" on the board. The floor stays 25 (send eligibility is not
+     this line's decision to make), but the CLAIM in the copy is capped at what the board itself
+     would call it, so the two surfaces never disagree about the same posting.
+     required_coverage IS PASSED, not left to default null. scoreBand's gate downgrades "strong" to
+     "Missing key requirements" when the resume covers less than half the hard requirements, even at
+     a high score - the board's own /jobs/:id route passes this same value. A first version of this
+     fix called scoreBand(input.score) alone, which meant the gate could never fire from the email
+     and the exact same disagreement this fix exists to close could still happen on the coverage
+     axis instead of the score axis. */
+  const boardCallsItStrong = scoreBand(input.score, job.required_coverage).tone === 'strong';
+  const eyebrow = boardCallsItStrong ? 'A strong match opened' : 'A new match opened';
 
   return {
     from: emailSender(),
@@ -143,30 +232,41 @@ export function strongMatchEmail(input: StrongMatchEmailInput): OutboundEmail {
     text: [
       `${line}`,
       ...(where ? [where] : []),
-      `${found}. ${input.score}% match against your resume.`,
+      `${metaLine}`,
       ``,
-      `Open the posting: ${job.posting_url}`,
-      `See it in ${PRODUCT_NAME}: ${boardUrl}`,
+      `Open your ${PRODUCT_NAME} dashboard: ${boardUrl}`,
+      `(This takes you straight to the full posting and an apply-ready packet, not to the employer's site.)`,
+      `Prefer the original listing? ${job.posting_url}`,
       ``,
       `You are getting this because you asked ${PRODUCT_NAME} to tell you when a strong match opens.`,
       `Stop these alerts: ${input.unsubscribeUrl}`,
     ].join('\n'),
     html: shell(
       [
-        `<p style="margin:0 0 8px;color:#6b6a64;">A strong match opened.</p>`,
-        `<h1 style="margin:0 0 8px;color:#12120f;">${escapeHtml(job.title)}</h1>`,
-        `<p style="margin:0 0 4px;color:#12120f;">${escapeHtml(job.company_name)}</p>`,
-        where ? `<p style="margin:0 0 16px;color:#6b6a64;">${escapeHtml(where)}</p>` : `<p style="margin:0 0 16px;"></p>`,
+        `<p class="email-muted" style="margin:0 0 16px;color:#6b6a64;font-size:13px;text-transform:uppercase;letter-spacing:0.06em;">${escapeHtml(eyebrow)}</p>`,
+        `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 20px;">`,
+        `<tr>`,
+        companyLogoHtml(job.company_name, job.company_domain),
+        `<td style="width:14px;"></td>`,
+        `<td style="vertical-align:middle;">`,
+        `<h1 class="email-text" style="margin:0 0 4px;color:#12120f;font-size:20px;">${escapeHtml(job.title)}</h1>`,
+        `<p class="email-muted" style="margin:0;color:#6b6a64;">${escapeHtml(job.company_name)}${where ? ` &middot; ${escapeHtml(where)}` : ''}</p>`,
+        `</td>`,
+        `</tr>`,
+        `</table>`,
         /* Found, never Posted. See the note at the top of this file. */
-        `<p style="margin:0 0 24px;color:#6b6a64;">${escapeHtml(found)}. ${input.score}% match against your resume.</p>`,
-        `<p style="margin:0 0 20px;">`,
-        `<a href="${escapeHtml(job.posting_url)}" style="display:inline-block;padding:13px 20px;background-color:#6b84e8;color:#ffffff;text-decoration:none;border-radius:999px;">Open the posting</a>`,
+        showScore
+          ? `<p style="margin:0 0 24px;"><span class="email-muted" style="color:#6b6a64;">${escapeHtml(found)}.</span> <span class="email-badge" style="display:inline-block;background-color:#eef1fe;color:#3f52b8;border-radius:999px;padding:2px 10px;font-size:13px;font-weight:600;">${input.score}% match</span></p>`
+          : `<p class="email-muted" style="margin:0 0 24px;color:#6b6a64;">${escapeHtml(found)}.</p>`,
+        `<p style="margin:0 0 8px;">`,
+        `<a href="${escapeHtml(boardUrl)}" class="email-button" style="display:inline-block;padding:13px 20px;background-color:#6b84e8;color:#ffffff;text-decoration:none;border-radius:999px;">Open your ${escapeHtml(PRODUCT_NAME)} dashboard</a>`,
         `</p>`,
-        `<p style="margin:0;color:#6b6a64;">Or see it in ${PRODUCT_NAME}: <a href="${escapeHtml(boardUrl)}" style="color:#4f68c9;">your board</a>.</p>`,
+        `<p class="email-muted" style="margin:0 0 20px;color:#6b6a64;font-size:13px;">This button takes you straight to your ${escapeHtml(PRODUCT_NAME)} dashboard, not the employer's site, with the full posting and an apply-ready packet waiting.</p>`,
+        `<p class="email-muted" style="margin:0;color:#6b6a64;">Prefer the original listing? <a href="${escapeHtml(job.posting_url)}" class="email-link" style="color:#4f68c9;">Open it here</a>.</p>`,
       ].join(''),
       [
-        `<p style="margin:0 0 6px;color:#6b6a64;">You asked ${PRODUCT_NAME} to tell you when a strong match opens. One a day at most, never a digest.</p>`,
-        `<p style="margin:0;color:#6b6a64;"><a href="${escapeHtml(input.unsubscribeUrl)}" style="color:#4f68c9;">Stop these alerts</a> or <a href="${escapeHtml(settingsUrl)}" style="color:#4f68c9;">change what you hear about</a>.</p>`,
+        `<p class="email-muted" style="margin:0 0 6px;color:#6b6a64;">You asked ${PRODUCT_NAME} to tell you when a strong match opens. One a day at most, never a digest.</p>`,
+        `<p class="email-muted" style="margin:0;color:#6b6a64;"><a href="${escapeHtml(input.unsubscribeUrl)}" class="email-link" style="color:#4f68c9;">Stop these alerts</a> or <a href="${escapeHtml(settingsUrl)}" class="email-link" style="color:#4f68c9;">change what you hear about</a>.</p>`,
       ].join(''),
     ),
   };

@@ -17,9 +17,12 @@ import { readUnsubscribeToken, unsubscribeConfiguration, unsubscribeConfigured }
 import { sendNotification } from '../lib/notificationSend';
 import { strongMatchEmail } from '../lib/notificationEmail';
 import {
+  breachesStrongFitSla,
+  STRONG_FIT_SLA_HOURS,
   strongMatchDedupeKey,
   strongMatchForAccount,
   subscribedMatchAccounts,
+  VERY_STRONG_FIT_SCORE,
 } from '../lib/strongMatchNotification';
 import { previewDigest, runDigestSweep } from '../lib/digestSweep';
 import { forgetPushSubscription, pushConfiguration, pushPublicKey, rememberPushSubscription } from '../lib/webPush';
@@ -79,6 +82,13 @@ export type MatchSweepSummary = {
   suppressed: Record<string, number>;
   failed: number;
   truncated: boolean;
+  /** How many of this run's sends were themselves the SLA breach: a very-strong fit
+   *  (score >= very_strong_fit_score) that had already sat past sla_hours before this sweep
+   *  finally reached it. Echoed on every run, not only on a breach, for the same reason
+   *  surfaced_postings is on jobMonitor's payload: a promise erodes before it snaps. */
+  sla_breaches: number;
+  sla_hours: number;
+  very_strong_fit_score: number;
 };
 
 /**
@@ -90,12 +100,35 @@ export type MatchSweepSummary = {
  * simply not be told about anything that day, with nothing on screen to say so. So each account is
  * wrapped, its failure is counted, and the sweep carries on.
  */
+/**
+ * `slaBreach` is computed from the CANDIDATE, not from whether the send succeeded - and that is
+ * the whole fix for the gap a review caught in this barrier's first version. A very-strong fit that
+ * `strongMatchForAccount` correctly identifies as this account's best available posting, but that
+ * `sendNotification` then suppresses (most concretely: the daily cap already spent on a weaker
+ * match sent earlier the same UTC day), used to vanish with zero signal - `breachesStrongFitSla`
+ * was only ever called inside the `outcome.sent` branch, so a starved very-strong fit aged out of
+ * MATCH_LOOKBACK_HOURS silently, `sla_breaches` stayed 0, and the route answered 200 throughout.
+ * The promise was never "we will always send a late very-strong fit", it was "we will not stay
+ * quiet about missing it" - so the breach is now measured against the candidate the moment it is
+ * chosen, whether or not the send that follows is the thing that fails.
+ *
+ * A SECOND round of the same review then caught a narrower version of the same gap: an account can
+ * have TWO live very-strong fits in one run, and `strongMatchForAccount` only ever returns the
+ * single best-ranked one - the other was never even handed to this function, so it could never be
+ * checked, suppressed, or counted. `strandedVeryStrongFit` is that missing signal, computed inside
+ * `strongMatchForAccount` from the same already-ranked pool at no extra query cost, and folded into
+ * `slaBreach` here alongside the candidate's own lateness.
+ */
 async function sweepAccount(
   account: { id: string; email: string },
   now: Date,
-): Promise<'sent' | 'no_match' | { suppressed: string }> {
-  const match = await strongMatchForAccount(account.id, now);
-  if (!match) return 'no_match';
+): Promise<
+  | { kind: 'sent'; slaBreach: boolean }
+  | { kind: 'no_match' }
+  | { kind: 'suppressed'; reason: string; slaBreach: boolean }
+> {
+  const { candidate: match, strandedVeryStrongFit } = await strongMatchForAccount(account.id, now);
+  if (!match) return { kind: 'no_match' };
   const outcome = await sendNotification({
     userId: account.id,
     kind: 'strong_match',
@@ -109,8 +142,12 @@ async function sweepAccount(
       score: match.score,
     }),
   }, { now: () => now });
-  if (outcome.sent) return 'sent';
-  return { suppressed: outcome.reason };
+  /* Either the picked candidate itself sat past the window, or a DIFFERENT very-strong fit for
+     this same account lost the single-slot pick to it this run (see strongMatchForAccount's own
+     doc for why that second case needed its own signal, not just this candidate's own lateness). */
+  const slaBreach = breachesStrongFitSla(match, now) || strandedVeryStrongFit;
+  if (outcome.sent) return { kind: 'sent', slaBreach };
+  return { kind: 'suppressed', reason: outcome.reason, slaBreach };
 }
 
 export async function runStrongMatchSweep(now: Date, log?: FastifyRequest['log']): Promise<MatchSweepSummary> {
@@ -124,17 +161,27 @@ export async function runStrongMatchSweep(now: Date, log?: FastifyRequest['log']
     suppressed: {},
     failed: 0,
     truncated,
+    sla_breaches: 0,
+    sla_hours: STRONG_FIT_SLA_HOURS,
+    very_strong_fit_score: VERY_STRONG_FIT_SCORE,
   };
 
   for (const account of considered) {
     try {
       const result = await sweepAccount(account, now);
-      if (result === 'no_match') continue;
+      if (result.kind === 'no_match') continue;
       summary.matched += 1;
-      if (result === 'sent') {
+      if (result.slaBreach) {
+        summary.sla_breaches += 1;
+        log?.error(
+          { userId: account.id, sla_hours: STRONG_FIT_SLA_HOURS, outcome: result.kind },
+          'a very-strong-fit match was not emailed within the SLA window',
+        );
+      }
+      if (result.kind === 'sent') {
         summary.sent += 1;
       } else {
-        summary.suppressed[result.suppressed] = (summary.suppressed[result.suppressed] ?? 0) + 1;
+        summary.suppressed[result.reason] = (summary.suppressed[result.reason] ?? 0) + 1;
       }
     } catch (error) {
       summary.failed += 1;
@@ -404,6 +451,29 @@ export async function notificationRoutes(fastify: FastifyInstance) {
       });
     }
     const summary = await runStrongMatchSweep(new Date(), request.log);
+    /* THE HARD BARRIER. A cron that always answers 200 is a cron nobody reads - see
+       MINIMUM_SURFACED_JOBS in jobMonitor.ts, the same pattern applied here. The fix for a breach
+       is a sweep that runs often enough to catch very-strong fits sooner (see
+       .github/workflows/strong-match-notifications.yml, the sub-daily cadence Vercel's Hobby-tier cron
+       cannot run on its own), never a wider STRONG_FIT_SLA_HOURS. */
+    if (summary.sla_breaches > 0) {
+      request.log.error(
+        {
+          sla_breaches: summary.sla_breaches,
+          sla_hours: summary.sla_hours,
+          very_strong_fit_score: summary.very_strong_fit_score,
+        },
+        'Strong-match SLA breached',
+      );
+      return reply.status(500).send({
+        ...summary,
+        error: `${summary.sla_breaches} very-strong-fit match(es) (score >= ${summary.very_strong_fit_score}) `
+          + `reached a student more than ${summary.sla_hours} hours after Litos found them. Check that the `
+          + 'sub-daily sweep cadence is actually firing (GitHub Actions, not vercel.json - Vercel Hobby '
+          + 'rejects sub-daily crons at deploy time) before assuming this run is the anomaly. '
+          + 'Do not raise sla_hours to clear this.',
+      });
+    }
     return reply.status(200).send(summary);
   };
   fastify.get('/internal/strong-match-notifications', handleSweep);
