@@ -48,6 +48,7 @@ import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { blankRequiredQuestionLabels, preparedRunCanRestart, preparedRunHandoffExpired, resumeEditDisposition, reviewAnswerSaveDisposition, submitRequestDisposition } from '../lib/submissionSafety';
+import { releasedExpiredAttendedHandoffReview } from '../lib/expiredHandoffClaimRelease';
 import { submissionClaimPatch } from '../lib/submissionStop';
 import { advanceCanonicalApplicationFromPacketSubmission } from '../lib/canonicalApplicationSync';
 import { extensionAuthorizationRequiresAutomaticSubmission } from '../lib/submissionAuthorization';
@@ -301,6 +302,53 @@ async function ownedResume(request: FastifyRequest, reply: FastifyReply) {
   return rows[0];
 }
 
+/* REPAIR ON LOAD, IN THE SHAPE restoreExpiredResume ALREADY SET: the row is healed at the moment a
+ * route loads it, with an exact CAS, and the caller keeps working with the healed row.
+ *
+ * THE TRAP THIS LIFTS, measured live 2026-08-20 on the Fully (teamtailor) packet. A managed run
+ * claimed the send, filled the whole form, and parked at the attended consent handoff WITHOUT
+ * pressing send - status needs_attention, no submitted_at, no submission_attempted_at, no
+ * unverified_submission, no receipt. The claim it still wore then refused the packet audit
+ * ("This application can no longer be audited before submission") and refused every re-run
+ * (submitRequestDisposition rejects claimed needs_attention, and its only key exists for runs whose
+ * press outcome was unknown, which this run's provably was not). The attended finish needs
+ * extension >= 0.5.10 while the store serves 0.5.9, and the 55-minute handoff window was long past:
+ * a row nothing could ever move again, guarding a send its own record says never happened.
+ *
+ * The evidence rule lives in lib/expiredHandoffClaimRelease.ts; this helper is only the write. The
+ * CAS is against the exact spec that was read, so a run taking the row concurrently wins and the
+ * release simply does not happen - null on any miss, and the caller proceeds with the stored row,
+ * whose gates then refuse exactly as they did before. That is the safe failure direction: a missed
+ * release costs one more request, a wrong release could cost a duplicate application. */
+async function repairExpiredAttendedHandoffClaim(
+  row: NonNullable<Awaited<ReturnType<typeof ownedResume>>>,
+  userId: string,
+  log: FastifyRequest['log'],
+): Promise<NonNullable<Awaited<ReturnType<typeof ownedResume>>> | null> {
+  const current = readApplicationReview(row.spec);
+  if (!current) return null;
+  const released = await releasedExpiredAttendedHandoffReview(row.id, userId, current);
+  if (!released) return null;
+  const updated = await db.update(generated_resumes)
+    .set({ spec: reviewSpec(released) })
+    .where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, userId),
+      sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+    ))
+    .returning({ id: generated_resumes.id });
+  if (updated.length === 0) return null;
+  log.info(
+    {
+      applicationId: row.id,
+      releasedClaimId: released.claim_released?.claim_id ?? null,
+      handoffExpiredAt: current.handoff_expires_at,
+    },
+    'Released the submission claim of an expired attended handoff whose run never pressed send',
+  );
+  return { ...row, spec: { ...(row.spec as StoredSpec), _review: released } };
+}
+
 function editableResumeSpec(value: unknown): ResumeSpec {
   const spec = normalizeSpec(value);
   if (!spec.school && spec.experience.length === 0 && spec.skills.length === 0) {
@@ -523,8 +571,15 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     '/applications/:id/packet-audit',
     { preHandler: requireAuth },
     async (request: FastifyRequest, reply: FastifyReply) => {
-      const row = await ownedResume(request, reply);
+      let row = await ownedResume(request, reply);
       if (!row) return;
+      /* Ahead of the claim gate below, because that gate is the first half of the trap this repair
+       * exists for: a run that parked at an attended handoff without pressing send left the claim
+       * on the row, the handoff window closed with the attended finish unavailable, and this route
+       * then refused the row forever. The repair releases the claim only when the row itself proves
+       * no send can have happened and no attended finish is still possible; on any other row it is
+       * a no-op and the gate refuses exactly as before. See repairExpiredAttendedHandoffClaim. */
+      row = await repairExpiredAttendedHandoffClaim(row, request.jwtPayload!.userId, request.log) ?? row;
       const review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       /* awaiting_security_code is NOT past auditing, and blocking it here deadlocked the code step.
@@ -1580,10 +1635,18 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     '/applications/:id/submit-request',
     { preHandler: requireAuth },
     async (request: FastifyRequest, reply: FastifyReply) => {
-      const row = await ownedResume(request, reply);
+      let row = await ownedResume(request, reply);
       if (!row) return;
       const parsed = submitBodySchema.safeParse(request.body);
       if (!parsed.success) return reply.status(400).send({ error: 'Invalid answers', detail: parsed.error.issues });
+      /* The second half of the expired-handoff trap. submitRequestDisposition rightly refuses a
+       * claimed needs_attention row, and its only key - the applicant's own 'not_sent' answer -
+       * exists only for runs whose press outcome was unknown. A run that parked at an attended
+       * handoff BEFORE pressing has no unverified record, so there is no question to answer and
+       * this route refused it forever. The repair releases the claim only on the row's own proof
+       * that nothing was pressed and the attended window is over; the disposition below then reads
+       * the released row and answers 'start' the ordinary way, with every other gate intact. */
+      row = await repairExpiredAttendedHandoffClaim(row, request.jwtPayload!.userId, request.log) ?? row;
       const stored = row.spec as StoredSpec;
       let current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
