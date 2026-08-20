@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { keepStudentWording } from './resumePolicy';
+import { startsWithStrongVerb } from './resumeValidate';
 
 /* THE STUDENT'S OWN SENTENCE, when the model only paraphrased one they already wrote.
  *
@@ -62,5 +63,36 @@ describe('it refuses to touch anything that is not a near-copy', () => {
     /* Scoring against the larger side is what stops "Tested a signal." scoring 1.0 against a full
        sentence it merely dropped half of. That would restore on far too little evidence. */
     assert.equal(keepStudentWording('Tested a signal.', OWN), 'Tested a signal.');
+  });
+});
+
+describe('the restored sentence still has to pass the gate the model was satisfying', () => {
+  /* THE REGRESSION THIS EXISTS FOR, found on the first production run of the restore. The model
+   * paraphrases weak openers because the validator REQUIRES an action-verb-first bullet, so putting
+   * the student's verb back put a rejected verb back and the whole resume was refused with
+   * `resume_quality_hold` - a worse outcome than the paraphrase by any measure. */
+  test('the verbs that caused this are admitted now, so the student keeps their own word', () => {
+    for (const verb of ['Rewrote', 'Backtested', 'Resequenced', 'Reordered', 'Restructured']) {
+      assert.equal(
+        startsWithStrongVerb(`${verb} something measurable for the team.`),
+        true,
+        `"${verb}" is still rejected, so restoring it would refuse the resume`,
+      );
+    }
+  });
+
+  /* A near-copy whose only real difference IS the opener, so the two cases below differ by the gate
+     alone rather than by the similarity score. "Helped" is deliberately absent from STRONG_VERBS,
+     and that flag is correct: it is a genuinely weak opener. */
+  const WEAK = ['Helped migrate twelve services to Kubernetes across two quarters.'];
+  const REWRITTEN = 'Migrated twelve services to Kubernetes across two quarters.';
+
+  test('a genuinely weak opener keeps the model\'s rewrite rather than losing the resume', () => {
+    // A bullet nobody can attach helps no one, so here the gate wins and the student keeps a resume.
+    assert.equal(keepStudentWording(REWRITTEN, WEAK, startsWithStrongVerb), REWRITTEN);
+  });
+
+  test('without a gate it would restore, which is why the caller always passes one', () => {
+    assert.equal(keepStudentWording(REWRITTEN, WEAK), WEAK[0]);
   });
 });

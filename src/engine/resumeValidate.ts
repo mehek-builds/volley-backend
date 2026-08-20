@@ -39,6 +39,29 @@ import { deriveCandidateContext, resumeSafeTargetRole, type CandidateEducation }
  *    verb it matches. Nothing is admitted because it appeared in a resume; only because rejecting
  *    it while accepting its twin was incoherent.
  *
+ * 4. THE SAME COIN TOSS, FOUND AGAIN BY GENERATING TEN REAL RESUMES ON 2026-08-20, and this time
+ *    the cost was measurable rather than theoretical. A rejected opener does not just get flagged:
+ *    the model rewrites the bullet to satisfy the gate, so the gate SILENTLY EDITS the student's
+ *    prose toward whatever it happens to admit. Observed:
+ *
+ *      "Backtested a mean-reversion signal..."  ->  "Tested a mean-reversion signal..."
+ *      "Rewrote a Go payment reconciliation..." ->  "Rebuilt a Go payment reconciliation..."
+ *      "Resequenced a pick path with OR-Tools"  ->  "Optimized a pick path with OR-Tools"
+ *
+ *    The first is on a QUANTITATIVE TRADING application, where "backtested" is the precise term a
+ *    screener looks for and "tested" is not. The gate made the resume worse for the exact posting
+ *    it was tailored to, because `tested` was admitted and `backtested` was not.
+ *
+ *    Added under the same discipline as the additions above, each named against its admitted twin:
+ *      rewrote        <- rebuilt, refactored, redesigned (all admitted)
+ *      backtested     <- tested, benchmarked, validated  (all admitted)
+ *      resequenced    <- structured, consolidated        (admitted)
+ *      reordered      <- structured, streamlined         (admitted)
+ *      restructured   <- structured, overhauled          (admitted)
+ *
+ *    Weak verbs stay out, and none of these is weak: every one is a specific form of a verb the
+ *    list already calls strong.
+ *
  *    First batch, against the verb each one twins: performed/conducted, operated/ran,
  *    assessed/evaluated, simulated/modeled, prototyped/built, fabricated and machined against
  *    constructed and assembled, programmed and coded against developed, debugged/diagnosed,
@@ -75,7 +98,8 @@ constructed assembled purified sequenced cultured calibrated administered dissec
 performed operated assessed simulated tested prototyped fabricated machined programmed coded
 debugged refactored migrated
 recorded logged compiled wrote installed reviewed tuned estimated computed soldered welded iterated
-characterized`
+characterized
+rewrote backtested resequenced reordered restructured`
     .split(/\s+/)
     .filter(Boolean),
 );

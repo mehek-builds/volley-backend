@@ -1,6 +1,7 @@
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
+import { startsWithStrongVerb } from './resumeValidate';
 
 export interface CandidateEducation {
   school: string;
@@ -415,7 +416,18 @@ function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: Experi
  * Threshold is on CONTENT overlap rather than string distance so that a verb swap reads as
  * near-identical (which it is) while a real rewrite does not.
  */
-export function keepStudentWording(bullet: string, sourceBullets: readonly string[]): string {
+export function keepStudentWording(
+  bullet: string,
+  sourceBullets: readonly string[],
+  /* THE GATE THE RESTORED SENTENCE STILL HAS TO PASS, and leaving it out broke every build on the
+     first run of this. The validator requires an action-verb-first opener; the model had been
+     paraphrasing precisely to satisfy it, so putting the student's verb back put a REJECTED verb
+     back, and the whole resume was refused with `resume_quality_hold` rather than attached.
+     The verbs that mattered are admitted now (see resumeValidate's STRONG_VERBS, note 4), which is
+     the real fix. This is the belt: a student whose verb is genuinely weak keeps the model's
+     rewrite rather than losing their resume, because a bullet nobody can attach helps no one. */
+  passesGate: (candidate: string) => boolean = () => true,
+): string {
   const generated = tokens(bullet);
   if (generated.size === 0) return bullet;
   let best: { text: string; score: number } | null = null;
@@ -432,7 +444,8 @@ export function keepStudentWording(bullet: string, sourceBullets: readonly strin
   /* 0.7 keeps verb swaps and small reorderings ("Found and corrected" / "Identified and corrected"
      scores 0.75; "Backtested"/"Tested" scores 0.9) and leaves a real rewrite, which shares far less
      than two thirds of its content words, to stand as written. */
-  return best && best.score >= 0.7 ? best.text : bullet;
+  if (!best || best.score < 0.7) return bullet;
+  return passesGate(best.text) ? best.text : bullet;
 }
 
 /** Deterministic backstop for the three-bullet contract. */
@@ -505,7 +518,9 @@ export function applyResumePolicy(
       const seen = new Set<string>();
       const bullets = entry.bullets
         .map((bullet) => bullet.trim())
-        .map((bullet) => (ownWording.length > 0 ? keepStudentWording(bullet, ownWording) : bullet))
+        .map((bullet) =>
+          ownWording.length > 0 ? keepStudentWording(bullet, ownWording, startsWithStrongVerb) : bullet,
+        )
         .filter((bullet) => bullet.length > 0)
         .filter((bullet) => {
           const key = bullet.toLowerCase().replace(/\s+/g, ' ');
