@@ -1211,3 +1211,36 @@ describe('the challenge-on-screen sentence', () => {
     );
   });
 });
+
+/* THE CLIENT-VALIDATION REFUSAL, measured on the live transparent-hiring.breezy.hr form
+ * (run 549604ee, 2026-08-20): 'Your application contains errors' under the pressed button, zero
+ * requests to any breezy host in the press window, the form still standing. */
+describe('the client-validation refusal', () => {
+  const base = { pressed: true, state: 'rejected', evidence: 'validation_message' };
+
+  test('a validation sentence over the LIVE form is a proven refusal', () => {
+    const verdict = managedSubmitVerdict({ submitOutcome: {
+      ...base, source: 'client_validation',
+      message: 'Your application contains errors (1 required response still missing on the form)',
+      formStillPresent: true,
+    } });
+    assert.deepEqual(verdict, {
+      kind: 'refused',
+      message: 'Your application contains errors (1 required response still missing on the form)',
+    });
+  });
+
+  test('the same sentence with the form GONE is unverified, like any unproven refusal', () => {
+    const verdict = managedSubmitVerdict({ submitOutcome: {
+      ...base, source: 'client_validation', message: 'Your application contains errors', formStillPresent: false,
+    } });
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+
+  test('the general rule is untouched: an ATS panel over a live form still cannot prove a refusal', () => {
+    const verdict = managedSubmitVerdict({ submitOutcome: {
+      ...base, source: 'ats_state', message: 'Something went wrong', formStillPresent: true,
+    } });
+    assert.deepEqual(verdict, { kind: 'unverified', cause: 'no_confirmation_state' });
+  });
+});

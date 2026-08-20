@@ -36,7 +36,7 @@ export type ManagedSubmitOutcome = {
    * 'unmatched_page_text' is the weakest of all: no arm recognised the page. It carries the raw text
    * Stratus actually saw so a genuinely new ATS shape (breezy.hr, workable.com - no arm exists for
    * either) leaves evidence instead of nothing; the verdict logic below never treats it as a claim. */
-  source: 'ats_state' | 'ats_route' | 'ats_state_unconfirmed' | 'live_region' | 'page_text' | 'unmatched_page_text' | null;
+  source: 'ats_state' | 'ats_route' | 'ats_state_unconfirmed' | 'live_region' | 'page_text' | 'unmatched_page_text' | 'client_validation' | null;
   /** The selector or role that proved it, so a verdict can be argued with. */
   evidence: string | null;
   /** The sentence the employer showed. Evidence for a person, never the thing the verdict rests on. */
@@ -81,7 +81,7 @@ const readSubmitNetwork = (raw: unknown): SubmitNetworkEntry[] | null => {
 type MaybeOutcome = { submitOutcome?: unknown };
 
 const STATES = new Set(['confirmed', 'rejected', 'unknown', 'not_attempted']);
-const SOURCES = new Set(['ats_state', 'ats_route', 'ats_state_unconfirmed', 'live_region', 'page_text', 'unmatched_page_text']);
+const SOURCES = new Set(['ats_state', 'ats_route', 'ats_state_unconfirmed', 'live_region', 'page_text', 'unmatched_page_text', 'client_validation']);
 
 /**
  * Normalise what came back over the wire. Returns null when the runner said nothing at all, which
@@ -143,6 +143,18 @@ export type ManagedSubmitVerdict =
  * resolvable, against a duplicate application filed at an employer who may cap re-applications.
  */
 function refusalIsProven(outcome: ManagedSubmitOutcome): boolean {
+  /* CLIENT VALIDATION IS THE ONE REFUSAL THE LIVE FORM CORROBORATES, so its proof runs the
+   * OPPOSITE polarity. Measured on the live transparent-hiring.breezy.hr form (run 549604ee,
+   * 2026-08-20): 'Your application contains errors' under the pressed button, zero requests to
+   * any breezy host in the press window, the whole form still standing - and the general rule
+   * below, written for ATS failure panels that linger over live forms, downgraded the clearest
+   * not-sent a page can say to 'unverified'. A validation sentence exists only while the form
+   * does, so for this source the form still being present is the corroboration and its absence
+   * is the ambiguity: a validation message with the form GONE is a leftover over some other
+   * view, and falls to the unverified treatment like any unproven refusal. */
+  if (outcome.source === 'client_validation') {
+    return Boolean(outcome.message?.trim()) && outcome.formStillPresent === true;
+  }
   return Boolean(outcome.message?.trim()) && outcome.formStillPresent === false;
 }
 
