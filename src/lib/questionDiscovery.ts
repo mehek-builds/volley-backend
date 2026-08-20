@@ -5125,7 +5125,7 @@ const EXPLICIT_CITY_QUESTION =
  * answered a travel-preference and a seniority question with a fabricated GPA sentence. This
  * vocabulary drops those bare band words entirely and keeps only the compounds that name the
  * degree or its classification directly: "class of degree", "degree classification" and its kin,
- * plus the 2:1/2:2 notation, which is not ordinary English and carries no comparable risk.
+ * plus the 2:1/2:2 notation.
  *
  * Scoped to those compounds, never to the bare word "classification" alone either, so an unrelated
  * "job classification" or "employee classification" field on the same form is untouched.
@@ -5137,9 +5137,40 @@ const EXPLICIT_CITY_QUESTION =
  * string "gpa"), and the control was answered "Bachelor of Science in Computer Science" instead of
  * her GPA - a real wrong answer, not a blank, on the one family of question this vocabulary exists
  * to name.
+ *
+ * THE BAND NOTATION ALONE IS NOT SAFE UNSCOPED, and an earlier version of this comment claimed
+ * otherwise ("not ordinary English, carries no comparable risk"). MEASURED (2026-08-21, the same
+ * review pass, item 1): "What ratio of in-office to remote days do you prefer, 2:1 or 3:1?" and
+ * "Preferred on-site:remote split (2:1, 3:2, or fully remote)" both contain a bare `2:1` with zero
+ * academic wording anywhere in the label - `\b2:[12]\b` alone matched them, routed them to 'gpa',
+ * and answered a scheduling-preference question with a fabricated GPA sentence. `2:1`/`2:2` colon
+ * notation is not unique to UK honours; it is ordinary shorthand for any 2-to-1 ratio.
+ *
+ * gpaClassificationVocabularyMatches (below) is the actual matcher: the compound phrases still fire
+ * unconditionally, but the bare band notation only counts when the SAME label also carries an
+ * academic-adjacent word (degree/grade/class/honours/result/academic - see
+ * GPA_CLASSIFICATION_BAND_CONTEXT), or when the notation is essentially the label's entire content,
+ * which is the shape a closed-list control's own option text takes when it is read back as a label
+ * ("2:1", "(2:1)") - the real case this file measured needing the bare alternative for in the first
+ * place, with nothing else in the string to disambiguate it either way.
  */
-const GPA_CLASSIFICATION_VOCABULARY =
-  /\b(?:degree|honou?rs?)\s+classification\b|\bclassification\s+of\s+(?:your\s+)?degree\b|\bclass\s+of\s+(?:your\s+)?degree\b|\b2:[12]\b/i;
+const GPA_CLASSIFICATION_COMPOUND =
+  /\b(?:degree|honou?rs?)\s+classification\b|\bclassification\s+of\s+(?:your\s+)?degree\b|\bclass\s+of\s+(?:your\s+)?degree\b/i;
+const GPA_CLASSIFICATION_BAND = /\b2:[12]\b/i;
+const GPA_CLASSIFICATION_BAND_CONTEXT =
+  /\b(?:degree|grade|grades|graded|class|classification|classified|honou?rs?|result|results|academic)\b/i;
+
+function gpaClassificationVocabularyMatches(label: string): boolean {
+  if (GPA_CLASSIFICATION_COMPOUND.test(label)) return true;
+  if (!GPA_CLASSIFICATION_BAND.test(label)) return false;
+  if (GPA_CLASSIFICATION_BAND_CONTEXT.test(label)) return true;
+  // No academic word anywhere in the label: only safe when the band notation IS the label, give or
+  // take punctuation/whitespace, the shape a raw option value takes when echoed back as a label.
+  // Anything else left over (a whole sentence, a second unrelated ratio) means the colon notation is
+  // ordinary English for something else, and the label is left unmatched.
+  const remainder = label.replace(/\b2:[12]\b/gi, ' ').replace(/[^a-z0-9]+/gi, ' ').trim();
+  return remainder.length === 0;
+}
 
 // Ported verbatim from generic.ts's classifyField (see that file for the full rationale on
 // ordering - refusals first, citizenship before residence, term before start date, state before
@@ -5284,7 +5315,7 @@ function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
    * the plain numeric branch. The optional "c" is anchored by the SAME leading/trailing \b as
    * "gpa" itself, so it cannot match a "gpa" that is merely the tail of some unrelated word ("nagpa"
    * still fails: no boundary before "n", and "c" would have to sit where "n" is). */
-  if (/\bc?gpa\b|grade average|grade point|academic performance|grade percentage|percentage grade|academic percentage/i.test(l) || GPA_CLASSIFICATION_VOCABULARY.test(l)) return 'gpa';
+  if (/\bc?gpa\b|grade average|grade point|academic performance|grade percentage|percentage grade|academic percentage/i.test(l) || gpaClassificationVocabularyMatches(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
   if (/\bhigh school\b/i.test(l) && /graduat|when|date|year/i.test(l)) return null;
   if (LANGUAGE_QUESTION.test(l)) return 'languages';
@@ -5872,8 +5903,8 @@ function locationStatusAnswer(
  *
  * Deliberately does not match a bare "first" or "percent" without its GPA/classification context -
  * a GPA-classified label is common enough ("what was your first year GPA?") that the word alone is
- * not evidence of a percentage/classification ask. Reuses GPA_CLASSIFICATION_VOCABULARY above, the
- * same compounds classifyFieldIntent routes to 'gpa' by, so the two cannot drift: whatever gets this
+ * not evidence of a percentage/classification ask. Reuses gpaClassificationVocabularyMatches above,
+ * the same test classifyFieldIntent routes to 'gpa' by, so the two cannot drift: whatever gets this
  * control classified as a GPA question in the first place is exactly what asks for the UK format
  * here, plus the plain "%"/"percent(age)" a form adds once it is already known to be a GPA field
  * ("What is your GPA? (e.g. 68%)" carries "gpa" and reaches this function by the ordinary route).
@@ -5884,7 +5915,7 @@ function locationStatusAnswer(
  * own comment for why the gate matters: without it, "First" would be offered as a candidate on an
  * ordinary numeric-only GPA select too, which could produce a wrong match on an unrelated field. */
 export function gpaWantsPercentageOrClassification(label: string): boolean {
-  return /%|\bpercent(?:age)?\b/i.test(label) || GPA_CLASSIFICATION_VOCABULARY.test(label);
+  return /%|\bpercent(?:age)?\b/i.test(label) || gpaClassificationVocabularyMatches(label);
 }
 
 /**
@@ -5916,6 +5947,16 @@ function gpaAnswer(label: string, ap: ApplicationProfileLike): string | null {
    * already names its own scale needs nothing added by this function - it is already the honest,
    * on-its-own-terms answer the branch below exists to produce. */
   if (trimmed.includes('/')) return trimmed;
+  /* GUARD: `gpa` ITSELF MAY NOT BE A NUMBER AT ALL.
+   *
+   * Same free-text column, same lack of format validation, but the other failure direction: a
+   * resume parse that could not find a GPA can plausibly seed this column with a placeholder like
+   * "N/A" or "Not calculated" instead of leaving it empty (empty already returns null above, three
+   * lines up). Without this guard that placeholder fell straight into the template below and
+   * produced "Not calculated/4.00 (US 4.0 scale)" - a fabricated-looking academic record built out
+   * of a value that was never a GPA to begin with, submitted as a real answer. A value that is not
+   * a clean number gets no scale suffix appended to it; it is returned exactly as stored. */
+  if (!/^\d+(?:\.\d+)?$/.test(trimmed)) return trimmed;
   const scale = ap.gpa_scale?.trim();
   if (!scale) return `${trimmed} (US GPA scale)`;
   const scaleNumber = Number(scale);

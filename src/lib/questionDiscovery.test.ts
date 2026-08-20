@@ -2270,6 +2270,42 @@ test('a GPA scale that is not a clean number is stated once, not doubled into a 
   );
 });
 
+/* Regression (2026-08-21, this review's item 5b): `ap.gpa` is a free-text column with no format
+ * validation, same as gpa_scale, and a resume parse that could not find a GPA can plausibly leave a
+ * non-numeric placeholder there ("Not calculated") instead of an empty string. gpaAnswer validated
+ * gpa_scale with Number.isFinite before formatting but never validated ap.gpa itself, so a
+ * classification/percentage-worded label concatenated the placeholder straight into the template and
+ * produced "Not calculated/4.00 (US 4.0 scale)" - a fabricated-looking academic record built out of a
+ * value that was never a GPA, submitted as a real answer. Fails on origin/main (garbled string);
+ * passes once a non-numeric `gpa` skips the scale annotation and is returned bare. */
+test('a GPA that is not a clean number gets no fabricated scale suffix', () => {
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Degree classification',
+      'text',
+      { ...PROD_OWNER_PROFILE, gpa: 'Not calculated' },
+      undefined,
+    ),
+    { value: 'Not calculated' },
+  );
+});
+
+/* Sub-case (a) from the same item: `ap.gpa` may already be a combined "value/scale" string (or, as
+ * here, a placeholder that happens to contain a slash, "N/A"). PR #675's own guard - "if the stored
+ * value already contains /, return it unchanged" - already covers this; confirmed present and correct
+ * rather than re-fixed. Locked here so it cannot regress silently. */
+test('a GPA placeholder that already contains a slash is returned unchanged', () => {
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Degree classification',
+      'text',
+      { ...PROD_OWNER_PROFILE, gpa: 'N/A' },
+      undefined,
+    ),
+    { value: 'N/A' },
+  );
+});
+
 /* REGRESSION (2026-08-21, this PR's own review): the GPA branch of classifyFieldIntent tested
  * `\bgpa\b`, which requires a word boundary right before "g" - and never fires on "CGPA" (Cumulative
  * GPA), which is one continuous run of letters with no boundary in the middle. "CGPA" is the
@@ -2283,6 +2319,51 @@ test('a "CGPA" label is recognised as a GPA question, plain and classification-w
   );
   assert.deepEqual(
     resolveKnownAnswer('What is your CGPA (on a percentage basis)?', 'text', PROD_OWNER_PROFILE, undefined),
+    { value: '3.89/4.00 (US 4.0 scale)' },
+  );
+});
+
+/* Regression (2026-08-21, this review's item 1): the bare `\b2:[12]\b` alternative in
+ * GPA_CLASSIFICATION_VOCABULARY had no scoping at all, unlike every other alternative in that
+ * pattern, which all require "degree"/"classification"/"class" nearby. "2:1" and "2:2" are ordinary
+ * shorthand for any 2-to-1 ratio, not exclusively UK honours notation, so a completely unrelated
+ * scheduling or budgeting question containing one matched anyway, classified as 'gpa', and would
+ * have been answered with a fabricated GPA sentence. Fails on origin/main (both labels below resolve
+ * to a GPA sentence instead of null); passes once the bare band notation requires either an
+ * academic-adjacent word in the same label or being essentially the whole label's content. */
+test('a bare 2:1/2:2 ratio outside academic context is not answered as a GPA', () => {
+  for (const label of [
+    'What ratio of in-office to remote days do you prefer, 2:1 or 3:1?',
+    'Preferred on-site:remote split (2:1, 3:2, or fully remote)',
+    'What is the budget split between engineering and sales, 2:1?',
+  ]) {
+    // The essential claim: this label never routes to 'gpa'. (Some of these labels legitimately hit
+    // an unrelated rule - e.g. the in-office/remote question is also a "where will you work from"
+    // residence-style question and comes back with its own skipReason - which is fine; what must
+    // never happen is a fabricated GPA `value` on any of them.)
+    assert.equal(classifyField(label), null, label);
+    const resolved = resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, undefined);
+    assert.equal(resolved === null || !('value' in resolved), true,
+      `${label} must not resolve to a fabricated GPA value, got ${JSON.stringify(resolved)}`);
+  }
+});
+
+/* The case the bare alternative exists to serve, preserved through the scoping fix above: a
+ * degree-classification control whose OWN label, echoed back with no other words, is just the band
+ * notation itself ("2:1", "(2:2)") - the shape a closed-list control's option text takes when read
+ * back as a label with nothing else to disambiguate it. Also covers the notation sitting alongside
+ * an explicit academic word, which needs no special-casing at all. */
+test('a bare 2:1/2:2 label is still answered as a GPA when it is academic', () => {
+  assert.deepEqual(
+    resolveKnownAnswer('2:1', 'text', PROD_OWNER_PROFILE, undefined),
+    { value: '3.89/4.00 (US 4.0 scale)' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('(2:2)', 'text', PROD_OWNER_PROFILE, undefined),
+    { value: '3.89/4.00 (US 4.0 scale)' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('Please state your degree result, 2:1 or 2:2', 'text', PROD_OWNER_PROFILE, undefined),
     { value: '3.89/4.00 (US 4.0 scale)' },
   );
 });
@@ -4166,4 +4247,28 @@ test('an endpoint that trails its scale is read by its bound, and a contradicted
   ], { gpa: '3.9', grad_date: '2027', grad_year: 2027 }, undefined, reviewedAt);
   assert.notEqual(refreshed[0].answer, '3.5 - 3.8 out of 4.0');
   assert.notEqual(refreshed[1].answer, 'January 2028 - July 2028');
+});
+
+/* Regression: reviewedOptionBandVerdict's numeric branch used to compare Number(current) directly.
+ * That is exact for a plain resolved GPA ("3.9", above), but resolveKnownAnswer no longer always
+ * returns a plain number for 'gpa' - a label that wants a UK classification/percentage now resolves
+ * through gpaAnswer to a composite string ("3.89/4.00 (US 4.0 scale)"), and Number() on that is
+ * NaN. The verdict fell back to 'incomparable', and because the reviewed answer is band-shaped
+ * (NUMBER_BAND) with no answer_option_source, refreshKnownQuestionAnswers' 'incomparable' branch
+ * WRONGLY kept the stale reviewed band even though her real GPA (3.89) sits outside it (3.5-3.8) -
+ * silently failing to detect a stale/wrong reviewed answer on exactly the label family this vocabulary
+ * exists to serve. Fails on origin/main (answer stays '3.5 - 3.8'); passes once the numeric branch
+ * extracts the leading bare number before comparing. */
+test('a reviewed GPA band against a classification-worded label still detects a real contradiction', () => {
+  const reviewedAt = '2026-08-21T12:00:00.000Z';
+  const refreshed = refreshKnownQuestionAnswers([
+    {
+      question: 'What was your degree classification?',
+      answer: '3.5 - 3.8',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+  ], { gpa: '3.89', gpa_scale: '4.0' }, undefined, reviewedAt);
+  assert.notEqual(refreshed[0].answer, '3.5 - 3.8',
+    'a stale reviewed band that her real GPA (3.89) sits outside must be recomputed, not kept');
 });

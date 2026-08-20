@@ -211,9 +211,47 @@ export function reviewedOptionBandVerdict(
   const lowNumber = endpointNumber(parts[0]);
   const highNumber = endpointNumber(parts[1]);
   if (Number.isFinite(lowNumber) && Number.isFinite(highNumber)) {
+    /* `current` goes straight into `Number()` FIRST, exactly as before - this branch is generic,
+     * reached for every reviewed numeric band regardless of what the question is about (years of
+     * experience, team size, GPA, anything), and Number() is exact for every plain value any of
+     * those domains actually stores. Only when that direct parse fails does the GPA-specific
+     * fallback below run.
+     *
+     * THE FALLBACK, AND WHY IT IS SCOPED TO GPA RATHER THAN GENERAL. `Number()` is NaN for
+     * gpaAnswer's composite classification/percentage string ("3.89/4.00 (US 4.0 scale)") -
+     * questionDiscovery.ts's refreshKnownQuestionAnswers passes exactly that string here once a
+     * label wants a UK classification or percentage - so a reviewed GPA-band answer stopped being
+     * comparable to her live GPA on precisely the label family this vocabulary exists to serve,
+     * falling back to 'incomparable' even when her real GPA plainly contradicts the stale reviewed
+     * band. bareGpaNumber pulls the leading bare number back out. It is deliberately scoped to
+     * plausible GPA digits (0-4), not a general "first number in the string" reach: this branch
+     * cannot tell a GPA band from a years-of-experience or team-size band by shape alone, and a
+     * general fallback would start parsing "5-10 employees" out of a string like "5-10 employees,
+     * see our About page for headcount 2024" in a way nothing here has verified is safe. Because it
+     * only runs after Number() has already failed, it never touches - and cannot regress - the
+     * numeric bands that already worked. */
     const currentNumber = Number(current);
-    if (!Number.isFinite(currentNumber)) return 'incomparable';
-    return within(currentNumber, lowNumber, highNumber);
+    if (Number.isFinite(currentNumber)) return within(currentNumber, lowNumber, highNumber);
+    const fallbackNumber = bareGpaNumber(current);
+    if (fallbackNumber === null) return 'incomparable';
+    return within(fallbackNumber, lowNumber, highNumber);
   }
   return 'incomparable';
+}
+
+/**
+ * The leading bare numeric value inside a GPA-shaped string, or null when there is none.
+ *
+ * Handles a plain profile value ("3.89") and gpaAnswer's composite classification/percentage string
+ * ("3.89/4.00 (US 4.0 scale)") the same way, always reading the FIRST number: a composite string
+ * names its own value before its scale, so taking the first number reads "3.89", never the "4.00"
+ * beside it. Mirrors portalSubmission.ts's parsedGpa (same unanchored leading-number extraction,
+ * scoped to plausible GPA digits 0-4) rather than importing it - this file has no imports on
+ * purpose (see the top-of-file comment) so the same small regex is kept here instead.
+ */
+export function bareGpaNumber(value: string): number | null {
+  const match = value.match(/\b([0-4](?:\.\d+)?)\b/);
+  if (!match) return null;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : null;
 }

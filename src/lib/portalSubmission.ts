@@ -2947,7 +2947,24 @@ const ASHBY_QUESTION_TEXT_SELECTOR_LIMIT = 9;
 export const MANAGED_ACTION_LIMIT = Number(process.env.LITOS_MEASURE_ACTION_LIMIT ?? 120);
 export const MANAGED_FINAL_SUBMIT_SELECTOR =
   'button, input[type="submit"], input[type="button"], input[type="image"], [role="button"]';
-const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree']);
+/*
+ * 'gpa' joined 'school'/'degree' here because PR #673 reclassified UK-style "degree
+ * classification" labels ("2:1", "First", "Degree classification") from 'degree' to 'gpa'. Before
+ * that reclassification, such a label was 'degree', which this set already covered, so the Enter
+ * press that commits a Greenhouse text-autocomplete widget after managedFill ran for it. After the
+ * reclassification the same label became 'gpa', which was not in this set, so the press was
+ * silently skipped - an uncommitted fill on the exact family of question this whole PR chain exists
+ * to fix, indistinguishable from a successful one.
+ *
+ * Adding 'gpa' also now presses Enter after an ORDINARY plain-numeric GPA field ("What is your
+ * GPA?" -> "3.89"), which was 'gpa' before PR #673 and worked fine without this press. That is
+ * still safe: Enter after typing an already-correct value into a plain text input is a no-op there
+ * (nothing autocompletes off a bare number), the same reasoning that lets 'school' and 'degree'
+ * press Enter unconditionally regardless of whether their control turns out to be a plain text
+ * input or an autocomplete widget - see "managed Greenhouse plain numeric GPA questions still fill
+ * correctly once gpa joins CONFIRM_AFTER_FILL_FIELDS" in portalSubmission.test.ts for the case that
+ * would catch this if it ever stopped holding. */
+const CONFIRM_AFTER_FILL_FIELDS = new Set(['school', 'degree', 'gpa']);
 
 function pushGreenhouseManagedPreflightActions(actions: ManagedBrowserAction[]) {
   const cookieClicks = [

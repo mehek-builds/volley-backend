@@ -2173,6 +2173,55 @@ test('managed Greenhouse academic questions confirm rediscovered autocomplete se
   assert.ok(actions.some((action) => action.type === 'press' && action.label === 'question_confirm:Degree' && action.value === 'Enter'));
 });
 
+// Regression: PR #673 reclassified UK-style "degree classification" labels from 'degree' to 'gpa',
+// but CONFIRM_AFTER_FILL_FIELDS was never updated to match, so the Enter press that commits a
+// Greenhouse text-autocomplete widget silently stopped firing for exactly this family of question -
+// an uncommitted fill indistinguishable from a successful one. Fails on origin/main (no press
+// action present); passes once 'gpa' joins the set.
+test('managed Greenhouse degree-classification questions confirm rediscovered autocomplete selectors after gpa reclassification', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'Degree classification',
+        answer: '3.89/4.00 (US 4.0 scale)',
+        portalSelector: 'input[name="job_application[answers_attributes][0][text_value]"]',
+      },
+    ],
+  });
+
+  assert.ok(actions.some((action) =>
+    action.type === 'press' && action.label === 'question_confirm:Degree classification' && action.value === 'Enter'));
+});
+
+// Adding 'gpa' to CONFIRM_AFTER_FILL_FIELDS must not regress an ORDINARY plain-numeric GPA text
+// field (the shape that worked fine before PR #673 ever touched this label family): the fill must
+// still carry the exact stored value, and the added Enter press must not replace or mangle it.
+test('managed Greenhouse plain numeric GPA questions still fill correctly once gpa joins CONFIRM_AFTER_FILL_FIELDS', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [
+      {
+        question: 'What is your GPA?',
+        answer: '3.89',
+        portalSelector: 'input[name="job_application[answers_attributes][0][text_value]"]',
+      },
+    ],
+  });
+
+  const fillAction = actions.find((action) => action.label === 'question:What is your GPA?');
+  assert.equal(fillAction?.type, 'fill');
+  assert.equal(fillAction?.value, '3.89');
+  assert.ok(actions.some((action) =>
+    action.type === 'press' && action.label === 'question_confirm:What is your GPA?' && action.value === 'Enter'));
+});
+
 test('managed question fills fall back to label text when a discovered selector exceeds the provider limit', () => {
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Taylor Example',

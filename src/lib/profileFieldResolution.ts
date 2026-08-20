@@ -49,6 +49,7 @@
 //     recoverable; selecting the wrong legal answer on a real application is not.
 
 import type { JobCountry } from './jobLocation';
+import { bareGpaNumber } from './optionBand';
 import {
   classifyField,
   consentAcknowledgementAnswer,
@@ -1197,7 +1198,33 @@ export function profileAnswerAliases(label: string, answer: string): string[] {
     case 'school': synthetic.school = base; break;
     case 'degree': synthetic.degree = base; break;
     case 'major': synthetic.major = base; break;
-    case 'gpa': synthetic.gpa = base; break;
+    /* `base` is whatever gpaAnswer already produced, which for a UK classification/percentage ask
+     * is now the composite "3.89/4.00 (US 4.0 scale)" string rather than a plain "3.89".
+     * gpaLadder's own numericValueOf is anchored to a bare number or a bare "number/number" and
+     * cannot parse that composite, so passing it straight through collapsed the whole candidate
+     * ladder to the one unmatchable composite string - losing the plain "3.89", "3.9" and
+     * "3.89/4.0" candidates that used to be tried against a control's option list, on exactly the
+     * Akuna/Virtu/Five Rings combobox path this ladder exists to feed.
+     *
+     * Two extractions, not one, because gpaAnswer's composite has a recoverable value AND a
+     * recoverable scale. When `base` opens with "value/scale" (gpaAnswer's own shape, or an
+     * already-combined profile value that reached here unchanged), both halves are pulled back out
+     * so gpaLadder gets a real scale and can still build the "value/scale" candidate. Anything else
+     * falls back to bareGpaNumber (shared with optionBand.ts's reviewedOptionBandVerdict - see that
+     * file for why the same extraction is needed there), which recovers just the value; and when
+     * neither parses, `base` passes through unchanged, keeping today's behaviour for any other
+     * GPA-shaped string. */
+    case 'gpa': {
+      const composite = /^(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)\b/.exec(base);
+      if (composite) {
+        synthetic.gpa = composite[1];
+        synthetic.gpa_scale = composite[2];
+      } else {
+        const bare = bareGpaNumber(base);
+        synthetic.gpa = bare === null ? base : String(bare);
+      }
+      break;
+    }
     case 'graduation_date': synthetic.grad_date = base; break;
     case 'referral_source_default': synthetic.referral_source_default = base; break;
     default: break;
