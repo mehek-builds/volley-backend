@@ -172,8 +172,16 @@ export function reviewedOptionBandVerdict(
   const highDate = monthYearValue(parts[1]);
   if (lowDate !== undefined && highDate !== undefined) {
     const currentDate = monthYearValue(current);
-    if (currentDate === undefined) return 'incomparable';
-    return within(currentDate, lowDate, highDate);
+    if (currentDate !== undefined) return within(currentDate, lowDate, highDate);
+    /* A profile that states only a year still carries the fact a month-year window is about, so a
+     * bare-year current value is judged at year granularity rather than rounded to incomparable:
+     * "January 2028 - July 2028" beside a stated "2027" is a window her own fact sits outside. */
+    const bareYear = /^\s*((?:19|20)\d{2})\s*$/.exec(current);
+    if (bareYear) {
+      const year = Number(bareYear[1]);
+      return within(year, Math.floor((Math.min(lowDate, highDate) - 1) / 12), Math.floor((Math.max(lowDate, highDate) - 1) / 12));
+    }
+    return 'incomparable';
   }
 
   const yearOf = (value: string): number | undefined => {
@@ -192,8 +200,12 @@ export function reviewedOptionBandVerdict(
   const endpointNumber = (value: string): number => {
     const bare = Number(value);
     if (Number.isFinite(bare)) return bare;
-    // A labelled endpoint ("GPA 3.5") is its number; anything with no number stays unparsed.
-    const match = /(\d+(?:\.\d+)?)\s*$/.exec(value.trim());
+    // A thousands separator means a figure this parser would truncate ("$50,000" is not 50).
+    if (/\d,\d/.test(value)) return Number.NaN;
+    /* A labelled endpoint ("GPA 3.5") is its FIRST number: an endpoint that trails its scale
+     * ("3.8 out of 4.0") names its bound first, and taking the last number read that band as
+     * [3.5, 4.0] and called a value the true band contradicts covered. */
+    const match = /(\d+(?:\.\d+)?)/.exec(value.trim());
     return match ? Number(match[1]) : Number.NaN;
   };
   const lowNumber = endpointNumber(parts[0]);

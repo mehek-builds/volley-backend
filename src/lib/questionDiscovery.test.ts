@@ -4028,3 +4028,39 @@ test('the incomparable keep is for bands only: a plain reviewed answer keeps the
   ], { degree: 'Bachelor of Science in Computer Science' }, undefined, reviewedAt);
   assert.equal(refreshed[0].answer, 'Bachelor of Science in Computer Science');
 });
+
+test('the covers arm still keeps any parseable reviewed range, band-shaped or not', () => {
+  const reviewedAt = '2026-08-20T18:30:00.000Z';
+  const refreshed = refreshKnownQuestionAnswers([
+    /* Multi-digit numeric range: NUMBER_BAND does not recognise it, but the boolean rule always
+       kept a covered range like this, and it must go on being kept. */
+    {
+      question: 'expected graduation year',
+      answer: '2027 through 2029',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+  ], { grad_date: 'May 2028', grad_year: 2028 }, undefined, reviewedAt);
+  assert.equal(refreshed[0].answer, '2027 through 2029');
+});
+
+test('an endpoint that trails its scale is read by its bound, and a contradicted band still loses', () => {
+  const reviewedAt = '2026-08-20T18:30:00.000Z';
+  const refreshed = refreshKnownQuestionAnswers([
+    {
+      question: 'what is your gpa?',
+      answer: '3.5 - 3.8 out of 4.0',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+    /* A month-year window judged against a bare-year profile fact: 2027 sits outside it. */
+    {
+      question: 'expected graduation date',
+      answer: 'January 2028 - July 2028',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+  ], { gpa: '3.9', grad_date: '2027', grad_year: 2027 }, undefined, reviewedAt);
+  assert.notEqual(refreshed[0].answer, '3.5 - 3.8 out of 4.0');
+  assert.notEqual(refreshed[1].answer, 'January 2028 - July 2028');
+});
