@@ -10998,21 +10998,23 @@ const SUBMIT_ENABLE_WAIT_MS = 3_000;
  * submit handle. This does not invent answers. It emits the framework event sequence ATS clients
  * use to move a visually filled value into validation state, then proves the sequence did not
  * change the selected value. The scope marker is consumed by READ_SUBMIT_READINESS_SCRIPT.
+ *
+ * KEPT AS TEXT, for the exact reason READ_FIELD_GROUP_DIAL_CODES_SCRIPT is: this is handed to
+ * Playwright's elementHandle.evaluate(), which serialises it with Function.prototype.toString()
+ * and re-parses the source INSIDE THE PAGE. Written as an ordinary TypeScript arrow function, under
+ * any bundler that transpiles with esbuild's keepNames (tsx's dev/watch runner is one; a Vercel
+ * Node.js function built from TypeScript source can be another), the compiled source wraps this in
+ * a `__name(...)` call that only exists in the bundle's own scope. The page then throws
+ * `ReferenceError: __name is not defined`, elementHandle.evaluate rejects, the call site's
+ * `.catch(() => null)` swallows it, and clickFinalSubmit reports "Litos could not bind
+ * required-field confirmation to the selected application form" - on every submission, on every
+ * board, regardless of whether the form was actually fine. Measured 2026-08-20 against the
+ * portal-shapes trial's phone-country and security-code cases, both of which never reached
+ * COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT's own logic at all; the failure was in getting the function
+ * into the page intact. Text is untouchable by a bundler, which is the property this needs.
  */
-export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = async (node: unknown) => {
-  const button = node as unknown as {
-    closest(selector: string): {
-      setAttribute(name: string, value: string): void;
-      querySelectorAll(selector: string): Iterable<unknown>;
-    } | null;
-    ownerDocument: {
-      getElementById(id: string): unknown;
-      defaultView: {
-      Event: new(type: string, init: { bubbles: boolean; cancelable?: boolean }) => { preventDefault(): void };
-      requestAnimationFrame(callback: () => void): void;
-      getComputedStyle(node: unknown): { display: string; visibility: string };
-    } };
-  };
+const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT_SCRIPT = String.raw`async (node) => {
+  const button = node;
   // Browser DOM elements always expose closest(). A handful of isolated unit doubles predate this
   // callback and intentionally model only label reads. Keep those doubles usable without treating
   // a real DOM node that has no owning form as confirmed.
@@ -11023,22 +11025,10 @@ export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = async (node: unknown) => {
   const view = button.ownerDocument.defaultView;
   const controls = Array.from(form.querySelectorAll(
     '[required], [aria-required="true"], [role="radio"][aria-checked="true"], [role="checkbox"][aria-checked="true"]',
-  )) as Array<{
-    type?: string; value?: string; checked?: boolean; files?: { length: number } | null;
-    disabled?: boolean; focus?(): void; blur?(): void; click?(): void;
-    getAttribute(name: string): string | null;
-    getClientRects(): { length: number };
-    dispatchEvent(event: unknown): boolean;
-  }>;
-  type Control = typeof controls[number];
+  ));
   const markers = Array.from(form.querySelectorAll(
     'label[class*="_required_"], legend[class*="_required_"], label, legend',
-  )) as Array<{
-    textContent?: string; className?: string; control?: unknown; parentElement?: { querySelector(selector: string): unknown } | null;
-    getAttribute(name: string): string | null;
-    querySelector(selector: string): unknown;
-    closest(selector: string): { querySelector(selector: string): unknown } | null;
-  }>;
+  ));
   const controlSelector = 'input:not([type="hidden"]), textarea, select, [role="combobox"], [role="radio"], [role="checkbox"]';
   for (const marker of markers) {
     const className = typeof marker.className === 'string' ? marker.className : '';
@@ -11051,9 +11041,9 @@ export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = async (node: unknown) => {
       || marker.querySelector(controlSelector)
       || wrapper?.querySelector(controlSelector)
       || marker.parentElement?.querySelector(controlSelector);
-    if (candidate && !controls.includes(candidate as Control)) controls.push(candidate as Control);
+    if (candidate && !controls.includes(candidate)) controls.push(candidate);
   }
-  const state = (control: typeof controls[number]) => JSON.stringify({
+  const state = (control) => JSON.stringify({
     value: control.value ?? null,
     checked: control.checked ?? null,
     ariaChecked: control.getAttribute('aria-checked'),
@@ -11082,11 +11072,23 @@ export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = async (node: unknown) => {
     }
     control.blur?.();
     committed += 1;
-    await new Promise<void>((resolve) => view.requestAnimationFrame(resolve));
+    await new Promise((resolve) => view.requestAnimationFrame(resolve));
     if (state(control) !== before) changed = true;
   }
   return { formFound: true, changed, committed };
-};
+}`;
+
+export type CommitRequiredControlsResult = { formFound: boolean; changed: boolean; committed: number };
+
+/* new Function compiles the text above in Node, with no bundler in the path, so the function object
+   this module exports serialises back out to the exact same text - see readFieldGroupDialCodes for
+   the identical pattern. `async` is preserved in the source text itself, so the compiled function
+   still returns a Promise and every existing caller (production and this file's own unit tests,
+   which call it directly against DOM doubles) keeps working unchanged. */
+export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = new Function(
+  'node',
+  'return (' + COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT_SCRIPT + ')(node);',
+) as (node: PlaywrightEvaluationTarget) => Promise<CommitRequiredControlsResult>;
 
 export async function clickFinalSubmit(page: Page): Promise<void> {
   /* ELEMENT HANDLES, NOT nth(). An index is only meaningful against the DOM that produced it, and
