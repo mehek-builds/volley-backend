@@ -51,8 +51,8 @@ export type ManagedSubmitOutcome = {
 export type SubmitNetworkEntry = {
   method: string;
   /* Origin plus path only. The runner strips query strings before this ever leaves the sandbox,
-   * because submit URLs carry tokens; the parse below cannot re-derive that guarantee, so it
-   * re-applies it. */
+   * because submit URLs carry tokens; the parse below cannot inherit that guarantee across the
+   * wire, so it re-applies it, fragments included. */
   url: string;
   status: number | null;
   failure?: string;
@@ -67,7 +67,7 @@ const readSubmitNetwork = (raw: unknown): SubmitNetworkEntry[] | null => {
     if (typeof value.method !== 'string' || typeof value.url !== 'string') continue;
     entries.push({
       method: value.method.slice(0, 10),
-      url: value.url.split('?')[0].slice(0, 300),
+      url: value.url.split(/[?#]/)[0].slice(0, 300),
       status: typeof value.status === 'number' ? value.status : null,
       ...(typeof value.failure === 'string' ? { failure: value.failure.slice(0, 120) } : {}),
     });
