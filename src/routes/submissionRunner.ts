@@ -2489,8 +2489,15 @@ export function coveredOptionProbeFailureIds(
 ): Set<string> {
   const chosen = storedQuestions.filter((question) => applicantChoseStoredAnswer(question));
   const chosenLabels = new Set(chosen.map((question) => normalizeReviewQuestionLabel(question.question).toLowerCase()));
+  /* SELECTOR-DERIVED IDS ONLY, deliberately narrower than managedOptionProbeControlId's full
+   * reading. The id fallback that mines handles out of the LABEL text can cover a failure whose
+   * label does not otherwise match her stored question - and the fill builder's own exemption
+   * (reviewQuestionFieldTarget) derives ids from the selector alone, so that is exactly the case
+   * where coverage here would excuse a wall while the fill stays suppressed. Coverage that the
+   * builder cannot honour is not coverage; the label-TEXT arm below stays, because the builder's
+   * label match is coarser than it, never finer. */
   const chosenControlIds = new Set(chosen
-    .map((question) => managedOptionProbeControlId({ label: question.question, selector: question.portal_selector }))
+    .map((question) => managedOptionProbeControlId({ selector: question.portal_selector }))
     .filter(Boolean));
   const labelById = new Map(failedFields.map((field) => [field.controlId, field.label?.trim()]));
   return new Set(failures
