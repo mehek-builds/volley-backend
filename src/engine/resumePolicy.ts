@@ -392,60 +392,58 @@ function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: Experi
 }
 
 /**
- * The student's own sentence, when the model has only paraphrased one they already wrote.
+ * The student's own OPENING VERB, when the model swapped it and changed nothing else.
  *
- * WHAT THIS IS FOR. Tailoring earns its keep by SELECTING which of a student's bullets to show and
- * in what order. It does not earn anything by rewriting a sentence they already wrote, and measured
- * across ten real generations on 2026-08-20 that rewriting only ever lost ground:
+ * WHAT THIS IS FOR. The verb whitelist used to reject openers the student had legitimately written,
+ * and a rejected opener is not merely flagged - the bullet is regenerated until it passes. So the
+ * gate silently rewrote their sentences, and measured across ten real generations it only ever lost
+ * ground:
  *
  *   "Backtested a mean-reversion signal..."   ->  "Tested a mean-reversion signal..."
  *   "Resequenced a pick path with OR-Tools"   ->  "Optimized a pick path with OR-Tools"
  *
- * The first is on a QUANTITATIVE TRADING application. "Backtested" is the precise term a quant
- * screener looks for and "Tested" is not, so the paraphrase made the resume worse for the exact
- * posting it was being tailored to, and dropped a keyword on the way. Nothing was fabricated - the
- * numbers and the employer survived every time - but a swap that can only lose specificity is a
- * trade with no upside.
+ * The first is on a QUANTITATIVE TRADING application, where "backtested" is the precise term a
+ * screener looks for. Those verbs are admitted now (resumeValidate note 4), which is the real fix;
+ * this is the backstop for the next one nobody has noticed yet.
  *
- * THE RULE, and it is deliberately narrow: when a generated bullet is a NEAR-COPY of one of the
- * student's own, the student's wording wins verbatim. A near-copy is the case where the model
- * changed the words and nothing else, so restoring costs no selection and no ordering - the bullet
- * chosen is still the bullet shown. A genuinely different sentence is left alone, because that is
- * the model doing the job it is here for rather than editing the student's prose.
+ * WHY IT IS THIS NARROW, and the first version was not. That one restored the student's sentence
+ * whenever the generated bullet was a near-copy by content overlap, which reverted far more than
+ * verbs. The prompt asks the model, deliberately, to "copy the JD's exact multi-word terminology
+ * into the bullet" when the student's evidence supports the same idea - that is keyword alignment
+ * the resume is supposed to do. Measured against the broad rule, all of these were thrown away:
  *
- * Threshold is on CONTENT overlap rather than string distance so that a verb swap reads as
- * near-identical (which it is) while a real rewrite does not.
+ *   "Kafka consumer"    -> "Kafka streaming pipeline"     reverted
+ *   "query time 60%"    -> "query latency 60%"            reverted
+ *   "React dashboard"   -> "React analytics dashboard"    reverted
+ *
+ * So the rule is now exactly the failure that was observed: the opening word differs and EVERY
+ * OTHER WORD IS IDENTICAL. A bullet whose body the model changed is a bullet the model was doing
+ * its job on, and it is left alone.
  */
 export function keepStudentWording(
   bullet: string,
   sourceBullets: readonly string[],
-  /* THE GATE THE RESTORED SENTENCE STILL HAS TO PASS, and leaving it out broke every build on the
-     first run of this. The validator requires an action-verb-first opener; the model had been
-     paraphrasing precisely to satisfy it, so putting the student's verb back put a REJECTED verb
-     back, and the whole resume was refused with `resume_quality_hold` rather than attached.
-     The verbs that mattered are admitted now (see resumeValidate's STRONG_VERBS, note 4), which is
-     the real fix. This is the belt: a student whose verb is genuinely weak keeps the model's
-     rewrite rather than losing their resume, because a bullet nobody can attach helps no one. */
+  /* THE GATE THE RESTORED OPENER STILL HAS TO PASS. Leaving it out broke every build on the first
+     production run of this: the model paraphrases weak openers precisely to satisfy the validator,
+     so putting the student's verb back put a REJECTED verb back and the whole resume was refused
+     with `resume_quality_hold`. A student whose opener is genuinely weak keeps the rewrite, because
+     a bullet nobody can attach helps no one. */
   passesGate: (candidate: string) => boolean = () => true,
 ): string {
-  const generated = tokens(bullet);
-  if (generated.size === 0) return bullet;
-  let best: { text: string; score: number } | null = null;
+  const generated = bullet.trim().split(/\s+/);
+  if (generated.length < 2) return bullet;
+  const body = (words: string[]) => words.slice(1).join(' ').toLowerCase();
+  const generatedBody = body(generated);
+
   for (const candidate of sourceBullets) {
-    const source = tokens(candidate);
-    if (source.size === 0) continue;
-    let shared = 0;
-    for (const token of generated) if (source.has(token)) shared += 1;
-    /* Against the LARGER side, so a generated bullet that merely drops words from a longer source
-       cannot score a perfect match on the strength of being a subset of it. */
-    const score = shared / Math.max(generated.size, source.size);
-    if (!best || score > best.score) best = { text: candidate, score };
+    const source = candidate.trim().split(/\s+/);
+    if (source.length !== generated.length) continue;
+    if (body(source) !== generatedBody) continue;
+    // Same sentence, different first word. Nothing else about the bullet is in question.
+    if (source[0].toLowerCase() === generated[0].toLowerCase()) return bullet;
+    return passesGate(candidate) ? candidate : bullet;
   }
-  /* 0.7 keeps verb swaps and small reorderings ("Found and corrected" / "Identified and corrected"
-     scores 0.75; "Backtested"/"Tested" scores 0.9) and leaves a real rewrite, which shares far less
-     than two thirds of its content words, to stand as written. */
-  if (!best || best.score < 0.7) return bullet;
-  return passesGate(best.text) ? best.text : bullet;
+  return bullet;
 }
 
 /** Deterministic backstop for the three-bullet contract. */
