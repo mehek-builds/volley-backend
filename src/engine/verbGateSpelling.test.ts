@@ -82,7 +82,11 @@ describe('the generators are told to keep the applicant\'s spelling', () => {
   test('both prompts carry the rule', async () => {
     const { readFile } = await import('node:fs/promises');
     for (const path of ['src/llm/resumeSpec.ts', 'src/llm/baseResume.ts']) {
-      const source = await readFile(new URL(`../../${path}`, import.meta.url), 'utf8');
+      /* Read from the repo root rather than through `import.meta.url`. This suite runs under tsx,
+         which resolves that fine, but `npm run typecheck` compiles with a module setting that
+         rejects it outright - so the file passed every local run and failed CI. Both test runners
+         start at the repo root, so a plain relative path is the portable answer. */
+      const source = await readFile(path, 'utf8');
       assert.match(source, /KEEP THE APPLICANT'S OWN SPELLING/, `${path} lost the spelling rule`);
       // Whitespace-tolerant: the rule is wrapped in the prompt and a line break is not a change.
       assert.match(
