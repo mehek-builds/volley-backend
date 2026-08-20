@@ -1336,10 +1336,23 @@ const POSTING_CLOSED_RE = /this (?:position|posting|job(?: posting)?|role) is no
 
 export function postingClosedReason(text: string | undefined): string | null {
   const match = POSTING_CLOSED_RE.exec(text ?? '');
-  if (!match) return null;
-  return 'The employer has taken this posting down: the page says "' + match[0].trim() + '". '
-    + 'There is no application form any more, nothing was filled in and nothing was sent. '
-    + 'There is nothing left to do on this one.';
+  if (match) {
+    return 'The employer has taken this posting down: the page says "' + match[0].trim() + '". '
+      + 'There is no application form any more, nothing was filled in and nothing was sent. '
+      + 'There is nothing left to do on this one.';
+  }
+  /* THE APPLY PAGE THAT 404s. Measured on the same moburst posting one URL over: the posting page
+   * says "no longer active", but the runner lands on /applications/new, which teamtailor renders
+   * as "The page you were looking for doesn't exist - You may have mistyped the address or the
+   * page may have moved" behind the cookie dialog. That is not proof the JOB is gone, so the
+   * sentence claims less: the application page is, and looking at the posting is the next step. */
+  const vanished = /the page you (?:are|were) looking for (?:doesn(?:'|\u2019)t|does not) exist|you may have mistyped the address or the page may have moved/i.exec(text ?? '');
+  if (vanished) {
+    return 'The employer\u2019s application page no longer exists: it says "' + vanished[0].trim() + '". '
+      + 'The posting has most likely closed or moved, so nothing was filled in and nothing was '
+      + 'sent. Check the posting itself if you want to be sure.';
+  }
+  return null;
 }
 
 /**

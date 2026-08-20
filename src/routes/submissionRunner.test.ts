@@ -40,6 +40,7 @@ import {
 } from '../lib/questionDiscovery';
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
 import type { ApplicationReviewState } from '../lib/applicationReview';
+import type { SubmissionPacket } from '../lib/portalSubmission';
 import { describeRequiredBlocker } from '../lib/fieldLabel';
 import {
   attachManagedFieldOptions,
@@ -3395,4 +3396,17 @@ test('a closed posting on the no-evidence path is said in the employer\u2019s ow
     filledFields: ['email'], blockers: [], discovered: [], extracted: [],
   }, packet);
   assert.doesNotMatch(reached.join(' '), /taken this posting down/);
+});
+
+
+test('a vanished apply page is said as the page\u2019s own 404, claiming less than a closed job', () => {
+  const packet = { email: 'a@b.c' } as SubmissionPacket;
+  const blockers = preparationEvidenceBlockers({
+    text: 'This website uses cookies to ensure you get the best experience. '
+      + 'The page you were looking for doesn\u2019t exist. You may have mistyped the address or the page may have moved.',
+    filledFields: [], blockers: [], discovered: [], extracted: [],
+  }, packet);
+  assert.equal(blockers.length, 1);
+  assert.match(blockers[0], /application page no longer exists/);
+  assert.doesNotMatch(blockers[0], /finish it off/);
 });
