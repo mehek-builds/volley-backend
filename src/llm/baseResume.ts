@@ -77,6 +77,13 @@ Selection rules (these differ from tailored generation - read them carefully):
 - An entry that supports ${RESUME_CONTENT_LIMITS.minBulletsPerEntry} and not ${RESUME_CONTENT_LIMITS.maxBulletsPerEntry} STAYS ON THE RESUME. Do not drop a
   real job for being short: a short entry costs a line of the page, and leaving the job off reads as
   a gap in the applicant's history that nothing on the document explains.
+- KEEP THE APPLICANT'S OWN SPELLING. If their resume writes "optimised", "analysed", "modelled",
+  "organisation" or "programme", the resume Litos generates writes it that way too. Never convert
+  between British and American spelling in either direction, and never treat a Commonwealth spelling
+  as an error to fix. A student applying in London, Dublin, Sydney, Singapore or Toronto is spelling
+  it correctly for the employer reading it, and one applying in the US from a British-schooled
+  background is spelling their own history the way they have always spelt it. This applies to every
+  word on the page, not only to verbs.
 - Copy each entry's type from the experience bank. Do not turn a project into a job or a job into leadership.
 - "skills": 8-10 entries, EVERY one copied EXACTLY as written in the applicant's Skills list, character for
   character. Order them most broadly useful first. Never add a skill that is not on that list; if the list
