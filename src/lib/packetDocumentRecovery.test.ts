@@ -272,8 +272,13 @@ describe('the restore is wired at the packet-audit gate, not at buildPacket', ()
     // Both calls also hash the RESOLVED questions now - see resolvedPacketAuditQuestions - so the
     // pin follows the call shape rather than the raw-rows form it used to have.
     const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-    assert.match(runner, /currentPacketAudit\(row, \{\n\s*questions: await resolvedPacketAuditQuestions\(row, current\),\n\s*restoreExpiredResume: 'authorizing_send',\n\s*\}\)/);
-    assert.match(runner, /currentAcknowledgedPacketAudit\(row, \{\n\s*questions: await resolvedPacketAuditQuestions\(row, current\),\n\s*restoreExpiredResume: 'authorizing_send',\n\s*\}\)/);
+    // Both send-path verifiers now route through verifiedPacketForRun, which names the authority
+    // on BOTH of its tries; see its comment for why there are two readings of one packet.
+    assert.match(runner, /verifiedPacketForRun\(row, current, currentPacketAudit\)/);
+    assert.match(runner, /verifiedPacketForRun\(row, current, currentAcknowledgedPacketAudit\)/);
+    const helper = runner.slice(runner.indexOf('async function verifiedPacketForRun'), runner.indexOf('async function prepare('));
+    assert.equal((helper.match(/restoreExpiredResume: 'authorizing_send'/g) ?? []).length, 2,
+      'both readings opt into the retention restore with the send authority');
   });
 
   test('the write is guarded on the old key, so two runners cannot both restore', () => {

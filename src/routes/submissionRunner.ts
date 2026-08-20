@@ -3584,6 +3584,37 @@ export async function resolvedPacketAuditQuestions(row: ResumeRow, review: Appli
   );
 }
 
+/* EITHER READING OF ACKNOWLEDGED CONTENT IS ACKNOWLEDGED CONTENT. The audit binds the resolved
+ * reading; the submit-request gate verifies its own resolved set against that binding and then
+ * PERSISTS that set as the stored rows. Re-resolving the persisted set is not guaranteed to be a
+ * fixpoint - measured on the Easy Dynamics Rippling packet, 2026-08-20, fifth round: acknowledge
+ * passed at 16:34:05 against refresh(stored), the gate passed and wrote its resolved set, and
+ * prepare() then refused at 16:34:42 because refresh(that set) hashed differently again - the
+ * sensitive-answer resolver rewrites machine-provenance EEO answers to its canonical vocabulary,
+ * and canonicalisation is not idempotent across the two resolvers the routes use.
+ *
+ * So a runner verifier accepts if EITHER canonicalisation of the stored rows matches the
+ * acknowledged audit: the resolved reading first (the audit's own binding), and the raw stored
+ * rows as they stand (the exact set the gate just verified and persisted). Both are readings of
+ * content the applicant acknowledged; a real packet change - an edited answer, a different PDF, a
+ * changed JD - flips both, so nothing unacknowledged can ride the second try. */
+async function verifiedPacketForRun(
+  row: ResumeRow,
+  current: ApplicationReviewState,
+  verify: typeof currentPacketAudit | typeof currentAcknowledgedPacketAudit,
+) {
+  const resolved = await verify(row, {
+    questions: await resolvedPacketAuditQuestions(row, current),
+    restoreExpiredResume: 'authorizing_send',
+  });
+  if (resolved.valid) return resolved;
+  const raw = await verify(row, {
+    questions: current.questions,
+    restoreExpiredResume: 'authorizing_send',
+  });
+  return raw.valid ? raw : resolved;
+}
+
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
   let current = readApplicationReview(row.spec);
   if (!current) throw new Error('We do not have a link to the company application page');
@@ -3591,10 +3622,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   /* The audit is also where a packet past its retention window gets its file rebuilt, so the row it
      returns can carry a NEW resume_object_key. Everything below reads from that row, never from
      inputRow, or the run assembles a packet from the key the sweep deleted. */
-  const packetAudit = await currentPacketAudit(row, {
-    questions: await resolvedPacketAuditQuestions(row, current),
-    restoreExpiredResume: 'authorizing_send',
-  });
+  const packetAudit = await verifiedPacketForRun(row, current, currentPacketAudit);
   if (!packetAudit.valid) {
     fastify.log.warn(
       { applicationId: row.id, code: packetAudit.code },
@@ -4222,10 +4250,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
 } = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
-  const packetAudit = await currentAcknowledgedPacketAudit(row, {
-    questions: await resolvedPacketAuditQuestions(row, current),
-    restoreExpiredResume: 'authorizing_send',
-  });
+  const packetAudit = await verifiedPacketForRun(row, current, currentAcknowledgedPacketAudit);
   if (!packetAudit.valid) {
     const finishingSecurityCode = Boolean(options.securityCode) && Boolean(current.security_code);
     fastify.log.error(
