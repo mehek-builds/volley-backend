@@ -5519,6 +5519,7 @@ function unverifiedSubmissionPatch(
       atsName: review.ats_name,
       portalUrl: review.portal_url,
       cause: input.cause,
+      network: input.network ?? null,
     }),
     attention_categories: ['unverified_submission'],
   };

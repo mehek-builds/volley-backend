@@ -590,10 +590,46 @@ const CONFIRMATION_LOOKS_LIKE: Record<string, string> = {
  * act on. Nothing here decides anything on her behalf: an application that may be with an employer
  * is not a thing to guess about.
  */
+/* THE PRESS THAT TALKED ONLY TO A CHALLENGE SERVER. Measured on the live Easy Dynamics Rippling
+ * form (2026-08-20, run 858a4f98, after three identical unverified presses): the press-window
+ * network record holds two POSTs to challenges.cloudflare.com and not one request to any
+ * rippling.com host. The Apply button is gated behind an invisible human-verification challenge;
+ * the submit request is never sent, the button spins forever, and the page renders nothing the
+ * outcome reader could read - so the same press failed the same unreadable way four times.
+ *
+ * This predicate reads that shape: a challenge platform was spoken to, and the employer's own host
+ * never was. It chooses a SENTENCE, never a verdict: the record is bounded and write-shaped only,
+ * so its silence about the portal host is strong but not proof, and the applicant is still the one
+ * who looks. A human-verification wall is also a wall Litos does not climb, by policy as much as by
+ * ability, so the honest next step on this arm is a person's press, not a re-run. */
+/* Hosts by name where the platform owns the whole host; Google's reCAPTCHA lives under a shared
+ * host and is recognised by its path instead, which is why the second test reads the URL. */
+const CHALLENGE_HOST_RE = /(^|\.)(?:challenges\.cloudflare\.com|hcaptcha\.com|arkoselabs\.com|funcaptcha\.com|recaptcha\.net)$/i;
+const CHALLENGE_PATH_RE = /^https:\/\/(?:www\.)?(?:google\.com|gstatic\.com)\/recaptcha\//i;
+export function pressReachedOnlyChallengePlatform(
+  network: SubmitNetworkEntry[] | null | undefined,
+  portalUrl: string | undefined,
+): boolean {
+  if (!network || network.length === 0 || !portalUrl) return false;
+  let portalHost: string;
+  try { portalHost = new URL(portalUrl).hostname.toLowerCase(); } catch { return false; }
+  // The registrable tail, so ats.rippling.com counts requests to api.rippling.com as reaching it.
+  const portalTail = portalHost.split('.').slice(-2).join('.');
+  let challenged = false;
+  for (const entry of network) {
+    let host: string;
+    try { host = new URL(entry.url).hostname.toLowerCase(); } catch { continue; }
+    if (host === portalHost || host === portalTail || host.endsWith('.' + portalTail)) return false;
+    if (CHALLENGE_HOST_RE.test(host) || CHALLENGE_PATH_RE.test(entry.url)) challenged = true;
+  }
+  return challenged;
+}
+
 export function unverifiedSubmissionReason(input: {
   atsName?: string;
   portalUrl?: string;
   cause: UnverifiedCause;
+  network?: SubmitNetworkEntry[] | null;
 }): string {
   const looksLike = CONFIRMATION_LOOKS_LIKE[(input.atsName ?? '').toLowerCase().trim()]
     ?? 'A sent application usually replaces the form with a short confirmation, and many employers '
@@ -601,6 +637,16 @@ export function unverifiedSubmissionReason(input: {
   const where = input.portalUrl
     ? `Open ${input.portalUrl} and look.`
     : 'Open the employer’s application page and look.';
+  if (input.cause === 'no_confirmation_state'
+    && pressReachedOnlyChallengePlatform(input.network, input.portalUrl)) {
+    return 'Litos pressed Send, but the page ran a human-verification check instead of submitting: '
+      + 'the only requests it made went to the verification service, and none reached the employer, '
+      + 'so this application very likely did not go through. This form will only accept a Send '
+      + `pressed by a person. ${where} ${looksLike} Then tell Litos which you found: if it is `
+      + 'there, Litos will record it as sent and will not apply again; if it is not, please finish '
+      + 'this one yourself on the employer’s page, because Litos cannot complete a '
+      + 'human-verification check for you.';
+  }
   const what = input.cause === 'run_timed_out'
     ? 'Litos pressed Send and the secure browser was cut off before the employer’s answer came back, '
       + 'so it does not know whether this application went through.'

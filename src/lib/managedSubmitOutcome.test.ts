@@ -12,6 +12,7 @@ import {
   isManagedRunTimeout,
   managedSubmitVerdict,
   observeManagedReceiptOnce as observeManagedReceiptOnceWithBinding,
+  pressReachedOnlyChallengePlatform,
   readManagedSubmitOutcome,
   unverifiedSubmissionReason,
 } from './managedSubmitOutcome';
@@ -1118,5 +1119,56 @@ describe('the submit network record', () => {
       },
     });
     assert.equal(outcome?.network?.length, 20);
+  });
+});
+
+/* THE PRESS THAT TALKED ONLY TO A CHALLENGE SERVER. The network record below is the measured one:
+ * run 858a4f98 on the live Easy Dynamics Rippling form, 2026-08-20 - two challenge POSTs, two
+ * analytics POSTs, and not one request to any rippling.com host. */
+describe('the human-verification press sentence', () => {
+  const PORTAL = 'https://ats.rippling.com/easy-dynamics-corporation/jobs/0eb836b2';
+  const MEASURED = [
+    { method: 'POST', url: 'https://browser-intake-datadoghq.com/api/v2/rum', status: 202 },
+    { method: 'POST', url: 'https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/fo/x', status: 200 },
+    { method: 'POST', url: 'https://telemetry.transcend.io/collect', status: 204 },
+  ];
+
+  test('the measured Rippling record chooses the human-verification sentence', () => {
+    assert.equal(pressReachedOnlyChallengePlatform(MEASURED, PORTAL), true);
+    const reason = unverifiedSubmissionReason({
+      atsName: 'rippling', portalUrl: PORTAL, cause: 'no_confirmation_state', network: MEASURED,
+    });
+    assert.match(reason, /human-verification check instead of submitting/);
+    assert.match(reason, /finish this one yourself/);
+    assert.doesNotMatch(reason, /Litos will send this one for you/);
+  });
+
+  test('one request to the employer withdraws the claim, whatever else was spoken to', () => {
+    const reached = [...MEASURED,
+      { method: 'POST', url: 'https://api.rippling.com/ats/apply', status: 500 }];
+    assert.equal(pressReachedOnlyChallengePlatform(reached, PORTAL), false);
+    const reason = unverifiedSubmissionReason({
+      atsName: 'rippling', portalUrl: PORTAL, cause: 'no_confirmation_state', network: reached,
+    });
+    assert.doesNotMatch(reason, /human-verification check/);
+    assert.match(reason, /Litos will send this one for you/);
+  });
+
+  test('no challenge platform means the ordinary sentence, and so does no record at all', () => {
+    const analyticsOnly = [MEASURED[0], MEASURED[2]];
+    assert.equal(pressReachedOnlyChallengePlatform(analyticsOnly, PORTAL), false);
+    assert.equal(pressReachedOnlyChallengePlatform(null, PORTAL), false);
+    assert.equal(pressReachedOnlyChallengePlatform(MEASURED, undefined), false);
+    assert.doesNotMatch(
+      unverifiedSubmissionReason({ atsName: 'rippling', portalUrl: PORTAL, cause: 'no_confirmation_state' }),
+      /human-verification check/,
+    );
+  });
+
+  test('the sentence never fires for a cut-off run, where the press may well have reached the employer', () => {
+    assert.doesNotMatch(
+      unverifiedSubmissionReason({ atsName: 'rippling', portalUrl: PORTAL, cause: 'run_timed_out', network: MEASURED }),
+      /human-verification check/,
+    );
   });
 });
