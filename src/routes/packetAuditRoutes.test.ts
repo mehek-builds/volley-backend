@@ -189,6 +189,67 @@ test('the packet-audit route audits the refreshed questions the send gate verifi
   );
 });
 
+/* A SECOND DEADLOCK IN THE SAME FAMILY, and the shape is not "one side refreshes and one does not"
+ * (that was the 2026-08-13 deadlock above) but "both sides refresh, against two different jdText
+ * inputs for what is supposed to be one packet."
+ *
+ * Every LIVE fill - buildPacket and discoverAndResolveQuestions in routes/submissionRunner.ts -
+ * has always resolved known answers against applicationContextForQuestionResolution(row, review),
+ * which appends the packet's frozen employer and frozen locations to jd_text. Six other call sites
+ * across this file, resume.ts and lib/submittedAnswers.ts independently resolved the SAME question
+ * set against review.jd_text bare. resolveKnownAnswer gates several real, common employer field
+ * labels - a bare "Source" or "Application Referral" control, several relocation and
+ * prior-application labels - on markers that exist ONLY in the enriched context's output, so those
+ * labels are deterministically held on jd_text bare and deterministically answered on the enriched
+ * context: two different literal answers for one unedited question, hashed into two different
+ * packet_version values, with no re-audit able to converge because the audit side kept recomputing
+ * on the poorer context. See lib/questionDiscovery.test.ts for the resolver-level proof that the
+ * two contexts really do disagree.
+ *
+ * Measured on production 2026-08-20 on two unrelated employers (Mytos/Lever, Davies-Keoghs/pinpoint):
+ * a clean "Review and fill" audit, zero manual edits, then packet_stale on the send.
+ *
+ * Asserted on the ROUTE SOURCE for the same reason the 2026-08-13 test above is: the failure is a
+ * wiring property (which context one call site builds its `questions` argument from), and a
+ * behavioural test would pass whenever a fixture's employer/location happened not to matter to any
+ * resolver - exactly the condition that let this hide until it hit two real postings in one day. */
+test('every audit or acknowledgement call site resolves known answers against the same enriched context the live fill uses', () => {
+  const packetAudit = routeSlice("'/applications/:id/packet-audit'", "'/applications/:id/packet-audit/acknowledge'");
+  assert.match(
+    packetAudit,
+    /refreshKnownQuestionAnswers\(\s*review\.questions,\s*[^,]+,\s*applicationContextForQuestionResolution\(row, review\)/,
+    'the packet-audit endpoint must resolve against the enriched context, or its acknowledged version disagrees with the send gate',
+  );
+
+  const extensionStart = routeSlice("'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
+  assert.match(
+    extensionStart,
+    /refreshKnownQuestionAnswers\(\s*current\.questions,\s*sensitiveProfile,\s*applicationContextForQuestionResolution\(row, current\)/,
+    'extension-start must refresh against the enriched context before deciding whether the packet changed',
+  );
+
+  const getSubmission = routeSlice("'/applications/:id/submission'", "'/applications/:id/submission/handoff-complete'");
+  assert.match(
+    getSubmission,
+    /refreshKnownQuestionAnswers\(\s*review\.questions,\s*profile,\s*applicationContextForQuestionResolution\(row, review\)/,
+    'the dashboard display route must show the same resolution the send will actually compute',
+  );
+
+  const approve = routeSlice("'/applications/:id/submission/approve'", "registerWorkdayVerificationRoute");
+  assert.match(
+    approve,
+    /refreshKnownQuestionAnswers\(\s*current\.questions,\s*sensitiveProfile,\s*applicationContextForQuestionResolution\(row, current\)/,
+    'submission/approve must not recompute the already-filled packet on jd_text bare before its own audit check',
+  );
+
+  const submitRequest = routeSlice("'/applications/:id/submit-request'", "'/applications/:id/submission'");
+  assert.match(
+    submitRequest,
+    /applicationContextForQuestionResolution\(row, current\)/,
+    'submit-request must feed resolveSubmittedApplicationAnswers the enriched context, not current.jd_text bare',
+  );
+});
+
 /* A THIRD DEADLOCK IN THE SAME FAMILY, on the seam between two HTTP requests rather than inside one.
  *
  * The route above already hashes auditQuestions - refreshed and persisted - rather than the raw

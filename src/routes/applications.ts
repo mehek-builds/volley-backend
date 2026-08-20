@@ -43,7 +43,7 @@ import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
 import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication } from './submissionRunner';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
-import { knownAnswerLookup, refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { applicationContextForQuestionResolution, knownAnswerLookup, refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
@@ -638,10 +638,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
          * It is also the more honest thing to show her. What she acknowledges is what the employer
          * receives, and an auto-resolved answer is part of that. Auditing the pre-refresh snapshot
          * asked her to approve a document that was never going to be sent. */
+        /* applicationContextForQuestionResolution(row, review), NOT review.jd_text bare.
+         *
+         * This is the audit whose result gets acknowledged and later checked against the actual
+         * fill, and the actual fill - buildPacket and discoverAndResolveQuestions in
+         * submissionRunner.ts - has always resolved questions against that richer context (role,
+         * jd_text, frozen employer, frozen locations), never against jd_text alone. A resolver
+         * gated on the frozen-employer marker (a bare "Source" or "Application Referral" label,
+         * several prior-application and relocation labels) is deterministically un-answerable from
+         * jd_text alone and deterministically answerable from this function's output, so auditing
+         * on the poorer context hashed a different `answer` for the same stored question than the
+         * fill a moment later would compute - a packet_stale with no edit and no elapsed time. See
+         * applicationContextForQuestionResolution's own comment for the mechanism. */
         const auditQuestions = refreshKnownQuestionAnswers(
           review.questions,
           await loadSensitiveQuestionProfile(request.jwtPayload!.userId),
-          review.jd_text,
+          applicationContextForQuestionResolution(row, review),
           review.questions_reviewed_at,
           postingCountryFromJobContext(row.job_context),
           postingCountryCodeFromJobContext(row.job_context),
@@ -1091,10 +1103,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const sensitiveProfile = await loadSensitiveQuestionProfile(userId);
         const packetCountry = postingCountryFromJobContext(row.job_context);
         const packetCountryCode = postingCountryCodeFromJobContext(row.job_context);
+        // Same context every live fill resolves against; see applicationContextForQuestionResolution.
         const refreshedQuestions = refreshKnownQuestionAnswers(
           current.questions,
           sensitiveProfile,
-          current.jd_text,
+          applicationContextForQuestionResolution(row, current),
           current.questions_reviewed_at,
           packetCountry,
           packetCountryCode,
@@ -1776,9 +1789,17 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * one call. See resolveSubmittedApplicationAnswers for the 130 packets on which reusing an
        * absent stored round erased the applicant's own answer on the request that reaches the
        * employer. */
+      /* current.jd_text overridden below to applicationContextForQuestionResolution(row, current),
+       * not passed bare. resolveSubmittedApplicationAnswers only reads jd_text to resolve known
+       * answers (the merge's resolverAnswerFor lookup and its own refresh), and that resolution has
+       * to agree with what the actual fill computes - buildPacket and discoverAndResolveQuestions in
+       * submissionRunner.ts, both already on this richer context - or the questions acknowledged
+       * here disagree with the packet the fill produces for no reason the applicant caused. See
+       * applicationContextForQuestionResolution's own comment for the mechanism. */
+      const submitResolutionCurrent = { ...current, jd_text: applicationContextForQuestionResolution(row, current) };
       const { questions: normalizedSubmittedQuestions, questionsReviewedAt: submittedReviewedAt } =
         resolveSubmittedApplicationAnswers({
-          current,
+          current: submitResolutionCurrent,
           submitted: submittedQuestions,
           profile: sensitiveProfile,
           postingCountry: postingCountryFromJobContext(row.job_context),
@@ -2039,10 +2060,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const profile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
       review = {
         ...review,
+        // Same context every live fill resolves against; see applicationContextForQuestionResolution.
+        // What this route displays must agree with what a send will actually compute, or the client's
+        // round trip back through submit-request re-diverges from the packet it just showed her.
         questions: refreshKnownQuestionAnswers(
           review.questions,
           profile,
-          review.jd_text,
+          applicationContextForQuestionResolution(row, review),
           review.questions_reviewed_at,
           postingCountryFromJobContext(row.job_context),
           postingCountryCodeFromJobContext(row.job_context),
@@ -2337,12 +2361,21 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send(duplicateApplicationResponse(approvalDuplicate));
       }
       const sensitiveProfile = await loadSensitiveQuestionProfile(request.jwtPayload!.userId);
+      /* applicationContextForQuestionResolution(row, current), NOT current.jd_text bare.
+       *
+       * approvalReview.questions is what gets handed to currentAcknowledgedPacketAudit below as
+       * the send gate's `questions` override, and by the time this route runs the form has already
+       * been filled once by prepare() - through buildPacket/discoverAndResolveQuestions, both of
+       * which resolve against this same richer context. Recomputing here on jd_text alone could
+       * flip a resolver like the "Source" / "Application Referral" family back to its un-answerable
+       * skipReason, producing a packet_version that disagrees with what was just filled and
+       * acknowledged, with nothing the applicant did causing it. */
       const approvalReview: ApplicationReviewState = {
         ...current,
         questions: refreshKnownQuestionAnswers(
           current.questions,
           sensitiveProfile,
-          current.jd_text,
+          applicationContextForQuestionResolution(row, current),
           current.questions_reviewed_at,
           postingCountryFromJobContext(row.job_context),
           postingCountryCodeFromJobContext(row.job_context),

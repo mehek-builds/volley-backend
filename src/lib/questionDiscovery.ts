@@ -1873,6 +1873,76 @@ function frozenJobRelocationLocationsFromContext(context: string | undefined): s
     .filter(Boolean);
 }
 
+/** Duplicated in miniature from routes/submissionRunner.ts's jobContextCompany rather than
+ *  imported, so this function's only job_context dependency is the loose shape below and it
+ *  cannot pull a route module into this lib. Kept in exact lockstep by
+ *  applicationContextForQuestionResolution.test-style coverage in submissionRunner.test.ts,
+ *  which calls this function by name and would catch the two drifting. */
+function frozenJobEmployerName(jobContext: unknown): string {
+  const context = (jobContext && typeof jobContext === 'object' ? jobContext : {}) as Record<string, unknown>;
+  const company = context.company;
+  return typeof company === 'string' ? company.trim() : '';
+}
+
+/**
+ * THE ONE CONTEXT STRING EVERY LIVE RESOLUTION OF "WHAT DOES THIS QUESTION ANSWER" IS BUILT
+ * AGAINST - discoverAndResolveQuestions and buildPacket in routes/submissionRunner.ts both call
+ * this rather than passing review.jd_text on its own, and every other caller of
+ * refreshKnownQuestionAnswers / resolveKnownAnswer / knownAnswerLookup that is deciding what the
+ * packet's questions currently say MUST call this too - not review.jd_text bare.
+ *
+ * THE BUG THIS FUNCTION'S EXISTENCE CREATED WHEN ONLY TWO CALLERS USED IT, measured on production
+ * 2026-08-20 as a false-positive packet_stale with no edit and no elapsed time. resolveKnownAnswer
+ * gates several branches - a bare "Source" or "Application Referral" label, and several relocation
+ * and prior-application labels - on frozenJobEmployerFromContext(jdText) / on the frozen location
+ * lines this function writes below. Those markers exist ONLY inside this function's output; a real
+ * job description's prose is never going to contain the literal string
+ * "[LITOS FROZEN JOB EMPLOYER] ". So a resolver gated on the marker is DETERMINISTICALLY false
+ * (skipReason, answer withheld) when fed review.jd_text bare, and DETERMINISTICALLY true (a real
+ * computed answer) when fed this function's output - for the exact same stored question, on the
+ * exact same packet, seconds apart, with nothing the applicant would call a change. That is not a
+ * flaky edge case: any posting with a "Source" field or a "have you applied here before" question
+ * hit it on every run, which is why it reproduced twice in one day on two unrelated employers.
+ *
+ * The two audit call sites (POST /applications/:id/packet-audit and every place that recomputes
+ * "the packet's questions" for currentAcknowledgedPacketAudit's `questions` override) used to pass
+ * jd_text bare, so the audit an applicant acknowledged was hashed from the skipReason-blank
+ * resolution, and the ACTUAL fill a moment later - which always goes through
+ * discoverAndResolveQuestions or buildPacket, both already on this function - resolved the same
+ * label to a real value. Two genuinely different literal answers for a question nothing else
+ * touched, hashed into two different packet_version values, and no re-audit could ever converge
+ * because one side kept computing on the poorer context. See packetAudit.ts's
+ * verifyCurrentPacketAudit and packetAuditService.ts's audit/send call sites, which all now build
+ * their `questions` argument through this function instead of jd_text alone. */
+export function applicationContextForQuestionResolution(
+  row: { job_context: unknown },
+  current: { role?: string; jd_text: string },
+): string {
+  const context = (row.job_context && typeof row.job_context === 'object' ? row.job_context : {}) as Record<string, unknown>;
+  /* SPLIT ON THE SEMICOLON BEFORE CLASSIFYING, because a multi-office posting writes its offices
+   * into ONE string: Anduril's 2027 intern posting stores `job_context.location` as
+   * "Atlanta, Georgia, United States; Boston, Massachusetts, United States; ..." and five more.
+   *
+   * Classifying the composite is wrong in both directions. It reached jobCountry as a single value
+   * and passed the every-one-is-US test on the strength of the American cities in it, so a posting
+   * mixing Chicago with London would have frozen as safe; and it was then frozen as ONE location,
+   * which is the shape the resolver could not read at all. One city per entry makes the every-one
+   * test mean what it says and gives the resolver something it can check. */
+  const locationValues = [
+    typeof context.location === 'string' ? context.location : '',
+    ...(Array.isArray(context.locations) ? context.locations.filter((value): value is string => typeof value === 'string') : []),
+  ].flatMap((value) => value.split(';')).map((value) => value.trim()).filter(Boolean);
+  const classifiedLocations = [...new Set(locationValues)].map((value) => ({ value, country: jobCountry(value) }));
+  const safeLocations = classifiedLocations.length > 0 && classifiedLocations.every((item) => item.country === 'us')
+    ? frozenJobLocationContext(classifiedLocations.map((item) => item.value))
+    : '';
+  const packetEmployer = frozenJobEmployerContext(frozenJobEmployerName(row.job_context));
+  const relocationLocations = frozenJobRelocationLocationContext(locationValues);
+  return [current.role, current.jd_text, packetEmployer, relocationLocations, safeLocations]
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+    .join('\n');
+}
+
 /* AGE_ATTESTATION_QUESTION is no longer in this list, and that is the whole of the second half of
  * this change. It sat here beside SSN and CAPTCHA, so "are you 18+ years of age?" was refused
  * before anything looked at whether the answer was known - and it is knowable. An age computed
