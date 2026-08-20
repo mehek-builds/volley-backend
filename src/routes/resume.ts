@@ -72,7 +72,7 @@ import {
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPortalRepair';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
-import { refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { applicationContextForQuestionResolution, refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { specWithoutDocumentPointers } from '../lib/documentStore';
 import { recoverOwnedGeneratedDocument } from '../lib/downloadDocumentRecovery';
@@ -258,10 +258,11 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
     ...(spec as Record<string, unknown>),
     _review: {
       ...review,
+      // Same context every live fill resolves against; see applicationContextForQuestionResolution.
       questions: refreshKnownQuestionAnswers(
         review.questions,
         profile,
-        review.jd_text,
+        applicationContextForQuestionResolution({ job_context: jobContext }, review),
         review.questions_reviewed_at,
         postingCountryFromJobContext(jobContext),
         postingCountryCodeFromJobContext(jobContext),
