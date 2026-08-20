@@ -1337,8 +1337,12 @@ test('readReceipt reports the security-code wall by name, not a generic confirma
 });
 
 test('readReceipt fails FAST on a security-code wall, not after riding out the 30-second deadline', async () => {
-  // waitForTimeout is the only thing that stands between a poll and the next one; it firing zero
-  // times means the security-code check fired on the very first pass, not on deadline expiry.
+  // waitForTimeout is the only thing that stands between a poll and the next one, so the count it
+  // reaches by the time readReceipt throws is a direct read of how many polls happened. A field that
+  // stays visible poll after poll must still close well inside the 30-second deadline (SECONDS, not
+  // the ~28 waits a near-full ride to deadline would rack up) - not on the very first sighting: see
+  // SECURITY_CODE_CONFIRM_POLLS in portalSubmission.ts for why a streak, not a single sighting, is
+  // required (a human finishing an attended handoff is the reason).
   let waited = 0;
   const page = {
     locator: (selector: string) => (selector === 'body'
@@ -1352,7 +1356,32 @@ test('readReceipt fails FAST on a security-code wall, not after riding out the 3
   } as unknown as Page;
 
   await assert.rejects(readReceipt(page));
-  assert.equal(waited, 0, 'a security-code field must be caught before the poll ever sleeps');
+  assert.equal(waited, 2, 'a persistent security-code field must be caught after its confirm streak, not on the first sighting and not near the 30s deadline');
+});
+
+test('readReceipt does NOT fail fast on a single fleeting security-code-shaped sighting', async () => {
+  // The selector is deliberately broad (case-insensitive name*="verification"), and readReceipt's
+  // other caller (applications.ts, attended-handoff) reconnects to a session a human may be actively
+  // finishing by hand. One tick where the field is visible - then a receipt - must not be treated as
+  // a wall this call can never get past.
+  let call = 0;
+  const page = {
+    locator: (selector: string) => (selector === 'body'
+      ? {
+        innerText: async () => {
+          call += 1;
+          return call === 1
+            ? 'One moment, verifying your submission.'
+            : 'Thanks for your application! We have received it.';
+        },
+      }
+      : { first: () => ({ isVisible: async () => call === 1 }) }),
+    url: () => 'https://boards.greenhouse.io/acme/jobs/1/apply',
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  const receipt = await readReceipt(page);
+  assert.match(receipt.confirmationText, /received/i);
 });
 
 test('a genuine confirmation still wins even on a page that also carries a one-time-code-shaped field', async () => {

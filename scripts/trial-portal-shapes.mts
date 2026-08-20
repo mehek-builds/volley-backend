@@ -66,7 +66,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium, type Page } from 'playwright-core';
-import type { ManagedBrowserAction } from '../src/lib/browserbase';
+import { MANAGED_SUBMIT_CHOOSER_POLICY, type ManagedBrowserAction } from '../src/lib/browserbase';
 import {
   READ_SUBMIT_READINESS_SCRIPT,
   buildManagedPortalActions,
@@ -74,6 +74,7 @@ import {
   fillPortal,
   COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT,
   SUBMIT_CANDIDATE_SELECTOR,
+  SUBMIT_ENABLE_WAIT_MS,
   READ_CONTROL_LABEL,
   chooseSubmitControl,
   type SubmissionPacket,
@@ -711,11 +712,26 @@ function submittingAshbyActions(): ManagedBrowserAction[] {
       + `not an emailed-code verification continuation - the two must never be confused.`,
     );
   }
-  if (!last.chooserPolicy || last.chooserPolicy.name !== 'litos-final-submit') {
+  /* Diffed against the REAL policy constant stratusAction() (src/lib/browserbase.ts) itself
+     validates every managed confirmAndSubmit against, not a hand-typed name check - a name-only
+     check would still pass if version/finalPattern/exclusionPattern/grammarHash regressed on their
+     own, which is exactly the kind of second, drifting reader this repo's other comments warn
+     against. */
+  const policy = last.chooserPolicy;
+  if (
+    !policy
+    || policy.name !== MANAGED_SUBMIT_CHOOSER_POLICY.name
+    || policy.version !== MANAGED_SUBMIT_CHOOSER_POLICY.version
+    || policy.finalPattern !== MANAGED_SUBMIT_CHOOSER_POLICY.finalPattern
+    || policy.exclusionPattern !== MANAGED_SUBMIT_CHOOSER_POLICY.exclusionPattern
+    || policy.grammarHash !== MANAGED_SUBMIT_CHOOSER_POLICY.grammarHash
+  ) {
     throw new Error(
-      `the production Ashby builder's confirmAndSubmit is missing the "litos-final-submit" chooser `
-      + `policy (got ${JSON.stringify(last.chooserPolicy ?? null)}). Without it the sandbox runner's `
-      + `own boot check rejects the action before a browser opens.`,
+      `the production Ashby builder's confirmAndSubmit chooserPolicy does not match `
+      + `MANAGED_SUBMIT_CHOOSER_POLICY (got ${JSON.stringify(policy ?? null)}, wanted `
+      + `${JSON.stringify(MANAGED_SUBMIT_CHOOSER_POLICY)}). This is the same policy stratusAction() `
+      + `itself validates every managed confirmAndSubmit against - a mismatch here means the real `
+      + `sandbox runner's own boot check would reject this action before a browser ever opens.`,
     );
   }
   return all;
@@ -760,6 +776,16 @@ function uploadActions(packet: SubmissionPacket): ManagedBrowserAction[] {
  * boot check would fail against these bytes, this throws first and says so; if it passes, the values
  * about to be substituted are provably the ones production's require() would have produced, without
  * ever loading @vercel/sandbox to get them. */
+/* Pinned here, independently of anything the extraction below slices out of the checkout, so the
+ * hash check that follows has an outside source of truth to fail against - not just the extracted
+ * object's own embedded grammarHash. A slice-boundary bug that carves out a stale or malformed
+ * literal, but one that is internally self-consistent (all seven fields plus a grammarHash all
+ * came from the same bad slice), would still satisfy a check that only compares the extraction to
+ * itself; it cannot satisfy a check against a value fixed here, outside the slice. Rotate this the
+ * same day SUBMIT_READINESS_POLICY.grammarHash rotates in managed-browser.js - a stale value here
+ * fails loudly with a clear message, not silently. */
+const KNOWN_SUBMIT_READINESS_GRAMMAR_HASH = '5382e70ebe4ac09c4a66af78dd1aae3b37032f30295621bdabfe43dbc0eaadbc';
+
 function submitReadinessPolicy(source: string): Record<string, string> {
   const open = 'export const SUBMIT_READINESS_POLICY = Object.freeze({';
   const start = source.indexOf(open);
@@ -787,6 +813,19 @@ function submitReadinessPolicy(source: string): Record<string, string> {
   const hash = createHash('sha256').update(grammar).digest('hex');
   if (hash !== policy.grammarHash) {
     throw new Error('extracted SUBMIT_READINESS_POLICY does not match its own grammarHash; extraction is wrong');
+  }
+  // The check above only proves the slice is internally coherent - see KNOWN_SUBMIT_READINESS_GRAMMAR_HASH's
+  // own comment for why that is not the same as correct. This is the check against something outside
+  // the slice: stratus's grammar actually changing is a real, expected event (it did on 2026-08-13),
+  // so this fails with a message that says what to do, not a bare mismatch.
+  if (hash !== KNOWN_SUBMIT_READINESS_GRAMMAR_HASH) {
+    throw new Error(
+      `SUBMIT_READINESS_POLICY's grammar hash (${hash}) no longer matches the value pinned in this `
+      + `trial (KNOWN_SUBMIT_READINESS_GRAMMAR_HASH, ${KNOWN_SUBMIT_READINESS_GRAMMAR_HASH}). Either `
+      + `stratus's readiness grammar genuinely changed (update the pinned constant to match, after `
+      + `checking what changed and why) or this extraction sliced out something stale - do not just `
+      + `widen or delete this check.`,
+    );
   }
   return policy;
 }
@@ -936,9 +975,21 @@ async function main() {
            defect being measured. Reproducing clickFinalSubmit's own control-selection here, rather
            than calling the gate a beat too early, is what makes this a faithful replay of the
            production sequence instead of a shortcut around it. */
-        const handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
-        const labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
-        const chosen = chooseSubmitControl(labels);
+        let handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
+        let labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
+        let chosen = chooseSubmitControl(labels);
+        /* Mirrors clickFinalSubmit's own one-retry-after-SUBMIT_ENABLE_WAIT_MS (imported, not
+           re-typed, so the two cannot drift apart): plenty of ATS forms render the final button
+           disabled until async client-side validation settles, and a single synchronous read here
+           would otherwise leave the scope unbound - and every gate case reporting empty/wrong
+           blocking data - for any shape whose submit control needs that beat to become selectable,
+           even though production handles it fine. */
+        if (chosen === null) {
+          await page.waitForTimeout(SUBMIT_ENABLE_WAIT_MS);
+          handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
+          labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
+          chosen = chooseSubmitControl(labels);
+        }
         if (chosen !== null) {
           await handles[chosen]!.evaluate(COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT).catch(() => null);
         }

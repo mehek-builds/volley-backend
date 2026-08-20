@@ -304,6 +304,14 @@ const ICIMS_HCAPTCHA_SELECTOR = 'textarea[name="h-captcha-response"]';
    way a real iCIMS or Greenhouse one does. One selector, not two that can drift apart. */
 const SECURITY_CODE_FIELD_SELECTOR =
   'input[autocomplete="one-time-code"], input[name*="verification" i], input[name*="securityCode" i]';
+/* How many consecutive 1-second polls readReceipt requires the field above to stay visible, with no
+   receipt on any of them, before treating it as a wall rather than a moment. See the fail-fast
+   comment inside readReceipt for why one sighting is not enough: this selector is deliberately broad
+   enough to catch an unrelated field for a single transitional tick, and readReceipt's other caller
+   reconnects to a session a human may be actively finishing by hand. 3 polls is 2-3 real seconds,
+   short enough to still close well inside the 30s deadline for a genuine wall, long enough that a
+   receipt or a cleared field on any of those polls resets the streak before this ever fires. */
+const SECURITY_CODE_CONFIRM_POLLS = 3;
 const ORACLE_PRIMARY_EMAIL_SELECTOR = 'input#primary-email-1[name="primary-email"]';
 const ORACLE_LEGAL_DISCLAIMER_SELECTOR = 'input#legal-disclaimer-checkbox';
 const ORACLE_HONEYPOT_SELECTOR = 'input#honey-pot-0[name="honey-pot"]';
@@ -10994,8 +11002,11 @@ export const READ_CONTROL_LABEL = (node: unknown) => {
     || el.getAttribute('alt') || uaDefault || '').trim();
 };
 
-/** How long to give a submit control that is disabled until client-side validation settles. */
-const SUBMIT_ENABLE_WAIT_MS = 3_000;
+/** How long to give a submit control that is disabled until client-side validation settles.
+ *  Exported so the trial's ctx.gate (scripts/trial-portal-shapes.mts) can reproduce the same
+ *  retry clickFinalSubmit relies on, rather than hand-typing a second copy of this number that can
+ *  drift from the real one. */
+export const SUBMIT_ENABLE_WAIT_MS = 3_000;
 
 /**
  * Commit the values already present in required controls on the exact form owned by the retained
@@ -11253,10 +11264,15 @@ export async function readReceipt(page: Page): Promise<{ confirmationText: strin
    * the auto-waiting innerText read for the reason above. */
   const deadline = Date.now() + 30_000;
   let body = '';
+  /* How many CONSECUTIVE polls in a row have seen the security-code field, with no receipt on any
+   * of them. Required to reach SECURITY_CODE_CONFIRM_POLLS before the fail-fast below fires - see
+   * that constant for why a single sighting is not enough. */
+  let securityCodeStreak = 0;
   for (;;) {
     body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
     if (RECEIPT_PROOF_RE.test(body)) break;
-    /* FAIL FAST ON A SECURITY-CODE WALL, RATHER THAN RIDING OUT THE REST OF THE DEADLINE.
+    /* FAIL FAST ON A SECURITY-CODE WALL, RATHER THAN RIDING OUT THE REST OF THE DEADLINE - BUT ONLY
+     * ONCE IT HAS HELD FOR SECURITY_CODE_CONFIRM_POLLS IN A ROW.
      *
      * clickFinalSubmit (both callers: submitControlled's controlled_test path and the plain
      * browserbase-session path) presses submit exactly ONCE and has no idea a second press could
@@ -11274,14 +11290,33 @@ export async function readReceipt(page: Page): Promise<{ confirmationText: strin
      * gets, which is indistinguishable from the real defect: trial case 'security-code' (regression
      * test below) measured this directly as one submit press, no receipt, and the code field still
      * on screen, with nothing in the error to say why. Checking on every poll, not only once, is
-     * deliberate too - the field can render at any point inside the window, not only up front. */
+     * deliberate too - the field can render at any point inside the window, not only up front.
+     *
+     * REQUIRING A STREAK, NOT ONE SIGHTING, is what makes this safe for readReceipt's OTHER caller:
+     * applications.ts's attended-handoff route reconnects this same function to a session a HUMAN is
+     * driving by hand, after they say they already submitted. A person who has just pressed submit
+     * on a code-gated form and is a few keystrokes from entering it and pressing submit again has a
+     * field visible on the very next poll that isn't a wall this call can never get past - it is one
+     * they are about to get past themselves, and firing on that single sighting would reject a
+     * submission the very next poll would have seen succeed. SECURITY_CODE_FIELD_SELECTOR is also
+     * broad (case-insensitive name*="verification"), wide enough to catch an unrelated field on a
+     * transitional page for one tick. A short streak absorbs both: a field that is genuinely a wall
+     * this call cannot clear stays visible poll after poll, so the streak still closes well inside
+     * the 30s deadline; a field that clears because a human finished, or that was never the wall to
+     * begin with, breaks the streak back to zero the moment the receipt (or the field's absence)
+     * shows up on a later poll. */
     if (await page.locator(SECURITY_CODE_FIELD_SELECTOR).first().isVisible().catch(() => false)) {
-      throw new Error(
-        'Litos pressed submit, and the employer is now holding this application behind an emailed '
-        + 'security code. This browser has no inbox to read that code from and cannot press submit '
-        + 'a second time on its own, so the application was not completed. Open the portal, enter '
-        + 'the code from the confirmation email, and finish the application there.',
-      );
+      securityCodeStreak += 1;
+      if (securityCodeStreak >= SECURITY_CODE_CONFIRM_POLLS) {
+        throw new Error(
+          'Litos pressed submit, and the employer is now holding this application behind an emailed '
+          + 'security code. This browser has no inbox to read that code from and cannot press submit '
+          + 'a second time on its own, so the application was not completed. Open the portal, enter '
+          + 'the code from the confirmation email, and finish the application there.',
+        );
+      }
+    } else {
+      securityCodeStreak = 0;
     }
     if (Date.now() >= deadline) {
       throw new Error('The company never showed a confirmation we could check');

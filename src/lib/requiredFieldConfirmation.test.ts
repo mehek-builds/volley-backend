@@ -230,6 +230,52 @@ test('direct confirmation commits the visually filled custom box without changin
   assert.equal(control.getAttribute('aria-checked'), 'true', 'confirmation must preserve the answer');
 });
 
+/* THIS IS THE ONE TEST THAT ACTUALLY EXERCISES THE BUG THIS FILE'S OWN FIX WAS FOR.
+ *
+ * Every other test here calls COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT directly, in-process, as an
+ * ordinary JS function - which proves its LOGIC but never its SERIALIZABILITY. The incident this
+ * fix closed was never a logic bug: clickFinalSubmit hands this function to Playwright's
+ * elementHandle.evaluate(), which calls Function.prototype.toString() on it, ships that source text
+ * into the browser page, and re-parses it there with `new Function`. Under esbuild's `keepNames`
+ * bundling, the reserialized source referenced a `__name(...)` helper that only exists in the
+ * bundle's own module scope - so every direct in-process test kept passing while every real call
+ * threw `ReferenceError: __name is not defined`, silently swallowed by clickFinalSubmit's
+ * `.catch(() => null)`, and reported as "Litos could not bind required-field confirmation" on every
+ * submission. A future edit that reintroduces that class of bug - referencing any binding that only
+ * exists in this module's scope, not the function's own closure - would pass every test above and
+ * only fail here, exactly as it would in a real browser. */
+test('the exported confirmation function survives being serialized and re-parsed, the way Playwright actually runs it', async () => {
+  // eslint-disable-next-line no-new-func -- reproducing exactly what Playwright's elementHandle.evaluate() does internally
+  const reparsed = new Function(
+    'return (' + COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT.toString() + ');',
+  )() as typeof COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT;
+
+  let committed = false;
+  const control = {
+    disabled: false,
+    value: 'Yes',
+    getAttribute: (name: string) => name === 'role' ? 'radio' : name === 'aria-checked' ? 'true' : null,
+    getClientRects: () => ({ length: 1 }),
+    focus: () => undefined,
+    blur: () => undefined,
+    dispatchEvent: (event: unknown) => {
+      if ((event as { type?: string }).type === 'click') committed = true;
+      return true;
+    },
+  };
+  const form = { setAttribute: () => undefined, querySelectorAll: () => [control] };
+  const result = await reparsed({
+    closest: () => form,
+    ownerDocument: { defaultView: {
+      Event,
+      requestAnimationFrame: (callback: () => void) => callback(),
+      getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+    } },
+  });
+  assert.deepEqual(result, { formFound: true, changed: false, committed: 1 });
+  assert.equal(committed, true, 'a reparsed copy must still behave exactly like the original');
+});
+
 async function commitMarkerOnlyRequiredControl(marker: { textContent: string; className: string }) {
   let events = 0;
   const control = {
