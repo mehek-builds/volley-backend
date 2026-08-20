@@ -907,6 +907,26 @@ export type ApplicationReviewState = {
   submission_claim_id?: string;
   /** Exact server-audited packet reserved by an extension submission claim. */
   submission_packet_version?: string;
+  /* A CLAIM THAT WAS LIFTED BY THE ROW'S OWN EVIDENCE, NAMED, so the audit trail can say what
+   * happened and why without grepping prose.
+   *
+   * Written by releaseExpiredAttendedHandoffClaim (lib/expiredHandoffClaimRelease.ts) and by
+   * nothing else. 'attended_handoff_expired' means: the run parked at an attended handoff without
+   * pressing send, the row carried none of the four stored facts that mean something may already
+   * be at the employer, the 55-minute handoff window was over, and no extension submission outcome
+   * event existed for this application - so the claim was guarding a send that provably never
+   * happened and an attended finish that could no longer happen. Measured on the Fully
+   * (teamtailor) packet, 2026-08-20, where that combination was permanently un-auditable and
+   * un-runnable.
+   *
+   * claim_id is the exact claim that was released, kept so the release can be reconciled against
+   * whatever run took it. Presence of this record proves a release occurred; it is never read as a
+   * licence for anything, and a later run that takes a fresh claim leaves it in place as history. */
+  claim_released?: {
+    cause: 'attended_handoff_expired';
+    claim_id?: string;
+    released_at: string;
+  };
   /* WHICH ADDRESS THE EMPLOYER WAS GIVEN, and why that one.
    *
    * Litos prefers a per-application alias so replies come back through the product and can be
