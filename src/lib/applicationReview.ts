@@ -1081,6 +1081,9 @@ export type ApplicationReviewState = {
      * next session) resolving this record: a 200 on the board's submit path reads very differently
      * from a 422 or a request that never returned. Never used to decide anything automatically. */
     network?: { method: string; url: string; status: number | null; failure?: string }[];
+    /* The runner reported a rendered CAPTCHA still standing after the press. Evidence for the
+     * person resolving this record, and what selects the human-check sentence. */
+    challenge_on_screen?: true;
     resolution?: 'sent' | 'not_sent';
     resolved_at?: string;
   };
