@@ -5,6 +5,7 @@ import { DOMParser } from '@xmldom/xmldom';
 import type { Page } from 'playwright-core';
 import { CONTROLLED_PORTAL_BINDING_PARAM, controlledPortalBinding } from './controlledTestPortal';
 import { resolveKnownAnswer } from './questionDiscovery';
+import { reparseThroughPlaywrightSerialization } from './playwrightSerializationRoundTrip';
 import {
   AUTONOMOUS_PORTAL_FAMILIES,
   blockersRequireCoverLetter,
@@ -5775,6 +5776,84 @@ test('READ_CONTROL_LABEL reads the element, and the tag gate is the load-bearing
   }), '');
   // And the ordinary case still reads.
   assert.equal(READ_CONTROL_LABEL(node({ innerText: 'Submit application' })), 'Submit application');
+});
+
+/* READ_CONTROL_LABEL is handed to Playwright's elementHandle.evaluate() exactly like
+ * COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT was before the fix in requiredFieldConfirmation.test.ts:
+ * evaluate() serialises it with Function.prototype.toString() and re-parses the source INSIDE the
+ * page. That fix's class of bug - a bundler's esbuild `keepNames` transform wrapping a NAMED helper
+ * declared inside the function body in a `__name(...)` call that only exists in the bundle's own
+ * module scope - only bites when such an inner named binding exists to wrap. READ_CONTROL_LABEL has
+ * none today (confirmed by bundling it with esbuild's --bundle --keep-names and inspecting the
+ * reserialized source directly), which is why it is still a plain arrow function rather than the
+ * String.raw + new Function form used for COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT and
+ * READ_SUBMIT_READINESS_SCRIPT. This test is the tripwire: a future edit that adds so much as one
+ * `const helper = (...) => ...` inside this function would still pass every direct call above and
+ * only fail here, exactly as it would in a real browser. */
+test('READ_CONTROL_LABEL survives being serialized and re-parsed, the way Playwright actually runs it', () => {
+  const reparsed = reparseThroughPlaywrightSerialization(READ_CONTROL_LABEL);
+
+  const node = {
+    innerText: 'Submit application', value: '', title: '', disabled: false, type: '', tagName: 'BUTTON',
+    getAttribute: () => null,
+    getClientRects: () => ({ length: 1 }),
+    parentElement: null,
+    ownerDocument: {
+      defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+      getElementById: () => null,
+    },
+  };
+  assert.equal(reparsed(node), 'Submit application',
+    'a reparsed copy must still behave exactly like the original');
+});
+
+/* The test above only exercises the innerText happy path: its mock's parentElement is null and
+ * getAttribute always returns null, so the ancestor aria-hidden walk's loop body, the
+ * aria-labelledby -> getElementById lookup, and the tail of the label-fallback chain (aria-label,
+ * title, alt) never actually EXECUTE - not just receive uninteresting input. A named inner helper
+ * placed inside any of those three spots would not be called by that test's single input, and
+ * would silently escape the tripwire. These two exercise the rest. */
+test('READ_CONTROL_LABEL reparsed still walks a real ancestor chain and resolves aria-labelledby', () => {
+  const reparsed = reparseThroughPlaywrightSerialization(READ_CONTROL_LABEL);
+
+  let ancestorWalked = false;
+  const parent = {
+    getAttribute: (name: string) => {
+      if (name === 'aria-hidden') { ancestorWalked = true; return 'false'; }
+      return null;
+    },
+    parentElement: null,
+  };
+  const node = {
+    innerText: '', value: '', title: '', disabled: false, type: '', tagName: 'BUTTON',
+    getAttribute: (name: string) => name === 'aria-labelledby' ? 'referenced-label' : null,
+    getClientRects: () => ({ length: 1 }),
+    parentElement: parent,
+    ownerDocument: {
+      defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+      getElementById: (id: string) => id === 'referenced-label' ? { innerText: 'Upload your resume' } : null,
+    },
+  };
+  assert.equal(reparsed(node), 'Upload your resume',
+    'a reparsed copy must still resolve an aria-labelledby reference through a real ancestor chain');
+  assert.equal(ancestorWalked, true, 'the ancestor walk must actually have run, not been skipped');
+});
+
+test('READ_CONTROL_LABEL reparsed still falls through to aria-label, title and alt when nothing else answers', () => {
+  const reparsed = reparseThroughPlaywrightSerialization(READ_CONTROL_LABEL);
+
+  const node = {
+    innerText: '', value: '', title: '', disabled: false, type: '', tagName: 'BUTTON',
+    getAttribute: (name: string) => name === 'alt' ? 'Close' : null,
+    getClientRects: () => ({ length: 1 }),
+    parentElement: null,
+    ownerDocument: {
+      defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+      getElementById: () => null,
+    },
+  };
+  assert.equal(reparsed(node), 'Close',
+    'a reparsed copy must still reach the tail of the label-fallback chain');
 });
 
 test('a legitimate submit label is not rejected as a handoff', () => {
