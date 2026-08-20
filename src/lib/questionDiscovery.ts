@@ -6,7 +6,7 @@ import { officeMetrosNamed } from './officeMetros';
 import {
   derivationIsCurrent,
   optionBandAnswer,
-  reviewedOptionBandCoversCurrentValue,
+  reviewedOptionBandVerdict,
   storedOptionAnswerIsCurrent,
 } from './optionBand';
 import type { SupportedPortal } from './portalSubmission';
@@ -2357,8 +2357,15 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
         ? withProvenance.answer_option_source
         : undefined;
       if (storedOptionAnswerIsCurrent(question.answer, derivedFrom, known.value)) return question;
+      /* 'covers' keeps the reviewed range because the profile still sits inside it. 'incomparable'
+       * keeps it because the resolver's value does not parse into the range's dimension at all -
+       * measured on the Mytos degree-classification control, whose reviewed "GPA 3.5-3.8" was
+       * replaced with "Bachelor's Degree" (a string not on the control's list) on every read, so
+       * her save could never stick. Only 'contradicts' - her range against her own stated fact,
+       * in the same dimension - lets the recomputed value win. See reviewedOptionBandVerdict. */
       if (applicantReviewedCurrentAnswer
-        && reviewedOptionBandCoversCurrentValue(question.answer, known.value)) return question;
+        && reviewedOptionBandVerdict(question.answer, known.value) !== 'contradicts'
+        && optionBandAnswer(question.answer)) return question;
       /* HER OWN CORRECTION OF A RESOLVED ANSWER, WHICH BEFORE THIS COULD NOT BE MADE AT ALL.
        *
        * THE DEFECT THIS CLOSES, measured on the live Lever degree control. resolveProfileField has
