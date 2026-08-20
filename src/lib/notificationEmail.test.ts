@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { employerReplyEmail, foundPhrase, strongMatchEmail } from './notificationEmail';
+import { EMAIL_MATCH_DISPLAY_FLOOR, employerReplyEmail, foundPhrase, strongMatchEmail } from './notificationEmail';
 
 const NOW = new Date('2026-08-19T12:00:00.000Z');
 const UNSUBSCRIBE = 'https://api.trylitos.com/notifications/unsubscribe?token=v1.strong_match.abc.def';
@@ -17,6 +17,7 @@ function matchEmail(over: Partial<Parameters<typeof strongMatchEmail>[0]['job']>
       location: 'New York, NY',
       first_seen_at: new Date('2026-08-19T08:00:00.000Z'),
       posting_url: 'https://job-boards.greenhouse.io/ramp/jobs/1234',
+      company_domain: 'ramp.com',
       ...over,
     },
   });
@@ -91,6 +92,45 @@ test('company and title are escaped into the HTML', () => {
   const email = matchEmail({ company_name: 'Ramp & Co <script>', title: 'Intern "2027"' });
   assert.doesNotMatch(email.html ?? '', /<script>/);
   assert.match(email.html ?? '', /Ramp &amp; Co/);
+});
+
+test('a score below the display floor drops the percentage but keeps the found phrase', () => {
+  /* MIN_RANKED_MATCH_SCORE (the board's own floor) is 25, so "strong match" alone already promises
+     more than a 31% score backs up. The email must not print a number that undercuts its own claim
+     in the same sentence. */
+  const weak = matchEmail({}, 31);
+  assert.doesNotMatch(weak.text, /\d+% match/);
+  assert.doesNotMatch(weak.html ?? '', /\d+% match/);
+  assert.match(weak.text, /Found 4 hours ago\./);
+  assert.match(weak.html ?? '', /Found 4 hours ago\./);
+
+  const strong = matchEmail({}, EMAIL_MATCH_DISPLAY_FLOOR);
+  assert.match(strong.text, /70% match against your resume/);
+  assert.match(strong.html ?? '', /70% match/);
+});
+
+test('the CTA sends a student to the Litos dashboard, not straight to the employer', () => {
+  const email = matchEmail();
+  assert.match(email.html ?? '', /Open your Litos dashboard/);
+  assert.match(email.text, /Open your Litos dashboard: https:\/\/trylitos\.com\/dashboard\/jobs/);
+  // The original posting is still reachable, but only as the secondary link.
+  assert.match(email.html ?? '', /Prefer the original listing\?/);
+  assert.match(email.text, /Prefer the original listing\? https:\/\/job-boards\.greenhouse\.io/);
+});
+
+test('the company logo renders from the resolved domain, and falls back to an initial without one', () => {
+  const withDomain = matchEmail({ company_domain: 'ramp.com' });
+  assert.match(withDomain.html ?? '', /google\.com\/s2\/favicons\?domain=ramp\.com/);
+
+  const withoutDomain = matchEmail({ company_domain: null });
+  assert.doesNotMatch(withoutDomain.html ?? '', /google\.com\/s2\/favicons/);
+  assert.match(withoutDomain.html ?? '', /email-logo-fallback/);
+});
+
+test('the shell declares a dark palette so the email is legible in both color schemes', () => {
+  const email = matchEmail();
+  assert.match(email.html ?? '', /name="color-scheme" content="light dark"/);
+  assert.match(email.html ?? '', /prefers-color-scheme: dark/);
 });
 
 test('the reply alert says mail arrived and never says what it said', () => {

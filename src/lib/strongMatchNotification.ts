@@ -2,6 +2,7 @@ import { and, desc, eq, gte, inArray, notInArray, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { career_page_sources, monitored_jobs, notification_sends, users } from '../db/schema';
 import { decide, isBlocked } from '../engine/eligibility';
+import { companyDomainFor } from './companyDomains';
 import { hasTargeting, recommendationTargetingEligible } from './jobPreferences';
 import {
   accountJobTargeting,
@@ -73,6 +74,9 @@ export type StrongMatchCandidate = {
   first_seen_at: Date;
   posting_url: string;
   score: number;
+  /** Resolved the same way the board resolves it, so the email's logo and the board's logo can
+   *  never disagree about a company. See lib/companyDomains.ts. */
+  company_domain: string | null;
 };
 
 /**
@@ -207,6 +211,7 @@ export async function strongMatchForAccount(
       first_seen_at: row.first_seen_at,
       posting_url: row.posting_url,
       score,
+      company_domain: companyDomainFor(row.company_name),
     };
   }
   return null;
