@@ -633,6 +633,13 @@ export function unverifiedSubmissionReason(input: {
   portalUrl?: string;
   cause: UnverifiedCause;
   network?: SubmitNetworkEntry[] | null;
+  /* The runner SAW a rendered challenge standing after the press (its CAPTCHA blocker). Stronger
+   * evidence than the network heuristic below: measured on the live Mytos Lever form, 2026-08-20,
+   * run 6757f19a - the press fetched an hCaptcha drag puzzle and the receipt screenshot shows it
+   * standing over a fully filled form, but the press window also carried an ordinary POST to the
+   * employer's own host (Lever re-parses the resume at submit), so the requests-only predicate
+   * rightly withdrew and the applicant was promised a re-send that would hit the same wall. */
+  challengeOnScreen?: boolean;
 }): string {
   const looksLike = CONFIRMATION_LOOKS_LIKE[(input.atsName ?? '').toLowerCase().trim()]
     ?? 'A sent application usually replaces the form with a short confirmation, and many employers '
@@ -641,10 +648,14 @@ export function unverifiedSubmissionReason(input: {
     ? `Open ${input.portalUrl} and look.`
     : 'Open the employer’s application page and look.';
   if (input.cause === 'no_confirmation_state'
-    && pressReachedOnlyChallengePlatform(input.network, input.portalUrl)) {
-    return 'Litos pressed Send, but the page ran a human-verification check instead of submitting: '
-      + 'the only requests it made went to the verification service, and none reached the employer, '
-      + 'so this application very likely did not go through. This form will only accept a Send '
+    && (input.challengeOnScreen || pressReachedOnlyChallengePlatform(input.network, input.portalUrl))) {
+    const how = input.challengeOnScreen
+      ? 'Litos pressed Send, and the page put up a human-verification challenge instead of a '
+        + 'confirmation, so this application very likely did not go through.'
+      : 'Litos pressed Send, but the page ran a human-verification check instead of submitting: '
+        + 'the only requests it made went to the verification service, and none reached the '
+        + 'employer, so this application very likely did not go through.';
+    return `${how} This form will only accept a Send `
       + `pressed by a person. ${where} ${looksLike} Then tell Litos which you found: if it is `
       + 'there, Litos will record it as sent and will not apply again; if it is not, please finish '
       + 'this one yourself on the employer’s page, because Litos cannot complete a '

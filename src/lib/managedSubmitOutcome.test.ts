@@ -1172,3 +1172,42 @@ describe('the human-verification press sentence', () => {
     );
   });
 });
+
+/* THE CHALLENGE THE RUNNER SAW, measured on the live Mytos Lever form (run 6757f19a, 2026-08-20):
+ * the press fetched an hCaptcha drag puzzle, the receipt shows it standing over the fully filled
+ * form, and the press window also carried an ordinary POST to jobs.lever.co (Lever re-parses the
+ * resume at submit) - so the requests-only predicate rightly withdrew and the applicant was
+ * promised a re-send that would hit the same wall. */
+describe('the challenge-on-screen sentence', () => {
+  const LEVER_PORTAL = 'https://jobs.lever.co/mytos/bbb558c0';
+  const LEVER_PRESS = [
+    { method: 'POST', url: 'https://api.hcaptcha.com/getcaptcha/e33f87f8', status: 200 },
+    { method: 'POST', url: 'https://jobs.lever.co/parseResume', status: 200 },
+  ];
+
+  test('a standing challenge selects the human-check sentence even when the employer host was spoken to', () => {
+    assert.equal(pressReachedOnlyChallengePlatform(LEVER_PRESS, LEVER_PORTAL), false);
+    const reason = unverifiedSubmissionReason({
+      atsName: 'lever', portalUrl: LEVER_PORTAL, cause: 'no_confirmation_state',
+      network: LEVER_PRESS, challengeOnScreen: true,
+    });
+    assert.match(reason, /put up a human-verification challenge/);
+    assert.match(reason, /finish this one yourself/);
+    assert.doesNotMatch(reason, /Litos will send this one for you/);
+  });
+
+  test('without the runner sighting, the same press keeps the ordinary sentence', () => {
+    const reason = unverifiedSubmissionReason({
+      atsName: 'lever', portalUrl: LEVER_PORTAL, cause: 'no_confirmation_state', network: LEVER_PRESS,
+    });
+    assert.doesNotMatch(reason, /human-verification/);
+    assert.match(reason, /Litos will send this one for you/);
+  });
+
+  test('a sighting on a cut-off run never claims the press ran into a check', () => {
+    assert.doesNotMatch(
+      unverifiedSubmissionReason({ atsName: 'lever', portalUrl: LEVER_PORTAL, cause: 'run_timed_out', challengeOnScreen: true }),
+      /human-verification/,
+    );
+  });
+});
