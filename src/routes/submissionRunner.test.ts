@@ -3383,7 +3383,7 @@ test('a closed posting on the no-evidence path is said in the employer\u2019s ow
   const blockers = preparationEvidenceBlockers(closedPage, packet);
   assert.equal(blockers.length, 1);
   assert.match(blockers[0], /taken this posting down/);
-  assert.match(blockers[0], /This position is no longer active/);
+  assert.match(blockers[0], /position was filled, or the ad has expired/);
   assert.doesNotMatch(blockers[0], /finish it off/);
 
   // An unreachable form with no closed-posting sentence keeps the honest not-reached sentence.
@@ -3409,4 +3409,17 @@ test('a vanished apply page is said as the page\u2019s own 404, claiming less th
   assert.equal(blockers.length, 1);
   assert.match(blockers[0], /application page no longer exists/);
   assert.doesNotMatch(blockers[0], /finish it off/);
+});
+
+
+test('the greenhouse closed banner is believed even when the page looks reached', () => {
+  const packet = { email: 'a@b.c' } as SubmissionPacket;
+  const blockers = preparationEvidenceBlockers({
+    text: 'Current openings at Redwood Materials. The job you are looking for is no longer open. '
+      + '151 jobs. Engineering & Technology. Abuse Test Engineer, Energy Storage. a@b.c',
+    filledFields: [], blockers: [], discovered: [], extracted: [{ value: 'something', label: 'x' }],
+  }, packet);
+  assert.equal(blockers.length, 1);
+  assert.match(blockers[0], /taken this posting down/);
+  assert.match(blockers[0], /no longer open/);
 });

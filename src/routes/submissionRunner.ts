@@ -1334,6 +1334,15 @@ export const FORM_NOT_REACHED_REASON =
  * so a live form whose job description happens to contain similar words can never trip it. */
 const POSTING_CLOSED_RE = /this (?:position|posting|job(?: posting)?|role) is no longer (?:active|open|available|accepting applications)|no longer accepting applications|position was filled, or the ad has expired|this job is not available anymore|job (?:has been|was) (?:filled|closed)/i;
 
+/* The boards' own closed BANNERS, word for word, safe to read even on a page the reached
+ * heuristic believes in. Measured on the live Redwood Materials board, 2026-08-21: greenhouse
+ * answers a closed token with the full job LIST plus the banner "The job you are looking for is
+ * no longer open." - a page busy enough that the reached heuristic can believe it, so the
+ * not-reached-only check above never ran and the run reported three missing-field blockers about
+ * a form that does not exist. A banner this specific appears in no job description, so it is
+ * checked before the evidence question rather than behind it. */
+const POSTING_CLOSED_BANNER_RE = /the job you are looking for is no longer open|position was filled, or the ad has expired/i;
+
 export function postingClosedReason(text: string | undefined): string | null {
   const match = POSTING_CLOSED_RE.exec(text ?? '');
   if (match) {
@@ -1412,6 +1421,12 @@ export function preparationEvidenceBlockers(
 ): string[] {
   const previewBlockers = previewContentBlockers(result.text);
   if (previewBlockers.length > 0) return previewBlockers;
+  const bannerClosed = POSTING_CLOSED_BANNER_RE.exec(result.text ?? '');
+  if (bannerClosed) {
+    return ['The employer has taken this posting down: the page says "' + bannerClosed[0].trim() + '". '
+      + 'There is no application form any more, nothing was filled in and nothing was sent. '
+      + 'There is nothing left to do on this one.'];
+  }
   // The abort case gets ONE honest sentence and no fabricated field list. Returning the per-field
   // blockers here is what made those runs unreadable, and inventing a blocker list to fill the
   // space would repeat the same lie in different words.
