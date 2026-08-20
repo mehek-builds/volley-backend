@@ -773,6 +773,26 @@ export type ApplicationReviewState = {
   };
   attention_reason?: string;
   attention_categories?: ApplicationAttentionCategory[];
+  /* THE APPLICANT'S OWN TICKS ON THE "Your turn" PANEL, keyed by the dashboard's checklist row id
+   * (which is derived from the attention sentence, so the key names the sentence it is about).
+   *
+   * This exists because the panel's checkbox was scenery: `<input type="checkbox">` with no
+   * handler, no state and no request, measured on the Easy Dynamics rippling packet on 2026-08-20.
+   * Ticking a box wrote nothing, and the next poll re-rendered the panel with the box cleared.
+   *
+   * DISPLAY-ONLY, DELIBERATELY. An acknowledgement is the applicant saying "I handled this on the
+   * employer's page myself". It is her claim, not a measurement, and the send gate keeps reading
+   * the run's measurements: a required field the run found empty still blocks a send whether or
+   * not the row that names it is ticked. What the tick changes is what the panel counts and
+   * colours as outstanding, which is the only thing the dead checkbox ever pretended to do.
+   *
+   * SCOPED TO ONE RUN'S REPORT. attention_reason is a run's account of the employer's form, and a
+   * tick is only meaningful beside the report it was made against - the same discipline the
+   * per-answer applicant claim is held to via its review round. So applyReviewPatch drops this map
+   * whenever a patch carries a fresh attention_reason, and freshSubmitRequestReview clears it with
+   * the rest of the run-scoped state. A re-run that re-measures the same blocker starts her
+   * checklist clean rather than inheriting a claim made about an older report. */
+  attention_acknowledgements?: Record<string, { label: string; acknowledged_at: string }>;
   /* The TYPED half of attention_reason, which is prose and always will be.
    *
    * attention_reason is written for a person and is the right thing to show them. It is the wrong

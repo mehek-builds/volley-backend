@@ -132,5 +132,27 @@ export function applyReviewPatch(
   patch: Partial<ApplicationReviewState>,
   now: () => string = () => new Date().toISOString(),
 ): ApplicationReviewState {
-  return withTerminalCause(settleStall({ ...current, ...patch, updated_at: now() }, now));
+  /* THE APPLICANT'S TICKS EXPIRE WITH THE REPORT THEY WERE MADE AGAINST. attention_acknowledgements
+   * annotates one attention_reason: each tick says "I handled this line myself". A patch that
+   * carries attention_reason - fresh prose or its clearance - is a new report about the form, so a
+   * tick carried across it would claim she acknowledged sentences she has not seen, including a
+   * re-measured blocker that happens to spell itself identically. Same round discipline as the
+   * per-answer applicant claim. Own-property test, not truthiness: `attention_reason: undefined`
+   * is a report too ("nothing is owed"), and the map must not outlive it. Done here because this is
+   * the one merge every review writer goes through; a patch that explicitly writes the map (the
+   * acknowledgement route itself) is stating the new report's ticks and is kept. */
+  const acknowledgements = 'attention_reason' in patch && !('attention_acknowledgements' in patch)
+    ? { attention_acknowledgements: undefined }
+    : {};
+  const merged = withTerminalCause(settleStall({ ...current, ...patch, ...acknowledgements, updated_at: now() }, now));
+  /* THE SECOND HALF OF THE SAME RULE, decided on the RESULT. withTerminalCause runs after the
+   * merge and can mint an attention_reason no caller named - that is its whole job - so a patch-key
+   * test alone would carry her ticks onto a report the merge itself just invented. If the merged
+   * report differs from the one the ticks were made against, they expire with it, exactly as if
+   * the caller had spelled the key out. The patch's own explicit map still wins: the one writer
+   * that sets it is stating the new report's ticks. */
+  if (merged.attention_acknowledgements && !('attention_acknowledgements' in patch) && merged.attention_reason !== current.attention_reason) {
+    return { ...merged, attention_acknowledgements: undefined };
+  }
+  return merged;
 }
