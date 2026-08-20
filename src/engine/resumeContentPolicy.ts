@@ -22,7 +22,25 @@ export const RESUME_CONTENT_LIMITS = {
    * page around it, which is why the floor exists at all; the student is asked to add a second
    * rather than having the entry quietly disappear. */
   minBulletsPerEntry: 2,
+  /* WHAT THE MODEL SELECTS. Three is the right default: the strongest three lines of an entry are
+     what a reader gets through, and asking for more up front produces filler. */
   maxBulletsPerEntry: 3,
+  /* WHAT THE PAGE MAY HOLD once it turns out to be empty, and it is a different question.
+   *
+   * Measured on ten real generations 2026-08-20: every one filled 0.69 of the page with the
+   * expansion search pinned at its maximum, leaving 222pt - over three inches - blank at the
+   * bottom. Reaching the design's own 0.94 target by spacing alone would need roughly 15pt body
+   * type, which is a poster rather than a resume.
+   *
+   * So the room gets spent on the student's OWN unused evidence instead of on air. The bank holds
+   * bullets the selection did not print; a page with three inches to spare and the applicant's real
+   * work sitting unused is padding with whitespace while discarding substance. Five is the ceiling
+   * because a six-bullet entry stops being read.
+   *
+   * This is the mirror of the trimmer that already runs above it in planResumeLayout: one removes
+   * the lowest-value bullet while the page overflows, the other restores the highest-value unused
+   * one while the page is empty. Both stop at a measurement, neither invents anything. */
+  expandedBulletsPerEntry: 5,
 } as const;
 
 export const RESUME_FIT_FALLBACKS = {

@@ -367,7 +367,10 @@ export function orgScore(generated: string, source: string): number {
   return acronymMatch ? Math.max(overlap, 1) : overlap;
 }
 
-function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: ExperienceBankEntry[]) {
+/* Exported for the renderer's expand pass, which needs the same identity rule the floor uses: an
+   added bullet must come from THIS entry's bank row and never from another job at the same
+   employer. One matcher, one answer. */
+export function matchingBankEntry(entry: ResumeSpec['experience'][number], bank: ExperienceBankEntry[]) {
   const generatedTitle = tokens(entry.title ?? '');
   const generatedYears = new Set((entry.date_range ?? '').match(/\b(?:19|20)\d{2}\b/g) ?? []);
   return bank

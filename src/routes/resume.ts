@@ -1040,7 +1040,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let visualWarnings: string[];
     let visualIssues: string[];
     try {
-      const rendered = await renderResumePdf(spec, applicationContact, jdText);
+      /* The bank goes in so a page with room to spare is filled with the student's own unused
+         bullets instead of with spacing. See planResumeLayout's expand pass. */
+      const rendered = await renderResumePdf(spec, applicationContact, jdText, bank);
       pdfBuffer = rendered.buffer;
       spec = rendered.spec;
       trimmedForFit = rendered.trimmed;

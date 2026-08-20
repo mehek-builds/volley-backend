@@ -560,7 +560,9 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        * always reassigned `spec = rendered.spec` here; this route was the one that did not. */
       let printed = spec;
       try {
-        const rendered = await renderResumePdf(spec, contact, targetText);
+        /* Same as the tailored path: the base resume gets the same page-filling rule, from the
+           same bank, because it is the same document made for a different audience. */
+        const rendered = await renderResumePdf(spec, contact, targetText, bank);
         printed = rendered.spec;
         const parsedPdf = await extractPdfText(rendered.buffer);
         const layout = validatePdfLayout(parsedPdf.text, parsedPdf.numpages);

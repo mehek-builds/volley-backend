@@ -1,6 +1,8 @@
 import PDFDocument from 'pdfkit';
 import type { ResumeSpec } from '../llm/resumeSpec';
-import { relevanceScore } from './resumePolicy';
+import { matchingBankEntry, relevanceScore } from './resumePolicy';
+import { startsWithStrongVerb } from './resumeValidate';
+import type { ExperienceBankEntry } from '../db/schema';
 import {
   RESUME_DESIGN,
   resumeDesignAtExpansion,
@@ -683,6 +685,59 @@ function lowestValueBullet(
   return lowest;
 }
 
+
+/**
+ * The student's own unused bullet that best fits this posting, for a page with room to spare.
+ *
+ * The mirror of lowestValueBullet: that one finds the weakest line to remove while the page
+ * overflows, this one finds the strongest line the selection left behind while the page is empty.
+ * Candidates come from the BANK, so everything it can add is evidence the student wrote and the
+ * grounding checks already accepted. It can never reach for a different entry's work, and it can
+ * never invent: an entry whose bank row holds nothing new simply yields nothing.
+ */
+function highestValueUnusedBullet(
+  spec: ResumeSpec,
+  bank: ExperienceBankEntry[],
+  jdText: string,
+  ceiling: number,
+): { entryIndex: number; bullet: string } | null {
+  /* A plain loop rather than forEach: control-flow analysis cannot see an assignment made inside a
+     callback, so `best` narrows to never after the iteration and the return stops compiling. */
+  let best: { entryIndex: number; bullet: string; score: number } | null = null;
+  for (let entryIndex = 0; entryIndex < spec.experience.length; entryIndex += 1) {
+    const entry = spec.experience[entryIndex];
+    if (entry.bullets.length >= ceiling) continue;
+    const source = matchingBankEntry(entry, bank);
+    if (!source) continue;
+    const printed = new Set(entry.bullets.map((bullet) => bullet.toLowerCase().replace(/\s+/g, ' ').trim()));
+    const variants = Array.isArray(source.bullet_variants) ? source.bullet_variants : [];
+    for (const variant of variants) {
+      if (typeof variant !== 'string') continue;
+      const bullet = variant.trim();
+      if (!bullet) continue;
+      const key = bullet.toLowerCase().replace(/\s+/g, ' ').trim();
+      if (printed.has(key)) continue;
+      /* The same gate every printed bullet passed. An unused variant is raw bank text and has not
+         necessarily been through the opener rule, so adding one blindly would put a bullet on the
+         page that the validator then refuses - turning an empty page into no page at all. */
+      if (!startsWithStrongVerb(bullet)) continue;
+      const score = relevanceScore(bullet, jdText);
+      if (!best || score > best.score) best = { entryIndex, bullet, score };
+    }
+  }
+  return best ? { entryIndex: best.entryIndex, bullet: best.bullet } : null;
+}
+
+function addBullet(
+  spec: ResumeSpec,
+  choice: { entryIndex: number; bullet: string },
+): ResumeSpec {
+  const experience = [...spec.experience];
+  const entry = experience[choice.entryIndex];
+  experience[choice.entryIndex] = { ...entry, bullets: [...entry.bullets, choice.bullet] };
+  return { ...spec, experience };
+}
+
 function entryValue(entry: ResumeEntry, jdText: string): number {
   return relevanceScore([entry.org, entry.title, ...entry.bullets].join(' '), jdText);
 }
@@ -845,6 +900,12 @@ export function planResumeLayout(
   rawSpec: ResumeSpec,
   contact: ContactHeader,
   jdText: string,
+  /* THE STUDENT'S OWN UNUSED EVIDENCE, for a page that turns out to have room to spare.
+   *
+   * Optional because the trimming half of this function has never needed it and callers that only
+   * want a fit decision should not have to load a bank to get one. Without it the expand pass
+   * simply does not run and the behaviour is exactly what it was. */
+  bank: ExperienceBankEntry[] = [],
 ): ResumeLayoutPlan {
   const compact = RESUME_DESIGN.compact;
   const omissions: string[] = [];
@@ -875,6 +936,46 @@ export function planResumeLayout(
         experience: [first, ...ranked.slice(0, RESUME_CONTENT_LIMITS.maxEntries - 1).map(({ entry }) => entry)],
       };
     }
+    /* AND THE OTHER DIRECTION: a page that SPACING CANNOT FILL gets more of the student's own work.
+     *
+     * Measured on ten real generations 2026-08-20 - every one filled 0.69 of the page with the
+     * density search pinned at its maximum, leaving 222pt blank at the bottom. Reaching the design's
+     * own 0.94 target by spacing alone needs about 15pt body type, which is a poster. So the room is
+     * spent on evidence instead: the highest-value bullet the selection left in the bank, added one
+     * at a time, each time re-measuring.
+     *
+     * MEASURED AGAINST THE MOST SPACIOUS DESIGN, and the first draft of this measured the most
+     * compact one, which was wrong in a way worth recording. At compact even a full resume has room
+     * - a 12-bullet spec measures 0.60 there - so every resume qualified and dense ones grew denser
+     * while the density search was left with nothing to do. The question is not "is there space on
+     * the page" but "is there space SPACING CANNOT USE", and only the expanded design answers it.
+     * A resume that fills at expansion 1 is left entirely alone, which is what makes this an
+     * emptiness fix rather than a density change.
+     *
+     * The loop stops on the first refusal - no bank row, nothing new, nothing that clears the opener
+     * gate, the entry already at its expanded ceiling, or the next bullet would overshoot - so it
+     * terminates on content rather than on a guard, and it can add nothing the student did not
+     * write. */
+    const spacious = resumeDesignAtExpansion(1);
+    const spaciousRoom = (candidate: ResumeSpec) =>
+      usableHeight(spacious) * spacious.density.targetFillRatio -
+      estimateResumeHeight(candidate, contact, spacious, measurementDocument);
+
+    while (spaciousRoom(spec) > 0) {
+      const candidate = highestValueUnusedBullet(
+        spec,
+        bank,
+        jdText,
+        RESUME_CONTENT_LIMITS.expandedBulletsPerEntry,
+      );
+      if (!candidate) break;
+      const next = addBullet(spec, candidate);
+      /* Never past the target. Overshooting hands the trimmer below a bullet to take straight back
+         out, which is churn at best and a swap nobody asked for at worst. */
+      if (spaciousRoom(next) < 0) break;
+      spec = next;
+    }
+
     let guard = 0;
 
     while (
@@ -1080,6 +1181,10 @@ export async function renderResumePdf(
   rawSpec: ResumeSpec,
   contact: ContactHeader,
   jdText = '',
+  /* Passed through to the fit plan so a page with room to spare can be filled with the student's
+     own unused bullets rather than with spacing. Defaults to empty, which is the previous
+     behaviour exactly: no bank, no expansion. */
+  bank: ExperienceBankEntry[] = [],
 ): Promise<{
   buffer: Buffer;
   spec: ResumeSpec;
@@ -1097,7 +1202,7 @@ export async function renderResumePdf(
    * the one place where "uncontactable" can be made unrepresentable rather than merely unlikely. */
   if (!hasContactRoute(contact)) throw new ResumeContactError();
 
-  const plan = planResumeLayout(rawSpec, contact, jdText);
+  const plan = planResumeLayout(rawSpec, contact, jdText, bank);
   const { design, spec } = plan;
   const width = usableWidth(design);
   const doc = createResumeDocument(design);
