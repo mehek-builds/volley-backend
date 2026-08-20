@@ -256,7 +256,7 @@ test('a cover letter that cannot be fetched degrades the run instead of aborting
     runner.indexOf('function strippedCoverLetterSpec'),
   );
   assert.ok(fn.length > 0, 'packetForCoverLetterCapability must still exist');
-  assert.match(fn, /try \{\s*return \{ packet: await buildPacket\(rows\[0\], controlledTest\) \};\s*\} catch \(error\) \{/);
+  assert.match(fn, /try \{\s*return \{ packet: await buildPacket\(rows\[0\], controlledTest\), row: rows\[0\] \};\s*\} catch \(error\) \{/);
   const issue = fn.match(/coverLetterIssue: '([^']*)'/g) ?? [];
   assert.equal(issue.length, 2, 'both failures owe the applicant a sentence');
   for (const sentence of issue) {
@@ -285,17 +285,17 @@ test('every cover-letter capability rebuild preserves the caller controlled-resu
 
   assert.match(
     fn,
-    /if \(!supported\) return \{ packet: omitCoverLetter\(await buildPacket\(row, controlledTest\)\) \};/,
+    /if \(!supported\) \{[\s\S]{0,220}packet: omitCoverLetter\(await buildPacket\(row, controlledTest\)\), row: strippedRow/,
     'a controlled form with no cover-letter input must keep fixture resume bytes after discovery',
   );
   assert.match(
     fn,
-    /Cover letter generation failed[\s\S]{0,240}omitCoverLetter\(await buildPacket\(row, controlledTest\)\)/,
+    /Cover letter generation or revalidation failed[\s\S]{0,360}omitCoverLetter\(await buildPacket\(strippedRow, controlledTest\)\)/,
     'the generation-error degrade must keep the same resume source',
   );
   assert.match(
     fn,
-    /return \{ packet: await buildPacket\(rows\[0\], controlledTest\) \}/,
+    /return \{ packet: await buildPacket\(rows\[0\], controlledTest\), row: rows\[0\] \}/,
     'the supported cover-letter success branch must keep the same resume source',
   );
   assert.match(
@@ -330,5 +330,15 @@ test('every cover-letter capability rebuild preserves the caller controlled-resu
     `${managedCall}\n${directCall}`,
     /packetForCoverLetterCapability\([^;]*,\s*(?:true|false)\s*\)/,
     'callers must derive fixture use from the detected portal, not choose it ad hoc',
+  );
+  assert.match(
+    managedCall,
+    /discoverAndResolveQuestions\(\s*discoveredFields,\s*coverLetterOutcome\.row,/,
+    'managed discovery must use the regenerated or safely stripped row, never the stale input row',
+  );
+  assert.match(
+    directCall,
+    /discoverAndResolveQuestions\(\s*discovered,\s*builtOutcome\.row,/,
+    'direct discovery must use the regenerated or safely stripped row, never the stale input row',
   );
 });

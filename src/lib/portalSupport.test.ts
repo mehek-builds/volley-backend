@@ -406,7 +406,7 @@ test('a cover letter failure degrades the run instead of aborting it', () => {
   // The generate call is inside a try, and its failure returns a packet rather than rethrowing.
   assert.match(
     runner,
-    /try \{\s*await generateStoredCoverLetter\(row, false, true\);\s*\} catch \(error\) \{[\s\S]{0,400}coverLetterIssue:/,
+    /try \{\s*await generateStoredCoverLetter\(row, false, true\);\s*\} catch \(error\) \{[\s\S]{0,700}coverLetterIssue:/,
   );
   // And the reason reaches the applicant on both provider paths rather than being swallowed. The
   // managed path names its final reason before it signs the attended URL binding, while the direct
@@ -473,5 +473,5 @@ test('the applicant is told what happened, not what the model said', () => {
   assert.ok(!issue.includes('${'), 'the applicant-facing sentence must not interpolate anything');
   assert.ok(!/error\.message/.test(issue), 'the raw error must not reach the applicant');
   // And the detail is not thrown away: whoever fixes the generator reads it in the logs.
-  assert.match(runner, /fastify\.log\.warn\(\{ error, applicationId: row\.id \}[\s\S]{0,120}Cover letter generation failed/);
+  assert.match(runner, /fastify\.log\.warn\(\{ error, applicationId: row\.id \}[\s\S]{0,180}Cover letter generation or revalidation failed/);
 });

@@ -58,6 +58,29 @@ export function canGenerateCoverLetter(supported: boolean | undefined, capabilit
  */
 export type CoverLetterCandidateContext = Awaited<ReturnType<typeof coverLetterCandidateContext>>;
 
+export type StoredCoverLetterReuseDisposition = {
+  action: 'reuse' | 'regenerate' | 'reject';
+  issues: string[];
+};
+
+/** Pure decision for a historical artifact under today's grounding rules. */
+export function storedCoverLetterReuseDisposition(
+  artifact: CoverLetterArtifact,
+  company: string,
+  role: string,
+  context: Pick<CoverLetterCandidateContext, 'source' | 'contested'>,
+): StoredCoverLetterReuseDisposition {
+  const issues = validateCoverLetter(
+    artifact.body,
+    company,
+    role,
+    context.source,
+    context.contested,
+  ).issues;
+  if (issues.length === 0) return { action: 'reuse', issues };
+  return { action: artifact.approved_at ? 'reject' : 'regenerate', issues };
+}
+
 export async function coverLetterCandidateContext(row: ApplicationRow) {
   const [bank, profileRows] = await Promise.all([
     readExperienceBankOrSeedFromBaseResume(row.user_id),
@@ -187,8 +210,31 @@ export async function generateStoredCoverLetter(row: ApplicationRow, force = fal
     throw new Error('This company’s application page has nowhere to attach a cover letter');
   }
   const existing = storedCoverLetter(row);
-  if (existing && !force) return { cover_letter: existing, blob_url: undefined };
   const { source, contested } = await coverLetterCandidateContext(row);
+  /* STORED DOES NOT MEAN SAFE FOREVER.
+   *
+   * Every newly generated or edited letter passes validateCoverLetter, but artifacts written before
+   * a grounding rule was added otherwise bypass that rule forever. Measured live on the Quandela
+   * Workable packet on 2026-08-21: the saved letter called the applicant a Computer Science and
+   * Business Administration student after the academic-program validator was deployed, because the
+   * send path returned the old artifact before validation ran. Revalidate against today's frozen
+   * candidate source before any caller can reuse it.
+   *
+   * An applicant-edited artifact is never silently replaced. If a later rule rejects it, the issues
+   * return to the applicant through the normal cover-letter stop. An AI artifact can be regenerated
+   * through the same two-attempt gate that created it, which repairs old packets without asking the
+   * applicant to rewrite machine prose. */
+  if (existing && !force) {
+    const disposition = storedCoverLetterReuseDisposition(existing, job.company, job.role, { source, contested });
+    if (disposition.action === 'reuse') {
+      return { cover_letter: existing, blob_url: undefined };
+    }
+    if (disposition.action === 'reject') {
+      const error = new Error('The saved cover letter no longer passes the current quality gate') as Error & { issues?: string[] };
+      error.issues = disposition.issues;
+      throw error;
+    }
+  }
   let body = '';
   let validation = { issues: ['not generated'], warnings: [] as string[], word_count: 0, body: '' };
   for (let attempt = 0; attempt < 2; attempt += 1) {
