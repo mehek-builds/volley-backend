@@ -2270,6 +2270,42 @@ test('a GPA scale that is not a clean number is stated once, not doubled into a 
   );
 });
 
+/* REGRESSION (2026-08-21, this PR's own review): the GPA branch of classifyFieldIntent tested
+ * `\bgpa\b`, which requires a word boundary right before "g" - and never fires on "CGPA" (Cumulative
+ * GPA), which is one continuous run of letters with no boundary in the middle. "CGPA" is the
+ * standard term on Indian-style ATS forms, so a label like "Enter your CGPA" was not classified as
+ * 'gpa' at all - not even the plain numeric branch - and fell all the way through to the essay
+ * drafter or a "left for you" skip instead of the stored "3.89". */
+test('a "CGPA" label is recognised as a GPA question, plain and classification-worded alike', () => {
+  assert.deepEqual(
+    resolveKnownAnswer('Enter your CGPA', 'text', PROD_OWNER_PROFILE, undefined),
+    { value: '3.89' },
+  );
+  assert.deepEqual(
+    resolveKnownAnswer('What is your CGPA (on a percentage basis)?', 'text', PROD_OWNER_PROFILE, undefined),
+    { value: '3.89/4.00 (US 4.0 scale)' },
+  );
+});
+
+/* REGRESSION: `gpa` is a free-text profile column with no format validation (see
+ * applicationProfile.ts's bodySchema, `gpa: z.string().nullable().optional()`), so a manual profile
+ * edit or an earlier resume parse can seed it as an already-combined "value/scale" string like
+ * "3.89/4.0" rather than the bare "3.89" gpaAnswer's classification/percentage branch assumes.
+ * Appending the scale suffix on top of that combined string used to double the scale:
+ * "3.89/4.0/4.00 (US 4.0 scale)". A stored value that already names its own scale must be used
+ * exactly as stored, with nothing appended. */
+test('a GPA already stored as a combined "value/scale" string is not doubled on a classification ask', () => {
+  assert.deepEqual(
+    resolveKnownAnswer(
+      'Degree classification',
+      'text',
+      { ...PROD_OWNER_PROFILE, gpa: '3.89/4.0' },
+      undefined,
+    ),
+    { value: '3.89/4.0' },
+  );
+});
+
 test('IMC begin-working and future sponsorship questions use their separate declarations', () => {
   assert.deepEqual(
     resolveKnownAnswer(

@@ -3257,7 +3257,20 @@ function greenhouseComboboxValuesForQuestion(
     values.splice(Math.max(behindAnswer, 0), 0, ...buckets.map((bucket) => bucket ?? ''));
   };
   const isGraduationPartQuestion = /\bgraduat(?:ion|e)\s+(?:month|year)\b|\bwhat\s+is\s+your\s+graduation\s+(?:month|year)\b/.test(normalizedQuestion);
-  if (/\bwhat\s+is\s+your\s+gpa\b|\bgpa\b|academic\s+performance|grade\s+average|grade\s+point/.test(normalizedQuestion)) {
+  /* ASKED THROUGH classifyField, NOT A SECOND HAND-MAINTAINED REGEX - the same lesson
+   * questionMayBeClosedList's own comment above already draws for the education combobox family.
+   *
+   * This used to be its own pattern (`\bwhat\s+is\s+your\s+gpa\b|\bgpa\b|academic\s+performance|
+   * grade\s+average|grade\s+point`), independent of classifyFieldIntent's 'gpa' vocabulary in
+   * questionDiscovery.ts. The two drifted the moment #673 added GPA_CLASSIFICATION_VOCABULARY and
+   * the percentage wordings ("degree classification", "grade percentage", "2:1"): questionDiscovery
+   * started answering those labels with the long classification/percentage string, but this
+   * function's own regex never recognised them, so pushComputedBucket never ran and a Greenhouse
+   * GPA combobox labelled "Degree classification" or "Grade percentage" came back required and
+   * empty - Optiver, Akuna and Jump Trading are all Greenhouse-family and are blocked on exactly
+   * this. classifyField is the single definition of what counts as a GPA question; asking it here
+   * instead of maintaining a second copy is what keeps the two from disagreeing again. */
+  if (classifyField(normalizedQuestion) === 'gpa') {
     pushComputedBucket(greenhouseGpaBucket(answer));
     if (isAkunaContext) pushComputedBucket(greenhouseExactGpaOption(answer));
   }

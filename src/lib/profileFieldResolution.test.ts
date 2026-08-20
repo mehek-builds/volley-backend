@@ -93,6 +93,32 @@ test('Class A: GPA (Akuna x4, Five Rings, IMC, Virtu)', () => {
   assert.equal(answer('What is your GPA?', ['3.7', '3.8', '3.9', '4.0']), '3.9');
 });
 
+/* REGRESSION: gpaLadder only ever emitted numeric variants (X.XX, X.X, X/scale). A closed-list
+ * control that offers ONLY UK honours classification bands - no plain numeric option at all, the
+ * shape a "Degree classification" combobox actually takes on Greenhouse once fix #1 lets the label
+ * reach this resolver - had nothing in the ladder for chooseClosestOption to match against, so the
+ * field fell back to human review even though the profile holds a real, resolvable GPA. Fixed by
+ * adding the one classification band her stored 3.89/4.0 actually earns (First) as a candidate,
+ * gated on the label itself asking for a classification/percentage - see gpaLadder's own comment
+ * for why an ordinary numeric-only GPA select must never see this candidate. */
+test('a classification-only GPA select resolves to the honours band her GPA actually earns', () => {
+  assert.equal(
+    answer('Degree classification', ['First', '2:1', '2:2', 'Third']),
+    'First',
+  );
+  assert.equal(
+    answer('What was your degree classification? (First, 2:1, 2:2, Third)', ['First', '2:1', '2:2', 'Third']),
+    'First',
+  );
+  // An ordinary numeric-only GPA select must NEVER see the classification band as a candidate: the
+  // label here carries none of gpaWantsPercentageOrClassification's vocabulary, so nothing should
+  // even be capable of matching a stray "First" option that happens to sit on some unrelated list.
+  assert.equal(
+    answer('What is your GPA?', ['3.75 - 4.0', 'First']),
+    '3.75 - 4.0',
+  );
+});
+
 test('Class A: which university do/did you attend (Akuna, Virtu)', () => {
   // Free text keeps the resume's full phrasing.
   assert.equal(

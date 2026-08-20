@@ -1532,6 +1532,49 @@ test('discovered GPA and major questions resolve from profile-backed academic fa
   );
 });
 
+/* REGRESSION (2026-08-21): known-answer text values were typed with no field.maxLength check at
+ * all, unlike the essay-drafter path a few lines below in this same file, which always calls
+ * fitToBudget(answer, field.maxLength ?? 100_000) before pushing a question. gpaAnswer's
+ * classification/percentage branch can produce a string like "3.89/4.00 (US 4.0 scale)" - about six
+ * times the length of the bare "3.89" this path used to type - and a real control's own maxLength
+ * would silently truncate that into a garbled, unreadable value with no attention flag raised. The
+ * fix falls back to the bare stored GPA when the long form does not fit and the bare form does. */
+test('a GPA answer that would overflow the control maxLength falls back to the bare number', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship asks for an education history.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        // Long enough for the bare "3.89" (4 chars) but far too short for gpaAnswer's classification
+        // string "3.89/4.00 (US 4.0 scale)" (24 chars).
+        label: 'Degree classification',
+        selector: '[data-litos-discovered-9]',
+        inputType: 'text',
+        maxLength: 10,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { gpa: '3.89', gpa_scale: '4.0' },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.attentionReasons, []);
+  assert.equal(result.questions.length, 1);
+  assert.equal(result.questions[0].answer, '3.89');
+});
+
 test('managed Greenhouse education combobox labels are not replayed as text fields', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship asks for an education history.',

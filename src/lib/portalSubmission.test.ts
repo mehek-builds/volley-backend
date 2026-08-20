@@ -3148,6 +3148,67 @@ test('Greenhouse replays Databricks React-select buckets without portal selector
   assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `expected at most ${MANAGED_ACTION_LIMIT} actions, got ${actions.length}`);
 });
 
+/* REGRESSION (2026-08-21): the Greenhouse GPA-detection regex inside
+ * greenhouseComboboxValuesForQuestion drifted from classifyFieldIntent's 'gpa' vocabulary the
+ * moment #673 added GPA_CLASSIFICATION_VOCABULARY and the percentage wordings. questionDiscovery.ts
+ * already classifies "Degree classification" and "Grade percentage" as 'gpa' and answers them with
+ * gpaAnswer's long classification/percentage string, but this file's own regex
+ * (`\bwhat\s+is\s+your\s+gpa\b|\bgpa\b|academic\s+performance|grade\s+average|grade\s+point`) never
+ * recognised either label, so pushComputedBucket never ran and a Greenhouse combobox on exactly
+ * this shape came back required and empty on Optiver, Akuna and Jump Trading. Fixed by asking
+ * classifyField instead of maintaining a second, independent copy of the vocabulary. */
+test('a Greenhouse "Degree classification" combobox still gets the GPA bucket', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Optiver Trading Intern application.',
+    questions: [
+      {
+        // The exact shape gpaAnswer's classification branch produces for this label.
+        question: 'Degree classification',
+        answer: '3.89/4.00 (US 4.0 scale)',
+      },
+    ],
+  });
+
+  const comboActions = actions.filter((action) => action.label?.startsWith('question_combo_label:'));
+  assert.ok(
+    comboActions.some((action) => action.type === 'fill'
+      && action.selector?.includes('label:has-text("Degree classification")')
+      && action.value === '3.6 or above (out of 4.0)'),
+    'the GPA bucket must still be pushed for a classification-worded label',
+  );
+});
+
+/* REGRESSION (2026-08-21), same root cause as above, on the "Grade percentage" wording rather than
+ * the "Degree classification" wording - both are new vocabulary #673 added to questionDiscovery.ts
+ * that this file's independent regex never learned. */
+test('a Greenhouse "Grade percentage" combobox still gets the GPA bucket', () => {
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Mehek Mandal',
+    email: 'mehekmandal05@gmail.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    jdText: 'Jump Trading Quant Intern application.',
+    questions: [
+      {
+        question: 'Grade percentage',
+        answer: '3.89 (US GPA scale)',
+      },
+    ],
+  });
+
+  const comboActions = actions.filter((action) => action.label?.startsWith('question_combo_label:'));
+  assert.ok(
+    comboActions.some((action) => action.type === 'fill'
+      && action.selector?.includes('label:has-text("Grade percentage")')
+      && action.value === '3.6 or above (out of 4.0)'),
+    'the GPA bucket must still be pushed for a percentage-worded label',
+  );
+});
+
 test('Greenhouse routes Akuna reviewed dropdown blockers through label-scoped React-selects', () => {
   const packet = {
     fullName: 'Mehek Mandal',

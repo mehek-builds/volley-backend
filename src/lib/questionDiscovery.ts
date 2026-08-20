@@ -5278,7 +5278,13 @@ function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
   if (START_DATE_QUESTION.test(l)) return 'availability_date';
   if (LOCATION_PREFERENCE_QUESTION.test(l)) return null;
 
-  if (/\bgpa\b|grade average|grade point|academic performance|grade percentage|percentage grade|academic percentage/i.test(l) || GPA_CLASSIFICATION_VOCABULARY.test(l)) return 'gpa';
+  /* \bc?gpa\b, not \bgpa\b: "CGPA" (Cumulative GPA) is the standard term on Indian-style ATS forms
+   * and shares no word boundary with a bare \bgpa\b test - "cgpa" is one continuous run of letters,
+   * so the boundary before "g" never fires and the label fell through to nothing at all, not even
+   * the plain numeric branch. The optional "c" is anchored by the SAME leading/trailing \b as
+   * "gpa" itself, so it cannot match a "gpa" that is merely the tail of some unrelated word ("nagpa"
+   * still fails: no boundary before "n", and "c" would have to sit where "n" is). */
+  if (/\bc?gpa\b|grade average|grade point|academic performance|grade percentage|percentage grade|academic percentage/i.test(l) || GPA_CLASSIFICATION_VOCABULARY.test(l)) return 'gpa';
   if (/gpa scale|out of.*(4\.0|100)|grading scale/i.test(l)) return 'gpa_scale';
   if (/\bhigh school\b/i.test(l) && /graduat|when|date|year/i.test(l)) return null;
   if (LANGUAGE_QUESTION.test(l)) return 'languages';
@@ -5872,7 +5878,12 @@ function locationStatusAnswer(
  * here, plus the plain "%"/"percent(age)" a form adds once it is already known to be a GPA field
  * ("What is your GPA? (e.g. 68%)" carries "gpa" and reaches this function by the ordinary route).
  */
-function gpaWantsPercentageOrClassification(label: string): boolean {
+/* Exported so profileFieldResolution.ts's gpaLadder can gate its classification-band select
+ * candidate on the SAME test gpaAnswer uses to decide the text answer needs one - one definition
+ * of "this label wants a classification/percentage", not two that can drift apart. See gpaLadder's
+ * own comment for why the gate matters: without it, "First" would be offered as a candidate on an
+ * ordinary numeric-only GPA select too, which could produce a wrong match on an unrelated field. */
+export function gpaWantsPercentageOrClassification(label: string): boolean {
   return /%|\bpercent(?:age)?\b/i.test(label) || GPA_CLASSIFICATION_VOCABULARY.test(label);
 }
 
@@ -5895,6 +5906,16 @@ function gpaAnswer(label: string, ap: ApplicationProfileLike): string | null {
   const trimmed = ap.gpa?.trim();
   if (!trimmed) return null;
   if (!gpaWantsPercentageOrClassification(label)) return trimmed;
+  /* GUARD: `gpa` ITSELF MAY ALREADY BE A COMBINED "value/scale" STRING.
+   *
+   * applicationProfile.ts's edit-profile bodySchema puts no format validation on `gpa` - it is a
+   * free-text column, same as gpa_scale - so a manual profile edit (or an earlier resume parse) can
+   * seed it as "3.89/4.0" rather than the bare "3.89" the rest of this function assumes. Appending
+   * the scale suffix on TOP of an already-combined string doubles the scale:
+   * "3.89/4.0/4.00 (US 4.0 scale)", a garbled record no employer should ever see. A value that
+   * already names its own scale needs nothing added by this function - it is already the honest,
+   * on-its-own-terms answer the branch below exists to produce. */
+  if (trimmed.includes('/')) return trimmed;
   const scale = ap.gpa_scale?.trim();
   if (!scale) return `${trimmed} (US GPA scale)`;
   const scaleNumber = Number(scale);

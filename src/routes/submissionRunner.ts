@@ -1914,7 +1914,32 @@ export async function discoverAndResolveQuestions(
         postingCountryCode,
       )
       : null;
-    const knownValue = resolvedField?.value ?? (known && 'value' in known ? known.value : '');
+    const rawKnownValue = resolvedField?.value ?? (known && 'value' in known ? known.value : '');
+    /*
+     * KNOWN-ANSWER TEXT MUST FIT THE CONTROL'S OWN maxLength, THE SAME PROMISE THE DRAFTED-ANSWER
+     * PATH ALREADY KEEPS (fitToBudget, further down this function, for the essay-drafter path).
+     *
+     * Nothing guarded this before. gpaAnswer's classification/percentage branch (questionDiscovery
+     * .ts) can now produce a string like "3.89/4.00 (US 4.0 scale)" - roughly six times the length
+     * of the bare "3.89" this path used to type - and a text control enforcing its own maxLength
+     * truncates whatever is typed into it with no signal back to Litos that anything was cut. A
+     * truncated GPA record ("3.89/4.00 (US 4.0 sc") submitted with no attention flag reads as a
+     * deliberate, malformed answer, which is worse than leaving the field for her.
+     *
+     * Falls back to the BARE stored value, never to a truncation of the long form - a chopped
+     * sentence can land mid-word with no honest reading, where the plain "3.89" is both short
+     * enough to fit virtually any real control and exactly true on its own terms. Scoped to a
+     * 'gpa' key that did NOT already match one of the control's own options: an option chosen from
+     * the control's real list (matchedOption) is that control's own text, and swapping it for a
+     * value that is not one of its options would break an exact match rather than protect it.
+     */
+    const knownValueFitsField = field.maxLength === null || rawKnownValue.length <= field.maxLength;
+    const gpaBareFallback = ap.gpa?.trim();
+    const knownValue = knownValueFitsField
+      ? rawKnownValue
+      : (resolvedField?.key === 'gpa' && !resolvedField.matchedOption && gpaBareFallback && gpaBareFallback.length <= (field.maxLength as number))
+        ? gpaBareFallback
+        : rawKnownValue;
     const offeredOptions = usableOptions(field.options);
     const reviewedOption = existing?.answer_source === 'applicant_review'
       ? offeredOptions.find((option) => option.trim().toLowerCase() === existing.answer.trim().toLowerCase())
