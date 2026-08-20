@@ -3262,7 +3262,7 @@ test('every route verifier names the questions it hashes', async () => {
   const applications = readFileSync(join(__dirname, 'applications.ts'), 'utf8');
   const runner = readFileSync(join(__dirname, 'submissionRunner.ts'), 'utf8');
   for (const [name, source] of [['applications.ts', applications], ['submissionRunner.ts', runner]]) {
-    const bare = source.match(/current(?:Acknowledged)?PacketAudit\(row(?:\)|, \{(?![^}]*questions)[^}]*\})/g) ?? [];
+    const bare = source.match(/current(?:Acknowledged)?PacketAudit\(\w+(?:\)|, \{(?![^}]*questions)[^}]*\})/g) ?? [];
     assert.deepEqual(bare, [], name + ' has a verifier hashing raw stored rows: ' + bare.join(' | '));
   }
 });

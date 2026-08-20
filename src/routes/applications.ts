@@ -1073,7 +1073,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         }
       }
       if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
-        const auditVerdict = await currentAcknowledgedPacketAudit(precheckRow, { restoreExpiredResume: 'authorizing_send' });
+        const auditVerdict = await currentAcknowledgedPacketAudit(precheckRow, {
+          questions: await resolvedPacketAuditQuestions(precheckRow, precheckReview),
+          restoreExpiredResume: 'authorizing_send',
+        });
         if (!auditVerdict.valid) {
           return reply.status(409).send(packetAuditClientError(auditVerdict));
         }
