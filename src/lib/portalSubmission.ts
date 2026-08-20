@@ -298,8 +298,20 @@ export function managedAttendedAccountUrlIsSupported(portal: SupportedPortal, ra
 const JOBVITE_DATA_CONSENT_SELECTOR = 'select#jv-country-select';
 const ICIMS_LOGIN_EMAIL_SELECTOR = 'input#email[name="css_loginName"]';
 const ICIMS_HCAPTCHA_SELECTOR = 'textarea[name="h-captcha-response"]';
-const ICIMS_SECURITY_CODE_SELECTOR =
+/* Not iCIMS-only despite the constant's original name-until-2026-08-20: readReceipt below reuses
+   it verbatim to recognise an emailed-security-code wall on the direct-Playwright path, and the
+   controlled_test QA fixture's own code field (autoComplete="one-time-code") matches it the same
+   way a real iCIMS or Greenhouse one does. One selector, not two that can drift apart. */
+const SECURITY_CODE_FIELD_SELECTOR =
   'input[autocomplete="one-time-code"], input[name*="verification" i], input[name*="securityCode" i]';
+/* How many consecutive 1-second polls readReceipt requires the field above to stay visible, with no
+   receipt on any of them, before treating it as a wall rather than a moment. See the fail-fast
+   comment inside readReceipt for why one sighting is not enough: this selector is deliberately broad
+   enough to catch an unrelated field for a single transitional tick, and readReceipt's other caller
+   reconnects to a session a human may be actively finishing by hand. 3 polls is 2-3 real seconds,
+   short enough to still close well inside the 30s deadline for a genuine wall, long enough that a
+   receipt or a cleared field on any of those polls resets the streak before this ever fires. */
+const SECURITY_CODE_CONFIRM_POLLS = 3;
 const ORACLE_PRIMARY_EMAIL_SELECTOR = 'input#primary-email-1[name="primary-email"]';
 const ORACLE_LEGAL_DISCLAIMER_SELECTOR = 'input#legal-disclaimer-checkbox';
 const ORACLE_HONEYPOT_SELECTOR = 'input#honey-pot-0[name="honey-pot"]';
@@ -341,7 +353,7 @@ export function buildManagedAttendedAccountProbeActions(portal: SupportedPortal)
       },
       {
         type: 'extract',
-        selector: ICIMS_SECURITY_CODE_SELECTOR,
+        selector: SECURITY_CODE_FIELD_SELECTOR,
         attribute: 'name',
         label: 'icims_security_code_gate',
         optional: true,
@@ -11100,29 +11112,34 @@ export const READ_CONTROL_LABEL = (node: unknown) => {
     || el.getAttribute('alt') || uaDefault || '').trim();
 };
 
-/** How long to give a submit control that is disabled until client-side validation settles. */
-const SUBMIT_ENABLE_WAIT_MS = 3_000;
+/** How long to give a submit control that is disabled until client-side validation settles.
+ *  Exported so the trial's ctx.gate (scripts/trial-portal-shapes.mts) can reproduce the same
+ *  retry clickFinalSubmit relies on, rather than hand-typing a second copy of this number that can
+ *  drift from the real one. */
+export const SUBMIT_ENABLE_WAIT_MS = 3_000;
 
 /**
  * Commit the values already present in required controls on the exact form owned by the retained
  * submit handle. This does not invent answers. It emits the framework event sequence ATS clients
  * use to move a visually filled value into validation state, then proves the sequence did not
  * change the selected value. The scope marker is consumed by READ_SUBMIT_READINESS_SCRIPT.
+ *
+ * KEPT AS TEXT, for the exact reason READ_FIELD_GROUP_DIAL_CODES_SCRIPT is: this is handed to
+ * Playwright's elementHandle.evaluate(), which serialises it with Function.prototype.toString()
+ * and re-parses the source INSIDE THE PAGE. Written as an ordinary TypeScript arrow function, under
+ * any bundler that transpiles with esbuild's keepNames (tsx's dev/watch runner is one; a Vercel
+ * Node.js function built from TypeScript source can be another), the compiled source wraps this in
+ * a `__name(...)` call that only exists in the bundle's own scope. The page then throws
+ * `ReferenceError: __name is not defined`, elementHandle.evaluate rejects, the call site's
+ * `.catch(() => null)` swallows it, and clickFinalSubmit reports "Litos could not bind
+ * required-field confirmation to the selected application form" - on every submission, on every
+ * board, regardless of whether the form was actually fine. Measured 2026-08-20 against the
+ * portal-shapes trial's phone-country and security-code cases, both of which never reached
+ * COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT's own logic at all; the failure was in getting the function
+ * into the page intact. Text is untouchable by a bundler, which is the property this needs.
  */
-export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = async (node: unknown) => {
-  const button = node as unknown as {
-    closest(selector: string): {
-      setAttribute(name: string, value: string): void;
-      querySelectorAll(selector: string): Iterable<unknown>;
-    } | null;
-    ownerDocument: {
-      getElementById(id: string): unknown;
-      defaultView: {
-      Event: new(type: string, init: { bubbles: boolean; cancelable?: boolean }) => { preventDefault(): void };
-      requestAnimationFrame(callback: () => void): void;
-      getComputedStyle(node: unknown): { display: string; visibility: string };
-    } };
-  };
+const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT_SCRIPT = String.raw`async (node) => {
+  const button = node;
   // Browser DOM elements always expose closest(). A handful of isolated unit doubles predate this
   // callback and intentionally model only label reads. Keep those doubles usable without treating
   // a real DOM node that has no owning form as confirmed.
@@ -11133,22 +11150,10 @@ export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = async (node: unknown) => {
   const view = button.ownerDocument.defaultView;
   const controls = Array.from(form.querySelectorAll(
     '[required], [aria-required="true"], [role="radio"][aria-checked="true"], [role="checkbox"][aria-checked="true"]',
-  )) as Array<{
-    type?: string; value?: string; checked?: boolean; files?: { length: number } | null;
-    disabled?: boolean; focus?(): void; blur?(): void; click?(): void;
-    getAttribute(name: string): string | null;
-    getClientRects(): { length: number };
-    dispatchEvent(event: unknown): boolean;
-  }>;
-  type Control = typeof controls[number];
+  ));
   const markers = Array.from(form.querySelectorAll(
     'label[class*="_required_"], legend[class*="_required_"], label, legend',
-  )) as Array<{
-    textContent?: string; className?: string; control?: unknown; parentElement?: { querySelector(selector: string): unknown } | null;
-    getAttribute(name: string): string | null;
-    querySelector(selector: string): unknown;
-    closest(selector: string): { querySelector(selector: string): unknown } | null;
-  }>;
+  ));
   const controlSelector = 'input:not([type="hidden"]), textarea, select, [role="combobox"], [role="radio"], [role="checkbox"]';
   for (const marker of markers) {
     const className = typeof marker.className === 'string' ? marker.className : '';
@@ -11161,9 +11166,9 @@ export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = async (node: unknown) => {
       || marker.querySelector(controlSelector)
       || wrapper?.querySelector(controlSelector)
       || marker.parentElement?.querySelector(controlSelector);
-    if (candidate && !controls.includes(candidate as Control)) controls.push(candidate as Control);
+    if (candidate && !controls.includes(candidate)) controls.push(candidate);
   }
-  const state = (control: typeof controls[number]) => JSON.stringify({
+  const state = (control) => JSON.stringify({
     value: control.value ?? null,
     checked: control.checked ?? null,
     ariaChecked: control.getAttribute('aria-checked'),
@@ -11192,11 +11197,23 @@ export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = async (node: unknown) => {
     }
     control.blur?.();
     committed += 1;
-    await new Promise<void>((resolve) => view.requestAnimationFrame(resolve));
+    await new Promise((resolve) => view.requestAnimationFrame(resolve));
     if (state(control) !== before) changed = true;
   }
   return { formFound: true, changed, committed };
-};
+}`;
+
+export type CommitRequiredControlsResult = { formFound: boolean; changed: boolean; committed: number };
+
+/* new Function compiles the text above in Node, with no bundler in the path, so the function object
+   this module exports serialises back out to the exact same text - see readFieldGroupDialCodes for
+   the identical pattern. `async` is preserved in the source text itself, so the compiled function
+   still returns a Promise and every existing caller (production and this file's own unit tests,
+   which call it directly against DOM doubles) keeps working unchanged. */
+export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = new Function(
+  'node',
+  'return (' + COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT_SCRIPT + ')(node);',
+) as (node: PlaywrightEvaluationTarget) => Promise<CommitRequiredControlsResult>;
 
 export async function clickFinalSubmit(page: Page): Promise<void> {
   /* ELEMENT HANDLES, NOT nth(). An index is only meaningful against the DOM that produced it, and
@@ -11357,9 +11374,60 @@ export async function readReceipt(page: Page): Promise<{ confirmationText: strin
    * the auto-waiting innerText read for the reason above. */
   const deadline = Date.now() + 30_000;
   let body = '';
+  /* How many CONSECUTIVE polls in a row have seen the security-code field, with no receipt on any
+   * of them. Required to reach SECURITY_CODE_CONFIRM_POLLS before the fail-fast below fires - see
+   * that constant for why a single sighting is not enough. */
+  let securityCodeStreak = 0;
   for (;;) {
     body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
     if (RECEIPT_PROOF_RE.test(body)) break;
+    /* FAIL FAST ON A SECURITY-CODE WALL, RATHER THAN RIDING OUT THE REST OF THE DEADLINE - BUT ONLY
+     * ONCE IT HAS HELD FOR SECURITY_CODE_CONFIRM_POLLS IN A ROW.
+     *
+     * clickFinalSubmit (both callers: submitControlled's controlled_test path and the plain
+     * browserbase-session path) presses submit exactly ONCE and has no idea a second press could
+     * ever be required - unlike the managed path, which was given a full two-phase model
+     * (securityCodeContinuationActions, status 'awaiting_security_code') after three real
+     * Greenhouse runs on 2026-08-08 each got exactly this far and stopped. Nothing built for the
+     * managed path reaches this direct-Playwright one, and nothing here can complete a second
+     * phase either: a genuine employer code arrives by real email, on nobody's schedule, and this
+     * function only ever has the ONE open page in front of it.
+     *
+     * So a security-code field appearing here is not a page that is merely slow to confirm - it is
+     * proof the employer refused the press and is waiting on a code this call can never supply.
+     * Riding out the rest of the 30-second wait for a confirmation that cannot come turns that into
+     * the exact same generic "never showed a confirmation" message a page that is simply broken
+     * gets, which is indistinguishable from the real defect: trial case 'security-code' (regression
+     * test below) measured this directly as one submit press, no receipt, and the code field still
+     * on screen, with nothing in the error to say why. Checking on every poll, not only once, is
+     * deliberate too - the field can render at any point inside the window, not only up front.
+     *
+     * REQUIRING A STREAK, NOT ONE SIGHTING, is what makes this safe for readReceipt's OTHER caller:
+     * applications.ts's attended-handoff route reconnects this same function to a session a HUMAN is
+     * driving by hand, after they say they already submitted. A person who has just pressed submit
+     * on a code-gated form and is a few keystrokes from entering it and pressing submit again has a
+     * field visible on the very next poll that isn't a wall this call can never get past - it is one
+     * they are about to get past themselves, and firing on that single sighting would reject a
+     * submission the very next poll would have seen succeed. SECURITY_CODE_FIELD_SELECTOR is also
+     * broad (case-insensitive name*="verification"), wide enough to catch an unrelated field on a
+     * transitional page for one tick. A short streak absorbs both: a field that is genuinely a wall
+     * this call cannot clear stays visible poll after poll, so the streak still closes well inside
+     * the 30s deadline; a field that clears because a human finished, or that was never the wall to
+     * begin with, breaks the streak back to zero the moment the receipt (or the field's absence)
+     * shows up on a later poll. */
+    if (await page.locator(SECURITY_CODE_FIELD_SELECTOR).first().isVisible().catch(() => false)) {
+      securityCodeStreak += 1;
+      if (securityCodeStreak >= SECURITY_CODE_CONFIRM_POLLS) {
+        throw new Error(
+          'Litos pressed submit, and the employer is now holding this application behind an emailed '
+          + 'security code. This browser has no inbox to read that code from and cannot press submit '
+          + 'a second time on its own, so the application was not completed. Open the portal, enter '
+          + 'the code from the confirmation email, and finish the application there.',
+        );
+      }
+    } else {
+      securityCodeStreak = 0;
+    }
     if (Date.now() >= deadline) {
       throw new Error('The company never showed a confirmation we could check');
     }

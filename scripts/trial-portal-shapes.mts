@@ -60,19 +60,30 @@
  * form has no action attribute and makes no network write of any kind.
  */
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium, type Page } from 'playwright-core';
-import type { ManagedBrowserAction } from '../src/lib/browserbase';
+import { MANAGED_SUBMIT_CHOOSER_POLICY, type ManagedBrowserAction } from '../src/lib/browserbase';
 import {
   READ_SUBMIT_READINESS_SCRIPT,
   buildManagedPortalActions,
   clickFinalSubmit,
   fillPortal,
+  COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT,
+  SUBMIT_CANDIDATE_SELECTOR,
+  SUBMIT_ENABLE_WAIT_MS,
+  READ_CONTROL_LABEL,
+  chooseSubmitControl,
   type SubmissionPacket,
 } from '../src/lib/portalSubmission';
+// The mailbox stand-in URL builder, straight out of the one other place this repo already reads the
+// harness's fake inbox (the security-code e2e harness). Reusing it rather than re-deriving the path
+// here is the same "no second reader" rule the file banner states: two builders of the same URL that
+// drift apart is exactly the kind of bug this trial exists to catch, not commit.
+import { securityCodeMailboxUrl } from './qa-guest-submissions-lib.mjs';
 
 const require = createRequire(import.meta.url);
 const BASE = process.env.BASE ?? 'http://localhost:3999';
@@ -351,6 +362,36 @@ const CASES: Case[] = [
     id: 'security-code',
     defect: '9. an emailed security code and a two-phase submit',
     engine: 'direct',
+    /* THE FIRST PRESS DEFINITELY WORKED. clickFinalSubmit is production's own control-selection,
+       required-field bind and readiness gate, called against a real Chromium exactly as
+       submitControlled calls it - the earlier fix in this branch (983b272) already proved that
+       part clean, down to "security-code now runs cleanly past the bind failure and reports a
+       real, substantive result: only 1 submit press recorded". What was never proven is why a
+       SECOND press never happened, and reading production for the answer settles it: neither
+       clickFinalSubmit nor submitControlled (submissionRunner.ts) contains one line that looks for
+       a security-code field, reads a code, or presses submit twice. The only place in this
+       codebase that drives a security-code continuation at all is the MANAGED path (submit() in
+       submissionRunner.ts, securityCode.ts's securityCodeContinuationActions), and that path is
+       architecturally async by necessity: a real employer's code arrives by real email, so
+       production parks the row at status 'awaiting_security_code' and finishes on a SEPARATE run,
+       potentially minutes or hours later, once a human or the inbox watcher supplies the code.
+       There is no missing synchronous call in production to add here - a synchronous "press,
+       detect, enter, press again" loop cannot exist for a real Greenhouse code, because the code
+       does not exist anywhere until the email actually lands.
+
+       So the two presses this case wants are not something clickFinalSubmit forgot to do; they are
+       something THIS SCRIPT forgot to do. The fixture (role-quick-website's shape-form.tsx,
+       onSubmit's shape==='security-code' branch) exists precisely to let an automated trial stand
+       in for the wait-for-the-email step: phase 1 flips a client-side `phase` flag to "security"
+       instead of navigating anywhere, and the code that phase expects is available synchronously,
+       without an inbox, from the QA-only mailbox stand-in
+       (/qa/portal-submission/security-code?case=..., securityCodeMailboxUrl in
+       qa-guest-submissions-lib.mjs - the same helper the security-code E2E harness already reads
+       it through, imported above rather than re-derived here). A trial that never calls that
+       endpoint can only ever press once, no matter what production does, which is exactly the
+       failure recorded. Driving phase 2 here - fetch the code, type it into the field the fixture
+       renders, and call PRODUCTION'S clickFinalSubmit a second time so the second press is still
+       real production code and not a re-implementation of it - is the fix. */
     async run(ctx) {
       return ctx.direct('security-code', async (page) => {
         await fillPortal(page, 'controlled_test', packetFor());
@@ -360,9 +401,33 @@ const CASES: Case[] = [
         } catch (error) {
           submitError = (error as Error).message.split('\n')[0];
         }
+        const codeFieldAppeared = (await page.locator('#security_code').count()) > 0;
+        if (codeFieldAppeared && !submitError) {
+          const mailboxUrl = securityCodeMailboxUrl(BASE, 'security-code')
+            + (QA_KEY ? `&${QA_KEY_PARAM}=${encodeURIComponent(QA_KEY)}` : '');
+          const mailboxResponse = await page.request.get(mailboxUrl);
+          if (!mailboxResponse.ok()) {
+            submitError = `security-code mailbox stand-in answered ${mailboxResponse.status()}`;
+          } else {
+            const { code } = await mailboxResponse.json() as { code: string };
+            await page.locator('#security_code').fill(code);
+            try {
+              await clickFinalSubmit(page);
+            } catch (error) {
+              submitError = (error as Error).message.split('\n')[0];
+            }
+          }
+        }
         const received = await page.getByText('Your application was received').count();
         const codeFieldShown = await page.locator('#security_code').count();
-        const attempts = await page.locator('#litos-qa-log')
+        /* NOT #litos-qa-log. That element only exists in the "form"/"security" phases - the
+           fixture's "done" render (shape-form.tsx) is a wholly separate JSX branch that drops
+           <QaLog /> and puts the SAME data-litos-qa-submit-attempts attribute directly on its own
+           <section> instead. A pass reaches "done", so a read pinned to #litos-qa-log would find
+           nothing there and silently report 0 on every success - which is exactly what the first
+           version of this fix did. The plain attribute selector finds whichever element is
+           currently carrying the count, in every phase. */
+        const attempts = await page.locator('[data-litos-qa-submit-attempts]').first()
           .getAttribute('data-litos-qa-submit-attempts').catch(() => null);
         return {
           pass: received > 0 && Number(attempts ?? 0) >= 2,
@@ -600,22 +665,74 @@ function eeoActions(pairs: Array<[question: string, answer: string]>): ManagedBr
   return picked;
 }
 
-/* THE ASHBY SUBMIT LIST, STRAIGHT OUT OF THE PRODUCTION BUILDER, both with and without the click.
+/* THE ASHBY SUBMIT LIST, STRAIGHT OUT OF THE PRODUCTION BUILDER, both with and without the final action.
  *
  * `buildManagedPortalActions('controlled_ashby', packet, true)` is byte for byte what production
- * queued for packet 13bccb2d: eight fills and uploads, then one click on
- * `button[type="submit"], input[type="submit"]`, which is what isFinalSubmitAction recognises as the
- * final submit. Nine actions in total against a MANAGED_ACTION_LIMIT of 120, and no action is added
- * by anything in this fix - the outcome read is a page evaluation inside the runner, not an action.
+ * queues for packet 13bccb2d: eight fills and uploads, then one `confirmAndSubmit`. Nine actions in
+ * total against a MANAGED_ACTION_LIMIT of 120, and no action is added by anything in this fix - the
+ * outcome read is a page evaluation inside the runner, not an action.
  *
- * The fill list is the same nine minus the click, taken by dropping the LAST action rather than by
- * calling the builder with `false`, so the two lists cannot drift into being different runs.
+ * It used to end in a plain `click` on `button[type="submit"], input[type="submit"]`. It does not
+ * any more: the contract-v2 migration (see browserbase.ts's ManagedBrowserAction.contractVersion doc
+ * and stratus-browser-cloud's README, "Use one `confirmAndSubmit` action for an authorized final
+ * submit") folded the submit click into one atomic action that also owns the required-field
+ * confirmation, carrying the full `litos-final-submit` chooser policy (contractVersion 2,
+ * submitKind 'application', the pinned MANAGED_SUBMIT_CHOOSER_POLICY). This is asserted structurally
+ * below rather than by type alone, because a real regression here (a stale or missing chooser policy,
+ * or the wrong submitKind) would otherwise pass this check and only surface as a blocked or
+ * mis-targeted click deep inside the sandbox.
+ *
+ * The fill list is the same nine minus the final action, taken by dropping the LAST action rather
+ * than by calling the builder with `false`, so the two lists cannot drift into being different runs.
  */
 function submittingAshbyActions(): ManagedBrowserAction[] {
   const all = buildManagedPortalActions('controlled_ashby', packetFor(), true);
   const last = all[all.length - 1];
-  if (last?.type !== 'click') {
-    throw new Error(`the production Ashby builder no longer ends in a submit click, it ends in ${last?.type}`);
+  if (last?.type !== 'confirmAndSubmit') {
+    throw new Error(
+      `the production Ashby builder's final action changed shape: expected type "confirmAndSubmit", `
+      + `got ${JSON.stringify(last?.type ?? null)}. Either production regressed to a bare click (or `
+      + `something else), or this trial's expectation is stale again - check `
+      + `buildManagedPortalActions in src/lib/portalSubmission.ts and update this assertion to match `
+      + `what it now emits, do not just widen the check.`,
+    );
+  }
+  if (last.contractVersion !== 2) {
+    throw new Error(
+      `the production Ashby builder's confirmAndSubmit carries contractVersion `
+      + `${JSON.stringify(last.contractVersion ?? null)}, not 2. The runner pins the submit-readiness `
+      + `and chooser-policy grammar to contract v2; a different version here means either a real `
+      + `production migration to v3+ (update this trial to match) or a stale/dropped field.`,
+    );
+  }
+  if (last.submitKind !== 'application') {
+    throw new Error(
+      `the production Ashby builder's confirmAndSubmit carries submitKind `
+      + `${JSON.stringify(last.submitKind ?? null)}, not "application". This is the employer send, `
+      + `not an emailed-code verification continuation - the two must never be confused.`,
+    );
+  }
+  /* Diffed against the REAL policy constant stratusAction() (src/lib/browserbase.ts) itself
+     validates every managed confirmAndSubmit against, not a hand-typed name check - a name-only
+     check would still pass if version/finalPattern/exclusionPattern/grammarHash regressed on their
+     own, which is exactly the kind of second, drifting reader this repo's other comments warn
+     against. */
+  const policy = last.chooserPolicy;
+  if (
+    !policy
+    || policy.name !== MANAGED_SUBMIT_CHOOSER_POLICY.name
+    || policy.version !== MANAGED_SUBMIT_CHOOSER_POLICY.version
+    || policy.finalPattern !== MANAGED_SUBMIT_CHOOSER_POLICY.finalPattern
+    || policy.exclusionPattern !== MANAGED_SUBMIT_CHOOSER_POLICY.exclusionPattern
+    || policy.grammarHash !== MANAGED_SUBMIT_CHOOSER_POLICY.grammarHash
+  ) {
+    throw new Error(
+      `the production Ashby builder's confirmAndSubmit chooserPolicy does not match `
+      + `MANAGED_SUBMIT_CHOOSER_POLICY (got ${JSON.stringify(policy ?? null)}, wanted `
+      + `${JSON.stringify(MANAGED_SUBMIT_CHOOSER_POLICY)}). This is the same policy stratusAction() `
+      + `itself validates every managed confirmAndSubmit against - a mismatch here means the real `
+      + `sandbox runner's own boot check would reject this action before a browser ever opens.`,
+    );
   }
   return all;
 }
@@ -640,12 +757,87 @@ function uploadActions(packet: SubmissionPacket): ManagedBrowserAction[] {
 
 /* ─── the managed engine: the real SANDBOX_RUNNER, not a copy of it ─────────────────────────── */
 
+/* THE SUBMIT READINESS GRAMMAR, PULLED OUT BY THE SAME RULE AS THE RUNNER ITSELF.
+ *
+ * SANDBOX_RUNNER stopped being interpolation-free on 2026-08-13 (0bac311, "The readiness gate gets
+ * the guard the submit chooser already had"): seven spots inside it now read
+ * `${SUBMIT_READINESS_POLICY.<field>}`, pulled from the small Object.freeze declared earlier in the
+ * same file so the runner's gate and the backend's own copy of the gate cannot silently diverge again
+ * the way they did in incident PR #527. A plain text slice of the template no longer equals what
+ * ships to the sandbox: it would carry the literal eight characters "${SUBMIT_READINESS_POLICY.
+ * errorText}" instead of the pattern that string stands for. So this extracts SUBMIT_READINESS_POLICY
+ * the same way it extracts SANDBOX_RUNNER - text out of the checkout, not an import, for the same
+ * @vercel/sandbox reason - and performs the substitution ourselves.
+ *
+ * Trusting our own extraction of the policy object would just move the "second reader" problem one
+ * file up. So this does not take the object on faith: it re-runs the exact boot check
+ * managed-browser.js runs on itself (hash the seven grammar fragments in the fixed order, compare to
+ * the policy's own pinned grammarHash) against the values this function pulled out. If stratus's own
+ * boot check would fail against these bytes, this throws first and says so; if it passes, the values
+ * about to be substituted are provably the ones production's require() would have produced, without
+ * ever loading @vercel/sandbox to get them. */
+/* Pinned here, independently of anything the extraction below slices out of the checkout, so the
+ * hash check that follows has an outside source of truth to fail against - not just the extracted
+ * object's own embedded grammarHash. A slice-boundary bug that carves out a stale or malformed
+ * literal, but one that is internally self-consistent (all seven fields plus a grammarHash all
+ * came from the same bad slice), would still satisfy a check that only compares the extraction to
+ * itself; it cannot satisfy a check against a value fixed here, outside the slice. Rotate this the
+ * same day SUBMIT_READINESS_POLICY.grammarHash rotates in managed-browser.js - a stale value here
+ * fails loudly with a clear message, not silently. */
+const KNOWN_SUBMIT_READINESS_GRAMMAR_HASH = '5382e70ebe4ac09c4a66af78dd1aae3b37032f30295621bdabfe43dbc0eaadbc';
+
+function submitReadinessPolicy(source: string): Record<string, string> {
+  const open = 'export const SUBMIT_READINESS_POLICY = Object.freeze({';
+  const start = source.indexOf(open);
+  if (start < 0) throw new Error('SUBMIT_READINESS_POLICY not found in managed-browser.js');
+  const objectStart = start + open.length - 1; // back up onto the '{' so the slice below is a full object literal
+  const objectEnd = source.indexOf('\n});', objectStart);
+  if (objectEnd < 0) throw new Error('SUBMIT_READINESS_POLICY is not terminated in managed-browser.js');
+  const objectLiteral = source.slice(objectStart, objectEnd + 2); // '{ ... }'
+
+  // The literal is String.raw string fields plus a version number and a hash, nothing that reaches
+  // outside itself, so evaluating it standalone (no access to the module's other bindings) is safe -
+  // and the hash check right below refuses to trust the result if that stops being true.
+  // eslint-disable-next-line no-new-func -- data literal only, verified against its own hash below
+  const policy = new Function(`return Object.freeze(${objectLiteral});`)() as Record<string, string>;
+
+  const grammar = [
+    policy.requiredAttributes,
+    policy.requiredClassMarkers,
+    policy.asteriskMark,
+    policy.asteriskLegend,
+    policy.errorText,
+    policy.legendText,
+    policy.ownQuestionSkip,
+  ].join('\n');
+  const hash = createHash('sha256').update(grammar).digest('hex');
+  if (hash !== policy.grammarHash) {
+    throw new Error('extracted SUBMIT_READINESS_POLICY does not match its own grammarHash; extraction is wrong');
+  }
+  // The check above only proves the slice is internally coherent - see KNOWN_SUBMIT_READINESS_GRAMMAR_HASH's
+  // own comment for why that is not the same as correct. This is the check against something outside
+  // the slice: stratus's grammar actually changing is a real, expected event (it did on 2026-08-13),
+  // so this fails with a message that says what to do, not a bare mismatch.
+  if (hash !== KNOWN_SUBMIT_READINESS_GRAMMAR_HASH) {
+    throw new Error(
+      `SUBMIT_READINESS_POLICY's grammar hash (${hash}) no longer matches the value pinned in this `
+      + `trial (KNOWN_SUBMIT_READINESS_GRAMMAR_HASH, ${KNOWN_SUBMIT_READINESS_GRAMMAR_HASH}). Either `
+      + `stratus's readiness grammar genuinely changed (update the pinned constant to match, after `
+      + `checking what changed and why) or this extraction sliced out something stale - do not just `
+      + `widen or delete this check.`,
+    );
+  }
+  return policy;
+}
+
 /* Extracted as TEXT from the stratus checkout rather than imported. Importing the module would drag
  * in @vercel/sandbox and the rest of that service's dependency tree, which this repo does not have;
  * copying the script into this repo would create the second reader this codebase has already had to
- * delete once. The runner is a String.raw template with no interpolation, so the text between the
- * delimiters IS the script, byte for byte, and the assertion below fails loudly the day that stops
- * being true. */
+ * delete once. The runner is a String.raw template, and its only interpolation is the seven
+ * `${SUBMIT_READINESS_POLICY.*}` reads resolved by submitReadinessPolicy() above, so once those are
+ * substituted back in, the text between the delimiters IS the script, byte for byte, and the
+ * assertion below fails loudly the day any OTHER interpolation shows up that this function does not
+ * yet know how to resolve. */
 function sandboxRunnerSource(): string {
   const file = join(STRATUS_REPO, 'src', 'managed-browser.js');
   const source = readFileSync(file, 'utf8');
@@ -655,7 +847,14 @@ function sandboxRunnerSource(): string {
   const body = source.slice(start + open.length);
   const end = body.indexOf('`;');
   if (end < 0) throw new Error(`SANDBOX_RUNNER is not terminated in ${file}`);
-  const script = body.slice(0, end);
+  let script = body.slice(0, end);
+
+  const policy = submitReadinessPolicy(source);
+  for (const [key, value] of Object.entries(policy)) {
+    if (typeof value !== 'string') continue;
+    script = script.split(`\${SUBMIT_READINESS_POLICY.${key}}`).join(value);
+  }
+
   if (script.includes('${')) {
     throw new Error('SANDBOX_RUNNER now interpolates, so this text extraction is no longer exact');
   }
@@ -767,6 +966,33 @@ async function main() {
       try {
         await page.goto(shapeUrl(shape, query), { waitUntil: 'domcontentloaded', timeout: 30_000 });
         await page.waitForTimeout(500);
+        /* READ_SUBMIT_READINESS_SCRIPT only trusts a form once `data-litos-submit-scope-v1="active"`
+           is on it, and in production that attribute is set by COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT,
+           called on the chosen submit control inside clickFinalSubmit, immediately before the gate
+           runs. Evaluating the readiness script on its own - as this engine did before - never binds
+           the scope, so scanRoot is always null and every case here failed on "Litos could not bind
+           required-field validation to the selected application form" regardless of the actual
+           defect being measured. Reproducing clickFinalSubmit's own control-selection here, rather
+           than calling the gate a beat too early, is what makes this a faithful replay of the
+           production sequence instead of a shortcut around it. */
+        let handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
+        let labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
+        let chosen = chooseSubmitControl(labels);
+        /* Mirrors clickFinalSubmit's own one-retry-after-SUBMIT_ENABLE_WAIT_MS (imported, not
+           re-typed, so the two cannot drift apart): plenty of ATS forms render the final button
+           disabled until async client-side validation settles, and a single synchronous read here
+           would otherwise leave the scope unbound - and every gate case reporting empty/wrong
+           blocking data - for any shape whose submit control needs that beat to become selectable,
+           even though production handles it fine. */
+        if (chosen === null) {
+          await page.waitForTimeout(SUBMIT_ENABLE_WAIT_MS);
+          handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
+          labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
+          chosen = chooseSubmitControl(labels);
+        }
+        if (chosen !== null) {
+          await handles[chosen]!.evaluate(COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT).catch(() => null);
+        }
         return await page.evaluate(READ_SUBMIT_READINESS_SCRIPT) as { blocking: string[]; stale: string[] };
       } finally {
         await page.close();

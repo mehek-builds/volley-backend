@@ -30,6 +30,7 @@ import {
   CaptchaUnresolvedError,
   SUBMIT_CANDIDATE_SELECTOR,
   NoSubmitControlError,
+  readReceipt,
   type SubmissionPacket,
 } from './portalSubmission';
 
@@ -1297,6 +1298,106 @@ test('a detached element is pre-dispatch too, and says nothing was sent', async 
   } as unknown as Page;
 
   await assert.rejects(clickFinalSubmit(page), NoSubmitControlError);
+});
+
+/* ---- readReceipt and the emailed security-code wall ----
+ *
+ * Trial case 'security-code' (scripts/trial-portal-shapes.mts, defect 9) measured this directly:
+ * clickFinalSubmit on a Greenhouse-shaped form that answers a submit with an emailed 8-character
+ * code presses once, the employer refuses the application and renders the code field, and nothing
+ * downstream has ever known to look for it. Before this fix readReceipt just kept polling for a
+ * confirmation sentence that was never coming until its 30-second deadline expired, then threw the
+ * same generic "The company never showed a confirmation we could check" a page that is simply
+ * broken would produce - indistinguishable from an actual defect, and only reachable by running
+ * the full Playwright trial by hand. These tests pin readReceipt's own behaviour so this specific
+ * failure mode - a two-phase submit silently stalling at phase one - fails `npm run test` on its
+ * own, the moment anyone touches the security-code detection or removes it, with no browser and no
+ * 30-second wait required. */
+
+test('readReceipt reports the security-code wall by name, not a generic confirmation timeout', async () => {
+  const page = {
+    locator: (selector: string) => (selector === 'body'
+      ? {
+        innerText: async () =>
+          'We emailed you an 8-character security code. Enter it below and submit the application again.',
+      }
+      : { first: () => ({ isVisible: async () => true }) }),
+    url: () => 'https://boards.greenhouse.io/acme/jobs/1/apply',
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  await assert.rejects(
+    readReceipt(page),
+    (error: Error) => {
+      assert.match(error.message, /security code/i);
+      assert.doesNotMatch(error.message, /never showed a confirmation/i);
+      return true;
+    },
+  );
+});
+
+test('readReceipt fails FAST on a security-code wall, not after riding out the 30-second deadline', async () => {
+  // waitForTimeout is the only thing that stands between a poll and the next one, so the count it
+  // reaches by the time readReceipt throws is a direct read of how many polls happened. A field that
+  // stays visible poll after poll must still close well inside the 30-second deadline (SECONDS, not
+  // the ~28 waits a near-full ride to deadline would rack up) - not on the very first sighting: see
+  // SECURITY_CODE_CONFIRM_POLLS in portalSubmission.ts for why a streak, not a single sighting, is
+  // required (a human finishing an attended handoff is the reason).
+  let waited = 0;
+  const page = {
+    locator: (selector: string) => (selector === 'body'
+      ? {
+        innerText: async () =>
+          'We emailed you an 8-character security code. Enter it below and submit the application again.',
+      }
+      : { first: () => ({ isVisible: async () => true }) }),
+    url: () => 'https://boards.greenhouse.io/acme/jobs/1/apply',
+    waitForTimeout: async () => { waited += 1; },
+  } as unknown as Page;
+
+  await assert.rejects(readReceipt(page));
+  assert.equal(waited, 2, 'a persistent security-code field must be caught after its confirm streak, not on the first sighting and not near the 30s deadline');
+});
+
+test('readReceipt does NOT fail fast on a single fleeting security-code-shaped sighting', async () => {
+  // The selector is deliberately broad (case-insensitive name*="verification"), and readReceipt's
+  // other caller (applications.ts, attended-handoff) reconnects to a session a human may be actively
+  // finishing by hand. One tick where the field is visible - then a receipt - must not be treated as
+  // a wall this call can never get past.
+  let call = 0;
+  const page = {
+    locator: (selector: string) => (selector === 'body'
+      ? {
+        innerText: async () => {
+          call += 1;
+          return call === 1
+            ? 'One moment, verifying your submission.'
+            : 'Thanks for your application! We have received it.';
+        },
+      }
+      : { first: () => ({ isVisible: async () => call === 1 }) }),
+    url: () => 'https://boards.greenhouse.io/acme/jobs/1/apply',
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  const receipt = await readReceipt(page);
+  assert.match(receipt.confirmationText, /received/i);
+});
+
+test('a genuine confirmation still wins even on a page that also carries a one-time-code-shaped field', async () => {
+  // The receipt check runs BEFORE the security-code check on every pass, so a form that happens to
+  // keep an unrelated one-time-code input around (a leftover 2FA field, say) must never be read as
+  // a stalled two-phase submit once the employer has actually confirmed the application.
+  const page = {
+    locator: (selector: string) => (selector === 'body'
+      ? { innerText: async () => 'Thanks for your application! We have received it.' }
+      : { first: () => ({ isVisible: async () => true }) }),
+    url: () => 'https://boards.greenhouse.io/acme/jobs/1/apply',
+    waitForTimeout: async () => undefined,
+  } as unknown as Page;
+
+  const receipt = await readReceipt(page);
+  assert.match(receipt.confirmationText, /received/i);
 });
 
 /* ---- the pre-submit required-field gate ----
