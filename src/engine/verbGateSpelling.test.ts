@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
 import { describe, test } from 'node:test';
 import { startsWithStrongVerb } from './resumeValidate';
 
@@ -82,7 +83,7 @@ describe('the generators are told to keep the applicant\'s spelling', () => {
   test('both prompts carry the rule', async () => {
     const { readFile } = await import('node:fs/promises');
     for (const path of ['src/llm/resumeSpec.ts', 'src/llm/baseResume.ts']) {
-      const source = await readFile(new URL(`../../${path}`, import.meta.url), 'utf8');
+      const source = await readFile(join(__dirname, '..', '..', path), 'utf8');
       assert.match(source, /KEEP THE APPLICANT'S OWN SPELLING/, `${path} lost the spelling rule`);
       // Whitespace-tolerant: the rule is wrapped in the prompt and a line break is not a change.
       assert.match(
