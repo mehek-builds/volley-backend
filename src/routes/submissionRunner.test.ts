@@ -3110,3 +3110,67 @@ test("Teamtailor's default consent checkbox becomes the consent_permission quest
   assert.equal(ungranted.questions[0].answer, '');
   assert.notEqual(ungranted.questions[0].answer_source, 'consent_permission');
 });
+
+/* The Breezy mirror of the Teamtailor test above, on the label the capture actually stores.
+ *
+ * MEASURED LIVE 2026-08-20 (Transparent Hiring, "HR Assistant Intern"): Breezy's discovery capture
+ * welds the control's own name onto the platform-default sentence, and the run parked on exactly
+ * this control, still empty at submit time. The resolver must turn the welded label into the
+ * machine acceptance under the grant - "as part of" is now accounted as a scaffolding span, and
+ * this particular weld self-accounts because it spells gdpr plus agreement - so a future Breezy
+ * row she never reviews carries answer_source consent_permission into managedConsentTickPlan. The
+ * live row itself predates this and carries HER review's "Yes"; the plan's breezy replay arm is
+ * what unparks that one, and portalSubmission.test.ts pins it. */
+test("Breezy's welded default consent label becomes the consent_permission question on the packet", async () => {
+  const welded = "i've read the privacy notice below and consent the processing of my data as part of my job application. gdprAgreement";
+  const current: ApplicationReviewState = {
+    jd_text: 'Support the HR team across sourcing and onboarding.',
+    role: 'HR Assistant Intern',
+    portal_url: 'https://transparent-hiring.breezy.hr/p/4d5a1d20f0ce-hr-assistant-intern-m-f-d-remote/apply',
+    ats_name: 'breezy',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const resolve = (ap: ApplicationProfileLike) => discoverAndResolveQuestions(
+    [
+      {
+        label: welded,
+        selector: '[data-litos-discovered-1]',
+        durableSelector: 'input[name="gdprAgreement"]',
+        inputType: 'checkbox',
+        maxLength: null,
+        required: true,
+      },
+    ],
+    { user_id: 'user-1', job_context: { company: 'Transparent Hiring' } } as ResumeRow,
+    current,
+    ap,
+    true,
+    'breezy',
+  );
+
+  const granted = await resolve({
+    consent_acknowledgement_permission: { granted_at: '2026-08-12T09:15:00.000Z', version: '2026-08-12' },
+  });
+  assert.equal(granted.questions.length, 1);
+  const question = granted.questions[0];
+  assert.equal(question.answer, 'Yes');
+  assert.equal(question.answer_source, 'consent_permission');
+  assert.equal(question.consent_permission_version, 'privacy_and_terms@2026-08-12');
+  assert.equal(question.consent_permission_granted_at, '2026-08-12T09:15:00.000Z');
+  assert.equal(question.portal_selector, 'input[name="gdprAgreement"]');
+  assert.equal(question.portal_input_type, 'checkbox');
+  assert.deepEqual(granted.attentionReasons, []);
+
+  // No grant means main's behaviour: the required checkbox surfaces as HER question, unanswered,
+  // never as a machine acceptance - and a no-grant Breezy run then parks on the tenant's own
+  // validation exactly as the live run did.
+  const ungranted = await resolve({});
+  assert.equal(ungranted.questions.length, 1);
+  assert.equal(ungranted.questions[0].answer, '');
+  assert.notEqual(ungranted.questions[0].answer_source, 'consent_permission');
+});

@@ -202,20 +202,39 @@ const CONSENT_GATED_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
  * portalCanAutoSubmitWithConsentGrant below, which takes the account's grant as an argument.
  *
  * personio is NOT here, deliberately: its bar is custom required-marking that defeats the
- * readiness reader, which no consent permission can lift. */
-export type ConsentGrantConditionalFamily = 'teamtailor' | 'pinpoint';
+ * readiness reader, which no consent permission can lift.
+ *
+ * breezy joined on 2026-08-20, and it is in this list for a DIFFERENT reason than the other two,
+ * stated here so nobody "fixes" the asymmetry. Teamtailor's and pinpoint's SUBMIT is what the
+ * grant unlocks: both are statically denied, and without the grant they never press anything.
+ * Breezy is statically AUTONOMOUS (single-step, CAPTCHA-free, on AUTONOMOUS_PORTAL_FAMILIES since
+ * 2026-07-29) and stays so; the grant unlocks only the guarded consent TICK on tenants that ship
+ * the optional gdprAgreement checkbox. Measured live 2026-08-20 on Transparent Hiring
+ * (<tenant>.breezy.hr, "HR Assistant Intern"): the run filled everything, pressed submit, and
+ * parked SOLELY on the required, still-empty gdprAgreement control - which is also the live proof
+ * the tenant does not pre-tick it, the re-confirmation pushManagedConsentTickActions' comment
+ * demands before any new family is admitted. Without the grant a breezy run keeps exactly that
+ * measured behaviour: fill, press, park on the tenant's own validation. */
+export type ConsentGrantConditionalFamily = 'teamtailor' | 'pinpoint' | 'breezy';
 
 const CONSENT_GRANT_CONDITIONAL_FAMILIES: ReadonlySet<PortalFamily> = new Set<PortalFamily>(
-  ['teamtailor', 'pinpoint'] satisfies ConsentGrantConditionalFamily[],
+  ['teamtailor', 'pinpoint', 'breezy'] satisfies ConsentGrantConditionalFamily[],
 );
 
-/* Compile-time: every grant-conditional family is STATICALLY denied by one of the deny sets above,
- * so AutonomousPortalFamily (and with it the jobs board's union) can never claim one. If a family
- * is added here without being consent-gated or manual-final-review, this line stops compiling. */
+/* Compile-time: every grant-conditional family whose SUBMIT the grant unlocks is STATICALLY denied
+ * by one of the deny sets above, so AutonomousPortalFamily (and with it the jobs board's union) can
+ * never claim one. breezy is the named exception, not a loosening of the rule: its submit was never
+ * the grant's to unlock, so the second line pins the opposite direction - breezy must STAY on the
+ * autonomous list, or the tick plan silently becomes the thing that unlocks its submit and this
+ * whole split stops being true. A new family added here must satisfy one line or the other, by
+ * name, and this comment is where its measurement belongs. */
 type _ConditionalFamilyIsStaticallyGated =
-  ConsentGrantConditionalFamily extends ConsentGatedFamily | ManualFinalReviewFamily ? true : never;
+  Exclude<ConsentGrantConditionalFamily, 'breezy'> extends ConsentGatedFamily | ManualFinalReviewFamily ? true : never;
 const _conditionalFamilyIsStaticallyGated: _ConditionalFamilyIsStaticallyGated = true;
 void _conditionalFamilyIsStaticallyGated;
+type _BreezyStaysStaticallyAutonomous = 'breezy' extends AutonomousPortalFamily ? true : never;
+const _breezyStaysStaticallyAutonomous: _BreezyStaysStaticallyAutonomous = true;
+void _breezyStaysStaticallyAutonomous;
 
 export function isConsentGrantConditionalFamily(portal: SupportedPortal): boolean {
   // manual_recruitee resolves to the recruitee family, which is not conditional; the controlled QA
@@ -224,7 +243,7 @@ export function isConsentGrantConditionalFamily(portal: SupportedPortal): boolea
 }
 
 function consentGrantConditionalFamilyName(family: PortalFamily): ConsentGrantConditionalFamily | null {
-  return family === 'teamtailor' || family === 'pinpoint' ? family : null;
+  return family === 'teamtailor' || family === 'pinpoint' || family === 'breezy' ? family : null;
 }
 
 // Portals where there is no application form to fill AT ALL until a human passes a gate that only
@@ -5266,6 +5285,11 @@ const BREEZY_RESUME_SELECTOR = 'input[type="file"][name="cResume"]';
 const BREEZY_COVER_LETTER_SELECTOR = 'input[type="file"][name="cCoverLetterFileThatDoesNotExist"]';
 
 // NOT filled: input[name="smsConsent"] and input[name="gdprAgreement"]. Both consent checkboxes.
+// gdprAgreement is never filled by the fixed-field pass or the reviewed-question replay: on a
+// submit run whose packet licenses it, it is ticked by the guarded consent-tick block immediately
+// before the submit action (managedConsentTickPlan, breezy entry in CONSENT_TICK_CONTROL_NAMES),
+// and on every other run it stays with the applicant exactly as before. smsConsent stays with the
+// applicant unconditionally - marketing texts are not the application's routine privacy consent.
 //
 // AND NOT FILLED, the one worth reading: Breezy ships a honeypot at name="hp_<4 hex>" - randomised
 // per render, so it must be matched by prefix if it is ever matched at all. It defeats a visibility
@@ -5335,6 +5359,13 @@ const CONSENT_TICK_CONTROL_NAMES: Record<ConsentGrantConditionalFamily, readonly
     'application_form[application][process_information]',
     'application[process_information]',
   ],
+  /* Captured as this exact camel-case spelling on the 2026-07-29 Zinier read (see the BreezyHR
+   * block above) and matched live on the 2026-08-20 Transparent Hiring run, whose packet selector
+   * reads input[name="gdprAgreement"]. selectorControlName hands back the attribute value byte for
+   * byte - no case folding, no bracket rewriting - so the one captured spelling is the whole list.
+   * smsConsent is deliberately NOT here: text-message marketing is an ongoing relationship no
+   * standing permission covers, the same judgement as teamtailor's future-jobs opt-in. */
+  breezy: ['gdprAgreement'],
 };
 
 /* The name vocabulary the discovery script's isHoneypot uses, applied to the control this plan is
@@ -5353,6 +5384,23 @@ function selectorControlName(selector: string | undefined): string | null {
   return match ? match[1].replace(/\\(.)/g, '$1') : null;
 }
 
+/* THE CAPTURED LABEL CAN CARRY THE CONTROL'S OWN NAME, and the grammar must not read it.
+ *
+ * Breezy's discovery capture welds the control name onto the end of the consent sentence: the live
+ * 2026-08-20 Transparent Hiring row stores "i've read the privacy notice below and consent the
+ * processing of my data as part of my job application. gdpragreement". That trailing token is the
+ * control's IDENTITY - the same name the packet's own selector carries, which is exactly how this
+ * function's caller proved which control the question is about - not a second document, so it comes
+ * off before consentAcknowledgementLicence reads the sentence. Bounded on purpose: only the exact
+ * control name, only as the label's final token, only behind whitespace or sentence punctuation,
+ * compared case-insensitively because the stored label is lowercased. Anything else stays in the
+ * label and holds, which is the direction the grammar is allowed to fail in. */
+function consentQuestionWithoutWeldedControlName(questionText: string, controlName: string): string {
+  const escaped = controlName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const stripped = questionText.replace(new RegExp(String.raw`[\s.,;:]+${escaped}\s*$`, 'i'), '').trim();
+  return stripped || questionText;
+}
+
 /** Everything a grant-conditional submit run needs in order to tick the consent control: which
  *  control, under which question wording, and under which grant the acceptance is licensed. */
 export type ManagedConsentTickPlan = {
@@ -5360,6 +5408,13 @@ export type ManagedConsentTickPlan = {
   question: string;
   selector: string;
   licence: PortalConsentGrant;
+  /* WHOSE acceptance the tick executes, kept truthful end to end. 'consent_permission' is the
+   * machine acceptance the resolver recorded under the standing grant - the only provenance the
+   * submit-unlocking families accept. 'applicant_review' is HER OWN reviewed answer replayed onto
+   * the control, allowed only on breezy (see managedConsentTickPlan condition 4), and it is never
+   * relabelled: the packet record keeps answer_source applicant_review, and the tick's action label
+   * says the run replayed her review rather than exercised the permission. */
+  answerProvenance: 'consent_permission' | 'applicant_review';
 };
 
 export const MANAGED_CONSENT_TICK_GUARD_LABEL = 'consent_tick_honeypot_guard';
@@ -5384,12 +5439,24 @@ export const MANAGED_CONSENT_TICK_LABEL_PREFIX = 'question_consent_tick';
  *      work-authorization declaration sitting in the consent control's place is never ticked,
  *      whatever control it sits in. The licence is also re-derived from the profile buildPacket
  *      loaded moments ago, so a permission revoked after review kills the plan at fill time.
- *   4. The stored answer is a machine acceptance recorded under the permission: answerSource is
- *      'consent_permission' and the value reads as an acceptance. That record - written by the
- *      resolution loop with consent_permission_version and consent_permission_granted_at beside it
- *      (routes/submissionRunner.ts, "THE ACCEPTANCE, WRITTEN DOWN ON THE QUESTION IT WAS MADE ON")
- *      - is the audit trail for this tick; the run executes an acceptance the packet already says
- *      Litos made on her behalf, rather than inventing one the audit cannot explain.
+ *   4. The stored answer is an acceptance the packet can already explain, and WHOSE acceptance it
+ *      is depends on what the plan is unlocking. On teamtailor and pinpoint the plan is what
+ *      unlocks SUBMIT, so only the machine acceptance qualifies: answerSource
+ *      'consent_permission', written by the resolution loop with consent_permission_version and
+ *      consent_permission_granted_at beside it (routes/submissionRunner.ts, "THE ACCEPTANCE,
+ *      WRITTEN DOWN ON THE QUESTION IT WAS MADE ON"); her own reviewed tick still parks there,
+ *      pinned in recruiteeTeamtailorPortal.test.ts, because relabelling her answer as made under
+ *      the permission would misreport it. On breezy the submit was never this plan's to unlock -
+ *      the family is statically autonomous and the reviewed-question replay already fills her
+ *      answers onto every breezy control, consent-shaped included (shouldSkipPortalConsentQuestion
+ *      names no breezy skip) - so her own applicant_review acceptance ALSO licenses the tick
+ *      there, executed as a replay of HER answer and recorded that way: the plan carries
+ *      answerProvenance 'applicant_review', the packet record keeps her provenance untouched, and
+ *      the tick's action label says replayed_review. Measured live 2026-08-20 (Transparent
+ *      Hiring): the parked row carries her review's "Yes", because the resolver's
+ *      applicant-override contract (PR #566) rightly refuses to overwrite or relabel an answer she
+ *      gave, so a machine-only gate would park forever on a consent she has already accepted in so
+ *      many words.
  *   5. The wording is not the future-jobs retention opt-in, and the control's name is not
  *      honeypot-shaped.
  */
@@ -5414,7 +5481,12 @@ export function managedConsentTickPlan(
   if (HONEYPOT_CONTROL_NAME_RE.test(name)) return null;
   // A control whose live evidence failed is refused to every builder; the tick is no exception.
   if (packetQuestionFailed(packet, item)) return null;
-  const questionText = normalizeReviewQuestionLabel(item.question);
+  // The welded control name comes off only AFTER the selector proved which control this is, so
+  // the strip can never invent a consent: it removes the one token the match itself explains.
+  const questionText = consentQuestionWithoutWeldedControlName(
+    normalizeReviewQuestionLabel(item.question),
+    name,
+  );
   if (!questionText || FUTURE_JOBS_RETENTION_CONSENT_RE.test(questionText)) return null;
   /* THE SAME CONTEXT SHAPE THE RESOLVER USED, recomposed rather than trusted. packet.jdText is the
    * raw posting prose; the frozen employer line lives only in the discovery pass's composed
@@ -5427,9 +5499,16 @@ export function managedConsentTickPlan(
     .join('\n');
   const licence = consentAcknowledgementLicence(questionText, ap, licenceContext || undefined);
   if (!licence) return null;
-  if (item.answerSource !== 'consent_permission') return null;
+  // Condition 4 of the block comment above: whose acceptance this is. Machine acceptance
+  // everywhere; her own reviewed acceptance only on breezy, and only as itself.
+  const answerProvenance = item.answerSource === 'consent_permission'
+    ? 'consent_permission' as const
+    : family === 'breezy' && applicantChoseAnswer(item)
+      ? 'applicant_review' as const
+      : null;
+  if (!answerProvenance) return null;
   if (!item.answer.trim() || !isConsentAcceptingWording(item.answer)) return null;
-  return { family, question: questionText, selector, licence };
+  return { family, question: questionText, selector, licence, answerProvenance };
 }
 
 /* TICK ONCE, GUARDED, RIGHT BEFORE THE SUBMIT ACTION.
@@ -5451,9 +5530,12 @@ export function managedConsentTickPlan(
  *                      CAN be pinned by rejection.
  *   click              the one authorized tick. click toggles, which is exactly why there is ONE
  *                      click behind a uniqueness guard and never a ladder - see the Cloudflare
- *                      measurement on pushGreenhouseCheckboxOptionActions. Neither captured tenant
+ *                      measurement on pushGreenhouseCheckboxOptionActions. No captured tenant
  *                      pre-ticks the control (pre-ticked consent is the pattern GDPR forbids), and
  *                      that must be re-confirmed live before widening this to any new family.
+ *                      Re-confirmed for breezy on 2026-08-20: the Transparent Hiring run reached
+ *                      submit with gdprAgreement empty and parked on the employer's own
+ *                      "required and is still empty" validation, so the tenant does not pre-tick.
  */
 function pushManagedConsentTickActions(actions: ManagedBrowserAction[], plan: ManagedConsentTickPlan) {
   actions.push({
@@ -5476,7 +5558,11 @@ function pushManagedConsentTickActions(actions: ManagedBrowserAction[], plan: Ma
   actions.push({
     type: 'click',
     selector: plan.selector,
-    label: `${MANAGED_CONSENT_TICK_LABEL_PREFIX}:${plan.question.slice(0, 80)}`,
+    // A replayed applicant_review acceptance says so in the transcript, so the run's own record
+    // never reads as a permission being exercised when it was her answer being executed.
+    label: plan.answerProvenance === 'applicant_review'
+      ? `${MANAGED_CONSENT_TICK_LABEL_PREFIX}:replayed_review:${plan.question.slice(0, 80)}`
+      : `${MANAGED_CONSENT_TICK_LABEL_PREFIX}:${plan.question.slice(0, 80)}`,
     optional: false,
     requireUnique: true,
     timeout: MANAGED_FILL_TIMEOUT_MS,
@@ -6553,6 +6639,10 @@ function pushFixedFieldActions(
     managedUpload(actions, BREEZY_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     // textarea[name="cSummary"] is left alone: it is candidate-authored positioning, the same
     // judgement already made for Workable's `headline`.
+    // gdprAgreement is never filled HERE: on a submit run whose packet licenses it, the guarded
+    // consent-tick block immediately before the submit action ticks it (managedConsentTickPlan),
+    // and on every other run it stays with the applicant. smsConsent stays with the applicant
+    // unconditionally.
   } else if (family === 'bamboohr') {
     // The form does not exist until this button is clicked, so this must be the FIRST action, the
     // same shape as the SmartRecruiters apply link. Optional and bounded, so a page that already

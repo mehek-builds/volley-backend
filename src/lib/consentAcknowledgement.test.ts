@@ -486,3 +486,67 @@ describe("Teamtailor's platform-default consent sentence", () => {
     assert.equal(consentAcknowledgementLicence(TEAMTAILOR_DEFAULT('Fully'), {}, employerContext('Fully')), null);
   });
 });
+
+describe("Breezy's platform-default consent sentence", () => {
+  /* MEASURED LIVE, 2026-08-20, on the account's real Breezy row (Transparent Hiring, "HR Assistant
+   * Intern", <tenant>.breezy.hr). The run filled everything, pressed submit, and parked SOLELY on
+   * the stock gdprAgreement checkbox, because this sentence - the platform's own default wording -
+   * classified as nothing.
+   *
+   * Bisected, one word held it: "part", inside "as part of my job application". Every other token
+   * is already filler or scaffolding, and one unexplained token is enough to hold, so the
+   * platform's default wording parked every consent-bearing Breezy send one step from completion.
+   * CONSENT_PART_OF_CLAUSE accounts for the literal idiom "as part of" as a span, the same device
+   * as the purpose and capability clauses and for the same reason: as a filler word, "part" would
+   * be absorbed anywhere; as a fixed phrase of closed-class words it absorbs nothing else.
+   *
+   * No employer context here, deliberately: unlike Teamtailor's default, this sentence names no
+   * tenant, so the grammar must classify it with nothing but the label in hand. */
+  const BREEZY_DEFAULT =
+    "I've read the Privacy Notice below and consent the processing of my data as part of my job application.";
+  /* The stored question is the capture's own lowercased label with the control name welded onto
+   * the end. The weld happens to spell "gdpr" plus "agreement", which the coverage rule already
+   * accounts for on its own - the span reader places "gdpr" and "agreement" is a document head
+   * noun - so THIS label classifies even before managedConsentTickPlan strips the weld it can
+   * prove. A control name that spells nothing the grammar knows still holds at this level, which
+   * is why the plan-level strip exists and is bounded to the selector-proven name. */
+  const BREEZY_STORED =
+    "i've read the privacy notice below and consent the processing of my data as part of my job application. gdpragreement";
+
+  test('the exact live sentence classifies as a privacy consent with no employer context', () => {
+    assert.deepEqual(consentAcknowledgementClasses(BREEZY_DEFAULT), ['privacy_and_terms']);
+    assert.deepEqual(consentAcknowledgementClasses(BREEZY_STORED), ['privacy_and_terms']);
+  });
+
+  test('"as part of" absorbs only itself: a document smuggled behind it still holds the label', () => {
+    assert.deepEqual(
+      consentAcknowledgementClasses(
+        "I've read the Privacy Notice below and the hiring handbook as part of my job application.",
+      ),
+      [],
+    );
+    // And a conduct document there needs the conduct grant, exactly as anywhere else.
+    assert.deepEqual(
+      consentAcknowledgementClasses(
+        "I've read the code of conduct as part of my job application.",
+      ),
+      ['conduct'],
+    );
+  });
+
+  test('the veto still runs first: welding a declaration onto the live sentence holds it', () => {
+    assert.deepEqual(
+      consentAcknowledgementClasses(
+        `${BREEZY_DEFAULT.slice(0, -1)} and certify that the information provided is true.`,
+      ),
+      [],
+    );
+  });
+
+  test('with the standing permission the licence covers the live sentence; without it, null', () => {
+    const licence = consentAcknowledgementLicence(BREEZY_DEFAULT, GRANTED);
+    assert.ok(licence);
+    assert.equal(licence.version, `privacy_and_terms@${AUTOMATIC_CONSENT_ACCEPTANCE_VERSION}`);
+    assert.equal(consentAcknowledgementLicence(BREEZY_DEFAULT, {}), null);
+  });
+});

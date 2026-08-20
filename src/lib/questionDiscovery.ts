@@ -4288,6 +4288,25 @@ const CONSENT_PURPOSE_CLAUSE =
  * one, and the veto still runs first regardless. */
 const CONSENT_CAPABILITY_CLAUSE = String.raw`be(?:ing)?\s+able\s+to`;
 
+/* HOW THE HANDLING RELATES TO THE APPLICATION, the third scaffolding construction, and the same
+ * safety argument as the two above word for word.
+ *
+ * Breezy's PLATFORM-DEFAULT consent sentence, measured live on 2026-08-20 on Transparent Hiring
+ * (<tenant>.breezy.hr, the stock gdprAgreement checkbox), reads "...consent the processing of my
+ * data as part of my job application." Bisected against the grammar: every word of that tail is
+ * already structural filler except one, "part" - not a document name, not a fact about her, just
+ * the idiom English uses to attach the handling to the application it serves - and one unexplained
+ * token is enough to hold, so the platform's own default wording parked every consent-bearing
+ * Breezy send one step from completion.
+ *
+ * ACCOUNTED FOR AS A SPAN, NOT AS ONE MORE FILLER WORD. Added to CONSENT_STRUCTURAL_FILLER, "part"
+ * would be absorbed anywhere in any label ("part-time", "as part of the interview panel"); matched
+ * here it is absorbed only inside the literal three-word idiom. The span is a fixed phrase of
+ * closed-class words with no wildcard in it, so nothing can be smuggled through a match that
+ * admits no variable content. Used ONLY by consentLabelIsFullyAccountedFor, so it can widen no
+ * label into a consent that was not already one, and the veto still runs first regardless. */
+const CONSENT_PART_OF_CLAUSE = String.raw`as\s+part\s+of`;
+
 /**
  * A label that IS a consent document and nothing else: "Privacy Statement", "Interview Code of
  * Conduct", "Privacy Policy Acknowledgement", "Processing of Personal Data".
@@ -4601,7 +4620,7 @@ function consentLabelIsFullyAccountedFor(
    * cosmetic. The clause's own verb list contains `read` and `review`, which CONSENT_ACT also
    * matches; letting CONSENT_ACT run first would blank the verb out of "to read more about how" and
    * leave the clause unmatchable, stranding `how` exactly as before. */
-  for (const source of [CONSENT_PURPOSE_CLAUSE, CONSENT_CAPABILITY_CLAUSE, CONSENT_ACT, CONSENT_DOCUMENT_QUALIFIER]) {
+  for (const source of [CONSENT_PURPOSE_CLAUSE, CONSENT_CAPABILITY_CLAUSE, CONSENT_PART_OF_CLAUSE, CONSENT_ACT, CONSENT_DOCUMENT_QUALIFIER]) {
     residue = residue.replace(new RegExp(String.raw`\b(?:${source})\b`, 'gi'), ' ');
   }
   /* A genitive is a determiner wearing a noun's clothes: "cloudflare's candidate privacy policy"

@@ -43,6 +43,9 @@ import {
   reactSelectListboxSelector,
   GREENHOUSE_OPTION_PROBE_IDS,
   MANAGED_ACTION_LIMIT,
+  MANAGED_CONSENT_TICK_GUARD_LABEL,
+  MANAGED_CONSENT_TICK_LABEL_PREFIX,
+  managedConsentTickPlan,
   ManagedActionBudgetError,
   budgetDroppedReviewedQuestions,
   reviewedQuestionsWithoutActions,
@@ -58,6 +61,7 @@ import {
   READ_CONTROL_LABEL,
 } from './portalSubmission';
 import { POLLABLE_JOB_BOARDS } from './jobMonitor';
+import { AUTOMATIC_CONSENT_ACCEPTANCE_VERSION } from './automationConsent';
 import { resolveProfileField } from './profileFieldResolution';
 import {
   MANAGED_DISCOVERY_ROLE_CAPABILITY,
@@ -4876,14 +4880,196 @@ test('Breezy uses one full-name field and never splits it into first and last', 
   }
 });
 
-test('Breezy touches neither its honeypot nor its two consent checkboxes', () => {
+test('Breezy touches neither its honeypot nor its two consent checkboxes on an unlicensed run', () => {
   // hp_<hex> is randomised per render AND defeats a naive visibility check: the input itself computes
   // to opacity 1 / visibility visible / 250x43, concealed only by a height:0 overflow:hidden
   // ancestor. This adapter is safe because it fills by explicit name, and this test keeps it that way.
+  // gdprAgreement's ONE exception is the guarded consent tick a submit-run packet can license
+  // (managedConsentTickPlan); this packet carries no grant and no consent question, so nothing here
+  // may name the control - which is also the byte-for-byte no-consent-tenant story pinned below.
   const actions = buildManagedPortalActions('breezy', capturePacket, true);
   const serialised = JSON.stringify(actions);
   for (const forbidden of ['hp_', 'smsConsent', 'gdprAgreement']) {
     assert.equal(serialised.includes(forbidden), false, forbidden);
+  }
+});
+
+/* ---- the consent tick, Breezy side: a statically autonomous family whose grant licenses ONLY
+ * the tick.
+ *
+ * MEASURED LIVE 2026-08-20, account mehekmandal05@gmail.com, "HR Assistant Intern" at Transparent
+ * Hiring (<tenant>.breezy.hr), run 06:27 UTC: every other question answered, submit pressed, and
+ * the run parked SOLELY on the stock gdprAgreement checkbox - '"I've read the Privacy Notice below
+ * and consent the processing of my data as part of my job application." is required and is still
+ * empty'. The park at submit time is the live proof the tenant does NOT pre-tick the control,
+ * which is the re-confirmation the #620 tick comment demands before any new family is widened.
+ * The stored question is the capture's own lowercased label with the control name welded onto the
+ * end, used verbatim here so the fixtures are the measurement. */
+
+const BREEZY_CONSENT_SELECTOR = 'input[name="gdprAgreement"]';
+const BREEZY_LIVE_CONSENT_LABEL =
+  "i've read the privacy notice below and consent the processing of my data as part of my job application. gdpragreement";
+const breezyGrantedProfile = {
+  consent_acknowledgement_permission: {
+    granted_at: '2026-08-12T09:15:00.000Z',
+    version: AUTOMATIC_CONSENT_ACCEPTANCE_VERSION,
+  },
+};
+const breezyConsentQuestion = {
+  question: BREEZY_LIVE_CONSENT_LABEL,
+  answer: 'Yes',
+  answerSource: 'consent_permission',
+  portalSelector: BREEZY_CONSENT_SELECTOR,
+  portalInputType: 'checkbox',
+};
+
+function breezyTickClicks(actions: ReturnType<typeof buildManagedPortalActions>) {
+  return actions.filter((action) => action.type === 'click'
+    && action.label?.startsWith(`${MANAGED_CONSENT_TICK_LABEL_PREFIX}:`));
+}
+
+test('with the grant and the recorded machine acceptance, Breezy ticks once, guarded, then submits', () => {
+  const actions = buildManagedPortalActions('breezy', {
+    ...capturePacket,
+    employerName: 'Transparent Hiring',
+    applicationProfile: breezyGrantedProfile,
+    questions: [breezyConsentQuestion],
+  }, true);
+  const ticks = breezyTickClicks(actions);
+  assert.equal(ticks.length, 1);
+  assert.equal(ticks[0].selector, BREEZY_CONSENT_SELECTOR);
+  assert.equal(ticks[0].optional, false);
+  assert.equal(ticks[0].requireUnique, true);
+  const guardIndex = actions.findIndex((action) => action.label === MANAGED_CONSENT_TICK_GUARD_LABEL);
+  const tickIndex = actions.indexOf(ticks[0]);
+  assert.ok(guardIndex >= 0 && guardIndex < tickIndex, 'honeypot guard precedes the tick');
+  assert.equal(actions[guardIndex].requireVisible, true);
+  assert.equal(actions[guardIndex].requireUnique, true);
+  assert.equal(actions[guardIndex].optional, false);
+  const submits = actions.filter((action) => action.type === 'confirmAndSubmit');
+  assert.equal(submits.length, 1);
+  assert.equal(actions.indexOf(submits[0]), tickIndex + 1);
+  // One control, one path: nothing but the guard and the tick may touch gdprAgreement, or the
+  // reviewed-question check plus the tick's toggle would untick it under a submit.
+  assert.deepEqual(
+    actions.filter((action) => action.selector?.includes('gdprAgreement')
+      || action.text?.includes('privacy notice below')),
+    [actions[guardIndex], ticks[0]],
+  );
+});
+
+test("Breezy replays HER OWN reviewed acceptance onto the control, recorded as hers, never relabelled", () => {
+  /* The live row's exact state: she answered this consent herself through the review editor
+   * (answer "Yes", answer_source applicant_review), and the applicant-override contract rightly
+   * keeps that record hers. On breezy the plan is not what unlocks submit - the family is
+   * statically autonomous, and the reviewed-question replay already fills her answers onto every
+   * breezy control - so her acceptance licenses the tick AS HER OWN, with the provenance carried
+   * on the plan and named in the action label. */
+  const packetWithHers = {
+    ...capturePacket,
+    employerName: 'Transparent Hiring',
+    applicationProfile: breezyGrantedProfile,
+    questions: [{ ...breezyConsentQuestion, answerSource: 'applicant_review' }],
+  };
+  const plan = managedConsentTickPlan('breezy', packetWithHers);
+  assert.ok(plan);
+  assert.equal(plan!.family, 'breezy');
+  assert.equal(plan!.answerProvenance, 'applicant_review');
+  assert.equal(plan!.selector, BREEZY_CONSENT_SELECTOR);
+  // The welded control name is stripped before the grammar reads the sentence, and the licence is
+  // the privacy grant.
+  assert.doesNotMatch(plan!.question, /gdpragreement/i);
+  assert.match(plan!.licence.version, /privacy_and_terms@/);
+
+  const actions = buildManagedPortalActions('breezy', packetWithHers, true);
+  const ticks = breezyTickClicks(actions);
+  assert.equal(ticks.length, 1);
+  assert.ok(
+    ticks[0].label?.startsWith(`${MANAGED_CONSENT_TICK_LABEL_PREFIX}:replayed_review:`),
+    'the transcript says her review was replayed, not that a permission was exercised',
+  );
+  assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1);
+
+  // An unattributed answer proves nothing and licenses nothing, on breezy exactly as elsewhere.
+  assert.equal(managedConsentTickPlan('breezy', {
+    ...packetWithHers,
+    questions: [{ ...breezyConsentQuestion, answerSource: undefined }],
+  }), null);
+
+  // And the replay arm is BREEZY'S alone: on the submit-unlocking families her reviewed tick still
+  // parks, exactly as recruiteeTeamtailorPortal.test.ts pins for the whole action list.
+  for (const family of ['teamtailor', 'pinpoint'] as const) {
+    const selector = family === 'teamtailor'
+      ? 'input[name="candidate[consent_given]"]'
+      : 'input[name="application_form[application][process_information]"]';
+    assert.equal(managedConsentTickPlan(family, {
+      ...capturePacket,
+      applicationProfile: breezyGrantedProfile,
+      questions: [{
+        question: 'I consent to the processing of my personal data in accordance with the privacy policy.',
+        answer: 'Yes',
+        answerSource: 'applicant_review',
+        portalSelector: selector,
+        portalInputType: 'checkbox',
+      }],
+    }), null, family);
+  }
+});
+
+test('Breezy without the grant, with two consent-shaped controls, or on the wrong wording never ticks, and the static story never moves', () => {
+  // No grant: no tick and gdprAgreement untouched, but the submit press is NOT the grant's to
+  // withhold - breezy is statically autonomous, and the run parks on the tenant's own validation
+  // exactly as the live 2026-08-20 run did.
+  const noGrant = buildManagedPortalActions('breezy', {
+    ...capturePacket,
+    employerName: 'Transparent Hiring',
+    questions: [{ ...breezyConsentQuestion, answerSource: 'applicant_review' }],
+  }, true);
+  assert.equal(breezyTickClicks(noGrant).length, 0);
+  assert.doesNotMatch(JSON.stringify(noGrant), /gdprAgreement/);
+  assert.equal(noGrant.filter((action) => action.type === 'confirmAndSubmit').length, 1);
+
+  // A tenant with NO consent control behaves byte-for-byte as before, grant or no grant.
+  const grantNoConsent = buildManagedPortalActions('breezy', {
+    ...capturePacket,
+    applicationProfile: breezyGrantedProfile,
+  }, true);
+  assert.deepEqual(grantNoConsent, buildManagedPortalActions('breezy', capturePacket, true));
+  assert.equal(grantNoConsent.filter((action) => action.type === 'confirmAndSubmit').length, 1);
+
+  // Two questions naming the captured control is ambiguity: park the tick, not guess.
+  const ambiguous = buildManagedPortalActions('breezy', {
+    ...capturePacket,
+    employerName: 'Transparent Hiring',
+    applicationProfile: breezyGrantedProfile,
+    questions: [breezyConsentQuestion, { ...breezyConsentQuestion, question: 'privacy notice' }],
+  }, true);
+  assert.equal(breezyTickClicks(ambiguous).length, 0);
+  assert.doesNotMatch(JSON.stringify(ambiguous), /gdprAgreement/);
+
+  // A honeypot-named control can never become the candidate: the name table is the boundary, and
+  // Breezy's own hp_<hex> trap stays exactly as untouchable as the family capture pinned it.
+  const honeypot = buildManagedPortalActions('breezy', {
+    ...capturePacket,
+    applicationProfile: breezyGrantedProfile,
+    questions: [{ ...breezyConsentQuestion, portalSelector: 'input[name="hp_3f2a"]' }],
+  }, true);
+  assert.equal(breezyTickClicks(honeypot).length, 0);
+  assert.doesNotMatch(JSON.stringify(honeypot), /hp_3f2a/);
+
+  // The future-jobs retention opt-in and a held declaration sitting in the control's place are
+  // refused whatever the provenance says.
+  for (const wording of [
+    'Keep my information on file so you can contact me about future jobs and other opportunities.',
+    'I certify that the information provided in this application is true and I authorize a background check.',
+  ]) {
+    const refused = buildManagedPortalActions('breezy', {
+      ...capturePacket,
+      employerName: 'Transparent Hiring',
+      applicationProfile: breezyGrantedProfile,
+      questions: [{ ...breezyConsentQuestion, question: wording }],
+    }, true);
+    assert.equal(breezyTickClicks(refused).length, 0, wording);
   }
 });
 
