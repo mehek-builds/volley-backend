@@ -5517,6 +5517,39 @@ export function managedConsentTickPlan(
   return { family, question: questionText, selector, licence, answerProvenance };
 }
 
+/* THE BLOCKER THE TICK PLAN ALREADY COVERS IS NOT A BLOCKER AT PREPARE TIME.
+ *
+ * Measured live on Transparent Hiring (breezy, 2026-08-20): the fill run cannot tick the consent
+ * checkbox - no captured tenant pre-ticks, and GDPR forbids a pre-ticked consent, so the tick is
+ * planned for the instant before submit (pushManagedConsentTickActions) and NOWHERE else. The
+ * readiness gate then read the untouched checkbox back as '"..." is required and is still empty',
+ * `safe` went false, the row parked at needs_attention, and the Send button that would have run the
+ * tick could never be offered: the design deadlocked itself one screen early.
+ *
+ * Fail-closed on the plan itself: no standing plan, no excusal, and the plan already demands the
+ * grant, the licence, exactly one captured control and an accepting recorded answer. The comparison
+ * is against the plan's own question text (welded control name stripped), with the raw label and
+ * the label-plus-control-name both accepted, because the gate names the control by whichever label
+ * face it recovered. Everything else in the list is untouched.
+ */
+export function consentTickCoveredBlockers(
+  blockers: readonly string[],
+  plan: ManagedConsentTickPlan | null,
+): string[] {
+  if (!plan) return [];
+  const comparable = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const planKey = comparable(plan.question);
+  if (!planKey) return [];
+  const name = selectorControlName(plan.selector);
+  const weldedKey = name ? comparable(plan.question + ' ' + name) : null;
+  return blockers.filter((blocker) => {
+    const match = blocker.match(/^"(.+)" is required and is still empty$/);
+    if (!match) return false;
+    const blockerKey = comparable(match[1]!);
+    return blockerKey === planKey || (weldedKey !== null && blockerKey === weldedKey);
+  });
+}
+
 /* TICK ONCE, GUARDED, RIGHT BEFORE THE SUBMIT ACTION.
  *
  * Three actions, all required (optional: false), so any one of them failing stops the list and

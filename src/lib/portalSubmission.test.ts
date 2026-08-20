@@ -46,6 +46,7 @@ import {
   MANAGED_CONSENT_TICK_GUARD_LABEL,
   MANAGED_CONSENT_TICK_LABEL_PREFIX,
   managedConsentTickPlan,
+  consentTickCoveredBlockers,
   ManagedActionBudgetError,
   budgetDroppedReviewedQuestions,
   reviewedQuestionsWithoutActions,
@@ -4956,6 +4957,34 @@ test('with the grant and the recorded machine acceptance, Breezy ticks once, gua
       || action.text?.includes('privacy notice below')),
     [actions[guardIndex], ticks[0]],
   );
+});
+
+test('the blocker naming the tick-covered consent control is excused, and only that one', () => {
+  /* The live Transparent Hiring deadlock, 2026-08-20: the fill run leaves the consent untouched by
+   * design, the readiness gate reads it back as required-and-still-empty, and the row parks one
+   * screen before the Send press that would run the tick. The excusal keys on the plan itself. */
+  const packetWithHers = {
+    ...capturePacket,
+    employerName: 'Transparent Hiring',
+    applicationProfile: breezyGrantedProfile,
+    questions: [{ ...breezyConsentQuestion, answerSource: 'applicant_review' as const }],
+  };
+  const plan = managedConsentTickPlan('breezy', packetWithHers);
+  assert.ok(plan);
+  const consentBlocker = '"I\'ve read the Privacy Notice below and consent the processing of my data'
+    + ' as part of my job application." is required and is still empty';
+  const otherBlocker = '"Your earliest possible start date" is required and is still empty';
+  const nonBlocker = 'CAPTCHA requires your attention';
+  assert.deepEqual(
+    consentTickCoveredBlockers([consentBlocker, otherBlocker, nonBlocker], plan!),
+    [consentBlocker],
+  );
+  // The welded face of the same label is the same control.
+  const welded = '"I\'ve read the Privacy Notice below and consent the processing of my data'
+    + ' as part of my job application. gdprAgreement" is required and is still empty';
+  assert.deepEqual(consentTickCoveredBlockers([welded], plan!), [welded]);
+  // No plan, no excusal: fail-closed.
+  assert.deepEqual(consentTickCoveredBlockers([consentBlocker], null), []);
 });
 
 test("Breezy replays HER OWN reviewed acceptance onto the control, recorded as hers, never relabelled", () => {

@@ -94,6 +94,7 @@ import {
   isCaptchaGatedFamily,
   isConsentGrantConditionalFamily,
   managedConsentTickPlan,
+  consentTickCoveredBlockers,
   portalCanAutoSubmit,
   portalCanAutoSubmitWithConsentGrant,
   portalHandoffReason,
@@ -1792,6 +1793,12 @@ export async function discoverAndResolveQuestions(
     reviewLabel: string,
     existing: ApplicationReviewQuestion | undefined,
     preserveExistingAnswer = false,
+    /* False when the employer left the control optional. The record is still minted on the
+       left-for-you branches - a question Litos refuses to answer must reach her as something she
+       CAN answer inside the product (R-096), whether or not the employer demands it - but an
+       optional blank must never enter blankRequiredQuestionLabels, or the send gate would hold a
+       complete application over a field the employer does not require. */
+    required = true,
   ): ApplicationReviewQuestion => ({
     id: existing?.id ?? randomUUID(),
     question: reviewLabel,
@@ -1799,7 +1806,7 @@ export async function discoverAndResolveQuestions(
     // an old value may have been created by a superseded unsafe resolver and must be re-confirmed.
     answer: preserveExistingAnswer ? (existing?.answer ?? '') : '',
     kind: 'required',
-    required: true,
+    required,
     portal_selector: portalSelectorForField(field),
     portal_input_type: discoveredControlInputType(field),
     /* THE MENU, CARRIED TO HER. This is the branch that says "you answer this", so it is exactly the
@@ -1950,13 +1957,13 @@ export async function discoverAndResolveQuestions(
       && usableOptions(field.options).length > 0) {
       invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
       attentionReasons.push(`none of the options exactly match your remembered answer, so this one is left for you: "${label.slice(0, 60)}"`);
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
       continue;
     }
     if (known && 'skipReason' in known) {
       invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
       attentionReasons.push(known.skipReason);
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
       continue;
     }
     if (!known && isRefusedQuestion(label)) {
@@ -1964,7 +1971,7 @@ export async function discoverAndResolveQuestions(
       attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
         ? workEligibilitySkipReason(label)
         : `sensitive question left for you: "${label.slice(0, 60)}"`);
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+      questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
       continue;
     }
     if (isSelfDeclarationQuestion(label)) {
@@ -2984,13 +2991,31 @@ async function prepareManaged(
    * Read before every other use of `blockers`, so the send gate, the unanswerable count and the
    * applicant's attention_reason cannot disagree about which sentences this run stands behind. */
   const unmetFollowUps = unmetConditionalFollowUpBlockers(providerBlockers, discoveredFields, mergedQuestions);
-  const blockers = unmetFollowUps.length > 0
+  const afterFollowUps = unmetFollowUps.length > 0
     ? providerBlockers.filter((blocker) => !unmetFollowUps.includes(blocker))
     : providerBlockers;
   if (unmetFollowUps.length > 0) {
     fastify.log.info(
       { applicationId: row.id, portal, blockers: unmetFollowUps },
       'Conditional follow-up reported required on a field the employer marked optional, and its condition is unmet',
+    );
+  }
+  /* The consent control the submit-time tick plan already covers is not a prepare-time blocker.
+   *
+   * The fill run leaves it untouched BY DESIGN (no pre-ticked consent, ever), the tick runs as the
+   * action immediately before submit, and the plan below is the same fail-closed licence the submit
+   * path demands. Without this excusal the readiness gate reads the deliberately-untouched checkbox
+   * as required-and-still-empty, `safe` goes false, and the Send press that would run the tick can
+   * never be offered - measured live on Transparent Hiring (breezy), 2026-08-20. */
+  const prepareConsentTickPlan = managedConsentTickPlan(portal, packet);
+  const consentTickExcused = consentTickCoveredBlockers(afterFollowUps, prepareConsentTickPlan);
+  const blockers = consentTickExcused.length > 0
+    ? afterFollowUps.filter((blocker) => !consentTickExcused.includes(blocker))
+    : afterFollowUps;
+  if (consentTickExcused.length > 0) {
+    fastify.log.info(
+      { applicationId: row.id, portal, blockers: consentTickExcused },
+      'Consent control covered by the standing submit-time tick plan excused from prepare blockers',
     );
   }
   const networkAccessRestriction = managedNetworkAccessRestrictionReason(portal, result.text, result.title, result);

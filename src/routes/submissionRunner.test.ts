@@ -1248,7 +1248,11 @@ test('portal country metadata reaches managed send resolution without borrowing 
       true,
       'greenhouse',
     );
-    assert.equal(mixed.questions[0]?.answer, undefined);
+    /* R-096 widened: the refused question is minted even on an optional control, answerless, so
+       she can answer it inside the product; `required` carries the employer's own marker so an
+       optional blank never gates the send. */
+    assert.equal(mixed.questions[0]?.answer, '');
+    assert.equal(mixed.questions[0]?.required, false);
     assert.equal(mixed.attentionReasons.length, 1);
     assert.match(mixed.attentionReasons[0], /work-eligibility question left for you/i);
   }
@@ -1937,8 +1941,14 @@ test('refused required and optional answers cannot re-enter a packet through the
   );
   const merged = mergeDiscoveredPortalQuestions(result.questions, stored, result.invalidatedQuestionKeys);
   assert.equal(merged.some((question) => question.answer.trim()), false);
-  assert.equal(merged.some((question) => question.question === 'Candidate Privacy Notice'), false);
-  assert.equal(merged.some((question) => question.question === 'AI Policy for Interviewers'), false);
+  /* The two optional attestations now arrive as ANSWERLESS records she can answer herself (R-096
+     widened to optional controls); what must never re-enter is an answer, and none does. */
+  for (const label of ['Candidate Privacy Notice', 'AI Policy for Interviewers']) {
+    const minted = merged.find((question) => question.question === label);
+    assert.ok(minted, label);
+    assert.equal(minted!.answer, '');
+    assert.equal(minted!.required, false);
+  }
 });
 
 test('a remembered exact score does not survive changed closed-list options in discovery', async () => {
