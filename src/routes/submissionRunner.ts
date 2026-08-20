@@ -5003,9 +5003,11 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * Measured on the live Mytos Lever form (run 6757f19a, 2026-08-20): the press fetched an
      * hCaptcha drag puzzle, the receipt shows it standing over the fully filled form, and the
      * unverified sentence promised a re-send that would hit the same wall. */
-    const pressChallengeOnScreen = blockersIncludeCaptcha(
-      (receiptResult as { blockers?: readonly string[] }).blockers ?? [],
-    );
+    const pressChallengeOnScreen = blockersIncludeCaptcha(corroborateManagedCaptchaBlockers(
+      portal,
+      (receiptResult.blockers ?? []) as readonly string[],
+      receiptResult,
+    ));
     if (verdict.kind === 'refused') {
       const refusedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'rejected'
         ? 'rejected' as const
