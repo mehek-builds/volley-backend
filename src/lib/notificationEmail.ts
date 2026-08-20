@@ -1,4 +1,6 @@
+import { FAVICON_ENDPOINT, FAVICON_PX } from './companyDomains';
 import { emailSender, type OutboundEmail } from './email';
+import { scoreBand } from '../engine/jdMatch';
 import { PRODUCT_LINKS, PRODUCT_NAME } from './product';
 
 /* THE TWO MESSAGES, and the two rules that decide every word in them.
@@ -37,15 +39,10 @@ function escapeHtml(value: string): string {
  */
 export const EMAIL_MATCH_DISPLAY_FLOOR = 70;
 
-/** Same favicon source and size the dashboard's CompanyLogo uses, so a student who has seen the
- *  board recognises the row in her inbox. See components/app/CompanyLogo.tsx in the web app. */
-const FAVICON_ENDPOINT = 'https://www.google.com/s2/favicons';
-const FAVICON_PX = 64;
-
 /**
  * The 48px circle beside the job title: the employer's favicon when we have a verified domain for
  * them, otherwise their initial. No onerror fallback exists in email the way it does on the
- * dashboard, so a domain we are not confident in must not reach this function at all — the caller
+ * dashboard, so a domain we are not confident in must not reach this function at all: the caller
  * passes the same `company_domain` the board itself renders, resolved server-side by
  * `companyDomainFor`, never guessed here.
  */
@@ -199,6 +196,14 @@ export function strongMatchEmail(input: StrongMatchEmailInput): OutboundEmail {
      sentence, so the sentence is written to work with or without it rather than blanking a slot. */
   const showScore = input.score >= EMAIL_MATCH_DISPLAY_FLOOR;
   const metaLine = showScore ? `${found}. ${input.score}% match against your resume.` : `${found}.`;
+  /* The board's OWN bar for the word "strong" is scoreBand's 40, not MIN_RANKED_MATCH_SCORE's 25 -
+     the eligibility floor this alert sends on. Left as-is, a posting scoring 26-39 clears the send
+     floor and gets emailed "A strong match opened," then the student clicks through and the same
+     posting is labelled "Solid match" on the board. The floor stays 25 (send eligibility is not
+     this line's decision to make), but the CLAIM in the copy is capped at what the board itself
+     would call it, so the two surfaces never disagree about the same posting. */
+  const boardCallsItStrong = scoreBand(input.score).tone === 'strong';
+  const eyebrow = boardCallsItStrong ? 'A strong match opened' : 'A new match opened';
 
   return {
     from: emailSender(),
@@ -226,7 +231,7 @@ export function strongMatchEmail(input: StrongMatchEmailInput): OutboundEmail {
     ].join('\n'),
     html: shell(
       [
-        `<p class="email-muted" style="margin:0 0 16px;color:#6b6a64;font-size:13px;text-transform:uppercase;letter-spacing:0.06em;">A strong match opened</p>`,
+        `<p class="email-muted" style="margin:0 0 16px;color:#6b6a64;font-size:13px;text-transform:uppercase;letter-spacing:0.06em;">${escapeHtml(eyebrow)}</p>`,
         `<table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 20px;">`,
         `<tr>`,
         companyLogoHtml(job.company_name, job.company_domain),

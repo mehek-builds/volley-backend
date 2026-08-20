@@ -109,6 +109,21 @@ test('a score below the display floor drops the percentage but keeps the found p
   assert.match(strong.html ?? '', /70% match/);
 });
 
+test('the email never claims "strong" for a score the board itself would not call strong', () => {
+  /* The board's own scoreBand() draws "Strong match" at 40, not at MIN_RANKED_MATCH_SCORE's 25 -
+     the floor this alert sends on. A score of 31 clears the send floor but not the board's own bar,
+     so the email must not say "A strong match opened" for it: a student who clicks through from
+     that claim to a board that labels the same posting "Solid match" is the exact failure this
+     file's own docstring warns against - the score stops being a measurement and becomes copy. */
+  const belowBoardBar = matchEmail({}, 31);
+  assert.doesNotMatch(belowBoardBar.html ?? '', /A strong match opened/);
+  assert.match(belowBoardBar.html ?? '', /A new match opened/);
+
+  const atBoardBar = matchEmail({}, 40);
+  assert.match(atBoardBar.html ?? '', /A strong match opened/);
+  assert.doesNotMatch(atBoardBar.html ?? '', /A new match opened/);
+});
+
 test('the CTA sends a student to the Litos dashboard, not straight to the employer', () => {
   const email = matchEmail();
   assert.match(email.html ?? '', /Open your Litos dashboard/);

@@ -87,8 +87,11 @@ export function matchLookbackSince(now: Date): Date {
 export const VERY_STRONG_FIT_SCORE = 70;
 export const STRONG_FIT_SLA_HOURS = 3;
 
+/** Clamped at 0, the same way notificationEmail.ts's foundPhrase clamps its own elapsed-time math:
+ *  a first_seen_at slightly ahead of now (clock skew between the polling and the notifications
+ *  process) must read as "just found", not as a negative number of hours. */
 export function hoursSinceFound(firstSeenAt: Date, now: Date): number {
-  return (now.getTime() - firstSeenAt.getTime()) / (60 * 60 * 1000);
+  return Math.max(0, (now.getTime() - firstSeenAt.getTime()) / (60 * 60 * 1000));
 }
 
 /** Whether THIS SEND, happening now, is itself the SLA breach - a very strong fit that sat past its

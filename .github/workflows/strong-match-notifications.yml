@@ -15,6 +15,16 @@
 # routes/notifications.ts). That is still a genuine failure of the barrier this workflow exists to
 # keep, so it is still treated as one - the run goes red and the breach is unmissable, rather than
 # quietly logging a warning nobody scheduled to read.
+#
+# NO curl --retry ON THIS CALL, and that is deliberate rather than an omission. curl's --retry
+# treats HTTP 500 as a transient error and resends the request, but the 500 above is not transient:
+# by the time it is returned, runStrongMatchSweep has already finished and any qualifying email has
+# already gone out. A retry would not be idempotent-and-cheap here - the daily-cap/dedupe check that
+# would let a repeat call skip already-handled accounts only runs AFTER the full per-account query
+# and resume-scoring pipeline, so every retry re-pays that cost for the whole subscriber population.
+# curl retrying the one response that means "we are already behind" would triple the work at
+# exactly the moment the system can least afford it. A single failed attempt here still fails the
+# workflow (see the status checks below) and the next run is at most two hours away.
 name: strong-match-notifications
 
 on:
@@ -50,7 +60,6 @@ jobs:
 
           http_status=$(curl -sS \
             --max-time 300 \
-            --retry 2 --retry-delay 10 --retry-connrefused \
             -o response.json \
             -w '%{http_code}' \
             -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
@@ -74,8 +83,15 @@ jobs:
             exit 1
           fi
 
-          sla_breaches=$(jq -r '.sla_breaches // "unknown"' response.json)
-          if [ "${http_status}" = 500 ] && [ "${sla_breaches}" != "unknown" ] && [ "${sla_breaches}" != "0" ]; then
+          # `|| echo 0` is load-bearing under set -e: response.json is not guaranteed to be JSON at
+          # this point (a platform-level failure - a function timeout, a cold-start crash - can
+          # return Vercel's own plain-text/HTML error page instead of the app's JSON). Without the
+          # fallback, jq failing to parse that body would exit the whole script right here, on this
+          # line, before the "unexpected status" diagnostic below ever gets a chance to print -
+          # turning a readable error into a bare jq parse failure at the exact moment something has
+          # already gone wrong and a clear message matters most.
+          sla_breaches=$(jq -r '.sla_breaches // 0' response.json 2>/dev/null || echo 0)
+          if [ "${http_status}" = 500 ] && [ "${sla_breaches}" -gt 0 ] 2>/dev/null; then
             echo "::error::${sla_breaches} very-strong-fit match(es) were emailed past the 3-hour SLA. Confirm this workflow's schedule is actually firing every two hours - a missed or delayed run is the most likely cause."
             exit 1
           fi

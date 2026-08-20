@@ -100,12 +100,28 @@ export type MatchSweepSummary = {
  * simply not be told about anything that day, with nothing on screen to say so. So each account is
  * wrapped, its failure is counted, and the sweep carries on.
  */
+/**
+ * `slaBreach` is computed from the CANDIDATE, not from whether the send succeeded - and that is
+ * the whole fix for the gap a review caught in this barrier's first version. A very-strong fit that
+ * `strongMatchForAccount` correctly identifies as this account's best available posting, but that
+ * `sendNotification` then suppresses (most concretely: the daily cap already spent on a weaker
+ * match sent earlier the same UTC day), used to vanish with zero signal - `breachesStrongFitSla`
+ * was only ever called inside the `outcome.sent` branch, so a starved very-strong fit aged out of
+ * MATCH_LOOKBACK_HOURS silently, `sla_breaches` stayed 0, and the route answered 200 throughout.
+ * The promise was never "we will always send a late very-strong fit", it was "we will not stay
+ * quiet about missing it" - so the breach is now measured against the candidate the moment it is
+ * chosen, whether or not the send that follows is the thing that fails.
+ */
 async function sweepAccount(
   account: { id: string; email: string },
   now: Date,
-): Promise<{ sent: true; slaBreach: boolean } | 'no_match' | { suppressed: string }> {
+): Promise<
+  | { kind: 'sent'; slaBreach: boolean }
+  | { kind: 'no_match' }
+  | { kind: 'suppressed'; reason: string; slaBreach: boolean }
+> {
   const match = await strongMatchForAccount(account.id, now);
-  if (!match) return 'no_match';
+  if (!match) return { kind: 'no_match' };
   const outcome = await sendNotification({
     userId: account.id,
     kind: 'strong_match',
@@ -119,8 +135,9 @@ async function sweepAccount(
       score: match.score,
     }),
   }, { now: () => now });
-  if (outcome.sent) return { sent: true, slaBreach: breachesStrongFitSla(match, now) };
-  return { suppressed: outcome.reason };
+  const slaBreach = breachesStrongFitSla(match, now);
+  if (outcome.sent) return { kind: 'sent', slaBreach };
+  return { kind: 'suppressed', reason: outcome.reason, slaBreach };
 }
 
 export async function runStrongMatchSweep(now: Date, log?: FastifyRequest['log']): Promise<MatchSweepSummary> {
@@ -142,19 +159,19 @@ export async function runStrongMatchSweep(now: Date, log?: FastifyRequest['log']
   for (const account of considered) {
     try {
       const result = await sweepAccount(account, now);
-      if (result === 'no_match') continue;
+      if (result.kind === 'no_match') continue;
       summary.matched += 1;
-      if (typeof result === 'object' && 'sent' in result) {
+      if (result.slaBreach) {
+        summary.sla_breaches += 1;
+        log?.error(
+          { userId: account.id, sla_hours: STRONG_FIT_SLA_HOURS, outcome: result.kind },
+          'a very-strong-fit match was not emailed within the SLA window',
+        );
+      }
+      if (result.kind === 'sent') {
         summary.sent += 1;
-        if (result.slaBreach) {
-          summary.sla_breaches += 1;
-          log?.error(
-            { userId: account.id, sla_hours: STRONG_FIT_SLA_HOURS },
-            'a very-strong-fit match was not emailed within the SLA window',
-          );
-        }
       } else {
-        summary.suppressed[result.suppressed] = (summary.suppressed[result.suppressed] ?? 0) + 1;
+        summary.suppressed[result.reason] = (summary.suppressed[result.reason] ?? 0) + 1;
       }
     } catch (error) {
       summary.failed += 1;
@@ -427,7 +444,7 @@ export async function notificationRoutes(fastify: FastifyInstance) {
     /* THE HARD BARRIER. A cron that always answers 200 is a cron nobody reads - see
        MINIMUM_SURFACED_JOBS in jobMonitor.ts, the same pattern applied here. The fix for a breach
        is a sweep that runs often enough to catch very-strong fits sooner (see
-       .github/workflows/strong-match-sla.yml, the sub-daily cadence Vercel's Hobby-tier cron
+       .github/workflows/strong-match-notifications.yml, the sub-daily cadence Vercel's Hobby-tier cron
        cannot run on its own), never a wider STRONG_FIT_SLA_HOURS. */
     if (summary.sla_breaches > 0) {
       request.log.error(
