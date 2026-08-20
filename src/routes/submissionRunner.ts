@@ -2164,6 +2164,10 @@ export async function discoverAndResolveQuestions(
           portal_selector: portalSelectorForField(field),
           portal_input_type: controlType,
           answer_option_source: answerOptionSource,
+          /* The answer can come from the profile while the choices come from this live employer
+           * control. Preserve both. Otherwise an already-known answer keeps its text but the
+           * dashboard has no option list and renders the employer's select as a text box. */
+          ...(usableOptions(field.options).length > 0 ? { options: usableOptions(field.options) } : {}),
           // Last, so a re-run over a packet whose provenance was stripped by a review merge stamps
           // the acceptance back on rather than inheriting a blank.
           ...consentTrail,
@@ -2178,6 +2182,11 @@ export async function discoverAndResolveQuestions(
           required: existing.required || fieldIsRequired,
           portal_selector: portalSelectorForField(field),
           portal_input_type: controlType,
+          /* A stored answer predates this live form read, but the employer's menu does not. Keep
+           * the applicant's answer and refresh the display-only choices beside it. Without this,
+           * every already-answered Greenhouse select was returned to the dashboard as a free-text
+           * field even though the option probe had just read the exact allowed values. */
+          ...(usableOptions(field.options).length > 0 ? { options: usableOptions(field.options) } : {}),
         });
       } else if (fieldIsRequired) {
         questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, true));

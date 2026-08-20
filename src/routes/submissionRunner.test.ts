@@ -3370,6 +3370,46 @@ test('a current-round reviewed option stands when the profile value matches noth
   assert.deepEqual(result.attentionReasons, []);
 });
 
+test('a stored answered choice keeps the employer options discovered on the current run', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'Software engineering internship.',
+    role: 'Software Engineer Intern',
+    portal_url: 'https://job-boards.greenhouse.io/optiver/jobs/1',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'pronouns',
+      question: 'What are your preferred pronouns?',
+      answer: 'She/her',
+      kind: 'required',
+      required: true,
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const options = ['He/him', 'She/her', 'They/them', 'Prefer not to say'];
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'What are your preferred pronouns?*',
+      selector: '#question_12345678',
+      durableSelector: '#question_12345678',
+      inputType: 'select-one',
+      maxLength: null,
+      required: true,
+      options,
+    }],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { pronouns: 'She/her' },
+    true,
+    'greenhouse',
+  );
+
+  assert.equal(result.questions[0]?.answer, 'She/her');
+  assert.deepEqual(result.questions[0]?.options, options);
+});
+
 test('the profile still wins when it can name an offered option itself', async () => {
   const reviewedAt = '2026-08-20T18:30:00.000Z';
   const current: ApplicationReviewState = {
