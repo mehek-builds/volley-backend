@@ -1953,15 +1953,6 @@ export async function discoverAndResolveQuestions(
     // too, and those are filled with the value beside it.
     if (resolvedField && !resolvedField.matchedOption && usableOptions(field.options).length > 0) {
       attentionReasons.push(`none of the options match your saved answer, so this one is left for you: "${label.slice(0, 60)}"`);
-      /* AND THE MENU RIDES WITH IT. This branch told her an answer matched nothing and gave her a
-         bare box to retype into: the run had just READ the employer's own list to make that
-         judgement, and dropped it. The record carries the live options so the Review answers
-         screen shows her exactly what the control accepts (measured on Rippling's pronouns list,
-         2026-08-20: "she/her" matched nothing and nothing showed her what would). The stored
-         answer is blanked, not preserved - it is the answer that just failed the list. */
-      invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
-      questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
-      continue;
     }
     if (rememberedWithoutOptionConstraint !== undefined
       && remembered === undefined
@@ -2118,6 +2109,12 @@ export async function discoverAndResolveQuestions(
         portal_selector: portalSelectorForField(field),
         portal_input_type: controlType,
         answer_option_source: answerOptionSource,
+        /* THE MENU RIDES WITH THE RECORD, display-only, exactly as R-096 carries it for the
+           unanswered mint. The option-mismatch branch above warns her an answer matched nothing
+           the control offers; without the list beside it the Review answers screen hands her a
+           bare box and no hint of what the employer accepts (measured on Rippling's pronouns
+           list, 2026-08-20: "she/her" matched nothing and nothing showed her what would). */
+        ...(usableOptions(field.options).length > 0 ? { options: usableOptions(field.options) } : {}),
         ...consentTrail,
       });
       continue;
