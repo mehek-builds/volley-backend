@@ -269,9 +269,11 @@ describe('the restore is wired at the packet-audit gate, not at buildPacket', ()
     }
     // And the send paths must opt in, or the expired packet is never fixed at all. They opt in by
     // naming their authority, which is what decides whether an approval may travel to the new file.
+    // Both calls also hash the RESOLVED questions now - see resolvedPacketAuditQuestions - so the
+    // pin follows the call shape rather than the raw-rows form it used to have.
     const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-    assert.match(runner, /currentPacketAudit\(row, \{ restoreExpiredResume: 'authorizing_send' \}\)/);
-    assert.match(runner, /currentAcknowledgedPacketAudit\(row, \{ restoreExpiredResume: 'authorizing_send' \}\)/);
+    assert.match(runner, /currentPacketAudit\(row, \{\n\s*questions: await resolvedPacketAuditQuestions\(row, current\),\n\s*restoreExpiredResume: 'authorizing_send',\n\s*\}\)/);
+    assert.match(runner, /currentAcknowledgedPacketAudit\(row, \{\n\s*questions: await resolvedPacketAuditQuestions\(row, current\),\n\s*restoreExpiredResume: 'authorizing_send',\n\s*\}\)/);
   });
 
   test('the write is guarded on the old key, so two runners cannot both restore', () => {

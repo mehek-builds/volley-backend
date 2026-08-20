@@ -3552,6 +3552,38 @@ async function prepareManagedAttendedAccountGate(
   }, 'Application held at an attended account gate without operating it');
 }
 
+/* THE QUESTIONS EVERY PACKET VERIFIER MUST HASH, resolved once, the same way everywhere.
+ *
+ * There are four places a stored packet is compared against its audit: the audit route (which
+ * creates and acknowledges it), the submit-request gate, prepare(), and submit(). The first two
+ * have always hashed the RESOLVED reading - refreshKnownQuestionAnswers over the applicant's
+ * profile and the application's full resolution context - because that is the packet the fill
+ * actually types (see the #649 fix and the audit route's own comment). prepare() and submit()
+ * hashed the RAW stored rows instead.
+ *
+ * That skew is a deadlock, not a corner. The fill run's merge writes the raw merged set back to
+ * the row, so the moment any resolver answers a question the merge minted blank - R-096 mints
+ * availability and self-declaration offers answerless on purpose - the stored rows and the
+ * audited rows hash differently by construction: the audit binds the resolved reading, the run
+ * re-mints the blank one, and submit() then refuses the very packet the applicant just audited
+ * and acknowledged as packet_stale. Measured live on the Easy Dynamics Rippling packet
+ * (2026-08-20, application 165c42fb): four consecutive audit-acknowledge-send rounds, four
+ * packet_stale refusals, questionsSha256 the only differing binding each time.
+ *
+ * Same loader, same context builder, same country reads as the audit route, deliberately: the
+ * constructor and the verifier must be looking at one packet, and this helper is the one place
+ * that says what that packet's questions are. */
+async function resolvedPacketAuditQuestions(row: ResumeRow, review: ApplicationReviewState) {
+  return refreshKnownQuestionAnswers(
+    review.questions,
+    await loadApplicationProfileLike(row.user_id),
+    applicationContextForQuestionResolution(row, review),
+    review.questions_reviewed_at,
+    postingCountryFromJobContext(row.job_context),
+    postingCountryCodeFromJobContext(row.job_context),
+  );
+}
+
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
   let current = readApplicationReview(row.spec);
   if (!current) throw new Error('We do not have a link to the company application page');
@@ -3559,7 +3591,10 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
   /* The audit is also where a packet past its retention window gets its file rebuilt, so the row it
      returns can carry a NEW resume_object_key. Everything below reads from that row, never from
      inputRow, or the run assembles a packet from the key the sweep deleted. */
-  const packetAudit = await currentPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
+  const packetAudit = await currentPacketAudit(row, {
+    questions: await resolvedPacketAuditQuestions(row, current),
+    restoreExpiredResume: 'authorizing_send',
+  });
   if (!packetAudit.valid) {
     fastify.log.warn(
       { applicationId: row.id, code: packetAudit.code },
@@ -4187,7 +4222,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
 } = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
-  const packetAudit = await currentAcknowledgedPacketAudit(row, { restoreExpiredResume: 'authorizing_send' });
+  const packetAudit = await currentAcknowledgedPacketAudit(row, {
+    questions: await resolvedPacketAuditQuestions(row, current),
+    restoreExpiredResume: 'authorizing_send',
+  });
   if (!packetAudit.valid) {
     const finishingSecurityCode = Boolean(options.securityCode) && Boolean(current.security_code);
     fastify.log.error(
