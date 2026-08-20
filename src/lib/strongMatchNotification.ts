@@ -115,6 +115,12 @@ export type StrongMatchCandidate = {
   /** Resolved the same way the board resolves it, so the email's logo and the board's logo can
    *  never disagree about a company. See lib/companyDomains.ts. */
   company_domain: string | null;
+  /** Carried through from rankByFit so the email's own "is this actually strong" check
+   *  (notificationEmail.ts's scoreBand call) can apply the SAME requirements gate the board's
+   *  /jobs/:id route applies - a high score with most hard requirements unmet is "Missing key
+   *  requirements" there, and must not read as "Strong match" here just because this field went
+   *  missing along the way. */
+  required_coverage: number | null;
 };
 
 /**
@@ -152,8 +158,21 @@ export async function subscribedMatchAccounts(limit: number): Promise<Array<{ id
   return rows.filter((row): row is { id: string; email: string } => typeof row.email === 'string' && row.email.length > 0);
 }
 
+/** What strongMatchForAccount found, in two independent facts. `candidate` is the one posting this
+ *  run would send; `strandedVeryStrongFit` is a separate signal - see the function doc below - and
+ *  the two are independent on purpose: a run can send nothing AND still be sitting on a starved
+ *  very-strong fit (it lost the single-slot pick to an even better one this same run). */
+export type StrongMatchLookup = {
+  candidate: StrongMatchCandidate | null;
+  strandedVeryStrongFit: boolean;
+};
+
+const NO_MATCH: StrongMatchLookup = { candidate: null, strandedVeryStrongFit: false };
+
 /**
- * The single best posting to tell this student about, or null.
+ * The single best posting to tell this student about, or null - plus one more fact a review
+ * caught was missing: whether a DIFFERENT very-strong fit for this same account, this same run,
+ * lost the single-slot pick to the one being returned.
  *
  * NULL IS A COMMON AND CORRECT ANSWER, and the run reports it as a quiet day rather than as a
  * problem. Internship supply is the board's thinnest tier, most accounts will have no new posting
@@ -163,11 +182,21 @@ export async function subscribedMatchAccounts(limit: number): Promise<Array<{ id
  * is written to pass a null score through when the caller has no resume (the board still has to
  * render), and this deliberately does not take that branch: an unranked posting is not a strong
  * match, it is an unjudged one, and the email would be claiming a fit that was never computed.
+ *
+ * WHY strandedVeryStrongFit EXISTS. This function used to return the single best candidate and
+ * nothing else. rankByFit sorts strictly by score, so the single pick is always the account's best
+ * available match - but "best" is not the same claim as "every very-strong fit got checked". An
+ * account can have TWO live very-strong fits in the same lookback window (a 95 found an hour ago
+ * and an 85 found ten hours ago); only the 95 was ever returned, the 85 was never sent, never
+ * suppressed-and-counted, never checked against the SLA - it just aged out of MATCH_LOOKBACK_HOURS
+ * in silence. The scoring pass already ranks the WHOLE pool before picking one, so checking the
+ * rest of that already-computed list for a stranded very-strong fit costs nothing extra: no new
+ * query, no new scoring, just a scan of numbers already sitting in memory.
  */
 export async function strongMatchForAccount(
   userId: string,
   now: Date,
-): Promise<StrongMatchCandidate | null> {
+): Promise<StrongMatchLookup> {
   const [sponsorOnly, jobTargeting, resumeFacts, gradDate] = await Promise.all([
     accountRequiresSponsor(userId),
     accountJobTargeting(userId),
@@ -175,7 +204,7 @@ export async function strongMatchForAccount(
     studentGradDate(userId),
   ]);
   const resumeText = resumeFacts.resumeText?.trim();
-  if (!resumeText) return null;
+  if (!resumeText) return NO_MATCH;
 
   const since = matchLookbackSince(now);
   const conditions = [
@@ -201,12 +230,12 @@ export async function strongMatchForAccount(
     .where(and(...conditions, notInArray(monitored_jobs.id, announced)))
     .orderBy(desc(monitored_jobs.first_seen_at), desc(monitored_jobs.id))
     .limit(RANKING_POOL * 4);
-  if (candidates.length === 0) return null;
+  if (candidates.length === 0) return NO_MATCH;
 
   const poolIds = pickDiversePool(candidates, PER_COMPANY_CAP, RANKING_POOL)
     .slice(0, RANKING_POOL)
     .map((row) => row.id);
-  if (poolIds.length === 0) return null;
+  if (poolIds.length === 0) return NO_MATCH;
 
   const pool = await db
     .select({
@@ -231,7 +260,9 @@ export async function strongMatchForAccount(
     .filter((row): row is (typeof pool)[number] => row !== undefined);
 
   const ranked = rankByFit(ordered, resumeText, jobTargeting);
-  for (const { row, score } of ranked) {
+  let candidate: StrongMatchCandidate | null = null;
+  let strandedVeryStrongFit = false;
+  for (const { row, score, required_coverage } of ranked) {
     /* `true` for hasResumeScore is not a shortcut: this function returned null above when there is
        no resume, so the caller-has-no-resume branch of rankedMatchEligible is unreachable here and
        passing anything else would let an unscored posting through as a strong match. */
@@ -241,18 +272,30 @@ export async function strongMatchForAccount(
       if (!recommendationTargetingEligible(row, jobTargeting, resumeFacts.degree)) continue;
     }
     if (gradDate && isBlocked(decide({ title: row.title, employment_type: row.employment_type }, gradDate))) continue;
-    return {
-      id: row.id,
-      company_name: row.company_name,
-      title: row.title,
-      location: row.location,
-      first_seen_at: row.first_seen_at,
-      posting_url: row.posting_url,
-      score,
-      company_domain: companyDomainFor(row.company_name),
-    };
+    if (candidate === null) {
+      /* The first eligible row is the pick - rankByFit sorted highest score first, so nothing
+         later in this loop can outrank it. Scanning continues anyway, not to find a better pick
+         (there isn't one), but to check whether the STUDENT lost anything by the single-slot rule:
+         see strandedVeryStrongFit above. */
+      candidate = {
+        id: row.id,
+        company_name: row.company_name,
+        title: row.title,
+        location: row.location,
+        first_seen_at: row.first_seen_at,
+        posting_url: row.posting_url,
+        score,
+        company_domain: companyDomainFor(row.company_name),
+        required_coverage,
+      };
+      continue;
+    }
+    if (breachesStrongFitSla({ score, first_seen_at: row.first_seen_at }, now)) {
+      strandedVeryStrongFit = true;
+      break;
+    }
   }
-  return null;
+  return { candidate, strandedVeryStrongFit };
 }
 
 /** The dedupe key for one posting announced to one student. Prefixed so no two kinds can collide

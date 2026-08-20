@@ -111,6 +111,13 @@ export type MatchSweepSummary = {
  * The promise was never "we will always send a late very-strong fit", it was "we will not stay
  * quiet about missing it" - so the breach is now measured against the candidate the moment it is
  * chosen, whether or not the send that follows is the thing that fails.
+ *
+ * A SECOND round of the same review then caught a narrower version of the same gap: an account can
+ * have TWO live very-strong fits in one run, and `strongMatchForAccount` only ever returns the
+ * single best-ranked one - the other was never even handed to this function, so it could never be
+ * checked, suppressed, or counted. `strandedVeryStrongFit` is that missing signal, computed inside
+ * `strongMatchForAccount` from the same already-ranked pool at no extra query cost, and folded into
+ * `slaBreach` here alongside the candidate's own lateness.
  */
 async function sweepAccount(
   account: { id: string; email: string },
@@ -120,7 +127,7 @@ async function sweepAccount(
   | { kind: 'no_match' }
   | { kind: 'suppressed'; reason: string; slaBreach: boolean }
 > {
-  const match = await strongMatchForAccount(account.id, now);
+  const { candidate: match, strandedVeryStrongFit } = await strongMatchForAccount(account.id, now);
   if (!match) return { kind: 'no_match' };
   const outcome = await sendNotification({
     userId: account.id,
@@ -135,7 +142,10 @@ async function sweepAccount(
       score: match.score,
     }),
   }, { now: () => now });
-  const slaBreach = breachesStrongFitSla(match, now);
+  /* Either the picked candidate itself sat past the window, or a DIFFERENT very-strong fit for
+     this same account lost the single-slot pick to it this run (see strongMatchForAccount's own
+     doc for why that second case needed its own signal, not just this candidate's own lateness). */
+  const slaBreach = breachesStrongFitSla(match, now) || strandedVeryStrongFit;
   if (outcome.sent) return { kind: 'sent', slaBreach };
   return { kind: 'suppressed', reason: outcome.reason, slaBreach };
 }

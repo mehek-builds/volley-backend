@@ -171,6 +171,12 @@ export type StrongMatchEmailInput = {
     /** The employer's verified domain, resolved by `companyDomainFor` the same way the board
      *  resolves it. Null renders the initial-letter fallback rather than guessing at a logo. */
     company_domain: string | null;
+    /** From the same scoreJdMatch call that produced `score`, threaded through rankByFit rather
+     *  than discarded. Required so scoreBand's requirements gate (below) can agree with the board's
+     *  own /jobs/:id route, which passes this same value - without it, a high-scoring posting
+     *  missing most of its hard requirements would read as "strong" here and "Missing key
+     *  requirements" there. */
+    required_coverage: number | null;
   };
   /** The fit percentage from the same scorer the board ranks with. Null is never sent: a match
    *  alert with no score behind it is not a match alert, and the matcher refuses to build one. */
@@ -201,8 +207,14 @@ export function strongMatchEmail(input: StrongMatchEmailInput): OutboundEmail {
      floor and gets emailed "A strong match opened," then the student clicks through and the same
      posting is labelled "Solid match" on the board. The floor stays 25 (send eligibility is not
      this line's decision to make), but the CLAIM in the copy is capped at what the board itself
-     would call it, so the two surfaces never disagree about the same posting. */
-  const boardCallsItStrong = scoreBand(input.score).tone === 'strong';
+     would call it, so the two surfaces never disagree about the same posting.
+     required_coverage IS PASSED, not left to default null. scoreBand's gate downgrades "strong" to
+     "Missing key requirements" when the resume covers less than half the hard requirements, even at
+     a high score - the board's own /jobs/:id route passes this same value. A first version of this
+     fix called scoreBand(input.score) alone, which meant the gate could never fire from the email
+     and the exact same disagreement this fix exists to close could still happen on the coverage
+     axis instead of the score axis. */
+  const boardCallsItStrong = scoreBand(input.score, job.required_coverage).tone === 'strong';
   const eyebrow = boardCallsItStrong ? 'A strong match opened' : 'A new match opened';
 
   return {

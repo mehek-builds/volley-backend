@@ -574,6 +574,54 @@ test('a very strong fit blocked by the daily cap is still counted as a breach, n
   assert.equal(sent.length, 1, 'only the first email actually went out');
 });
 
+test('a stale very strong fit that loses the single-slot pick to a fresher one, same run, is still a counted breach', async () => {
+  /* A NARROWER version of the same gap, caught by a second review pass. strongMatchForAccount only
+     ever RETURNS the single best-ranked candidate - rankByFit sorts strictly by score, so a second
+     eligible very-strong fit in the SAME run, that lost the pick to a higher (or tied-and-fresher)
+     one, used to never even reach sweepAccount. Not sent, not suppressed-and-counted, not checked
+     against the SLA at all - it would just silently age out of MATCH_LOOKBACK_HOURS. This is
+     distinct from the daily-cap test above: here both postings are live in ONE sweep call, and
+     neither the daily cap nor a second sweep run is what strands the older one - losing the ranked
+     pick alone does. */
+  await seedBoard(undefined, "now() - interval '1 hour'"); // job-1: fresh, wins the tie on index.
+  await seedResume();
+
+  // job-2: identical description (so an identical score - a genuine tie, not just "also above the
+  // floor"), found 6 hours ago - past STRONG_FIT_SLA_HOURS on its own. Query order is oldest-last
+  // (first_seen_at desc), so job-1 sorts first into the pool and wins the score tie by index,
+  // leaving job-2 eligible, tied, and stranded in the same ranked list.
+  const description = [
+    'About the role',
+    'We are a small team shipping quickly.',
+    '',
+    'Requirements',
+    '- Strong TypeScript and React experience\n- Familiarity with Next.js and Tailwind CSS\n- Comfort with PostgreSQL and REST APIs\n- Experience with CI/CD and Git',
+    '',
+    'Benefits',
+    'Unlimited vacation, great coffee, a passionate team.',
+  ].join('\n').replace(/'/g, "''");
+  await database.exec(`
+    insert into "monitored_jobs"
+      ("source_id", "external_id", "company_name", "title", "location", "description", "description_digest", "apply_url", "posting_url", "posted_at", "first_seen_at")
+    values (
+      'c4f0e4a2-7c1f-4a4c-9c53-9c2b7f1a2b3c', 'job-2', 'Ramp', 'Software Engineer Intern', 'New York, NY',
+      '${description}', '${description}',
+      'https://job-boards.greenhouse.io/ramp/jobs/2', 'https://job-boards.greenhouse.io/ramp/jobs/2',
+      now() - interval '6 hours', now() - interval '6 hours'
+    )
+  `);
+
+  const summary = await runStrongMatchSweep(new Date());
+  assert.equal(summary.sent, 1, 'only the picked candidate is sent');
+  assert.deepEqual(sent[0]?.to, ['student@example.edu']);
+  assert.match(sent[0]?.text ?? '', /job-boards\.greenhouse\.io\/ramp\/jobs\/1/, 'the fresher posting is the one actually sent');
+  assert.equal(
+    summary.sla_breaches,
+    1,
+    'the stranded sibling is counted as a breach even though it was never sent or suppressed-and-counted',
+  );
+});
+
 test('a posting below the floor is not called a strong match', async () => {
   /* The floor is MIN_RANKED_MATCH_SCORE, the SAME number the board hides rows under. A second
      definition of "strong" would mean the email and the board disagreed about the same posting,

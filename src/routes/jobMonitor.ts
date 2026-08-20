@@ -845,21 +845,29 @@ export function rankByFit<T extends RankableJob>(
   rows: readonly T[],
   resumeText: string,
   targetingPreferences: JobTargeting = normalizeTargeting(null),
-): Array<{ row: T; score: number | null }> {
-  const scored = rows.map((row, index) => ({
-    row,
+): Array<{ row: T; score: number | null; required_coverage: number | null }> {
+  const scored = rows.map((row, index) => {
     // The posting never asks for experience with its own company, job title or offices, so all
     // three are excluded from the requirement set. Same context the review screen passes.
-    score: resumeText.trim()
+    const jdMatch = resumeText.trim()
       ? scoreJdMatch(resumeText, row.scored_description ?? '', {
           company: row.company_name,
           role: row.title,
           location: row.location,
-        }).score
-      : null,
-    preferenceScore: preferenceFit(row, targetingPreferences).score,
-    index,
-  }));
+        })
+      : null;
+    return {
+      row,
+      score: jdMatch?.score ?? null,
+      /* Kept alongside score, not discarded the way it used to be: scoreBand()'s own gate needs
+         it to tell "high score, but missing the hard requirements" from an actually strong match,
+         and every caller of rankByFit that wants a band-accurate verdict needs the same input the
+         board's own /jobs/:id route already passes it. */
+      required_coverage: jdMatch?.required_coverage ?? null,
+      preferenceScore: preferenceFit(row, targetingPreferences).score,
+      index,
+    };
+  });
   scored.sort((a, b) => {
     if (a.score === null && b.score === null) return b.preferenceScore - a.preferenceScore || a.index - b.index;
     if (a.score === null) return 1;
@@ -867,7 +875,7 @@ export function rankByFit<T extends RankableJob>(
     if (a.score !== b.score) return b.score - a.score;
     return b.preferenceScore - a.preferenceScore || a.index - b.index;
   });
-  return scored.map(({ row, score }) => ({ row, score }));
+  return scored.map(({ row, score, required_coverage }) => ({ row, score, required_coverage }));
 }
 
 export const MIN_RANKED_MATCH_SCORE = 25;

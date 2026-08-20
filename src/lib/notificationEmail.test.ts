@@ -18,6 +18,7 @@ function matchEmail(over: Partial<Parameters<typeof strongMatchEmail>[0]['job']>
       first_seen_at: new Date('2026-08-19T08:00:00.000Z'),
       posting_url: 'https://job-boards.greenhouse.io/ramp/jobs/1234',
       company_domain: 'ramp.com',
+      required_coverage: null,
       ...over,
     },
   });
@@ -122,6 +123,22 @@ test('the email never claims "strong" for a score the board itself would not cal
   const atBoardBar = matchEmail({}, 40);
   assert.match(atBoardBar.html ?? '', /A strong match opened/);
   assert.doesNotMatch(atBoardBar.html ?? '', /A new match opened/);
+});
+
+test('a high score with most hard requirements unmet is also not claimed "strong"', () => {
+  /* scoreBand's SECOND gate, independent of the score threshold: less than half the requirements
+     block covered caps the band at "Missing key requirements" even at a score that clears 40. A
+     review caught that the first version of this fix called scoreBand(score) alone, so this gate
+     could never fire from the email and the board/email disagreement just moved from the score
+     axis to the coverage axis instead of actually closing. required_coverage has to reach here for
+     the gate to work at all. */
+  const highScoreLowCoverage = matchEmail({ required_coverage: 0.25 }, 61);
+  assert.doesNotMatch(highScoreLowCoverage.html ?? '', /A strong match opened/);
+  assert.match(highScoreLowCoverage.html ?? '', /A new match opened/);
+
+  // Same score, requirements mostly covered: the gate must not fire when it should not.
+  const highScoreGoodCoverage = matchEmail({ required_coverage: 0.9 }, 61);
+  assert.match(highScoreGoodCoverage.html ?? '', /A strong match opened/);
 });
 
 test('the CTA sends a student to the Litos dashboard, not straight to the employer', () => {

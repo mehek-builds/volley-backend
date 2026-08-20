@@ -23,8 +23,17 @@
 # would let a repeat call skip already-handled accounts only runs AFTER the full per-account query
 # and resume-scoring pipeline, so every retry re-pays that cost for the whole subscriber population.
 # curl retrying the one response that means "we are already behind" would triple the work at
-# exactly the moment the system can least afford it. A single failed attempt here still fails the
-# workflow (see the status checks below) and the next run is at most two hours away.
+# exactly the moment the system can least afford it.
+#
+# A hand-rolled retry loop stands in for it below, and it retries a NARROWER thing than curl's own
+# --retry did: only a connection that never reached the app at all (DNS hiccup, TCP reset, refused
+# connection during a Vercel cold start or mid-deploy window - curl's own nonzero exit code). Once
+# curl completes an HTTP exchange, whatever the status code, the loop stops - a completed response
+# means the app was reached and already did whatever it was going to do, so retrying it is either
+# pointless (200) or actively harmful (the 500 case above). A first version of this fix dropped
+# retries altogether, which also gave up retrying a plain dropped connection - a real, if rare cost
+# a review caught. The surgical fix is to be selective about WHAT gets retried, not to stop
+# retrying entirely.
 name: strong-match-notifications
 
 on:
@@ -42,7 +51,9 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Worst case for the retry loop below is 3 attempts x 300s (--max-time) plus two 15s backoffs,
+    # ~15.5 minutes. 20 leaves headroom without masking a genuinely stuck run for hours.
+    timeout-minutes: 20
     steps:
       - name: Call the strong-match sweep
         env:
@@ -58,12 +69,29 @@ jobs:
             exit 1
           fi
 
-          http_status=$(curl -sS \
-            --max-time 300 \
-            -o response.json \
-            -w '%{http_code}' \
-            -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
-            "${API_BASE}/internal/strong-match-notifications")
+          # Retries only a connection that never reached the app - see the header comment for why
+          # curl's own --retry is wrong here. `if http_status=$(...)` is deliberate: a command used
+          # as an if-condition is exempt from `set -e`, so a failed connection attempt does not kill
+          # the script, it falls through to the retry/backoff below instead.
+          max_attempts=3
+          attempt=1
+          while true; do
+            if http_status=$(curl -sS \
+              --max-time 300 \
+              -o response.json \
+              -w '%{http_code}' \
+              -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
+              "${API_BASE}/internal/strong-match-notifications"); then
+              break
+            fi
+            if [ "${attempt}" -ge "${max_attempts}" ]; then
+              echo "::error::Could not reach ${API_BASE} after ${max_attempts} attempts - the connection never completed (DNS, TLS, or a refused/reset connection), so no response was ever received."
+              exit 1
+            fi
+            echo "Connection attempt ${attempt} did not reach ${API_BASE}; retrying in 15 seconds (${attempt}/${max_attempts})."
+            attempt=$((attempt + 1))
+            sleep 15
+          done
 
           echo "status=${http_status}"
           cat response.json
