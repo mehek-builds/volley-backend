@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { MANAGED_SUBMIT_CHOOSER_POLICY, runManagedBrowser, type ManagedBrowserResult } from './browserbase';
+import { reparseThroughPlaywrightSerialization } from './playwrightSerializationRoundTrip';
 import {
   assertManagedRequiredFieldsConfirmed,
   AUTONOMOUS_PORTAL_FAMILIES,
@@ -245,10 +246,7 @@ test('direct confirmation commits the visually filled custom box without changin
  * exists in this module's scope, not the function's own closure - would pass every test above and
  * only fail here, exactly as it would in a real browser. */
 test('the exported confirmation function survives being serialized and re-parsed, the way Playwright actually runs it', async () => {
-  // eslint-disable-next-line no-new-func -- reproducing exactly what Playwright's elementHandle.evaluate() does internally
-  const reparsed = new Function(
-    'return (' + COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT.toString() + ');',
-  )() as typeof COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT;
+  const reparsed = reparseThroughPlaywrightSerialization(COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT);
 
   let committed = false;
   const control = {
