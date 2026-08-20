@@ -3233,8 +3233,11 @@ test("Breezy's welded default consent label becomes the consent_permission quest
  * reading, and any resolver-answered merge-minted blank made every audit-acknowledge-send round
  * end in packet_stale - measured four rounds in a row on the Easy Dynamics Rippling packet,
  * 2026-08-20. One helper, both call sites, same recipe as the audit route. */
-test('prepare and submit verify the packet against the resolved questions, via one helper', () => {
-  const source = readFileSync(new URL('./submissionRunner.ts', import.meta.url), 'utf8');
+test('prepare and submit verify the packet against the resolved questions, via one helper', async () => {
+  const { join } = await import('node:path');
+  // path.join(__dirname, ...), not new URL(import.meta.url): this tree compiles as commonjs and
+  // import.meta is a TS1343 under it. Same rule as the documentReuse/coverLetterAttachment pins.
+  const source = readFileSync(join(__dirname, 'submissionRunner.ts'), 'utf8');
   const helper = source.indexOf('async function resolvedPacketAuditQuestions');
   assert.notEqual(helper, -1, 'the shared resolver helper must exist');
   const helperBody = source.slice(helper, source.indexOf('\n}', helper));
