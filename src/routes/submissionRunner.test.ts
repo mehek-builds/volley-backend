@@ -3250,3 +3250,19 @@ test('prepare and submit verify the packet against the resolved questions, via o
     /current(?:Acknowledged)?PacketAudit\(row, \{ restoreExpiredResume: 'authorizing_send' \}\)/,
     'no runner verifier may fall back to hashing the raw stored rows');
 });
+
+/* THE SAME CONTRACT, SWEPT ACROSS EVERY VERIFIER THE ROUTES OWN. The acknowledge route was the
+ * third verifier found hashing the raw stored rows (measured live on the Mytos lever packet,
+ * 2026-08-20: audit green, acknowledge 409 packet_stale, forever), and six call sites in
+ * applications.ts had the same shape. A verifier that does not name its questions hashes
+ * review.questions raw, and raw disagrees with the resolved reading the audit binds whenever a
+ * resolver answers a merge-minted blank. So: every call must carry a `questions:` option. */
+test('every route verifier names the questions it hashes', async () => {
+  const { join } = await import('node:path');
+  const applications = readFileSync(join(__dirname, 'applications.ts'), 'utf8');
+  const runner = readFileSync(join(__dirname, 'submissionRunner.ts'), 'utf8');
+  for (const [name, source] of [['applications.ts', applications], ['submissionRunner.ts', runner]]) {
+    const bare = source.match(/current(?:Acknowledged)?PacketAudit\(\w+(?:\)|, \{(?![^}]*questions)[^}]*\})/g) ?? [];
+    assert.deepEqual(bare, [], name + ' has a verifier hashing raw stored rows: ' + bare.join(' | '));
+  }
+});
