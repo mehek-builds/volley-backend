@@ -1715,12 +1715,18 @@ export async function discoverAndResolveQuestions(
    * savedAnswerFor for why the read side has to check again rather than trust the write side. */
   savedAnswers: ReadonlyMap<string, string> = new Map(),
   compactAnswers: ReadonlyMap<string, string> = new Map(),
-): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[]; invalidatedQuestionKeys: string[] }> {
+): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[]; optionalAttentionReasons: string[]; invalidatedQuestionKeys: string[] }> {
   const existingByLabel = new Map(
     current.questions.map((q) => [normalizeReviewQuestionLabel(q.question).toLowerCase(), q] as const),
   );
   const questions: ApplicationReviewQuestion[] = [];
   const attentionReasons: string[] = [];
+  /* Attention about a control the employer left OPTIONAL. Shown to her exactly like the rest,
+     but it does not gate `safe`: a left-for-you skip or an option mismatch on an optional field
+     was parking complete applications (measured on Easy Dynamics' optional pronouns, 2026-08-20,
+     and on Transparent Hiring's optional start date before it) over answers the employer does
+     not demand. A REQUIRED field's attention still parks, exactly as before. */
+  const optionalAttentionReasons: string[] = [];
   const invalidatedQuestionKeys = new Set<string>();
 
   let bank: Awaited<ReturnType<typeof readExperienceBank>> | null = null;
@@ -1952,25 +1958,25 @@ export async function discoverAndResolveQuestions(
     // Only when the control really had a list. matchedOption is false for every free-text field
     // too, and those are filled with the value beside it.
     if (resolvedField && !resolvedField.matchedOption && usableOptions(field.options).length > 0) {
-      attentionReasons.push(`none of the options match your saved answer, so this one is left for you: "${label.slice(0, 60)}"`);
+      (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`none of the options match your saved answer, so this one is left for you: "${label.slice(0, 60)}"`);
     }
     if (rememberedWithoutOptionConstraint !== undefined
       && remembered === undefined
       && usableOptions(field.options).length > 0) {
       invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
-      attentionReasons.push(`none of the options exactly match your remembered answer, so this one is left for you: "${label.slice(0, 60)}"`);
+      (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`none of the options exactly match your remembered answer, so this one is left for you: "${label.slice(0, 60)}"`);
       questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
       continue;
     }
     if (known && 'skipReason' in known) {
       invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
-      attentionReasons.push(known.skipReason);
+      (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(known.skipReason);
       questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
       continue;
     }
     if (!known && isRefusedQuestion(label)) {
       invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
-      attentionReasons.push(WORK_ELIGIBILITY_QUESTION.test(label)
+      (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(WORK_ELIGIBILITY_QUESTION.test(label)
         ? workEligibilitySkipReason(label)
         : `sensitive question left for you: "${label.slice(0, 60)}"`);
       questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
@@ -1979,7 +1985,7 @@ export async function discoverAndResolveQuestions(
     if (isSelfDeclarationQuestion(label)) {
       if (!known) {
         invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
-        attentionReasons.push(selfDeclarationSkipReason(label));
+        (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(selfDeclarationSkipReason(label));
         if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
         continue;
       }
@@ -2149,7 +2155,7 @@ export async function discoverAndResolveQuestions(
         declaredSkills = declaredSkillsList(profileRow?.skills);
       }
       if (bank.length === 0) {
-        attentionReasons.push(`open-ended question left for you (no experience bank on file): "${label.slice(0, 60)}"`);
+        (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`open-ended question left for you (no experience bank on file): "${label.slice(0, 60)}"`);
         if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
         continue;
       }
@@ -2180,25 +2186,25 @@ export async function discoverAndResolveQuestions(
         );
       const fitted = answer ? fitToBudget(answer, field.maxLength ?? 100_000) : null;
       if (!fitted) {
-        attentionReasons.push(`open-ended question left for you (could not draft a confident answer): "${label.slice(0, 60)}"`);
+        (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`open-ended question left for you (could not draft a confident answer): "${label.slice(0, 60)}"`);
         if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
         continue;
       }
       questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: fieldIsRequired, portal_selector: field.selector, portal_input_type: controlType });
       if (warnings.length > 0) {
-        attentionReasons.push(`drafted answer needs your review: ${warnings.join('; ').slice(0, 300)}`);
+        (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`drafted answer needs your review: ${warnings.join('; ').slice(0, 300)}`);
       }
       if (!automaticSubmissionEnabled) {
-        attentionReasons.push(`AI-drafted answer needs your review before this goes out: "${label.slice(0, 60)}"`);
+        (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`AI-drafted answer needs your review before this goes out: "${label.slice(0, 60)}"`);
       }
     } catch (error) {
       if (isBillingOrAuthFailure(error)) throw error; // this is a real outage, not a per-field skip
-      attentionReasons.push(`open-ended question left for you (draft generation failed): "${label.slice(0, 60)}"`);
+      (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`open-ended question left for you (draft generation failed): "${label.slice(0, 60)}"`);
       if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
     }
   }
 
-  return { questions, attentionReasons, invalidatedQuestionKeys: [...invalidatedQuestionKeys] };
+  return { questions, attentionReasons, optionalAttentionReasons, invalidatedQuestionKeys: [...invalidatedQuestionKeys] };
 }
 
 function applicationProfileForPacket(
@@ -2841,6 +2847,7 @@ async function prepareManaged(
   const {
     questions: discoveredQuestions,
     attentionReasons: discoveryAttention,
+    optionalAttentionReasons: discoveryOptionalAttention,
     invalidatedQuestionKeys,
   } = await discoverAndResolveQuestions(
     discoveredFields,
@@ -3201,6 +3208,8 @@ async function prepareManaged(
   const attentionReasons = [
     ...blockers,
     ...discoveryAttention,
+    /* Shown, never gating: see optionalAttentionReasons in discoverAndResolveQuestions. */
+    ...discoveryOptionalAttention,
     ...evidenceBlockers,
     ...coverLetterAttention,
     ...transcriptAttention,

@@ -59,7 +59,9 @@ test('direct browser send remains blocked by discovered sensitive and self-decla
 
   assert.match(runner, /sensitive question left for you:/);
   assert.match(runner, /if \(isSelfDeclarationQuestion\(label\)\) \{/);
-  assert.match(runner, /attentionReasons\.push\(selfDeclarationSkipReason\(label\)\)/);
+  /* Routed by the employer's own required flag since the optional-attention split: a REQUIRED
+     field's declaration attention still gates `safe`; an optional one is shown without parking. */
+  assert.match(runner, /\(fieldIsRequired \? attentionReasons : optionalAttentionReasons\)\.push\(selfDeclarationSkipReason\(label\)\)/);
   assert.match(runner, /attentionCount: discoveryAttention\.length/);
 
   const safety = await readFile('src/lib/submissionSafety.ts', 'utf8');

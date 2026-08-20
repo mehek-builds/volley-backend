@@ -1253,8 +1253,10 @@ test('portal country metadata reaches managed send resolution without borrowing 
        optional blank never gates the send. */
     assert.equal(mixed.questions[0]?.answer, '');
     assert.equal(mixed.questions[0]?.required, false);
-    assert.equal(mixed.attentionReasons.length, 1);
-    assert.match(mixed.attentionReasons[0], /work-eligibility question left for you/i);
+    /* Optional control: shown, never gating, since the optional-attention split. */
+    assert.equal(mixed.attentionReasons.length, 0);
+    assert.equal(mixed.optionalAttentionReasons.length, 1);
+    assert.match(mixed.optionalAttentionReasons[0], /work-eligibility question left for you/i);
   }
 });
 
@@ -1321,7 +1323,8 @@ test('select and radio discoveries relay a stored onsite commitment alongside st
     true,
     'greenhouse',
   );
-  assert.deepEqual(unasked.attentionReasons, [
+  assert.deepEqual(unasked.attentionReasons, []);
+  assert.deepEqual(unasked.optionalAttentionReasons, [
     'where you will work from is yours to answer: "Are you able to work onsite 4 days a week?"',
   ]);
 });
@@ -1421,7 +1424,8 @@ test('an option list with no match for the saved answer is reported to the appli
     'greenhouse',
   );
 
-  assert.deepEqual(result.attentionReasons, [
+  assert.deepEqual(result.attentionReasons, []);
+  assert.deepEqual(result.optionalAttentionReasons, [
     'none of the options match your saved answer, so this one is left for you: '
     + '"Are you legally authorized to work in the United States?"',
   ]);
