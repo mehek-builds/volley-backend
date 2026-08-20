@@ -6,6 +6,7 @@ import {
   escapeRawControlCharacters,
   generateCoverLetter,
   parseCoverLetterBody,
+  ungroundedAcademicPrograms,
   validateCoverLetter,
 } from './coverLetter';
 
@@ -140,6 +141,30 @@ test('cover-letter validation blocks fabricated candidate metrics', () => {
   const body = `I am applying for the Software Engineer role at Acme. ${'My work at Acme Labs used Python to build reliable systems. '.repeat(25)}I increased revenue by 82%.`;
   const result = validateCoverLetter(body, 'Acme', 'Software Engineer', source);
   assert.ok(result.issues.some((item) => item.includes('82%')));
+});
+
+test('cover-letter validation blocks an invented second academic program', () => {
+  const candidate = JSON.stringify({
+    education: {
+      school: 'University of Southern California',
+      degree: 'Bachelor of Science in Computer Science',
+      major: 'Computer Science',
+    },
+  });
+  const invented = `I am applying for the Software Engineer role at Acme. ${'As a Computer Science and Business Administration student, I build reliable systems with Python. '.repeat(18)}`;
+  const result = validateCoverLetter(invented, 'Acme', 'Software Engineer', candidate);
+
+  assert.deepEqual(ungroundedAcademicPrograms(invented, candidate), ['Computer Science and Business Administration']);
+  assert.ok(result.issues.some((item) => item.includes('academic programs not found')));
+});
+
+test('cover-letter validation accepts the exact saved academic program', () => {
+  const candidate = JSON.stringify({ degree: 'Bachelor of Science in Computer Science', major: 'Computer Science' });
+  const grounded = `I am applying for the Software Engineer role at Acme. ${'As a Computer Science student, I build reliable systems with Python. '.repeat(18)}`;
+  const result = validateCoverLetter(grounded, 'Acme', 'Software Engineer', candidate);
+
+  assert.deepEqual(ungroundedAcademicPrograms(grounded, candidate), []);
+  assert.equal(result.issues.some((item) => item.includes('academic programs not found')), false);
 });
 
 /* ================================================================================================
