@@ -60,7 +60,7 @@ test('attended extension refill returns the exact owned generated packet and a f
   assert.ok(route.indexOf('extensionHandoffPacketMatches(') < route.indexOf('mintDownloadToken('));
 });
 
-test('attended extension start validates every supplied binding and rejects a changed answer refresh', () => {
+test('attended extension start validates every supplied binding and carries one audited question snapshot into its exact-CAS claim', () => {
   const route = source.slice(
     source.indexOf("'/applications/:id/submission/extension-start'"),
     source.indexOf("'/applications/:id/submission/extension-outcome'"),
@@ -70,8 +70,16 @@ test('attended extension start validates every supplied binding and rejects a ch
   assert.match(route, /binding === 'mismatch'/);
   assert.match(route, /binding === 'stale'/);
   assert.doesNotMatch(route, /extension_handoff_url\).*binding/);
-  assert.match(route, /parsed\.data\.handoff_version && !isDeepStrictEqual\(refreshedQuestions, current\.questions\)/);
-  assert.match(route, /isDeepStrictEqual\(refreshedQuestions, current\.questions\)/);
+  assert.match(route, /const packetQuestions = resolvePacketAuditQuestionFixpoint\(/);
+  assert.match(route, /questions:\s*packetQuestions/);
+  assert.match(route, /precheckPacketQuestions = packetQuestions/);
+  assert.match(route, /const refreshedQuestions = precheckPacketQuestions;/);
+  assert.equal(route.match(/resolvePacketAuditQuestionFixpoint\(/g)?.length, 1,
+    'the transaction must not produce a second question identity from a later profile or clock read');
+  assert.equal(route.match(/loadSensitiveQuestionProfile\(/g)?.length, 1,
+    'the profile that produced the audited snapshot must also drive the send-time sensitive gate');
+  assert.doesNotMatch(route, /parsed\.data\.handoff_version && !isDeepStrictEqual/,
+    'legacy clients without a handoff version must not be allowed to send a second snapshot');
   assert.match(route, /generated_resumes\.spec\} = \$\{JSON\.stringify\(precheckRow\.spec\)\}::jsonb/);
   assert.match(route, /row\.resume_object_key !== precheckRow\.resume_object_key/);
   assert.match(route, /isDeepStrictEqual\(row\.job_context, precheckRow\.job_context\)/);
@@ -94,6 +102,14 @@ test('extension outcomes only mark confirmed claims applied', () => {
   assert.match(source, /extensionReceiptUrlSchema/);
   assert.match(source, /extensionEmployerReceiptIsSufficient\(/);
   assert.match(source, /outcome === 'confirmed'/);
+  const route = source.slice(
+    source.indexOf("'/applications/:id/submission/extension-outcome'"),
+    source.indexOf("'/applications/:id/resume'"),
+  );
+  assert.match(route, /questions:\s*current\.questions/,
+    'a receipt must bind to the stored snapshot the extension sent');
+  assert.doesNotMatch(route, /resolvedPacketAuditQuestions\(/,
+    'post-send profile or clock drift must not prevent receipt recording');
 });
 
 test('attended handoff submission trusts only the retained exact session receipt', () => {

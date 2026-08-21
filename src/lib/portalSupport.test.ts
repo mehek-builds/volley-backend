@@ -270,7 +270,7 @@ test('the centralized runner refuses stale lead evidence before every claim and 
   assert.match(preparationClaim, /generated_resumes\.spec\} = \$\{JSON\.stringify\(row\.spec\)\}::jsonb/);
   for (const channel of [
     'submitControlled(row',
-    'submitViaAtsSubmissionChannel(row',
+    'submitViaAtsSubmissionChannel(',
     'runManagedBrowser(',
     'clickFinalSubmit(',
   ]) {
@@ -309,10 +309,16 @@ test('unsupported-portal email claims the exact verified packet before building 
   );
   const verify = handler.indexOf('preSendResumeVerificationIssues(');
   const exactClaim = handler.indexOf('sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`', verify);
-  const packet = handler.indexOf('buildPacket(claimedRow)', exactClaim);
-  const send = handler.indexOf('sendUnsupportedPortalApplicationEmail', exactClaim);
+  const packet = handler.indexOf('buildPacket(claimedRow, false, canonicalSubmittedQuestions)', exactClaim);
+  const verifyPacket = handler.indexOf('transportVerifiedBuiltPacket(', packet);
+  const prepareEmail = handler.indexOf('prepareUnsupportedPortalApplicationEmail', exactClaim);
+  const send = handler.indexOf('sendPreparedUnsupportedPortalApplicationEmail', exactClaim);
   assert.ok(verify > 0 && exactClaim > verify, 'the email claim must compare against the packet that passed verification');
-  assert.ok(packet > exactClaim && send > exactClaim, 'a changed packet must be refused before packet build or employer email');
+  assert.ok(packet > exactClaim && prepareEmail > packet && verifyPacket > prepareEmail && send > verifyPacket,
+    'the exact claimed packet must be rebuilt, audit-verified, and only then sent to the employer');
+  assert.match(handler,
+    /transportVerifiedBuiltPacket\([\s\S]{0,220}submitAudit\.audit,[\s\S]{0,120}canonicalSubmittedQuestions,[\s\S]{0,220}sendPreparedUnsupportedPortalApplicationEmail[\s\S]{0,180}'full'/,
+    'unsupported email must transport the exact object whose applicant snapshot and questions passed the audit');
 });
 
 /**
@@ -367,8 +373,8 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(applicationsRoute, /\/applications\/:id\/submission\/channels/);
   assert.match(applicationsRoute, /assessAtsSubmissionChannel\(review\.portal_url\)/);
   assert.doesNotMatch(applicationsRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
-  assert.match(applicationsRoute, /sendUnsupportedPortalApplicationEmail/);
-  assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,1800}sendUnsupportedPortalApplicationEmail/);
+  assert.match(applicationsRoute, /sendPreparedUnsupportedPortalApplicationEmail/);
+  assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,2600}sendPreparedUnsupportedPortalApplicationEmail/);
   assert.doesNotMatch(applicationsRoute, /PORTAL_NOT_SUPPORTED/);
   const repairIndex = applicationsRoute.indexOf('repairReviewPortalFromMonitoredJob(row, current)');
   const guardIndex = applicationsRoute.indexOf('!isPortalSupported(current.portal_url)');

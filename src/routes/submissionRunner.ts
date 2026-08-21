@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { decide, isBlocked } from '../engine/eligibility';
 import { chromium, type Page } from 'playwright-core';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
@@ -36,6 +37,7 @@ import {
 import { storeFilledPreviewScreenshot, storeReceiptScreenshot } from '../lib/receiptScreenshot';
 import {
   connectToSession,
+  browserDeliveryRuntimeIdentity,
   continueManagedBrowser,
   createBrowserContext,
   createBrowserSession,
@@ -43,6 +45,7 @@ import {
   HANDOFF_WINDOW_MS,
   isBrowserbaseConfigured,
   isManagedStratusProvider,
+  managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
   runManagedBrowser,
@@ -136,6 +139,16 @@ import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess'
 import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
 import { PACKET_EXPIRED_REASON } from '../lib/packetResumeRestore';
 import { currentAcknowledgedPacketAudit, currentPacketAudit, packetAuditClientError } from '../lib/packetAuditService';
+import { packetAuditSha256, type PacketAudit } from '../lib/packetAudit';
+import { packetQuestionFixpoint } from '../lib/packetQuestionIdentity';
+import {
+  browserEmployerDeliveryChannel,
+  employerDeliveryBindingIssue,
+  employerDeliveryEnvelope,
+  packetForEmployerDelivery,
+  type EmployerDeliveryEnvelope,
+  type EmployerPacketDeliveryMode,
+} from '../lib/employerDeliveryIdentity';
 import { createDashboardHandoffBinding } from '../lib/extensionHandoffPacket';
 import { decryptRow } from './applicationProfile';
 import { readExperienceBank } from '../db/experienceBank';
@@ -196,7 +209,7 @@ import { loadApplicationProfileLike, loadUnattendedConsentGrant } from '../lib/a
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { applicantChoseStoredAnswer } from '../lib/applicantAnswer';
-import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
+import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
 import {
   coverLetterCandidateContext,
   generateStoredCoverLetter,
@@ -223,7 +236,6 @@ import {
   storedDocuments,
   MAX_USER_DOCUMENT_BYTES,
 } from '../lib/documentStore';
-import { assessAtsSubmissionChannel, tryAtsSubmissionChannel } from '../lib/atsSubmissionChannels';
 import { duplicateApplicationVerdict } from '../lib/duplicateApplication';
 import {
   ApplicantEmailRegenerationRequiredError,
@@ -682,6 +694,129 @@ export function packetQuestionsForFill(
   }));
 }
 
+function submissionPacketQuestions(
+  questions: readonly ApplicationReviewQuestion[],
+): SubmissionPacket['questions'] {
+  return questions.map((item) => ({
+    question: item.question,
+    answer: item.answer,
+    portalSelector: item.portal_selector,
+    portalInputType: item.portal_input_type,
+    atsApiField: item.ats_api_field,
+    answerOptionSource: item.answer_option_source,
+    answerSource: item.answer_source,
+    required: item.required,
+  }));
+}
+
+/**
+ * Compare the exact packet about to cross the employer boundary with the audit that authorized it.
+ * The caller must send this same object after the check, never rebuild it.
+ */
+export function verifiedBuiltPacketIssues(
+  packet: SubmissionPacket,
+  audit: PacketAudit,
+  verifiedQuestions: readonly ApplicationReviewQuestion[],
+  mode: EmployerPacketDeliveryMode,
+  envelope: EmployerDeliveryEnvelope,
+): string[] {
+  const issues: string[] = [];
+  if (packetAuditSha256(packet.applicantSnapshot) !== audit.bindings.applicantSnapshotSha256) {
+    issues.push('applicant snapshot changed after packet approval');
+  }
+  if (packetAuditSha256(packet.jdText ?? '') !== audit.bindings.jdSha256) {
+    issues.push('job description changed after packet approval');
+  }
+  if (packet.email.trim().toLowerCase() !== audit.identities.applicant_email.trim().toLowerCase()) {
+    issues.push('applicant email changed after packet approval');
+  }
+  if (packet.resume.byteLength !== audit.bindings.pdf.sizeBytes
+    || createHash('sha256').update(packet.resume).digest('hex') !== audit.bindings.pdf.sha256) {
+    issues.push('resume file changed after packet approval');
+  }
+  if (!isDeepStrictEqual(packet.questions, submissionPacketQuestions(verifiedQuestions))) {
+    issues.push('application questions changed after packet approval');
+  }
+  const deliveryIssue = employerDeliveryBindingIssue(packet, audit.bindings.employerDelivery, mode, envelope);
+  if (deliveryIssue) issues.push(deliveryIssue);
+  return issues;
+}
+
+function assertVerifiedBuiltPacket(
+  packet: SubmissionPacket,
+  audit: PacketAudit,
+  verifiedQuestions: readonly ApplicationReviewQuestion[],
+  mode: EmployerPacketDeliveryMode,
+  envelope: EmployerDeliveryEnvelope,
+): void {
+  const issues = verifiedBuiltPacketIssues(packet, audit, verifiedQuestions, mode, envelope);
+  if (issues.length > 0) {
+    throw new Error(`The employer-bound packet changed after approval: ${issues.join('; ')}`);
+  }
+}
+
+export async function transportVerifiedBuiltPacket<T>(
+  packet: SubmissionPacket,
+  audit: PacketAudit,
+  verifiedQuestions: readonly ApplicationReviewQuestion[],
+  transport: (exactPacket: SubmissionPacket) => Promise<T>,
+  mode: EmployerPacketDeliveryMode,
+  envelope: EmployerDeliveryEnvelope,
+): Promise<T> {
+  assertVerifiedBuiltPacket(packet, audit, verifiedQuestions, mode, envelope);
+  return transport(packet);
+}
+
+export function employerPageUrlIssue(expected: string, observed: string | undefined): string | null {
+  try {
+    const expectedUrl = new URL(expected);
+    const observedUrl = new URL(observed ?? '');
+    expectedUrl.hash = '';
+    observedUrl.hash = '';
+    return expectedUrl.href === observedUrl.href
+      ? null
+      : 'the employer page redirected away from the approved destination';
+  } catch {
+    return 'the employer page did not report a valid approved destination';
+  }
+}
+
+function assertEmployerPageUrl(expected: string, observed: string | undefined): void {
+  const issue = employerPageUrlIssue(expected, observed);
+  if (issue) throw new Error(issue);
+}
+
+async function holdPreparationForPacketDrift(input: {
+  row: ResumeRow;
+  current: ApplicationReviewState;
+  packet: SubmissionPacket;
+  audit: PacketAudit;
+  verifiedQuestions: readonly ApplicationReviewQuestion[];
+  mode: EmployerPacketDeliveryMode;
+  envelope: EmployerDeliveryEnvelope;
+  patch: Partial<ApplicationReviewState>;
+}): Promise<boolean> {
+  const issues = verifiedBuiltPacketIssues(
+    input.packet,
+    input.audit,
+    input.verifiedQuestions,
+    input.mode,
+    input.envelope,
+  );
+  if (issues.length === 0) return false;
+  await writeReview(input.row, nextReview(input.current, {
+    ...input.patch,
+    status: 'needs_attention',
+    attention_reason: 'This application changed after you approved the exact packet Litos prepared, so it was not sent. Open it to review the current one and send from there.',
+    attention_categories: ['evidence_gap'],
+    packet_audit_acknowledgement: undefined,
+    submission_authorization: undefined,
+    submission_claimed_at: undefined,
+    submission_claim_id: undefined,
+  }));
+  return true;
+}
+
 /** Load the resume bytes independently from the rest of packet assembly so fixture isolation is testable. */
 export async function resumeBytesForPacket(
   objectKey: string,
@@ -805,7 +940,12 @@ export async function documentBytesForPacket(
   return documentBytesFromPointer({ blobUrl: row.blob_url, objectKey: row.object_key }, dependencies);
 }
 
-export async function buildPacket(row: ResumeRow, controlledTest = false): Promise<SubmissionPacket> {
+export async function buildPacket(
+  row: ResumeRow,
+  controlledTest = false,
+  verifiedQuestionSnapshot?: readonly ApplicationReviewQuestion[],
+  strictStoredAttachments = false,
+): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
   const [userRow, appRow, profileRow, referralSourceEvidence] = await Promise.all([
@@ -869,6 +1009,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
   const coverLetterKey = coverLetterObjectKeyToAttach(stored);
   if (coverLetterKey) {
     const coverLetterUrl = await resolveBlobUrl(coverLetterKey);
+    if (!coverLetterUrl && strictStoredAttachments) throw new PacketDocumentExpiredError('cover_letter');
     coverLetter = coverLetterUrl
       ? await fetchStoredCoverLetter(coverLetterUrl)
       /* Same recovery, same frozen inputs, and it matters more here than it looks: the letter's own
@@ -952,14 +1093,16 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
    * for 12 weeks during the internship?" resolves to Yes from the frozen job locations under the
    * discovery context and stayed blank here, so the packet the fill run was built from still
    * carried no answer for it. */
-  const refreshedQuestions = refreshKnownQuestionAnswers(
-    review.questions,
-    applicationProfile,
-    applicationContextForQuestionResolution(row, review),
-    review.questions_reviewed_at,
-    postingCountryFromJobContext(row.job_context),
-    postingCountryCodeFromJobContext(row.job_context),
-  );
+  const refreshedQuestions = verifiedQuestionSnapshot
+    ? [...verifiedQuestionSnapshot]
+    : resolvePacketAuditQuestionFixpoint(
+      review,
+      applicationProfile,
+      applicationContextForQuestionResolution(row, review),
+      postingCountryFromJobContext(row.job_context),
+      postingCountryCodeFromJobContext(row.job_context),
+      new Date(),
+    );
   const snapshotExperience = (value: unknown): NonNullable<SubmissionPacket['applicantSnapshot']>['profile']['experience'] => {
     if (!Array.isArray(value)) return [];
     return value.flatMap((item) => {
@@ -1071,24 +1214,7 @@ export async function buildPacket(row: ResumeRow, controlledTest = false): Promi
     // prepare paths can write which address was used, and why, onto the review state.
     applicantEmail,
     mostRecentRole: readMostRecentRole(parsed),
-    questions: refreshedQuestions.map((item) => ({
-      question: item.question,
-      answer: item.answer,
-      portalSelector: item.portal_selector,
-      portalInputType: item.portal_input_type,
-      atsApiField: item.ats_api_field,
-      // Carried through so the fill can tell an option the resolver read off this control from a
-      // profile value that merely survived the refresh. Dropping it here would leave the fill
-      // unable to distinguish them and it would fall back to the computed bucket, which is exactly
-      // the state this packet was in before. See greenhouseReviewedAnswerIsResolved.
-      answerOptionSource: item.answer_option_source,
-      // And WHO wrote the answer, for the same reason. Absent option evidence means "unproven" for a
-      // machine answer and "she picked it" for hers, and only this tells them apart.
-      answerSource: item.answer_source,
-      // The form's own required flag rides along for the budget trim: an explicitly optional
-      // question gives up its fill chains before any required question loses its only attempt.
-      required: item.required,
-    })),
+    questions: submissionPacketQuestions(refreshedQuestions),
   };
 }
 
@@ -2953,6 +3079,8 @@ async function prepareManaged(
   runId: string,
   fastify: FastifyInstance,
   authorization: StandingAuthorization,
+  audit: PacketAudit,
+  verifiedQuestions: readonly ApplicationReviewQuestion[],
 ) {
   await writeReview(row, nextReview(current, {
     status: 'filling',
@@ -2965,7 +3093,11 @@ async function prepareManaged(
   // Neither document goes on the discovery pass. It runs before anything is known about the form,
   // and its whole job is to read the page; carrying a file there would spend an upload action on a
   // control this run has not yet established exists.
-  let packet = omitTranscript(omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal))));
+  let packet = packetForEmployerDelivery(
+    await buildPacket(row, packetUsesControlledResumeFixture(portal), verifiedQuestions),
+    current,
+    'browser',
+  );
 
   // R-055 on the managed path: a cheap first call fills only the fixed fields and asks
   // stratus-browser-cloud's 'discover' action (PR #7) to scan the resulting page for custom
@@ -2973,6 +3105,15 @@ async function prepareManaged(
   // stateless. Resolved through the SAME questionDiscovery.ts logic the direct-Playwright path
   // uses, so the two providers can never answer a question differently.
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
+  const prepareEnvelope = employerDeliveryEnvelope({
+    channel: browserEmployerDeliveryChannel(browserDeliveryRuntimeIdentity().provider),
+    destinationUrl: applicationUrl,
+    portalFamily: portal,
+    runtime: browserDeliveryRuntimeIdentity(),
+    coverLetterSupported: current.cover_letter_supported,
+    transcriptSupported: current.transcript_supported,
+  });
+  assertVerifiedBuiltPacket(packet, audit, verifiedQuestions, 'browser', prepareEnvelope);
   /* `.catch(() => null)` used to be the whole error handling here, and it is how a total failure of
    * the discovery pass became indistinguishable from a form that simply had no custom questions.
    *
@@ -2988,7 +3129,10 @@ async function prepareManaged(
   // An array rather than a nullable local so the assignment inside the catch callback is visible to
   // the code below it; TypeScript does not narrow across a closure it cannot prove ran.
   const discoveryFailures: string[] = [];
-  const discoveryResult = await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions(portal, packet))
+  const discoveryResult = await runManagedBrowser(
+    applicationUrl,
+    managedActionsWithExactPageUrl(buildManagedDiscoveryActions(portal, packet), applicationUrl),
+  )
     .catch((error: unknown) => {
       // Normalized rather than taken raw, because `new Error()` carries `message === ''` and an
       // empty string reaches discoveryHonestyReasons as falsy: the run would be correctly held back
@@ -3001,6 +3145,7 @@ async function prepareManaged(
       );
       return null;
     });
+  if (discoveryResult) assertEmployerPageUrl(applicationUrl, discoveryResult.url);
   let progressScreenshotUrl: string | undefined;
   if (discoveryResult?.screenshot) {
     try {
@@ -3431,6 +3576,32 @@ async function prepareManaged(
   packet.fieldOptions = fieldOptions;
   packet.failedFields = failedFields;
 
+  const measuredPrepareEnvelope = employerDeliveryEnvelope({
+    channel: browserEmployerDeliveryChannel(browserDeliveryRuntimeIdentity().provider),
+    destinationUrl: applicationUrl,
+    portalFamily: portal,
+    runtime: browserDeliveryRuntimeIdentity(),
+    coverLetterSupported,
+    transcriptSupported,
+  });
+  if (await holdPreparationForPacketDrift({
+    row,
+    current,
+    packet,
+    audit,
+    verifiedQuestions,
+    mode: 'browser',
+    envelope: measuredPrepareEnvelope,
+    patch: {
+      submission_run_id: runId,
+      questions: mergedQuestions,
+      cover_letter_supported: coverLetterSupported,
+      transcript_supported: transcriptSupported,
+      ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
+      ...(packet.applicantSnapshot ? { applicant_snapshot: packet.applicantSnapshot } : {}),
+    },
+  })) return;
+
   const fillActions = buildManagedPortalActions(portal, packet);
   /* Action shape only, never question text or answer values. A required field can be discovered,
    * answered, and still remain empty because the final packet aimed it by label rather than by the
@@ -3477,7 +3648,10 @@ async function prepareManaged(
     progress_stage: 'Filling your answers',
     progress_updated_at: new Date().toISOString(),
   }));
-  const result = await runManagedBrowser(applicationUrl, fillActions);
+  const result = await runManagedBrowser(
+    applicationUrl,
+    managedActionsWithExactPageUrl(fillActions, applicationUrl),
+  );
   const actionDiagnostics = managedActionDiagnosticsForLog(result.actionDiagnostics);
   if (actionDiagnostics.length > 0) {
     fastify.log.info({
@@ -4130,46 +4304,60 @@ export function normalizedPacketAuditQuestions(review: ApplicationReviewState) {
   return normalizeStoredPortalQuestions(review.questions, portal);
 }
 
-export async function resolvedPacketAuditQuestions(row: ResumeRow, review: ApplicationReviewState) {
-  return refreshKnownQuestionAnswers(
-    normalizedPacketAuditQuestions(review),
-    await loadApplicationProfileLike(row.user_id),
-    applicationContextForQuestionResolution(row, review),
-    review.questions_reviewed_at,
-    postingCountryFromJobContext(row.job_context),
-    postingCountryCodeFromJobContext(row.job_context),
+export function resolvePacketAuditQuestionFixpoint(
+  review: ApplicationReviewState,
+  profile: ApplicationProfileLike,
+  questionContext: string,
+  postingCountry?: JobCountry,
+  postingCountryCode?: string,
+  asOf: Date = new Date(),
+): ApplicationReviewQuestion[] {
+  const normalize = (questions: readonly ApplicationReviewQuestion[]) => normalizedPacketAuditQuestions({
+    ...review,
+    questions: [...questions],
+  });
+  return packetQuestionFixpoint(
+    normalize(review.questions),
+    (questions) => normalize(refreshKnownQuestionAnswers(
+      questions,
+      profile,
+      questionContext,
+      review.questions_reviewed_at,
+      postingCountry,
+      postingCountryCode,
+      asOf,
+    )),
   );
 }
 
-/* EITHER READING OF ACKNOWLEDGED CONTENT IS ACKNOWLEDGED CONTENT. The audit binds the resolved
- * reading; the submit-request gate verifies its own resolved set against that binding and then
- * PERSISTS that set as the stored rows. Re-resolving the persisted set is not guaranteed to be a
- * fixpoint - measured on the Easy Dynamics Rippling packet, 2026-08-20, fifth round: acknowledge
- * passed at 16:34:05 against refresh(stored), the gate passed and wrote its resolved set, and
- * prepare() then refused at 16:34:42 because refresh(that set) hashed differently again - the
- * sensitive-answer resolver rewrites machine-provenance EEO answers to its canonical vocabulary,
- * and canonicalisation is not idempotent across the two resolvers the routes use.
- *
- * So a runner verifier accepts if EITHER canonicalisation of the stored rows matches the
- * acknowledged audit: the resolved reading first (the audit's own binding), and the raw stored
- * rows as they stand (the exact set the gate just verified and persisted). Both are readings of
- * content the applicant acknowledged; a real packet change - an edited answer, a different PDF, a
- * changed JD - flips both, so nothing unacknowledged can ride the second try. */
+export async function resolvedPacketAuditQuestions(row: ResumeRow, review: ApplicationReviewState) {
+  const asOf = new Date();
+  return resolvePacketAuditQuestionFixpoint(
+    review,
+    await loadApplicationProfileLike(row.user_id),
+    applicationContextForQuestionResolution(row, review),
+    postingCountryFromJobContext(row.job_context),
+    postingCountryCodeFromJobContext(row.job_context),
+    asOf,
+  );
+}
+
+/* One stable reading everywhere. The former runner-only raw fallback was asymmetric: it could let
+ * prepare and submit accept a stored answer after the profile-backed reading had changed, while
+ * audit, acknowledgement and submit-request still rejected the same row. Resolving to a true
+ * fixpoint before the audit is minted gives every request one identity and preserves fail-closed
+ * behavior for any real answer, label, control, profile, document or posting change. */
 async function verifiedPacketForRun(
   row: ResumeRow,
   current: ApplicationReviewState,
   verify: typeof currentPacketAudit | typeof currentAcknowledgedPacketAudit,
 ) {
-  const resolved = await verify(row, {
-    questions: await resolvedPacketAuditQuestions(row, current),
+  const questions = await resolvedPacketAuditQuestions(row, current);
+  const verdict = await verify(row, {
+    questions,
     restoreExpiredResume: 'authorizing_send',
   });
-  if (resolved.valid) return resolved;
-  const raw = await verify(row, {
-    questions: current.questions,
-    restoreExpiredResume: 'authorizing_send',
-  });
-  return raw.valid ? raw : resolved;
+  return { ...verdict, questions };
 }
 
 async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = false) {
@@ -4250,41 +4438,11 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
 
   const authorization = await standingAuthorization(row.user_id);
   assertControlledPortalEnabled(portal);
-  const atsAssessment = atsApiSubmissionEnabled() ? assessAtsSubmissionChannel(portalUrl) : null;
-  if (atsAssessment?.status === 'available') {
-    /* The one preparation that reads no form at all, so `safe` cannot be a literal.
-     *
-     * This branch opens no browser, computes no blockers and never sees the employer's page: it
-     * decides the posting can be submitted through an employer-authorized API and hands off. `true`
-     * was therefore the honest answer about the FORM and the wrong answer about the PACKET - with
-     * standing consent it turns straight into 'submitting' and submit() posts the application, and
-     * nothing between here and there had ever read the question list. Latent today because
-     * atsApiSubmissionEnabled() gates the branch, and the shape is what bites the day that flag goes
-     * on. submit() refuses at the click as well; this is what stops the packet being DESCRIBED as
-     * ready in the first place. */
-    const atsUnansweredRequired = blankRequiredQuestionLabels(current.questions);
-    await writeReview(row, nextReview(current, {
-      ...preparedReviewPatch(authorization, atsUnansweredRequired.length === 0),
-      ...(atsUnansweredRequired.length > 0
-        ? {
-          attention_reason: `${atsUnansweredRequired.length} required `
-            + `${atsUnansweredRequired.length === 1 ? 'question is' : 'questions are'} still unanswered: `
-            + `${atsUnansweredRequired.map((label) => `"${label.slice(0, 60)}"`).join(', ').slice(0, 400)}`,
-        }
-        : {}),
-      submission_run_id: runId,
-      browser_context_id: undefined,
-      browser_session_id: undefined,
-      submission_error: undefined,
-    }));
-    fastify.log.info(
-      { applicationId: row.id, provider: atsAssessment.provider, unansweredRequired: atsUnansweredRequired.length },
-      'Application prepared for employer-authorized ATS API submission',
-    );
-    return;
+  if (String(packetAudit.audit.bindings.employerDelivery?.mode) === 'ats_api') {
+    throw new Error('ATS API delivery is withheld until Litos can verify and send one prebuilt request object');
   }
   if (shouldUseLocalControlledBrowser(portal)) {
-    await prepareControlled(row, current, runId, authorization, fastify);
+    await prepareControlled(row, current, runId, authorization, fastify, packetAudit.audit, packetAudit.questions);
     return;
   }
   if (isManagedStratusProvider() && isManagedAttendedAccountPortal(portal)
@@ -4344,9 +4502,37 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     return;
   }
   if (isManagedStratusProvider()) {
-    await prepareManaged(row, current, portal, runId, fastify, authorization);
+    await prepareManaged(
+      row,
+      current,
+      portal,
+      runId,
+      fastify,
+      authorization,
+      packetAudit.audit,
+      packetAudit.questions,
+    );
     return;
   }
+  const initialDirectPacket = packetForEmployerDelivery(
+    await buildPacket(row, packetUsesControlledResumeFixture(portal), packetAudit.questions),
+    current,
+    'browser',
+  );
+  assertVerifiedBuiltPacket(
+    initialDirectPacket,
+    packetAudit.audit,
+    packetAudit.questions,
+    'browser',
+    employerDeliveryEnvelope({
+      channel: browserEmployerDeliveryChannel(browserDeliveryRuntimeIdentity().provider),
+      destinationUrl: portalApplicationUrl(portal, current.portal_url!),
+      portalFamily: portal,
+      runtime: browserDeliveryRuntimeIdentity(),
+      coverLetterSupported: current.cover_letter_supported,
+      transcriptSupported: current.transcript_supported,
+    }),
+  );
   const contextId = current.browser_context_id ?? (await createBrowserContext());
   const session = await createBrowserSession(contextId, portalUrl);
   {
@@ -4364,6 +4550,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     // SmartRecruiters follows its captured link. Workable canonicalizes to /apply and clears its
     // optional-cookie overlay. Every other portal is a no-op here.
     await navigateToApplicationForm(page, portal);
+    assertEmployerPageUrl(portalApplicationUrl(portal, current.portal_url!), page.url());
     const [verificationSettings] = await db.select({ enabled: users.automatic_verification_enabled })
       .from(users).where(eq(users.id, row.user_id)).limit(1);
     const verificationRoute = await resolveVerificationEmailRoute({
@@ -4479,6 +4666,34 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
      * answer_source, which made applicantChoseAnswer false for every question here. See
      * packetQuestionsForFill for the measurement and for the three merged fixes it left inert. */
     packet.questions = packetQuestionsForFill(mergedQuestions);
+
+    const directPrepareEnvelope = employerDeliveryEnvelope({
+      channel: browserEmployerDeliveryChannel(browserDeliveryRuntimeIdentity().provider),
+      destinationUrl: portalApplicationUrl(portal, current.portal_url!),
+      portalFamily: portal,
+      runtime: browserDeliveryRuntimeIdentity(),
+      coverLetterSupported,
+      transcriptSupported,
+    });
+    if (await holdPreparationForPacketDrift({
+      row,
+      current,
+      packet,
+      audit: packetAudit.audit,
+      verifiedQuestions: packetAudit.questions,
+      mode: 'browser',
+      envelope: directPrepareEnvelope,
+      patch: {
+        submission_run_id: runId,
+        browser_context_id: contextId,
+        browser_session_id: session.id,
+        questions: mergedQuestions,
+        cover_letter_supported: coverLetterSupported,
+        transcript_supported: transcriptSupported,
+        ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
+        ...(packet.applicantSnapshot ? { applicant_snapshot: packet.applicantSnapshot } : {}),
+      },
+    })) return;
 
     let result = await fillPortal(page, portal, packet);
     const postFillVerification = await completeEmailVerificationIfPresent({
@@ -4651,13 +4866,30 @@ async function prepareControlled(
   runId: string,
   authorization: StandingAuthorization,
   fastify: FastifyInstance,
+  audit: PacketAudit,
+  verifiedQuestions: readonly ApplicationReviewQuestion[],
 ) {
   if (process.env.LITOS_ENABLE_TEST_PORTAL !== 'true') throw new Error('Controlled portal is disabled');
+  const packet = await buildPacket(row, true, verifiedQuestions);
+  assertVerifiedBuiltPacket(
+    packet,
+    audit,
+    verifiedQuestions,
+    'full',
+    employerDeliveryEnvelope({
+      channel: 'controlled_browser',
+      destinationUrl: current.portal_url!,
+      portalFamily: 'controlled_test',
+      runtime: { provider: 'local_playwright', executable: controlledChromeExecutable() },
+      coverLetterSupported: current.cover_letter_supported,
+      transcriptSupported: current.transcript_supported,
+    }),
+  );
   const browser = await chromium.launch({ executablePath: controlledChromeExecutable(), headless: true });
   try {
     const page = await browser.newPage();
     await page.goto(current.portal_url!, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    const packet = await buildPacket(row, true);
+    assertEmployerPageUrl(current.portal_url!, page.url());
     const result = await fillPortal(page, 'controlled_test', packet);
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
     const pageText = await page.locator('body').innerText({ timeout: 1_000 }).catch(() => '');
@@ -4684,14 +4916,34 @@ async function prepareControlled(
   }
 }
 
-async function submitControlled(row: ResumeRow, review: ApplicationReviewState, fastify: FastifyInstance) {
+async function submitControlled(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  fastify: FastifyInstance,
+  audit: PacketAudit,
+  verifiedQuestions: readonly ApplicationReviewQuestion[],
+) {
   if (process.env.LITOS_ENABLE_TEST_PORTAL !== 'true') throw new Error('Controlled portal is disabled');
+  const packet = await buildPacket(row, true, verifiedQuestions);
+  const envelope = employerDeliveryEnvelope({
+    channel: 'controlled_browser',
+    destinationUrl: review.portal_url!,
+    portalFamily: 'controlled_test',
+    runtime: { provider: 'local_playwright', executable: controlledChromeExecutable() },
+    coverLetterSupported: review.cover_letter_supported,
+    transcriptSupported: review.transcript_supported,
+  });
+  assertVerifiedBuiltPacket(packet, audit, verifiedQuestions, 'full', envelope);
   const browser = await chromium.launch({ executablePath: controlledChromeExecutable(), headless: true });
   try {
     const page = await browser.newPage();
     await page.goto(review.portal_url!, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    await fillPortal(page, 'controlled_test', await buildPacket(row, true));
-    await clickFinalSubmit(page);
+    assertEmployerPageUrl(review.portal_url!, page.url());
+    await transportVerifiedBuiltPacket(packet, audit, verifiedQuestions, async (exactPacket) => {
+      await fillPortal(page, 'controlled_test', exactPacket);
+      assertEmployerPageUrl(review.portal_url!, page.url());
+      await clickFinalSubmit(page);
+    }, 'full', envelope);
     const receipt = await readReceipt(page);
     const capturedAt = new Date().toISOString();
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
@@ -4713,58 +4965,15 @@ async function submitControlled(row: ResumeRow, review: ApplicationReviewState, 
   }
 }
 
-function packetForApiSubmission(review: ApplicationReviewState, builtPacket: SubmissionPacket): SubmissionPacket {
-  const withCoverLetter = review.cover_letter_supported === false ? omitCoverLetter(builtPacket) : builtPacket;
-  /* THE TRANSCRIPT READS THE FLAG THE OTHER WAY ROUND FROM THE LETTER, and the asymmetry is the
-   * point rather than an oversight.
-   *
-   * The letter is kept unless the prepared form explicitly rejected it, because an unmeasured packet
-   * predates the field and a letter she approved should still go. The transcript is dropped unless
-   * the form was explicitly measured as able to take one: every packet carrying a transcript was
-   * prepared on a build that writes transcript_supported on both prepare paths, so `undefined` here
-   * means the file was attached after the last prepare and no run has ever looked at this form for
-   * somewhere to put it. Attaching on a guess sends an unasked-for document, in her name, through a
-   * channel where nobody sees the form first. */
-  return review.transcript_supported === true ? withCoverLetter : omitTranscript(withCoverLetter);
-}
-
 async function submitViaAtsSubmissionChannel(
   row: ResumeRow,
   review: ApplicationReviewState,
   fastify: FastifyInstance,
+  audit: PacketAudit,
+  verifiedQuestions: readonly ApplicationReviewQuestion[],
 ): Promise<boolean> {
-  if (!atsApiSubmissionEnabled()) return false;
-  review = await repairReviewPortalFromMonitoredJob(row, review);
-  if (!await authorizationValidAtClick(row, review)) {
-    await holdRevokedSubmission(row, review);
-    return true;
-  }
-  const packet = packetForApiSubmission(review, await buildPacket(row));
-  const atsResult = await tryAtsSubmissionChannel(review.portal_url, packet);
-  if (atsResult.kind === 'submitted') {
-    const capturedAt = new Date().toISOString();
-    await writeReview(row, nextReview(review, {
-      status: 'submitted',
-      submitted_at: capturedAt,
-      submission_error: undefined,
-      receipt: {
-        confirmation_text: atsResult.confirmationText,
-        final_url: atsResult.finalUrl,
-        captured_at: capturedAt,
-        reference_id: atsResult.referenceId,
-        source: 'ats_api',
-      },
-    }));
-    fastify.log.info({ applicationId: row.id, provider: atsResult.provider }, 'Application submission accepted by ATS API');
-    return true;
-  }
-  if (atsResult.assessment.status === 'unavailable') {
-    fastify.log.info(
-      { applicationId: row.id, provider: atsResult.assessment.provider, reason: atsResult.assessment.reason },
-      'ATS API submission channel unavailable, continuing with browser submission',
-    );
-  }
-  return false;
+  if (String(audit.bindings.employerDelivery?.mode) !== 'ats_api') return false;
+  throw new Error('ATS API delivery is withheld until Litos can verify and send one prebuilt request object');
 }
 
 /**
@@ -4922,7 +5131,6 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
   row = claimedRow;
   let claimedReview = readApplicationReview(row.spec);
   if (!claimedReview) return;
-  claimedReview = await repairReviewPortalFromMonitoredJob(row, claimedReview);
   /* THE LAST PLACE THIS CAN BE ASKED, and the only one that covers every path to 'submitted'.
    *
    * blankRequiredQuestionLabels already gates the two PREPARE decisions and the approve route, and
@@ -4988,10 +5196,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
   const claimedPortal = detectPortal(claimedReview.portal_url!);
   assertControlledPortalEnabled(claimedPortal);
   if (shouldUseLocalControlledBrowser(claimedPortal)) {
-    await submitControlled(row, claimedReview, fastify);
+    await submitControlled(row, claimedReview, fastify, packetAudit.audit, packetAudit.questions);
     return;
   }
-  if (await submitViaAtsSubmissionChannel(row, claimedReview, fastify)) return;
+  if (await submitViaAtsSubmissionChannel(
+    row,
+    claimedReview,
+    fastify,
+    packetAudit.audit,
+    packetAudit.questions,
+  )) return;
   // Portals that cannot be submitted in one run stop HERE, before either provider path.
   //
   // This gate used to live only inside buildManagedPortalActions, which was wrong in two ways that
@@ -5039,6 +5253,21 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       return;
     }
     const applicationUrl = portalApplicationUrl(portal, claimedReview.portal_url!);
+    const builtPacket = await buildPacket(
+      row,
+      packetUsesControlledResumeFixture(portal),
+      packetAudit.questions,
+    );
+    const packet = packetForEmployerDelivery(builtPacket, claimedReview, 'browser');
+    const envelope = employerDeliveryEnvelope({
+      channel: browserEmployerDeliveryChannel(browserDeliveryRuntimeIdentity().provider),
+      destinationUrl: applicationUrl,
+      portalFamily: portal,
+      runtime: browserDeliveryRuntimeIdentity(),
+      coverLetterSupported: claimedReview.cover_letter_supported,
+      transcriptSupported: claimedReview.transcript_supported,
+    });
+    assertVerifiedBuiltPacket(packet, packetAudit.audit, packetAudit.questions, 'browser', envelope);
     // There is no Playwright Page on this path - the actions run inside the remote runner - so
     // neither fillPortal's blocker check nor clickFinalSubmit's guard executes here, and the code
     // below writes status:'submitted' on a receipt screenshot. Without this probe, portalCanAutoSubmit
@@ -5063,6 +5292,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         fastify.log.warn({ applicationId: row.id, detail }, 'CAPTCHA probe failed, continuing unprobed');
         return null;
       });
+    if (!captchaProbe) throw new Error('The employer destination could not be verified before submission');
+    assertEmployerPageUrl(applicationUrl, captchaProbe.url);
     // ONE check, named once. This used to read
     //   managedResultRequiresCaptchaAttention(probe) && managedCaptchaVerdictIsCorroborated(portal, probe)
     // and presented itself as probe-plus-corroboration. It was not. Both terms call
@@ -5079,14 +5310,6 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       // codebase that declined to.
       throw new CaptchaUnresolvedError('before_fill', managedCaptchaProvider(captchaProbe, portal));
     }
-    const builtPacket = await buildPacket(row, packetUsesControlledResumeFixture(portal));
-    const withCoverLetter = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
-    // Re-derived from what the prepare measured, not probed again: this run has no discovery pass,
-    // and the form it is about to submit is the one the prepare read. See packetForApiSubmission for
-    // why the transcript needs an explicit true where the letter needs only "not explicitly false".
-    const packet = claimedReview.transcript_supported === true
-      ? withCoverLetter
-      : omitTranscript(withCoverLetter);
     /* A grant-conditional family got past the gate above on the ACCOUNT's grant; whether THIS
      * packet licenses a tick is the plan's stricter question (exactly one captured consent control,
      * routine class, recorded consent_permission acceptance). No plan means park at the handoff
@@ -5107,7 +5330,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * paint a Greenhouse application form carries no security-code control, because Greenhouse only
      * renders one after a submit has been refused. So a code cannot be attached to this list. It is
      * attached to the CONTINUATION below, which runs on the very DOM this submit produced. */
-    const initialActions = buildManagedPortalActions(portal, packet, true);
+    const initialActions = buildManagedPortalActions(portal, packet, true, applicationUrl);
     /* NO continuationCheckpoint, AND THE COMMENT THAT USED TO SIT HERE WAS SIMPLY WRONG.
      *
      * It said "an ordinary unknown receipt does not offer a continuation, so it needs an explicit
@@ -5329,7 +5552,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           // Spend the exact code before the one-shot remote call. If the worker stops after this
           // write, the same retained code cannot be selected and submitted on another run.
           await writeReview(row, nextReview(claimedReview, { security_code: enteredSecurityCodeState }));
-          const codeActions = securityCodeContinuationActions(initialActions, prepared.code) ?? prepared.actions;
+          const codeActions = securityCodeContinuationActions(initialActions, prepared.code, result.url) ?? prepared.actions;
           try {
             // Exactly one continuation call. An uncertain click is never retried.
             receiptResult = await continueManagedBrowser(continuationToken, codeActions);
@@ -5708,25 +5931,37 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     return;
   }
   if (!claimedReview.browser_session_id) throw new Error('The prepared run is missing its session.');
+  const directPortal = detectPortal(claimedReview.portal_url!);
+  const directBuiltPacket = await buildPacket(row, false, packetAudit.questions);
+  const directPacket = packetForEmployerDelivery(directBuiltPacket, claimedReview, 'browser');
+  const directEnvelope = employerDeliveryEnvelope({
+    channel: browserEmployerDeliveryChannel(browserDeliveryRuntimeIdentity().provider),
+    destinationUrl: portalApplicationUrl(directPortal, claimedReview.portal_url!),
+    portalFamily: directPortal,
+    runtime: browserDeliveryRuntimeIdentity(),
+    coverLetterSupported: claimedReview.cover_letter_supported,
+    transcriptSupported: claimedReview.transcript_supported,
+  });
+  assertVerifiedBuiltPacket(
+    directPacket,
+    packetAudit.audit,
+    packetAudit.questions,
+    'browser',
+    directEnvelope,
+  );
   const session = await getBrowserSession(claimedReview.browser_session_id);
   let browser;
   try {
     const connected = await connectToSession(session);
     browser = connected.browser;
     const page = connected.page;
+    assertEmployerPageUrl(directEnvelope.destinationUrl, page.url());
     if (!await authorizationValidAtClick(row, claimedReview)) {
       await holdRevokedSubmission(row, claimedReview);
       return;
     }
-    const portal = detectPortal(claimedReview.portal_url!);
-    const builtPacket = await buildPacket(row);
-    const withCoverLetter = claimedReview.cover_letter_supported === true ? builtPacket : omitCoverLetter(builtPacket);
-    // Same re-derivation as the managed submit above, on the path that reconnects to the session the
-    // prepare left open. Both submit sites and the ATS channel read this one flag.
-    const packet = claimedReview.transcript_supported === true
-      ? withCoverLetter
-      : omitTranscript(withCoverLetter);
-    await fillPortal(page, portal, packet);
+    await fillPortal(page, directPortal, directPacket);
+    assertEmployerPageUrl(directEnvelope.destinationUrl, page.url());
     await clickFinalSubmit(page);
     const receipt = await readReceipt(page);
     const capturedAt = new Date().toISOString();

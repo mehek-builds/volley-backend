@@ -240,8 +240,8 @@ describe('every path that can write status submitted is behind the guard', () =>
     );
     // submitViaAtsSubmissionChannel and submitControlled both live below the claim, so a guard
     // above it covers them. Pinned so a later move of either one cannot slip out from under it.
-    assert.ok(body.indexOf('submitViaAtsSubmissionChannel(row') > claimAt);
-    assert.ok(body.indexOf('submitControlled(row') > claimAt);
+    assert.ok(body.indexOf('submitViaAtsSubmissionChannel(') > claimAt);
+    assert.ok(body.indexOf('submitControlled(') > claimAt);
   });
 
   test('the unsupported-portal email fallback: POST /submit-request', async () => {
@@ -250,7 +250,7 @@ describe('every path that can write status submitted is behind the guard', () =>
     assert.ok(routeAt > 0);
     const body = source.slice(routeAt);
     const guardAt = body.indexOf('refuseDuplicateApplication');
-    const emailAt = body.indexOf('sendUnsupportedPortalApplicationEmail');
+    const emailAt = body.indexOf('sendPreparedUnsupportedPortalApplicationEmail');
     assert.ok(guardAt > 0, 'submit-request does not consult the duplicate guard');
     assert.ok(guardAt < emailAt, 'the guard must run before the packet is emailed to the employer');
   });

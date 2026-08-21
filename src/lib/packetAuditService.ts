@@ -564,6 +564,7 @@ function auditInput(row: ResumeRow, review: ApplicationReviewState, pdfBytes: Bu
        packet is. See PACKET_VISIBLE_QUESTION_FIELDS. */
     questions: normalizeApplicationReviewQuestions(review.questions),
     applicantSnapshot: review.applicant_snapshot ?? null,
+    employerDelivery: review.employer_delivery_bindings,
     resumeEmail: String(contact.email ?? '').trim().toLowerCase(),
     applicantEmail: String(review.applicant_email?.address ?? '').trim().toLowerCase(),
     pdfObjectKey: row.resume_object_key,
@@ -760,11 +761,14 @@ export async function createAndPersistPacketAudit(
      * applicant to acknowledge has to build it over that same set, or the acknowledgement it
      * produces is spent on a packet_version the gate will never compute. */
     questions?: readonly ApplicationReviewQuestion[];
+    /** Exact review snapshot whose applicant and delivery bindings were built for this audit. */
+    review?: ApplicationReviewState;
   } = {},
 ): Promise<{ audit: PacketAudit; persisted: boolean; pdfBytes: Buffer }> {
   const stored = readApplicationReview(row.spec);
   if (!stored) throw new Error('Application review is not available for this resume');
-  const review = options.questions ? { ...stored, questions: [...options.questions] } : stored;
+  const review = options.review
+    ?? (options.questions ? { ...stored, questions: [...options.questions] } : stored);
   const emailIssue = packetEmailIdentityIssue(row, review);
   if (emailIssue) throw new Error(emailIssue);
   await (options.validateApplicantEmail ?? verifyCurrentPacketEmailIdentities)(row);

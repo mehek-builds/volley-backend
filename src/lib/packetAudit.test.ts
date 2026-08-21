@@ -13,6 +13,7 @@ import {
   type PacketAudit,
   type PacketAuditClauseInput,
   type PacketAuditTermInput,
+  verifyStoredPacketAuditAcknowledgement,
   verifyCurrentPacketAudit,
 } from './packetAudit';
 
@@ -87,6 +88,11 @@ function validInput(): CreatePacketAuditInput {
     },
     resumeEmail: 'student@usc.edu',
     applicantEmail: 'app-application-1@apply.trylitos.com',
+    employerDelivery: {
+      version: 'employer_delivery_v1',
+      mode: 'browser',
+      sha256: '1'.repeat(64),
+    },
     pdfObjectKey: 'users/owner-1/resumes/application-1.pdf',
     pdfBytes: Buffer.from('%PDF-1.7 exact packet bytes'),
     editedTerms: ['deployment pipeline'],
@@ -112,11 +118,54 @@ function currentInput(input: CreatePacketAuditInput, audit: PacketAudit) {
     applicantSnapshot: input.applicantSnapshot,
     resumeEmail: input.resumeEmail,
     applicantEmail: input.applicantEmail,
+    employerDelivery: input.employerDelivery,
     pdfObjectKey: input.pdfObjectKey,
     pdfBytes: input.pdfBytes,
     audit,
   };
 }
+
+test('stored acknowledgement is a pure four-digest check and refuses every identity mismatch', () => {
+  const input = validInput();
+  const audit = createPacketAudit(input);
+  const client = {
+    audit_digest: audit.audit_digest,
+    packet_version: audit.packet_version,
+    pdf_sha256: audit.bindings.pdf.sha256,
+    size_bytes: audit.bindings.pdf.sizeBytes,
+  };
+  const verify = (overrides: Partial<Parameters<typeof verifyStoredPacketAuditAcknowledgement>[0]> = {}) => (
+    verifyStoredPacketAuditAcknowledgement({
+      audit,
+      ownerId: input.ownerId,
+      applicationId: input.applicationId,
+      client,
+      ...overrides,
+    })
+  );
+
+  assert.deepEqual(verify(), { valid: true, audit });
+  assert.deepEqual(verify({ ownerId: 'other-owner' }), { valid: false, reason: 'packet_audit_stale' });
+  assert.deepEqual(verify({ applicationId: 'other-application' }), { valid: false, reason: 'packet_audit_stale' });
+  const missingDelivery = structuredClone(audit);
+  delete missingDelivery.bindings.employerDelivery;
+  const { packet_version: _packetVersion, audit_digest: _auditDigest, ...unsignedMissingDelivery } = missingDelivery;
+  missingDelivery.packet_version = packetAuditSha256({
+    version: missingDelivery.version,
+    bindings: missingDelivery.bindings,
+  });
+  missingDelivery.audit_digest = packetAuditSha256({ ...unsignedMissingDelivery, packet_version: missingDelivery.packet_version });
+  assert.deepEqual(verify({ audit: missingDelivery }), { valid: false, reason: 'packet_audit_stale' });
+
+  for (const key of Object.keys(client) as Array<keyof typeof client>) {
+    const changed = { ...client, [key]: key === 'size_bytes' ? client.size_bytes + 1 : '0'.repeat(64) };
+    assert.deepEqual(
+      verify({ client: changed }),
+      { valid: false, reason: 'client_packet_mismatch' },
+      key,
+    );
+  }
+});
 
 function expectInvalid(mutator: (input: CreatePacketAuditInput) => void, pattern: RegExp): void {
   const input = validInput();
@@ -136,7 +185,7 @@ test('canonical JSON sorts object keys recursively and produces a stable SHA-256
   assert.throws(() => canonicalPacketJson({ bad: Number.NaN }), /non-finite number/);
 });
 
-test('creates a submission-ready v1 audit with exact PDF, clause, evidence, and term bindings', () => {
+test('creates a submission-ready v2 audit with exact PDF, clause, evidence, and term bindings', () => {
   const input = validInput();
   const audit = createPacketAudit(input);
   assert.equal(packetAuditIsSubmissionReady(audit), true);
@@ -361,6 +410,10 @@ test('the current-packet verifier rejects stale JD, spec, job, answers, applican
     { expected: 'applicant_snapshot', input: { ...base, applicantSnapshot: { profile: { currently_enrolled: false } } } },
     { expected: 'resume_email', input: { ...base, resumeEmail: 'changed@usc.edu' } },
     { expected: 'applicant_email', input: { ...base, applicantEmail: 'app-changed@apply.trylitos.com' } },
+    { expected: 'employer_delivery', input: {
+      ...base,
+      employerDelivery: { ...base.employerDelivery!, sha256: '9'.repeat(64) },
+    } },
     { expected: 'pdf_object', input: { ...base, pdfObjectKey: 'users/owner-1/resumes/another.pdf' } },
     { expected: 'pdf_sha256', input: { ...base, pdfBytes: Buffer.from('%PDF-1.7 changed packet bytes') } },
   ];
@@ -463,8 +516,8 @@ test('tampering with persisted audit evidence or bindings invalidates the audit 
 });
 
 test('malformed persisted JSON fails closed instead of throwing in a submission route', () => {
-  for (const malformed of [null, {}, { version: 'packet_audit_v1' }, {
-    version: 'packet_audit_v1',
+  for (const malformed of [null, {}, { version: 'packet_audit_v2' }, {
+    version: 'packet_audit_v2',
     status: 'passed',
     complete: true,
     degraded: false,

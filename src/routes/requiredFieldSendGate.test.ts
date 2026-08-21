@@ -75,9 +75,9 @@ test('the final click refuses a blank required answer on every provider, includi
   );
   // Before every send. Each of these is a separate way to reach an employer from this function.
   for (const send of [
-    'submitControlled(row, claimedReview, fastify)',
-    'submitViaAtsSubmissionChannel(row, claimedReview, fastify)',
-    'buildManagedPortalActions(portal, packet, true)',
+    'submitControlled(row, claimedReview, fastify, packetAudit.audit, packetAudit.questions)',
+    'submitViaAtsSubmissionChannel(',
+    'buildManagedPortalActions(portal, packet, true, applicationUrl)',
     'clickFinalSubmit(page)',
   ]) {
     const at = submit.indexOf(send);
@@ -90,7 +90,7 @@ test('the unsupported-portal email fallback still refuses before it emails an em
   const route = await readFile('src/routes/applications.ts', 'utf8');
   const handler = slice(route, "'/applications/:id/submit-request'", "'/applications/:id/submission/channels'");
   const gate = handler.indexOf('blankRequired.length > 0');
-  const send = handler.indexOf('sendUnsupportedPortalApplicationEmail');
+  const send = handler.indexOf('sendPreparedUnsupportedPortalApplicationEmail');
   assert.ok(gate >= 0 && send > gate, 'the blank-required refusal must precede the email send');
   // Scoped to the branch that sends. Everything else in this route books a browser, and a fill run
   // is what ANSWERS a required question, so refusing the run is a loop with no exit.
@@ -113,17 +113,14 @@ test('booking a fill run is not gated on the answers the run exists to produce',
   assert.ok(books > gate, 'expected the browser-booking call after the email branch');
 });
 
-test('the ATS API channel does not describe a packet as ready without reading its questions', async () => {
+test('the ATS API channel fails closed before it can describe or send a packet', async () => {
   /* The one preparation with no browser behind it. It opens no page, computes no blockers and never
      sees the employer's form, so `safe` was written as a literal `true` - honest about the form and
      wrong about the packet, because with standing consent that turns straight into 'submitting' and
      submitViaAtsSubmissionChannel posts the application. Latent today, since atsApiSubmissionEnabled()
      gates the branch; the literal is the shape that bites the day the flag goes on. */
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const branch = slice(runner, "if (atsAssessment?.status === 'available')", 'if (shouldUseLocalControlledBrowser(portal))');
-  assert.doesNotMatch(branch, /preparedReviewPatch\(authorization, true\)/);
-  assert.match(branch, /blankRequiredQuestionLabels\(current\.questions\)/);
-  assert.match(branch, /preparedReviewPatch\(authorization, atsUnansweredRequired\.length === 0\)/);
-  // And it says why, rather than leaving a packet at needs_attention with no stated cause.
-  assert.match(branch, /still unanswered/);
+  const branch = slice(runner, "if (String(packetAudit.audit.bindings.employerDelivery?.mode) === 'ats_api')", 'if (shouldUseLocalControlledBrowser(portal))');
+  assert.match(branch, /throw new Error\('ATS API delivery is withheld until Litos can verify and send one prebuilt request object'\)/);
+  assert.doesNotMatch(branch, /preparedReviewPatch|tryAtsSubmissionChannel|transportVerifiedBuiltPacket/);
 });

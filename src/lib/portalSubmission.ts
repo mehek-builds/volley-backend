@@ -1,6 +1,7 @@
 import type { Page } from 'playwright-core';
 import {
   MANAGED_DISCOVERY_ROLE_CAPABILITY,
+  MANAGED_EXACT_PAGE_URL_CAPABILITY,
   MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
   MANAGED_SUBMIT_CHOOSER_POLICY,
   type ManagedBrowserAction,
@@ -1395,7 +1396,7 @@ export function pushManagedReactSelectOptionProbeActions(
  * thing to a stored answer on that list is the placeholder itself.
  */
 const NON_OPTION_LISTBOX_LINE =
-  /^(?:loading(?:\.{3}|…)?|no options?|no results?(?: found)?|type to search|start typing|searching(?:\.{3}|…)?|(?:please\s+)?select(?:\s+(?:an?|one|option|value))?(?:\.{3}|…)?|choose(?:\s+(?:an?|one|option|value))?(?:\.{3}|…)?|--\s*select\s*--)$/i;
+  /^(?:loading(?:\.{3}|…)?|no options?|no results?(?: found)?|type to search|start typing|searching(?:\.{3}|…)?|(?:please\s+)?select(?:\s+(?:an?|one|option|value))?(?:\.{3}|…)?|choose(?:\s+(?:an?|one|option|value))?(?:\.{3}|…)?|auswählen|--\s*select\s*--)$/i;
 
 /**
  * How many rows Greenhouse's select renders into an unfiltered menu. A read this long is a WINDOW
@@ -7152,13 +7153,16 @@ export function buildManagedPortalActions(
   portal: SupportedPortal,
   packet: SubmissionPacket,
   submit = false,
+  expectedPageUrl?: string,
 ): ManagedBrowserAction[] {
   const family = portalFamily(portal);
   // A packet is untrusted input at this boundary. Account-walled portals have no application form,
   // so even a reviewed question carrying a malicious selector must not create an action against the
   // login, CAPTCHA, or privacy gate that happens to be on screen.
   if (ACCOUNT_WALLED_FAMILIES.has(family)) return [];
-  const actions: ManagedBrowserAction[] = [];
+  const actions: ManagedBrowserAction[] = submit && expectedPageUrl
+    ? [{ type: 'requireCapability', value: MANAGED_EXACT_PAGE_URL_CAPABILITY, optional: false }]
+    : [];
   let workablePhoneReadyForSubmit = true;
   /* The one consent control this run may tick, or null for "park at the handoff exactly as today".
    * Computed only for a submit run: a prepare or fill run never ticks a consent, because the tick
@@ -7580,6 +7584,7 @@ export function buildManagedPortalActions(
       contractVersion: 2,
       submitKind: 'application',
       chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
+      ...(expectedPageUrl ? { expectedPageUrl } : {}),
     });
   }
   return actions;

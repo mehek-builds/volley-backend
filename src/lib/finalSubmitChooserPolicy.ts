@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
 
 export const FINAL_SUBMIT_CHOOSER_NAME = 'litos-final-submit' as const;
-export const FINAL_SUBMIT_CHOOSER_VERSION = 2 as const;
+export const FINAL_SUBMIT_CHOOSER_VERSION = 3 as const;
 
 /** Canonical positive grammar. Keep this source byte-identical in the managed runner. */
-export const FINAL_SUBMIT_PATTERN = String.raw`(?:\b(?:submit|send)\s+(?:your\s+|my\s+|the\s+|this\s+)?application\b|\bsubmit\s+with\s+(?:attachments?|resumes?|cvs?|cover\s+letters?)\b|^\s*submit\s*$|^\s*apply\s*$|^\s*apply\s+now\s*$|\bfinish\s+(?:and|&)\s+apply\b)`;
+export const FINAL_SUBMIT_PATTERN = String.raw`(?:\b(?:submit|send)\s+(?:your\s+|my\s+|the\s+|this\s+)?application\b|\bsubmit\s+with\s+(?:attachments?|resumes?|cvs?|cover\s+letters?)\b|^\s*submit\s*$|^\s*apply\s*$|^\s*apply\s+now\s*$|^\s*senden\s*$|\bfinish\s+(?:and|&)\s+apply\b)`;
 
 /**
  * Canonical hard exclusions. The document exception keeps labels such as "Submit application

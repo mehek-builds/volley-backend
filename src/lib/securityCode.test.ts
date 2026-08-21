@@ -380,21 +380,29 @@ test('the code rides a continuation carrying the packet\'s own submit action, an
     { type: 'upload', selector: '#resume', label: 'resume' },
     submitAction,
   ];
-  const actions = securityCodeContinuationActions(packetActions, 'TPHJrFMJ');
+  const challengeUrl = 'https://boards.example.com/jobs/123/verification';
+  const actions = securityCodeContinuationActions(packetActions, 'TPHJrFMJ', challengeUrl);
   assert.ok(actions, 'a packet that ends in an atomic submit can be continued with a code');
-  // ONE action. The continuation runs on a browser that is already looking at the challenge, so
+  // One browser action plus the fail-closed URL capability. The continuation already has the form,
   // re-filling the form would re-fill fields the employer already has, and re-uploading the resume
   // would attach it twice.
-  assert.equal(actions.length, 1);
-  assert.equal(actions[0].type, 'confirmAndSubmit');
-  assert.equal(actions[0].securityCode, 'TPHJrFMJ');
-  assert.equal(actions[0].submitKind, 'verification');
+  assert.equal(actions.length, 2);
+  assert.deepEqual(actions[0], {
+    type: 'requireCapability',
+    value: 'exact-page-url-v1',
+    optional: false,
+    expectedPageUrl: challengeUrl,
+  });
+  assert.equal(actions[1].type, 'confirmAndSubmit');
+  assert.equal(actions[1].securityCode, 'TPHJrFMJ');
+  assert.equal(actions[1].submitKind, 'verification');
+  assert.equal(actions[1].expectedPageUrl, challengeUrl);
   // Derived from the packet's own submit action rather than written out again. The runner validates
   // selector, contract version, retry budget and chooser policy field by field and refuses the whole
   // run on any mismatch, so a second hand-written copy is a fifth place they all have to agree.
-  assert.equal(actions[0].selector, submitAction.selector);
-  assert.equal(actions[0].maxRetries, submitAction.maxRetries);
-  assert.equal(actions[0].contractVersion, 2);
+  assert.equal(actions[1].selector, submitAction.selector);
+  assert.equal(actions[1].maxRetries, submitAction.maxRetries);
+  assert.equal(actions[1].contractVersion, 2);
   assert.equal(submitAction.securityCode, undefined, 'and the packet\'s own action is not mutated');
   assert.equal(submitAction.submitKind, 'application');
 });
@@ -403,20 +411,20 @@ test('a packet Litos may not auto-submit does not become submittable by holding 
   // Same upstream gate withSecurityCode respects: no atomic submit means portalCanAutoSubmit, a
   // multi-step wizard or an account wall said no somewhere above here. Returning null rather than
   // synthesising a submit is what keeps that decision from being reversed by a code arriving.
-  assert.equal(securityCodeContinuationActions([{ type: 'fill', selector: '#email', value: 'a@b.com' }], 'TPHJrFMJ'), null);
-  assert.equal(securityCodeContinuationActions([], 'TPHJrFMJ'), null);
+  assert.equal(securityCodeContinuationActions([{ type: 'fill', selector: '#email', value: 'a@b.com' }], 'TPHJrFMJ', 'https://example.com'), null);
+  assert.equal(securityCodeContinuationActions([], 'TPHJrFMJ', 'https://example.com'), null);
   assert.equal(securityCodeContinuationActions([{
     type: 'confirmAndSubmit',
     selector: 'button',
     contractVersion: 2,
     submitKind: 'verification',
     maxRetries: 1,
-  }], 'TPHJrFMJ'), null, 'a list that is already a verification submit is not a packet');
+  }], 'TPHJrFMJ', 'https://example.com'), null, 'a list that is already a verification submit is not a packet');
 });
 
 test('the first managed run of a code finish is an application submit with no code on it', async () => {
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const start = source.indexOf('const initialActions = buildManagedPortalActions(portal, packet, true);');
+  const start = source.indexOf('const initialActions = buildManagedPortalActions(portal, packet, true, applicationUrl);');
   assert.ok(start > 0, 'the first run must build the ordinary packet actions');
   const firstRun = source.slice(start, source.indexOf('const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);', start));
   // THE REGRESSION GUARD. The code must not be attached to a list that begins with a page load.
@@ -457,7 +465,7 @@ test('a code supplied out of band is never typed, only fingerprinted as supersed
   assert.doesNotMatch(half, /securityCodeContinuationActions\([^)]*options\.securityCode/);
   assert.doesNotMatch(half, /withSecurityCode\(\s*initialActions,\s*options\.securityCode/);
   // And what IS typed comes from the mailbox read this run made, on the page this run submitted.
-  assert.match(half, /securityCodeContinuationActions\(initialActions, prepared\.code\)/);
+  assert.match(half, /securityCodeContinuationActions\(initialActions, prepared\.code, result\.url\)/);
   assert.match(half, /enteredCode = prepared\.code/);
 });
 
@@ -576,7 +584,7 @@ test('automatic verification records one remote managed continuation without exp
   // MANAGED_ACTION_LIMIT is 120 and the runner types the eight boxes itself, so this is one action
   // where buildManagedVerificationActions was ten - and it is the shape whose selector, chooser
   // policy and contract version the runner validates field by field.
-  assert.match(continuation, /const codeActions = securityCodeContinuationActions\(initialActions, prepared\.code\) \?\? prepared\.actions/);
+  assert.match(continuation, /const codeActions = securityCodeContinuationActions\(initialActions, prepared\.code, result\.url\) \?\? prepared\.actions/);
   assert.match(continuation, /receiptResult = await continueManagedBrowser\(continuationToken, codeActions\)/);
   assert.match(continuation, /continuation_resumed: true/);
   assert.doesNotMatch(continuation, /continuation_token:/i);

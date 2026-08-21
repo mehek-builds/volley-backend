@@ -72,7 +72,8 @@ import {
 import { contentDispositionFileName, resumeFileNameForRole } from '../lib/resumeFileName';
 import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPortalRepair';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
-import { applicationContextForQuestionResolution, refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { applicationContextForQuestionResolution, normalizeStoredPortalQuestions, refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { packetQuestionFixpoint } from '../lib/packetQuestionIdentity';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { specWithoutDocumentPointers } from '../lib/documentStore';
 import { recoverOwnedGeneratedDocument } from '../lib/downloadDocumentRecovery';
@@ -254,18 +255,26 @@ function repairedHistorySpec(
 function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jobContext: unknown): unknown {
   const review = readApplicationReview(spec);
   if (!review || !spec || typeof spec !== 'object' || Array.isArray(spec)) return spec;
+  const asOf = new Date();
+  const normalize = (questions: typeof review.questions) => review.portal_url && isPortalSupported(review.portal_url)
+    ? normalizeStoredPortalQuestions(questions, detectPortal(review.portal_url))
+    : questions;
   return {
     ...(spec as Record<string, unknown>),
     _review: {
       ...review,
       // Same context every live fill resolves against; see applicationContextForQuestionResolution.
-      questions: refreshKnownQuestionAnswers(
-        review.questions,
-        profile,
-        applicationContextForQuestionResolution({ job_context: jobContext }, review),
-        review.questions_reviewed_at,
-        postingCountryFromJobContext(jobContext),
-        postingCountryCodeFromJobContext(jobContext),
+      questions: packetQuestionFixpoint(
+        normalize(review.questions),
+        (questions) => normalize(refreshKnownQuestionAnswers(
+          questions,
+          profile,
+          applicationContextForQuestionResolution({ job_context: jobContext }, review),
+          review.questions_reviewed_at,
+          postingCountryFromJobContext(jobContext),
+          postingCountryCodeFromJobContext(jobContext),
+          asOf,
+        )),
       ),
     },
   };

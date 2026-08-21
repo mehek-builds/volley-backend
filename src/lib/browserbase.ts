@@ -14,6 +14,8 @@ export const MANAGED_DISCOVERY_ROLE_CAPABILITY = 'discovery-control-role-v1';
  * whole request during action normalization, before it can execute any browser action.
  */
 export const MANAGED_EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
+/** The remote runner verifies the exact posting URL before any action and again at the submit click. */
+export const MANAGED_EXACT_PAGE_URL_CAPABILITY = 'exact-page-url-v1';
 /**
  * Stratus result capability that proves an `extract` carrying `requireVisible` was answered by a
  * real layout read, one entry per match that is painting something, rather than by the ordinary
@@ -94,6 +96,8 @@ export type ManagedBrowserAction = {
    * already reconstructs to exactly 120, and an action added here would displace a field fill. The
    * runner does click, type, click and reports the outcome in securityCodeAttempt. */
   securityCode?: string;
+  /** confirmAndSubmit only. Exact hash-free posting URL required at the two irreversible boundaries. */
+  expectedPageUrl?: string;
 };
 
 // One entry per text-shaped custom question the 'discover' action found on the live page.
@@ -170,6 +174,12 @@ export type ManagedBrowserResult = {
   discovered?: ManagedDiscoveredQuestion[];
   /** Additive runner features this exact result contract supports. Absence means unsupported. */
   capabilities?: string[];
+  exactPageUrlProof?: {
+    expected: string;
+    beforeActions: string;
+    beforeApplicantData: string;
+    beforeSubmit: string | null;
+  };
   extracted?: Array<{
     selector: string;
     label?: string;
@@ -289,8 +299,17 @@ const STRATUS_SELECTOR_MAX_LENGTH = 500;
 
 function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
   if (action.type === 'requireCapability') {
-    if (action.value !== MANAGED_EXTRACT_ASSERTIONS_CAPABILITY) {
+    if (action.value !== MANAGED_EXTRACT_ASSERTIONS_CAPABILITY
+      && action.value !== MANAGED_EXACT_PAGE_URL_CAPABILITY) {
       throw new Error('Managed Stratus runner capability requirement is invalid');
+    }
+    if (action.expectedPageUrl !== undefined) {
+      const expectedPageUrl = new URL(action.expectedPageUrl);
+      expectedPageUrl.hash = '';
+      if (!/^https?:$/.test(expectedPageUrl.protocol)) {
+        throw new Error('Managed employer page URL must use HTTP or HTTPS');
+      }
+      return { ...action, expectedPageUrl: expectedPageUrl.href };
     }
     return action;
   }
@@ -313,6 +332,14 @@ function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
       || action.chooserPolicy.exclusionPattern !== FINAL_SUBMIT_CHOOSER_POLICY.exclusionPattern
       || action.chooserPolicy.grammarHash !== FINAL_SUBMIT_CHOOSER_POLICY.grammarHash) {
       throw new Error('Managed final-submit chooser policy is invalid');
+    }
+    if (action.expectedPageUrl !== undefined) {
+      const expectedPageUrl = new URL(action.expectedPageUrl);
+      expectedPageUrl.hash = '';
+      if (!/^https?:$/.test(expectedPageUrl.protocol)) {
+        throw new Error('Managed employer page URL must use HTTP or HTTPS');
+      }
+      return { ...action, expectedPageUrl: expectedPageUrl.href };
     }
     return action;
   }
@@ -358,6 +385,38 @@ function assertRequiredManagedCapabilities(
   if (missing.length > 0) {
     throw new Error(`Managed Stratus result did not advertise required runner capability: ${missing.join(', ')}`);
   }
+  if (required.includes(MANAGED_EXACT_PAGE_URL_CAPABILITY)) {
+    const expected = actions.find((action) => action.expectedPageUrl)?.expectedPageUrl;
+    const canonicalExpected = expected ? new URL(expected) : null;
+    if (canonicalExpected) canonicalExpected.hash = '';
+    const proof = result.exactPageUrlProof;
+    if (!canonicalExpected || proof?.expected !== canonicalExpected.href
+      || proof.beforeActions !== canonicalExpected.href
+      || proof.beforeApplicantData !== canonicalExpected.href
+      || (result.submitOutcome?.pressed === true && proof.beforeSubmit !== canonicalExpected.href)) {
+      throw new Error('Managed Stratus result did not prove the exact employer page URL boundaries');
+    }
+  }
+}
+
+export function managedActionsWithExactPageUrl(
+  actions: readonly ManagedBrowserAction[],
+  expectedPageUrl: string,
+): ManagedBrowserAction[] {
+  const expected = new URL(expectedPageUrl);
+  expected.hash = '';
+  if (!/^https?:$/.test(expected.protocol)) throw new Error('Managed employer page URL must use HTTP or HTTPS');
+  return [
+    {
+      type: 'requireCapability',
+      value: MANAGED_EXACT_PAGE_URL_CAPABILITY,
+      optional: false,
+      expectedPageUrl: expected.href,
+    },
+    ...actions.map((action) => action.type === 'confirmAndSubmit'
+      ? { ...action, expectedPageUrl: expected.href }
+      : { ...action }),
+  ];
 }
 
 function preview(value: string | undefined): string | undefined {
@@ -456,6 +515,28 @@ export function isBrowserbaseConfigured(): boolean {
 
 export function isManagedStratusProvider(): boolean {
   return process.env.BROWSER_PROVIDER === 'stratus-managed';
+}
+
+/** Secret-free identity for the browser runtime that will receive and replay employer data. */
+export function browserDeliveryRuntimeIdentity(env: NodeJS.ProcessEnv = process.env): {
+  provider: BrowserProvider;
+  apiRoot: string | undefined;
+  projectId: string | undefined;
+} {
+  const provider: BrowserProvider = env.BROWSER_PROVIDER === 'stratus-managed'
+    ? 'stratus-managed'
+    : env.BROWSER_PROVIDER === 'stratus' || Boolean(env.STRATUS_BASE_URL)
+      ? 'stratus'
+      : 'browserbase';
+  const stratusBaseUrl = env.STRATUS_BASE_URL?.replace(/\/$/, '');
+  const apiRoot = (env.BROWSER_API_ROOT
+    ?? (provider === 'stratus' && stratusBaseUrl ? `${stratusBaseUrl}/v1` : 'https://api.browserbase.com/v1'))
+    .replace(/\/$/, '');
+  return {
+    provider,
+    apiRoot: provider === 'stratus-managed' ? stratusBaseUrl : apiRoot,
+    projectId: provider === 'browserbase' ? env.BROWSERBASE_PROJECT_ID : undefined,
+  };
 }
 
 export function managedContinuationFingerprint(token: string): string {

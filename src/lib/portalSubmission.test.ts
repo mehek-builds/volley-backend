@@ -7061,11 +7061,13 @@ test('a listbox read mid-fetch contributes nothing, and never becomes an option'
     extracted: [
       { selector: reactSelectListboxSelector('discipline--0'), value: 'Loading...' },
       { selector: reactSelectListboxSelector('degree--0'), value: 'No options' },
+      { selector: reactSelectListboxSelector('salutation--0'), value: 'Auswählen' },
       // The second round, once the fetch has landed.
       { selector: reactSelectListboxSelector('discipline--0'), value: GREENHOUSE_DISCIPLINE_OPTIONS.join('\n') },
     ],
   });
   assert.equal('degree--0' in parsed, false);
+  assert.equal('salutation--0' in parsed, false);
   assert.deepEqual(parsed['discipline--0'], GREENHOUSE_DISCIPLINE_OPTIONS);
   // And with only the placeholder read, the fill falls back to the ladder rather than to it.
   const actions = buildManagedPortalActions('greenhouse', andurilPacket({ fieldOptions: { 'discipline--0': ['Loading...'] } }));

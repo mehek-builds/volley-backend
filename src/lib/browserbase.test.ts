@@ -2,9 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   browserSessionBody,
+  browserDeliveryRuntimeIdentity,
   continueManagedBrowser,
   isBrowserbaseConfigured,
   MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
+  MANAGED_EXACT_PAGE_URL_CAPABILITY,
+  managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
   runManagedBrowser,
@@ -20,6 +23,24 @@ function assertStratusSafeActions(actions: Array<Record<string, unknown>>) {
     assert.doesNotMatch(String(action.selector), /:right-of|:below|:is\(/);
   }
 }
+
+test('browser delivery runtime identity binds provider, endpoint, and Browserbase project', () => {
+  assert.deepEqual(browserDeliveryRuntimeIdentity({
+    BROWSER_PROVIDER: 'stratus-managed',
+    STRATUS_BASE_URL: 'https://stratus.example/',
+  }), {
+    provider: 'stratus-managed',
+    apiRoot: 'https://stratus.example',
+    projectId: undefined,
+  });
+  assert.deepEqual(browserDeliveryRuntimeIdentity({
+    BROWSERBASE_PROJECT_ID: 'project-1',
+  }), {
+    provider: 'browserbase',
+    apiRoot: 'https://api.browserbase.com/v1',
+    projectId: 'project-1',
+  });
+});
 
 test('Browserbase configuration requires only the current API key', () => {
   const previousKey = process.env.BROWSERBASE_API_KEY;
@@ -596,6 +617,77 @@ test('managed Stratus serializes the required extract assertion capability and e
   else process.env.STRATUS_API_KEY = previousKey;
   if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
   else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('managed Stratus proves the exact employer URL before actions and before a physical submit', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  const expectedPageUrl = 'https://jobs.example.com/postings/cbs-123?source=litos';
+  let proofMatches = true;
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { actions: Array<Record<string, unknown>> };
+    assert.deepEqual(body.actions.slice(0, 1), [{
+      type: 'requireCapability',
+      value: MANAGED_EXACT_PAGE_URL_CAPABILITY,
+      optional: false,
+    }]);
+    assert.equal(body.actions.at(-1)?.expectedPageUrl, expectedPageUrl);
+    return new Response(JSON.stringify({
+      run: {
+        title: 'Submitted',
+        url: 'https://jobs.example.com/receipt',
+        text: 'Thank you',
+        capabilities: [MANAGED_EXACT_PAGE_URL_CAPABILITY],
+        exactPageUrlProof: {
+          expected: expectedPageUrl,
+          beforeActions: expectedPageUrl,
+          beforeApplicantData: expectedPageUrl,
+          beforeSubmit: proofMatches ? expectedPageUrl : 'https://jobs.example.com/postings/other',
+        },
+        submitOutcome: { pressed: true, state: 'confirmed' },
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+
+  const packet = {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  };
+  const actions = buildManagedPortalActions('greenhouse', packet, true, expectedPageUrl);
+  await runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true });
+  proofMatches = false;
+  await assert.rejects(
+    runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true }),
+    /did not prove the exact employer page URL boundaries/,
+  );
+
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('managed prepare and continuation actions bind the exact page without consuming a browser action', () => {
+  const expectedPageUrl = 'https://jobs.example.com/postings/cbs-123#apply';
+  const actions = managedActionsWithExactPageUrl([
+    { type: 'fill', selector: '#email', value: 'person@example.com' },
+  ], expectedPageUrl);
+  assert.deepEqual(actions, [
+    {
+      type: 'requireCapability',
+      value: MANAGED_EXACT_PAGE_URL_CAPABILITY,
+      optional: false,
+      expectedPageUrl: 'https://jobs.example.com/postings/cbs-123',
+    },
+    { type: 'fill', selector: '#email', value: 'person@example.com' },
+  ]);
 });
 
 test('managed Stratus Greenhouse builder payloads are selector-safe after normalization', async () => {
