@@ -7213,6 +7213,10 @@ export function buildManagedPortalActions(
     const portalSelector = durablePortalSelector(rawPortalSelector);
     const measuredClosedOption = Boolean(item.answerOptionSource?.trim())
       && /^(?:text|combobox)?$/i.test(portalInputType ?? '');
+    const rolelessKnownClosedOption = portalFamily(portal) === 'greenhouse'
+      && Boolean(portalSelector)
+      && /^text$/i.test(portalInputType ?? '')
+      && questionMayBeClosedList(questionText);
     /* Never replay a data-litos-discovered selector in this managed fill. The discovery pass and
      * the fill pass are separate stateless Stratus runs. Those attributes exist only on the page
      * where discovery assigned them, so preserving one here protects a chain that cannot match and
@@ -7222,19 +7226,21 @@ export function buildManagedPortalActions(
      * durable replay for these runtime selects. */
     if (portalSelector) {
       if (portalFamily(portal) === 'greenhouse'
-        && (/^combobox$/i.test(portalInputType ?? '') || measuredClosedOption)) {
+        && (/^combobox$/i.test(portalInputType ?? '') || measuredClosedOption || rolelessKnownClosedOption)) {
         /* A current option or an applicant-reviewed choice can use the managed runner's semantic
          * question fill. The runner resolves this question's own block, detects React Select, picks
          * the exact option, and verifies the committed value inside one bounded action. Keeping the
          * older five-action selector ladder for these proven values made large Greenhouse forms
          * exhaust the 120-action ceiling and leave reviewed answers untouched. */
-        if (hasExactChoiceEvidence) {
+        if (hasExactChoiceEvidence || rolelessKnownClosedOption) {
           /* A role-less Greenhouse React Select has an exact durable input id but discovery reports
            * inputType=text. Label-scoped dispatch can stop at the surrounding text-shaped node and
            * never reach that input. Aim the same single semantic fill at the provider-owned id in
-           * this measured shape. The managed runner still detects the live choice widget, selects
-           * an exact offered row, and verifies the committed value. Ordinary reported comboboxes
-           * keep the label-scoped path that already handles their stateless DOM variants. */
+           * this measured shape. A role-less control can also omit option provenance entirely, as
+           * Jump Trading's degree picker does, so the known closed-question grammar is sufficient
+           * to take this path. The managed runner still selects only an exact offered row and
+           * verifies the committed value. Ordinary reported comboboxes keep the label-scoped path
+           * that already handles their stateless DOM variants. */
           if (/^combobox$/i.test(portalInputType ?? '')) {
             pushScopedQuestionChoiceActions(
               actions,
