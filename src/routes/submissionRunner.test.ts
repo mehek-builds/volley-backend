@@ -227,6 +227,51 @@ test('managed choice fallback carries the job-board detail when options survive 
   );
 });
 
+test('a legacy recent-employer Other recovers provenance only from a resume employer absent from the live list', () => {
+  const discovered = [{
+    label: 'Where did you complete your most recent internship or research experience?',
+    selector: '#recent-employer',
+    inputType: 'combobox',
+    maxLength: null,
+    options: ['Amazon', 'Anduril Industries', 'Other'],
+  }];
+  const question = {
+    id: 'recent-employer',
+    question: 'Where did you complete your most recent internship or research experience?',
+    answer: 'Other',
+    kind: 'required' as const,
+    required: true,
+    options: ['Amazon', 'Anduril Industries', 'Other'],
+  };
+
+  const recovered = resolveApplicantClosedChoiceFallbacks(
+    discovered,
+    [question],
+    undefined,
+    'Cinematica Labs, Los Angeles, CA',
+  );
+  assert.equal(recovered[0]?.answer_option_source, 'Cinematica Labs, Los Angeles, CA');
+  assert.deepEqual(filterAutomaticallyResolvedReferralAttention([
+    'none of the options match your saved answer, so this one is left for you: "Where did you complete your most recent internship or research"',
+  ], recovered), []);
+
+  const applicantSelectedOther = resolveApplicantClosedChoiceFallbacks(
+    discovered,
+    [{ ...question, answer_source: 'applicant_review' }],
+    undefined,
+    'Cinematica Labs, Los Angeles, CA',
+  );
+  assert.equal(applicantSelectedOther[0]?.answer_option_source, undefined);
+
+  const listedEmployer = resolveApplicantClosedChoiceFallbacks(
+    discovered,
+    [question],
+    undefined,
+    'Amazon',
+  );
+  assert.equal(listedEmployer[0]?.answer_option_source, undefined);
+});
+
 test('the referral detail fallback retires only its stale draft classification', () => {
   const resolved = resolveApplicantClosedChoiceFallbacks(
     [
