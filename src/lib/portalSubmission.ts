@@ -3479,6 +3479,9 @@ const GREENHOUSE_REACT_SELECT_PROFILE_KEYS: ReadonlySet<ProfileKey> = new Set<Pr
   'school', 'degree', 'major', 'study_year', 'current_enrollment',
 ]);
 
+const GREENHOUSE_OPEN_CONDITIONAL_EXPLANATION =
+  /^\s*if\s+(?:so|yes|no)\s*,?\s+please\s+(?:explain|describe)\b/i;
+
 /**
  * A wording somebody has already met, and knows renders as a react-select.
  *
@@ -3488,7 +3491,8 @@ const GREENHOUSE_REACT_SELECT_PROFILE_KEYS: ReadonlySet<ProfileKey> = new Set<Pr
  * would take the text fill away from controls nobody has ever looked at.
  */
 function isGreenhouseReactSelectQuestion(question: string): boolean {
-  return GREENHOUSE_REACT_SELECT_LITERALS.test(question);
+  return !GREENHOUSE_OPEN_CONDITIONAL_EXPLANATION.test(question)
+    && GREENHOUSE_REACT_SELECT_LITERALS.test(question);
 }
 
 /**
@@ -3513,7 +3517,7 @@ function isGreenhouseReactSelectQuestion(question: string): boolean {
  * The cost of being wrong here is a few spent actions, not an unfilled field.
  */
 function questionMayBeClosedList(question: string): boolean {
-  if (GREENHOUSE_REACT_SELECT_LITERALS.test(question)) return true;
+  if (isGreenhouseReactSelectQuestion(question)) return true;
   const key = classifyField(question);
   return key !== null && GREENHOUSE_REACT_SELECT_PROFILE_KEYS.has(key);
 }
