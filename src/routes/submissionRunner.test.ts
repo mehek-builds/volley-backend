@@ -34,6 +34,7 @@ import {
   filterAutomaticallyResolvedReferralAttention,
   managedSearchFillableWindowedFailureIds,
   truthfulOtherChoice,
+  managedActionDiagnosticsForLog,
 } from './submissionRunner';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
 import { savedAnswerKey } from '../lib/answerReuse';
@@ -69,6 +70,63 @@ test('a profile with no usable experience yields undefined rather than throwing'
   assert.equal(readMostRecentRole({ experience: [] }), undefined);
   assert.equal(readMostRecentRole({ experience: 'Traeco' }), undefined);
   assert.equal(readMostRecentRole({ experience: {} }), undefined);
+});
+
+test('managed action diagnostics log only structural fields and fixed outcome names', () => {
+  const diagnostics = managedActionDiagnosticsForLog([{
+    controlId: 'question_67595191',
+    locatorCount: 1,
+    targetResolved: true,
+    targetVisible: true,
+    targetTag: 'input',
+    targetInChoiceShell: false,
+    targetPlaceholderSignal: false,
+    labelCount: 1,
+    labelledQuestionCount: 1,
+    locatorChoicePlaceholderCount: 0,
+    labelChoicePlaceholderCount: 1,
+    route: 'custom_choice',
+    choiceAttempted: true,
+    choiceFilled: false,
+    choiceLanded: false,
+    choiceControlOpened: true,
+    choiceUnreadable: false,
+    choiceRefused: true,
+    choiceStateKind: 'empty',
+    outcome: 'choice_unmatched',
+    answer: "Bachelor's Degree",
+    question: 'What degree are you currently pursuing?',
+    optionText: "Bachelor's Degree",
+    email: 'person@example.com',
+  }, {
+    controlId: 'not-a-provider-control',
+    outcome: 'choice_unmatched',
+  }]);
+
+  assert.deepEqual(diagnostics, [{
+    controlId: 'question_67595191',
+    locatorCount: 1,
+    targetResolved: true,
+    targetVisible: true,
+    targetTag: 'input',
+    targetInChoiceShell: false,
+    targetPlaceholderSignal: false,
+    labelCount: 1,
+    labelledQuestionCount: 1,
+    locatorChoicePlaceholderCount: 0,
+    labelChoicePlaceholderCount: 1,
+    route: 'custom_choice',
+    choiceAttempted: true,
+    choiceFilled: false,
+    choiceLanded: false,
+    choiceControlOpened: true,
+    choiceUnreadable: false,
+    choiceRefused: true,
+    choiceStateKind: 'empty',
+    outcome: 'choice_unmatched',
+  }]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /Bachelor|What degree|person@example/,
+    'answers, employer prose, options, and applicant data must be discarded');
 });
 
 test('closed taxonomies use Other only for truthful referral and recent-experience fallbacks', () => {

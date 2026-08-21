@@ -134,6 +134,33 @@ export type ManagedBrowserResult = {
   text: string;
   screenshot?: string | null;
   filledFields?: string[];
+  /**
+   * Privacy-safe structural breadcrumbs for exact provider-owned question controls. The managed
+   * runner emits only control ids, counts, booleans, and bounded outcome names. No applicant
+   * answer, employer question text, option text, or page content is part of this contract.
+   */
+  actionDiagnostics?: Array<{
+    controlId: string;
+    locatorCount: number;
+    targetResolved: boolean;
+    targetVisible: boolean;
+    targetTag: string;
+    targetInChoiceShell: boolean;
+    targetPlaceholderSignal: boolean;
+    labelCount: number;
+    labelledQuestionCount: number;
+    locatorChoicePlaceholderCount: number;
+    labelChoicePlaceholderCount: number;
+    route: string;
+    choiceAttempted: boolean;
+    choiceFilled: boolean;
+    choiceLanded: boolean;
+    choiceControlOpened: boolean;
+    choiceUnreadable: boolean;
+    choiceRefused: boolean;
+    choiceStateKind: string;
+    outcome: string;
+  }>;
   blockers?: string[];
   skipped?: string[];
   discovered?: ManagedDiscoveredQuestion[];

@@ -2752,6 +2752,67 @@ export function describeDiscoveryFailure(error: unknown): string {
   return raw.trim() || 'the scan failed without reporting a reason';
 }
 
+const MANAGED_DIAGNOSTIC_TAGS = new Set(['unknown', 'input', 'select', 'textarea', 'button', 'div', 'other']);
+const MANAGED_DIAGNOSTIC_ROUTES = new Set(['unresolved', 'native_select', 'custom_choice', 'bare_opener', 'text']);
+const MANAGED_DIAGNOSTIC_STATES = new Set(['not_read', 'chosen', 'empty', 'unknown', 'other']);
+const MANAGED_DIAGNOSTIC_OUTCOMES = new Set([
+  'started',
+  'target_unresolved',
+  'native_option_unmatched',
+  'native_committed',
+  'native_uncommitted',
+  'choice_committed',
+  'choice_uncommitted',
+  'choice_already_answered',
+  'choice_unmatched',
+  'text_committed',
+  'text_uncommitted',
+]);
+
+/**
+ * Whitelist the managed runner diagnostic contract before it reaches production logs. The
+ * provider response is an external boundary even when its TypeScript type is narrow, so unknown
+ * keys and all strings except fixed enums and durable Greenhouse control ids are dropped here.
+ */
+export function managedActionDiagnosticsForLog(value: unknown): Array<Record<string, string | number | boolean>> {
+  if (!Array.isArray(value)) return [];
+  const boundedCount = (input: unknown) => Number.isInteger(input) && Number(input) >= 0
+    ? Math.min(Number(input), 100)
+    : 0;
+  const boundedEnum = (input: unknown, allowed: ReadonlySet<string>, fallback: string) =>
+    typeof input === 'string' && allowed.has(input) ? input : fallback;
+  return value.flatMap((raw) => {
+    if (!raw || typeof raw !== 'object') return [];
+    const entry = raw as Record<string, unknown>;
+    const controlId = typeof entry.controlId === 'string' && /^question_\d{1,20}$/.test(entry.controlId)
+      ? entry.controlId
+      : null;
+    if (!controlId) return [];
+    return [{
+      controlId,
+      locatorCount: boundedCount(entry.locatorCount),
+      targetResolved: entry.targetResolved === true,
+      targetVisible: entry.targetVisible === true,
+      targetTag: boundedEnum(entry.targetTag, MANAGED_DIAGNOSTIC_TAGS, 'unknown'),
+      targetInChoiceShell: entry.targetInChoiceShell === true,
+      targetPlaceholderSignal: entry.targetPlaceholderSignal === true,
+      labelCount: boundedCount(entry.labelCount),
+      labelledQuestionCount: boundedCount(entry.labelledQuestionCount),
+      locatorChoicePlaceholderCount: boundedCount(entry.locatorChoicePlaceholderCount),
+      labelChoicePlaceholderCount: boundedCount(entry.labelChoicePlaceholderCount),
+      route: boundedEnum(entry.route, MANAGED_DIAGNOSTIC_ROUTES, 'unresolved'),
+      choiceAttempted: entry.choiceAttempted === true,
+      choiceFilled: entry.choiceFilled === true,
+      choiceLanded: entry.choiceLanded === true,
+      choiceControlOpened: entry.choiceControlOpened === true,
+      choiceUnreadable: entry.choiceUnreadable === true,
+      choiceRefused: entry.choiceRefused === true,
+      choiceStateKind: boundedEnum(entry.choiceStateKind, MANAGED_DIAGNOSTIC_STATES, 'other'),
+      outcome: boundedEnum(entry.outcome, MANAGED_DIAGNOSTIC_OUTCOMES, 'started'),
+    }];
+  }).slice(0, 60);
+}
+
 /**
  * ONE CONTROL LITOS COULD NOT READ, NAMED ON ITS OWN.
  *
@@ -3403,6 +3464,14 @@ async function prepareManaged(
     progress_updated_at: new Date().toISOString(),
   }));
   const result = await runManagedBrowser(applicationUrl, fillActions);
+  const actionDiagnostics = managedActionDiagnosticsForLog(result.actionDiagnostics);
+  if (actionDiagnostics.length > 0) {
+    fastify.log.info({
+      applicationId: row.id,
+      portal,
+      actionDiagnostics,
+    }, 'Managed provider-owned question action diagnostics');
+  }
   if (!result.screenshot) throw new Error('Stratus managed browser did not return a preview screenshot');
   /* A value Litos typed that the run then never accounted for.
    *
