@@ -7261,6 +7261,42 @@ test('recognized Greenhouse choice questions are probed when the provider omits 
   );
 });
 
+test('a role-less Greenhouse explanation stays open even when its instructions mention sponsorship', () => {
+  const explanation = {
+    label: 'If so, please explain (visa status and expiration). If you do not require sponsorship, please type "N/A".* question_67595192',
+    selector: '#question_67595192',
+    inputType: 'text',
+    role: null,
+    required: true,
+  };
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', [explanation], {}, true), []);
+  assert.deepEqual(managedOptionProbeTargets('greenhouse', [{
+    ...explanation,
+    label: 'Will you now or in the future require sponsorship?* question_67595193',
+    selector: '#question_67595193',
+  }], {}, true), ['question_67595193'], 'the actual closed sponsorship question must still be probed');
+
+  const actions = buildManagedPortalActions('greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question: 'If so, please explain (visa status and expiration). If you do not require sponsorship, please type "N/A".',
+      answer: 'F-1 student status, valid through May 2028',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_67595192',
+      portalInputType: 'text',
+      required: true,
+    }],
+  });
+  assert.ok(actions.some((action) => action.type === 'fill'
+    && action.selector === '#question_67595192'
+    && action.value === 'F-1 student status, valid through May 2028'));
+  assert.equal(actions.some((action) => action.label?.startsWith('question_combo:')), false,
+    'an explicit explanation must not take the role-less React-select path');
+});
+
 test('the probe keeps plain end-year text open while retaining its normal final fill', () => {
   const discovered = [
     { label: 'End date year* end-year--0', selector: '#end-year--0', inputType: 'text', required: true },

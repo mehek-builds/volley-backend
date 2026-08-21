@@ -31,6 +31,7 @@ import {
   unansweredRequiredBlockerLabels,
   type ResumeRow,
   packetQuestionsForFill,
+  filterAutomaticallyResolvedReferralAttention,
   truthfulOtherChoice,
 } from './submissionRunner';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
@@ -229,6 +230,42 @@ test('the referral detail fallback retires only its stale draft classification',
       { answer: 'A grounded draft.', kind: 'essay', answer_source: undefined },
     ],
   );
+});
+
+test('a Job board source makes only an employee-referral detail non-applicable', () => {
+  const discovered = [
+    { label: 'How did you hear about Optiver?', selector: '#source', inputType: 'combobox', maxLength: null, options: ['Other', 'Employee Referral'] },
+    { label: 'If other, please explain', selector: '#other-detail', inputType: 'text', maxLength: 100 },
+    { label: 'If referred by an Optiver employee or Optiver intern, please provide their name', selector: '#employee-detail', inputType: 'text', maxLength: 100 },
+    { label: 'Were you referred by an Optiver employee?', selector: '#employee-question', inputType: 'select', maxLength: null, options: ['Yes', 'No'] },
+  ];
+  const resolved = resolveApplicantClosedChoiceFallbacks(discovered, [
+    { id: 'source', question: 'How did you hear about Optiver?', answer: 'Job board', kind: 'required', required: true, options: ['Other', 'Employee Referral'] },
+    { id: 'other-detail', question: 'If other, please explain', answer: '', kind: 'required', required: false },
+    { id: 'employee-detail', question: 'If referred by an Optiver employee or Optiver intern, please provide their name', answer: '', kind: 'required', required: false },
+    { id: 'employee-question', question: 'Were you referred by an Optiver employee?', answer: '', kind: 'required', required: false },
+  ]);
+
+  assert.deepEqual(resolved.map(({ answer, kind }) => ({ answer, kind })), [
+    { answer: 'Other', kind: 'required' },
+    { answer: 'Litos', kind: 'required' },
+    { answer: 'N/A', kind: 'required' },
+    { answer: '', kind: 'required' },
+  ]);
+  assert.deepEqual(
+    filterAutomaticallyResolvedReferralAttention([
+      'how you heard about this role is yours to answer: "How did you hear about Optiver?"',
+      'how you heard about this role is yours to answer: "If referred by an Optiver employee or Optiver intern, please"',
+      'how you heard about this role is yours to answer: "Were you referred by an Optiver employee?"',
+    ], resolved),
+    ['how you heard about this role is yours to answer: "Were you referred by an Optiver employee?"'],
+  );
+
+  const unprovenOther = resolveApplicantClosedChoiceFallbacks(discovered, [
+    { id: 'source', question: 'How did you hear about Optiver?', answer: 'Other', kind: 'required', required: true, options: ['Other', 'Employee Referral'], answer_source: 'applicant_review' },
+    { id: 'employee-detail', question: 'If referred by an Optiver employee or Optiver intern, please provide their name', answer: '', kind: 'required', required: false },
+  ]);
+  assert.equal(unprovenOther[1]?.answer, '', 'Other without Job board provenance does not prove the employee condition false');
 });
 
 test('the compact packet preselects only unresolved open prose controls', () => {

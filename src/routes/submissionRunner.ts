@@ -2316,6 +2316,41 @@ const REFERRAL_SOURCE_CHOICE_QUESTION =
   /\b(?:how\s+did\s+you\s+hear|how\s+did\s+you\s+find|where\s+did\s+you\s+hear|referral\s+source|source\s+of\s+(?:your\s+|the\s+)?application)\b/i;
 const GENERIC_OTHER_DETAIL_QUESTION =
   /^if\s+other\b[^?]{0,80}\b(?:explain|specify|describe|provide|tell)\b/i;
+const EMPLOYEE_REFERRAL_DETAIL_QUESTION =
+  /^if\s+(?:you\s+(?:were|are)\s+)?referred\s+by\b[^?]{0,160}\b(?:employee|intern)\b/i;
+
+function isTruthfulJobBoardOtherReferral(
+  question: Pick<ApplicationReviewQuestion, 'question' | 'answer' | 'answer_option_source' | 'options'>,
+): boolean {
+  const original = question.answer_option_source?.trim();
+  const other = otherReferralOption(usableOptions(question.options));
+  return Boolean(
+    original
+    && isJobBoardReferralClaim(original)
+    && REFERRAL_SOURCE_CHOICE_QUESTION.test(normalizeReviewQuestionLabel(question.question))
+    && other
+    && question.answer.trim().toLowerCase() === other.toLowerCase(),
+  );
+}
+
+export function filterAutomaticallyResolvedReferralAttention(
+  reasons: readonly string[],
+  questions: readonly ApplicationReviewQuestion[],
+): string[] {
+  const jobBoardOtherResolved = questions.some(isTruthfulJobBoardOtherReferral);
+  const resolvedPrefixes = questions.flatMap((question) => {
+    const normalized = normalizeReviewQuestionLabel(question.question);
+    const automaticallyResolved = isTruthfulJobBoardOtherReferral(question)
+      || (jobBoardOtherResolved
+        && EMPLOYEE_REFERRAL_DETAIL_QUESTION.test(normalized)
+        && /^n\/?a$/i.test(question.answer.trim()));
+    return automaticallyResolved ? [normalized.slice(0, 60).toLowerCase()] : [];
+  });
+  return reasons.filter((reason) => {
+    const normalized = reason.toLowerCase();
+    return !resolvedPrefixes.some((prefix) => prefix && normalized.includes(prefix));
+  });
+}
 
 /**
  * The literal "Other" option that truthfully carries an answer the employer omitted from a closed
@@ -2387,13 +2422,17 @@ export function resolveApplicantClosedChoiceFallbacks(
   };
   collectAdjacentReferralDetail(discovered);
   collectAdjacentReferralDetail(resolved.map((question) => ({ label: question.question })));
+  const jobBoardOtherResolved = resolved.some(isTruthfulJobBoardOtherReferral);
 
   return resolved.map((question) => {
     const normalized = normalizeReviewQuestionLabel(question.question);
-    if (!referralDetailLabels.has(normalized.toLowerCase())) return question;
+    const referralOtherDetail = referralDetailLabels.has(normalized.toLowerCase());
+    const employeeDetailDoesNotApply = jobBoardOtherResolved
+      && EMPLOYEE_REFERRAL_DETAIL_QUESTION.test(normalized);
+    if (!referralOtherDetail && !employeeDetailDoesNotApply) return question;
     return {
       ...question,
-      answer: REFERRAL_OTHER_DETAIL,
+      answer: referralOtherDetail ? REFERRAL_OTHER_DETAIL : 'N/A',
       kind: 'required',
       answer_source: undefined,
       answer_reviewed_at: undefined,
@@ -3149,15 +3188,10 @@ async function prepareManaged(
       optionProbe.failedIds,
     ),
   );
-  const automaticallyResolvedOtherPrefixes = mergedQuestions.flatMap((question) => {
-    const other = otherReferralOption(usableOptions(question.options));
-    if (!question.answer_option_source?.trim() || !other || question.answer.trim().toLowerCase() !== other.toLowerCase()) return [];
-    return [normalizeReviewQuestionLabel(question.question).slice(0, 60).toLowerCase()];
-  });
-  const discoveryAttention = discoveredAttentionReasons.filter((reason) => {
-    const normalized = reason.toLowerCase();
-    return !automaticallyResolvedOtherPrefixes.some((prefix) => prefix && normalized.includes(prefix));
-  });
+  const discoveryAttention = filterAutomaticallyResolvedReferralAttention(
+    discoveredAttentionReasons,
+    mergedQuestions,
+  );
   packet.questions = mergedQuestions.map((q) => ({
     question: q.question,
     answer: q.answer,
