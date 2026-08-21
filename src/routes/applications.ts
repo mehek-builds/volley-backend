@@ -685,14 +685,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
          * on the poorer context hashed a different `answer` for the same stored question than the
          * fill a moment later would compute - a packet_stale with no edit and no elapsed time. See
          * applicationContextForQuestionResolution's own comment for the mechanism. */
-        const auditQuestions = refreshKnownQuestionAnswers(
-          review.questions,
-          await loadSensitiveQuestionProfile(request.jwtPayload!.userId),
-          applicationContextForQuestionResolution(row, review),
-          review.questions_reviewed_at,
-          postingCountryFromJobContext(row.job_context),
-          postingCountryCodeFromJobContext(row.job_context),
-        );
+        /* One shared packet reading for audit and acknowledgement. The shared helper first removes
+         * portal-owned controls such as Recruitee candidate.phone, then resolves the remaining
+         * questions. Calling refreshKnownQuestionAnswers directly here hashed legacy fixed controls
+         * that the acknowledgement route correctly normalized away. */
+        const auditQuestions = await resolvedPacketAuditQuestions(row, review);
         // review_only: this route RENDERS the packet for the applicant to look at. It may rebuild
         // a file that aged out so she can see it; it authorizes nothing, and the acknowledgement
         // she has to give is the separate POST below.
