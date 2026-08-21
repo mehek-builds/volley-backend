@@ -163,6 +163,24 @@ test('managed choice fallback carries the job-board detail and preserves the ori
     ['Other', 'Litos', 'Other'],
     'the exact reviewed packet and the submit packet must keep the same truthful choices',
   );
+  assert.deepEqual(
+    filterAutomaticallyResolvedReferralAttention([
+      'none of the options match your saved answer, so this one is left for you: "Where did you complete your most recent internship or research"',
+    ], resolved),
+    [],
+    'the pre-fallback mismatch must not keep blocking after the original employer is preserved',
+  );
+
+  const unprovenRecentEmployerOther = resolved.map((question) => question.id === 'experience'
+    ? { ...question, answer_option_source: undefined, answer_source: 'applicant_review' as const }
+    : question);
+  assert.equal(
+    filterAutomaticallyResolvedReferralAttention([
+      'none of the options match your saved answer, so this one is left for you: "Where did you complete your most recent internship or research"',
+    ], unprovenRecentEmployerOther).length,
+    1,
+    'an applicant-selected Other without original-employer provenance remains reviewable',
+  );
 });
 
 test('managed choice fallback carries the job-board detail when options survive only on the review question', () => {
