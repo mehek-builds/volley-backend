@@ -147,10 +147,14 @@ export type ManagedBrowserResult = {
     targetTag: string;
     targetInChoiceShell: boolean;
     targetPlaceholderSignal: boolean;
+    targetValuePlaceholderSignal: boolean;
+    targetPseudoPlaceholderSignal: boolean;
     labelCount: number;
     labelledQuestionCount: number;
     locatorChoicePlaceholderCount: number;
     labelChoicePlaceholderCount: number;
+    choicePeerCount: number;
+    nearbyChoiceIndicator: boolean;
     route: string;
     choiceAttempted: boolean;
     choiceFilled: boolean;
