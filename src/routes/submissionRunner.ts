@@ -2391,11 +2391,23 @@ export function truthfulOtherChoice(
 export function resolveApplicantClosedChoiceFallbacks(
   discovered: readonly DiscoveredQuestion[],
   questions: readonly ApplicationReviewQuestion[],
+  currentReferralSource?: string | null,
 ): ApplicationReviewQuestion[] {
   const resolved = questions.map((question) => {
     const normalized = normalizeReviewQuestionLabel(question.question);
     const fallback = truthfulOtherChoice(normalized, question.answer, question.options);
-    if (!fallback) return question;
+    if (!fallback) {
+      const other = otherReferralOption(usableOptions(question.options));
+      const recoverLegacyProvenance = !question.answer_source
+        && !question.answer_option_source?.trim()
+        && isJobBoardReferralClaim(currentReferralSource)
+        && REFERRAL_SOURCE_CHOICE_QUESTION.test(normalized)
+        && Boolean(other)
+        && question.answer.trim().toLowerCase() === other?.toLowerCase();
+      return recoverLegacyProvenance
+        ? { ...question, answer_option_source: currentReferralSource?.trim() }
+        : question;
+    }
     return {
       ...question,
       answer: fallback,
@@ -3194,6 +3206,10 @@ async function prepareManaged(
       storedQuestions,
       [...invalidatedQuestionKeys, ...failedQuestionKeys, ...staleRelabeledKeys],
       optionProbe.failedIds,
+    ),
+    referralSourceForApplication(
+      applicationProfile.referral_source_default,
+      applicationProfile.referral_source_evidence,
     ),
   );
   const discoveryAttention = filterAutomaticallyResolvedReferralAttention(
