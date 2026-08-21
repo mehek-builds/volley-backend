@@ -7229,13 +7229,28 @@ export function buildManagedPortalActions(
          * older five-action selector ladder for these proven values made large Greenhouse forms
          * exhaust the 120-action ceiling and leave reviewed answers untouched. */
         if (hasExactChoiceEvidence) {
-          pushScopedQuestionChoiceActions(
-            actions,
-            questionText,
-            answer,
-            'question',
-            { includeSelectFallbacks: false },
-          );
+          /* A role-less Greenhouse React Select has an exact durable input id but discovery reports
+           * inputType=text. Label-scoped dispatch can stop at the surrounding text-shaped node and
+           * never reach that input. Aim the same single semantic fill at the provider-owned id in
+           * this measured shape. The managed runner still detects the live choice widget, selects
+           * an exact offered row, and verifies the committed value. Ordinary reported comboboxes
+           * keep the label-scoped path that already handles their stateless DOM variants. */
+          if (/^combobox$/i.test(portalInputType ?? '')) {
+            pushScopedQuestionChoiceActions(
+              actions,
+              questionText,
+              answer,
+              'question',
+              { includeSelectFallbacks: false },
+            );
+          } else {
+            managedFill(
+              actions,
+              portalSelector,
+              answer,
+              `question:${questionText.slice(0, 80)}`,
+            );
+          }
           continue;
         }
         pushGreenhouseQuestionComboboxActions(

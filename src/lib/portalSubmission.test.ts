@@ -6172,9 +6172,9 @@ test('a measured option answer stays a dropdown when an older runner stored text
     ],
   }));
   const group = actions.filter((action) => /anticipated graduation date/i.test(action.label ?? ''));
-  assert.deepEqual(group.map((action) => action.type), ['fillByLabelText']);
-  assert.equal(group.some((action) => action.type === 'fill' && action.label?.startsWith('question:')), false,
-    'measured option provenance must bypass the plain text replay path');
+  assert.deepEqual(group.map((action) => action.type), ['fill']);
+  assert.equal(group[0]?.selector, '#question_9170559101');
+  assert.equal(group[0]?.value, 'January 2028 - July 2028');
   const privacyGroup = actions.filter((action) => /privacy statement/i.test(action.label ?? ''));
   assert.ok(privacyGroup.some((action) => action.type === 'click' && action.label?.endsWith('_open')));
   assert.ok(privacyGroup.some((action) => action.type === 'press' && action.value === 'Enter'));
@@ -6238,6 +6238,27 @@ test('current profile option provenance earns one semantic action without a repe
   assert.equal(staleGroup.some((action) => action.type === 'fillByLabelText'), false,
     'provenance from an older profile value must not bypass live option verification');
   assert.ok(staleGroup.some((action) => action.type === 'fill'));
+});
+
+test('a role-less reviewed Greenhouse choice uses its exact durable input in one action', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    applicationProfile: { degree: "Bachelor's Degree" },
+    fieldOptions: { question_67595191: ["Bachelor's Degree", "Master's Degree", 'PhD'] },
+    questions: [{
+      question: 'What degree are you currently pursuing?',
+      answer: "Bachelor's Degree",
+      answerOptionSource: "Bachelor's Degree",
+      portalSelector: '#question_67595191',
+      portalInputType: 'text',
+      required: true,
+    }],
+  }));
+  const degree = actions.filter((action) => /what degree are you currently pursuing/i.test(
+    action.label ?? '',
+  ));
+  assert.deepEqual(degree.map((action) => action.type), ['fill']);
+  assert.equal(degree[0]?.selector, '#question_67595191');
+  assert.equal(degree[0]?.value, "Bachelor's Degree");
 });
 
 test('Greenhouse demographics use durable label replay after stateless discovery', () => {
