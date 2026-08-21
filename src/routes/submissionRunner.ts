@@ -3357,6 +3357,27 @@ async function prepareManaged(
   packet.failedFields = failedFields;
 
   const fillActions = buildManagedPortalActions(portal, packet);
+  /* Action shape only, never question text or answer values. A required field can be discovered,
+   * answered, and still remain empty because the final packet aimed it by label rather than by the
+   * provider's durable control id. The existing option-probe diagnostic cannot distinguish those
+   * paths because probing and filling use separate action lists. Recording the control handle,
+   * action type, and scoping mechanism makes that boundary observable without logging applicant
+   * data or employer option text. */
+  const reviewedActionShapeDiagnostics = fillActions.flatMap((action) => {
+    if (!action.label?.startsWith('question:')
+      && !action.label?.startsWith('question_combo')) return [];
+    return [{
+      type: action.type,
+      controlId: managedOptionProbeControlId({ label: '', selector: action.selector }) ?? null,
+      scopedByLabel: Boolean(action.text?.trim()),
+    }];
+  }).slice(0, 60);
+  fastify.log.info({
+    applicationId: row.id,
+    portal,
+    reviewedActionCount: reviewedActionShapeDiagnostics.length,
+    reviewedActionShapes: reviewedActionShapeDiagnostics,
+  }, 'Managed reviewed-question action shapes');
   /* Which reviewed questions this run will not even attempt.
    *
    * On a form small enough to fit the runner's action ceiling this is empty and costs nothing. On
