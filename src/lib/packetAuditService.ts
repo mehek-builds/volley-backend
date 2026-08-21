@@ -89,6 +89,8 @@ export type PacketAuditFailure = {
   reason: string;
   /** Set ONLY by tokenisedPacketAuditFailure, and the sentence an applicant is allowed to read. */
   message?: string;
+  /** Privacy-safe fixed binding names for production diagnosis. */
+  bindingMismatchKeys?: string[];
 };
 
 /* WHAT A FAILED VERDICT IS ALLOWED TO SAY TO AN APPLICANT.
@@ -126,8 +128,15 @@ export function packetAuditClientError(verdict: PacketAuditFailure): { error: st
 export function tokenisedPacketAuditFailure(
   code: PacketAuditFailure['code'],
   reason: string,
+  bindingMismatchKeys?: string[],
 ): PacketAuditFailure {
-  return { valid: false, code, reason, message: PACKET_AUDIT_SENTENCES[reason] ?? PACKET_AUDIT_GENERIC };
+  return {
+    valid: false,
+    code,
+    reason,
+    message: PACKET_AUDIT_SENTENCES[reason] ?? PACKET_AUDIT_GENERIC,
+    ...(bindingMismatchKeys?.length ? { bindingMismatchKeys } : {}),
+  };
 }
 
 export type PacketAuditSuccess = {
@@ -704,7 +713,7 @@ export async function currentPacketAudit(
   const verification = verifyCurrentPacketAudit({ ...input, audit: review.packet_audit });
   return verification.valid
     ? { valid: true, audit: review.packet_audit, pdfBytes: loaded.bytes, row }
-    : tokenisedPacketAuditFailure('PACKET_AUDIT_STALE', verification.reason);
+    : tokenisedPacketAuditFailure('PACKET_AUDIT_STALE', verification.reason, verification.bindingMismatchKeys);
 }
 
 export async function currentAcknowledgedPacketAudit(

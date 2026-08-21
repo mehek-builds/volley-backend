@@ -4802,7 +4802,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
   if (!packetAudit.valid) {
     const finishingSecurityCode = Boolean(options.securityCode) && Boolean(current.security_code);
     fastify.log.error(
-      { applicationId: row.id, code: packetAudit.code },
+      { applicationId: row.id, code: packetAudit.code, bindingMismatchKeys: packetAudit.bindingMismatchKeys ?? [] },
       'Submission withheld because the exact packet audit is missing or stale',
     );
     await writeReview(row, nextReview(current, {
