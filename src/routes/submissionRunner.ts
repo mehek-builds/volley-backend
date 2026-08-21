@@ -2393,6 +2393,33 @@ export function resolveApplicantClosedChoiceFallbacks(
   questions: readonly ApplicationReviewQuestion[],
   currentReferralSource?: string | null,
 ): ApplicationReviewQuestion[] {
+  const questionByLabel = new Map(questions.map((question) => [
+    normalizeReviewQuestionLabel(question.question).toLowerCase(),
+    question,
+  ] as const));
+  const legacyLitosReferralSources = new Set<string>();
+  const collectLegacyLitosReferralSource = (items: readonly { label: string }[]) => {
+    for (let index = 0; index < items.length - 1; index += 1) {
+      const sourceLabel = normalizeReviewQuestionLabel(items[index]?.label ?? '');
+      const detailLabel = normalizeReviewQuestionLabel(items[index + 1]?.label ?? '');
+      const source = questionByLabel.get(sourceLabel.toLowerCase());
+      const detail = questionByLabel.get(detailLabel.toLowerCase());
+      const other = otherReferralOption(usableOptions(source?.options));
+      if (!source
+        || !detail
+        || source.answer_source
+        || source.answer_option_source?.trim()
+        || !REFERRAL_SOURCE_CHOICE_QUESTION.test(sourceLabel)
+        || !GENERIC_OTHER_DETAIL_QUESTION.test(detailLabel)
+        || source.answer.trim().toLowerCase() !== other?.toLowerCase()
+        || detail.answer_source
+        || detail.answer.trim() !== REFERRAL_OTHER_DETAIL) continue;
+      legacyLitosReferralSources.add(sourceLabel.toLowerCase());
+    }
+  };
+  collectLegacyLitosReferralSource(discovered);
+  collectLegacyLitosReferralSource(questions.map((question) => ({ label: question.question })));
+
   const resolved = questions.map((question) => {
     const normalized = normalizeReviewQuestionLabel(question.question);
     const fallback = truthfulOtherChoice(normalized, question.answer, question.options);
@@ -2400,12 +2427,13 @@ export function resolveApplicantClosedChoiceFallbacks(
       const other = otherReferralOption(usableOptions(question.options));
       const recoverLegacyProvenance = !question.answer_source
         && !question.answer_option_source?.trim()
-        && isJobBoardReferralClaim(currentReferralSource)
+        && (isJobBoardReferralClaim(currentReferralSource)
+          || legacyLitosReferralSources.has(normalized.toLowerCase()))
         && REFERRAL_SOURCE_CHOICE_QUESTION.test(normalized)
         && Boolean(other)
         && question.answer.trim().toLowerCase() === other?.toLowerCase();
       return recoverLegacyProvenance
-        ? { ...question, answer_option_source: currentReferralSource?.trim() }
+        ? { ...question, answer_option_source: isJobBoardReferralClaim(currentReferralSource) ? currentReferralSource?.trim() : 'Job board' }
         : question;
     }
     return {
