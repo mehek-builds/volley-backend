@@ -354,21 +354,22 @@ test('the current-packet verifier rejects stale JD, spec, job, answers, applican
   const changedSpec = structuredClone(spec);
   changedSpec.experience[0].bullets[0] = 'Built Go services for operations teams and reduced response time by 30 percent';
   const cases = [
-    { ...base, jdText: `${JD}\nAnother requirement.` },
-    { ...base, spec: changedSpec },
-    { ...base, jobContext: { company: 'Other Company', role: 'Software Engineer', job_id: 'job-1' } },
-    { ...base, questions: [{ id: 'q1', question: 'Are you authorized to work?', answer: 'No', required: true }] },
-    { ...base, applicantSnapshot: { profile: { currently_enrolled: false } } },
-    { ...base, resumeEmail: 'changed@usc.edu' },
-    { ...base, applicantEmail: 'app-changed@apply.trylitos.com' },
-    { ...base, pdfObjectKey: 'users/owner-1/resumes/another.pdf' },
-    { ...base, pdfBytes: Buffer.from('%PDF-1.7 changed packet bytes') },
+    { expected: 'jd', input: { ...base, jdText: `${JD}\nAnother requirement.` } },
+    { expected: 'spec', input: { ...base, spec: changedSpec } },
+    { expected: 'job_context', input: { ...base, jobContext: { company: 'Other Company', role: 'Software Engineer', job_id: 'job-1' } } },
+    { expected: 'questions', input: { ...base, questions: [{ id: 'q1', question: 'Are you authorized to work?', answer: 'No', required: true }] } },
+    { expected: 'applicant_snapshot', input: { ...base, applicantSnapshot: { profile: { currently_enrolled: false } } } },
+    { expected: 'resume_email', input: { ...base, resumeEmail: 'changed@usc.edu' } },
+    { expected: 'applicant_email', input: { ...base, applicantEmail: 'app-changed@apply.trylitos.com' } },
+    { expected: 'pdf_object', input: { ...base, pdfObjectKey: 'users/owner-1/resumes/another.pdf' } },
+    { expected: 'pdf_sha256', input: { ...base, pdfBytes: Buffer.from('%PDF-1.7 changed packet bytes') } },
   ];
   for (const changed of cases) {
-    const result = verifyCurrentPacketAudit(changed);
+    const result = verifyCurrentPacketAudit(changed.input);
     assert.equal(result.valid, false);
     assert.equal(result.reason, 'packet_stale');
     assert.notEqual(result.packetVersion, audit.packet_version);
+    assert.ok(result.bindingMismatchKeys?.includes(changed.expected));
   }
 });
 

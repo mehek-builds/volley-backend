@@ -121,6 +121,8 @@ export type PacketAuditVerification = {
   valid: boolean;
   reason: string;
   packetVersion?: string;
+  /** Fixed binding names only. Hashes and applicant values never leave this module. */
+  bindingMismatchKeys?: string[];
 };
 
 export class PacketAuditValidationError extends Error {
@@ -692,7 +694,22 @@ export function verifyCurrentPacketAudit(input: VerifyCurrentPacketAuditInput): 
     return { valid: false, reason: 'application_mismatch', packetVersion: currentVersion };
   }
   if (input.audit.packet_version !== currentVersion) {
-    return { valid: false, reason: 'packet_stale', packetVersion: currentVersion };
+    const stored = input.audit.bindings;
+    const bindingMismatchKeys = [
+      stored.ownerSha256 !== currentBindings.ownerSha256 ? 'owner' : '',
+      stored.applicationId !== currentBindings.applicationId ? 'application' : '',
+      stored.jdSha256 !== currentBindings.jdSha256 ? 'jd' : '',
+      stored.specSha256 !== currentBindings.specSha256 ? 'spec' : '',
+      stored.jobContextSha256 !== currentBindings.jobContextSha256 ? 'job_context' : '',
+      stored.questionsSha256 !== currentBindings.questionsSha256 ? 'questions' : '',
+      stored.applicantSnapshotSha256 !== currentBindings.applicantSnapshotSha256 ? 'applicant_snapshot' : '',
+      stored.resumeContactEmailSha256 !== currentBindings.resumeContactEmailSha256 ? 'resume_email' : '',
+      stored.applicantEmailSha256 !== currentBindings.applicantEmailSha256 ? 'applicant_email' : '',
+      stored.pdf.objectKey !== currentBindings.pdf.objectKey ? 'pdf_object' : '',
+      stored.pdf.sha256 !== currentBindings.pdf.sha256 ? 'pdf_sha256' : '',
+      stored.pdf.sizeBytes !== currentBindings.pdf.sizeBytes ? 'pdf_size' : '',
+    ].filter(Boolean);
+    return { valid: false, reason: 'packet_stale', packetVersion: currentVersion, bindingMismatchKeys };
   }
   return { valid: true, reason: 'valid', packetVersion: currentVersion };
 }
