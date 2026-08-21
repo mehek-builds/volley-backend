@@ -3220,6 +3220,46 @@ async function prepareManaged(
       applicationProfile.referral_source_evidence,
     ),
   );
+  const referralResolutionDiagnostics = mergedQuestions.flatMap((question) => {
+    const label = normalizeReviewQuestionLabel(question.question);
+    const family = REFERRAL_SOURCE_CHOICE_QUESTION.test(label)
+      ? 'source'
+      : GENERIC_OTHER_DETAIL_QUESTION.test(label)
+        ? 'other_detail'
+        : EMPLOYEE_REFERRAL_DETAIL_QUESTION.test(label)
+          ? 'employee_detail'
+          : null;
+    if (!family) return [];
+    const other = otherReferralOption(usableOptions(question.options));
+    const answer = question.answer.trim();
+    const answerShape = !answer
+      ? 'empty'
+      : other && answer.toLowerCase() === other.toLowerCase()
+        ? 'other_option'
+        : answer === REFERRAL_OTHER_DETAIL
+          ? 'litos_detail'
+          : /^n\/?a$/i.test(answer)
+            ? 'not_applicable'
+            : 'other_value';
+    const optionSource = question.answer_option_source?.trim();
+    return [{
+      family,
+      answerShape,
+      answerSource: question.answer_source ?? null,
+      optionSourceShape: !optionSource
+        ? 'empty'
+        : isJobBoardReferralClaim(optionSource)
+          ? 'job_board'
+          : 'other_value',
+      optionCount: usableOptions(question.options).length,
+    }];
+  });
+  if (referralResolutionDiagnostics.length > 0) {
+    fastify.log.info(
+      { applicationId: row.id, portal, referralResolutionDiagnostics },
+      'Referral resolution provenance shape',
+    );
+  }
   const discoveryAttention = filterAutomaticallyResolvedReferralAttention(
     discoveredAttentionReasons,
     mergedQuestions,
