@@ -50,6 +50,7 @@ import {
   normalizeTargeting,
   preferenceFit,
   recommendationTargetingEligible,
+  roleTypeEmploymentPattern,
   roleTypePattern,
   targetTitleTerms,
   type JobTargeting,
@@ -1477,20 +1478,30 @@ export function boardConditions(f: {
   }
 
   if (f.targeting?.role_types.length) {
+    /* Every chosen stage contributes one clause and they are OR-ed: stages are alternatives a
+       student would accept, not requirements a posting must satisfy at once.
+       Three kinds of evidence, and each stage reads only the ones that can carry it:
+         - the TITLE, for the six stages an employer names there (roleTypePattern);
+         - the EMPLOYMENT_TYPE column, for part-time and contract, which a board routinely states
+           there and omits from the title (roleTypeEmploymentPattern);
+         - the absence of every one of those words, which is what full-time means here.
+       Written as a clause list rather than the previous title/full-time if-ladder because there
+       are now three sources instead of two; with only the original four stages chosen the list
+       holds exactly the same one or two clauses that ladder produced. */
     const titlePattern = roleTypePattern(f.targeting.role_types);
+    const employmentPattern = roleTypeEmploymentPattern(f.targeting.role_types);
     const acceptsFullTime = f.targeting.role_types.includes('full-time');
     const fullTime = sql`(
       ${monitored_jobs.title} !~* ${'(^|[^a-z])(intern|internship|trainee|co-op|co op|coop)([^a-z]|$)'}
       and ${monitored_jobs.title} !~* ${'(^|[^a-z])(part.?time|contract|temporary|freelance)([^a-z]|$)'}
       and (${monitored_jobs.employment_type} ~* ${'full.?time'} or ${monitored_jobs.employment_type} is null)
     )`;
-    if (titlePattern && acceptsFullTime) {
-      conditions.push(or(sql`${monitored_jobs.title} ~* ${titlePattern}`, fullTime)!);
-    } else if (titlePattern) {
-      conditions.push(sql`${monitored_jobs.title} ~* ${titlePattern}`);
-    } else if (acceptsFullTime) {
-      conditions.push(fullTime);
-    }
+    const stageClauses: SQL[] = [];
+    if (titlePattern) stageClauses.push(sql`${monitored_jobs.title} ~* ${titlePattern}`);
+    if (employmentPattern) stageClauses.push(sql`${monitored_jobs.employment_type} ~* ${employmentPattern}`);
+    if (acceptsFullTime) stageClauses.push(fullTime);
+    if (stageClauses.length === 1) conditions.push(stageClauses[0]!);
+    else if (stageClauses.length > 1) conditions.push(or(...stageClauses)!);
   }
 
   const desiredTitleTerms = f.targeting ? targetTitleTerms(f.targeting) : [];
