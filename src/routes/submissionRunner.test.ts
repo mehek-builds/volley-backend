@@ -307,6 +307,28 @@ test('a Job board source makes only an employee-referral detail non-applicable',
   );
 });
 
+test('managed provider blockers pass through the proven referral filter before the send gate', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const prepareStart = source.indexOf('async function prepareManaged(');
+  const prepareEnd = source.indexOf('\nasync function prepareControlled', prepareStart);
+  assert.ok(prepareStart > 0 && prepareEnd > prepareStart);
+  const prepareBody = source.slice(prepareStart, prepareEnd);
+  assert.match(
+    prepareBody,
+    /const afterReferralResolution = filterAutomaticallyResolvedReferralAttention\(\s*afterFollowUps,\s*mergedQuestions,\s*\);/,
+    'the managed provider channel must use the same provenance proof as discovery attention',
+  );
+  assert.match(
+    prepareBody,
+    /consentTickCoveredBlockers\(afterReferralResolution, prepareConsentTickPlan\)/,
+    'the send gate must read the filtered provider blockers',
+  );
+  assert.doesNotMatch(
+    prepareBody,
+    /consentTickCoveredBlockers\(afterFollowUps, prepareConsentTickPlan\)/,
+  );
+});
+
 test('the compact packet preselects only unresolved open prose controls', () => {
   const current: ApplicationReviewState = {
     jd_text: 'Build Python services.',

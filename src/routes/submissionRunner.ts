@@ -3398,6 +3398,15 @@ async function prepareManaged(
       'Conditional follow-up reported required on a field the employer marked optional, and its condition is unmet',
     );
   }
+  /* The discovery pass and the managed fill provider can report the same referral refusal through
+   * separate channels. The discovery channel is filtered above. Apply the identical proof to the
+   * provider channel too: only an employer Other option that still carries the applicant's exact
+   * Job board provenance can retire its source/detail refusal. An applicant-reviewed Other without
+   * that provenance, or any primary employee-referral question, remains a blocker. */
+  const afterReferralResolution = filterAutomaticallyResolvedReferralAttention(
+    afterFollowUps,
+    mergedQuestions,
+  );
   /* The consent control the submit-time tick plan already covers is not a prepare-time blocker.
    *
    * The fill run leaves it untouched BY DESIGN (no pre-ticked consent, ever), the tick runs as the
@@ -3406,10 +3415,10 @@ async function prepareManaged(
    * as required-and-still-empty, `safe` goes false, and the Send press that would run the tick can
    * never be offered - measured live on Transparent Hiring (breezy), 2026-08-20. */
   const prepareConsentTickPlan = managedConsentTickPlan(portal, packet);
-  const consentTickExcused = consentTickCoveredBlockers(afterFollowUps, prepareConsentTickPlan);
+  const consentTickExcused = consentTickCoveredBlockers(afterReferralResolution, prepareConsentTickPlan);
   const blockers = consentTickExcused.length > 0
-    ? afterFollowUps.filter((blocker) => !consentTickExcused.includes(blocker))
-    : afterFollowUps;
+    ? afterReferralResolution.filter((blocker) => !consentTickExcused.includes(blocker))
+    : afterReferralResolution;
   if (consentTickExcused.length > 0) {
     fastify.log.info(
       { applicationId: row.id, portal, blockers: consentTickExcused },
