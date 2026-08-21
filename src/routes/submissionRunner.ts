@@ -3662,6 +3662,47 @@ async function prepareManaged(
   // path's comment below gives: a sentence that renders to nothing must never be able to restore
   // `safe`.
   const unansweredRequiredQuestions = blankRequiredQuestionLabels(mergedQuestions);
+  const discoveryAttentionDiagnostics = discoveryAttention.map((reason) => {
+    const questionStem = /(?:left for you|answer):\s*["']([^"']{1,160})/i.exec(reason)?.[1]
+      ?? /(?:question|answer)[^"']*["']([^"']{1,160})/i.exec(reason)?.[1]
+      ?? null;
+    const normalized = reason.toLowerCase();
+    const reasonShape = normalized.startsWith('none of the options match')
+      ? 'closed_option_mismatch'
+      : normalized.startsWith('none of the options exactly match')
+        ? 'remembered_option_mismatch'
+        : normalized.startsWith('open-ended question left for you')
+          ? 'open_ended_unanswered'
+          : normalized.startsWith('drafted answer needs your review')
+            ? 'draft_review'
+            : normalized.startsWith('ai-drafted answer needs your review')
+              ? 'ai_draft_review'
+              : normalized.includes('how you heard about this role is yours to answer')
+                ? 'referral_unresolved'
+                : 'other';
+    return { reasonShape, questionStem };
+  });
+  const recentEmployerResolutionDiagnostics = mergedQuestions
+    .filter((question) => RECENT_EXPERIENCE_EMPLOYER_QUESTION.test(normalizeReviewQuestionLabel(question.question)))
+    .map((question) => {
+      const recentEmployer = packet.mostRecentRole?.company?.trim();
+      const optionSource = question.answer_option_source?.trim();
+      return {
+        answerShape: question.answer.trim().toLowerCase() === otherReferralOption(usableOptions(question.options))?.toLowerCase()
+          ? 'other_option'
+          : question.answer.trim() ? 'other_value' : 'empty',
+        answerSource: question.answer_source ?? null,
+        optionSourceShape: !optionSource
+          ? 'empty'
+          : recentEmployer && optionSource.toLowerCase() === recentEmployer.toLowerCase()
+            ? 'current_recent_employer'
+            : 'other_value',
+        recentEmployerPresent: Boolean(recentEmployer),
+        recentEmployerListed: Boolean(recentEmployer && usableOptions(question.options)
+          .some((option) => option.trim().toLowerCase() === recentEmployer.toLowerCase())),
+        optionCount: usableOptions(question.options).length,
+      };
+    });
   const safe = blockers.length === 0
     && discoveryAttention.length === 0
     && evidenceBlockers.length === 0
@@ -3688,6 +3729,8 @@ async function prepareManaged(
     unattemptedQuestionCount: unattemptedQuestions.length,
     unansweredRequiredQuestionCount: unansweredRequiredQuestions.length,
     transcriptAttentionCount: transcriptAttention.length,
+    discoveryAttentionDiagnostics,
+    recentEmployerResolutionDiagnostics,
     safe,
   }, 'Managed prepare safety gate shape');
   /* A FILL RUN THAT FOUND A SECURITY-CODE SCREEN HAS SUBMITTED THIS APPLICATION.
