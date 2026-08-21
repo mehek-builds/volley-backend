@@ -2333,6 +2333,20 @@ function isTruthfulJobBoardOtherReferral(
   );
 }
 
+function isTruthfulRecentEmployerOther(
+  question: Pick<ApplicationReviewQuestion, 'question' | 'answer' | 'answer_option_source' | 'options'>,
+): boolean {
+  const original = question.answer_option_source?.trim();
+  const other = otherReferralOption(usableOptions(question.options));
+  return Boolean(
+    original
+    && RECENT_EXPERIENCE_EMPLOYER_QUESTION.test(normalizeReviewQuestionLabel(question.question))
+    && other
+    && question.answer.trim().toLowerCase() === other.toLowerCase()
+    && original.toLowerCase() !== other.toLowerCase(),
+  );
+}
+
 export function filterAutomaticallyResolvedReferralAttention(
   reasons: readonly string[],
   questions: readonly ApplicationReviewQuestion[],
@@ -2341,6 +2355,7 @@ export function filterAutomaticallyResolvedReferralAttention(
   const resolvedPrefixes = questions.flatMap((question) => {
     const normalized = normalizeReviewQuestionLabel(question.question);
     const automaticallyResolved = isTruthfulJobBoardOtherReferral(question)
+      || isTruthfulRecentEmployerOther(question)
       || (jobBoardOtherResolved
         && EMPLOYEE_REFERRAL_DETAIL_QUESTION.test(normalized)
         && /^n\/?a$/i.test(question.answer.trim()));
