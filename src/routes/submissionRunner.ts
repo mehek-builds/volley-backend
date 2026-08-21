@@ -3264,6 +3264,10 @@ async function prepareManaged(
     discoveredAttentionReasons,
     mergedQuestions,
   );
+  const filteredDiscoveryOptionalAttention = filterAutomaticallyResolvedReferralAttention(
+    discoveryOptionalAttention,
+    mergedQuestions,
+  );
   packet.questions = mergedQuestions.map((q) => ({
     question: q.question,
     answer: q.answer,
@@ -3555,7 +3559,7 @@ async function prepareManaged(
     ...blockers,
     ...discoveryAttention,
     /* Shown, never gating: see optionalAttentionReasons in discoverAndResolveQuestions. */
-    ...discoveryOptionalAttention,
+    ...filteredDiscoveryOptionalAttention,
     ...evidenceBlockers,
     ...coverLetterAttention,
     ...transcriptAttention,
@@ -3608,6 +3612,21 @@ async function prepareManaged(
     && unansweredRequiredQuestions.length === 0
     // See transcriptAttention: this one holds back a send nothing else would refuse.
     && transcriptAttention.length === 0;
+  fastify.log.info({
+    applicationId: row.id,
+    portal,
+    blockerCount: blockers.length,
+    discoveryAttentionCount: discoveryAttention.length,
+    optionalAttentionCount: filteredDiscoveryOptionalAttention.length,
+    evidenceBlockerCount: evidenceBlockers.length,
+    discoveryFailureCount: discoveryFailures.length,
+    uncoveredProbeFailureCount: uncoveredProbeFailures.length,
+    coverLetterAttentionCount: coverLetterAttention.length,
+    unattemptedQuestionCount: unattemptedQuestions.length,
+    unansweredRequiredQuestionCount: unansweredRequiredQuestions.length,
+    transcriptAttentionCount: transcriptAttention.length,
+    safe,
+  }, 'Managed prepare safety gate shape');
   /* A FILL RUN THAT FOUND A SECURITY-CODE SCREEN HAS SUBMITTED THIS APPLICATION.
    *
    * Measured 2026-08-08: three Greenhouse packets (Redwood Materials, Scale AI, Cresta) came out of

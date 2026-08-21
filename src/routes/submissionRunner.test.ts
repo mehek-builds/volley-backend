@@ -320,6 +320,20 @@ test('managed provider blockers pass through the proven referral filter before t
   );
   assert.match(
     prepareBody,
+    /const filteredDiscoveryOptionalAttention = filterAutomaticallyResolvedReferralAttention\(\s*discoveryOptionalAttention,\s*mergedQuestions,\s*\);/,
+    'optional discovery attention must use the same provenance proof too',
+  );
+  assert.match(
+    prepareBody,
+    /\.\.\.filteredDiscoveryOptionalAttention,/,
+    'the rendered attention list must use the filtered optional channel',
+  );
+  assert.doesNotMatch(
+    prepareBody,
+    /\.\.\.discoveryOptionalAttention,/,
+  );
+  assert.match(
+    prepareBody,
     /consentTickCoveredBlockers\(afterReferralResolution, prepareConsentTickPlan\)/,
     'the send gate must read the filtered provider blockers',
   );
