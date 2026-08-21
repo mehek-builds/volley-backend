@@ -1658,7 +1658,7 @@ async function packetForCoverLetterCapability(
 ): Promise<{ packet: SubmissionPacket; row: ResumeRow; coverLetterIssue?: string }> {
   if (!supported) {
     const strippedRow = { ...row, spec: strippedCoverLetterSpec(row.spec) } as ResumeRow;
-    return { packet: omitCoverLetter(await buildPacket(row, controlledTest)), row: strippedRow };
+    return { packet: omitCoverLetter(await buildPacket(strippedRow, controlledTest)), row: strippedRow };
   }
   /* Always enter the generator gate, including when a letter is already stored. That function now
      revalidates historical artifacts against every current grounding rule and returns immediately

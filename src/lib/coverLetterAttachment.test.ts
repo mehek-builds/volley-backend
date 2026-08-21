@@ -285,8 +285,9 @@ test('every cover-letter capability rebuild preserves the caller controlled-resu
 
   assert.match(
     fn,
-    /if \(!supported\) \{[\s\S]{0,220}packet: omitCoverLetter\(await buildPacket\(row, controlledTest\)\), row: strippedRow/,
-    'a controlled form with no cover-letter input must keep fixture resume bytes after discovery',
+    /if \(!supported\) \{[\s\S]{0,220}packet: omitCoverLetter\(await buildPacket\(strippedRow, controlledTest\)\), row: strippedRow/,
+    'a controlled form with no cover-letter input must keep fixture resume bytes after discovery, '
+      + 'and must not fetch a cover letter this form has nowhere to put',
   );
   assert.match(
     fn,
