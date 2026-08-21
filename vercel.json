@@ -16,6 +16,7 @@
     { "path": "/internal/application-submission-runner", "schedule": "15 4 * * *" },
     { "path": "/internal/managed-receiving-canary", "schedule": "0 15 * * *" },
     { "path": "/internal/strong-match-notifications", "schedule": "0 8 * * *" },
-    { "path": "/internal/activity-digest", "schedule": "30 13 * * *" }
+    { "path": "/internal/activity-digest", "schedule": "30 13 * * *" },
+    { "path": "/internal/submission-confirmation-reconciler", "schedule": "45 13 * * *" }
   ]
 }
