@@ -1,5 +1,6 @@
 import { del, put } from '@vercel/blob';
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import {
@@ -18,7 +19,13 @@ import { contestedMetrics } from '../engine/grounding';
 import { resolveBlobUrl } from './resumeAccess';
 import { coverLetterFileNameForRole } from './resumeFileName';
 import { immutableDocumentContentHash } from './immutableDocumentHash';
-import { deleteCanonicalCoverLetters } from './canonicalCoverLetterService';
+import {
+  canonicalCoverLetterMutationBlocked,
+  CanonicalCoverLetterConflictError,
+  CanonicalCoverLetterLockedError,
+  deleteCanonicalCoverLetters,
+  packetSpecWithCanonicalCoverLetter,
+} from './canonicalCoverLetterService';
 
 export type ApplicationRow = typeof generated_resumes.$inferSelect;
 type StoredSpec = Record<string, unknown>;
@@ -116,58 +123,62 @@ async function persistCoverLetter(
   const job = row.job_context as { company?: string; role?: string };
   if (!review?.jd_text || !job.company || !job.role || !contact.full_name) throw new Error('This application is missing something we need');
   const pdf = await renderCoverLetterPdf({ full_name: contact.full_name, email: contact.email }, job.company, body);
-  const blob = await put(`users/${row.user_id}/resumes/${row.id}-cover-letter-${Date.now()}.pdf`, pdf, {
-    access: 'public',
-    contentType: 'application/pdf',
-  });
   const generatedAt = new Date().toISOString();
-  const artifact: CoverLetterArtifact = {
-    body,
-    word_count: wordCount,
-    warnings,
-    generated_at: generatedAt,
-    approved_at: approved ? generatedAt : undefined,
-    object_key: blob.pathname,
-    file_name: coverLetterFileNameForRole(contact.full_name, job.role),
-  };
-  const previous = storedCoverLetter(row);
-  let updated: Array<{ id: string }>;
+  const blobState: { current?: { pathname: string; url: string } } = {};
   try {
-    updated = await db.transaction(async (tx) => {
-      const [canonicalApplication] = await tx.select({
-        application_id: application_artifacts.application_id,
-      }).from(application_artifacts).innerJoin(artifacts, eq(
-        artifacts.id,
-        application_artifacts.artifact_id,
-      )).where(and(
-        eq(artifacts.user_id, row.user_id),
-        eq(artifacts.legacy_generated_resume_id, row.id),
-        eq(application_artifacts.purpose, 'resume'),
-      )).limit(1);
+    const stored = await db.transaction(async (tx) => {
+      const [currentPacket] = await tx.select().from(generated_resumes).where(and(
+        eq(generated_resumes.id, row.id),
+        eq(generated_resumes.user_id, row.user_id),
+      )).limit(1).for('update');
+      if (!currentPacket || !isDeepStrictEqual(currentPacket.spec, row.spec)) {
+        throw new CanonicalCoverLetterConflictError();
+      }
+      const [canonicalApplication] = await tx.select().from(applications).where(and(
+        eq(applications.user_id, row.user_id),
+        eq(applications.legacy_generated_resume_id, row.id),
+      )).limit(1).for('update');
       if (!canonicalApplication) throw new Error('This application is missing its retained document record');
+      if (canonicalCoverLetterMutationBlocked(canonicalApplication, currentPacket.spec)) {
+        throw new CanonicalCoverLetterLockedError();
+      }
+      const storedBlob = await put(`users/${row.user_id}/resumes/${row.id}-cover-letter-${Date.now()}.pdf`, pdf, {
+        access: 'public',
+        contentType: 'application/pdf',
+      });
+      blobState.current = storedBlob;
+      const artifact: CoverLetterArtifact = {
+        body,
+        word_count: wordCount,
+        warnings,
+        generated_at: generatedAt,
+        approved_at: approved ? generatedAt : undefined,
+        object_key: storedBlob.pathname,
+        file_name: coverLetterFileNameForRole(contact.full_name, job.role),
+      };
 
       const frozenContent = {
         body: artifact.body,
+        word_count: artifact.word_count,
+        warnings: artifact.warnings,
         full_name: contact.full_name,
         email: contact.email,
         company: job.company,
+        role: job.role,
         generated_at: artifact.generated_at,
+        approved_at: artifact.approved_at,
+        file_name: artifact.file_name,
       };
       const coverArtifactId = randomUUID();
-      const changed = await tx.update(generated_resumes).set({
-        spec: sql`jsonb_set(${generated_resumes.spec}, '{_cover_letter}', ${JSON.stringify(artifact)}::jsonb, true)`,
-      }).where(and(eq(generated_resumes.id, row.id), eq(generated_resumes.user_id, row.user_id)))
-        .returning({ id: generated_resumes.id });
-      if (!changed[0]) return changed;
-      await tx.insert(artifacts).values({
+      const [storedArtifact] = await tx.insert(artifacts).values({
         id: coverArtifactId,
         user_id: row.user_id,
         kind: 'cover_letter',
         structured_content: frozenContent,
         rendered_object_key: artifact.object_key,
-        rendered_blob_url: blob.url,
+        rendered_blob_url: storedBlob.url,
         source: approved ? 'user_edited_cover_letter' : 'ai_cover_letter',
-      });
+      }).returning();
       await tx.insert(artifact_versions).values({
         artifact_id: coverArtifactId,
         version_number: 1,
@@ -176,29 +187,33 @@ async function persistCoverLetter(
         content_hash: immutableDocumentContentHash(frozenContent),
         structured_content: frozenContent,
         rendered_object_key: artifact.object_key,
-        rendered_blob_url: blob.url,
+        rendered_blob_url: storedBlob.url,
       });
+      await tx.update(application_artifacts).set({ selected: false }).where(and(
+        eq(application_artifacts.application_id, canonicalApplication.id),
+        eq(application_artifacts.purpose, 'cover_letter'),
+      ));
       await tx.insert(application_artifacts).values({
-        application_id: canonicalApplication.application_id,
+        application_id: canonicalApplication.id,
         artifact_id: coverArtifactId,
         purpose: 'cover_letter',
         selected: true,
       });
-      return changed;
+      const mirrored = packetSpecWithCanonicalCoverLetter(currentPacket.spec, storedArtifact);
+      const changed = await tx.update(generated_resumes).set({ spec: mirrored.spec }).where(and(
+        eq(generated_resumes.id, row.id),
+        eq(generated_resumes.user_id, row.user_id),
+        sql`${generated_resumes.spec} = ${JSON.stringify(currentPacket.spec)}::jsonb`,
+      )).returning({ id: generated_resumes.id });
+      if (!changed[0]) throw new CanonicalCoverLetterConflictError();
+      return artifact;
     });
+    if (!blobState.current) throw new Error('Cover letter persistence returned no blob');
+    return { cover_letter: stored, blob_url: blobState.current.url };
   } catch (error) {
-    await del(blob.url).catch(() => undefined);
+    if (blobState.current) await del(blobState.current.url).catch(() => undefined);
     throw error;
   }
-  if (!updated[0]) {
-    await del(blob.url).catch(() => undefined);
-    throw new Error('Application changed before the cover letter could be saved');
-  }
-  if (previous?.object_key && previous.object_key !== artifact.object_key) {
-    const previousUrl = await resolveBlobUrl(previous.object_key).catch(() => null);
-    if (previousUrl) await del(previousUrl).catch(() => undefined);
-  }
-  return { cover_letter: artifact, blob_url: blob.url };
 }
 
 export async function generateStoredCoverLetter(row: ApplicationRow, force = false, capabilityConfirmed = false) {
@@ -318,9 +333,16 @@ export async function deleteStoredCoverLetter(row: ApplicationRow) {
     });
     return;
   }
-  await db.update(generated_resumes).set({
-    spec: sql`${generated_resumes.spec} - '_cover_letter'`,
-  }).where(and(eq(generated_resumes.id, row.id), eq(generated_resumes.user_id, row.user_id)));
+  if (canonicalCoverLetterMutationBlocked({ submission_state: 'not_started', tracker_state: 'saved' }, row.spec)) {
+    throw new CanonicalCoverLetterLockedError();
+  }
+  const next = packetSpecWithCanonicalCoverLetter(row.spec, null);
+  const changed = await db.update(generated_resumes).set({ spec: next.spec }).where(and(
+    eq(generated_resumes.id, row.id),
+    eq(generated_resumes.user_id, row.user_id),
+    sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+  )).returning({ id: generated_resumes.id });
+  if (!changed[0]) throw new Error('Application changed before the cover letter could be removed');
   if (existing?.object_key) {
     const url = await resolveBlobUrl(existing.object_key).catch(() => null);
     if (url) await del(url).catch(() => undefined);

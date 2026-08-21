@@ -30,6 +30,13 @@ test('packet audit endpoint is owner scoped and persists only with exact packet 
   assert.match(route, /result\.audit\.bindings\.pdf\.sha256/);
   assert.match(route, /result\.audit\.bindings\.pdf\.sizeBytes/);
   assert.match(route, /mintDownloadToken/);
+  const canonicalCoverLetter = route.indexOf('reconcileCanonicalCoverLetterForPacket(row)');
+  const terminalRefusal = route.indexOf("review.status === 'submitted'");
+  const reviewRead = route.indexOf('readApplicationReview(row.spec)', canonicalCoverLetter);
+  const packetBuild = route.indexOf('const packet = await buildPacket(', canonicalCoverLetter);
+  assert.ok(terminalRefusal >= 0 && canonicalCoverLetter > terminalRefusal
+    && reviewRead > canonicalCoverLetter && packetBuild > reviewRead,
+    'historical canonical cover-letter selection must be mirrored before audit build but never rewrite sent history');
 });
 
 test('extension packet refuses missing, stale, or unacknowledged server audit before disclosure', () => {

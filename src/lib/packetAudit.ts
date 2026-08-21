@@ -177,6 +177,10 @@ export function packetAuditSha256(value: unknown): string {
   return createHash('sha256').update(canonicalPacketJson(value)).digest('hex');
 }
 
+export function packetAuditTextSha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
 function byteSha256(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -377,7 +381,7 @@ function packetBindings(input: PacketBindingInput): PacketAuditBindings {
   return {
     ownerSha256: createHash('sha256').update(input.ownerId).digest('hex'),
     applicationId: input.applicationId,
-    jdSha256: createHash('sha256').update(input.jdText).digest('hex'),
+    jdSha256: packetAuditTextSha256(input.jdText),
     specSha256: packetAuditSha256(normalizedSpec),
     jobContextSha256: packetAuditSha256(input.jobContext),
     questionsSha256: packetAuditSha256(packetVisibleQuestions(input.questions)),

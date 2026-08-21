@@ -108,6 +108,7 @@ import { verifyStoredPacketAuditAcknowledgement } from '../lib/packetAudit';
 import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
 import { resumeEmailOfRecord, resumePacketEmailIsCurrent } from '../lib/resumeEmail';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
+import { reconcileCanonicalCoverLetterForPacket } from '../lib/canonicalCoverLetterService';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(4000) });
@@ -635,9 +636,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * on the row, the handoff window closed with the attended finish unavailable, and this route
        * then refused the row forever. The repair releases the claim only when the row itself proves
        * no send can have happened and no attended finish is still possible; on any other row it is
-       * a no-op and the gate refuses exactly as before. See repairExpiredAttendedHandoffClaim. */
+      * a no-op and the gate refuses exactly as before. See repairExpiredAttendedHandoffClaim. */
       row = await repairExpiredAttendedHandoffClaim(row, request.jwtPayload!.userId, request.log) ?? row;
-      const review = readApplicationReview(row.spec);
+      let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       /* awaiting_security_code is NOT past auditing, and blocking it here deadlocked the code step.
        *
@@ -664,6 +665,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'This application can no longer be audited before submission' });
       }
       try {
+        /* Canonical cover-letter edits are the authority for the attachment. Historical packets
+         * can still name a prior retained blob in `_cover_letter`, so reconcile the exact selected
+         * artifact before the audit loads or hashes any employer-bound bytes. This runs after the
+         * terminal-state refusal above, so a forbidden re-audit cannot rewrite sent history. */
+        row = await reconcileCanonicalCoverLetterForPacket(row);
+        review = readApplicationReview(row.spec);
+        if (!review) throw new Error('Application review is not available for this resume');
         const auditSourceReview = await repairReviewPortalFromMonitoredJob(row, review);
         /* AUDIT THE PACKET THE SEND GATE WILL CHECK, not the one sitting in the row.
          *

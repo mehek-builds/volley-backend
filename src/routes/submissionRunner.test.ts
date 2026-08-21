@@ -44,7 +44,12 @@ import {
 } from './submissionRunner';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
-import { packetAuditSha256, packetVisibleQuestions, type PacketAudit } from '../lib/packetAudit';
+import {
+  createPacketAudit,
+  packetAuditSha256,
+  packetVisibleQuestions,
+  type PacketAudit,
+} from '../lib/packetAudit';
 import { savedAnswerKey } from '../lib/answerReuse';
 import {
   refreshKnownQuestionAnswers,
@@ -877,11 +882,11 @@ test('a post-gate profile rebuild cannot reach transport, while the exact audite
     kind: 'required',
     required: true,
   }];
-  const packetForPhone = (phone: string): SubmissionPacket => ({
+  const packetForPhone = (phone: string, jdText = 'Consulting role'): SubmissionPacket => ({
     fullName: 'Mehek Mandal',
     email: 'mehek@example.com',
     phone,
-    jdText: 'Consulting role',
+    jdText,
     resume,
     resumeName: 'resume.pdf',
     applicantSnapshot: {
@@ -907,25 +912,36 @@ test('a post-gate profile rebuild cannot reach transport, while the exact audite
     }],
   });
   const approvedPacket = packetForPhone('+971 50 111 1111');
-  const audit = {
-    identities: { resume_email: 'mehek@example.com', applicant_email: 'mehek@example.com' },
-    bindings: {
-      applicantSnapshotSha256: packetAuditSha256(approvedPacket.applicantSnapshot),
-      jdSha256: packetAuditSha256(approvedPacket.jdText),
-      pdf: {
-        sha256: createHash('sha256').update(resume).digest('hex'),
-        sizeBytes: resume.byteLength,
-      },
-      employerDelivery: createEmployerDeliveryBindings(approvedPacket, {}, {
-        mode: 'full',
-        envelope: employerDeliveryEnvelope({
-          channel: 'controlled_browser',
-          destinationUrl: 'https://example.com/apply',
-          portalFamily: 'controlled_test',
-        }),
-      }),
-    },
-  } as PacketAudit;
+  const envelope = employerDeliveryEnvelope({
+    channel: 'controlled_browser',
+    destinationUrl: 'https://example.com/apply',
+    portalFamily: 'controlled_test',
+  });
+  const auditForPacket = (packet: SubmissionPacket): PacketAudit => createPacketAudit({
+    ownerId: 'owner-1',
+    applicationId: 'application-1',
+    jdText: packet.jdText ?? '',
+    spec: {},
+    jobContext: { company: 'Example', role: 'Consultant' },
+    questions,
+    applicantSnapshot: packet.applicantSnapshot,
+    resumeEmail: 'resume-alias@example.com',
+    applicantEmail: packet.email,
+    employerDelivery: createEmployerDeliveryBindings(packet, {}, { mode: 'full', envelope }),
+    pdfObjectKey: 'users/owner-1/resumes/application-1.pdf',
+    pdfBytes: packet.resume,
+    editedTerms: [],
+    clauses: [{
+      text: packet.jdText ?? '',
+      start: 0,
+      end: packet.jdText?.length ?? 0,
+      verdict: 'unscoreable',
+    }],
+    rejected: [],
+    degraded: false,
+    terms: { covered: [], missing: [], edited: [] },
+  });
+  const audit = auditForPacket(approvedPacket);
 
   let profileRead = 0;
   const rebuildFromProfile = async () => {
@@ -946,11 +962,6 @@ test('a post-gate profile rebuild cannot reach transport, while the exact audite
     /applicant snapshot changed after packet approval/,
   );
   assert.equal(transports, 0, 'profile drift after the gate must stop before an employer transport');
-  const envelope = employerDeliveryEnvelope({
-    channel: 'controlled_browser',
-    destinationUrl: 'https://example.com/apply',
-    portalFamily: 'controlled_test',
-  });
   assert.deepEqual(verifiedBuiltPacketIssues(approvedPacket, audit, questions, 'full', envelope), []);
 
   const sent = await transportVerifiedBuiltPacket(approvedPacket, audit, questions, async (exactPacket) => {
@@ -959,6 +970,16 @@ test('a post-gate profile rebuild cannot reach transport, while the exact audite
   }, 'full', envelope);
   assert.strictEqual(sent, approvedPacket, 'the transport receives the exact object that was verified');
   assert.equal(transports, 1);
+
+  for (const jdText of [
+    'Line one.\nLine "two".',
+    'Build café systems for 東京 teams.',
+  ]) {
+    const packet = packetForPhone('+971 50 111 1111', jdText);
+    const exactAudit = auditForPacket(packet);
+    assert.equal(exactAudit.bindings.jdSha256, createHash('sha256').update(jdText, 'utf8').digest('hex'));
+    assert.deepEqual(verifiedBuiltPacketIssues(packet, exactAudit, questions, 'full', envelope), []);
+  }
 });
 
 test('an observed employer redirect cannot pass an approved destination check', () => {

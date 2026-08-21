@@ -9,7 +9,7 @@ import { SignJWT } from 'jose';
 import { PGlite } from '@electric-sql/pglite';
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
 import { generateDrizzleJson, generateMigration } from 'drizzle-kit/api';
-import { eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import * as schema from '../db/schema';
 
 const JWT_SECRET = 'canonical-persistence-test-secret-32-chars';
@@ -31,6 +31,9 @@ let upsertCanonicalApplicationForUser: typeof import('./canonicalApplications').
 let reuseCanonicalCoverLetter: typeof import('../lib/canonicalCoverLetterService').reuseCanonicalCoverLetter;
 let listCanonicalStoredCoverLetters: typeof import('../lib/canonicalCoverLetterService').listCanonicalStoredCoverLetters;
 let deleteCanonicalCoverLetters: typeof import('../lib/canonicalCoverLetterService').deleteCanonicalCoverLetters;
+let reconcileCanonicalCoverLetterForPacket: typeof import('../lib/canonicalCoverLetterService').reconcileCanonicalCoverLetterForPacket;
+let saveCanonicalCoverLetter: typeof import('../lib/canonicalCoverLetterService').saveCanonicalCoverLetter;
+let uploadCanonicalCoverLetter: typeof import('../lib/canonicalCoverLetterService').uploadCanonicalCoverLetter;
 let canonicalDraftContext: typeof import('./draft').canonicalDraftContext;
 let deleteUnreferencedManualContacts: typeof import('./account').deleteUnreferencedManualContacts;
 
@@ -68,6 +71,9 @@ before(async () => {
     reuseCanonicalCoverLetter,
     listCanonicalStoredCoverLetters,
     deleteCanonicalCoverLetters,
+    reconcileCanonicalCoverLetterForPacket,
+    saveCanonicalCoverLetter,
+    uploadCanonicalCoverLetter,
   } = await import('../lib/canonicalCoverLetterService'));
   const { canonicalDraftContext: canonicalizeDraft, draftRoutes } = await import('./draft');
   canonicalDraftContext = canonicalizeDraft;
@@ -454,8 +460,28 @@ test('an owned cover letter can be reused across applications and is deleted onl
   const userId = randomUUID();
   const sourceApplicationId = randomUUID();
   const targetApplicationId = randomUUID();
+  const targetPacketId = randomUUID();
   const artifactId = randomUUID();
   await dbInsertUser(userId, 'cover-letter-reuse@example.test');
+  await backendDb.insert(schema.generated_resumes).values({
+    id: targetPacketId,
+    user_id: userId,
+    job_context: { company: 'Target', role: 'Engineer' },
+    resume_object_key: 'users/cover-letter-reuse/resume.pdf',
+    spec: {
+      summary: 'Saved packet',
+      _cover_letter: { body: 'Expired', object_key: 'users/cover-letter-reuse/expired.pdf', file_name: 'expired.pdf' },
+      _review: {
+        status: 'needs_attention',
+        jd_text: 'Build reliable systems.',
+        questions: [],
+        packet_audit: { version: 'packet_audit_v2' },
+        packet_audit_acknowledgement: { acknowledgedAt: new Date().toISOString() },
+        employer_delivery_bindings: { version: 'employer_delivery_v1' },
+        submission_authorization: { source: 'per_application_approval' },
+      },
+    },
+  });
   await backendDb.insert(schema.applications).values([
     {
       id: sourceApplicationId,
@@ -472,6 +498,7 @@ test('an owned cover letter can be reused across applications and is deleted onl
       company_scope_key: 'domain:target.example',
       company_name: 'Target',
       role: 'Engineer',
+      legacy_generated_resume_id: targetPacketId,
       source_surface: 'dashboard',
       application_fingerprint: `test:${targetApplicationId}`,
     },
@@ -509,13 +536,34 @@ test('an owned cover letter can be reused across applications and is deleted onl
 
   const reused = await reuseCanonicalCoverLetter({ userId, applicationId: targetApplicationId, artifactId });
   assert.equal(reused?.cover_letter.artifact_id, artifactId);
+  let [targetPacket] = await backendDb.select().from(schema.generated_resumes)
+    .where(eq(schema.generated_resumes.id, targetPacketId)).limit(1);
+  const mirroredSpec = targetPacket.spec as Record<string, any>;
+  assert.equal(mirroredSpec._cover_letter.artifact_id, artifactId);
+  assert.equal(mirroredSpec._cover_letter.object_key, 'users/cover-letter-reuse/source.pdf');
+  assert.equal(mirroredSpec._review.packet_audit, undefined);
+  assert.equal(mirroredSpec._review.packet_audit_acknowledgement, undefined);
+  assert.equal(mirroredSpec._review.employer_delivery_bindings, undefined);
+  assert.equal(mirroredSpec._review.submission_authorization, undefined);
   let links = (await backendDb.select().from(schema.application_artifacts))
     .filter((row: typeof schema.application_artifacts.$inferSelect) => row.artifact_id === artifactId);
   assert.deepEqual(new Set(links.map((row: typeof schema.application_artifacts.$inferSelect) => row.application_id)),
     new Set([sourceApplicationId, targetApplicationId]));
   assert.equal((await listCanonicalStoredCoverLetters(userId)).length, 2);
 
+  const beforeDeleteSpec = structuredClone(targetPacket.spec) as Record<string, any>;
+  beforeDeleteSpec._review.packet_audit = { version: 'packet_audit_v2' };
+  beforeDeleteSpec._review.packet_audit_acknowledgement = { acknowledgedAt: new Date().toISOString() };
+  beforeDeleteSpec._review.employer_delivery_bindings = { version: 'employer_delivery_v1' };
+  beforeDeleteSpec._review.submission_authorization = { source: 'per_application_approval' };
+  [targetPacket] = await backendDb.update(schema.generated_resumes).set({ spec: beforeDeleteSpec })
+    .where(eq(schema.generated_resumes.id, targetPacketId)).returning();
+
   await deleteCanonicalCoverLetters({ userId, applicationId: targetApplicationId });
+  [targetPacket] = await backendDb.select().from(schema.generated_resumes)
+    .where(eq(schema.generated_resumes.id, targetPacketId)).limit(1);
+  assert.equal((targetPacket.spec as Record<string, unknown>)._cover_letter, undefined);
+  assert.equal(((targetPacket.spec as Record<string, any>)._review).submission_authorization, undefined);
   let [artifact] = (await backendDb.select().from(schema.artifacts))
     .filter((row: typeof schema.artifacts.$inferSelect) => row.id === artifactId);
   assert.equal(artifact.deleted_at, null);
@@ -531,6 +579,635 @@ test('an owned cover letter can be reused across applications and is deleted onl
   assert.equal((await backendDb.select().from(schema.artifact_versions))
     .filter((row: typeof schema.artifact_versions.$inferSelect) => row.artifact_id === artifactId).length, 0);
   assert.equal(await findOwnedDownloadSource(userId, 'users/cover-letter-reuse/source.pdf'), null);
+});
+
+test('concurrent canonical cover-letter selections leave one selected artifact and the same exact packet pointer', async () => {
+  const userId = randomUUID();
+  const applicationId = randomUUID();
+  const packetId = randomUUID();
+  const firstArtifactId = randomUUID();
+  const secondArtifactId = randomUUID();
+  await dbInsertUser(userId, 'cover-letter-race@example.test');
+  await backendDb.insert(schema.generated_resumes).values({
+    id: packetId,
+    user_id: userId,
+    job_context: { company: 'Race', role: 'Engineer' },
+    resume_object_key: 'users/cover-letter-race/resume.pdf',
+    spec: { summary: 'Saved packet', _review: { status: 'needs_attention', jd_text: 'Race JD', questions: [] } },
+  });
+  await backendDb.insert(schema.applications).values({
+    id: applicationId,
+    user_id: userId,
+    legacy_generated_resume_id: packetId,
+    company_scope_key: 'domain:race.example',
+    company_name: 'Race',
+    role: 'Engineer',
+    source_surface: 'dashboard',
+    application_fingerprint: `test:${applicationId}`,
+  });
+  const contentFor = (body: string) => ({
+    body,
+    word_count: 2,
+    warnings: [],
+    generated_at: '2026-08-21T10:00:00.000Z',
+    approved_at: '2026-08-21T10:00:00.000Z',
+    file_name: 'cover-letter.pdf',
+  });
+  await backendDb.insert(schema.artifacts).values([
+    {
+      id: firstArtifactId,
+      user_id: userId,
+      kind: 'cover_letter',
+      structured_content: contentFor('First letter'),
+      rendered_object_key: 'users/cover-letter-race/first.pdf',
+      source: 'user_edited_cover_letter',
+    },
+    {
+      id: secondArtifactId,
+      user_id: userId,
+      kind: 'cover_letter',
+      structured_content: contentFor('Second letter'),
+      rendered_object_key: 'users/cover-letter-race/second.pdf',
+      source: 'user_edited_cover_letter',
+    },
+  ]);
+
+  await Promise.all([
+    reuseCanonicalCoverLetter({ userId, applicationId, artifactId: firstArtifactId }),
+    reuseCanonicalCoverLetter({ userId, applicationId, artifactId: secondArtifactId }),
+  ]);
+
+  const selected = (await backendDb.select().from(schema.application_artifacts))
+    .filter((link: typeof schema.application_artifacts.$inferSelect) => link.application_id === applicationId
+      && link.purpose === 'cover_letter' && link.selected);
+  assert.equal(selected.length, 1);
+  const [packet] = await backendDb.select().from(schema.generated_resumes)
+    .where(eq(schema.generated_resumes.id, packetId)).limit(1);
+  const packetArtifactId = ((packet.spec as Record<string, unknown>)._cover_letter as Record<string, unknown>).artifact_id;
+  assert.equal(packetArtifactId, selected[0].artifact_id);
+});
+
+test('audit-time reconciliation rerenders an expired selected generated cover letter from its immutable version', async () => {
+  const userId = randomUUID();
+  const applicationId = randomUUID();
+  const packetId = randomUUID();
+  const artifactId = randomUUID();
+  const expiredKey = 'users/cover-letter-restore/expired.pdf';
+  const restoredKey = 'users/cover-letter-restore/restored.pdf';
+  const frozen = {
+    body: 'Frozen approved cover letter.',
+    word_count: 4,
+    warnings: [],
+    full_name: 'Mehek Mandal',
+    email: 'mehek@example.test',
+    company: 'Restore',
+    role: 'Engineer',
+    generated_at: '2026-08-21T10:00:00.000Z',
+    approved_at: '2026-08-21T10:00:00.000Z',
+    file_name: 'Mehek_Mandal_Cover_Letter.pdf',
+  };
+  await dbInsertUser(userId, 'cover-letter-restore@example.test');
+  await backendDb.insert(schema.generated_resumes).values({
+    id: packetId,
+    user_id: userId,
+    job_context: { company: 'Restore', role: 'Engineer' },
+    resume_object_key: 'users/cover-letter-restore/resume.pdf',
+    spec: {
+      summary: 'Saved packet',
+      _cover_letter: { body: 'Older letter', object_key: 'users/cover-letter-restore/older.pdf', file_name: 'older.pdf' },
+      _review: {
+        status: 'needs_attention',
+        jd_text: 'Restore reliable systems.',
+        questions: [],
+        packet_audit: { version: 'packet_audit_v2' },
+        packet_audit_acknowledgement: { acknowledgedAt: '2026-08-21T09:00:00.000Z' },
+        employer_delivery_bindings: { version: 'employer_delivery_v1' },
+        submission_authorization: { source: 'per_application_approval' },
+      },
+    },
+  });
+  await backendDb.insert(schema.applications).values({
+    id: applicationId,
+    user_id: userId,
+    legacy_generated_resume_id: packetId,
+    company_scope_key: 'domain:restore.example',
+    company_name: 'Restore',
+    role: 'Engineer',
+    source_surface: 'dashboard',
+    application_fingerprint: `test:${applicationId}`,
+  });
+  await backendDb.insert(schema.artifacts).values({
+    id: artifactId,
+    user_id: userId,
+    kind: 'cover_letter',
+    structured_content: frozen,
+    rendered_object_key: expiredKey,
+    rendered_blob_url: 'https://blob.example/expired.pdf',
+    retention_class: 'generated_spec',
+    source: 'user_edited_cover_letter',
+  });
+  await backendDb.insert(schema.artifact_versions).values({
+    artifact_id: artifactId,
+    version_number: 1,
+    generation_source: 'user_edited_cover_letter',
+    job_context: { application_id: applicationId, company: 'Restore', role: 'Engineer' },
+    content_hash: immutableDocumentContentHash(frozen),
+    structured_content: frozen,
+    rendered_object_key: expiredKey,
+    rendered_blob_url: 'https://blob.example/expired.pdf',
+  });
+  await backendDb.insert(schema.application_artifacts).values({
+    application_id: applicationId,
+    artifact_id: artifactId,
+    purpose: 'cover_letter',
+    selected: true,
+  });
+  const [before] = await backendDb.select().from(schema.generated_resumes)
+    .where(eq(schema.generated_resumes.id, packetId)).limit(1);
+  let restoredBytes = '';
+  const reconciled = await reconcileCanonicalCoverLetterForPacket(before, {
+    resolveObjectUrl: async () => null,
+    recoverDocument: async () => ({ status: 'rendered', kind: 'cover_letter', buffer: Buffer.from('restored exact pdf') }),
+    putObject: async (_objectKey, bytes) => {
+      restoredBytes = bytes.toString('utf8');
+      return { pathname: restoredKey, url: 'https://blob.example/restored.pdf' };
+    },
+    deleteObject: async () => undefined,
+  });
+
+  assert.equal(restoredBytes, 'restored exact pdf');
+  const reconciledSpec = reconciled.spec as Record<string, any>;
+  assert.equal(reconciledSpec._cover_letter.object_key, restoredKey);
+  assert.equal(reconciledSpec._cover_letter.artifact_id, artifactId);
+  assert.equal(reconciledSpec._review.packet_audit, undefined);
+  assert.equal(reconciledSpec._review.packet_audit_acknowledgement, undefined);
+  assert.equal(reconciledSpec._review.employer_delivery_bindings, undefined);
+  assert.equal(reconciledSpec._review.submission_authorization, undefined);
+  const [storedArtifact] = await backendDb.select().from(schema.artifacts)
+    .where(eq(schema.artifacts.id, artifactId)).limit(1);
+  assert.equal(storedArtifact.rendered_object_key, restoredKey);
+  const versions = (await backendDb.select().from(schema.artifact_versions))
+    .filter((version: typeof schema.artifact_versions.$inferSelect) => version.artifact_id === artifactId)
+    .sort((left: typeof schema.artifact_versions.$inferSelect, right: typeof schema.artifact_versions.$inferSelect) => left.version_number - right.version_number);
+  assert.deepEqual(versions.map((version: typeof schema.artifact_versions.$inferSelect) => ({
+    version: version.version_number,
+    key: version.rendered_object_key,
+    hash: version.content_hash,
+  })), [
+    { version: 1, key: expiredKey, hash: immutableDocumentContentHash(frozen) },
+    { version: 2, key: restoredKey, hash: immutableDocumentContentHash(frozen) },
+  ]);
+});
+
+test('audit reconciliation rereads a moved selection under lock and deletes its stale recovered blob', async () => {
+  const userId = randomUUID();
+  const applicationId = randomUUID();
+  const packetId = randomUUID();
+  const expiredArtifactId = randomUUID();
+  const replacementArtifactId = randomUUID();
+  const expiredKey = 'users/cover-letter-interleaving/expired.pdf';
+  const replacementKey = 'users/cover-letter-interleaving/replacement.pdf';
+  const staleRecoveredUrl = 'https://blob.example/stale-recovered.pdf';
+  const contentFor = (body: string) => ({
+    body,
+    word_count: 2,
+    warnings: [],
+    generated_at: '2026-08-21T10:00:00.000Z',
+    approved_at: '2026-08-21T10:00:00.000Z',
+    file_name: 'cover-letter.pdf',
+  });
+  await dbInsertUser(userId, 'cover-letter-interleaving@example.test');
+  await backendDb.insert(schema.generated_resumes).values({
+    id: packetId,
+    user_id: userId,
+    job_context: { company: 'Interleaving', role: 'Engineer' },
+    resume_object_key: 'users/cover-letter-interleaving/resume.pdf',
+    spec: {
+      summary: 'Saved packet',
+      _cover_letter: { body: 'Older', object_key: 'users/cover-letter-interleaving/older.pdf', file_name: 'older.pdf' },
+      _review: {
+        status: 'needs_attention',
+        jd_text: 'Build reliable systems.',
+        questions: [],
+        packet_audit: { version: 'packet_audit_v2' },
+        packet_audit_acknowledgement: { acknowledgedAt: '2026-08-21T09:00:00.000Z' },
+        employer_delivery_bindings: { version: 'employer_delivery_v1' },
+        submission_authorization: { source: 'per_application_approval' },
+      },
+    },
+  });
+  await backendDb.insert(schema.applications).values({
+    id: applicationId,
+    user_id: userId,
+    legacy_generated_resume_id: packetId,
+    company_scope_key: 'domain:interleaving.example',
+    company_name: 'Interleaving',
+    role: 'Engineer',
+    source_surface: 'dashboard',
+    application_fingerprint: `test:${applicationId}`,
+  });
+  await backendDb.insert(schema.artifacts).values([
+    {
+      id: expiredArtifactId,
+      user_id: userId,
+      kind: 'cover_letter',
+      structured_content: contentFor('Expired letter'),
+      rendered_object_key: expiredKey,
+      rendered_blob_url: 'https://blob.example/expired.pdf',
+      retention_class: 'generated_spec',
+      source: 'user_edited_cover_letter',
+    },
+    {
+      id: replacementArtifactId,
+      user_id: userId,
+      kind: 'cover_letter',
+      structured_content: contentFor('Replacement letter'),
+      rendered_object_key: replacementKey,
+      rendered_blob_url: 'https://blob.example/replacement.pdf',
+      retention_class: 'generated_spec',
+      source: 'user_edited_cover_letter',
+    },
+  ]);
+  await backendDb.insert(schema.artifact_versions).values([
+    {
+      artifact_id: expiredArtifactId,
+      version_number: 1,
+      generation_source: 'user_edited_cover_letter',
+      content_hash: immutableDocumentContentHash(contentFor('Expired letter')),
+      structured_content: contentFor('Expired letter'),
+      rendered_object_key: expiredKey,
+    },
+    {
+      artifact_id: replacementArtifactId,
+      version_number: 1,
+      generation_source: 'user_edited_cover_letter',
+      content_hash: immutableDocumentContentHash(contentFor('Replacement letter')),
+      structured_content: contentFor('Replacement letter'),
+      rendered_object_key: replacementKey,
+    },
+  ]);
+  await backendDb.insert(schema.application_artifacts).values({
+    application_id: applicationId,
+    artifact_id: expiredArtifactId,
+    purpose: 'cover_letter',
+    selected: true,
+  });
+  const [before] = await backendDb.select().from(schema.generated_resumes)
+    .where(eq(schema.generated_resumes.id, packetId)).limit(1);
+  let reachedPause!: () => void;
+  const paused = new Promise<void>((resolve) => { reachedPause = resolve; });
+  let releaseLock!: () => void;
+  const released = new Promise<void>((resolve) => { releaseLock = resolve; });
+  const deletedUrls: string[] = [];
+  const reconciliation = reconcileCanonicalCoverLetterForPacket(before, {
+    resolveObjectUrl: async (key) => key === replacementKey ? 'https://blob.example/replacement.pdf' : null,
+    recoverDocument: async () => ({ status: 'rendered', kind: 'cover_letter', buffer: Buffer.from('stale bytes') }),
+    putObject: async () => ({
+      pathname: 'users/cover-letter-interleaving/stale-recovered.pdf',
+      url: staleRecoveredUrl,
+    }),
+    deleteObject: async (url) => { deletedUrls.push(url); },
+    beforeLock: async (attempt) => {
+      if (attempt !== 0) return;
+      reachedPause();
+      await released;
+    },
+  });
+
+  await paused;
+  await reuseCanonicalCoverLetter({ userId, applicationId, artifactId: replacementArtifactId });
+  releaseLock();
+  const reconciled = await reconciliation;
+
+  assert.deepEqual(deletedUrls, [staleRecoveredUrl]);
+  const selected = (await backendDb.select().from(schema.application_artifacts))
+    .filter((link: typeof schema.application_artifacts.$inferSelect) => link.application_id === applicationId
+      && link.purpose === 'cover_letter' && link.selected);
+  assert.deepEqual(selected.map((link: typeof schema.application_artifacts.$inferSelect) => link.artifact_id), [replacementArtifactId]);
+  const packetSpec = reconciled.spec as Record<string, any>;
+  assert.equal(packetSpec._cover_letter.artifact_id, replacementArtifactId);
+  assert.equal(packetSpec._cover_letter.object_key, replacementKey);
+  assert.equal(packetSpec._review.packet_audit, undefined);
+  assert.equal(packetSpec._review.packet_audit_acknowledgement, undefined);
+  assert.equal(packetSpec._review.employer_delivery_bindings, undefined);
+  assert.equal(packetSpec._review.submission_authorization, undefined);
+  const [expiredArtifact] = await backendDb.select().from(schema.artifacts)
+    .where(eq(schema.artifacts.id, expiredArtifactId)).limit(1);
+  assert.equal(expiredArtifact.rendered_object_key, expiredKey);
+  const expiredVersions = (await backendDb.select().from(schema.artifact_versions))
+    .filter((version: typeof schema.artifact_versions.$inferSelect) => version.artifact_id === expiredArtifactId);
+  assert.equal(expiredVersions.length, 1);
+  assert.equal(expiredVersions[0].rendered_object_key, expiredKey);
+});
+
+test('reuse, edit, upload, and delete refuse claimed and submitted packets before any state or blob mutation', async () => {
+  for (const lifecycle of ['claimed', 'submitted'] as const) {
+    for (const operationName of ['reuse', 'edit', 'upload', 'delete'] as const) {
+      const userId = randomUUID();
+      const applicationId = randomUUID();
+      const packetId = randomUUID();
+      const selectedArtifactId = randomUUID();
+      const reuseArtifactId = randomUUID();
+      await dbInsertUser(userId, `${lifecycle}-${operationName}-${userId}@example.test`);
+      await backendDb.insert(schema.profiles).values({
+        user_id: userId,
+        parsed_json: { full_name: 'Mehek Mandal', email: 'mehek@example.test' },
+      });
+      const review = {
+        status: lifecycle === 'claimed' ? 'submitting' : 'submitted',
+        jd_text: 'Build reliable systems.',
+        questions: [],
+        packet_audit: { version: 'packet_audit_v2', audit_digest: 'audit' },
+        packet_audit_acknowledgement: { acknowledgedAt: '2026-08-21T09:00:00.000Z' },
+        employer_delivery_bindings: { version: 'employer_delivery_v1' },
+        submission_authorization: { source: 'per_application_approval' },
+        ...(lifecycle === 'claimed' ? {
+          submission_claimed_at: '2026-08-21T09:01:00.000Z',
+          submission_claim_id: randomUUID(),
+        } : {}),
+      };
+      await backendDb.insert(schema.generated_resumes).values({
+        id: packetId,
+        user_id: userId,
+        job_context: { company: 'Locked', role: 'Engineer' },
+        resume_object_key: `users/${userId}/resume.pdf`,
+        spec: {
+          summary: 'Saved packet',
+          _cover_letter: {
+            artifact_id: selectedArtifactId,
+            body: 'Selected letter',
+            object_key: `users/${userId}/selected.pdf`,
+            file_name: 'cover-letter.pdf',
+          },
+          _review: review,
+        },
+      });
+      const [application] = await backendDb.insert(schema.applications).values({
+        id: applicationId,
+        user_id: userId,
+        legacy_generated_resume_id: packetId,
+        company_scope_key: `domain:${applicationId}.example`,
+        company_name: 'Locked',
+        role: 'Engineer',
+        source_surface: 'dashboard',
+        application_fingerprint: `test:${applicationId}`,
+        submission_state: lifecycle === 'submitted' ? 'submitted' : 'not_started',
+        tracker_state: lifecycle === 'submitted' ? 'applied' : 'saved',
+      }).returning();
+      const contentFor = (body: string) => ({
+        body,
+        word_count: 2,
+        warnings: [],
+        generated_at: '2026-08-21T09:00:00.000Z',
+        approved_at: '2026-08-21T09:00:00.000Z',
+        file_name: 'cover-letter.pdf',
+      });
+      await backendDb.insert(schema.artifacts).values([
+        {
+          id: selectedArtifactId,
+          user_id: userId,
+          kind: 'cover_letter',
+          structured_content: contentFor('Selected letter'),
+          rendered_object_key: `users/${userId}/selected.pdf`,
+          rendered_blob_url: `https://blob.example/${selectedArtifactId}.pdf`,
+          retention_class: 'generated_spec',
+          source: 'user_edited_cover_letter',
+        },
+        {
+          id: reuseArtifactId,
+          user_id: userId,
+          kind: 'cover_letter',
+          structured_content: contentFor('Reuse letter'),
+          rendered_object_key: `users/${userId}/reuse.pdf`,
+          rendered_blob_url: `https://blob.example/${reuseArtifactId}.pdf`,
+          retention_class: 'generated_spec',
+          source: 'user_edited_cover_letter',
+        },
+      ]);
+      await backendDb.insert(schema.artifact_versions).values([
+        {
+          artifact_id: selectedArtifactId,
+          version_number: 1,
+          generation_source: 'user_edited_cover_letter',
+          content_hash: immutableDocumentContentHash(contentFor('Selected letter')),
+          structured_content: contentFor('Selected letter'),
+          rendered_object_key: `users/${userId}/selected.pdf`,
+        },
+        {
+          artifact_id: reuseArtifactId,
+          version_number: 1,
+          generation_source: 'user_edited_cover_letter',
+          content_hash: immutableDocumentContentHash(contentFor('Reuse letter')),
+          structured_content: contentFor('Reuse letter'),
+          rendered_object_key: `users/${userId}/reuse.pdf`,
+        },
+      ]);
+      await backendDb.insert(schema.application_artifacts).values({
+        application_id: applicationId,
+        artifact_id: selectedArtifactId,
+        purpose: 'cover_letter',
+        selected: true,
+      });
+      const state = async () => JSON.stringify({
+        application: (await backendDb.select().from(schema.applications))
+          .filter((item: typeof schema.applications.$inferSelect) => item.id === applicationId),
+        packet: (await backendDb.select().from(schema.generated_resumes))
+          .filter((item: typeof schema.generated_resumes.$inferSelect) => item.id === packetId),
+        links: (await backendDb.select().from(schema.application_artifacts))
+          .filter((item: typeof schema.application_artifacts.$inferSelect) => item.application_id === applicationId)
+          .sort((left: typeof schema.application_artifacts.$inferSelect, right: typeof schema.application_artifacts.$inferSelect) => left.artifact_id.localeCompare(right.artifact_id)),
+        artifacts: (await backendDb.select().from(schema.artifacts))
+          .filter((item: typeof schema.artifacts.$inferSelect) => item.id === selectedArtifactId || item.id === reuseArtifactId)
+          .sort((left: typeof schema.artifacts.$inferSelect, right: typeof schema.artifacts.$inferSelect) => left.id.localeCompare(right.id)),
+        versions: (await backendDb.select().from(schema.artifact_versions))
+          .filter((item: typeof schema.artifact_versions.$inferSelect) => item.artifact_id === selectedArtifactId || item.artifact_id === reuseArtifactId)
+          .sort((left: typeof schema.artifact_versions.$inferSelect, right: typeof schema.artifact_versions.$inferSelect) => left.artifact_id.localeCompare(right.artifact_id)),
+      });
+      const before = await state();
+      let putCalls = 0;
+      let deleteCalls = 0;
+      const storage = {
+        renderPdf: async () => Buffer.from('%PDF exact edited cover letter'),
+        putObject: async () => {
+          putCalls += 1;
+          return { pathname: `users/${userId}/new.pdf`, url: `https://blob.example/${userId}-new.pdf` };
+        },
+        deleteObject: async () => { deleteCalls += 1; },
+      };
+      const operation = operationName === 'reuse'
+        ? () => reuseCanonicalCoverLetter({ userId, applicationId, artifactId: reuseArtifactId })
+        : operationName === 'edit'
+          ? () => saveCanonicalCoverLetter(application, 'Edited cover letter.', storage)
+          : operationName === 'upload'
+            ? () => uploadCanonicalCoverLetter({
+              application,
+              bytes: Buffer.from('%PDF uploaded cover letter'),
+              fileName: 'cover-letter.pdf',
+              contentType: 'application/pdf',
+            }, storage)
+            : () => deleteCanonicalCoverLetters({ userId, applicationId, legacyPacketId: packetId });
+
+      await assert.rejects(operation, /can no longer be changed after submission starts/,
+        `${operationName} must refuse the ${lifecycle} packet`);
+      assert.equal(await state(), before, `${operationName} changed retained state for a ${lifecycle} packet`);
+      assert.equal(putCalls, 0, `${operationName} wrote a blob for a ${lifecycle} packet`);
+      assert.equal(deleteCalls, 0, `${operationName} deleted a blob for a ${lifecycle} packet`);
+    }
+  }
+});
+
+test('cover-letter mutation stops once submission starts, and receipt write cannot restore stale approval', async () => {
+  const seed = async (label: string) => {
+    const userId = randomUUID();
+    const applicationId = randomUUID();
+    const packetId = randomUUID();
+    const selectedArtifactId = randomUUID();
+    const replacementArtifactId = randomUUID();
+    await dbInsertUser(userId, `${label}-${userId}@example.test`);
+    const review = {
+      status: 'submitting',
+      jd_text: 'Build reliable systems.',
+      questions: [],
+      packet_audit: { version: 'packet_audit_v2', audit_digest: `${label}-audit` },
+      packet_audit_acknowledgement: { acknowledgedAt: '2026-08-21T09:00:00.000Z' },
+      employer_delivery_bindings: { version: 'employer_delivery_v1', sha256: `${label}-delivery` },
+      submission_authorization: { source: 'per_application_approval', authorized_at: '2026-08-21T09:00:00.000Z' },
+    };
+    await backendDb.insert(schema.generated_resumes).values({
+      id: packetId,
+      user_id: userId,
+      job_context: { company: 'Serialized', role: 'Engineer' },
+      resume_object_key: `users/${userId}/resume.pdf`,
+      spec: {
+        summary: 'Saved packet',
+        _cover_letter: {
+          artifact_id: selectedArtifactId,
+          body: 'Selected letter',
+          object_key: `users/${userId}/selected.pdf`,
+          file_name: 'cover-letter.pdf',
+        },
+        _review: review,
+      },
+    });
+    await backendDb.insert(schema.applications).values({
+      id: applicationId,
+      user_id: userId,
+      legacy_generated_resume_id: packetId,
+      company_scope_key: `domain:${applicationId}.example`,
+      company_name: 'Serialized',
+      role: 'Engineer',
+      source_surface: 'dashboard',
+      application_fingerprint: `test:${applicationId}`,
+    });
+    const contentFor = (body: string) => ({
+      body,
+      word_count: 2,
+      warnings: [],
+      generated_at: '2026-08-21T09:00:00.000Z',
+      approved_at: '2026-08-21T09:00:00.000Z',
+      file_name: 'cover-letter.pdf',
+    });
+    await backendDb.insert(schema.artifacts).values([
+      {
+        id: selectedArtifactId,
+        user_id: userId,
+        kind: 'cover_letter',
+        structured_content: contentFor('Selected letter'),
+        rendered_object_key: `users/${userId}/selected.pdf`,
+        source: 'user_edited_cover_letter',
+      },
+      {
+        id: replacementArtifactId,
+        user_id: userId,
+        kind: 'cover_letter',
+        structured_content: contentFor('Replacement letter'),
+        rendered_object_key: `users/${userId}/replacement.pdf`,
+        source: 'user_edited_cover_letter',
+      },
+    ]);
+    await backendDb.insert(schema.application_artifacts).values({
+      application_id: applicationId,
+      artifact_id: selectedArtifactId,
+      purpose: 'cover_letter',
+      selected: true,
+    });
+    const [packet] = await backendDb.select().from(schema.generated_resumes)
+      .where(eq(schema.generated_resumes.id, packetId)).limit(1);
+    return { userId, applicationId, packetId, selectedArtifactId, replacementArtifactId, packet, review };
+  };
+
+  const mutationFirst = await seed('mutation-first');
+  await assert.rejects(
+    () => reuseCanonicalCoverLetter({
+      userId: mutationFirst.userId,
+      applicationId: mutationFirst.applicationId,
+      artifactId: mutationFirst.replacementArtifactId,
+    }),
+    /can no longer be changed after submission starts/,
+    'the pre-claim submitting window must already be immutable',
+  );
+  const staleClaimedReview = {
+    ...mutationFirst.review,
+    submission_claimed_at: '2026-08-21T09:01:00.000Z',
+    submission_claim_id: randomUUID(),
+  };
+  const acquiredClaim = await backendDb.update(schema.generated_resumes).set({
+    spec: sql`jsonb_set(coalesce(${schema.generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(staleClaimedReview)}::jsonb, true)`,
+  }).where(and(
+    eq(schema.generated_resumes.id, mutationFirst.packetId),
+    sql`${schema.generated_resumes.spec} = ${JSON.stringify(mutationFirst.packet.spec)}::jsonb`,
+    sql`${schema.generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+    sql`${schema.generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
+  )).returning({ id: schema.generated_resumes.id });
+  assert.equal(acquiredClaim.length, 1, 'the exact claim proceeds only because the refused mutation changed nothing');
+
+  const claimFirst = await seed('claim-first');
+  const claimedReview = {
+    ...claimFirst.review,
+    submission_claimed_at: '2026-08-21T09:01:00.000Z',
+    submission_claim_id: randomUUID(),
+  };
+  const [claimedPacket] = await backendDb.update(schema.generated_resumes).set({
+    spec: sql`jsonb_set(coalesce(${schema.generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(claimedReview)}::jsonb, true)`,
+  }).where(and(
+    eq(schema.generated_resumes.id, claimFirst.packetId),
+    sql`${schema.generated_resumes.spec} = ${JSON.stringify(claimFirst.packet.spec)}::jsonb`,
+    sql`${schema.generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+    sql`${schema.generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
+  )).returning();
+  assert.ok(claimedPacket);
+
+  // The database state is intentionally identical after claim before click and after click before
+  // receipt. The same refusal protects both windows, while the claim records that a click may occur.
+  for (const phase of ['after claim before click', 'after click before receipt']) {
+    await assert.rejects(
+      () => reuseCanonicalCoverLetter({
+        userId: claimFirst.userId,
+        applicationId: claimFirst.applicationId,
+        artifactId: claimFirst.replacementArtifactId,
+      }),
+      /can no longer be changed after submission starts/,
+      phase,
+    );
+  }
+
+  const receiptReview = {
+    ...claimedReview,
+    status: 'submitted',
+    submitted_at: '2026-08-21T09:02:00.000Z',
+  };
+  const [receiptPacket] = await backendDb.update(schema.generated_resumes).set({
+    spec: sql`jsonb_set(coalesce(${schema.generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(receiptReview)}::jsonb, true)`,
+  }).where(eq(schema.generated_resumes.id, claimFirst.packetId)).returning();
+  const receiptSpec = receiptPacket.spec as Record<string, any>;
+  assert.equal(receiptSpec._cover_letter.artifact_id, claimFirst.selectedArtifactId);
+  assert.equal(receiptSpec._review.packet_audit.audit_digest, 'claim-first-audit');
+  assert.equal(receiptSpec._review.employer_delivery_bindings.sha256, 'claim-first-delivery');
+  assert.equal(receiptSpec._review.submission_authorization.source, 'per_application_approval');
+  const selected = (await backendDb.select().from(schema.application_artifacts))
+    .filter((link: typeof schema.application_artifacts.$inferSelect) => link.application_id === claimFirst.applicationId
+      && link.purpose === 'cover_letter' && link.selected);
+  assert.deepEqual(selected.map((link: typeof schema.application_artifacts.$inferSelect) => link.artifact_id), [claimFirst.selectedArtifactId]);
 });
 
 test('manual outreach contacts dedupe by owner identity, export, and delete with the account', async () => {
