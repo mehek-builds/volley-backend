@@ -6261,6 +6261,26 @@ test('a role-less reviewed Greenhouse choice uses its exact durable input in one
   assert.equal(degree[0]?.value, "Bachelor's Degree");
 });
 
+test('a role-less known Greenhouse choice needs no stale option provenance to use its exact input', () => {
+  const actions = buildManagedPortalActions('greenhouse', andurilPacket({
+    applicationProfile: { degree: "Bachelor's Degree" },
+    fieldOptions: {},
+    questions: [{
+      question: 'What degree are you currently pursuing?',
+      answer: "Bachelor's Degree",
+      portalSelector: '#question_67595191',
+      portalInputType: 'text',
+      required: true,
+    }],
+  }));
+  const degree = actions.filter((action) => /what degree are you currently pursuing/i.test(
+    action.label ?? '',
+  ));
+  assert.deepEqual(degree.map((action) => action.type), ['fill']);
+  assert.equal(degree[0]?.selector, '#question_67595191');
+  assert.equal(degree[0]?.value, "Bachelor's Degree");
+});
+
 test('Greenhouse demographics use durable label replay after stateless discovery', () => {
   const actions = buildManagedPortalActions('greenhouse', andurilPacket({
     jdText: 'IMC Software Engineer Intern - Summer 2027',
