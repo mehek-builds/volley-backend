@@ -2753,7 +2753,14 @@ export function describeDiscoveryFailure(error: unknown): string {
 }
 
 const MANAGED_DIAGNOSTIC_TAGS = new Set(['unknown', 'input', 'select', 'textarea', 'button', 'div', 'other']);
-const MANAGED_DIAGNOSTIC_ROUTES = new Set(['unresolved', 'native_select', 'custom_choice', 'bare_opener', 'text']);
+const MANAGED_DIAGNOSTIC_ROUTES = new Set([
+  'unresolved',
+  'native_select',
+  'custom_choice',
+  'bare_opener',
+  'text',
+  'text_then_choice',
+]);
 const MANAGED_DIAGNOSTIC_STATES = new Set(['not_read', 'chosen', 'empty', 'unknown', 'other']);
 const MANAGED_DIAGNOSTIC_OUTCOMES = new Set([
   'started',
