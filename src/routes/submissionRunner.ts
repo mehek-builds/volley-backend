@@ -158,6 +158,7 @@ import {
 } from '../lib/browserVerification';
 import {
   discoverPageQuestions,
+  discoveredFieldIsFixedPortalProfileControl,
   discoveredFieldIsRequired,
   consentAcknowledgementLicence,
   isCoreIdentityField,
@@ -1727,6 +1728,7 @@ export function compactMaterialQuestions(
     const reviewLabel = normalizeReviewQuestionLabel(field.label);
     if (!label || !reviewLabel) continue;
     if (normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
+    if (discoveredFieldIsFixedPortalProfileControl(portal, field)) continue;
     if (discoveredFieldIsNotAQuestion({ label: field.label, options: field.options })
       || discoveredFieldIsNotAQuestion({ label: reviewLabel, options: field.options })) continue;
     const controlType = discoveredControlInputType(field);
@@ -1873,6 +1875,7 @@ export async function discoverAndResolveQuestions(
     const label = normalizeDiscoveredLabel(field.label);
     const reviewLabel = normalizeReviewQuestionLabel(field.label);
     if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
+    if (discoveredFieldIsFixedPortalProfileControl(portal, field)) continue;
     /* A radio's own option, or a composite widget's whole rendered subtree, is not a question, and
      * recording one manufactures work the applicant cannot do: the Apply screen shows her "Yes" and
      * asks her to answer it. The same test runs on the pre-script's ingest, so the two surfaces
@@ -4121,9 +4124,15 @@ async function prepareManagedAttendedAccountGate(
  * Same loader, same context builder, same country reads as the audit route, deliberately: the
  * constructor and the verifier must be looking at one packet, and this helper is the one place
  * that says what that packet's questions are. */
+export function normalizedPacketAuditQuestions(review: ApplicationReviewState) {
+  if (!review.portal_url) return review.questions;
+  const portal = detectPortal(review.portal_url);
+  return normalizeStoredPortalQuestions(review.questions, portal);
+}
+
 export async function resolvedPacketAuditQuestions(row: ResumeRow, review: ApplicationReviewState) {
   return refreshKnownQuestionAnswers(
-    review.questions,
+    normalizedPacketAuditQuestions(review),
     await loadApplicationProfileLike(row.user_id),
     applicationContextForQuestionResolution(row, review),
     review.questions_reviewed_at,

@@ -6541,8 +6541,39 @@ function isFixedPortalProfileField(portal: SupportedPortal, label: string): bool
   return false;
 }
 
+function recruiteeFixedCandidateSelector(selector: string | null | undefined): boolean {
+  const normalized = selector?.trim().replace(/\\\./g, '.') ?? '';
+  if (!normalized) return false;
+  return /^(?:input)?\[name=(?:"|')?candidate\.(?:name|email|phone)(?:"|')?\]$/i.test(normalized)
+    || /^#input-candidate\.(?:name|email|phone)(?:-[\w-]+)?$/i.test(normalized)
+    || /^input\[id=(?:"|')?input-candidate\.(?:name|email|phone)(?:-[\w-]+)?(?:"|')?\]$/i.test(normalized);
+}
+
+/**
+ * Whether discovery captured one of Recruitee's built-in candidate controls under a section
+ * heading instead of the control's own label.
+ *
+ * CBS renders its phone input below the heading "Meine Daten" and gives the input an id whose
+ * final token changes between discovery and fill. The fixed Recruitee pass already fills this
+ * control through candidate.phone. Treating the same input as a custom question both replays the
+ * phone number and makes the packet identity depend on the changing id.
+ */
+export function discoveredFieldIsFixedPortalProfileControl(
+  portal: SupportedPortal,
+  field: Pick<DiscoveredQuestion, 'label' | 'selector' | 'durableSelector'>,
+): boolean {
+  if (isFixedPortalProfileField(portal, normalizeDiscoveredLabel(field.label))) return true;
+  if (portal !== 'recruitee' && portal !== 'manual_recruitee') return false;
+  return recruiteeFixedCandidateSelector(field.durableSelector)
+    || recruiteeFixedCandidateSelector(field.selector);
+}
+
 /** Normalize legacy provider labels and remove controls already owned by fixed portal selectors. */
-export function normalizeStoredPortalQuestions<T extends { question: string; answer: string }>(
+export function normalizeStoredPortalQuestions<T extends {
+  question: string;
+  answer: string;
+  portal_selector?: string;
+}>(
   questions: readonly T[],
   portal: SupportedPortal,
 ): T[] {
@@ -6551,6 +6582,8 @@ export function normalizeStoredPortalQuestions<T extends { question: string; ans
   for (const question of questions) {
     const label = normalizeDiscoveredLabel(question.question);
     if (!label || isFixedPortalProfileField(portal, label)) continue;
+    if ((portal === 'recruitee' || portal === 'manual_recruitee')
+      && recruiteeFixedCandidateSelector(question.portal_selector)) continue;
     const reviewLabel = normalizeReviewQuestionLabel(label);
     if (!reviewLabel) continue;
     const key = reviewLabel.toLowerCase();

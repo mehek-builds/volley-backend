@@ -22,6 +22,7 @@ import {
   preparationEvidenceBlockers,
   reconcileManagedProviderBlockers,
   readMostRecentRole,
+  normalizedPacketAuditQuestions,
   resolveApplicantClosedChoiceFallbacks,
   resumeBytesForPacket,
   sanitizeEeoPrefs,
@@ -521,6 +522,107 @@ test('the compact packet preselects only unresolved open prose controls', () => 
   assert.deepEqual(selected.map((question) => question.id), [
     'tell us about a project you are proud of.',
   ]);
+});
+
+test('Recruitee fixed candidate controls are excluded from compact generation', () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'Lead consulting projects.',
+    role: 'Manager',
+    portal_url: 'https://example.recruitee.com/o/manager/c/new',
+    ats_name: 'recruitee',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const selected = compactMaterialQuestions([
+    {
+      label: 'Meine Daten',
+      selector: '[data-litos-discovered-4]',
+      durableSelector: '#input-candidate\\.phone-undefined',
+      inputType: 'textarea',
+      maxLength: 500,
+    },
+  ], current, 'recruitee', []);
+
+  assert.deepEqual(selected, []);
+});
+
+test('Recruitee fixed phone discovery cannot mint or retain a custom question', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'Lead consulting projects.',
+    role: 'Manager',
+    portal_url: 'https://example.recruitee.com/o/manager/c/new',
+    ats_name: 'recruitee',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'Meine Daten',
+      selector: '[data-litos-discovered-4]',
+      durableSelector: 'input[id="input-candidate.phone-5"]',
+      inputType: 'text',
+      maxLength: null,
+      required: true,
+    }],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { phone: '+971 50 123 4567' },
+    true,
+    'recruitee',
+  );
+
+  assert.deepEqual(result.questions, []);
+  assert.deepEqual(result.attentionReasons, []);
+});
+
+test('the audit helper drops legacy Recruitee phone controls and retains custom questions', async () => {
+  const custom = {
+    id: 'custom',
+    question: 'Best number for an interview?',
+    answer: '+971 50 123 4567',
+    kind: 'required' as const,
+    required: true,
+    portal_selector: '#input-custom-interview-phone',
+  };
+  const review: ApplicationReviewState = {
+    jd_text: 'Lead consulting projects.',
+    role: 'Manager',
+    portal_url: 'https://example.recruitee.com/o/manager/c/new',
+    ats_name: 'recruitee',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [
+      {
+        id: 'managed-phone',
+        question: 'Meine Daten',
+        answer: '+971 50 123 4567',
+        kind: 'required',
+        required: true,
+        portal_selector: '#input-candidate\\.phone-undefined',
+      },
+      {
+        id: 'direct-phone',
+        question: 'Contact details',
+        answer: '+971 50 123 4567',
+        kind: 'required',
+        required: true,
+        portal_selector: 'input[id="input-candidate.phone-5"]',
+      },
+      custom,
+    ],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const questions = normalizedPacketAuditQuestions(review);
+
+  assert.deepEqual(questions, [custom]);
 });
 
 test('a malformed first entry never throws, because it would break every other portal too', () => {

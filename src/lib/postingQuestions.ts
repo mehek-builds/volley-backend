@@ -41,6 +41,7 @@
 
 import type { JobCountry } from './jobLocation';
 import {
+  discoveredFieldIsFixedPortalProfileControl,
   discoveredFieldIsNotAQuestion,
   discoveredFieldIsRequired,
   isCoreIdentityField,
@@ -142,6 +143,7 @@ export function postingQuestionsFromDiscovered(
      * widget-subtree markers live in punctuation the normalizer collapses. */
     if (discoveredFieldIsNotAQuestion({ label: raw, options: field.options })) continue;
     if (discoveredFieldIsNotAQuestion({ label, options: field.options })) continue;
+    if (portal && discoveredFieldIsFixedPortalProfileControl(portal, field)) continue;
     // Portal-owned fixed fields are filled from the packet before reviewed questions run. Keeping
     // one in the pre-script asks the applicant for data Litos already has, and can also leave a
     // second representation of the same widget blocked. Use the shared submission normalizer so

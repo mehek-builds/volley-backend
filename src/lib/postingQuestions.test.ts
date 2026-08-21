@@ -86,6 +86,29 @@ test('a second email control on the same form is inventory, not the packet\'s ow
   assert.equal(stored[0].required, true);
 });
 
+test('Recruitee section headings do not turn its fixed phone control into a custom question', () => {
+  const stored = postingQuestionsFromDiscovered([
+    {
+      label: 'Meine Daten',
+      selector: '[data-litos-discovered-4]',
+      durableSelector: 'input[id="input-candidate.phone-5"]',
+      inputType: 'text',
+      maxLength: null,
+      required: true,
+    },
+    {
+      label: 'Best number for an interview?',
+      selector: '[data-litos-discovered-5]',
+      durableSelector: '#input-custom-interview-phone',
+      inputType: 'text',
+      maxLength: null,
+      required: false,
+    },
+  ], 'recruitee');
+
+  assert.deepEqual(stored.map((item) => item.label), ['Best number for an interview?']);
+});
+
 test('one label discovered twice keeps the richer record', () => {
   const stored = postingQuestionsFromDiscovered([
     { label: 'How did you hear about us?', selector: '#a', inputType: 'radio', maxLength: null, options: null, required: false },
