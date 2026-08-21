@@ -139,7 +139,7 @@ import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess'
 import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
 import { PACKET_EXPIRED_REASON } from '../lib/packetResumeRestore';
 import { currentAcknowledgedPacketAudit, currentPacketAudit, packetAuditClientError } from '../lib/packetAuditService';
-import { packetAuditSha256, type PacketAudit } from '../lib/packetAudit';
+import { packetAuditSha256, packetAuditTextSha256, type PacketAudit } from '../lib/packetAudit';
 import { packetQuestionFixpoint } from '../lib/packetQuestionIdentity';
 import {
   browserEmployerDeliveryChannel,
@@ -724,7 +724,7 @@ export function verifiedBuiltPacketIssues(
   if (packetAuditSha256(packet.applicantSnapshot) !== audit.bindings.applicantSnapshotSha256) {
     issues.push('applicant snapshot changed after packet approval');
   }
-  if (packetAuditSha256(packet.jdText ?? '') !== audit.bindings.jdSha256) {
+  if (packetAuditTextSha256(packet.jdText ?? '') !== audit.bindings.jdSha256) {
     issues.push('job description changed after packet approval');
   }
   if (packet.email.trim().toLowerCase() !== audit.identities.applicant_email.trim().toLowerCase()) {
