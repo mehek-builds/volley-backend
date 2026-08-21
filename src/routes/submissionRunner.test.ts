@@ -269,19 +269,23 @@ test('a Job board source makes only an employee-referral detail non-applicable',
     'the stale refusal retires even when a failed optional control did not survive the question merge',
   );
 
-  const legacyResolved = resolveApplicantClosedChoiceFallbacks(discovered, [
+  const legacyResolved = resolveApplicantClosedChoiceFallbacks([
+    discovered[0]!,
+    discovered[2]!,
+    discovered[1]!,
+  ], [
     { id: 'source', question: 'How did you hear about Optiver?', answer: 'Other', kind: 'required', required: true, options: ['Other', 'Employee Referral'] },
-    { id: 'other-detail', question: 'If other, please explain', answer: 'Litos', kind: 'required', required: false },
     { id: 'employee-detail', question: 'If referred by an Optiver employee or Optiver intern, please provide their name', answer: '', kind: 'required', required: false },
+    { id: 'other-detail', question: 'If other, please explain', answer: 'Litos', kind: 'required', required: false },
   ]);
   assert.deepEqual(
     legacyResolved.map(({ answer, answer_option_source }) => ({ answer, answer_option_source })),
     [
       { answer: 'Other', answer_option_source: 'Job board' },
-      { answer: 'Litos', answer_option_source: undefined },
       { answer: 'N/A', answer_option_source: undefined },
+      { answer: 'Litos', answer_option_source: undefined },
     ],
-    'the adjacent deterministic Litos detail repairs a legacy machine-resolved Other that predates provenance',
+    'the deterministic Litos detail repairs a non-adjacent legacy machine-resolved Other that predates provenance',
   );
   assert.deepEqual(
     filterAutomaticallyResolvedReferralAttention([
