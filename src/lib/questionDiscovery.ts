@@ -4881,6 +4881,13 @@ const CONSENT_ACCEPTING_OPTION = new RegExp(
   + String.raw`)$`,
 );
 
+/* Some Greenhouse tenants append the document names to the ordinary "I have read and agree"
+ * acceptance. This remains deliberately narrower than an arbitrary sentence: after the employer's
+ * possessive name, every remaining word must name the privacy policy, notices or disclaimers. It
+ * cannot absorb arbitration, assessments, future-job retention or another unknown obligation. */
+const CONSENT_PRIVACY_DOCUMENT_ACCEPTANCE =
+  /^yes i (?:have )?read and agree to (?:[a-z0-9]+ ){0,5}[a-z0-9]+s privacy polic(?:y|ies)(?: notices?)?(?: and disclaimers?)?[.]?$/;
+
 /* WHAT JOINS TWO VERBS INTO ONE OPTION LABEL. A slash, an ampersand, a plus, a comma, or the two
  * coordinators English writes them out with.
  *
@@ -4943,6 +4950,7 @@ export function isConsentAcceptingWording(value: string): boolean {
    * yields "read", which is not an accepting verb on its own. Asking the compound rule first would
    * therefore stop recognising a wording this vocabulary has always recognised. */
   if (CONSENT_ACCEPTING_OPTION.test(key)) return true;
+  if (CONSENT_PRIVACY_DOCUMENT_ACCEPTANCE.test(key)) return true;
   return consentAcceptingCompound(key);
 }
 

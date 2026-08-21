@@ -372,6 +372,23 @@ describe('an option that joins two accepting verbs', () => {
     assert.equal(chooseConsentOption(['Yes I agree']), 'Yes I agree');
   });
 
+  test('a document-only privacy acceptance may include the employer name and document list', () => {
+    const optiver = 'Yes, I have read and agree to Optiver’s privacy policies, notices and disclaimers.';
+    assert.equal(chooseConsentOption([optiver]), optiver);
+    assert.equal(isConsentAcceptingWording(optiver), true);
+
+    assert.equal(
+      chooseConsentOption(['Yes, I have read and agree to Optiver’s privacy policies, notices and disclaimers and arbitration agreement.']),
+      null,
+      'an additional legal obligation is not a document-only privacy acceptance',
+    );
+    assert.equal(
+      chooseConsentOption(['Yes, I have read and agree to Optiver’s interview rules and assessment policy.']),
+      null,
+      'a non-privacy declaration remains outside the permission',
+    );
+  });
+
   test('a stored compound acceptance is still recognised as one on the next run', () => {
     /* THE HALF THAT MAKES THIS A REPAIR RATHER THAN A NEW DIVERGENCE.
      *
