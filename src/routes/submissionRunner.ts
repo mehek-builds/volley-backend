@@ -2348,7 +2348,15 @@ export function filterAutomaticallyResolvedReferralAttention(
   });
   return reasons.filter((reason) => {
     const normalized = reason.toLowerCase();
-    return !resolvedPrefixes.some((prefix) => prefix && normalized.includes(prefix));
+    if (resolvedPrefixes.some((prefix) => prefix && normalized.includes(prefix))) return false;
+    /* Discovery can emit the refusal before the corresponding optional detail row survives the
+     * failed-control merge. The source row still proves the same narrow fact: Litos converted the
+     * applicant's stored Job board source to the employer's Other option, so a conditional employee
+     * or intern name is not applicable. Match only that exact refusal shape. A primary referral
+     * question such as "Were you referred by an employee?" still remains held, and an applicant-
+     * reviewed Other has no Job board provenance and never enters this branch. */
+    return !(jobBoardOtherResolved
+      && /how you heard about this role is yours to answer:\s*["']if\s+(?:you\s+(?:were|are)\s+)?referred\s+by\b[^"']{0,160}\b(?:employee|intern)\b/i.test(reason));
   });
 }
 
