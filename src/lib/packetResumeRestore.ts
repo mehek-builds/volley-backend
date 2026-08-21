@@ -1,10 +1,16 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { put } from '@vercel/blob';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { generated_resumes } from '../db/schema';
 import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
-import { acknowledgementBindsAudit, packetAuditContentIdentity, type PacketAudit } from './packetAudit';
+import {
+  acknowledgementBindsAudit,
+  packetAuditContentIdentity,
+  packetAuditIsSubmissionReady,
+  type PacketAudit,
+} from './packetAudit';
 import { rerenderFrozenResume } from './packetDocumentRecovery';
 import { createPdfGenerationBinding } from './pdfGenerationBinding';
 import { PacketDocumentExpiredError, resolveBlobUrl } from './resumeAccess';
@@ -46,22 +52,23 @@ export const PACKET_EXPIRED_REASON =
  * differ in sha256 while matching in length (measured, 22607 bytes both times). Three separate
  * records bind the exact bytes - _quality.pdfGenerationBinding.pdfSha256, packet_audit.bindings
  * .pdf.sha256, and packet_audit_acknowledgement.pdfSha256 - so an in-memory rebuild would have the
- * audit verifying one document and the employer receiving another. One render, written once, with
- * all three records re-issued against it, is the only shape that keeps those three agreeing.
+ * audit verifying one document and the employer receiving another. One render is written once,
+ * the generation binding and audit are re-issued, and any acknowledgement that names the deleted
+ * bytes remains stale until the applicant reviews the fresh delivery-bound packet.
  *
- * WHAT THE APPLICANT IS NOT ASKED, AND WHAT SHE STILL HAS TO HAVE SAID. A rebuilt packet sends
- * without re-approval, which is Mehek's explicit call (2026-08-11) and is what
- * restoredPacketAcknowledgement below implements: an acknowledgement she already gave is CARRIED
- * FORWARD onto the new file, because every input to the render is frozen on the row and the audit
- * re-issued here still says the same thing about the packet. `source` records that the carried
- * record was machine-written, because the alternative is a corpus where "a human checked this" and
- * "a machine rebuilt this" are indistinguishable forever.
+ * WHAT THE APPLICANT IS ASKED. A normal rebuild changes the PDF bytes, and the employer-delivery
+ * binding hashes those exact bytes. This layer cannot rebuild that binding because it does not
+ * construct the channel-specific packet, so changed bytes require the packet-audit route to build
+ * a fresh exact delivery binding and the applicant to acknowledge it. A prior acknowledgement may
+ * carry only in the unusual case where the stored object key changes but the PDF bytes and every
+ * current audit and delivery binding remain exact. `source` records that exceptional carry as a
+ * machine rewrite rather than a new human review.
  *
- * A restore CANNOT CREATE ONE. Where no acknowledgement existed, none is written and the packet
- * comes out of the rebuild exactly as sendable as it went in - which is not sendable, because the
- * acknowledgement is the record that authorizes the send. Writing one on a packet nobody approved
- * would collapse the two-step gate into whichever step happened to run first, and the first step is
- * routinely a review that authorizes nothing.
+ * A restore CANNOT CREATE ONE. Where no acknowledgement existed, none is written. Where the PDF
+ * bytes changed, both the obsolete acknowledgement and its employer-delivery binding are removed
+ * before the replacement audit is created. Writing or rebinding either here would collapse the
+ * two-step gate into whichever step happened to run first, and the first step is routinely a
+ * review that authorizes nothing.
  *
  * The new file starts its own 30-day clock, which is the same thing a regenerate does and keeps the
  * published promise true: the old file was deleted on time, and this is a new one.
@@ -104,11 +111,12 @@ type PacketAcknowledgement = NonNullable<ApplicationReviewState['packet_audit_ac
  *   2. An acknowledgement existed AND bound the pre-restore audit exactly, on the same comparison
  *      the send gate makes. An acknowledgement that was already stale is not approval of anything,
  *      and re-binding it to the new file would launder it into approval of something newer.
- *   3. The re-issued audit says the same thing about the packet as the one she approved, on
- *      everything except which file carries it. Bytes cannot be compared - a rebuild differs from
- *      its own source by construction, see packetAuditContentIdentity - and the content can move
- *      even from a frozen row, because scoring reads the calendar. An audit that now reads
- *      differently is one she has not seen.
+ *   3. Both audits carry the current employer-delivery binding. A legacy audit with no exhaustive
+ *      delivery identity cannot authorize a later transport.
+ *   4. The re-issued audit says the same thing about the packet as the one she approved, and the
+ *      resume bytes are identical. The employer-delivery hash includes those bytes, but restore
+ *      cannot rebuild that hash because it does not construct the exact channel packet. A normal
+ *      PDF rerender changes its bytes, so it requires a fresh audit and acknowledgement.
  */
 export function restoredPacketAcknowledgement(input: {
   authority: PacketRestoreAuthority;
@@ -119,7 +127,10 @@ export function restoredPacketAcknowledgement(input: {
 }): PacketAcknowledgement | null {
   if (input.authority !== 'authorizing_send') return null;
   if (!input.priorAudit || !input.priorAcknowledgement) return null;
+  if (!packetAuditIsSubmissionReady(input.priorAudit)
+    || !packetAuditIsSubmissionReady(input.restoredAudit)) return null;
   if (!acknowledgementBindsAudit(input.priorAcknowledgement, input.priorAudit)) return null;
+  if (input.priorAudit.bindings.pdf.sha256 !== input.restoredAudit.bindings.pdf.sha256) return null;
   if (packetAuditContentIdentity(input.priorAudit) !== packetAuditContentIdentity(input.restoredAudit)) return null;
   return {
     ownerSha256: input.restoredAudit.bindings.ownerSha256,
@@ -156,10 +167,15 @@ export async function restoreExpiredPacketResume(
     /* INJECTED, NOT IMPORTED. packetAuditService is what calls this function, so a static import
        back into it would close a cycle. Required rather than defaulted for the same reason: there
        is no sensible default that does not reach across the cycle. */
-    persistAudit: (row: ResumeRow) => Promise<{ audit: PacketAudit }>;
+    persistAudit: (row: ResumeRow) => Promise<{ audit: PacketAudit; persisted: boolean }>;
     /** The blob write, as a seam. Defaulted to @vercel/blob's put, so production is unchanged and a
         test can drive this function end to end against a real database without a network store. */
     putObject?: (key: string, bytes: Buffer) => Promise<{ pathname: string }>;
+    /** Test seam for the otherwise non-deterministic PDF render. */
+    rerenderResume?: typeof rerenderFrozenResume;
+    /** Test seam for a database mutation after the audited row is read and before acknowledgement
+        carry attempts its exact compare-and-swap. */
+    beforeAcknowledgementCarry?: () => Promise<void>;
   },
 ): Promise<PacketResumeRestoreOutcome> {
   const resolve = dependencies.resolveObjectUrl ?? resolveBlobUrl;
@@ -175,7 +191,7 @@ export async function restoreExpiredPacketResume(
 
   let bytes: Buffer;
   try {
-    bytes = await rerenderFrozenResume({
+    bytes = await (dependencies.rerenderResume ?? rerenderFrozenResume)({
       spec: row.spec,
       jdText: review.jd_text ?? '',
       role: review.role,
@@ -205,12 +221,23 @@ export async function restoreExpiredPacketResume(
     restoredFromSpecAt: new Date().toISOString(),
   };
 
+  const restoredPdfSha256 = createHash('sha256').update(bytes).digest('hex');
+  const bytesChanged = review.packet_audit?.bindings.pdf.sha256 !== restoredPdfSha256;
+
   /* Guarded on the OLD key, so two runners racing the same expired packet cannot both win: the
      second update matches nothing, and that run re-reads a row whose file another run already
      restored. Its orphaned blob ages out on the normal 30-day window. */
   const updated = await db.update(generated_resumes).set({
     resume_object_key: blob.pathname,
-    spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_quality}', ${JSON.stringify(nextQuality)}::jsonb, true)`,
+    spec: bytesChanged
+      ? sql`jsonb_set(
+          coalesce(${generated_resumes.spec}, '{}'::jsonb)
+            #- '{_review,employer_delivery_bindings}'
+            #- '{_review,packet_audit_acknowledgement}'
+            #- '{_review,packet_audit}',
+          '{_quality}', ${JSON.stringify(nextQuality)}::jsonb, true
+        )`
+      : sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_quality}', ${JSON.stringify(nextQuality)}::jsonb, true)`,
   }).where(and(
     eq(generated_resumes.id, row.id),
     eq(generated_resumes.user_id, row.user_id),
@@ -233,13 +260,23 @@ export async function restoreExpiredPacketResume(
   /* Re-issued in dependency order: the audit reads the generation binding written above, and the
      acknowledgement reads the audit written here. Doing these in one place is what stops a packet
      existing in the half-state where its file is new and its audit still describes the deleted one. */
-  const { audit } = await dependencies.persistAudit(refreshed);
+  const persistedAudit = await dependencies.persistAudit(refreshed);
+  if (!persistedAudit.persisted) {
+    const [latest] = await db.select().from(generated_resumes)
+      .where(eq(generated_resumes.id, row.id)).limit(1);
+    return { restored: true, row: latest ?? refreshed, objectKey: blob.pathname };
+  }
+  const { audit } = persistedAudit;
 
   const audited = await db.select().from(generated_resumes)
     .where(eq(generated_resumes.id, row.id)).limit(1);
   const auditedRow = audited[0] ?? refreshed;
   const auditedReview = readApplicationReview(auditedRow.spec);
-  if (!auditedReview) return { restored: true, row: auditedRow, objectKey: blob.pathname };
+  if (!auditedReview
+    || auditedRow.resume_object_key !== blob.pathname
+    || !isDeepStrictEqual(auditedReview.packet_audit, audit)) {
+    return { restored: true, row: auditedRow, objectKey: blob.pathname };
+  }
 
   /* THE APPROVAL SHE ALREADY GAVE, OR NOTHING. Read off the PRE-restore review, which is the one
      that holds the audit she was shown and the acknowledgement she gave for it. */
@@ -250,18 +287,20 @@ export async function restoreExpiredPacketResume(
     restoredAudit: audit,
     acknowledgedAt: new Date().toISOString(),
   });
-  /* Nothing to carry, so nothing is written. The stale acknowledgement, if there is one, is left
-     exactly as it is: it names the deleted file, so every gate downstream compares it against the
-     re-issued audit and refuses, which is the same answer as deleting it and one fewer write. */
+  /* Nothing to carry, so nothing is written. Changed bytes already removed obsolete authorization
+     before audit persistence. In the byte-identical review-only case an old acknowledgement may
+     remain, but it names the prior packet version and every downstream gate refuses it. */
   if (!carried) return { restored: true, row: auditedRow, objectKey: blob.pathname };
 
-  const nextReview: ApplicationReviewState = {
-    ...auditedReview,
-    packet_audit_acknowledgement: carried,
-  };
+  await dependencies.beforeAcknowledgementCarry?.();
   await db.update(generated_resumes).set({
-    spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(nextReview)}::jsonb, true)`,
-  }).where(and(eq(generated_resumes.id, row.id), eq(generated_resumes.user_id, row.user_id)));
+    spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review,packet_audit_acknowledgement}', ${JSON.stringify(carried)}::jsonb, true)`,
+  }).where(and(
+    eq(generated_resumes.id, row.id),
+    eq(generated_resumes.user_id, row.user_id),
+    eq(generated_resumes.resume_object_key, auditedRow.resume_object_key),
+    sql`${generated_resumes.spec} = ${JSON.stringify(auditedRow.spec)}::jsonb`,
+  ));
 
   const [final] = await db.select().from(generated_resumes)
     .where(eq(generated_resumes.id, row.id)).limit(1);

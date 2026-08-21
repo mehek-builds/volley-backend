@@ -3800,11 +3800,109 @@ test('the discovery walk models current Workable composite controls', () => {
   assert.match(DISCOVER_QUESTIONS_SCRIPT, /var sharedChoiceReference = /);
   // Its visible select opener is readonly, and its checkbox options use unique numeric names.
   assert.match(DISCOVER_QUESTIONS_SCRIPT, /var readonlyChoiceOpener = el\.readOnly/);
-  assert.match(DISCOVER_QUESTIONS_SCRIPT, /var fieldsetOwnsChoice = !choice \|\| fieldsetNames\.size <= 1;/);
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /var fieldsetOwnsChoice = choice && fieldsetNames\.size <= 1;/);
   assert.match(DISCOVER_QUESTIONS_SCRIPT, /function choiceQuestionKey\(el\)/);
   assert.match(DISCOVER_QUESTIONS_SCRIPT, /var seenChoiceQuestions = new Set\(\);/);
   // A stable id or name survives the later stateless fill run.
   assert.match(DISCOVER_QUESTIONS_SCRIPT, /durableSelector: selector\.indexOf\('\[data-litos-discovered-'\) === 0 \? null : selector/);
+});
+
+test('direct discovery keeps a Recruitee button choice out of its section legend and preserves its exact options', () => {
+  const attributes = new Map<string, string>([
+    ['id', 'input-candidate.salutation-2'],
+    ['type', 'button'],
+    ['aria-haspopup', 'listbox'],
+    ['aria-label', 'Allgemeine Anrede'],
+  ]);
+  const label = {
+    innerText: 'Allgemeine Anrede\u00a0*',
+    textContent: 'Allgemeine Anrede\u00a0*',
+  };
+  const option = (text: string) => ({
+    innerText: text,
+    textContent: text,
+    getAttribute: (name: string) => name === 'aria-label' ? text : null,
+  });
+  const options = ['Herr', 'Frau', 'Kein/e'].map(option);
+  const fieldset = {
+    querySelector: (selector: string) => selector === 'legend'
+      ? { innerText: 'Meine Daten', textContent: 'Meine Daten' }
+      : null,
+    querySelectorAll: () => [],
+  };
+  const listboxes: any[] = [];
+  const questionBlock: any = {
+    parentElement: null,
+    querySelector: () => null,
+    querySelectorAll: (selector: string) => {
+      if (selector === '[role="listbox"][aria-labelledby]') return listboxes;
+      if (selector === 'label') return [label];
+      return [];
+    },
+  };
+  const listbox: any = {
+    parentElement: questionBlock,
+    getAttribute: (name: string) => name === 'aria-labelledby'
+      ? 'supporting-label input-candidate.salutation-2'
+      : null,
+    querySelectorAll: (selector: string) => selector === '[role="option"]' ? options : [],
+  };
+  listboxes.push(listbox);
+  const opener: any = {
+    tagName: 'BUTTON',
+    type: 'button',
+    id: 'input-candidate.salutation-2',
+    labels: undefined,
+    parentElement: questionBlock,
+    disabled: false,
+    readOnly: false,
+    required: false,
+    maxLength: -1,
+    getAttribute: (name: string) => attributes.get(name) ?? null,
+    setAttribute: (name: string, value: string) => { attributes.set(name, value); },
+    getBoundingClientRect: () => ({ width: 440, height: 48 }),
+    querySelector: () => null,
+    closest: (selector: string) => {
+      if (selector === 'fieldset') return fieldset;
+      return null;
+    },
+  };
+  const fakeDocument: any = {
+    querySelectorAll: (selector: string) => selector.startsWith('label[for=') ? [label] : [opener],
+    querySelector: () => null,
+    getElementById: () => null,
+  };
+  const run = new Function(
+    'document',
+    'getComputedStyle',
+    'CSS',
+    `return ${DISCOVER_QUESTIONS_SCRIPT};`,
+  ) as (documentValue: unknown, style: unknown, css: unknown) => any[];
+  const execute = () => run(
+    fakeDocument,
+    () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
+    { escape: (value: string) => value },
+  );
+
+  assert.deepEqual(execute(), [{
+    label: 'Allgemeine Anrede *',
+    selector: 'button[id="input-candidate.salutation-2"]',
+    durableSelector: 'button[id="input-candidate.salutation-2"]',
+    inputType: 'combobox',
+    maxLength: null,
+    options: ['Herr', 'Frau', 'Kein/e'],
+    required: true,
+  }]);
+
+  // A second popup claiming the same opener makes the option binding ambiguous. Keep the question
+  // and its required evidence, but infer no choices from either popup.
+  listboxes.push({ ...listbox });
+  assert.deepEqual(execute()[0]?.options, []);
+});
+
+test('direct discovery excludes only the exact German native-select placeholder', () => {
+  assert.match(DISCOVER_QUESTIONS_SCRIPT, /!\/\^auswählen\$\/i\.test\(text\)/);
+  assert.doesNotMatch(DISCOVER_QUESTIONS_SCRIPT, /ausw[aä]hlen\|/i);
 });
 
 test('direct discovery keeps name-only Workable choice groups separate inside an outer fieldset', () => {

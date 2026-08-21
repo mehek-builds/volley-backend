@@ -22,10 +22,8 @@ function routeSlice(start: string, end: string): string {
 test('packet audit endpoint is owner scoped and persists only with exact packet CAS', () => {
   const route = routeSlice("'/applications/:id/packet-audit'", "'/applications/:id/submission/extension-packet'");
   assert.match(route, /ownedResume\(request, reply\)/);
-  /* Was /createAndPersistPacketAudit\(row\)/. The constructor now takes the refreshed question
-   * set, so that the audit it persists carries the same packet_version the send gate computes.
-   * See the deadlock test at the bottom of this file. */
-  assert.match(route, /createAndPersistPacketAudit\(row,\s*\{\s*questions:\s*auditQuestions\s*\}\)/);
+  assert.match(route, /createEmployerDeliveryBindings\(packet, boundReview, deliverySelection\)/);
+  assert.match(route, /createAndPersistPacketAudit\(packetRow, \{ review: auditReview \}\)/);
   assert.match(route, /currentPacketAudit\(row[,)]/);
   assert.match(route, /allowHourly\(request\.jwtPayload!\.userId, 'packet-audit', LIMITS\.perHour\.packetAudit\)/);
   assert.match(route, /PACKET_AUDIT_STALE/);
@@ -40,17 +38,29 @@ test('extension packet refuses missing, stale, or unacknowledged server audit be
   const response = route.indexOf('resume_url:');
   assert.ok(audit >= 0 && response > audit);
   assert.match(route, /packet_audit: auditVerdict\.audit/);
+  assert.match(route, /extensionEmployerDeliveryBindingIssue\(/);
+  assert.ok(route.indexOf('extensionEmployerDeliveryBindingIssue(') < response,
+    'the extension payload must match its audit-time delivery hash before disclosure');
 });
 
 test('packet acknowledgement binds the exact rendered audit and PDF with an exact CAS', () => {
-  const route = routeSlice("'/applications/:id/packet-audit/acknowledge'", "'/applications/:id/submission/extension-packet'");
-  assert.match(route, /currentPacketAudit\(row[,)]/);
-  assert.match(route, /parsed\.data\.audit_digest !== audit\.audit_digest/);
-  assert.match(route, /parsed\.data\.packet_version !== audit\.packet_version/);
-  assert.match(route, /parsed\.data\.pdf_sha256 !== audit\.bindings\.pdf\.sha256/);
-  assert.match(route, /parsed\.data\.size_bytes !== audit\.bindings\.pdf\.sizeBytes/);
+  const route = routeSlice("'/applications/:id/packet-audit/acknowledge'", "'/applications/:id/submission/manual-handoff'");
+  assert.match(route, /verifyStoredPacketAuditAcknowledgement\(\{/);
+  assert.match(route, /audit:\s*review\.packet_audit/);
+  assert.match(route, /client:\s*parsed\.data/);
+  assert.doesNotMatch(route, /current(?:Acknowledged)?PacketAudit\(/);
+  assert.doesNotMatch(route, /resolvedPacketAuditQuestions\(|buildPacket\(|loadApplicationProfileLike\(|resolveFrozenApplicantEmail\(|resolveBlobUrl\(|fetch\(|process\.env/,
+    'acknowledgement must do no profile, resolver, file, email, or environment read');
   assert.match(route, /JSON\.stringify\(row\.spec\)/);
+  assert.match(route, /generated_resumes\.resume_object_key\} = \$\{row\.resume_object_key\}/);
   assert.match(route, /acknowledged: true/);
+  assert.match(route, /if \(!updated\.length\)[\s\S]{0,300}reply\.status\(409\)/,
+    'an exact-CAS race must fail closed instead of acknowledging a different saved packet');
+  const storedVerify = route.indexOf('verifyStoredPacketAuditAcknowledgement({');
+  const timestamp = route.indexOf('acknowledged_at: new Date().toISOString()', storedVerify);
+  const cas = route.indexOf('db.update(generated_resumes)', timestamp);
+  assert.ok(storedVerify >= 0 && timestamp > storedVerify && cas > timestamp,
+    'the clock is read only after pure stored verification and the acknowledgement lands through the exact CAS');
 });
 
 test('manual dashboard navigation comes only from an action-time current acknowledged packet check', () => {
@@ -61,8 +71,10 @@ test('manual dashboard navigation comes only from an action-time current acknowl
   const binding = route.indexOf('verifiedDashboardHandoffUrl({');
   const response = route.indexOf('manual_handoff:');
   assert.ok(ownership >= 0 && audit > ownership && refresh > audit && binding > refresh && response > binding);
-  assert.match(route, /refreshed\.resume_object_key !== row\.resume_object_key/);
-  assert.match(route, /!isDeepStrictEqual\(refreshed\.spec, row\.spec\)/);
+  assert.match(route, /const auditedRow = audit\.row/,
+    'a retention restore must replace the pre-audit row before the handoff CAS');
+  assert.match(route, /refreshed\.resume_object_key !== auditedRow\.resume_object_key/);
+  assert.match(route, /!isDeepStrictEqual\(refreshed\.spec, auditedRow\.spec\)/);
   assert.match(route, /frozenUrl: refreshedReview\.portal_url/);
   assert.match(route, /frozenHandoffUrl: refreshedReview\.extension_handoff_url/);
   assert.match(route, /frozenAtsName: refreshedReview\.ats_name/);
@@ -156,7 +168,7 @@ test('the packet-audit route audits the refreshed questions the send gate verifi
 
   assert.match(
     route,
-    /const auditQuestions = await resolvedPacketAuditQuestions\(row, review\)/,
+    /let auditQuestions = await resolvedPacketAuditQuestions\(row, auditSourceReview\)/,
     'the audit must use the shared normalized and resolved packet reading, or it can hash portal-owned controls acknowledgement drops',
   );
   assert.match(
@@ -166,28 +178,23 @@ test('the packet-audit route audits the refreshed questions the send gate verifi
   );
   assert.match(
     route,
-    /createAndPersistPacketAudit\(row,\s*\{\s*questions:\s*auditQuestions\s*\}\)/,
-    'and must reach the constructor too, or a first-time audit persists the wrong version',
+    /const canonicalReview: ApplicationReviewState = \{ \.\.\.repairedPacketReview, questions: auditQuestions \}/,
+    'the exact question fixpoint must become the review used for packet construction',
   );
   assert.match(
     route,
-    /!isDeepStrictEqual\(cachedReview\.questions, auditQuestions\)/,
-    'a cached audit must detect when its exact refreshed questions are not stored on the row',
+    /createAndPersistPacketAudit\(packetRow, \{ review: auditReview \}\)/,
+    'the exact questions and delivery hashes must reach the constructor together',
   );
   assert.match(
     route,
-    /const exactPacketReview = \{ \.\.\.cachedReview, questions: auditQuestions \}/,
-    'the cached path must store the same question set the audit hashed',
+    /employer_delivery_bindings: createEmployerDeliveryBindings\(packet, boundReview, deliverySelection\)/,
+    'the audit must persist the one selected employer delivery mode and exact envelope',
   );
   assert.match(
     route,
-    /sql`\$\{generated_resumes\.spec\} = \$\{JSON\.stringify\(cached\.row\.spec\)\}::jsonb`/,
-    'the cached question sync must refuse to overwrite a concurrent application edit',
-  );
-  assert.match(
-    route,
-    /resume_object_key\} = \$\{cached\.row\.resume_object_key\}/,
-    'the cached question sync must stay bound to the exact audited PDF',
+    /const packetRow = cached\.valid \? cached\.row : await ownedResume\(request, reply\)/,
+    'a retention-restored packet must be the packet whose delivery hashes are built',
   );
 });
 
@@ -215,48 +222,58 @@ test('the packet-audit route audits the refreshed questions the send gate verifi
  * wiring property (which context one call site builds its `questions` argument from), and a
  * behavioural test would pass whenever a fixture's employer/location happened not to matter to any
  * resolver - exactly the condition that let this hide until it hit two real postings in one day. */
-test('every audit or acknowledgement call site resolves known answers against the same enriched context the live fill uses', () => {
+test('every pre-send canonicalization uses the shared enriched-context fixpoint and acknowledgement stays on the stored snapshot', () => {
   const packetAudit = routeSlice("'/applications/:id/packet-audit'", "'/applications/:id/packet-audit/acknowledge'");
   assert.match(
     packetAudit,
-    /resolvedPacketAuditQuestions\(row, review\)/,
+    /resolvedPacketAuditQuestions\(row, auditSourceReview\)/,
     'the packet-audit endpoint must use the shared normalized and enriched reading',
   );
 
-  const acknowledge = routeSlice("'/applications/:id/packet-audit/acknowledge'", "'/applications/:id/submission/extension-packet'");
-  assert.match(
-    acknowledge,
-    /resolvedPacketAuditQuestions\(row, review\)/,
-    'acknowledgement must verify the same normalized and enriched question set the audit rendered',
-  );
+  const acknowledge = routeSlice("'/applications/:id/packet-audit/acknowledge'", "'/applications/:id/submission/manual-handoff'");
+  assert.match(acknowledge, /verifyStoredPacketAuditAcknowledgement\(\{/);
+  assert.doesNotMatch(acknowledge, /resolvedPacketAuditQuestions\(/);
 
   const extensionStart = routeSlice("'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
   assert.match(
     extensionStart,
-    /refreshKnownQuestionAnswers\(\s*current\.questions,\s*sensitiveProfile,\s*applicationContextForQuestionResolution\(row, current\)/,
-    'extension-start must refresh against the enriched context before deciding whether the packet changed',
+    /const packetQuestions = resolvePacketAuditQuestionFixpoint\(\s*precheckReview,\s*sensitiveProfile,\s*applicationContextForQuestionResolution\(precheckRow, precheckReview\)/,
+    'extension-start must construct the audited snapshot once against the enriched context',
   );
+  assert.match(extensionStart, /const refreshedQuestions = precheckPacketQuestions;/,
+    'the transaction must carry the exact snapshot that passed the precheck');
 
   const getSubmission = routeSlice("'/applications/:id/submission'", "'/applications/:id/submission/handoff-complete'");
   assert.match(
     getSubmission,
-    /refreshKnownQuestionAnswers\(\s*review\.questions,\s*profile,\s*applicationContextForQuestionResolution\(row, review\)/,
+    /resolvePacketAuditQuestionFixpoint\(\s*review,\s*profile,\s*applicationContextForQuestionResolution\(row, review\)/,
     'the dashboard display route must show the same resolution the send will actually compute',
   );
 
   const approve = routeSlice("'/applications/:id/submission/approve'", "registerWorkdayVerificationRoute");
   assert.match(
     approve,
-    /refreshKnownQuestionAnswers\(\s*current\.questions,\s*sensitiveProfile,\s*applicationContextForQuestionResolution\(row, current\)/,
+    /resolvePacketAuditQuestionFixpoint\(\s*current,\s*sensitiveProfile,\s*applicationContextForQuestionResolution\(row, current\)/,
     'submission/approve must not recompute the already-filled packet on jd_text bare before its own audit check',
   );
 
   const submitRequest = routeSlice("'/applications/:id/submit-request'", "'/applications/:id/submission'");
   assert.match(
     submitRequest,
-    /applicationContextForQuestionResolution\(row, current\)/,
-    'submit-request must feed resolveSubmittedApplicationAnswers the enriched context, not current.jd_text bare',
+    /const submitResolutionCurrent = \{ \.\.\.current, jd_text: applicationContextForQuestionResolution\(row, current\) \}[\s\S]*?const canonicalSubmittedQuestions = resolvePacketAuditQuestionFixpoint\([\s\S]*?submitResolutionCurrent\.jd_text/,
+    'submit-request must verify and persist the same enriched-context fixpoint used by audit and prepare',
   );
+});
+
+test('extension receipt paths verify the captured stored snapshot without post-send resolver drift', () => {
+  const extensionOutcome = routeSlice("'/applications/:id/submission/extension-outcome'", "'/applications/:id/resume'");
+  assert.match(extensionOutcome, /questions:\s*current\.questions/);
+  assert.doesNotMatch(extensionOutcome, /resolvedPacketAuditQuestions\(/);
+  assert.match(extensionOutcome, /current\.submission_packet_version !== outcomeAudit\.audit\.packet_version/);
+
+  const handoffComplete = routeSlice("'/applications/:id/submission/handoff-complete'", "'/applications/:id/submission/approve'");
+  assert.match(handoffComplete, /questions:\s*current\.questions/);
+  assert.doesNotMatch(handoffComplete, /resolvedPacketAuditQuestions\(/);
 });
 
 /* A THIRD DEADLOCK IN THE SAME FAMILY, on the seam between two HTTP requests rather than inside one.

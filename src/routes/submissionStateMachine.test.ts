@@ -70,7 +70,7 @@ test('submit-request starts a fresh run instead of carrying stale run artifacts'
    * questions and the round they were stamped against, and that round is what gets persisted.
    * src/lib/submittedAnswers.test.ts holds the behaviour rather than the shape. */
   assert.match(route, /resolveSubmittedApplicationAnswers\(\{[\s\S]{0,240}submitted: submittedQuestions/);
-  assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions, submittedReviewedAt\)/);
+  assert.match(route, /const next = freshSubmitRequestReview\(current, canonicalSubmittedQuestions, submittedReviewedAt\)/);
 });
 
 /* R-095's gate, put on the transition it belongs to.
@@ -122,7 +122,7 @@ test('a filled but unclaimed packet can be restarted, and only when asked by nam
   assert.match(route, /if \(disposition === 'reject' && !\(restartable && parsed\.data\.restart === true\)\)/);
   assert.match(route, /code: 'PREPARED_RUN_RESTARTABLE'/);
   // A restart must not carry the previous run's filled form, preview or approval forward.
-  assert.match(route, /const next = freshSubmitRequestReview\(current, normalizedSubmittedQuestions, submittedReviewedAt\)/);
+  assert.match(route, /const next = freshSubmitRequestReview\(current, canonicalSubmittedQuestions, submittedReviewedAt\)/);
 });
 
 /* Staleness has to be readable, or a results table silently measures the wrong build. */
@@ -139,72 +139,64 @@ test('every review the runner writes records the build that produced it', async 
   assert.match(board, /revision: resolveRevision\(\)\.revision,/);
 });
 
-test('ATS API channel can prepare without opening a CAPTCHA-prone browser path only when posting is explicitly enabled', async () => {
+test('ATS API preparation fails closed before opening a browser or describing a packet as ready', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  assert.match(runner, /import \{ assessAtsSubmissionChannel, tryAtsSubmissionChannel \} from '\.\.\/lib\/atsSubmissionChannels'/);
+  assert.doesNotMatch(runner, /from '\.\.\/lib\/atsSubmissionChannels'/,
+    'the runner must not import an ATS serializer while audited ATS delivery is fail closed');
   assert.match(runner, /export function atsApiSubmissionEnabled\(env: NodeJS\.ProcessEnv = process\.env\)/);
   const prepareIndex = runner.indexOf('async function prepare(');
-  const atsAssessmentIndex = runner.indexOf('const atsAssessment = atsApiSubmissionEnabled() ? assessAtsSubmissionChannel', prepareIndex);
+  const atsAssessmentIndex = runner.indexOf("if (String(packetAudit.audit.bindings.employerDelivery?.mode) === 'ats_api')", prepareIndex);
   const localControlledIndex = runner.indexOf('if (shouldUseLocalControlledBrowser(portal))', prepareIndex);
   const accountGateIndex = runner.indexOf('isAccountWalledFamily(portal)', prepareIndex);
-  assert.ok(atsAssessmentIndex > prepareIndex, 'prepare must assess employer-authorized API channels only after the explicit posting gate');
-  assert.ok(localControlledIndex > atsAssessmentIndex, 'API-capable employers must skip browser preparation');
-  assert.ok(accountGateIndex > atsAssessmentIndex, 'API-capable employers must skip CAPTCHA and account-wall preparation gates');
-  /* This asserted the literal `preparedReviewPatch(authorization, true)`. What it is protecting is
-     that an API-capable employer prepares WITHOUT a browser, and that is still exactly what happens.
-     The literal itself was a hole: no browser means no blockers and no live form, so `true` was an
-     honest statement about the form and a false one about the packet - with standing consent it
-     becomes 'submitting' in the same call, and nothing on that path had ever read the question list.
-     `safe` is now the one thing this branch can actually know, which is whether a required question
-     is still unanswered. */
-  assert.match(
-    runner.slice(atsAssessmentIndex, localControlledIndex),
-    /preparedReviewPatch\(authorization, atsUnansweredRequired\.length === 0\)/,
-  );
-  assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /blankRequiredQuestionLabels\(current\.questions\)/);
-  assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /browser_context_id: undefined/);
-  assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /browser_session_id: undefined/);
+  assert.ok(atsAssessmentIndex > prepareIndex && localControlledIndex > atsAssessmentIndex && accountGateIndex > atsAssessmentIndex);
+  assert.match(runner.slice(atsAssessmentIndex, localControlledIndex), /ATS API delivery is withheld until Litos can verify and send one prebuilt request object/);
 });
 
 test('ATS API channel runs after final claim and before browser submission', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  assert.match(runner, /import \{ assessAtsSubmissionChannel, tryAtsSubmissionChannel \} from '\.\.\/lib\/atsSubmissionChannels'/);
+  assert.doesNotMatch(runner, /from '\.\.\/lib\/atsSubmissionChannels'/);
   assert.match(runner, /import \{ repairReviewPortalFromMonitoredJob \} from '\.\.\/lib\/applicationPortalRepair'/);
   const prepareIndex = runner.indexOf('async function prepare(');
   const prepareMissingReviewGuardIndex = runner.indexOf("if (!current) throw new Error('We do not have a link to the company application page');", prepareIndex);
   const prepareRepairIndex = runner.indexOf('current = await repairReviewPortalFromMonitoredJob(row, current);', prepareIndex);
   const prepareMissingUrlGuardIndex = runner.indexOf('if (!portalUrl) throw new Error', prepareIndex);
   const helperIndex = runner.indexOf('async function submitViaAtsSubmissionChannel');
-  const enabledIndex = runner.indexOf('if (!atsApiSubmissionEnabled()) return false;', helperIndex);
-  const repairIndex = runner.indexOf('review = await repairReviewPortalFromMonitoredJob(row, review);', helperIndex);
-  const atsIndex = runner.indexOf('const atsResult = await tryAtsSubmissionChannel', helperIndex);
-  const authCheckIndex = runner.indexOf('if (!await authorizationValidAtClick(row, review))', helperIndex);
+  const helperBody = runner.slice(helperIndex, runner.indexOf('/**', helperIndex));
+  const selectedModeIndex = runner.indexOf("if (String(audit.bindings.employerDelivery?.mode) !== 'ats_api') return false;", helperIndex);
+  const enabledIndex = runner.indexOf('ATS API delivery is withheld until Litos can verify and send one prebuilt request object', helperIndex);
+  const repairIndex = helperBody.indexOf('review = await repairReviewPortalFromMonitoredJob(row, review);');
+  const transportIndex = helperBody.indexOf('transportVerifiedBuiltPacket');
+  const atsIndex = helperBody.indexOf('tryAtsSubmissionChannel');
+  const authCheckIndex = helperBody.indexOf('authorizationValidAtClick');
   const claimIndex = runner.indexOf('const claimedRow = await claimSubmission(row, options.claimAlreadyHeld)');
-  const claimedRepairIndex = runner.indexOf('claimedReview = await repairReviewPortalFromMonitoredJob(row, claimedReview);', claimIndex);
   const detectIndex = runner.indexOf('const claimedPortal = detectPortal(claimedReview.portal_url!);', claimIndex);
-  const callIndex = runner.indexOf('if (await submitViaAtsSubmissionChannel(row, claimedReview, fastify)) return;');
+  const callIndex = runner.indexOf('if (await submitViaAtsSubmissionChannel(');
   const browserGateIndex = runner.indexOf('portalCanAutoSubmit(portal)', callIndex);
   const managedIndex = runner.indexOf('if (isManagedStratusProvider())', callIndex);
   assert.ok(prepareIndex > 0, 'prepare helper is missing');
   assert.ok(prepareMissingReviewGuardIndex > prepareIndex && prepareMissingReviewGuardIndex < prepareRepairIndex, 'prepare must only require a review before monitored portal repair');
   assert.ok(prepareRepairIndex > prepareMissingReviewGuardIndex && prepareRepairIndex < prepareMissingUrlGuardIndex, 'prepare must repair monitored portal URLs before requiring portal_url');
   assert.ok(helperIndex > 0, 'ATS API submission helper is missing');
-  assert.ok(enabledIndex > helperIndex && enabledIndex < authCheckIndex, 'API submission must be disabled by default before any POST path');
-  assert.ok(repairIndex > enabledIndex && repairIndex < authCheckIndex, 'API submission must repair monitored portal URLs before consent and POST');
-  assert.ok(authCheckIndex > repairIndex && authCheckIndex < atsIndex, 'API submission must re-check consent before send');
+  const failClosedIndex = runner.indexOf('ATS API delivery is withheld until Litos can verify and send one prebuilt request object', helperIndex);
+  assert.ok(selectedModeIndex > helperIndex && failClosedIndex > selectedModeIndex && enabledIndex === failClosedIndex,
+    'an ATS-selected packet must fail closed before configuration, consent, serialization, or POST');
+  assert.equal(repairIndex, -1, 'the API target must not be repaired after packet approval');
+  assert.equal(authCheckIndex, -1);
+  assert.equal(transportIndex, -1);
+  assert.equal(atsIndex, -1);
   assert.ok(claimIndex > 0, 'submit must atomically claim the final submission before any send path');
-  assert.ok(claimedRepairIndex > claimIndex && claimedRepairIndex < detectIndex, 'submit must repair stale monitored portal URLs before detecting the portal');
+  assert.equal(runner.indexOf('claimedReview = await repairReviewPortalFromMonitoredJob(row, claimedReview);', claimIndex), -1,
+    'submit must not repair or replace the approved destination after the final claim');
+  assert.ok(detectIndex > claimIndex, 'submit must detect the portal from the exact claimed review');
   assert.ok(callIndex > claimIndex, 'ATS API submission must run only after the final claim');
   assert.ok(browserGateIndex > callIndex, 'ATS API submission must run before browser-only portal gates');
   assert.ok(managedIndex > callIndex, 'ATS API submission must run before managed browser submission');
-  assert.match(runner.slice(atsIndex, browserGateIndex), /source: 'ats_api'/);
+  assert.doesNotMatch(runner.slice(callIndex, browserGateIndex), /source: 'ats_api'/);
 });
 
-test('ATS API packet keeps an approved cover letter unless the prepared form explicitly rejected it', async () => {
+test('runner constructs no ATS API packet while exact prepared-wire replay is unavailable', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const helperIndex = runner.indexOf('function packetForApiSubmission(');
-  assert.ok(helperIndex > 0, 'API packet helper is missing');
-  assert.match(runner.slice(helperIndex, runner.indexOf('\nasync function submit(', helperIndex)), /review\.cover_letter_supported === false \? omitCoverLetter\(builtPacket\) : builtPacket/);
+  assert.doesNotMatch(runner, /packetForApiSubmission|tryAtsSubmissionChannel/);
 });
 
 test('application routes refresh answers through the decrypted profile loader', async () => {
@@ -213,7 +205,8 @@ test('application routes refresh answers through the decrypted profile loader', 
   assert.match(route, /return loadApplicationProfileLike\(userId\)/);
   assert.doesNotMatch(route, /application_profile\.work_authorized/);
   assert.doesNotMatch(route, /application_profile\.needs_sponsorship/);
-  assert.match(route, /questions: refreshKnownQuestionAnswers\([\s\S]{0,160}review\.questions_reviewed_at/);
+  assert.match(route, /resolvePacketAuditQuestionFixpoint\(/);
+  assert.match(route, /return loadApplicationProfileLike\(userId\)/);
 });
 
 test('final approval validates and submits refreshed known question answers', async () => {
@@ -226,7 +219,7 @@ test('final approval validates and submits refreshed known question answers', as
 
   assert.match(approve, /const sensitiveProfile = await loadSensitiveQuestionProfile/);
   assert.match(approve, /const approvalReview: ApplicationReviewState = \{/);
-  assert.match(approve, /questions: refreshKnownQuestionAnswers\([\s\S]{0,180}current\.questions_reviewed_at/);
+  assert.match(approve, /questions: resolvePacketAuditQuestionFixpoint\([\s\S]{0,220}sensitiveProfile/);
   assert.match(approve, /approvalReview\.questions\.some/);
   assert.match(approve, /sensitiveQuestionFor\(\s*approvalReview\.questions, sensitiveProfile, approvalReview\.jd_text,/);
   assert.match(approve, /\.\.\.approvalReview,[\s\S]{0,120}status:\s*'submitting'/);
@@ -238,13 +231,14 @@ test('resume history refreshes known question answers without changing review st
   const route = await readFile('src/routes/resume.ts', 'utf8');
   assert.match(route, /function refreshedHistorySpec/);
   assert.match(route, /loadApplicationProfileLike\(userId\)/);
-  assert.match(route, /questions: refreshKnownQuestionAnswers\([\s\S]{0,200}review\.questions_reviewed_at,/);
+  assert.match(route, /questions: packetQuestionFixpoint\([\s\S]{0,260}refreshKnownQuestionAnswers\(/);
+  assert.match(route, /review\.questions_reviewed_at,[\s\S]{0,160}asOf/);
   assert.doesNotMatch(route, /status:\s*'ready_to_submit'[\s\S]{0,300}refreshKnownQuestionAnswers/);
 });
 
 test('submission packet attaches the role-specific resume filename', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  assert.match(runner, /const refreshedQuestions = refreshKnownQuestionAnswers\([\s\S]{0,180}review\.questions_reviewed_at/);
+  assert.match(runner, /const refreshedQuestions = verifiedQuestionSnapshot[\s\S]{0,180}resolvePacketAuditQuestionFixpoint\(/);
   assert.match(runner, /const roleTitle = \(row\.job_context as \{ role\?: unknown \} \| null\)\?\.role/);
   assert.match(runner, /resumeName:\s*resumeFileNameForRole\(fullName,\s*roleTitle\)/);
   assert.doesNotMatch(runner, /resumeName:\s*`litos-\$\{row\.id\}\.pdf`/);
@@ -269,7 +263,7 @@ test('submission packet only reaches for the alias through the deliverability pr
   assert.doesNotMatch(runner, /ensureApplicationEmailAlias/);
   // The choice and its reason are recorded on both full-fill paths and the attended account-gate
   // path. The latter validates the frozen alias before handing Jobvite or iCIMS to Chrome.
-  assert.equal(runner.match(/applicant_email: packet\.applicantEmail/g)?.length, 3);
+  assert.equal(runner.match(/applicant_email: packet\.applicantEmail/g)?.length, 5);
 });
 
 test('attended packets freeze one structured applicant snapshot with exact profile dates and application facts', async () => {

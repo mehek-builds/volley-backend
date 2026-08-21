@@ -6,8 +6,9 @@
  * a real re-render, the real createAndPersistPacketAudit, real UPDATEs, and then the real send gate
  * over whatever the restore left behind.
  *
- * Two seams are injected and neither is the subject: the blob write, so no network store is needed,
- * and the PDF read, so the audit can see the bytes the restore just produced. Everything the test
+ * Small seams are injected and none is the subject: the blob write, so no network store is needed,
+ * the PDF read, so the audit can see the bytes the restore just produced, and selected interleaving
+ * hooks that let the database mutate at a precise compare-and-swap boundary. Everything the test
  * asserts on - the acknowledgement, the audit, the object key, the verdict - is production code's
  * own output.
  *
@@ -23,6 +24,7 @@ import { join } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
 import { generateDrizzleJson, generateMigration } from 'drizzle-kit/api';
+import { verifyStoredPacketAuditAcknowledgement } from './packetAudit';
 
 const ENCRYPTION_KEY = 'packet-restore-acknowledgement-key';
 const JWT_SIGNING_SECRET = 'packet-restore-acknowledgement-secret';
@@ -33,6 +35,11 @@ const JD_TEXT = [
   '- Experience building reliable backend systems.',
 ].join('\n');
 const OLD_BYTES = Buffer.from('%PDF-1.7\nRestore Student\nBasic Information\nAcme');
+const EMPLOYER_DELIVERY_BINDING = {
+  version: 'employer_delivery_v1',
+  mode: 'browser',
+  sha256: 'c'.repeat(64),
+} as const;
 
 const previousEnv = {
   DATABASE_URL: process.env.DATABASE_URL,
@@ -97,6 +104,7 @@ function packetSpec(objectKey: string) {
         profile: { email: applicantEmail, experience: [], skills: ['TypeScript'], school: 'University of Southern California', grad_year: 2028 },
         application_profile: {},
       },
+      employer_delivery_bindings: EMPLOYER_DELIVERY_BINDING,
     },
   };
   spec._quality = { pdfGenerationBinding: createPdfGenerationBinding(spec, objectKey, OLD_BYTES, RESUME_EMAIL) };
@@ -153,7 +161,15 @@ async function seedPacket(options: { acknowledged: boolean }) {
 }
 
 /** The real restore, with the file gone, the blob write captured, and nothing else replaced. */
-async function restoreWith(row: Awaited<ReturnType<typeof rowById>>, authority: 'authorizing_send' | 'review_only') {
+async function restoreWith(
+  row: Awaited<ReturnType<typeof rowById>>,
+  authority: 'authorizing_send' | 'review_only',
+  options: {
+    rerenderResume?: Parameters<typeof restoreExpiredPacketResume>[1]['rerenderResume'];
+    persistAudit?: Parameters<typeof restoreExpiredPacketResume>[1]['persistAudit'];
+    beforeAcknowledgementCarry?: () => Promise<void>;
+  } = {},
+) {
   const written: { bytes: Buffer } = { bytes: Buffer.alloc(0) };
   const loadPdf = async () => ({ bytes: written.bytes, contentType: 'application/pdf' });
   const outcome = await restoreExpiredPacketResume(row, {
@@ -164,10 +180,12 @@ async function restoreWith(row: Awaited<ReturnType<typeof rowById>>, authority: 
       written.bytes = bytes;
       return { pathname: key };
     },
-    persistAudit: (target) => createAndPersistPacketAudit(target, {
+    rerenderResume: options.rerenderResume,
+    beforeAcknowledgementCarry: options.beforeAcknowledgementCarry,
+    persistAudit: options.persistAudit ?? ((target) => createAndPersistPacketAudit(target, {
       loadPdf,
       validateApplicantEmail: async () => {},
-    }),
+    })),
   });
   return { outcome, loadPdf };
 }
@@ -232,35 +250,51 @@ test('a packet nobody acknowledged comes out of the rebuild unsendable', async (
     loadPdf,
     validateApplicantEmail: async () => {},
   });
-  assert.equal(verdict.valid ? null : verdict.code, 'PACKET_AUDIT_ACK_REQUIRED');
+  assert.equal(verdict.valid ? null : verdict.code, 'PACKET_AUDIT_REQUIRED');
 });
 
-test('an acknowledgement she gave before the file expired carries onto the rebuilt file', async () => {
+test('an acknowledgement she gave before expiry does not authorize different rebuilt PDF bytes', async () => {
   const seeded = await seedPacket({ acknowledged: true });
-  const before = readApplicationReview(seeded.spec)!.packet_audit_acknowledgement!;
   const { outcome, loadPdf } = await restoreWith(seeded, 'authorizing_send');
 
   assert.equal(outcome.restored, true, JSON.stringify(outcome));
-  const carried = readApplicationReview((await rowById(seeded.id)).spec)?.packet_audit_acknowledgement;
-  assert.ok(carried, 'her approval of unchanged content survives the rebuild');
-  assert.equal(carried.source, 'auto_restored', 'and the corpus can still tell who looked');
-  assert.notEqual(carried.pdfSha256, before.pdfSha256, 'bound to the file that now exists');
+  const review = readApplicationReview((await rowById(seeded.id)).spec)!;
+  assert.equal(review.packet_audit_acknowledgement, undefined,
+    'changed bytes must remove the old acknowledgement before replacement audit persistence');
+  assert.equal(review.employer_delivery_bindings, undefined,
+    'changed bytes must remove the old employer delivery hash before replacement audit persistence');
+  assert.ok(review.packet_audit, 'the restore still creates a packet audit for the replacement PDF');
+  assert.deepEqual(
+    verifyStoredPacketAuditAcknowledgement({
+      audit: review.packet_audit,
+      ownerId: seeded.user_id,
+      applicationId: seeded.id,
+      client: {
+        audit_digest: review.packet_audit.audit_digest,
+        packet_version: review.packet_audit.packet_version,
+        pdf_sha256: review.packet_audit.bindings.pdf.sha256,
+        size_bytes: review.packet_audit.bindings.pdf.sizeBytes,
+      },
+    }),
+    { valid: false, reason: 'packet_audit_stale' },
+    'the restore-created audit cannot be acknowledged until packet-audit rebuilds delivery identity',
+  );
 
   const verdict = await currentAcknowledgedPacketAudit(outcome.row, {
     loadPdf,
     validateApplicantEmail: async () => {},
   });
-  assert.equal(verdict.valid, true, verdict.valid ? '' : verdict.reason);
+  assert.equal(verdict.valid ? null : verdict.code, 'PACKET_AUDIT_REQUIRED');
 });
 
 test('the review route rebuilds the file she asked to see and hands it no approval', async () => {
   const seeded = await seedPacket({ acknowledged: true });
-  const before = readApplicationReview(seeded.spec)!.packet_audit_acknowledgement!;
   const { outcome, loadPdf } = await restoreWith(seeded, 'review_only');
 
   assert.equal(outcome.restored, true, JSON.stringify(outcome));
-  const untouched = readApplicationReview((await rowById(seeded.id)).spec)?.packet_audit_acknowledgement;
-  assert.deepEqual(untouched, before, 'a look writes no acknowledgement, old or new');
+  const stored = readApplicationReview((await rowById(seeded.id)).spec)!;
+  assert.equal(stored.packet_audit_acknowledgement, undefined, 'changed bytes retain no old approval');
+  assert.equal(stored.employer_delivery_bindings, undefined, 'changed bytes retain no old delivery hash');
 
   /* It names the deleted file, so it is stale against the re-issued audit and the send gate asks
      her again. A review that quietly restored sendability would be the same defect wearing the
@@ -269,5 +303,67 @@ test('the review route rebuilds the file she asked to see and hands it no approv
     loadPdf,
     validateApplicantEmail: async () => {},
   });
-  assert.equal(verdict.valid ? null : verdict.code, 'PACKET_AUDIT_ACK_REQUIRED');
+  assert.equal(verdict.valid ? null : verdict.code, 'PACKET_AUDIT_REQUIRED');
+});
+
+test('a lost audit persistence CAS never carries acknowledgement onto its transient audit', async () => {
+  const seeded = await seedPacket({ acknowledged: true });
+  const before = readApplicationReview(seeded.spec)!;
+  const { outcome, loadPdf } = await restoreWith(seeded, 'authorizing_send', {
+    rerenderResume: async () => OLD_BYTES,
+    persistAudit: async (target) => {
+      await db.update(schema.generated_resumes).set({
+        spec: drizzle.sql`jsonb_set(
+          coalesce(${schema.generated_resumes.spec}, '{}'::jsonb),
+          '{_review,attention_reason}', '"mutation before audit CAS"'::jsonb, true
+        )`,
+      }).where(drizzle.eq(schema.generated_resumes.id, seeded.id));
+      const result = await createAndPersistPacketAudit(target, {
+        loadPdf: async () => ({ bytes: OLD_BYTES, contentType: 'application/pdf' }),
+        validateApplicantEmail: async () => {},
+      });
+      assert.equal(result.persisted, false, 'the concurrent spec mutation must defeat audit persistence CAS');
+      return result;
+    },
+  });
+
+  assert.equal(outcome.restored, true, JSON.stringify(outcome));
+  const stored = readApplicationReview((await rowById(seeded.id)).spec)!;
+  assert.equal(stored.packet_audit_acknowledgement?.source, undefined,
+    'persisted false cannot write an auto-restored acknowledgement');
+  assert.deepEqual(stored.packet_audit, before.packet_audit,
+    'the transient audit result is not treated as the stored audit');
+  assert.equal(stored.attention_reason, 'mutation before audit CAS', 'the concurrent mutation must survive');
+  const verdict = await currentAcknowledgedPacketAudit(outcome.row, {
+    loadPdf,
+    validateApplicantEmail: async () => {},
+  });
+  assert.equal(verdict.valid, false, 'the old audit and acknowledgement cannot authorize the new object key');
+});
+
+test('a concurrent review mutation before acknowledgement carry wins the exact spec CAS', async () => {
+  const seeded = await seedPacket({ acknowledged: true });
+  const { outcome, loadPdf } = await restoreWith(seeded, 'authorizing_send', {
+    rerenderResume: async () => OLD_BYTES,
+    beforeAcknowledgementCarry: async () => {
+      await db.update(schema.generated_resumes).set({
+        spec: drizzle.sql`jsonb_set(
+          coalesce(${schema.generated_resumes.spec}, '{}'::jsonb),
+          '{_review,attention_reason}', '"concurrent edit"'::jsonb, true
+        )`,
+      }).where(drizzle.eq(schema.generated_resumes.id, seeded.id));
+    },
+  });
+
+  assert.equal(outcome.restored, true, JSON.stringify(outcome));
+  const storedRow = await rowById(seeded.id);
+  const stored = readApplicationReview(storedRow.spec)!;
+  assert.equal(stored.attention_reason, 'concurrent edit', 'restore must not overwrite the concurrent review');
+  assert.equal(stored.packet_audit_acknowledgement?.source, undefined,
+    'a lost acknowledgement CAS writes no auto-restored approval');
+  const verdict = await currentAcknowledgedPacketAudit(storedRow, {
+    loadPdf,
+    validateApplicantEmail: async () => {},
+  });
+  assert.equal(verdict.valid, false, 'the failed carry leaves the replacement audit fail closed');
 });

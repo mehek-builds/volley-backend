@@ -31,7 +31,7 @@ import {
   type SubmittedApplicationReviewQuestion,
 } from '../lib/applicationReview';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
-import { connectToSession, getBrowserSession, getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
+import { browserDeliveryRuntimeIdentity, connectToSession, getBrowserSession, getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
 import { storedCoverLetter } from '../lib/coverLetterService';
@@ -41,10 +41,11 @@ import { mintDownloadToken } from '../lib/resumeAccess';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
 import { requireAuth } from '../middleware/auth';
 import { declaredSkillsList } from './profile';
-import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication, resolvedPacketAuditQuestions,
+import { buildPacket, finishSecurityCodeSubmission, processSubmissionApplication, resolvePacketAuditQuestionFixpoint, resolvedPacketAuditQuestions,
+  transportVerifiedBuiltPacket,
 } from './submissionRunner';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
-import { applicationContextForQuestionResolution, knownAnswerLookup, refreshKnownQuestionAnswers, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
+import { applicationContextForQuestionResolution, knownAnswerLookup, sensitiveQuestionRequiresAttention, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
@@ -55,7 +56,9 @@ import { advanceCanonicalApplicationFromPacketSubmission } from '../lib/canonica
 import { extensionAuthorizationRequiresAutomaticSubmission } from '../lib/submissionAuthorization';
 import {
   detectPortal,
+  isManagedAttendedAccountPortal,
   isPortalSupported,
+  portalApplicationUrl,
   readReceipt,
 } from '../lib/portalSubmission';
 import { dailySubmissionCap, withinDailyCap } from '../lib/submissionQueue';
@@ -71,7 +74,18 @@ import {
   packetEducationDrift,
 } from '../lib/submissionEducationGuard';
 import { resumeFileNameForRole } from '../lib/resumeFileName';
-import { sendUnsupportedPortalApplicationEmail } from '../lib/unsupportedPortalEmailFallback';
+import {
+  prepareUnsupportedPortalApplicationEmail,
+  sendPreparedUnsupportedPortalApplicationEmail,
+} from '../lib/unsupportedPortalEmailFallback';
+import {
+  browserEmployerDeliveryChannel,
+  createEmployerDeliveryBindings,
+  employerDeliveryEnvelope,
+  extensionBoundApplicationSpec,
+  extensionEmployerDeliveryBindingIssue,
+  extensionEmployerDeliveryProjection,
+} from '../lib/employerDeliveryIdentity';
 import { requireFeature } from '../lib/entitlements';
 import { appendEditedResumeArtifactVersion } from '../lib/resumeArtifactVersions';
 import {
@@ -90,6 +104,7 @@ import { resolveFrozenApplicantEmail } from '../lib/applicationEmail';
 import { findComposioVerificationCode } from '../lib/emailVerification';
 import { registerWorkdayVerificationRoute } from './workdayVerification';
 import { createAndPersistPacketAudit, currentAcknowledgedPacketAudit, currentPacketAudit, packetAuditClientError } from '../lib/packetAuditService';
+import { verifyStoredPacketAuditAcknowledgement } from '../lib/packetAudit';
 import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
 import { resumeEmailOfRecord, resumePacketEmailIsCurrent } from '../lib/resumeEmail';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
@@ -649,6 +664,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'This application can no longer be audited before submission' });
       }
       try {
+        const auditSourceReview = await repairReviewPortalFromMonitoredJob(row, review);
         /* AUDIT THE PACKET THE SEND GATE WILL CHECK, not the one sitting in the row.
          *
          * submit-request gates on currentAcknowledgedPacketAudit(row, { questions:
@@ -689,7 +705,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
          * portal-owned controls such as Recruitee candidate.phone, then resolves the remaining
          * questions. Calling refreshKnownQuestionAnswers directly here hashed legacy fixed controls
          * that the acknowledgement route correctly normalized away. */
-        const auditQuestions = await resolvedPacketAuditQuestions(row, review);
+        let auditQuestions = await resolvedPacketAuditQuestions(row, auditSourceReview);
         // review_only: this route RENDERS the packet for the applicant to look at. It may rebuild
         // a file that aged out so she can see it; it authorizes nothing, and the acknowledgement
         // she has to give is the separate POST below.
@@ -701,48 +717,109 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           const allowed = await allowHourly(request.jwtPayload!.userId, 'packet-audit', LIMITS.perHour.packetAudit);
           if (!allowed) return rateLimitedReply(reply);
         }
-        /* A VALID CACHED AUDIT STILL HAS TO STORE THE QUESTIONS IT HASHED.
-         *
-         * currentPacketAudit can prove that an existing audit matches auditQuestions without
-         * changing the row. That is normally the fast path, but it left a split packet whenever
-         * refreshKnownQuestionAnswers changed a visible value: the audit and acknowledgement bound
-         * the refreshed set while review.questions retained the older set. The next submit request
-         * refreshed from that older record and could produce a different version, rejecting the
-         * audit the applicant had acknowledged seconds earlier as packet_stale.
-         *
-         * The uncached path already persists auditQuestions through createAndPersistPacketAudit.
-         * Make the cached path obey the same invariant. This exact CAS also protects a concurrent
-         * edit or fill from being overwritten. cached.row matters because review_only may have
-         * restored an expired PDF before returning the valid audit. */
-        let packetRow = cached.valid ? cached.row : row;
-        let cachedQuestionsPersisted = true;
-        if (cached.valid) {
-          const cachedReview = readApplicationReview(cached.row.spec);
-          if (!cachedReview) {
-            cachedQuestionsPersisted = false;
-          } else if (!isDeepStrictEqual(cachedReview.questions, auditQuestions)) {
-            const exactPacketReview = { ...cachedReview, questions: auditQuestions };
-            const updated = await db.update(generated_resumes)
-              .set({ spec: reviewSpec(exactPacketReview) })
-              .where(and(
-                eq(generated_resumes.id, cached.row.id),
-                eq(generated_resumes.user_id, request.jwtPayload!.userId),
-                sql`${generated_resumes.spec} = ${JSON.stringify(cached.row.spec)}::jsonb`,
-                sql`${generated_resumes.resume_object_key} = ${cached.row.resume_object_key}`,
-              ))
-              .returning({ id: generated_resumes.id });
-            cachedQuestionsPersisted = updated.length === 1;
-            if (cachedQuestionsPersisted) {
-              packetRow = {
-                ...cached.row,
-                spec: { ...(cached.row.spec as StoredSpec), _review: exactPacketReview },
-              };
-            }
+        /* Build every finite employer-delivery mode now, from the same canonical questions shown in
+         * this audit. The hashes are persisted beside the audit, so acknowledgement needs no live
+         * profile or resolver read and every later transport can compare its exact effective packet. */
+        const packetRow = cached.valid ? cached.row : await ownedResume(request, reply);
+        if (!packetRow) return;
+        const packetReview = readApplicationReview(packetRow.spec);
+        if (!packetReview) throw new Error('Application review is not available for this resume');
+        const repairedPacketReview = await repairReviewPortalFromMonitoredJob(packetRow, packetReview);
+        if (!cached.valid && (packetRow.resume_object_key !== row.resume_object_key
+          || !isDeepStrictEqual(packetRow.spec, row.spec))) {
+          auditQuestions = await resolvedPacketAuditQuestions(packetRow, repairedPacketReview);
+        }
+        const canonicalReview: ApplicationReviewState = { ...repairedPacketReview, questions: auditQuestions };
+        const packet = await buildPacket({
+          ...packetRow,
+          spec: { ...(packetRow.spec as StoredSpec), _review: canonicalReview },
+        }, false, auditQuestions, true);
+        const boundReview: ApplicationReviewState = {
+          ...canonicalReview,
+          ...(packet.applicantSnapshot ? { applicant_snapshot: packet.applicantSnapshot } : {}),
+          ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
+        };
+        const extensionProjection = extensionEmployerDeliveryProjection({
+          resume: packet.resume,
+          fileName: packet.resumeName,
+          spec: editableResumeSpec(packetRow.spec as StoredSpec),
+          applicationSpec: extensionBoundApplicationSpec(specWithoutDocumentPointers({
+            ...(packetRow.spec as StoredSpec),
+            _review: boundReview,
+          })),
+          applicantSnapshot: packet.applicantSnapshot,
+        });
+        const portalUrl = boundReview.portal_url ?? '';
+        let deliverySelection: Parameters<typeof createEmployerDeliveryBindings>[2];
+        if (!isPortalSupported(portalUrl)) {
+          const preparedEmail = prepareUnsupportedPortalApplicationEmail({
+            application: packetRow,
+            review: boundReview,
+            packet,
+          });
+          deliverySelection = {
+            mode: 'full',
+            envelope: employerDeliveryEnvelope({
+              channel: 'unsupported_email',
+              destinationUrl: preparedEmail.recipient,
+              portalFamily: 'unsupported',
+              coverLetterSupported: boundReview.cover_letter_supported,
+              transcriptSupported: boundReview.transcript_supported,
+              email: preparedEmail.message,
+            }),
+          };
+        } else {
+          const portal = detectPortal(portalUrl);
+          if (portal === 'controlled_test') {
+            deliverySelection = {
+              mode: 'full',
+              envelope: employerDeliveryEnvelope({
+                channel: 'controlled_browser',
+                destinationUrl: portalUrl,
+                portalFamily: portal,
+                runtime: {
+                  provider: 'local_playwright',
+                  executable: process.env.LITOS_TEST_BROWSER_EXECUTABLE
+                    ?? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                },
+                coverLetterSupported: boundReview.cover_letter_supported,
+                transcriptSupported: boundReview.transcript_supported,
+              }),
+            };
+          } else if (isManagedAttendedAccountPortal(portal)) {
+            deliverySelection = {
+              mode: 'extension',
+              extensionProjection,
+              envelope: employerDeliveryEnvelope({
+                channel: 'extension',
+                destinationUrl: boundReview.extension_handoff_url ?? portalUrl,
+                portalFamily: portal,
+                coverLetterSupported: false,
+                transcriptSupported: false,
+              }),
+            };
+          } else {
+            /* ATS API serializers still construct multipart requests after the approval check.
+             * Until they can send one prebuilt, identity-checked request object, audit only the
+             * browser channel. This is an explicit fail-closed choice, not a runtime fallback. */
+            deliverySelection = {
+              mode: 'browser',
+              envelope: employerDeliveryEnvelope({
+                channel: browserEmployerDeliveryChannel(browserDeliveryRuntimeIdentity().provider),
+                destinationUrl: portalApplicationUrl(portal, portalUrl),
+                portalFamily: portal,
+                runtime: browserDeliveryRuntimeIdentity(),
+                coverLetterSupported: boundReview.cover_letter_supported,
+                transcriptSupported: boundReview.transcript_supported,
+              }),
+            };
           }
         }
-        const result = cached.valid
-          ? { audit: cached.audit, persisted: cachedQuestionsPersisted, pdfBytes: cached.pdfBytes }
-          : await createAndPersistPacketAudit(row, { questions: auditQuestions });
+        const auditReview: ApplicationReviewState = {
+          ...boundReview,
+          employer_delivery_bindings: createEmployerDeliveryBindings(packet, boundReview, deliverySelection),
+        };
+        const result = await createAndPersistPacketAudit(packetRow, { review: auditReview });
         if (!result.persisted) {
           return reply.status(409).send({
             error: 'The saved application changed while it was being audited. Reload it and audit again.',
@@ -803,25 +880,28 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!review || review.submission_claimed_at || review.status === 'submitted') {
         return reply.status(409).send({ error: 'This application cannot be acknowledged in its current state' });
       }
-      /* review_only: this IS the human step, not a send. The acknowledgement it writes is the
-         applicant's own, checked against the digests she was shown, so it must never be preceded by
-         a machine-written one. A rebuild here therefore leaves the digests she submitted stale and
-         answers 409, which sends her back to re-audit the file that now exists. */
-      const verdict = await currentPacketAudit(row, {
-        questions: await resolvedPacketAuditQuestions(row, review),
-        restoreExpiredResume: 'review_only',
+      /* Pure stored acknowledgement. No profile, email, alias, Blob, PDF, resolver, clock, or
+       * environment read belongs between the packet the applicant saw and this exact-CAS write.
+       * Live drift is rechecked at every send gate and exact delivery payload check. */
+      const storedAudit = verifyStoredPacketAuditAcknowledgement({
+        audit: review.packet_audit,
+        ownerId: request.jwtPayload!.userId,
+        applicationId: row.id,
+        client: parsed.data,
       });
-      if (!verdict.valid) return reply.status(409).send(packetAuditClientError(verdict));
-      const audit = verdict.audit;
-      if (parsed.data.audit_digest !== audit.audit_digest
-        || parsed.data.packet_version !== audit.packet_version
-        || parsed.data.pdf_sha256 !== audit.bindings.pdf.sha256
-        || parsed.data.size_bytes !== audit.bindings.pdf.sizeBytes) {
+      if (!storedAudit.valid && storedAudit.reason === 'packet_audit_stale') {
+        return reply.status(409).send({
+          error: 'The saved application does not have a complete current packet audit. Audit it again before continuing.',
+          code: 'PACKET_AUDIT_STALE',
+        });
+      }
+      if (!storedAudit.valid) {
         return reply.status(409).send({
           error: 'The rendered packet no longer matches the saved application. Reload it before continuing.',
           code: 'PACKET_AUDIT_STALE',
         });
       }
+      const audit = storedAudit.audit;
       const acknowledgement = {
         ownerSha256: audit.bindings.ownerSha256,
         applicationId: audit.bindings.applicationId,
@@ -866,6 +946,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         restoreExpiredResume: 'authorizing_send',
       });
       if (!audit.valid) return reply.status(409).send(packetAuditClientError(audit));
+      const auditedRow = audit.row;
 
       // PDF and alias verification perform external reads. Re-read the owner-scoped row after
       // those awaits and reject unless the complete saved packet is still byte-for-byte the one
@@ -873,8 +954,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // snapshot, so a concurrent portal/job/status/claim mutation cannot release a stale URL.
       const refreshed = await ownedResume(request, reply);
       if (!refreshed) return;
-      if (refreshed.resume_object_key !== row.resume_object_key
-        || !isDeepStrictEqual(refreshed.spec, row.spec)) {
+      if (refreshed.resume_object_key !== auditedRow.resume_object_key
+        || !isDeepStrictEqual(refreshed.spec, auditedRow.spec)) {
         return reply.status(409).send({
           error: 'This application changed while its company handoff was being verified. Reload it before continuing.',
           code: 'MANUAL_HANDOFF_STALE',
@@ -971,6 +1052,31 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         ? quality.groundingRemoved.filter((value): value is string => typeof value === 'string')
         : [];
       const fileName = resumeFileNameForRole(contact.full_name, job.role);
+      const extensionProjection = extensionEmployerDeliveryProjection({
+        resume: auditVerdict.pdfBytes,
+        fileName,
+        spec: editableResumeSpec(stored),
+        applicationSpec: extensionBoundApplicationSpec(specWithoutDocumentPointers(stored)),
+        applicantSnapshot: review.applicant_snapshot,
+      });
+      const deliveryIssue = extensionEmployerDeliveryBindingIssue(
+        extensionProjection,
+        auditVerdict.audit.bindings.employerDelivery,
+        employerDeliveryEnvelope({
+          channel: 'extension',
+          destinationUrl: query.data.current_url,
+          portalFamily: detectPortal(query.data.current_url),
+          coverLetterSupported: false,
+          transcriptSupported: false,
+        }),
+      );
+      if (deliveryIssue) {
+        return reply.status(409).send({
+          error: 'The employer-bound Chrome packet changed after approval. Audit it again before continuing.',
+          code: 'PACKET_AUDIT_STALE',
+          issues: [deliveryIssue],
+        });
+      }
       const handoffVersion = extensionHandoffVersion({
         applicationId: row.id,
         userId: request.jwtPayload!.userId,
@@ -1057,6 +1163,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       )).limit(1);
       const precheckReview = precheckRow ? readApplicationReview(precheckRow.spec) : null;
       let precheckPacketVersion: string | null = null;
+      let precheckPacketQuestions: ApplicationReviewQuestion[] | null = null;
+      let precheckSensitiveProfile: ApplicationProfileLike | null = null;
       if (precheckRow && precheckReview) {
         const binding = extensionStartHandoffBinding({
           handoffVersion: parsed.data.handoff_version,
@@ -1079,14 +1187,26 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         }
       }
       if (precheckRow && precheckReview && precheckReview.status !== 'submitted') {
+        const precheckAsOf = new Date();
+        const sensitiveProfile = await loadSensitiveQuestionProfile(userId);
+        const packetQuestions = resolvePacketAuditQuestionFixpoint(
+          precheckReview,
+          sensitiveProfile,
+          applicationContextForQuestionResolution(precheckRow, precheckReview),
+          postingCountryFromJobContext(precheckRow.job_context),
+          postingCountryCodeFromJobContext(precheckRow.job_context),
+          precheckAsOf,
+        );
         const auditVerdict = await currentAcknowledgedPacketAudit(precheckRow, {
-          questions: await resolvedPacketAuditQuestions(precheckRow, precheckReview),
+          questions: packetQuestions,
           restoreExpiredResume: 'authorizing_send',
         });
         if (!auditVerdict.valid) {
           return reply.status(409).send(packetAuditClientError(auditVerdict));
         }
         precheckPacketVersion = auditVerdict.audit.packet_version;
+        precheckPacketQuestions = packetQuestions;
+        precheckSensitiveProfile = sensitiveProfile;
         const verdict = await refuseDuplicateApplication(precheckRow, precheckReview, userId, fastify.log);
         if (verdict.kind === 'duplicate') return reply.status(409).send(duplicateApplicationResponse(verdict));
         const resumeIssues = await preSendResumeVerificationIssues(
@@ -1135,6 +1255,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const consentRow = consent[0];
         const disposition = canStartExtensionSubmission(current, parsed.data.authorization, consentRow?.automatic_submission_enabled === true);
         if (disposition !== 'start') return { kind: disposition, row, current };
+        if (!precheckPacketQuestions || !precheckSensitiveProfile || !precheckPacketVersion) {
+          return { kind: 'changed' as const };
+        }
         // The packet's PDF was frozen when it was built, so this is the last moment anything can
         // notice that the education block it prints no longer matches the profile. Checked BEFORE
         // the daily cap because drift is the actionable failure of the two: being told to fix a
@@ -1143,22 +1266,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           .from(profiles).where(eq(profiles.user_id, userId)).limit(1);
         const educationIssues = packetEducationDrift(row.spec, profileRows[0]?.parsed_json);
         if (educationIssues.length > 0) return { kind: 'education_drift' as const, issues: educationIssues };
-        const sensitiveProfile = await loadSensitiveQuestionProfile(userId);
         const packetCountry = postingCountryFromJobContext(row.job_context);
         const packetCountryCode = postingCountryCodeFromJobContext(row.job_context);
-        // Same context every live fill resolves against; see applicationContextForQuestionResolution.
-        const refreshedQuestions = refreshKnownQuestionAnswers(
-          current.questions,
-          sensitiveProfile,
-          applicationContextForQuestionResolution(row, current),
-          current.questions_reviewed_at,
+        /* Carry the exact question snapshot that passed the acknowledged-audit gate above. The row
+         * and job context are byte-checked against that precheck before this point. Re-resolving in
+         * the transaction used a second profile read and a second clock instant, then only refused
+         * Q2 != Q1 when a modern client supplied handoff_version. A legacy client could therefore
+         * send Q2 under Q1's packet version. The exact-CAS makes the already-verified snapshot the
+         * only honest input here, for clients with and without a handoff version. */
+        const refreshedQuestions = precheckPacketQuestions;
+        const sensitive = sensitiveQuestionFor(
+          refreshedQuestions,
+          precheckSensitiveProfile,
+          current.jd_text,
           packetCountry,
           packetCountryCode,
         );
-        if (parsed.data.handoff_version && !isDeepStrictEqual(refreshedQuestions, current.questions)) {
-          return { kind: 'changed' as const };
-        }
-        const sensitive = sensitiveQuestionFor(refreshedQuestions, sensitiveProfile, current.jd_text, packetCountry, packetCountryCode);
         if (sensitive) return { kind: 'sensitive_question' as const, question: sensitive.question };
         /* THE FIFTH SEND SITE, and the one blankRequiredQuestionLabels' own list did not name.
          *
@@ -1257,7 +1380,10 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'This extension submission is no longer active' });
       }
       const outcomeAudit = await currentAcknowledgedPacketAudit(row, {
-        questions: await resolvedPacketAuditQuestions(row, current),
+        /* The extension may already have pressed Submit. Verify the exact snapshot captured by the
+         * claim, not a new profile or clock reading that could change after the employer received
+         * it and prevent Litos from recording the receipt. */
+        questions: current.questions,
       });
       if (!outcomeAudit.valid || current.submission_packet_version !== outcomeAudit.audit.packet_version) {
         // packetAuditClientError, never the raw verdict: a failed verdict's reason can be a
@@ -1920,6 +2046,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * here disagree with the packet the fill produces for no reason the applicant caused. See
        * applicationContextForQuestionResolution's own comment for the mechanism. */
       const submitResolutionCurrent = { ...current, jd_text: applicationContextForQuestionResolution(row, current) };
+      const submitAsOf = new Date();
       const { questions: normalizedSubmittedQuestions, questionsReviewedAt: submittedReviewedAt } =
         resolveSubmittedApplicationAnswers({
           current: submitResolutionCurrent,
@@ -1927,7 +2054,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           profile: sensitiveProfile,
           postingCountry: postingCountryFromJobContext(row.job_context),
           postingCountryCode: postingCountryCodeFromJobContext(row.job_context),
+          asOf: submitAsOf,
         });
+      const canonicalSubmittedQuestions = resolvePacketAuditQuestionFixpoint(
+        { ...current, questions: normalizedSubmittedQuestions, questions_reviewed_at: submittedReviewedAt },
+        sensitiveProfile,
+        submitResolutionCurrent.jd_text,
+        postingCountryFromJobContext(row.job_context),
+        postingCountryCodeFromJobContext(row.job_context),
+        submitAsOf,
+      );
       /* THE REQUIRED-ANSWER GATE, ON THE SEND AND NOT ON THE RUN.
        *
        * This route has two outcomes and they need opposite treatment. On a supported portal it
@@ -1946,7 +2082,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * /submission/approve, and clickFinalSubmit's read of the live form - and those see the
        * questions the run discovered rather than this pre-run snapshot of them. */
       const sendsWithoutAnotherRun = Boolean(current.portal_url) && !isPortalSupported(current.portal_url!);
-      const blankRequired = blankRequiredQuestionLabels(normalizedSubmittedQuestions);
+      const blankRequired = blankRequiredQuestionLabels(canonicalSubmittedQuestions);
       if (sendsWithoutAnotherRun && blankRequired.length > 0) {
         return reply.status(422).send({
           error: 'Answer every required question before submitting.',
@@ -1970,7 +2106,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         });
       }
       const sensitive = sensitiveQuestionFor(
-        normalizedSubmittedQuestions, sensitiveProfile, current.jd_text,
+        canonicalSubmittedQuestions, sensitiveProfile, current.jd_text,
         postingCountryFromJobContext(row.job_context),
         postingCountryCodeFromJobContext(row.job_context),
       );
@@ -1984,7 +2120,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(422).send({ error: `Sensitive question requires your attention: ${sensitive.question.slice(0, 120)}` });
       }
       const submitAudit = await currentAcknowledgedPacketAudit(row, {
-        questions: normalizedSubmittedQuestions,
+        questions: canonicalSubmittedQuestions,
         restoreExpiredResume: 'authorizing_send',
       });
       if (!submitAudit.valid) {
@@ -2004,7 +2140,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * and failing her submission over it costs her the application. */
       void rememberReusableAnswers(
         request.jwtPayload!.userId,
-        normalizedSubmittedQuestions.map((question) => ({ question: question.question, answer: question.answer })),
+        canonicalSubmittedQuestions.map((question) => ({ question: question.question, answer: question.answer })),
         { company: applicationCompany(row), jobId: applicationJobId(row) },
       ).catch((error: unknown) => {
         fastify.log.warn({ error, applicationId: row.id }, 'could not remember the answers that carry to other postings');
@@ -2015,7 +2151,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // portal_supported check is helpful UI, not an enforcement point.
       if (current.portal_url && !isPortalSupported(current.portal_url)) {
         const authorizedAt = new Date().toISOString();
-        const base = freshSubmitRequestReview(current, normalizedSubmittedQuestions, submittedReviewedAt);
+        const base = freshSubmitRequestReview(current, canonicalSubmittedQuestions, submittedReviewedAt);
         const pending: ApplicationReviewState = {
           ...base,
           status: 'submitting',
@@ -2043,11 +2179,28 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const claimedRow = claimed[0];
         let sent: { messageId: string; recipient: string };
         try {
-          sent = await sendUnsupportedPortalApplicationEmail({
+          const packet = await buildPacket(claimedRow, false, canonicalSubmittedQuestions);
+          const preparedEmail = prepareUnsupportedPortalApplicationEmail({
             application: claimedRow,
             review: pending,
-            packet: await buildPacket(claimedRow),
+            packet,
           });
+          const envelope = employerDeliveryEnvelope({
+            channel: 'unsupported_email',
+            destinationUrl: preparedEmail.recipient,
+            portalFamily: 'unsupported',
+            coverLetterSupported: pending.cover_letter_supported,
+            transcriptSupported: pending.transcript_supported,
+            email: preparedEmail.message,
+          });
+          sent = await transportVerifiedBuiltPacket(
+            packet,
+            submitAudit.audit,
+            canonicalSubmittedQuestions,
+            () => sendPreparedUnsupportedPortalApplicationEmail(preparedEmail),
+            'full',
+            envelope,
+          );
         } catch (error) {
           request.log.warn({ error, applicationId: row.id }, 'Unsupported portal email fallback failed');
           const failedAt = new Date().toISOString();
@@ -2124,7 +2277,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           code: 'PORTAL_RUNNER_NOT_CONFIGURED',
         });
       }
-      const next = freshSubmitRequestReview(current, normalizedSubmittedQuestions, submittedReviewedAt);
+      const next = freshSubmitRequestReview(current, canonicalSubmittedQuestions, submittedReviewedAt);
       const claimed = await db.update(generated_resumes)
         .set({ spec: reviewSpec(next) })
         .where(and(
@@ -2186,20 +2339,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         // Same context every live fill resolves against; see applicationContextForQuestionResolution.
         // What this route displays must agree with what a send will actually compute, or the client's
         // round trip back through submit-request re-diverges from the packet it just showed her.
-        questions: refreshKnownQuestionAnswers(
-          review.questions,
+        questions: resolvePacketAuditQuestionFixpoint(
+          review,
           profile,
           applicationContextForQuestionResolution(row, review),
-          review.questions_reviewed_at,
           postingCountryFromJobContext(row.job_context),
           postingCountryCodeFromJobContext(row.job_context),
+          new Date(),
         ),
       };
       let handoff_url: string | undefined;
       let handoff_packet_valid = true;
       if ((review.status === 'filling' || review.status === 'needs_attention') && review.browser_session_id) {
         const audit = await currentAcknowledgedPacketAudit(row, {
-          questions: await resolvedPacketAuditQuestions(row, review),
+          // The response and this verdict must describe one snapshot. Re-resolving here could
+          // validate Q2 while the response below displayed Q1 from the profile read above.
+          questions: review.questions,
         });
         handoff_packet_valid = audit.valid;
         if (audit.valid) {
@@ -2239,7 +2394,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'This application is not waiting on you' });
       }
       const handoffAudit = await currentAcknowledgedPacketAudit(row, {
-        questions: await resolvedPacketAuditQuestions(row, current),
+        // This route can observe a receipt from a form already submitted in the retained session.
+        // Bind that receipt to the stored prepared snapshot without a post-send resolver read.
+        questions: current.questions,
       });
       if (!handoffAudit.valid) {
         return reply.status(409).send(packetAuditClientError(handoffAudit));
@@ -2505,13 +2662,13 @@ export async function applicationRoutes(fastify: FastifyInstance) {
        * acknowledged, with nothing the applicant did causing it. */
       const approvalReview: ApplicationReviewState = {
         ...current,
-        questions: refreshKnownQuestionAnswers(
-          current.questions,
+        questions: resolvePacketAuditQuestionFixpoint(
+          current,
           sensitiveProfile,
           applicationContextForQuestionResolution(row, current),
-          current.questions_reviewed_at,
           postingCountryFromJobContext(row.job_context),
           postingCountryCodeFromJobContext(row.job_context),
+          new Date(),
         ),
       };
       const approvalIssues: string[] = [];

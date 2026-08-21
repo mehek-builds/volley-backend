@@ -146,6 +146,13 @@ test('managed verification searches once and returns actions without exposing th
   assert.equal(result.status, 'ready');
   if (result.status === 'ready') {
     assert.equal(result.provider, 'gmail');
-    assert.equal(result.actions[0]?.value, 'HJJ53KPD');
+    assert.deepEqual(result.actions[0], {
+      type: 'requireCapability',
+      value: 'exact-page-url-v1',
+      optional: false,
+      expectedPageUrl: 'https://job-boards.greenhouse.io/verify/abc',
+    });
+    assert.equal(result.actions[1]?.value, 'HJJ53KPD');
+    assert.equal(result.actions.at(-1)?.expectedPageUrl, 'https://job-boards.greenhouse.io/verify/abc');
   }
 });

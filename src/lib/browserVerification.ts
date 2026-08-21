@@ -1,5 +1,5 @@
 import type { Locator, Page } from 'playwright-core';
-import { MANAGED_SUBMIT_CHOOSER_POLICY, type ManagedBrowserAction, type ManagedBrowserResult } from './browserbase';
+import { managedActionsWithExactPageUrl, MANAGED_SUBMIT_CHOOSER_POLICY, type ManagedBrowserAction, type ManagedBrowserResult } from './browserbase';
 import { findComposioVerificationCode, type VerificationCodeMatch } from './emailVerification';
 
 const OTP_SELECTORS = [
@@ -105,7 +105,7 @@ export function managedResultNeedsEmailVerification(result: ManagedBrowserResult
   ].join('\n'));
 }
 
-export function buildManagedVerificationActions(code: string): ManagedBrowserAction[] {
+export function buildManagedVerificationActions(code: string, expectedPageUrl?: string): ManagedBrowserAction[] {
   const actions: ManagedBrowserAction[] = [{
     type: 'fill',
     selector: MANAGED_VERIFICATION_SINGLE_SELECTOR,
@@ -132,7 +132,7 @@ export function buildManagedVerificationActions(code: string): ManagedBrowserAct
     submitKind: 'verification',
     chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
   });
-  return actions;
+  return expectedPageUrl ? managedActionsWithExactPageUrl(actions, expectedPageUrl) : actions;
 }
 
 export async function prepareManagedEmailVerification(options: {
@@ -172,7 +172,12 @@ export async function prepareManagedEmailVerification(options: {
    * below is the generic ten-action fallback for a caller that has no packet to derive from; see
    * securityCodeContinuationActions. Neither one may be built from a code that came from anywhere
    * other than a mailbox read inside the run that raised the challenge. */
-  return { status: 'ready', provider: match.provider, code: match.code, actions: buildManagedVerificationActions(match.code) };
+  return {
+    status: 'ready',
+    provider: match.provider,
+    code: match.code,
+    actions: buildManagedVerificationActions(match.code, options.result.url),
+  };
 }
 
 export async function completeEmailVerificationIfPresent(options: {

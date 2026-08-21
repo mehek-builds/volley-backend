@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
@@ -23,6 +24,7 @@ import {
   reconcileManagedProviderBlockers,
   readMostRecentRole,
   normalizedPacketAuditQuestions,
+  resolvePacketAuditQuestionFixpoint,
   resolveApplicantClosedChoiceFallbacks,
   resumeBytesForPacket,
   sanitizeEeoPrefs,
@@ -35,10 +37,14 @@ import {
   filterAutomaticallyResolvedReferralAttention,
   managedSearchFillableWindowedFailureIds,
   truthfulOtherChoice,
+  employerPageUrlIssue,
+  transportVerifiedBuiltPacket,
+  verifiedBuiltPacketIssues,
   managedActionDiagnosticsForLog,
 } from './submissionRunner';
+import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
-import { packetAuditSha256, packetVisibleQuestions } from '../lib/packetAudit';
+import { packetAuditSha256, packetVisibleQuestions, type PacketAudit } from '../lib/packetAudit';
 import { savedAnswerKey } from '../lib/answerReuse';
 import {
   refreshKnownQuestionAnswers,
@@ -46,8 +52,9 @@ import {
   type ApplicationProfileLike,
 } from '../lib/questionDiscovery';
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
-import type { ApplicationReviewState } from '../lib/applicationReview';
+import type { ApplicationReviewQuestion, ApplicationReviewState } from '../lib/applicationReview';
 import type { SubmissionPacket } from '../lib/portalSubmission';
+import { createEmployerDeliveryBindings, employerDeliveryEnvelope } from '../lib/employerDeliveryIdentity';
 import { describeRequiredBlocker } from '../lib/fieldLabel';
 import {
   attachManagedFieldOptions,
@@ -582,6 +589,53 @@ test('Recruitee fixed phone discovery cannot mint or retain a custom question', 
   assert.deepEqual(result.attentionReasons, []);
 });
 
+test('CBS Recruitee salutation becomes one required blank question with the employer options', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'Lead SAP S/4HANA consulting projects.',
+    role: 'Manager SAP S/4HANA Service',
+    portal_url: 'https://cbsconsulting.recruitee.com/o/manager-sap-s4hana-service-mwd/c/new',
+    ats_name: 'recruitee',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'Allgemeine Anrede *',
+      selector: 'button[id="input-candidate.salutation-2"]',
+      durableSelector: 'button[id="input-candidate.salutation-2"]',
+      inputType: 'combobox',
+      maxLength: null,
+      options: ['Herr', 'Frau', 'Kein/e'],
+      required: true,
+    }],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    {},
+    true,
+    'recruitee',
+  );
+
+  assert.equal(result.questions.length, 1);
+  assert.deepEqual(result.questions[0] && {
+    question: result.questions[0].question,
+    answer: result.questions[0].answer,
+    required: result.questions[0].required,
+    portal_selector: result.questions[0].portal_selector,
+    portal_input_type: result.questions[0].portal_input_type,
+    options: result.questions[0].options,
+  }, {
+    question: 'Allgemeine Anrede',
+    answer: '',
+    required: true,
+    portal_selector: 'button[id="input-candidate.salutation-2"]',
+    portal_input_type: 'combobox',
+    options: ['Herr', 'Frau', 'Kein/e'],
+  });
+});
+
 test('CBS legacy Recruitee phone produces one normalized audit and acknowledgement binding', async () => {
   const custom = {
     id: 'custom',
@@ -626,11 +680,13 @@ test('CBS legacy Recruitee phone produces one normalized audit and acknowledgeme
     job_context: { company: 'CBS Consulting', role: 'Manager SAP S/4HANA Service' },
   } as ResumeRow;
   const profile = { phone: '+971 50 123 4567' } as ApplicationProfileLike;
-  const resolvePacketQuestions = (current: ApplicationReviewState) => refreshKnownQuestionAnswers(
-    normalizedPacketAuditQuestions(current),
+  const resolvePacketQuestions = (current: ApplicationReviewState) => resolvePacketAuditQuestionFixpoint(
+    current,
     profile,
     applicationContextForQuestionResolution(row, current),
-    current.questions_reviewed_at,
+    undefined,
+    undefined,
+    new Date('2026-08-21T10:00:00.000Z'),
   );
 
   const auditQuestions = resolvePacketQuestions(review);
@@ -647,6 +703,290 @@ test('CBS legacy Recruitee phone produces one normalized audit and acknowledgeme
     acknowledgementBinding,
     'resolving the persisted audit set again for acknowledgement must be a packet-visible fixpoint',
   );
+});
+
+test('audit, acknowledgement, submit-request, and prepare share one production-shaped packet snapshot', () => {
+  const asOf = new Date('2026-08-21T10:00:00.000Z');
+  const reviewedAt = asOf.toISOString();
+  const row = {
+    user_id: 'user-1',
+    job_context: { company: 'CBS Consulting', role: 'Manager SAP S/4HANA Service' },
+  } as ResumeRow;
+  const profile = {
+    phone: '+971 50 123 4567',
+    date_of_birth: '2005-08-21',
+  } as ApplicationProfileLike;
+  const review: ApplicationReviewState = {
+    jd_text: 'Lead consulting projects.',
+    role: 'Manager',
+    portal_url: 'https://example.recruitee.com/o/manager/c/new',
+    ats_name: 'recruitee',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [
+      {
+        id: 'managed-phone',
+        question: 'Meine Daten',
+        answer: '+971 50 123 4567',
+        kind: 'required',
+        required: true,
+        portal_selector: '#input-candidate\\.phone-undefined',
+      },
+      {
+        id: 'age',
+        question: 'At the time of application, are you 18+ years of age?',
+        answer: '',
+        kind: 'required',
+        required: true,
+      },
+    ],
+    skipped_reasons: [],
+    updated_at: reviewedAt,
+  };
+  const context = applicationContextForQuestionResolution(row, review);
+  const canonical = (current: ApplicationReviewState) => resolvePacketAuditQuestionFixpoint(
+    current,
+    profile,
+    context,
+    undefined,
+    undefined,
+    asOf,
+  );
+
+  // Request 1 creates the audit and atomically persists exactly these questions.
+  const auditQuestions = canonical(review);
+  const persistedAuditReview = { ...review, questions: auditQuestions };
+
+  // Request 2 acknowledges the stored snapshot raw. No resolver or clock read is involved.
+  const acknowledgementQuestions = persistedAuditReview.questions;
+
+  // Request 3 merges the client's exact audited body, converges it, verifies it, and persists it.
+  const submitted = resolveSubmittedApplicationAnswers({
+    current: { ...persistedAuditReview, jd_text: context },
+    submitted: acknowledgementQuestions,
+    profile,
+    asOf,
+    now: () => reviewedAt,
+  });
+  const submitQuestions = resolvePacketAuditQuestionFixpoint(
+    { ...persistedAuditReview, questions: submitted.questions, questions_reviewed_at: submitted.questionsReviewedAt },
+    profile,
+    context,
+    undefined,
+    undefined,
+    asOf,
+  );
+  const persistedSubmitReview = {
+    ...persistedAuditReview,
+    questions: submitQuestions,
+    questions_reviewed_at: submitted.questionsReviewedAt,
+  };
+
+  // Request 4 prepares from the persisted submit snapshot through the same fixpoint.
+  const prepareQuestions = canonical(persistedSubmitReview);
+  const binding = (questions: ApplicationReviewQuestion[]) => packetAuditSha256(packetVisibleQuestions(questions));
+
+  assert.equal(auditQuestions.length, 1, 'the portal-owned Recruitee phone control is excluded once');
+  assert.equal(auditQuestions[0].answer, 'Yes', 'the frozen profile-backed answer is the packet value');
+  assert.deepEqual(acknowledgementQuestions, auditQuestions);
+  assert.deepEqual(submitQuestions, auditQuestions);
+  assert.deepEqual(prepareQuestions, auditQuestions);
+  assert.equal(binding(acknowledgementQuestions), binding(auditQuestions));
+  assert.equal(binding(submitQuestions), binding(auditQuestions));
+  assert.equal(binding(prepareQuestions), binding(auditQuestions));
+});
+
+test('one packet construction freezes age resolution at one asOf instant', () => {
+  const review: ApplicationReviewState = {
+    jd_text: 'Intern role.',
+    role: 'Intern',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'age',
+      question: 'At the time of application, are you 18+ years of age?',
+      answer: '',
+      kind: 'required',
+      required: true,
+    }],
+    skipped_reasons: [],
+    updated_at: '2026-08-21T10:00:00.000Z',
+  };
+  const profile = { date_of_birth: '2008-08-22' } as ApplicationProfileLike;
+  const beforeBirthday = resolvePacketAuditQuestionFixpoint(
+    review, profile, review.jd_text, undefined, undefined, new Date('2026-08-21T23:59:59.000Z'),
+  );
+  const repeatedAtSameInstant = resolvePacketAuditQuestionFixpoint(
+    { ...review, questions: beforeBirthday },
+    profile,
+    review.jd_text,
+    undefined,
+    undefined,
+    new Date('2026-08-21T23:59:59.000Z'),
+  );
+  const afterBirthday = resolvePacketAuditQuestionFixpoint(
+    review, profile, review.jd_text, undefined, undefined, new Date('2026-08-22T00:00:00.000Z'),
+  );
+
+  assert.equal(beforeBirthday[0].answer, 'No');
+  assert.deepEqual(repeatedAtSameInstant, beforeBirthday);
+  assert.equal(afterBirthday[0].answer, 'Yes', 'a later request can detect real profile-clock drift');
+});
+
+test('the real resolver needs a second pass to settle legacy option provenance', () => {
+  const asOf = new Date('2026-08-21T10:00:00.000Z');
+  const reviewedAt = asOf.toISOString();
+  const legacy: ApplicationReviewQuestion[] = [{
+    id: 'graduation',
+    question: 'Expected graduation date',
+    answer: 'May 2028',
+    kind: 'required',
+    required: true,
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+    answer_option_source: 'May 2028',
+  }];
+  const profile = { grad_date: 'May 2028', grad_year: 2028 } as ApplicationProfileLike;
+  const once = refreshKnownQuestionAnswers(legacy, profile, undefined, reviewedAt, undefined, undefined, asOf);
+  const twice = refreshKnownQuestionAnswers(once, profile, undefined, reviewedAt, undefined, undefined, asOf);
+  assert.notDeepEqual(once, legacy, 'the first real pass removes provenance that no longer describes a snap');
+  assert.deepEqual(twice, once, 'the second real pass proves the full question record is stable');
+
+  const review = {
+    jd_text: '',
+    role: 'Intern',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: legacy,
+    questions_reviewed_at: reviewedAt,
+    skipped_reasons: [],
+    updated_at: reviewedAt,
+  } as ApplicationReviewState;
+  assert.deepEqual(
+    resolvePacketAuditQuestionFixpoint(review, profile, '', undefined, undefined, asOf),
+    twice,
+  );
+});
+
+test('a post-gate profile rebuild cannot reach transport, while the exact audited packet does', async () => {
+  const resume = Buffer.from('%PDF-1.4\nverified packet\n%%EOF\n');
+  const questions: ApplicationReviewQuestion[] = [{
+    id: 'phone',
+    question: 'Phone number',
+    answer: '+971 50 111 1111',
+    kind: 'required',
+    required: true,
+  }];
+  const packetForPhone = (phone: string): SubmissionPacket => ({
+    fullName: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    phone,
+    jdText: 'Consulting role',
+    resume,
+    resumeName: 'resume.pdf',
+    applicantSnapshot: {
+      profile: {
+        full_name: 'Mehek Mandal',
+        email: 'mehek@example.com',
+        experience: [],
+        skills: [],
+        school: 'USC',
+        grad_year: 2028,
+      },
+      application_profile: { phone },
+    },
+    questions: [{
+      question: 'Phone number',
+      answer: '+971 50 111 1111',
+      portalSelector: undefined,
+      portalInputType: undefined,
+      atsApiField: undefined,
+      answerOptionSource: undefined,
+      answerSource: undefined,
+      required: true,
+    }],
+  });
+  const approvedPacket = packetForPhone('+971 50 111 1111');
+  const audit = {
+    identities: { resume_email: 'mehek@example.com', applicant_email: 'mehek@example.com' },
+    bindings: {
+      applicantSnapshotSha256: packetAuditSha256(approvedPacket.applicantSnapshot),
+      jdSha256: packetAuditSha256(approvedPacket.jdText),
+      pdf: {
+        sha256: createHash('sha256').update(resume).digest('hex'),
+        sizeBytes: resume.byteLength,
+      },
+      employerDelivery: createEmployerDeliveryBindings(approvedPacket, {}, {
+        mode: 'full',
+        envelope: employerDeliveryEnvelope({
+          channel: 'controlled_browser',
+          destinationUrl: 'https://example.com/apply',
+          portalFamily: 'controlled_test',
+        }),
+      }),
+    },
+  } as PacketAudit;
+
+  let profileRead = 0;
+  const rebuildFromProfile = async () => {
+    profileRead += 1;
+    return profileRead === 1 ? approvedPacket : packetForPhone('+971 50 222 2222');
+  };
+  await rebuildFromProfile(); // the packet state the acknowledgement bound
+  const rebuiltAfterGate = await rebuildFromProfile();
+  let transports = 0;
+  await assert.rejects(
+    () => transportVerifiedBuiltPacket(rebuiltAfterGate, audit, questions, async () => {
+      transports += 1;
+    }, 'full', employerDeliveryEnvelope({
+      channel: 'controlled_browser',
+      destinationUrl: 'https://example.com/apply',
+      portalFamily: 'controlled_test',
+    })),
+    /applicant snapshot changed after packet approval/,
+  );
+  assert.equal(transports, 0, 'profile drift after the gate must stop before an employer transport');
+  const envelope = employerDeliveryEnvelope({
+    channel: 'controlled_browser',
+    destinationUrl: 'https://example.com/apply',
+    portalFamily: 'controlled_test',
+  });
+  assert.deepEqual(verifiedBuiltPacketIssues(approvedPacket, audit, questions, 'full', envelope), []);
+
+  const sent = await transportVerifiedBuiltPacket(approvedPacket, audit, questions, async (exactPacket) => {
+    transports += 1;
+    return exactPacket;
+  }, 'full', envelope);
+  assert.strictEqual(sent, approvedPacket, 'the transport receives the exact object that was verified');
+  assert.equal(transports, 1);
+});
+
+test('an observed employer redirect cannot pass an approved destination check', () => {
+  assert.equal(
+    employerPageUrlIssue('https://boards.example.com/jobs/1#apply', 'https://boards.example.com/jobs/1'),
+    null,
+  );
+  assert.match(
+    employerPageUrlIssue('https://boards.example.com/jobs/1', 'https://other.example.com/jobs/1') ?? '',
+    /redirected away/,
+  );
+  assert.match(employerPageUrlIssue('https://boards.example.com/jobs/1', undefined) ?? '', /valid approved destination/);
+});
+
+test('every managed applicant-data run binds the exact live posting URL', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const start = source.indexOf('async function prepareManaged(');
+  const end = source.indexOf('\nasync function prepare(', start);
+  const prepare = source.slice(start, end);
+  assert.match(prepare, /managedActionsWithExactPageUrl\(buildManagedDiscoveryActions\(portal, packet\), applicationUrl\)/,
+    'discovery fills fixed applicant fields and must be URL-bound before the run starts');
+  assert.match(prepare, /managedActionsWithExactPageUrl\(fillActions, applicationUrl\)/,
+    'the main prepare fill and uploads must be URL-bound before the run starts');
+  const submitStart = source.indexOf('async function submit(row: ResumeRow');
+  const submitEnd = source.indexOf('\n/**\n \* What a failed run tells the applicant', submitStart);
+  const submit = source.slice(submitStart, submitEnd);
+  assert.match(submit, /securityCodeContinuationActions\(initialActions, prepared\.code, result\.url\)/,
+    'verification continuation must bind the exact challenge page returned by the authorized submit');
 });
 
 test('a malformed first entry never throws, because it would break every other portal too', () => {
@@ -1467,7 +1807,7 @@ test('managed prepare and final or security-code submit rebuild controlled packe
   const prepareBody = source.slice(prepareStart, prepareEnd);
   assert.match(
     prepareBody,
-    /omitCoverLetter\(await buildPacket\(row, packetUsesControlledResumeFixture\(portal\)\)\)/,
+    /packetForEmployerDelivery\([\s\S]{0,180}buildPacket\([\s\S]{0,120}verifiedQuestions[\s\S]{0,120}current,[\s\S]{0,40}'browser'/,
   );
 
   const submitStart = source.indexOf('async function submit(');
@@ -1479,11 +1819,11 @@ test('managed prepare and final or security-code submit rebuild controlled packe
   const managedBody = submitBody.slice(managedStart, directStart);
   assert.match(
     managedBody,
-    /const builtPacket = await buildPacket\(row, packetUsesControlledResumeFixture\(portal\)\)/,
+    /const builtPacket = await buildPacket\(\s*row,\s*packetUsesControlledResumeFixture\(portal\),\s*packetAudit\.questions,\s*\)/,
   );
   assert.match(
     managedBody,
-    /claimedReview\.cover_letter_supported === true \? builtPacket : omitCoverLetter\(builtPacket\)/,
+    /packetForEmployerDelivery\(builtPacket, claimedReview, 'browser'\)/,
     'fixture selection must not change the reviewed cover-letter attachment decision',
   );
 
@@ -3477,11 +3817,13 @@ test('buildPacket refreshes stored answers and carries the option derivation ont
   const buildEnd = source.indexOf('\nexport function readMostRecentRole', buildStart);
   assert.ok(buildStart > 0 && buildEnd > buildStart);
   const buildBody = source.slice(buildStart, buildEnd);
-  assert.match(buildBody, /const refreshedQuestions = refreshKnownQuestionAnswers\(/,
-    'the submit run resolves stored answers again before filling');
+  assert.match(buildBody, /const refreshedQuestions = verifiedQuestionSnapshot[\s\S]*?: resolvePacketAuditQuestionFixpoint\(/,
+    'prepare converges stored answers, while final send can carry the exact already-verified snapshot');
+  assert.match(buildBody, /questions: submissionPacketQuestions\(refreshedQuestions\)/,
+    'both branches must use one question-to-packet projection');
   assert.match(
-    buildBody,
-    /questions: refreshedQuestions\.map\(\(item\) => \(\{[\s\S]{0,600}?answerOptionSource: item\.answer_option_source,/,
+    source,
+    /function submissionPacketQuestions\([\s\S]{0,700}?answerOptionSource: item\.answer_option_source,/,
     'the derivation has to reach the packet, or the fill cannot tell a read option from a profile value',
   );
 });
@@ -3838,22 +4180,66 @@ test('prepare and submit verify the packet against the resolved questions, via o
   // path.join(__dirname, ...), not new URL(import.meta.url): this tree compiles as commonjs and
   // import.meta is a TS1343 under it. Same rule as the documentReuse/coverLetterAttachment pins.
   const source = readFileSync(join(__dirname, 'submissionRunner.ts'), 'utf8');
-  const helper = source.indexOf('async function resolvedPacketAuditQuestions');
-  assert.notEqual(helper, -1, 'the shared resolver helper must exist');
-  const helperBody = source.slice(helper, source.indexOf('\n}', helper));
-  assert.match(helperBody, /refreshKnownQuestionAnswers\(/);
+  const fixpoint = source.indexOf('export function resolvePacketAuditQuestionFixpoint');
+  const helper = source.indexOf('export async function resolvedPacketAuditQuestions');
+  assert.notEqual(fixpoint, -1, 'the shared fixpoint constructor must exist');
+  assert.notEqual(helper, -1, 'the shared profile-loading helper must exist');
+  const fixpointBody = source.slice(fixpoint, helper);
+  const helperBody = source.slice(helper, source.indexOf('async function verifiedPacketForRun', helper));
+  assert.match(fixpointBody, /packetQuestionFixpoint\(/);
+  assert.match(fixpointBody, /refreshKnownQuestionAnswers\(/);
+  assert.match(helperBody, /const asOf = new Date\(\)/);
+  assert.match(helperBody, /resolvePacketAuditQuestionFixpoint\(/);
   assert.match(helperBody, /applicationContextForQuestionResolution\(row, review\)/);
   assert.match(helperBody, /postingCountryFromJobContext\(row\.job_context\)/);
   const calls = source.match(/verifiedPacketForRun\(row, current, current(?:Acknowledged)?PacketAudit\)/g) ?? [];
-  assert.equal(calls.length, 2, 'both prepare() and submit() must verify through the two-reading helper');
-  const twoReadings = source.slice(source.indexOf('async function verifiedPacketForRun'), source.indexOf('async function prepare('));
-  assert.match(twoReadings, /questions: await resolvedPacketAuditQuestions\(row, current\)/,
-    'the resolved reading is tried first');
-  assert.match(twoReadings, /questions: current\.questions/,
-    'the raw stored rows - the set the gate verified and persisted - are the second reading');
+  assert.equal(calls.length, 2, 'both prepare() and submit() must verify through the one-reading helper');
+  const oneReading = source.slice(source.indexOf('async function verifiedPacketForRun'), source.indexOf('async function prepare('));
+  assert.match(oneReading, /const questions = await resolvedPacketAuditQuestions\(row, current\)/,
+    'both runner gates use the converged reading');
+  assert.match(oneReading, /const verdict = await verify\(row, \{\s*questions,/,
+    'the exact converged reading must reach the verifier');
+  assert.match(oneReading, /return \{ \.\.\.verdict, questions \};/,
+    'the verified snapshot must be carried past the gate to the send path');
+  assert.doesNotMatch(oneReading, /questions: current\.questions/,
+    'the former raw fallback could hide real profile drift and must not return');
   assert.doesNotMatch(source,
     /current(?:Acknowledged)?PacketAudit\(row, \{ restoreExpiredResume: 'authorizing_send' \}\)/,
     'no runner verifier may fall back to hashing the raw stored rows');
+});
+
+test('every irreversible runner channel builds once, verifies, then sends that exact packet', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const submitStart = source.indexOf('async function submit(row: ResumeRow');
+  const submitEnd = source.indexOf('\n/**\n * What a failed run tells the applicant', submitStart);
+  const submitBody = source.slice(submitStart, submitEnd);
+  assert.match(submitBody, /submitControlled\(row, claimedReview, fastify, packetAudit\.audit, packetAudit\.questions\)/);
+  assert.match(submitBody, /submitViaAtsSubmissionChannel\([\s\S]{0,180}packetAudit\.audit,[\s\S]{0,80}packetAudit\.questions/);
+  const managedStart = submitBody.indexOf('if (isManagedStratusProvider())');
+  const directStart = submitBody.indexOf("if (!claimedReview.browser_session_id)", managedStart);
+  const managed = submitBody.slice(managedStart, directStart);
+  assert.ok(managed.indexOf("const packet = packetForEmployerDelivery(builtPacket, claimedReview, 'browser')") >= 0);
+  assert.ok(managed.indexOf("assertVerifiedBuiltPacket(packet, packetAudit.audit, packetAudit.questions, 'browser', envelope)")
+    < managed.indexOf('runManagedBrowser(applicationUrl, buildManagedCaptchaProbeActions()'),
+  'managed send must verify before its first employer request');
+  assert.match(managed, /buildManagedPortalActions\(portal, packet, true, applicationUrl\)/,
+    'managed submit must bind its exact posting URL into the remote atomic-click contract');
+  const direct = submitBody.slice(directStart);
+  assert.ok(direct.indexOf("const directPacket = packetForEmployerDelivery(directBuiltPacket, claimedReview, 'browser')") >= 0);
+  assert.ok(direct.indexOf('assertVerifiedBuiltPacket(') < direct.indexOf('getBrowserSession('),
+    'direct send must verify before it reconnects to the employer session');
+  const controlled = source.slice(source.indexOf('async function submitControlled('), source.indexOf('async function submitViaAtsSubmissionChannel('));
+  assert.match(controlled, /transportVerifiedBuiltPacket\([\s\S]{0,500}'full', envelope\)/,
+    'the controlled transport must name its audit-time delivery mode');
+  assert.match(controlled, /fillPortal\(page, 'controlled_test', exactPacket\);\s*assertEmployerPageUrl\(review\.portal_url!, page\.url\(\)\);\s*await clickFinalSubmit\(page\);/,
+    'controlled submit must recheck the exact posting URL immediately before its click');
+  assert.match(direct, /fillPortal\(page, directPortal, directPacket\);\s*assertEmployerPageUrl\(directEnvelope\.destinationUrl, page\.url\(\)\);\s*await clickFinalSubmit\(page\);/,
+    'direct submit must recheck the exact posting URL immediately before its click');
+  const ats = source.slice(source.indexOf('async function submitViaAtsSubmissionChannel('), source.indexOf('const SECURITY_CODE_CONTINUATION_TTL_SECONDS'));
+  const atsRefusal = ats.indexOf('ATS API delivery is withheld until Litos can verify and send one prebuilt request object');
+  assert.ok(atsRefusal >= 0,
+    'ATS must fail closed before any serializer or transport until one prepared request object can be verified and sent');
+  assert.doesNotMatch(ats, /tryAtsSubmissionChannel|transportVerifiedBuiltPacket|fetch\(/);
 });
 
 /* THE SAME CONTRACT, SWEPT ACROSS EVERY VERIFIER THE ROUTES OWN. The acknowledge route was the

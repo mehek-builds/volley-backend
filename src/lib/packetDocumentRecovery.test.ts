@@ -236,10 +236,9 @@ describe('the restore is wired at the packet-audit gate, not at buildPacket', ()
   test('the restore persists the file and re-issues the records bound to those bytes', () => {
     /* Generation binding and packet audit. Re-issuing one of the two leaves the packet in a
        half-state whose file is new and whose audit still describes the deleted one.
-       THE ACKNOWLEDGEMENT IS NOT ON THIS LIST ANY MORE, and the omission is the fix: a restore may
-       carry one the applicant already gave, and may never write one she did not. That is a
-       behaviour, not a line of source, and packetResumeRestoreAcknowledgement.test.ts drives the
-       real function to prove it - including against a real database. */
+       THE ACKNOWLEDGEMENT IS NOT ON THIS LIST ANY MORE, and the omission is the fix: ordinary
+       rerendered bytes require a fresh applicant acknowledgement. The behavioural tests drive the
+       real function and database write, including the exceptional byte-identical carry case. */
     assert.match(restore, /await write\(objectKey, bytes\)/);
     // The default writer is the blob store, so the seam a test injects changes nothing in prod.
     assert.match(restore, /put\(key, payload, \{ access: 'public', contentType: 'application\/pdf' \}\)/);
@@ -272,13 +271,13 @@ describe('the restore is wired at the packet-audit gate, not at buildPacket', ()
     // Both calls also hash the RESOLVED questions now - see resolvedPacketAuditQuestions - so the
     // pin follows the call shape rather than the raw-rows form it used to have.
     const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-    // Both send-path verifiers now route through verifiedPacketForRun, which names the authority
-    // on BOTH of its tries; see its comment for why there are two readings of one packet.
+    // Both send-path verifiers route through verifiedPacketForRun. The helper performs one stable
+    // reading per call, and each caller selects whether it needs an audit or an acknowledged audit.
     assert.match(runner, /verifiedPacketForRun\(row, current, currentPacketAudit\)/);
     assert.match(runner, /verifiedPacketForRun\(row, current, currentAcknowledgedPacketAudit\)/);
     const helper = runner.slice(runner.indexOf('async function verifiedPacketForRun'), runner.indexOf('async function prepare('));
-    assert.equal((helper.match(/restoreExpiredResume: 'authorizing_send'/g) ?? []).length, 2,
-      'both readings opt into the retention restore with the send authority');
+    assert.equal((helper.match(/restoreExpiredResume: 'authorizing_send'/g) ?? []).length, 1,
+      'the shared reading opts into the retention restore with the send authority');
   });
 
   test('the write is guarded on the old key, so two runners cannot both restore', () => {

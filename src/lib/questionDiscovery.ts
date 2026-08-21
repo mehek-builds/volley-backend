@@ -2173,6 +2173,7 @@ export function knownAnswerLookup(
   jdText: string | undefined,
   postingCountry?: JobCountry,
   postingCountryCode?: string,
+  asOf: Date = new Date(),
 ): (question: { question: string; answer?: string }) => string | undefined {
   return (question) => {
     const label = normalizeReviewQuestionLabel(question.question ?? '');
@@ -2196,6 +2197,7 @@ export function knownAnswerLookup(
       postingCountry,
       postingCountryCode,
       storedAsCandidate,
+      asOf,
     );
     return known && 'value' in known ? known.value : undefined;
   };
@@ -2208,6 +2210,7 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
   questionsReviewedAt?: string,
   postingCountry?: JobCountry,
   postingCountryCode?: string,
+  asOf: Date = new Date(),
 ): T[] {
   return questions.map((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
@@ -2244,7 +2247,7 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
      */
     const storedAsCandidate = question.answer.trim() ? [question.answer.trim()] : undefined;
     const known = label
-      ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry, postingCountryCode, storedAsCandidate)
+      ? resolveKnownAnswer(label, 'text', ap, jdText, postingCountry, postingCountryCode, storedAsCandidate, asOf)
       : null;
     const withProvenance = question as T & {
       answer_source?: unknown;
@@ -5536,18 +5539,22 @@ export function graduationDateAnswer(
   return canonicalGraduationDay(year, month);
 }
 
-function graduationEvidenceIsFuture(gradDate: string | undefined, gradYear: number | undefined): boolean {
+function graduationEvidenceIsFuture(
+  gradDate: string | undefined,
+  gradYear: number | undefined,
+  asOf: Date = new Date(),
+): boolean {
   const answer = graduationDateAnswer(gradDate, gradYear, 'date');
   if (!answer) return false;
   const time = Date.parse(answer);
   if (!Number.isFinite(time)) return false;
-  return time >= Date.now();
+  return time >= asOf.getTime();
 }
 
-function enrollmentConfirmedForGraduationDate(ap: ApplicationProfileLike): boolean {
+function enrollmentConfirmedForGraduationDate(ap: ApplicationProfileLike, asOf: Date = new Date()): boolean {
   if (ap.currently_enrolled === true) return true;
   if (ap.currently_enrolled === false) return false;
-  return graduationEvidenceIsFuture(ap.grad_date, ap.grad_year);
+  return graduationEvidenceIsFuture(ap.grad_date, ap.grad_year, asOf);
 }
 
 function graduationMonthAnswer(gradDate: string | undefined, gradYear: number | undefined): string | null {
@@ -5672,18 +5679,20 @@ function graduationSemesterAnswer(gradDate: string | undefined, gradYear: number
   return `${semester} ${match[1]}`;
 }
 
-function currentEnrollmentAnswer(ap: ApplicationProfileLike): { value: string } | { skipReason: string } | null {
-  if (ap.currently_enrolled === true || graduationEvidenceIsFuture(ap.grad_date, ap.grad_year)) return { value: 'Yes' };
+function currentEnrollmentAnswer(
+  ap: ApplicationProfileLike,
+  asOf: Date = new Date(),
+): { value: string } | { skipReason: string } | null {
+  if (ap.currently_enrolled === true || graduationEvidenceIsFuture(ap.grad_date, ap.grad_year, asOf)) return { value: 'Yes' };
   if (ap.currently_enrolled === false) return { value: 'No' };
   return { skipReason: 'current enrollment question left for you' };
 }
 
-function studyYearAnswer(ap: ApplicationProfileLike): string | null {
+function studyYearAnswer(ap: ApplicationProfileLike, asOf: Date = new Date()): string | null {
   if (!/\b(?:bachelor|b\.?s\.?|b\.?a\.?)\b/i.test(ap.degree ?? '')) return null;
   const gradYear = ap.grad_year && ap.grad_year > 0 ? ap.grad_year : Number(graduationYearAnswer(ap.grad_date, ap.grad_year));
-  if (!gradYear || !enrollmentConfirmedForGraduationDate(ap)) return null;
-  const now = new Date();
-  const academicStartYear = now.getUTCMonth() >= 7 ? now.getUTCFullYear() : now.getUTCFullYear() - 1;
+  if (!gradYear || !enrollmentConfirmedForGraduationDate(ap, asOf)) return null;
+  const academicStartYear = asOf.getUTCMonth() >= 7 ? asOf.getUTCFullYear() : asOf.getUTCFullYear() - 1;
   const yearsUntilGraduation = gradYear - academicStartYear;
   const undergradYear = 4 - yearsUntilGraduation + 1;
   if (undergradYear <= 0 || undergradYear > 4) return null;
@@ -5707,8 +5716,12 @@ function postingSeasonAnswer(label: string, jdText: string | undefined): { value
  * names is not the one she declared for. See lib/availabilityWindow.ts for why each of those is a
  * refusal rather than a best guess.
  */
-function scopedAvailabilityWindow(ap: ApplicationProfileLike, jdText: string | undefined) {
-  return availabilityWindowForPosting(ap, jdText, new Date());
+function scopedAvailabilityWindow(
+  ap: ApplicationProfileLike,
+  jdText: string | undefined,
+  asOf: Date = new Date(),
+) {
+  return availabilityWindowForPosting(ap, jdText, asOf);
 }
 
 function internshipJoinAnswer(
@@ -5716,13 +5729,14 @@ function internshipJoinAnswer(
   inputType: string,
   ap: ApplicationProfileLike,
   jdText: string | undefined,
+  asOf: Date = new Date(),
 ): { value: string } | { skipReason: string } | null {
   if (!INTERNSHIP_JOIN_QUESTION.test(label)) return null;
   /* "When are you able to join us as an intern?" is answered by the START of a window that is
    * provably about this posting's cycle, and by nothing else. availability_date still cannot answer
    * it: it has no expiry and no posting scope, so an exact stored date may describe a recruiting
    * cycle that ended, and replaying it would commit her to a season she never applied for. */
-  const scoped = scopedAvailabilityWindow(ap, jdText);
+  const scoped = scopedAvailabilityWindow(ap, jdText, asOf);
   if (scoped) return { value: formatWindowDate(scoped.start, inputType) };
   return { skipReason: `internship availability question left for you: "${label.slice(0, 60)}"` };
 }
@@ -5739,12 +5753,13 @@ function availabilityWindowAnswer(
   inputType: string,
   ap: ApplicationProfileLike,
   jdText: string | undefined,
+  asOf: Date = new Date(),
 ): { value: string } | { skipReason: string } | null {
   const asksRange = AVAILABILITY_WINDOW_QUESTION.test(label);
   const asksEnd = INTERNSHIP_END_QUESTION.test(label);
   if (!asksRange && !asksEnd) return null;
   if (AVAILABILITY_CADENCE_VOCAB.test(label)) return null;
-  const scoped = scopedAvailabilityWindow(ap, jdText);
+  const scoped = scopedAvailabilityWindow(ap, jdText, asOf);
   if (!scoped) {
     return { skipReason: `internship availability dates left for you: "${label.slice(0, 60)}"` };
   }
@@ -6677,6 +6692,35 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     var rect = el.getBoundingClientRect();
     return style.opacity === '0' || (rect.width <= 1 && rect.height <= 1);
   }
+  /* Exactly one authored label for this exact control, or no evidence.
+   *
+   * Recruitee renders a required closed choice as a button rather than a form element. Buttons have
+   * no labels collection, but the employer still binds the visible label with for=<button id>.
+   * querySelector used to take the first match, which would let malformed duplicate labels lend a
+   * required marker or a question name to an ambiguous control. One exact binding is useful; zero or
+   * more than one fails closed. */
+  function exactControlLabel(el) {
+    if (el.labels && el.labels.length === 1) return el.labels[0];
+    if ((el.labels && el.labels.length > 1) || !el.id) return null;
+    var labels = document.querySelectorAll('label[for="' + CSS.escape(el.id) + '"]');
+    return labels.length === 1 ? labels[0] : null;
+  }
+  /* One popup explicitly names this exact opener, inside the opener's own immediate question block.
+   *
+   * CBS Recruitee keeps its closed menu in the DOM as a sibling of the button and binds it through
+   * aria-labelledby="input-candidate.salutation-2". The relation is token-based because ARIA permits
+   * more than one id. Requiring one same-parent listbox prevents a page-level menu or a neighbour's
+   * popup from donating its choices. Ambiguity returns null and no options are inferred. */
+  function exactBoundSiblingListbox(el) {
+    if (!el.id || !el.parentElement || !el.parentElement.querySelectorAll) return null;
+    var candidates = el.parentElement.querySelectorAll('[role="listbox"][aria-labelledby]');
+    var matches = Array.prototype.filter.call(candidates, function (listbox) {
+      if (listbox.parentElement !== el.parentElement) return false;
+      var ids = clean(listbox.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
+      return ids.indexOf(el.id) !== -1;
+    });
+    return matches.length === 1 ? matches[0] : null;
+  }
   /* THE QUESTION A CHOICE CONTROL BELONGS TO, when the DOM never said so in a standard way.
    *
    * For a radio or a checkbox, el.labels[0] is the OPTION's label - "Yes", "English (ENG)" - and
@@ -6798,7 +6842,11 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
       }));
     if (referencedText && sharedChoiceReference) return referencedText;
     var fieldsetNames = new Set(fieldsetChoices.map(function (input) { return input.name; }).filter(Boolean));
-    var fieldsetOwnsChoice = !choice || fieldsetNames.size <= 1;
+    /* A fieldset legend names a CHOICE GROUP, not every ordinary control nested below the section.
+     * Recruitee puts name, email, phone and its salutation button inside the fieldset "Meine Daten".
+     * Letting !choice through here renamed every one of those controls to that section legend,
+     * erased the salutation label's required asterisk, and left no question for the applicant. */
+    var fieldsetOwnsChoice = choice && fieldsetNames.size <= 1;
     var legend = fieldsetOwnsChoice && fieldset ? fieldset.querySelector('legend') : null;
     var legendText = renderedText(legend);
     if (legendText) return legendText;
@@ -6807,7 +6855,7 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
       if (recovered) return recovered;
     }
     if (referencedText && !choice) return referencedText;
-    var labelEl = (el.labels && el.labels[0]) || (el.id ? document.querySelector('label[for="' + CSS.escape(el.id) + '"]') : null);
+    var labelEl = exactControlLabel(el);
     /* innerText, not textContent, with textContent kept as the fallback for a label that is not
      * rendered. A <label> wrapping a composite widget contains every text node under it, including
      * the hidden ones, and textContent concatenates them with no separators: the Palantir location
@@ -6879,6 +6927,15 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   function isRequiredField(el) {
     if (el.required === true) return true;
     if ((el.getAttribute('aria-required') || '').toLowerCase() === 'true') return true;
+    /* Recruitee's button-shaped choices cannot carry HTML required. The literal asterisk on the
+     * exact label is the employer's only required evidence. Read that one label, not an ancestor's
+     * first label, and reject the explanatory legend shape for the same reason labelMarksRequired
+     * does on the backend side. */
+    var exactLabel = exactControlLabel(el);
+    var exactLabelText = renderedText(exactLabel);
+    if (exactLabelText
+      && !/\*\s*(?:indicates|denotes|means|=)\b/i.test(exactLabelText)
+      && (/\*(?:\s|$)/.test(exactLabelText) || /(?:^|\s)\*/.test(exactLabelText))) return true;
     var workableWidget = el.closest('[data-input-type]');
     if (workableWidget && workableWidget.querySelector('input[required], textarea[required], select[required], [aria-required="true"]')) return true;
     var node = el.parentElement;
@@ -6911,7 +6968,22 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
     if (el.tagName === 'SELECT') {
       for (i = 0; i < el.options.length; i += 1) {
         var text = clean(el.options[i].label || el.options[i].textContent || '');
-        if (text) out.push(text);
+        /* Exact Recruitee German placeholder. A longer option containing the verb is legitimate and
+         * remains untouched; only the standalone instruction is not an answer. */
+        if (text && !/^auswählen$/i.test(text)) out.push(text);
+      }
+      return out;
+    }
+    var boundListbox = exactBoundSiblingListbox(el);
+    if (boundListbox) {
+      var boundOptions = boundListbox.querySelectorAll('[role="option"]');
+      for (i = 0; i < boundOptions.length; i += 1) {
+        var boundText = clean(
+          boundOptions[i].getAttribute('aria-label')
+          || renderedText(boundOptions[i])
+          || '',
+        );
+        if (boundText) out.push(boundText);
       }
       return out;
     }
@@ -6967,14 +7039,23 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
   var els = Array.prototype.slice
     .call(
       document.querySelectorAll(
-        'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], input[type="date"], input:not([type]), textarea, select, input[type="radio"], input[type="checkbox"]',
+        'input[type="text"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"], input[type="date"], input:not([type]), textarea, select, input[type="radio"], input[type="checkbox"],'
+        + ' [role="combobox"]:not(input):not(select):not(textarea),'
+        + ' [aria-haspopup="listbox"]:not(input):not(select):not(textarea)',
       ),
     )
     .filter(function (el) {
-      var readonlyChoiceOpener = el.readOnly
-        && (el.getAttribute('role') === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox');
-      return !el.closest('[id*="litos"]') && !el.disabled && (!el.readOnly || readonlyChoiceOpener)
-        && isVisible(el) && !isHoneypot(el);
+      var choiceOpener = el.getAttribute('role') === 'combobox'
+        || el.getAttribute('aria-haspopup') === 'listbox';
+      var readonlyChoiceOpener = el.readOnly && choiceOpener;
+      var bareOpener = choiceOpener && !/^(?:INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
+      if (el.closest('[id*="litos"]') || el.disabled || (el.readOnly && !readonlyChoiceOpener)) return false;
+      if (bareOpener && el.closest('header, footer, nav, [role="navigation"], [role="banner"], [role="contentinfo"]')) return false;
+      if (bareOpener && el.querySelector(
+        'input:not([type="hidden"]):not([aria-hidden="true"]), textarea, select:not([aria-hidden="true"])'
+      )) return false;
+      if (bareOpener && el.querySelector('[role="combobox"], [aria-haspopup="listbox"]')) return false;
+      return isVisible(el) && !isHoneypot(el);
     });
 
   var out = [];
@@ -6999,7 +7080,11 @@ export const DISCOVER_QUESTIONS_SCRIPT = String.raw`(() => {
       durableSelector: selector.indexOf('[data-litos-discovered-') === 0 ? null : selector,
       inputType: el.tagName === 'TEXTAREA'
         ? 'textarea'
-        : (el.tagName === 'SELECT' ? 'select' : (el.getAttribute('role') === 'combobox' ? 'combobox' : (el.type || 'text'))),
+        : (el.tagName === 'SELECT'
+          ? 'select'
+          : ((el.getAttribute('role') === 'combobox' || el.getAttribute('aria-haspopup') === 'listbox')
+            ? 'combobox'
+            : (el.type || 'text'))),
       maxLength: el.maxLength > 0 ? el.maxLength : null,
       options: optionTexts(el),
       required: isRequiredField(el),
@@ -7043,6 +7128,8 @@ export function resolveKnownAnswer(
    * Callers that do not have a list omit it, and every one of them then behaves exactly as before:
    * a declared absence with no list HOLDS. */
   options?: readonly string[],
+  /** One frozen instant for every time-dependent rule in a packet identity construction. */
+  asOf: Date = new Date(),
 ): { value: string } | { skipReason: string } | null {
   /* THE SELF-DECLARATIONS COME FIRST, before every classifier in this file.
    *
@@ -7095,7 +7182,7 @@ export function resolveKnownAnswer(
    * reach a broad rule. It is the one member of this group that is answered from ARITHMETIC on a
    * stored fact rather than from a stored answer, and it refuses in exactly the same way when the
    * fact is missing. */
-  const ageAttestation = ageAttestationAnswer(label, ap);
+  const ageAttestation = ageAttestationAnswer(label, ap, asOf);
   if (ageAttestation) return ageAttestation;
 
   const furtherEducation = furtherEducationAnswer(label, ap);
@@ -7263,7 +7350,7 @@ export function resolveKnownAnswer(
   const internshipSeason = postingSeasonAnswer(label, jdText);
   if (internshipSeason) return internshipSeason;
 
-  const internshipJoin = internshipJoinAnswer(label, inputType, ap, jdText);
+  const internshipJoin = internshipJoinAnswer(label, inputType, ap, jdText, asOf);
   if (internshipJoin) return internshipJoin;
 
   /* MOVED ABOVE THE INTERNSHIP-AVAILABILITY BRANCH, and the move is the whole of the Faire fix.
@@ -7290,7 +7377,7 @@ export function resolveKnownAnswer(
    * question about where she sits can never be answered with a date. Placed ABOVE the cadence
    * branch because that one refuses on wording these labels share ("available ... internship"), and
    * it would otherwise refuse a question the record can honestly answer. */
-  const availabilityWindow = availabilityWindowAnswer(label, inputType, ap, jdText);
+  const availabilityWindow = availabilityWindowAnswer(label, inputType, ap, jdText, asOf);
   if (availabilityWindow) return availabilityWindow;
 
   if (INTERNSHIP_AVAILABILITY_QUESTION.test(label)) {
@@ -7424,7 +7511,7 @@ export function resolveKnownAnswer(
       /* "When can you start?", "Earliest start date". Answered from the START of a window that is
        * provably about this posting's cycle, and from nothing else - never from availability_date,
        * which is what this case used to have to refuse in full. */
-      const scoped = scopedAvailabilityWindow(ap, jdText);
+      const scoped = scopedAvailabilityWindow(ap, jdText, asOf);
       if (scoped) return { value: formatWindowDate(scoped.start, inputType) };
       return { skipReason: `availability date left for you: "${label.slice(0, 60)}"` };
     }
@@ -7435,9 +7522,9 @@ export function resolveKnownAnswer(
     case 'onsite_commitment':
       return onsiteCommitmentAnswer(label, ap, jdText);
     case 'current_enrollment':
-      return currentEnrollmentAnswer(ap);
+      return currentEnrollmentAnswer(ap, asOf);
     case 'study_year': {
-      const value = studyYearAnswer(ap);
+      const value = studyYearAnswer(ap, asOf);
       return value ? { value } : null;
     }
     case 'school':
@@ -7448,7 +7535,7 @@ export function resolveKnownAnswer(
         return value ? { value } : null;
       }
     case 'graduation_date': {
-      if (MIXED_ENROLLMENT_GRADUATION_QUESTION.test(label) && !enrollmentConfirmedForGraduationDate(ap)) {
+      if (MIXED_ENROLLMENT_GRADUATION_QUESTION.test(label) && !enrollmentConfirmedForGraduationDate(ap, asOf)) {
         return { skipReason: `enrollment/graduation date question left for you: "${label.slice(0, 60)}"` };
       }
       if (/\bgraduat(?:ion|e)\s+(?:semester|term)\b|\b(?:expected\s+)?graduat(?:ion|e)\s+semester\b/i.test(label)) {

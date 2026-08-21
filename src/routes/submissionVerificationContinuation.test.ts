@@ -4,7 +4,7 @@ import test from 'node:test';
 
 test('managed submission records a typed verification handoff before receipt parsing', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true)');
+  const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true, applicationUrl)');
   const verificationGate = runner.indexOf('managedResultNeedsEmailVerification(result)', firstSubmit);
   const receiptRead = runner.indexOf('readManagedReceipt(receiptResult)', firstSubmit);
   assert.ok(firstSubmit > 0);
@@ -19,7 +19,7 @@ test('managed submission records a typed verification handoff before receipt par
 
 test('managed verification resumes once by token, never by URL, then verifies the receipt', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true)');
+  const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true, applicationUrl)');
   const end = runner.indexOf("if (!claimedReview.browser_session_id)", firstSubmit);
   const managed = runner.slice(firstSubmit, end);
   // The submit options are one named builder now, asserted for what they do in browserbase.test.ts.
@@ -57,7 +57,7 @@ test('managed verification resumes once by token, never by URL, then verifies th
 
 test('managed alias permission is independent from connected-inbox consent and personal email is not', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true)');
+  const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true, applicationUrl)');
   const end = runner.indexOf("if (!claimedReview.browser_session_id)", firstSubmit);
   const managed = runner.slice(firstSubmit, end);
   assert.match(managed, /resolveVerificationEmailRoute\(\{[\s\S]*userId: row\.user_id,[\s\S]*applicationId: row\.id,[\s\S]*expectedRecipient: packet\.email/);
@@ -126,7 +126,7 @@ test('uncertain continuation outcome is handed off without a retry or URL reopen
 
 test('unknown receipt observation is one empty-action continuation with no URL or submit action', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true)');
+  const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true, applicationUrl)');
   const start = runner.indexOf('let receiptEvidenceResult = receiptResult');
   const end = runner.indexOf("if (!receiptEvidenceResult.screenshot)", start);
   assert.ok(firstSubmit > 0 && start > firstSubmit && end > start);

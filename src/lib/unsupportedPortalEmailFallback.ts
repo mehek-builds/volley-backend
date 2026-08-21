@@ -14,6 +14,11 @@ type SendResult = {
   recipient: string;
 };
 
+export type PreparedUnsupportedPortalApplicationEmail = {
+  recipient: string;
+  message: OutboundEmail;
+};
+
 const EMAIL_FIELDS = [
   'employer_email',
   'company_email',
@@ -153,18 +158,34 @@ export async function sendUnsupportedPortalApplicationEmail(input: {
   packet: SubmissionPacket;
   fetchImpl?: typeof fetch;
 }): Promise<SendResult> {
+  const prepared = prepareUnsupportedPortalApplicationEmail(input);
+  return sendPreparedUnsupportedPortalApplicationEmail(prepared, input.fetchImpl);
+}
+
+export function prepareUnsupportedPortalApplicationEmail(input: {
+  application: ApplicationLike;
+  review: ApplicationReviewState;
+  packet: SubmissionPacket;
+}): PreparedUnsupportedPortalApplicationEmail {
   const recipient = unsupportedPortalFallbackRecipient(input.review, input.application);
   if (!recipient) {
     throw new Error('Unsupported portal application email recipient is not configured');
   }
-  const messageId = await sendEmail(
-    buildUnsupportedPortalApplicationEmail({
+  return {
+    recipient,
+    message: buildUnsupportedPortalApplicationEmail({
       application: input.application,
       review: input.review,
       packet: input.packet,
       to: recipient,
     }),
-    input.fetchImpl,
-  );
-  return { messageId, recipient };
+  };
+}
+
+export async function sendPreparedUnsupportedPortalApplicationEmail(
+  prepared: PreparedUnsupportedPortalApplicationEmail,
+  fetchImpl?: typeof fetch,
+): Promise<SendResult> {
+  const messageId = await sendEmail(prepared.message, fetchImpl);
+  return { messageId, recipient: prepared.recipient };
 }

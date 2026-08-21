@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { normalizeSpec, type ResumeSpec } from '../llm/resumeSpec';
+import type { EmployerDeliveryBindings } from './employerDeliveryIdentity';
 
-export const PACKET_AUDIT_VERSION = 'packet_audit_v1' as const;
+export const PACKET_AUDIT_VERSION = 'packet_audit_v2' as const;
 
 export type PacketAuditEvidencePointer = {
   source: 'resume_spec' | 'applicant_snapshot';
@@ -48,6 +49,7 @@ export type PacketAuditBindings = {
   applicantSnapshotSha256: string;
   resumeContactEmailSha256: string;
   applicantEmailSha256: string;
+  employerDelivery?: EmployerDeliveryBindings;
   pdf: PacketAuditPdfBinding;
 };
 
@@ -101,6 +103,7 @@ type PacketBindingInput = {
   applicantSnapshot: unknown;
   resumeEmail: string;
   applicantEmail: string;
+  employerDelivery?: EmployerDeliveryBindings;
   pdfObjectKey: string;
   pdfBytes: Uint8Array;
 };
@@ -381,6 +384,7 @@ function packetBindings(input: PacketBindingInput): PacketAuditBindings {
     applicantSnapshotSha256: packetAuditSha256(input.applicantSnapshot),
     resumeContactEmailSha256: packetAuditSha256(input.resumeEmail.trim().toLowerCase()),
     applicantEmailSha256: packetAuditSha256(input.applicantEmail.trim().toLowerCase()),
+    ...(input.employerDelivery ? { employerDelivery: input.employerDelivery } : {}),
     pdf: {
       objectKey: input.pdfObjectKey,
       sha256: byteSha256(input.pdfBytes),
@@ -611,6 +615,45 @@ export type PacketAuditAcknowledgementBinding = {
   pdfSizeBytes: number;
 };
 
+export type StoredPacketAuditAcknowledgementInput = {
+  audit: unknown;
+  ownerId: string;
+  applicationId: string;
+  client: {
+    audit_digest: string;
+    packet_version: string;
+    pdf_sha256: string;
+    size_bytes: number;
+  };
+};
+
+export type StoredPacketAuditAcknowledgementVerification =
+  | { valid: true; audit: PacketAudit }
+  | { valid: false; reason: 'packet_audit_stale' | 'client_packet_mismatch' };
+
+/**
+ * Verifies only the immutable audit and the four values the applicant sends back from the packet
+ * she saw. This deliberately accepts no profile loader, PDF loader, resolver, clock, or environment
+ * input, so an acknowledgement cannot silently become a second packet-construction request.
+ */
+export function verifyStoredPacketAuditAcknowledgement(
+  input: StoredPacketAuditAcknowledgementInput,
+): StoredPacketAuditAcknowledgementVerification {
+  if (!packetAuditIsSubmissionReady(input.audit)
+    || input.audit.bindings.ownerSha256 !== createHash('sha256').update(input.ownerId).digest('hex')
+    || input.audit.bindings.applicationId !== input.applicationId
+    || input.audit.bindings.employerDelivery?.version !== 'employer_delivery_v1') {
+    return { valid: false, reason: 'packet_audit_stale' };
+  }
+  const audit = input.audit;
+  return input.client.audit_digest === audit.audit_digest
+    && input.client.packet_version === audit.packet_version
+    && input.client.pdf_sha256 === audit.bindings.pdf.sha256
+    && input.client.size_bytes === audit.bindings.pdf.sizeBytes
+    ? { valid: true, audit }
+    : { valid: false, reason: 'client_packet_mismatch' };
+}
+
 /**
  * Whether an acknowledgement is an acknowledgement OF this audit.
  *
@@ -666,6 +709,10 @@ export function packetAuditIsSubmissionReady(audit: unknown): audit is PacketAud
       || !candidate.identities || typeof candidate.identities !== 'object'
       || typeof candidate.identities.resume_email !== 'string'
       || typeof candidate.identities.applicant_email !== 'string') return false;
+    const delivery = candidate.bindings.employerDelivery;
+    if (!delivery || delivery.version !== 'employer_delivery_v1'
+      || !(['full', 'browser', 'extension'] as const).includes(delivery.mode)
+      || !/^[a-f0-9]{64}$/u.test(delivery.sha256)) return false;
     if (typeof candidate.packet_version !== 'string' || typeof candidate.audit_digest !== 'string'
       || !/^[a-f0-9]{64}$/u.test(candidate.packet_version)
       || !/^[a-f0-9]{64}$/u.test(candidate.audit_digest)) return false;
@@ -705,6 +752,8 @@ export function verifyCurrentPacketAudit(input: VerifyCurrentPacketAuditInput): 
       stored.applicantSnapshotSha256 !== currentBindings.applicantSnapshotSha256 ? 'applicant_snapshot' : '',
       stored.resumeContactEmailSha256 !== currentBindings.resumeContactEmailSha256 ? 'resume_email' : '',
       stored.applicantEmailSha256 !== currentBindings.applicantEmailSha256 ? 'applicant_email' : '',
+      packetAuditSha256(stored.employerDelivery ?? null)
+        !== packetAuditSha256(currentBindings.employerDelivery ?? null) ? 'employer_delivery' : '',
       stored.pdf.objectKey !== currentBindings.pdf.objectKey ? 'pdf_object' : '',
       stored.pdf.sha256 !== currentBindings.pdf.sha256 ? 'pdf_sha256' : '',
       stored.pdf.sizeBytes !== currentBindings.pdf.sizeBytes ? 'pdf_size' : '',

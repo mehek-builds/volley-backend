@@ -3,6 +3,7 @@ import type { ResumeSpec } from '../llm/resumeSpec';
 import { PACKET_VISIBLE_QUESTION_FIELDS, type PacketAudit } from './packetAudit';
 import type { RequiredDocumentAsk } from './requiredDocuments';
 import type { SubmissionStopRecord } from './submissionStop';
+import type { EmployerDeliveryBindings } from './employerDeliveryIdentity';
 import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported, type AutofillApplicantSnapshot } from './portalSubmission';
 
 export type ApplicationReviewQuestion = {
@@ -970,6 +971,8 @@ export type ApplicationReviewState = {
   };
   /** Immutable applicant facts captured by the same preparation that froze this handoff. */
   applicant_snapshot?: AutofillApplicantSnapshot;
+  /** Versioned hashes for every finite employer-delivery packet mode approved in this audit. */
+  employer_delivery_bindings?: EmployerDeliveryBindings;
   /** Server-owned proof that the exact JD, saved resume, answers, and stored PDF were audited. */
   packet_audit?: PacketAudit;
   /** Applicant acknowledgement of the exact rendered packet audit and PDF bytes. */

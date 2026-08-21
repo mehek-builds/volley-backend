@@ -19,7 +19,7 @@ test('supported submit-request discovery is not blocked by a sensitive pre-run s
     "'/applications/:id/submission/channels'",
   );
 
-  assert.match(handler, /const sensitive = sensitiveQuestionFor\(\s*normalizedSubmittedQuestions, sensitiveProfile, current\.jd_text,/);
+  assert.match(handler, /const sensitive = sensitiveQuestionFor\(\s*canonicalSubmittedQuestions, sensitiveProfile, current\.jd_text,/);
   assert.doesNotMatch(handler, /if \(sensitive\) \{\s*return reply\.status\(422\)/);
   assert.match(
     handler,
@@ -40,7 +40,7 @@ test('unsupported email and final approval retain sensitive-question send gates'
     "'/applications/:id/submission/channels'",
   );
   const unsupportedGate = submitRequest.indexOf('&& sensitive)');
-  const unsupportedSend = submitRequest.indexOf('sendUnsupportedPortalApplicationEmail');
+  const unsupportedSend = submitRequest.indexOf('sendPreparedUnsupportedPortalApplicationEmail');
   assert.ok(unsupportedGate >= 0 && unsupportedSend > unsupportedGate, 'email fallback must stay behind the sensitive gate');
   assert.match(submitRequest, /Sensitive question requires your attention/);
 

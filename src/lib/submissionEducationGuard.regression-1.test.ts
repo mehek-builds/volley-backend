@@ -199,8 +199,9 @@ test('extension-start refuses a drifted packet before it reserves the submission
 
 test('extension-start refuses sensitive questions before it reserves the submission', () => {
   const handler = slice(routes, "'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
-  assert.match(handler, /const refreshedQuestions = refreshKnownQuestionAnswers\([\s\S]{0,180}current\.questions_reviewed_at/);
-  assert.match(handler, /sensitiveQuestionFor\(refreshedQuestions/);
+  assert.match(handler, /const packetQuestions = resolvePacketAuditQuestionFixpoint\([\s\S]{0,300}applicationContextForQuestionResolution\(precheckRow, precheckReview\)/);
+  assert.match(handler, /const refreshedQuestions = precheckPacketQuestions;/);
+  assert.match(handler, /sensitiveQuestionFor\(\s*refreshedQuestions/);
   assert.match(handler, /kind: 'sensitive_question'/);
   assert.match(handler, /result\.kind === 'sensitive_question'/);
   assert.match(handler, /Sensitive question requires your attention/);
@@ -235,7 +236,7 @@ test('submit-request revalidates resume content and PDF layout before the browse
 
 test('final approval revalidates the full packet before it clicks submit', () => {
   const handler = slice(routes, "'/applications/:id/submission/approve'", "'/applications/:id/status'");
-  assert.match(handler, /questions: refreshKnownQuestionAnswers\([\s\S]{0,180}current\.questions_reviewed_at/);
+  assert.match(handler, /questions: resolvePacketAuditQuestionFixpoint\([\s\S]{0,260}applicationContextForQuestionResolution\(row, current\)/);
   assert.match(handler, /approvalReview\.preview_screenshot_url/);
   assert.match(handler, /approvalReview\.filled_fields/);
   /* The cover letter terms are pinned to the two facts they are ALLOWED to read, because both were

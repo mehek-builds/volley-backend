@@ -563,12 +563,12 @@ test('a scoped miss refuses instead of falling through to the unscoped resolver'
 
 /* THE FLAG HAS TO BE WRITTEN WHERE IT IS MEASURED AND READ WHERE IT IS USED, and the failure it
  * prevents has no symptom: the transcript attaches on the preview she approves and is missing from
- * the application that is sent, with nothing recorded either way. Two prepare paths write it, three
- * submit paths read it, and there is no fourth of either. */
+ * the application that is sent, with nothing recorded either way. Each prepare path records its
+ * pre-fill delivery measurement and its final review measurement, and every submit reads it. */
 test('transcript_supported is written by both prepares and read by all three submits', () => {
   const runner = routeSource('submissionRunner.ts');
-  assert.equal(runner.match(/transcript_supported: transcriptSupported/g)?.length, 2,
-    'both the managed and the direct prepare must record what they measured');
+  assert.equal(runner.match(/transcript_supported: transcriptSupported/g)?.length, 4,
+    'both prepares must bind the pre-fill measurement and persist the final review measurement');
   assert.match(runner, /const transcriptSupported = managedResultHasTranscriptUpload\(discoveryResult, portal\)/);
   assert.match(runner, /const transcriptSupported = await hasTranscriptUpload\(page, portal\)/);
 
@@ -585,10 +585,19 @@ test('transcript_supported is written by both prepares and read by all three sub
   assert.match(runner, /\.\.\.\(discoveryFailures\.length === 0 \? \{ transcript_supported: transcriptSupported \} : \{\}\),/,
     'the managed prepare must write the flag only when the discovery pass actually ran');
 
-  assert.equal(runner.match(/transcript_supported === true/g)?.length, 3,
-    'the ATS API channel and both browser submits re-derive the attach decision from the flag');
-  assert.match(runner, /review\.transcript_supported === true \? withCoverLetter : omitTranscript\(withCoverLetter\)/);
-  assert.equal(runner.match(/claimedReview\.transcript_supported === true/g)?.length, 2);
+  const deliveryIdentity = readFileSync(join(__dirname, 'employerDeliveryIdentity.ts'), 'utf8');
+  assert.match(
+    deliveryIdentity,
+    /review\.transcript_supported === true\s*\? withCoverLetter\s*:\s*\{/,
+    'the shared employer-delivery projection must derive transcript presence from the measured flag',
+  );
+  assert.equal(runner.match(/packetForEmployerDelivery\(/g)?.length, 4,
+    'both prepare and both submit paths must use the shared attachment projection');
+  assert.equal(
+    runner.match(/packetForEmployerDelivery\(\s*(?:builtPacket|directBuiltPacket),\s*claimedReview,\s*'browser'\s*\)/g)?.length,
+    2,
+    'both irreversible browser submits project attachments from the claimed review',
+  );
 });
 
 /* THE API CHANNEL IS A THIRD DELIVERY PATH AND IT SHIPS THE SAME APPLICATION. A document added only

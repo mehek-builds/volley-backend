@@ -15,6 +15,12 @@ import { mergeSubmittedApplicationReviewQuestions } from './applicationReview';
 import { resolveSubmittedApplicationAnswers } from './submittedAnswers';
 import { refreshKnownQuestionAnswers } from './questionDiscovery';
 
+const TEST_EMPLOYER_DELIVERY = {
+  version: 'employer_delivery_v1' as const,
+  mode: 'browser' as const,
+  sha256: '1'.repeat(64),
+};
+
 test('stored packet PDF requires an exact PDF signature', () => {
   assert.equal(validStoredPdf({ bytes: Buffer.from('%PDF-1.7\npacket') }), true);
   assert.equal(validStoredPdf({ bytes: Buffer.from(' %PDF-1.7\npacket') }), false);
@@ -60,6 +66,7 @@ test('a current audit does not authorize until the exact rendered packet is ackn
       _review: {
         jd_text: jdText,
         questions: [],
+        employer_delivery_bindings: TEST_EMPLOYER_DELIVERY,
         status: 'ready_for_final_approval',
         applicant_email: {
           address: 'app-owner@apply.trylitos.com', source: 'litos_alias', reason: 'deliverable', tracked: true,
@@ -82,6 +89,7 @@ test('a current audit does not authorize until the exact rendered packet is ackn
     applicantSnapshot: baseRow.spec._review.applicant_snapshot,
     resumeEmail: 'student@example.com',
     applicantEmail: 'app-owner@apply.trylitos.com',
+    employerDelivery: TEST_EMPLOYER_DELIVERY,
     pdfObjectKey: baseRow.resume_object_key,
     pdfBytes,
     editedTerms: [],
@@ -256,6 +264,7 @@ test('a low-detail open internship gets one exact unscoreable clause instead of 
     applicantSnapshot: null,
     resumeEmail: 'student@example.edu',
     applicantEmail: 'app-fully@apply.trylitos.com',
+    employerDelivery: TEST_EMPLOYER_DELIVERY,
     pdfObjectKey: 'users/owner-fully/resumes/application-fully.pdf',
     pdfBytes: Buffer.from('%PDF-1.7\nFully packet'),
     editedTerms: scored.editedTerms,
@@ -445,6 +454,7 @@ test('Mercari multilingual clause keeps generic API evidence separate from langu
     applicantSnapshot: null,
     resumeEmail: 'student@example.edu',
     applicantEmail: 'app-mercari@apply.trylitos.com',
+    employerDelivery: TEST_EMPLOYER_DELIVERY,
     pdfObjectKey: 'users/owner-mercari/resumes/application-mercari.pdf',
     pdfBytes: Buffer.from('%PDF-1.7\nMercari packet'),
     editedTerms: scored.editedTerms,
@@ -556,6 +566,7 @@ test('kos.ai Ashby bare You section emits exact auditable requirements with froz
     applicantSnapshot: review.applicant_snapshot,
     resumeEmail: 'student@example.edu',
     applicantEmail: 'app-kos@apply.trylitos.com',
+    employerDelivery: TEST_EMPLOYER_DELIVERY,
     pdfObjectKey: 'users/owner-kos/resumes/application-kos.pdf',
     pdfBytes: Buffer.from('%PDF-1.7\nkos packet'),
     editedTerms: scored.editedTerms,
@@ -649,6 +660,7 @@ test('a met clause without one exact frozen evidence pointer is unscoreable but 
     applicantSnapshot: null,
     resumeEmail: 'student@example.edu',
     applicantEmail: 'app-ungrounded@apply.trylitos.com',
+    employerDelivery: TEST_EMPLOYER_DELIVERY,
     pdfObjectKey: 'users/owner-ungrounded-fit/resumes/application.pdf',
     pdfBytes: Buffer.from('%PDF-1.7\nungrounded fit packet'),
     editedTerms: scored.editedTerms,
@@ -704,6 +716,7 @@ test('Remote Recruitment negated degree and AI term gaps stay visible without bl
     applicantSnapshot: null,
     resumeEmail: 'student@example.edu',
     applicantEmail: 'app-remote-recruitment@apply.trylitos.com',
+    employerDelivery: TEST_EMPLOYER_DELIVERY,
     pdfObjectKey: 'users/owner-remote-recruitment/resumes/application.pdf',
     pdfBytes: Buffer.from('%PDF-1.7\nRemote Recruitment packet'),
     editedTerms: scored.editedTerms,
@@ -830,6 +843,7 @@ const provenanceRow = (questions: unknown[], packetAudit: unknown, acknowledgeme
     _review: {
       jd_text: 'Build reliable systems.',
       questions,
+      employer_delivery_bindings: TEST_EMPLOYER_DELIVERY,
       questions_reviewed_at: '2026-08-12T13:45:27.969Z',
       status: 'questions_ready',
       applicant_email: {
@@ -905,6 +919,7 @@ const auditOverQuestions = (questions: unknown[]) => {
     applicantSnapshot: row.spec._review.applicant_snapshot,
     resumeEmail: 'student@example.com',
     applicantEmail: 'app-owner@apply.trylitos.com',
+    employerDelivery: TEST_EMPLOYER_DELIVERY,
     pdfObjectKey: row.resume_object_key,
     pdfBytes: packetPdfBytes,
     editedTerms: [],

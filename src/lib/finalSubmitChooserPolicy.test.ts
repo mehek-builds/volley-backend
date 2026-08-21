@@ -25,6 +25,8 @@ test('canonical final-submit grammar preserves approved application labels', () 
     'Finish & apply',
     'Submit your application - Contact Center Agent',
     'Submit application - Acme Corp',
+    // Recruitee localizes the stock final control. Captured live on CBS Consulting's German form.
+    'Senden',
   ]) assert.notEqual(finalSubmitLabelScore(label), null, label);
 });
 
@@ -62,10 +64,25 @@ test('canonical chooser ranks explicit application intent and blocks equal top c
   assert.equal(chooseCanonicalFinalSubmit(['Apply with LinkedIn', 'Submit application']), 1);
 });
 
+test('CBS German Recruitee chooses only the exact final control', () => {
+  const labels = [
+    'Über Indeed bewerben',
+    'Bewerben mit XING',
+    'Weiter',
+    'Anfrage senden',
+    'Senden',
+  ];
+  assert.equal(chooseCanonicalFinalSubmit(labels), 4);
+  for (const label of labels.slice(0, -1)) {
+    assert.equal(finalSubmitLabelScore(label), null, label);
+  }
+  assert.equal(chooseCanonicalFinalSubmit(['Senden', 'Senden']), null);
+});
+
 test('chooser policy hash identifies the exact declarative grammar bytes', () => {
   assert.equal(FINAL_SUBMIT_CHOOSER_POLICY.name, 'litos-final-submit');
-  assert.equal(FINAL_SUBMIT_CHOOSER_POLICY.version, 2);
-  assert.equal(FINAL_SUBMIT_CHOOSER_HASH, '3302786c27e20fc2dd0a7396078e286db37051962893b554e92b8fd9db6816e9');
+  assert.equal(FINAL_SUBMIT_CHOOSER_POLICY.version, 3);
+  assert.equal(FINAL_SUBMIT_CHOOSER_HASH, '9bd60803e7a713555132b6740e9765599ba975e75f803f436841dbc6d340091e');
   assert.equal(
     createHash('sha256').update(FINAL_SUBMIT_CHOOSER_GRAMMAR).digest('hex'),
     FINAL_SUBMIT_CHOOSER_HASH,

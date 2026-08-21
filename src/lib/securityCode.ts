@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { ManagedBrowserAction, ManagedBrowserResult } from './browserbase';
+import { managedActionsWithExactPageUrl, type ManagedBrowserAction, type ManagedBrowserResult } from './browserbase';
 import type { ApplicationReviewState, SecurityCodeAttempt, SecurityCodeState } from './applicationReview';
 
 /**
@@ -207,12 +207,13 @@ export function withSecurityCode(
 export function securityCodeContinuationActions(
   actions: readonly ManagedBrowserAction[],
   code: string,
+  expectedPageUrl: string,
 ): ManagedBrowserAction[] | null {
   const last = actions[actions.length - 1];
   if (!last || last.type !== 'confirmAndSubmit' || last.contractVersion !== 2 || last.submitKind !== 'application') {
     return null;
   }
-  return withSecurityCode([last], code);
+  return managedActionsWithExactPageUrl(withSecurityCode([last], code), expectedPageUrl);
 }
 
 /**
