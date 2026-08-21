@@ -261,11 +261,25 @@ test('a Job board source makes only an employee-referral detail non-applicable',
     ['how you heard about this role is yours to answer: "Were you referred by an Optiver employee?"'],
   );
 
+  assert.deepEqual(
+    filterAutomaticallyResolvedReferralAttention([
+      'how you heard about this role is yours to answer: "If referred by an Optiver employee or Optiver intern, please"',
+    ], resolved.filter((question) => question.id !== 'employee-detail')),
+    [],
+    'the stale refusal retires even when a failed optional control did not survive the question merge',
+  );
+
   const unprovenOther = resolveApplicantClosedChoiceFallbacks(discovered, [
     { id: 'source', question: 'How did you hear about Optiver?', answer: 'Other', kind: 'required', required: true, options: ['Other', 'Employee Referral'], answer_source: 'applicant_review' },
     { id: 'employee-detail', question: 'If referred by an Optiver employee or Optiver intern, please provide their name', answer: '', kind: 'required', required: false },
   ]);
   assert.equal(unprovenOther[1]?.answer, '', 'Other without Job board provenance does not prove the employee condition false');
+  assert.deepEqual(
+    filterAutomaticallyResolvedReferralAttention([
+      'how you heard about this role is yours to answer: "If referred by an Optiver employee or Optiver intern, please"',
+    ], unprovenOther.filter((question) => question.id !== 'employee-detail')),
+    ['how you heard about this role is yours to answer: "If referred by an Optiver employee or Optiver intern, please"'],
+  );
 });
 
 test('the compact packet preselects only unresolved open prose controls', () => {
