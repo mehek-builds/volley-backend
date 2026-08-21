@@ -38,6 +38,7 @@ import {
   managedActionDiagnosticsForLog,
 } from './submissionRunner';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
+import { packetAuditSha256, packetVisibleQuestions } from '../lib/packetAudit';
 import { savedAnswerKey } from '../lib/answerReuse';
 import {
   refreshKnownQuestionAnswers,
@@ -581,7 +582,7 @@ test('Recruitee fixed phone discovery cannot mint or retain a custom question', 
   assert.deepEqual(result.attentionReasons, []);
 });
 
-test('the audit helper drops legacy Recruitee phone controls and retains custom questions', async () => {
+test('CBS legacy Recruitee phone produces one normalized audit and acknowledgement binding', async () => {
   const custom = {
     id: 'custom',
     question: 'Best number for an interview?',
@@ -620,9 +621,32 @@ test('the audit helper drops legacy Recruitee phone controls and retains custom 
     updated_at: new Date().toISOString(),
   };
 
-  const questions = normalizedPacketAuditQuestions(review);
+  const row = {
+    user_id: 'user-1',
+    job_context: { company: 'CBS Consulting', role: 'Manager SAP S/4HANA Service' },
+  } as ResumeRow;
+  const profile = { phone: '+971 50 123 4567' } as ApplicationProfileLike;
+  const resolvePacketQuestions = (current: ApplicationReviewState) => refreshKnownQuestionAnswers(
+    normalizedPacketAuditQuestions(current),
+    profile,
+    applicationContextForQuestionResolution(row, current),
+    current.questions_reviewed_at,
+  );
 
-  assert.deepEqual(questions, [custom]);
+  const auditQuestions = resolvePacketQuestions(review);
+  const persistedReview = { ...review, questions: auditQuestions };
+  const acknowledgementQuestions = resolvePacketQuestions(persistedReview);
+  const rawBinding = packetAuditSha256(packetVisibleQuestions(review.questions));
+  const auditBinding = packetAuditSha256(packetVisibleQuestions(auditQuestions));
+  const acknowledgementBinding = packetAuditSha256(packetVisibleQuestions(acknowledgementQuestions));
+
+  assert.deepEqual(auditQuestions, [custom]);
+  assert.notEqual(rawBinding, auditBinding, 'the legacy candidate.phone row used to change packet identity');
+  assert.equal(
+    auditBinding,
+    acknowledgementBinding,
+    'resolving the persisted audit set again for acknowledgement must be a packet-visible fixpoint',
+  );
 });
 
 test('a malformed first entry never throws, because it would break every other portal too', () => {

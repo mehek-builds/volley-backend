@@ -156,8 +156,8 @@ test('the packet-audit route audits the refreshed questions the send gate verifi
 
   assert.match(
     route,
-    /refreshKnownQuestionAnswers\(/,
-    'the audit must refresh known answers, or it hashes a packet that will never be sent',
+    /const auditQuestions = await resolvedPacketAuditQuestions\(row, review\)/,
+    'the audit must use the shared normalized and resolved packet reading, or it can hash portal-owned controls acknowledgement drops',
   );
   assert.match(
     route,
@@ -219,8 +219,15 @@ test('every audit or acknowledgement call site resolves known answers against th
   const packetAudit = routeSlice("'/applications/:id/packet-audit'", "'/applications/:id/packet-audit/acknowledge'");
   assert.match(
     packetAudit,
-    /refreshKnownQuestionAnswers\(\s*review\.questions,\s*[^,]+,\s*applicationContextForQuestionResolution\(row, review\)/,
-    'the packet-audit endpoint must resolve against the enriched context, or its acknowledged version disagrees with the send gate',
+    /resolvedPacketAuditQuestions\(row, review\)/,
+    'the packet-audit endpoint must use the shared normalized and enriched reading',
+  );
+
+  const acknowledge = routeSlice("'/applications/:id/packet-audit/acknowledge'", "'/applications/:id/submission/extension-packet'");
+  assert.match(
+    acknowledge,
+    /resolvedPacketAuditQuestions\(row, review\)/,
+    'acknowledgement must verify the same normalized and enriched question set the audit rendered',
   );
 
   const extensionStart = routeSlice("'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
