@@ -8,9 +8,9 @@
  * for her to look at - so opening a packet could produce the record that authorizes sending it, for
  * every downstream caller including the unattended runner under standing consent.
  *
- * The rule now: an acknowledgement she already gave may be CARRIED onto the rebuilt file, by a
- * caller that is authorizing a send, when the re-issued audit still says the same thing about the
- * packet. Nothing else writes one.
+ * The rule now: changed PDF bytes require a fresh audit and acknowledgement because the exact
+ * employer-delivery binding includes those bytes. Carry is limited to an authorizing caller whose
+ * new object key still holds byte-identical content under the same current delivery binding.
  *
  * BEHAVIOURAL, DRIVING THE REAL FUNCTIONS. The decision function is the one the restore calls, and
  * the verdicts below come from the real send gate, currentAcknowledgedPacketAudit, over rows shaped
@@ -25,6 +25,13 @@ import { createPacketAudit, type PacketAudit } from './packetAudit';
 import { currentAcknowledgedPacketAudit } from './packetAuditService';
 import { restoredPacketAcknowledgement } from './packetResumeRestore';
 import { createPdfGenerationBinding } from './pdfGenerationBinding';
+import {
+  createEmployerDeliveryBindings,
+  employerDeliveryEnvelope,
+  transportBoundEmployerPacket,
+  type EmployerDeliveryBindings,
+} from './employerDeliveryIdentity';
+import type { SubmissionPacket } from './portalSubmission';
 
 const JD_TEXT = 'Build reliable systems.';
 const OWNER = 'owner-restore-1';
@@ -32,10 +39,18 @@ const APPLICATION = 'application-restore-1';
 const RESUME_EMAIL = 'student@example.com';
 const APPLICANT_EMAIL = 'app-owner@apply.trylitos.com';
 const ACKNOWLEDGED_AT = '2026-08-12T09:00:00.000Z';
+const EMPLOYER_DELIVERY_BINDING = {
+  version: 'employer_delivery_v1',
+  mode: 'browser',
+  sha256: 'b'.repeat(64),
+} as const;
 
 type Question = { question: string; answer: string };
 
-function specFor(questions: Question[]) {
+function specFor(
+  questions: Question[],
+  employerDelivery: EmployerDeliveryBindings | undefined = EMPLOYER_DELIVERY_BINDING,
+) {
   return {
     target_role: 'Engineer',
     school: '',
@@ -66,14 +81,23 @@ function specFor(questions: Question[]) {
         profile: { email: APPLICANT_EMAIL, experience: [], skills: [], school: '', grad_year: 0 },
         application_profile: {},
       },
+      ...(employerDelivery ? { employer_delivery_bindings: employerDelivery } : {}),
     },
   };
 }
 
 /** A real audit over a real spec, so the digests below are the ones production computes. */
-function auditFor(options: { objectKey: string; pdfBytes: Buffer; questions?: Question[] }): PacketAudit {
+function auditFor(options: {
+  objectKey: string;
+  pdfBytes: Buffer;
+  questions?: Question[];
+  employerDelivery?: EmployerDeliveryBindings | null;
+}): PacketAudit {
   const questions = options.questions ?? [];
-  const spec = specFor(questions);
+  const employerDelivery = options.employerDelivery === null
+    ? undefined
+    : options.employerDelivery ?? EMPLOYER_DELIVERY_BINDING;
+  const spec = specFor(questions, employerDelivery);
   return createPacketAudit({
     ownerId: OWNER,
     applicationId: APPLICATION,
@@ -82,6 +106,7 @@ function auditFor(options: { objectKey: string; pdfBytes: Buffer; questions?: Qu
     jobContext: { company: 'Acme', role: 'Engineer' },
     questions,
     applicantSnapshot: spec._review.applicant_snapshot,
+    ...(employerDelivery ? { employerDelivery } : {}),
     resumeEmail: RESUME_EMAIL,
     applicantEmail: APPLICANT_EMAIL,
     pdfObjectKey: options.objectKey,
@@ -102,7 +127,7 @@ function rowFor(options: {
   acknowledgement?: unknown;
   questions?: Question[];
 }) {
-  const spec = specFor(options.questions ?? []);
+  const spec = specFor(options.questions ?? [], options.audit.bindings.employerDelivery);
   return {
     id: APPLICATION,
     user_id: OWNER,
@@ -145,11 +170,29 @@ async function sendGate(row: ReturnType<typeof rowFor>, pdfBytes: Buffer) {
 
 const OLD_KEY = `users/${OWNER}/resumes/${APPLICATION}.pdf`;
 const NEW_KEY = `users/${OWNER}/resumes/${APPLICATION}-restored-1111.pdf`;
-/* Different bytes on purpose, and it is not a convenience of the fixture: pdfkit stamps a
-   CreationDate, so a rebuild of the same frozen spec never reproduces the sha of the file it
-   replaces. Nothing in this area can be written as "the bytes are identical". */
+/* Different bytes model the normal case: pdfkit stamps a CreationDate, so renders at different
+   times ordinarily have different hashes. Byte-identical output remains possible and is tested
+   separately because only that exceptional case may preserve the delivery binding. */
 const OLD_BYTES = Buffer.from('%PDF-1.7\npacket rendered on the day it was built');
 const NEW_BYTES = Buffer.from('%PDF-1.7\npacket rendered again thirty-one days later');
+const DELIVERY_ENVELOPE = employerDeliveryEnvelope({
+  channel: 'controlled_browser',
+  destinationUrl: 'https://example.com/jobs/restore-1',
+  portalFamily: 'controlled_test',
+  coverLetterSupported: false,
+  transcriptSupported: false,
+});
+
+function deliveryPacket(resume: Buffer): SubmissionPacket {
+  return {
+    fullName: 'Restore Student',
+    email: APPLICANT_EMAIL,
+    jdText: JD_TEXT,
+    resume,
+    resumeName: 'restore-student-resume.pdf',
+    questions: [],
+  };
+}
 
 test('a rebuild with no acknowledgement to carry leaves a packet nothing can send', async () => {
   const before = auditFor({ objectKey: OLD_KEY, pdfBytes: OLD_BYTES });
@@ -176,9 +219,15 @@ test('a rebuild with no acknowledgement to carry leaves a packet nothing can sen
   assert.equal(verdict.valid ? null : verdict.code, 'PACKET_AUDIT_ACK_REQUIRED');
 });
 
-test('an acknowledgement she already gave travels to the rebuilt file, on a send and not on a look', async () => {
-  const before = auditFor({ objectKey: OLD_KEY, pdfBytes: OLD_BYTES });
-  const restored = auditFor({ objectKey: NEW_KEY, pdfBytes: NEW_BYTES });
+test('changed rerendered bytes require a fresh audit and acknowledgement before transport', async () => {
+  const approvedPacket = deliveryPacket(OLD_BYTES);
+  const rebuiltPacket = deliveryPacket(NEW_BYTES);
+  const approvedDelivery = createEmployerDeliveryBindings(approvedPacket, {}, {
+    mode: 'browser',
+    envelope: DELIVERY_ENVELOPE,
+  });
+  const before = auditFor({ objectKey: OLD_KEY, pdfBytes: OLD_BYTES, employerDelivery: approvedDelivery });
+  const restored = auditFor({ objectKey: NEW_KEY, pdfBytes: NEW_BYTES, employerDelivery: approvedDelivery });
   const hers = applicantAcknowledgementOf(before);
 
   const carried = restoredPacketAcknowledgement({
@@ -188,22 +237,33 @@ test('an acknowledgement she already gave travels to the rebuilt file, on a send
     restoredAudit: restored,
     acknowledgedAt: ACKNOWLEDGED_AT,
   });
-  assert.ok(carried, 'a send may carry an approval she already gave');
-  // Bound to the NEW file, not copied off the old record: a carried acknowledgement that still
-  // named the deleted bytes would fail every gate and strand the packet it was meant to save.
-  assert.equal(carried.pdfSha256, restored.bindings.pdf.sha256);
-  assert.notEqual(carried.pdfSha256, before.bindings.pdf.sha256);
-  assert.equal(carried.audit_digest, restored.audit_digest);
-  assert.equal(carried.packet_version, restored.packet_version);
-  // And it says a machine wrote it, so the corpus can still tell the two apart.
-  assert.equal(carried.source, 'auto_restored');
-  assert.equal(carried.acknowledged_at, ACKNOWLEDGED_AT);
+  assert.equal(carried, null, 'approval of the deleted PDF cannot authorize different rebuilt bytes');
 
-  const sendable = await sendGate(
-    rowFor({ objectKey: NEW_KEY, pdfBytes: NEW_BYTES, audit: restored, acknowledgement: carried }),
-    NEW_BYTES,
+  let transports = 0;
+  await assert.rejects(
+    () => transportBoundEmployerPacket(
+      rebuiltPacket,
+      restored.bindings.employerDelivery,
+      'browser',
+      DELIVERY_ENVELOPE,
+      async () => { transports += 1; },
+    ),
+    /employer-delivery payload changed after packet approval/,
   );
-  assert.equal(sendable.valid, true, sendable.valid ? '' : sendable.reason);
+  assert.equal(transports, 0, 'the stale delivery binding must stop before employer transport');
+
+  const rebuiltDelivery = createEmployerDeliveryBindings(rebuiltPacket, {}, {
+    mode: 'browser',
+    envelope: DELIVERY_ENVELOPE,
+  });
+  const delivered = await transportBoundEmployerPacket(
+    rebuiltPacket,
+    rebuiltDelivery,
+    'browser',
+    DELIVERY_ENVELOPE,
+    async (exactPacket) => exactPacket,
+  );
+  assert.strictEqual(delivered, rebuiltPacket, 'a fresh binding sends the exact packet it verified');
 
   /* THE REVIEW ROUTE, WHICH IS WHERE THE DEFECT LIVED. It may rebuild the file she asked to see,
      and it carries nothing: the packet comes back with the acknowledgement that named the deleted
@@ -223,6 +283,21 @@ test('an acknowledgement she already gave travels to the rebuilt file, on a send
     NEW_BYTES,
   );
   assert.equal(afterLooking.valid ? null : afterLooking.code, 'PACKET_AUDIT_ACK_REQUIRED');
+});
+
+test('legacy audits without the exhaustive employer delivery binding never carry approval', () => {
+  const legacy = auditFor({ objectKey: OLD_KEY, pdfBytes: OLD_BYTES, employerDelivery: null });
+  const restoredLegacy = auditFor({ objectKey: NEW_KEY, pdfBytes: OLD_BYTES, employerDelivery: null });
+  assert.equal(
+    restoredPacketAcknowledgement({
+      authority: 'authorizing_send',
+      priorAudit: legacy,
+      priorAcknowledgement: applicantAcknowledgementOf(legacy),
+      restoredAudit: restoredLegacy,
+      acknowledgedAt: ACKNOWLEDGED_AT,
+    }),
+    null,
+  );
 });
 
 test('an acknowledgement that did not match the packet she approved is not laundered into one that does', () => {
@@ -287,9 +362,9 @@ test('an audit that now says something different about the packet is not covered
     null,
   );
 
-  // The same audit content over a different file is exactly the case that DOES carry, which is what
-  // makes the assertion above about content rather than about any difference at all.
-  const sameContent = auditFor({ objectKey: NEW_KEY, pdfBytes: NEW_BYTES });
+  // A new object key over byte-identical content can carry because the exhaustive delivery binding
+  // still describes the exact employer payload. Normal PDF rerenders do not meet this condition.
+  const sameContent = auditFor({ objectKey: NEW_KEY, pdfBytes: OLD_BYTES });
   assert.ok(restoredPacketAcknowledgement({
     authority: 'authorizing_send',
     priorAudit: before,

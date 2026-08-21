@@ -25,6 +25,11 @@ import { createPdfGenerationBinding } from './pdfGenerationBinding';
 const RESUME_EMAIL = 'student@example.com';
 const APPLICANT_EMAIL = 'app-owner@apply.trylitos.com';
 const JD_TEXT = 'Build reliable systems.';
+const EMPLOYER_DELIVERY_BINDING = {
+  version: 'employer_delivery_v1',
+  mode: 'browser',
+  sha256: 'a'.repeat(64),
+} as const;
 
 const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 
@@ -70,6 +75,7 @@ function packetRow(options: { objectKey: string; pdfBytes: Buffer }) {
         profile: { email: APPLICANT_EMAIL, experience: [], skills: [], school: '', grad_year: 0 },
         application_profile: {},
       },
+      employer_delivery_bindings: EMPLOYER_DELIVERY_BINDING,
     },
   };
   const jobContext = { company: 'Acme', role: 'Engineer' };
@@ -81,6 +87,7 @@ function packetRow(options: { objectKey: string; pdfBytes: Buffer }) {
     jobContext,
     questions: [],
     applicantSnapshot: spec._review.applicant_snapshot,
+    employerDelivery: EMPLOYER_DELIVERY_BINDING,
     resumeEmail: RESUME_EMAIL,
     applicantEmail: APPLICANT_EMAIL,
     pdfObjectKey: options.objectKey,
@@ -309,5 +316,5 @@ test('the packet audit route charges the hourly limiter once, and only inside th
 
   // The gate and the constructor are still the ones this route calls, whatever they are passed.
   assert.match(route, /currentPacketAudit\(row[,)]/);
-  assert.match(route, /createAndPersistPacketAudit\(row[,)]/);
+  assert.match(route, /createAndPersistPacketAudit\(packetRow[,)]/);
 });

@@ -71,8 +71,10 @@ test('manual dashboard navigation comes only from an action-time current acknowl
   const binding = route.indexOf('verifiedDashboardHandoffUrl({');
   const response = route.indexOf('manual_handoff:');
   assert.ok(ownership >= 0 && audit > ownership && refresh > audit && binding > refresh && response > binding);
-  assert.match(route, /refreshed\.resume_object_key !== row\.resume_object_key/);
-  assert.match(route, /!isDeepStrictEqual\(refreshed\.spec, row\.spec\)/);
+  assert.match(route, /const auditedRow = audit\.row/,
+    'a retention restore must replace the pre-audit row before the handoff CAS');
+  assert.match(route, /refreshed\.resume_object_key !== auditedRow\.resume_object_key/);
+  assert.match(route, /!isDeepStrictEqual\(refreshed\.spec, auditedRow\.spec\)/);
   assert.match(route, /frozenUrl: refreshedReview\.portal_url/);
   assert.match(route, /frozenHandoffUrl: refreshedReview\.extension_handoff_url/);
   assert.match(route, /frozenAtsName: refreshedReview\.ats_name/);

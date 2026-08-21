@@ -946,6 +946,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         restoreExpiredResume: 'authorizing_send',
       });
       if (!audit.valid) return reply.status(409).send(packetAuditClientError(audit));
+      const auditedRow = audit.row;
 
       // PDF and alias verification perform external reads. Re-read the owner-scoped row after
       // those awaits and reject unless the complete saved packet is still byte-for-byte the one
@@ -953,8 +954,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       // snapshot, so a concurrent portal/job/status/claim mutation cannot release a stale URL.
       const refreshed = await ownedResume(request, reply);
       if (!refreshed) return;
-      if (refreshed.resume_object_key !== row.resume_object_key
-        || !isDeepStrictEqual(refreshed.spec, row.spec)) {
+      if (refreshed.resume_object_key !== auditedRow.resume_object_key
+        || !isDeepStrictEqual(refreshed.spec, auditedRow.spec)) {
         return reply.status(409).send({
           error: 'This application changed while its company handoff was being verified. Reload it before continuing.',
           code: 'MANUAL_HANDOFF_STALE',
