@@ -12,6 +12,7 @@ const ENV_KEYS = [
 const saved = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
 const key = 'users/user-1/submission-runs/run-1/receipt.png';
 const previewKey = 'users/user-1/submission-runs/run-1/filled.png';
+const progressPreviewKey = 'users/user-1/submission-runs/run-1/progress-discovery.png';
 const png = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
   Buffer.from('controlled-receipt-evidence'),
@@ -95,6 +96,29 @@ test('controlled QA capture records a filled preview as distinct kind-bound evid
     bytes: png.length,
     sha256: digest,
   });
+});
+
+test('production accepts the exact progress discovery filename as filled-preview evidence', async () => {
+  process.env.NODE_ENV = 'production';
+  delete process.env.LITOS_QA_RECEIPT_CAPTURE_ENABLED;
+  let storedKey = '';
+  const result = await storeFilledPreviewScreenshot(progressPreviewKey, png, {
+    blobPut: async (objectKey) => {
+      storedKey = objectKey;
+      return { url: 'https://blob.example/progress-discovery.png' };
+    },
+  });
+  assert.equal(storedKey, progressPreviewKey);
+  assert.equal(result.kind, 'filled_preview');
+
+  await assert.rejects(
+    storeReceiptScreenshot(progressPreviewKey, png),
+    /Receipt screenshot object key is invalid/,
+  );
+  await assert.rejects(
+    storeFilledPreviewScreenshot('users/user-1/submission-runs/run-1/progress-discovery-extra.png', png),
+    /Filled preview screenshot object key is invalid/,
+  );
 });
 
 test('screenshot kinds reject each other object keys before storage', async () => {

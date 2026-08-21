@@ -8,7 +8,7 @@ import {
 } from './browserbase';
 import { describeRequiredBlocker, describeUnlabelledBlockers, humanFieldLabel } from './fieldLabel';
 import { applicantChoseStoredAnswer } from './applicantAnswer';
-import { optionBandAnswer, storedOptionAnswerIsCurrent } from './optionBand';
+import { derivationIsCurrent, optionBandAnswer, storedOptionAnswerIsCurrent } from './optionBand';
 import {
   classifyField,
   consentAcknowledgementLicence,
@@ -17,6 +17,7 @@ import {
   graduationYearFieldAnswer,
   isConsentAcceptingWording,
   isLegalConsentQuestion,
+  knownAnswerLookup,
   normalizeReviewQuestionLabel,
   resolveKnownAnswer,
   ROUTINE_APPLICANT_CONSENT_QUESTION,
@@ -1673,6 +1674,7 @@ export type ManagedOptionProbeTarget = {
 function managedOptionProbeTarget(
   field: { label: string; selector?: string; durableSelector?: string | null; inputType?: string; role?: string | null; required?: boolean },
   discoveryRoleCapability = false,
+  greenhouseFamily = false,
 ): ManagedOptionProbeTarget | undefined {
   const controlId = managedOptionProbeControlId(field);
   // A stable name is enough to join discovery options to the later packet. It is not a DOM id and
@@ -1687,6 +1689,7 @@ function managedOptionProbeTarget(
   const expectsClosed = kind === 'native'
     || /^(?:combobox|listbox)$/.test(inputType)
     || (discoveryRoleCapability && /^(?:combobox|listbox)$/.test(role))
+    || (greenhouseFamily && /^question_\d+$/.test(controlId) && isGreenhouseReactSelectQuestion(field.label))
     || MANAGED_FIXED_CLOSED_CONTROL_IDS.has(controlId);
   // Greenhouse's education row mixes React-selects with a plain text graduation-year input. The
   // shared `--0` suffix identifies a row, not a closed control. In particular, end-year--0 must be
@@ -1730,9 +1733,10 @@ export function managedOptionProbeTargets(
   }
   const required: ManagedOptionProbeTarget[] = [];
   const optional: ManagedOptionProbeTarget[] = [];
+  const greenhouseFamily = portalFamily(portal) === 'greenhouse';
   for (const field of discovered) {
     if (field.options && field.options.length > 0) continue;
-    const target = managedOptionProbeTarget(field, discoveryRoleCapability);
+    const target = managedOptionProbeTarget(field, discoveryRoleCapability, greenhouseFamily);
     if (!target || seen.has(target.controlId)) continue;
     seen.add(target.controlId);
     (target.required ? required : optional).push(target);
@@ -1748,8 +1752,9 @@ function detailedManagedOptionProbeTargets(
 ): ManagedOptionProbeTarget[] {
   const ids = managedOptionProbeTargets(portal, discovered, alreadyRead, discoveryRoleCapability);
   const byId = new Map<string, ManagedOptionProbeTarget>();
+  const greenhouseFamily = portalFamily(portal) === 'greenhouse';
   for (const field of discovered) {
-    const target = managedOptionProbeTarget(field, discoveryRoleCapability);
+    const target = managedOptionProbeTarget(field, discoveryRoleCapability, greenhouseFamily);
     if (target && !byId.has(target.controlId)) byId.set(target.controlId, target);
   }
   return ids.flatMap((id) => byId.get(id) ?? []);
@@ -4374,6 +4379,16 @@ function greenhouseCurrentOptionAnswer(
   item: SubmissionPacket['questions'][number],
   packet: SubmissionPacket,
 ): string | undefined {
+  const source = item.answerOptionSource?.trim();
+  if (source && packet.applicationProfile) {
+    const current = knownAnswerLookup(
+      packet.applicationProfile,
+      packet.jdText,
+      packet.roleCountry,
+      packet.roleCountryCode,
+    )(item);
+    if (derivationIsCurrent(source, current)) return item.answer.trim() || undefined;
+  }
   const band = optionBandAnswer(item.answer);
   if (!band) return undefined;
   const bucketInputs = [packet.gpa, packet.graduationDate, packet.graduationMonth, packet.graduationYear];

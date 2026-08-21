@@ -145,11 +145,11 @@ test('managed choice fallback carries the job-board detail and preserves the ori
   ]);
 
   assert.deepEqual(
-    resolved.map(({ answer, answer_source, answer_option_source }) => ({ answer, answer_source, answer_option_source })),
+    resolved.map(({ answer, kind, answer_source, answer_option_source }) => ({ answer, kind, answer_source, answer_option_source })),
     [
-      { answer: 'Other', answer_source: undefined, answer_option_source: 'Job board' },
-      { answer: 'Litos', answer_source: undefined, answer_option_source: undefined },
-      { answer: 'Other', answer_source: undefined, answer_option_source: 'Cinematica Labs, Los Angeles, CA' },
+      { answer: 'Other', kind: 'required', answer_source: undefined, answer_option_source: 'Job board' },
+      { answer: 'Litos', kind: 'required', answer_source: undefined, answer_option_source: undefined },
+      { answer: 'Other', kind: 'required', answer_source: undefined, answer_option_source: 'Cinematica Labs, Los Angeles, CA' },
     ],
   );
   assert.deepEqual(
@@ -203,6 +203,30 @@ test('managed choice fallback carries the job-board detail when options survive 
     [
       { answer: 'Other', answer_option_source: 'Job board' },
       { answer: 'Litos', answer_option_source: undefined },
+    ],
+  );
+});
+
+test('the referral detail fallback retires only its stale draft classification', () => {
+  const resolved = resolveApplicantClosedChoiceFallbacks(
+    [
+      { label: 'How did you hear about Optiver?', selector: '#source', inputType: 'combobox', maxLength: null, options: ['Other'] },
+      { label: 'If other, please explain', selector: '#detail', inputType: 'text', maxLength: 100 },
+      { label: 'Why Optiver?', selector: '#why', inputType: 'textarea', maxLength: 500 },
+    ],
+    [
+      { id: 'source', question: 'How did you hear about Optiver?', answer: 'Job board', kind: 'required', required: true, options: ['Other'] },
+      { id: 'detail', question: 'If other, please explain', answer: 'N/A', kind: 'essay', required: false },
+      { id: 'why', question: 'Why Optiver?', answer: 'A grounded draft.', kind: 'essay', required: true },
+    ],
+  );
+
+  assert.deepEqual(
+    resolved.map(({ answer, kind, answer_source }) => ({ answer, kind, answer_source })),
+    [
+      { answer: 'Other', kind: 'required', answer_source: undefined },
+      { answer: 'Litos', kind: 'required', answer_source: undefined },
+      { answer: 'A grounded draft.', kind: 'essay', answer_source: undefined },
     ],
   );
 });

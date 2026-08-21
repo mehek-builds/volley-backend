@@ -413,6 +413,17 @@ test('the guard stays honest: Class B fields the profile really does not hold ar
   assert.deepEqual(profileBackedBlockerLabels(classB.map((label) => describeRequiredBlocker(label)), STORED_PROFILE), []);
 });
 
+test('a stored gender identity snaps to the equivalent live checkbox wording', () => {
+  const resolved = resolveProfileField({
+    label: 'How would you describe your gender identity? (mark all that apply)',
+    inputType: 'checkbox',
+    options: ['Woman', 'Man', 'Non-binary', 'Prefer not to say'],
+  }, { eeo_prefs: { gender: 'Female' } });
+
+  assert.equal(resolved?.value, 'Woman');
+  assert.equal(resolved?.matchedOption, true);
+});
+
 test('blocker diagnosis receives the exact posting country for scoped eligibility', () => {
   const label = 'Will you require sponsorship?';
   const blockers = [describeRequiredBlocker(label)];
