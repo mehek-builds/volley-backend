@@ -261,7 +261,11 @@ test('a legacy recent-employer Other recovers provenance only from a resume empl
     undefined,
     'Cinematica Labs, Los Angeles, CA',
   );
-  assert.equal(applicantSelectedOther[0]?.answer_option_source, undefined);
+  assert.equal(
+    applicantSelectedOther[0]?.answer_option_source,
+    'Cinematica Labs, Los Angeles, CA',
+    'the resume and live list prove the same Other choice without changing the applicant selection',
+  );
 
   const listedEmployer = resolveApplicantClosedChoiceFallbacks(
     discovered,
