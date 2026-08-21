@@ -269,6 +269,25 @@ test('a Job board source makes only an employee-referral detail non-applicable',
     'the stale refusal retires even when a failed optional control did not survive the question merge',
   );
 
+  const legacyResolved = resolveApplicantClosedChoiceFallbacks(discovered, [
+    { id: 'source', question: 'How did you hear about Optiver?', answer: 'Other', kind: 'required', required: true, options: ['Other', 'Employee Referral'] },
+    { id: 'employee-detail', question: 'If referred by an Optiver employee or Optiver intern, please provide their name', answer: '', kind: 'required', required: false },
+  ], 'Job board');
+  assert.deepEqual(
+    legacyResolved.map(({ answer, answer_option_source }) => ({ answer, answer_option_source })),
+    [
+      { answer: 'Other', answer_option_source: 'Job board' },
+      { answer: 'N/A', answer_option_source: undefined },
+    ],
+    'the current stored referral fact repairs a legacy machine-resolved Other that predates provenance',
+  );
+  assert.deepEqual(
+    filterAutomaticallyResolvedReferralAttention([
+      'how you heard about this role is yours to answer: "If referred by an Optiver employee or Optiver intern, please"',
+    ], legacyResolved.filter((question) => question.id !== 'employee-detail')),
+    [],
+  );
+
   const unprovenOther = resolveApplicantClosedChoiceFallbacks(discovered, [
     { id: 'source', question: 'How did you hear about Optiver?', answer: 'Other', kind: 'required', required: true, options: ['Other', 'Employee Referral'], answer_source: 'applicant_review' },
     { id: 'employee-detail', question: 'If referred by an Optiver employee or Optiver intern, please provide their name', answer: '', kind: 'required', required: false },
