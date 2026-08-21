@@ -2449,8 +2449,7 @@ export function resolveApplicantClosedChoiceFallbacks(
         && REFERRAL_SOURCE_CHOICE_QUESTION.test(normalized)
         && Boolean(other)
         && question.answer.trim().toLowerCase() === other?.toLowerCase();
-      const recoverRecentEmployerProvenance = !question.answer_source
-        && !question.answer_option_source?.trim()
+      const recoverRecentEmployerProvenance = !question.answer_option_source?.trim()
         && Boolean(recentEmployer)
         && RECENT_EXPERIENCE_EMPLOYER_QUESTION.test(normalized)
         && Boolean(other)
