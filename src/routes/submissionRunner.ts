@@ -2361,6 +2361,26 @@ export function filterAutomaticallyResolvedReferralAttention(
 }
 
 /**
+ * Closed-list reads that may safely fall back to an exact search.
+ *
+ * Greenhouse's fixed school taxonomy can exceed the render cap before the applicant types. That
+ * does not make the stored school a guess: the fill types the full school name and clicks only an
+ * exactly matching visible option. If the employer spells it differently, no option click occurs
+ * and the required-field blocker still prevents send. Every custom control and every non-windowed
+ * read failure remains fail-closed.
+ */
+export function managedSearchFillableWindowedFailureIds(
+  failures: readonly { controlId: string; reason: string }[],
+  school: string | undefined,
+): Set<string> {
+  if (!school?.trim()) return new Set();
+  return new Set(failures
+    .filter(({ controlId, reason }) => controlId === 'school--0'
+      && reason === 'the option list was windowed at the render cap')
+    .map(({ controlId }) => controlId));
+}
+
+/**
  * The literal "Other" option that truthfully carries an answer the employer omitted from a closed
  * taxonomy. This is deliberately not a general fuzzy fallback. It covers only two facts the
  * applicant already supplied:
@@ -2968,6 +2988,15 @@ async function prepareManaged(
     optionProbeBatchFailures,
     discoveryRoleCapability,
   );
+  const searchFillableWindowedIds = managedSearchFillableWindowedFailureIds(
+    optionProbe.failures,
+    packet.school,
+  );
+  const blockingOptionProbeFailures = optionProbe.failures
+    .filter(({ controlId }) => !searchFillableWindowedIds.has(controlId));
+  const blockingOptionProbeFailedIds = new Set(
+    blockingOptionProbeFailures.map(({ controlId }) => controlId),
+  );
   /* NOT pushed into discoveryFailures. That array is the WHOLE-FORM honesty gate, and a per-control
    * read failure promoted into it made Litos tell her it could not read any of this form's questions
    * when it had read all but one of them. The failure is real and stays visible, and it still holds
@@ -2975,10 +3004,16 @@ async function prepareManaged(
    *
    * This is a change to the packet's account of itself, not to any answer. See
    * optionProbeAttentionReasons for why resolution cannot see this array at all. */
-  if (optionProbe.failures.length > 0) {
+  if (blockingOptionProbeFailures.length > 0) {
     fastify.log.error(
-      { applicationId: row.id, portal, controls: optionProbe.failures },
+      { applicationId: row.id, portal, controls: blockingOptionProbeFailures },
       'Closed controls whose option list could not be read, so each one alone is left for the applicant',
+    );
+  }
+  if (searchFillableWindowedIds.size > 0) {
+    fastify.log.info(
+      { applicationId: row.id, portal, controls: [...searchFillableWindowedIds] },
+      'Windowed fixed school taxonomy will use exact stored-school search with required-field verification',
     );
   }
   const fieldOptions = optionProbe.options;
@@ -3014,7 +3049,8 @@ async function prepareManaged(
       discovered: (discoveryResult?.discovered ?? []).length,
       targeted: targetedControlIds.length,
       read: Object.keys(fieldOptions).length,
-      failures: optionProbe.failures.length,
+      failures: blockingOptionProbeFailures.length,
+      searchableWindowed: searchFillableWindowedIds.size,
       roleCapability: discoveryRoleCapability,
       /* WHICH controls, not just how many. The counts said targeted 5 of 16 discovered and read 5,
        * so the probe is healthy and the question moved to why the other eleven were never targeted -
@@ -3034,7 +3070,7 @@ async function prepareManaged(
   );
   const failedFields = (discoveryResult?.discovered ?? []).flatMap((field) => {
     const controlId = managedOptionProbeControlId(field);
-    if (!controlId || !optionProbe.failedIds.has(controlId)) return [];
+    if (!controlId || !blockingOptionProbeFailedIds.has(controlId)) return [];
     return [{
       controlId,
       label: field.label,
@@ -3043,18 +3079,18 @@ async function prepareManaged(
     }];
   });
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
-  const optionProbeAttention = optionProbeAttentionReasons(optionProbe.failures, failedFields, storedQuestions);
+  const optionProbeAttention = optionProbeAttentionReasons(blockingOptionProbeFailures, failedFields, storedQuestions);
   /* The failed reads that are NOT excused by a reviewed answer. These are the ones that hold the
    * send; see the `safe` term below and coveredOptionProbeFailureIds for the one shared
    * derivation. */
   const uncoveredProbeFailures = (() => {
-    const covered = coveredOptionProbeFailureIds(optionProbe.failures, failedFields, storedQuestions);
-    return optionProbe.failures.filter(({ controlId }) => !covered.has(controlId));
+    const covered = coveredOptionProbeFailureIds(blockingOptionProbeFailures, failedFields, storedQuestions);
+    return blockingOptionProbeFailures.filter(({ controlId }) => !covered.has(controlId));
   })();
   const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
     .filter((field) => {
       const controlId = managedOptionProbeControlId(field);
-      return !controlId || !optionProbe.failedIds.has(controlId);
+      return !controlId || !blockingOptionProbeFailedIds.has(controlId);
     });
   const resolutionCurrent = { ...current, questions: storedQuestions };
   const applicationProfile = applicationProfileForPacket(
@@ -3213,7 +3249,7 @@ async function prepareManaged(
       discoveredQuestions,
       storedQuestions,
       [...invalidatedQuestionKeys, ...failedQuestionKeys, ...staleRelabeledKeys],
-      optionProbe.failedIds,
+      blockingOptionProbeFailedIds,
     ),
     referralSourceForApplication(
       applicationProfile.referral_source_default,

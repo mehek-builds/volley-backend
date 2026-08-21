@@ -32,6 +32,7 @@ import {
   type ResumeRow,
   packetQuestionsForFill,
   filterAutomaticallyResolvedReferralAttention,
+  managedSearchFillableWindowedFailureIds,
   truthfulOtherChoice,
 } from './submissionRunner';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
@@ -341,6 +342,21 @@ test('managed provider blockers pass through the proven referral filter before t
     prepareBody,
     /consentTickCoveredBlockers\(afterFollowUps, prepareConsentTickPlan\)/,
   );
+});
+
+test('only a windowed fixed school list with an exact stored school may use search fill', () => {
+  const failures = [
+    { controlId: 'school--0', reason: 'the option list was windowed at the render cap' },
+    { controlId: 'degree--0', reason: 'the option list was windowed at the render cap' },
+    { controlId: 'question_123', reason: 'the option list was windowed at the render cap' },
+    { controlId: 'school--0', reason: 'the option list returned no readable choices' },
+  ];
+  assert.deepEqual(
+    [...managedSearchFillableWindowedFailureIds(failures, 'University of Southern California')],
+    ['school--0'],
+  );
+  assert.deepEqual([...managedSearchFillableWindowedFailureIds(failures, '  ')], []);
+  assert.deepEqual([...managedSearchFillableWindowedFailureIds(failures.slice(1), 'USC')], []);
 });
 
 test('the compact packet preselects only unresolved open prose controls', () => {
@@ -2775,7 +2791,7 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   // an advisory, not a hold - see coveredOptionProbeFailureIds and the covered-excusal test above.
   assert.match(runner, /\.\.\.optionProbeAttention,/);
   assert.match(runner, /&& uncoveredProbeFailures\.length === 0/);
-  assert.match(runner, /coveredOptionProbeFailureIds\(optionProbe\.failures, failedFields, storedQuestions\)/);
+  assert.match(runner, /coveredOptionProbeFailureIds\(blockingOptionProbeFailures, failedFields, storedQuestions\)/);
 });
 
 /* THE IMC FIXTURE. Packet 920a6751, read off the live form on 2026-08-11.
