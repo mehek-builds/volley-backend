@@ -33,6 +33,7 @@ import {
 // The high-school test below asserts on the alias ladder as well as on the resolver: the wrong
 // graduation year came from the ladder, not from resolveKnownAnswer, and only this call sees it.
 import { resolveProfileField } from './profileFieldResolution';
+import { packetAuditSha256, packetVisibleQuestions } from './packetAudit';
 
 // R-004 originally refused every work-eligibility question after one false legal declaration
 // shipped. These are now answerable only from explicit stored booleans, never by inference.
@@ -2121,6 +2122,59 @@ test('Workable suppresses only its built-in phone and address fields', () => {
       { id: 'custom-address', question: 'What is your current mailing address?', answer: 'Dubai' },
     ]);
   }
+});
+
+test('Recruitee drops built-in candidate controls captured under a section heading', () => {
+  const input = [
+    {
+      id: 'phone-stable',
+      question: 'Meine Daten',
+      answer: '+971 50 123 4567',
+      portal_selector: '#input-candidate\\.phone-5',
+    },
+    {
+      id: 'phone-transient',
+      question: 'Candidate details',
+      answer: '+971 50 123 4567',
+      portal_selector: '#input-candidate\\.phone-undefined',
+    },
+    {
+      id: 'phone-direct',
+      question: 'Contact details',
+      answer: '+971 50 123 4567',
+      portal_selector: 'input[id="input-candidate.phone-5"]',
+    },
+    {
+      id: 'custom',
+      question: 'Best number for an interview?',
+      answer: '+971 50 123 4567',
+      portal_selector: '#input-custom-interview-phone',
+    },
+  ];
+
+  assert.deepEqual(normalizeStoredPortalQuestions(input, 'recruitee'), [input[3]]);
+  assert.deepEqual(normalizeStoredPortalQuestions(input, 'manual_recruitee'), [input[3]]);
+});
+
+test('Recruitee generated id churn leaves packet-visible custom questions unchanged', () => {
+  const custom = {
+    id: 'custom',
+    question: 'Best number for an interview?',
+    answer: '+971 50 123 4567',
+    portal_selector: '#input-custom-interview-phone',
+  };
+  const normalized = ['#input-candidate\\.phone-5', '#input-candidate\\.phone-undefined']
+    .map((portal_selector) => normalizeStoredPortalQuestions([
+      { id: 'fixed', question: 'Meine Daten', answer: '+971 50 123 4567', portal_selector },
+      custom,
+    ], 'recruitee'));
+
+  assert.deepEqual(normalized[0], [custom]);
+  assert.deepEqual(normalized[1], [custom]);
+  assert.equal(
+    packetAuditSha256(packetVisibleQuestions(normalized[0])),
+    packetAuditSha256(packetVisibleQuestions(normalized[1])),
+  );
 });
 
 test('review question labels are never empty or longer than the managed runner limit', () => {
