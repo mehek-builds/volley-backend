@@ -2427,6 +2427,7 @@ export function resolveApplicantClosedChoiceFallbacks(
   discovered: readonly DiscoveredQuestion[],
   questions: readonly ApplicationReviewQuestion[],
   currentReferralSource?: string | null,
+  currentRecentEmployer?: string | null,
 ): ApplicationReviewQuestion[] {
   const legacyLitosDetailPresent = questions.some((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
@@ -2440,6 +2441,7 @@ export function resolveApplicantClosedChoiceFallbacks(
     const fallback = truthfulOtherChoice(normalized, question.answer, question.options);
     if (!fallback) {
       const other = otherReferralOption(usableOptions(question.options));
+      const recentEmployer = currentRecentEmployer?.trim();
       const recoverLegacyProvenance = !question.answer_source
         && !question.answer_option_source?.trim()
         && (isJobBoardReferralClaim(currentReferralSource)
@@ -2447,9 +2449,19 @@ export function resolveApplicantClosedChoiceFallbacks(
         && REFERRAL_SOURCE_CHOICE_QUESTION.test(normalized)
         && Boolean(other)
         && question.answer.trim().toLowerCase() === other?.toLowerCase();
+      const recoverRecentEmployerProvenance = !question.answer_source
+        && !question.answer_option_source?.trim()
+        && Boolean(recentEmployer)
+        && RECENT_EXPERIENCE_EMPLOYER_QUESTION.test(normalized)
+        && Boolean(other)
+        && question.answer.trim().toLowerCase() === other?.toLowerCase()
+        && recentEmployer?.toLowerCase() !== other?.toLowerCase()
+        && !usableOptions(question.options).some((option) => option.trim().toLowerCase() === recentEmployer?.toLowerCase());
       return recoverLegacyProvenance
         ? { ...question, answer_option_source: isJobBoardReferralClaim(currentReferralSource) ? currentReferralSource?.trim() : 'Job board' }
-        : question;
+        : recoverRecentEmployerProvenance
+          ? { ...question, answer_option_source: recentEmployer }
+          : question;
     }
     return {
       ...question,
@@ -3270,6 +3282,7 @@ async function prepareManaged(
       applicationProfile.referral_source_default,
       applicationProfile.referral_source_evidence,
     ),
+    packet.mostRecentRole?.company,
   );
   const referralResolutionDiagnostics = mergedQuestions.flatMap((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
