@@ -7,6 +7,7 @@ import {
   employerDeliveryEnvelope,
   employerDeliveryProjection,
   employerDeliverySha256,
+  extensionBoundApplicationSpec,
   packetForEmployerDelivery,
   extensionEmployerDeliveryProjection,
   extensionEmployerDeliveryBindingIssue,
@@ -54,6 +55,71 @@ test('projection hashes file bytes without serializing them and includes every b
   assert.equal(projection.phone, '+971 50 111 1111');
   assert.deepEqual(projection.eeoPrefs, { gender: 'Female' });
   assert.deepEqual(projection.mostRecentRole, { company: 'Litos', title: 'Founder' });
+});
+
+test('absent and measured-empty managed form inventories have one delivery identity', () => {
+  const absent = packet();
+  const measuredEmpty = {
+    ...packet(),
+    fieldOptions: {},
+    failedFields: [],
+  };
+  const envelope = employerDeliveryEnvelope({
+    channel: 'browser:stratus-managed',
+    destinationUrl: 'https://apply.workable.com/example/j/123',
+    portalFamily: 'workable',
+  });
+
+  assert.deepEqual(employerDeliveryProjection(absent), employerDeliveryProjection(measuredEmpty));
+  assert.equal(employerDeliverySha256(absent, envelope), employerDeliverySha256(measuredEmpty, envelope));
+});
+
+test('nonempty managed form inventories remain bound to exact options and failures', () => {
+  const envelope = employerDeliveryEnvelope({
+    channel: 'browser:stratus-managed',
+    destinationUrl: 'https://apply.workable.com/example/j/123',
+    portalFamily: 'workable',
+  });
+  const base = {
+    ...packet(),
+    fieldOptions: { work_authorization: ['Yes', 'No'] },
+    failedFields: [{ controlId: 'office', label: 'Preferred office', selector: '#office' }],
+  };
+  const changedOption = {
+    ...packet(),
+    fieldOptions: { work_authorization: ['No', 'Yes'] },
+    failedFields: base.failedFields,
+  };
+  const changedFailure = {
+    ...packet(),
+    fieldOptions: base.fieldOptions,
+    failedFields: [{ controlId: 'location', label: 'Preferred office', selector: '#office' }],
+  };
+
+  assert.notEqual(employerDeliverySha256(base, envelope), employerDeliverySha256(changedOption, envelope));
+  assert.notEqual(employerDeliverySha256(base, envelope), employerDeliverySha256(changedFailure, envelope));
+});
+
+test('managed form snapshots do not alter the separate attended extension payload', () => {
+  const base = {
+    target_role: 'Engineer',
+    _review: { status: 'ready_for_final_approval', questions: [] },
+  };
+  const withManagedSnapshot = {
+    ...base,
+    _review: {
+      ...base._review,
+      managed_form_snapshot: {
+        version: 1,
+        field_options: { office: ['Dubai', 'London'] },
+        failed_fields: [],
+      },
+    },
+  };
+  assert.deepEqual(
+    extensionBoundApplicationSpec(withManagedSnapshot),
+    extensionBoundApplicationSpec(base),
+  );
 });
 
 test('every scalar, provenance, filename, question, and file mutation stops before transport', async () => {

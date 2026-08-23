@@ -126,6 +126,15 @@ export function employerDeliveryProjection(packet: SubmissionPacket): Record<str
   for (const key of Object.keys(EMPLOYER_DELIVERY_PACKET_FIELDS) as Array<keyof SubmissionPacket>) {
     const value = packet[key];
     if (value === undefined) continue;
+    // A managed discovery pass reports an explicit empty inventory after an audit built before the
+    // page was probed. Empty and absent both mean there is no behavior-bearing form evidence, so
+    // one canonical omission prevents a false packet drift while nonempty evidence stays bound.
+    if (key === 'fieldOptions'
+      && value !== null
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && Object.keys(value as Record<string, unknown>).length === 0) continue;
+    if (key === 'failedFields' && Array.isArray(value) && value.length === 0) continue;
     projection[key] = EMPLOYER_DELIVERY_PACKET_FIELDS[key] === 'file'
       ? fileProjection(value as Buffer)
       : value;
@@ -245,6 +254,7 @@ export function extensionBoundApplicationSpec(spec: unknown): unknown {
     packet_audit: _packetAudit,
     packet_audit_acknowledgement: _packetAuditAcknowledgement,
     employer_delivery_bindings: _employerDeliveryBindings,
+    managed_form_snapshot: _managedFormSnapshot,
     ...review
   } = rawReview as Record<string, unknown>;
   return { ...source, _review: review };

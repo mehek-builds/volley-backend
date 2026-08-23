@@ -567,12 +567,14 @@ test('a scoped miss refuses instead of falling through to the unscoped resolver'
  * pre-fill delivery measurement and its final review measurement, and every submit reads it. */
 test('transcript_supported is written by both prepares and read by all three submits', () => {
   const runner = routeSource('submissionRunner.ts');
-  assert.equal(runner.match(/transcript_supported: transcriptSupported/g)?.length, 4,
-    'both prepares must bind the pre-fill measurement and persist the final review measurement');
+  assert.equal(runner.match(/transcript_supported: transcriptSupported/g)?.length, 2,
+    'the direct prepare must bind and persist its measured capability');
+  assert.equal(runner.match(/transcript_supported: managedFormSnapshot\.transcript_supported/g)?.length, 2,
+    'the managed prepare must mirror the exact bounded snapshot capability at both writes');
   assert.match(runner, /const transcriptSupported = managedResultHasTranscriptUpload\(discoveryResult, portal\)/);
   assert.match(runner, /const transcriptSupported = await hasTranscriptUpload\(page, portal\)/);
 
-  /* THE MANAGED WRITE IS GUARDED ON THE DISCOVERY PASS HAVING RUN, and that guard is the whole
+  /* THE MANAGED WRITE IS GUARDED ON THE SNAPSHOT HAVING A CAPABILITY, and that guard is the whole
    * difference between a measurement and an invention.
    *
    * runManagedBrowser's catch returns null for any failure, and managedResultHasTranscriptUpload
@@ -581,9 +583,11 @@ test('transcript_supported is written by both prepares and read by all three sub
    * anything downstream: it means "this employer's form has nowhere to put a transcript". The
    * screen states that to her as fact, files the ask undeliverable, withholds the Add control and
    * tells her to finish by hand a form that may well have accepted the file. Absent is the third
-   * state and the only honest one, matching cover_letter_required in the same object literal. */
-  assert.match(runner, /\.\.\.\(discoveryFailures\.length === 0 \? \{ transcript_supported: transcriptSupported \} : \{\}\),/,
-    'the managed prepare must write the flag only when the discovery pass actually ran');
+   * state and the only honest one, matching cover_letter_required in the same object literal. A
+   * prior measured snapshot can be preserved across a transient discovery failure, so the mirror
+   * follows that bounded snapshot rather than the latest failed probe. */
+  assert.match(runner, /\.\.\.\(managedFormSnapshot\.transcript_supported !== undefined[\s\S]*?transcript_supported: managedFormSnapshot\.transcript_supported/,
+    'the managed prepare must mirror only a capability the bounded snapshot measured or preserved');
 
   const deliveryIdentity = readFileSync(join(__dirname, 'employerDeliveryIdentity.ts'), 'utf8');
   assert.match(

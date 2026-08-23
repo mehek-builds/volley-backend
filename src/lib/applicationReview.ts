@@ -4,7 +4,13 @@ import { PACKET_VISIBLE_QUESTION_FIELDS, type PacketAudit } from './packetAudit'
 import type { RequiredDocumentAsk } from './requiredDocuments';
 import type { SubmissionStopRecord } from './submissionStop';
 import type { EmployerDeliveryBindings } from './employerDeliveryIdentity';
-import { canonicalSupportedPortalUrl, detectPortal, isPortalSupported, type AutofillApplicantSnapshot } from './portalSubmission';
+import {
+  canonicalSupportedPortalUrl,
+  detectPortal,
+  isPortalSupported,
+  type AutofillApplicantSnapshot,
+  type SubmissionPacket,
+} from './portalSubmission';
 
 export type ApplicationReviewQuestion = {
   id: string;
@@ -685,6 +691,27 @@ export type SecurityCodeState = {
   attempts?: SecurityCodeAttempt[];
 };
 
+export type ManagedFormSnapshotV1 = {
+  version: 1;
+  field_options: NonNullable<SubmissionPacket['fieldOptions']>;
+  failed_fields: NonNullable<SubmissionPacket['failedFields']>;
+  cover_letter_supported?: boolean;
+  transcript_supported?: boolean;
+};
+
+const MANAGED_FORM_SNAPSHOT_MAX_CONTROLS = 80;
+const MANAGED_FORM_SNAPSHOT_MAX_OPTIONS_PER_CONTROL = 512;
+const MANAGED_FORM_SNAPSHOT_MAX_CONTROL_ID_LENGTH = 500;
+const MANAGED_FORM_SNAPSHOT_MAX_SELECTOR_LENGTH = 500;
+const MANAGED_FORM_SNAPSHOT_MAX_LABEL_LENGTH = 2_000;
+const MANAGED_FORM_SNAPSHOT_MAX_OPTION_LENGTH = 2_000;
+const MANAGED_FORM_SNAPSHOT_MAX_INPUT_TYPE_LENGTH = 100;
+const MANAGED_FORM_SNAPSHOT_MAX_BYTES = 512 * 1024;
+
+function compareSnapshotIdentity(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
 export type ApplicationReviewState = {
   jd_text: string;
   role?: string;
@@ -1021,6 +1048,8 @@ export type ApplicationReviewState = {
    * facts, and a gate built on the first refuses sends the employer would have taken. `undefined`
    * means unmeasured, never false. */
   transcript_supported?: boolean;
+  /** Bounded live-form inventory frozen into every later audit and managed submit packet. */
+  managed_form_snapshot?: ManagedFormSnapshotV1;
   /** Latest managed-run preview shown while the form is still being filled. */
   progress_screenshot_url?: string;
   /** Short, applicant-facing description of the current fill stage. */
@@ -1091,6 +1120,189 @@ export type ApplicationReviewState = {
     resolved_at?: string;
   };
 };
+
+function managedFormSnapshotString(
+  value: unknown,
+  field: string,
+  maxLength: number,
+): string {
+  if (typeof value !== 'string') throw new Error(`Managed form snapshot ${field} must be a string`);
+  const normalized = value.trim();
+  if (!normalized) throw new Error(`Managed form snapshot ${field} cannot be empty`);
+  if (normalized.length > maxLength) {
+    throw new Error(`Managed form snapshot ${field} exceeds ${maxLength} characters`);
+  }
+  return normalized;
+}
+
+function managedFormSnapshotOptionalString(
+  value: unknown,
+  field: string,
+  maxLength: number,
+): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  return managedFormSnapshotString(value, field, maxLength);
+}
+
+/**
+ * Canonicalize the live managed form inventory without dropping identity-bearing evidence.
+ * Oversized or malformed input stops the run instead of being truncated into an incomplete packet.
+ */
+export function normalizeManagedFormSnapshot(input: {
+  fieldOptions?: SubmissionPacket['fieldOptions'];
+  failedFields?: SubmissionPacket['failedFields'];
+  coverLetterSupported?: boolean;
+  transcriptSupported?: boolean;
+}): ManagedFormSnapshotV1 {
+  if (input.fieldOptions !== undefined
+    && (input.fieldOptions === null
+      || typeof input.fieldOptions !== 'object'
+      || Array.isArray(input.fieldOptions))) {
+    throw new Error('Managed form snapshot field options must be an object');
+  }
+  const optionEntries = Object.entries(input.fieldOptions ?? {});
+  if (optionEntries.length > MANAGED_FORM_SNAPSHOT_MAX_CONTROLS) {
+    throw new Error(`Managed form snapshot supports at most ${MANAGED_FORM_SNAPSHOT_MAX_CONTROLS} controls`);
+  }
+  const normalizedOptionEntries: Array<[string, string[]]> = [];
+  const normalizedControlIds = new Set<string>();
+  for (const [rawControlId, rawOptions] of optionEntries) {
+    const controlId = managedFormSnapshotString(
+      rawControlId,
+      'control id',
+      MANAGED_FORM_SNAPSHOT_MAX_CONTROL_ID_LENGTH,
+    );
+    if (normalizedControlIds.has(controlId)) {
+      throw new Error(`Managed form snapshot repeats control id ${controlId}`);
+    }
+    normalizedControlIds.add(controlId);
+    if (!Array.isArray(rawOptions)) {
+      throw new Error(`Managed form snapshot options for ${controlId} must be an array`);
+    }
+    if (rawOptions.length > MANAGED_FORM_SNAPSHOT_MAX_OPTIONS_PER_CONTROL) {
+      throw new Error(
+        `Managed form snapshot supports at most ${MANAGED_FORM_SNAPSHOT_MAX_OPTIONS_PER_CONTROL} options per control`,
+      );
+    }
+    const seen = new Set<string>();
+    const options: string[] = [];
+    for (const rawOption of rawOptions) {
+      const option = managedFormSnapshotString(
+        rawOption,
+        `option for ${controlId}`,
+        MANAGED_FORM_SNAPSHOT_MAX_OPTION_LENGTH,
+      );
+      if (seen.has(option)) continue;
+      seen.add(option);
+      options.push(option);
+    }
+    normalizedOptionEntries.push([controlId, options]);
+  }
+  normalizedOptionEntries.sort(([left], [right]) => compareSnapshotIdentity(left, right));
+  const fieldOptions = Object.fromEntries(normalizedOptionEntries);
+
+  if (input.failedFields !== undefined && !Array.isArray(input.failedFields)) {
+    throw new Error('Managed form snapshot failed fields must be an array');
+  }
+  const rawFailedFields = input.failedFields ?? [];
+  if (rawFailedFields.length > MANAGED_FORM_SNAPSHOT_MAX_CONTROLS) {
+    throw new Error(`Managed form snapshot supports at most ${MANAGED_FORM_SNAPSHOT_MAX_CONTROLS} failed controls`);
+  }
+  const failedByIdentity = new Map<string, ManagedFormSnapshotV1['failed_fields'][number]>();
+  for (const rawField of rawFailedFields) {
+    if (!rawField || typeof rawField !== 'object' || Array.isArray(rawField)) {
+      throw new Error('Managed form snapshot failed field must be an object');
+    }
+    const controlId = managedFormSnapshotString(
+      rawField.controlId,
+      'failed control id',
+      MANAGED_FORM_SNAPSHOT_MAX_CONTROL_ID_LENGTH,
+    );
+    const label = managedFormSnapshotOptionalString(
+      rawField.label,
+      `label for ${controlId}`,
+      MANAGED_FORM_SNAPSHOT_MAX_LABEL_LENGTH,
+    ) ?? controlId;
+    const selector = managedFormSnapshotOptionalString(
+      rawField.selector,
+      `selector for ${controlId}`,
+      MANAGED_FORM_SNAPSHOT_MAX_SELECTOR_LENGTH,
+    );
+    const inputType = managedFormSnapshotOptionalString(
+      rawField.inputType,
+      `input type for ${controlId}`,
+      MANAGED_FORM_SNAPSHOT_MAX_INPUT_TYPE_LENGTH,
+    );
+    const field = {
+      controlId,
+      label,
+      ...(selector ? { selector } : {}),
+      ...(inputType ? { inputType } : {}),
+    };
+    failedByIdentity.set(JSON.stringify(field), field);
+  }
+  const failedFields = [...failedByIdentity.entries()]
+    .sort(([left], [right]) => compareSnapshotIdentity(left, right))
+    .map(([, field]) => field);
+
+  const controlIdentities = new Set([...normalizedControlIds, ...failedFields.map((field) => field.controlId)]);
+  if (controlIdentities.size > MANAGED_FORM_SNAPSHOT_MAX_CONTROLS) {
+    throw new Error(`Managed form snapshot supports at most ${MANAGED_FORM_SNAPSHOT_MAX_CONTROLS} controls`);
+  }
+
+  if (input.coverLetterSupported !== undefined && typeof input.coverLetterSupported !== 'boolean') {
+    throw new Error('Managed form snapshot cover letter capability must be boolean');
+  }
+  if (input.transcriptSupported !== undefined && typeof input.transcriptSupported !== 'boolean') {
+    throw new Error('Managed form snapshot transcript capability must be boolean');
+  }
+  const snapshot: ManagedFormSnapshotV1 = {
+    version: 1,
+    field_options: fieldOptions,
+    failed_fields: failedFields,
+    ...(input.coverLetterSupported !== undefined
+      ? { cover_letter_supported: input.coverLetterSupported }
+      : {}),
+    ...(input.transcriptSupported !== undefined
+      ? { transcript_supported: input.transcriptSupported }
+      : {}),
+  };
+  if (Buffer.byteLength(JSON.stringify(snapshot), 'utf8') > MANAGED_FORM_SNAPSHOT_MAX_BYTES) {
+    throw new Error(`Managed form snapshot exceeds ${MANAGED_FORM_SNAPSHOT_MAX_BYTES} bytes`);
+  }
+  return snapshot;
+}
+
+/** Validate and read a stored snapshot, including its mirrored dashboard capability fields. */
+export function readManagedFormSnapshot(
+  review: Pick<ApplicationReviewState,
+    'managed_form_snapshot' | 'cover_letter_supported' | 'transcript_supported'>,
+): ManagedFormSnapshotV1 | undefined {
+  const stored = review.managed_form_snapshot as unknown;
+  if (stored === undefined) return undefined;
+  if (!stored || typeof stored !== 'object' || Array.isArray(stored)) {
+    throw new Error('Managed form snapshot must be an object');
+  }
+  const record = stored as Record<string, unknown>;
+  if (record.version !== 1) throw new Error('Managed form snapshot version is not supported');
+  if (!Object.prototype.hasOwnProperty.call(record, 'field_options')
+    || !Object.prototype.hasOwnProperty.call(record, 'failed_fields')) {
+    throw new Error('Managed form snapshot is missing its form inventory');
+  }
+  const snapshot = normalizeManagedFormSnapshot({
+    fieldOptions: record.field_options as SubmissionPacket['fieldOptions'],
+    failedFields: record.failed_fields as SubmissionPacket['failedFields'],
+    coverLetterSupported: record.cover_letter_supported as boolean | undefined,
+    transcriptSupported: record.transcript_supported as boolean | undefined,
+  });
+  if (snapshot.cover_letter_supported !== review.cover_letter_supported) {
+    throw new Error('Managed form snapshot cover letter capability differs from the review');
+  }
+  if (snapshot.transcript_supported !== review.transcript_supported) {
+    throw new Error('Managed form snapshot transcript capability differs from the review');
+  }
+  return snapshot;
+}
 
 const TERM_RE = /[A-Za-z][A-Za-z0-9+#./-]*/g;
 const STOPWORDS = new Set(
