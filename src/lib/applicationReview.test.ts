@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
@@ -10,7 +11,9 @@ import {
   finalApprovalCoverLetterIssue,
   finalApprovalFieldIssues,
   mergeSubmittedApplicationReviewQuestions,
+  normalizeManagedFormSnapshot,
   normalizeApplicationReviewQuestions,
+  readManagedFormSnapshot,
   readApplicationReview,
   type ApplicationReviewQuestion,
   type ApplicationReviewState,
@@ -57,6 +60,99 @@ const spec: ResumeSpec = {
 };
 
 describe('application review metadata', () => {
+  test('managed form snapshots are bounded and canonical while option order stays exact', () => {
+    const snapshot = normalizeManagedFormSnapshot({
+      fieldOptions: {
+        ' work_authorization ': [' Yes ', 'No', 'Yes'],
+      },
+      failedFields: [
+        { controlId: ' office ', label: ' Preferred office ', selector: ' #office ', inputType: ' select-one ' },
+        { controlId: 'degree', label: ' Degree ', selector: '#degree', inputType: 'combobox' },
+        { controlId: 'office', label: 'Preferred office', selector: '#office', inputType: 'select-one' },
+      ],
+      coverLetterSupported: false,
+      transcriptSupported: true,
+    });
+
+    assert.deepEqual(snapshot, {
+      version: 1,
+      field_options: { work_authorization: ['Yes', 'No'] },
+      failed_fields: [
+        { controlId: 'degree', label: 'Degree', selector: '#degree', inputType: 'combobox' },
+        { controlId: 'office', label: 'Preferred office', selector: '#office', inputType: 'select-one' },
+      ],
+      cover_letter_supported: false,
+      transcript_supported: true,
+    });
+    assert.deepEqual(readManagedFormSnapshot({
+      cover_letter_supported: false,
+      transcript_supported: true,
+      managed_form_snapshot: snapshot,
+    }), snapshot);
+  });
+
+  test('managed form snapshots reject overflow and capability divergence', () => {
+    assert.throws(() => normalizeManagedFormSnapshot({
+      fieldOptions: Object.fromEntries(Array.from({ length: 81 }, (_, index) => [`field_${index}`, ['Yes', 'No']])),
+      failedFields: [],
+    }), /at most 80 controls/);
+    assert.throws(() => normalizeManagedFormSnapshot({
+      fieldOptions: { field: Array.from({ length: 513 }, (_, index) => `Option ${index}`) },
+      failedFields: [],
+    }), /at most 512 options/);
+    assert.throws(() => normalizeManagedFormSnapshot({
+      fieldOptions: Object.fromEntries(Array.from({ length: 80 }, (_, index) => [`field_${index}`, ['Yes']])),
+      failedFields: [{ controlId: 'different_control', label: 'Different control' }],
+    }), /at most 80 controls/);
+    const snapshot = normalizeManagedFormSnapshot({
+      fieldOptions: {},
+      failedFields: [],
+      coverLetterSupported: true,
+    });
+    assert.throws(() => readManagedFormSnapshot({
+      cover_letter_supported: false,
+      managed_form_snapshot: snapshot,
+    }), /cover letter capability/);
+    assert.throws(() => readManagedFormSnapshot({
+      managed_form_snapshot: { version: 1 } as never,
+    }), /missing its form inventory/);
+    assert.throws(() => readManagedFormSnapshot({
+      managed_form_snapshot: { version: 1, field_options: null, failed_fields: [] } as never,
+    }), /field options must be an object/);
+    assert.throws(() => readManagedFormSnapshot({
+      managed_form_snapshot: { version: 1, field_options: {}, failed_fields: null } as never,
+    }), /failed fields must be an array/);
+    assert.throws(() => readManagedFormSnapshot({
+      managed_form_snapshot: {
+        version: 1,
+        field_options: {},
+        failed_fields: [],
+        transcript_supported: true,
+      },
+    }), /transcript capability differs/);
+  });
+
+  test('managed prepare persists one snapshot and every later packet rebuild restores it', () => {
+    const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+    const buildStart = source.indexOf('export async function buildPacket(');
+    const buildEnd = source.indexOf('\nexport function readMostRecentRole', buildStart);
+    const prepareStart = source.indexOf('async function prepareManaged(');
+    const prepareEnd = source.indexOf('\nasync function prepareManagedAttendedAccountGate', prepareStart);
+    assert.ok(buildStart > 0 && buildEnd > buildStart);
+    assert.ok(prepareStart > 0 && prepareEnd > prepareStart);
+    const build = source.slice(buildStart, buildEnd);
+    const prepare = source.slice(prepareStart, prepareEnd);
+
+    assert.match(build, /const managedFormSnapshot = readManagedFormSnapshot\(review\)/);
+    assert.match(build, /fieldOptions: managedFormSnapshot\.field_options/);
+    assert.match(build, /failedFields: managedFormSnapshot\.failed_fields/);
+    assert.match(prepare, /const managedFormSnapshot = [\s\S]*?normalizeManagedFormSnapshot\(/);
+    assert.match(prepare, /packet\.fieldOptions = managedFormSnapshot\.field_options/);
+    assert.match(prepare, /packet\.failedFields = managedFormSnapshot\.failed_fields/);
+    assert.ok((prepare.match(/managed_form_snapshot: managedFormSnapshot/g) ?? []).length >= 2,
+      'both the one-time drift hold and the prepared review must persist the same snapshot');
+  });
+
   test('derives only terms introduced by the tailored bullet', () => {
     const edited = deriveEditedTerms(spec, bank).map((term) => term.toLowerCase());
     assert.deepEqual(edited.sort(), ['automated', 'workflow']);

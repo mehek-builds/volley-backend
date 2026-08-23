@@ -16,7 +16,9 @@ import {
 } from '../db/schema';
 import { getEntitlementSnapshot } from '../lib/entitlements';
 import {
+  normalizeManagedFormSnapshot,
   normalizeApplicationReviewQuestions,
+  readManagedFormSnapshot,
   readApplicationReview,
   type ApplicationAttentionCategory,
   type ApplicationReviewState,
@@ -959,6 +961,7 @@ export async function buildPacket(
   const parsed = (profileRow[0]?.parsed_json ?? {}) as Record<string, unknown>;
   const review = readApplicationReview(stored);
   if (!review) throw new Error('We could not find this application');
+  const managedFormSnapshot = readManagedFormSnapshot(review);
   /* NO REBUILD HERE, DELIBERATELY, and this is the second design it has had.
      It first rebuilt the resume in memory at this line. That could never run: every send path
      passes a packet-audit gate that loads resume_object_key and refuses before buildPacket is
@@ -1186,6 +1189,12 @@ export async function buildPacket(
     currentlyEnrolled: academicBoolean('currently_enrolled'),
     referralSourceDefault,
     referralSourceEvidence,
+    ...(managedFormSnapshot
+      ? {
+        fieldOptions: managedFormSnapshot.field_options,
+        failedFields: managedFormSnapshot.failed_fields,
+      }
+      : {}),
     roleLocation: typeof context.location === 'string' ? context.location : undefined,
     roleLocations,
     roleCountry: postingCountryFromJobContext(row.job_context),
@@ -3082,6 +3091,7 @@ async function prepareManaged(
   audit: PacketAudit,
   verifiedQuestions: readonly ApplicationReviewQuestion[],
 ) {
+  const priorManagedFormSnapshot = readManagedFormSnapshot(current);
   await writeReview(row, nextReview(current, {
     status: 'filling',
     submission_run_id: runId,
@@ -3344,7 +3354,10 @@ async function prepareManaged(
     packet,
   );
   const savedAnswers = await loadSavedAnswers(row.user_id);
-  const coverLetterSupported = managedResultHasCoverLetterUpload(discoveryResult, portal);
+  const coverLetterCapability = discoveryFailures.length === 0
+    ? managedResultHasCoverLetterUpload(discoveryResult, portal)
+    : priorManagedFormSnapshot?.cover_letter_supported ?? current.cover_letter_supported;
+  const coverLetterSupported = coverLetterCapability === true;
   let compactAnswers: ReadonlyMap<string, string> = new Map();
   let packetRow = row;
   try {
@@ -3402,7 +3415,13 @@ async function prepareManaged(
    * packet the cover-letter step just produced rather than to a rebuild - see
    * packetForTranscriptCapability for why a rebuild here would be handed the wrong row. */
   const transcriptSupported = managedResultHasTranscriptUpload(discoveryResult, portal);
-  const transcriptOutcome = packetForTranscriptCapability(coverLetterOutcome.packet, transcriptSupported);
+  const transcriptCapability = discoveryFailures.length === 0
+    ? transcriptSupported
+    : priorManagedFormSnapshot?.transcript_supported ?? current.transcript_supported;
+  const transcriptOutcome = packetForTranscriptCapability(
+    coverLetterOutcome.packet,
+    transcriptCapability === true,
+  );
   if (coverLetterOutcome.packet.transcriptUnavailableReason) {
     // The raw reason to the log, the fixed sentence to the applicant, same split as the cover
     // letter's two failures. Whoever has to fix a dead pointer reads logs.
@@ -3573,16 +3592,24 @@ async function prepareManaged(
   // The fill run gets the same option lists, so the fixed education comboboxes type an exact option
   // instead of the profile's own phrasing. It only ever gets ONE attempt at a react-select (a second
   // click closes the menu the first one opened), so the first value has to be the right one.
-  packet.fieldOptions = fieldOptions;
-  packet.failedFields = failedFields;
+  const managedFormSnapshot = discoveryFailures.length > 0 && priorManagedFormSnapshot
+    ? priorManagedFormSnapshot
+    : normalizeManagedFormSnapshot({
+      fieldOptions: discoveryFailures.length === 0 ? fieldOptions : {},
+      failedFields: discoveryFailures.length === 0 ? failedFields : [],
+      coverLetterSupported: coverLetterCapability,
+      transcriptSupported: transcriptCapability,
+    });
+  packet.fieldOptions = managedFormSnapshot.field_options;
+  packet.failedFields = managedFormSnapshot.failed_fields;
 
   const measuredPrepareEnvelope = employerDeliveryEnvelope({
     channel: browserEmployerDeliveryChannel(browserDeliveryRuntimeIdentity().provider),
     destinationUrl: applicationUrl,
     portalFamily: portal,
     runtime: browserDeliveryRuntimeIdentity(),
-    coverLetterSupported,
-    transcriptSupported,
+    coverLetterSupported: managedFormSnapshot.cover_letter_supported,
+    transcriptSupported: managedFormSnapshot.transcript_supported,
   });
   if (await holdPreparationForPacketDrift({
     row,
@@ -3595,8 +3622,13 @@ async function prepareManaged(
     patch: {
       submission_run_id: runId,
       questions: mergedQuestions,
-      cover_letter_supported: coverLetterSupported,
-      transcript_supported: transcriptSupported,
+      managed_form_snapshot: managedFormSnapshot,
+      ...(managedFormSnapshot.cover_letter_supported !== undefined
+        ? { cover_letter_supported: managedFormSnapshot.cover_letter_supported }
+        : {}),
+      ...(managedFormSnapshot.transcript_supported !== undefined
+        ? { transcript_supported: managedFormSnapshot.transcript_supported }
+        : {}),
       ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
       ...(packet.applicantSnapshot ? { applicant_snapshot: packet.applicantSnapshot } : {}),
     },
@@ -4147,7 +4179,10 @@ async function prepareManaged(
     preview_screenshot_url: preview.url,
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
-    cover_letter_supported: coverLetterSupported,
+    managed_form_snapshot: managedFormSnapshot,
+    ...(managedFormSnapshot.cover_letter_supported !== undefined
+      ? { cover_letter_supported: managedFormSnapshot.cover_letter_supported }
+      : {}),
     /* Measured, not assumed. `blockers` here is the merge of the discovery pass's required-field
      * scan and the fill run's, which is the same evidence every other required field on this form
      * is judged by. Written only when the form HAS a cover-letter control: on a portal with no such
@@ -4178,7 +4213,9 @@ async function prepareManaged(
      * means never measured, which is the same tri-state cover_letter_required uses ten lines above
      * and the same one the website reads. A discovery failure already holds the run back on its own
      * evidence; it must not also invent a fact about the employer. */
-    ...(discoveryFailures.length === 0 ? { transcript_supported: transcriptSupported } : {}),
+    ...(managedFormSnapshot.transcript_supported !== undefined
+      ? { transcript_supported: managedFormSnapshot.transcript_supported }
+      : {}),
     // The security-code sentence LEADS when there is one, and it leads because it is the only line
     // here that says an application has already reached the employer. The blockers below it are
     // still worth reading - they describe the form that was sent - but a list of empty fields shown
