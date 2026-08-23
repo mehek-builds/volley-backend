@@ -404,6 +404,55 @@ test('contact unlock ownership and trial charging commit once across an exact co
     .filter((row) => row.user_id === user.id).length, 2);
 });
 
+test('contact unlock batch charges only rows inserted when one contact already exists', async () => {
+  const user = await trialUser('contact-unlock-partial-conflict@example.test');
+  await db.insert(schema.companies).values({ domain: 'partial-unlock.example', name: 'Partial Unlock' });
+  const existingContactId = randomUUID();
+  const newContactId = randomUUID();
+  await db.insert(schema.contacts).values([
+    { id: existingContactId, full_name: 'Existing Contact', company_domain: 'partial-unlock.example' },
+    { id: newContactId, full_name: 'New Contact', company_domain: 'partial-unlock.example' },
+  ]);
+  await db.insert(schema.user_contact_unlocks).values({
+    user_id: user.id,
+    contact_id: existingContactId,
+    company_scope_key: 'domain:partial-unlock.example',
+    source: 'earlier-operation',
+    unlocked_at: new Date(),
+  });
+  const reservation = await entitlements.reserveEntitledUsage({
+    userId: user.id,
+    kind: 'contact',
+    idempotencyKey: 'partial-conflict-contact-operation',
+    trigger: 'contact_discovery',
+    companyScopeKey: 'domain:partial-unlock.example',
+    companyName: 'Partial Unlock',
+    units: 2,
+  });
+  assert.equal(reservation.allowed, true);
+  if (!reservation.allowed) return;
+
+  const inserted = await entitlements.commitContactUnlocks({
+    userId: user.id,
+    companyScopeKey: 'domain:partial-unlock.example',
+    contactIds: [existingContactId, newContactId],
+    source: 'partial-conflict-test',
+    reservationId: reservation.reservationId,
+  });
+
+  assert.equal(inserted, 1);
+  const unlocks = (await db.select().from(schema.user_contact_unlocks))
+    .filter((row) => row.user_id === user.id);
+  assert.equal(unlocks.length, 2);
+  const companyUsage = (await db.select().from(schema.trial_company_usage))
+    .find((row) => row.user_id === user.id && row.company_scope_key === 'domain:partial-unlock.example');
+  assert.equal(companyUsage?.contacts_used, 1);
+  const savedReservation = (await db.select().from(schema.entitlement_usage_reservations))
+    .find((row) => row.id === reservation.reservationId);
+  assert.equal(savedReservation?.status, 'committed');
+  assert.equal(savedReservation?.units, 1);
+});
+
 test('one operation id cannot cross company or application scope', async () => {
   const user = await trialUser('idempotency-scope@example.test');
   const companyReservation = await entitlements.reserveEntitledUsage({
