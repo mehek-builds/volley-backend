@@ -1196,17 +1196,16 @@ export async function commitContactUnlocks(input: {
       throw new Error('Contact reservation is not active for this company');
     }
     const limitedContactIds = reservation ? contactIds.slice(0, reservation.units) : contactIds;
-    let insertedCount = 0;
-    for (const contactId of limitedContactIds) {
-      const inserted = await tx.insert(user_contact_unlocks).values({
+    const inserted = await tx.insert(user_contact_unlocks).values(
+      limitedContactIds.map((contactId) => ({
         user_id: input.userId,
         contact_id: contactId,
         company_scope_key: input.companyScopeKey,
         source: input.source,
         unlocked_at: now,
-      }).onConflictDoNothing().returning({ contact_id: user_contact_unlocks.contact_id });
-      insertedCount += inserted.length;
-    }
+      })),
+    ).onConflictDoNothing().returning({ contact_id: user_contact_unlocks.contact_id });
+    const insertedCount = inserted.length;
     if (input.cache && (!reservation || reservation.status === 'reserved')) {
       await tx.insert(resolve_cache).values({
         cache_key: input.cache.key,
