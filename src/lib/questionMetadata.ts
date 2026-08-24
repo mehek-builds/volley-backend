@@ -19,6 +19,7 @@ export type QuestionMetadataBlocker = {
 
 const GENERIC_ANSWER_CONTROL_LABEL = /^(?:(?:please\s+)?(?:type|enter|write)(?:\s+your)?\s+)?(?:your\s+)?(?:answer|response)(?:\s+here)?[\s.:]*$/i;
 const CLOSED_CONTROL_TYPE = /^(?:select(?:-one|-multiple)?|radio|combobox|listbox)$/i;
+const EXACT_OPTIONS_BEFORE_RESOLUTION_TYPE = /^(?:select(?:-one|-multiple)?|radio|listbox)$/i;
 const QUESTION_CONTROL_TYPE = /^(?:text|textarea|select(?:-one|-multiple)?|radio|checkbox|combobox|listbox)$/i;
 
 type MetadataDiscoveryField = Pick<
@@ -52,6 +53,23 @@ export function discoveredQuestionControlType(
   if (role === 'combobox' || role === 'listbox') return role;
   if (inputType === 'text' && usableOptions(field.options).length > 0) return 'combobox';
   return inputType;
+}
+
+/**
+ * Controls that cannot safely receive even a profile-backed value until their employer-owned
+ * option inventory is known.
+ *
+ * Searchable comboboxes are deliberately excluded. Greenhouse education controls use that shape
+ * and can search for an exact profile value even when the initial DOM walk has not expanded their
+ * menu. Native selects, radios, and listboxes cannot make the same promise: a string from the
+ * profile is not evidence that the employer currently offers that option.
+ */
+export function discoveredQuestionNeedsExactOptionsBeforeResolution(
+  field: Pick<DiscoveredQuestion, 'inputType' | 'role'>,
+): boolean {
+  const inputType = field.inputType.trim().toLowerCase();
+  const role = field.role?.trim().toLowerCase();
+  return EXACT_OPTIONS_BEFORE_RESOLUTION_TYPE.test(inputType) || role === 'listbox';
 }
 
 function blockerBase(field: MetadataDiscoveryField) {

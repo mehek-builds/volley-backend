@@ -266,17 +266,12 @@ test('Akuna and Jump failed option probes become exact-choice blockers without g
     ...failedField,
     options: null,
   }], 'greenhouse');
-  assert.deepEqual(unread.questions.map((item) => item.label), [failedField.label]);
-  assert.deepEqual(unread.metadata_blockers, []);
+  assert.deepEqual(unread.questions, []);
+  assert.deepEqual(unread.metadata_blockers, [blockers[0]]);
   assert.equal(postingQuestionInventoryStatus(unread), 'metadata_incomplete');
   const unresolvedUnread = resolvePrescript(unread.questions, {}, new Map());
   assert.deepEqual(unresolvedUnread.ask, []);
-  assert.deepEqual(unresolvedUnread.metadata_blockers, [{
-    kind: 'missing_exact_options',
-    required: true,
-    portal_input_type: 'select-one',
-    question: failedField.label,
-  }]);
+  assert.deepEqual(unresolvedUnread.metadata_blockers, []);
 
   const customPlaceholderOnly = postingQuestionInventoryFromDiscovered([{
     ...failedField,
@@ -356,8 +351,13 @@ test('typed metadata blockers persist as tagged array records while legacy rows 
       options: null,
     }),
   ]);
-  assert.equal(legacy.questions[0]?.label, 'Will you be subject to a non-compete or notice period?');
-  assert.deepEqual(legacy.metadata_blockers, []);
+  assert.deepEqual(legacy.questions, []);
+  assert.deepEqual(legacy.metadata_blockers, [{
+    kind: 'missing_exact_options',
+    required: true,
+    portal_input_type: 'select-one',
+    question: 'Will you be subject to a non-compete or notice period?',
+  }]);
 });
 
 test('metadata blocker dedupe enriches partial identities without collapsing distinct controls', () => {
@@ -709,9 +709,9 @@ test('the bare privacy labels are questions and are never filtered out', () => {
   );
 });
 
-test('short and unusual employer labels are not mistaken for options', () => {
+test('short and unusual employer labels are preserved or named in exact-metadata blockers', () => {
   // No minimum length, and no "must contain a verb" rule: these are all real field names.
-  const stored = postingQuestionsFromDiscovered([
+  const inventory = postingQuestionInventoryFromDiscovered([
     { label: 'GPA', selector: '#a', inputType: 'text', maxLength: null, options: null, required: true },
     { label: 'School', selector: '#b', inputType: 'combobox', maxLength: null, options: null, required: true },
     { label: 'Major', selector: '#c', inputType: 'combobox', maxLength: null, options: null, required: true },
@@ -721,7 +721,14 @@ test('short and unusual employer labels are not mistaken for options', () => {
     { label: 'Offer Deadlines', selector: '#g', inputType: 'text', maxLength: null, options: null, required: false },
   ]);
   assert.deepEqual(
-    stored.map((item) => item.label),
-    ['GPA', 'School', 'Major', 'Race', 'Veteran status', 'Other', 'Offer Deadlines'],
+    inventory.questions.map((item) => item.label),
+    ['GPA', 'School', 'Major', 'Race', 'Other', 'Offer Deadlines'],
   );
+  assert.deepEqual(inventory.metadata_blockers, [{
+    kind: 'missing_exact_options',
+    required: false,
+    portal_input_type: 'select',
+    control_id: 'e',
+    question: 'Veteran status',
+  }]);
 });

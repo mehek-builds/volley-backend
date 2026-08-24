@@ -214,6 +214,7 @@ import { applicantChoseStoredAnswer } from '../lib/applicantAnswer';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
 import {
   dedupeQuestionMetadataBlockers,
+  discoveredQuestionNeedsExactOptionsBeforeResolution,
   discoveredQuestionsForExactOptionProbe,
   discoveredQuestionControlType,
   questionMetadataBlockerForDiscovered,
@@ -2142,12 +2143,23 @@ export async function discoverAndResolveQuestions(
     // the missing question text when she entered an earlier value. Retire the generic row and make
     // the newly readable question earn a fresh answer under its real label.
     const existing = existingByLabel.get(reviewKey);
-    const metadataBlocker = questionMetadataBlockerForDiscovered(field);
+    const metadataBlocker = questionMetadataBlockerForDiscovered(field, {
+      closedControlRequiresOptions: discoveredQuestionNeedsExactOptionsBeforeResolution(field),
+    });
     if (metadataBlocker) {
-      questionMetadataBlockers.push({ ...metadataBlocker, required: fieldIsRequired });
-      (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(
-        questionMetadataBlockerReason({ ...metadataBlocker, required: fieldIsRequired }),
-      );
+      const measured = { ...metadataBlocker, required: fieldIsRequired };
+      const targetAttention = fieldIsRequired ? attentionReasons : optionalAttentionReasons;
+      questionMetadataBlockers.push(measured);
+      targetAttention.push(questionMetadataBlockerReason(measured));
+      if (metadataBlocker.kind === 'missing_exact_options') {
+        if (isRefusedQuestion(label)) {
+          targetAttention.push(WORK_ELIGIBILITY_QUESTION.test(label)
+            ? workEligibilitySkipReason(label)
+            : `sensitive question left for you: "${label.slice(0, 60)}"`);
+        } else if (isSelfDeclarationQuestion(label)) {
+          targetAttention.push(selfDeclarationSkipReason(label));
+        }
+      }
       const currentSelector = portalSelectorForField(field);
       if (metadataBlocker.kind === 'missing_exact_options'
         && existing

@@ -2087,6 +2087,10 @@ test('Greenhouse labels drop question handles and duplicate visible labels befor
     normalizeDiscoveredLabel('how did you hear about us?* question_37536799002'),
     'how did you hear about us?',
   );
+  assert.equal(
+    normalizeDiscoveredLabel('How do you currently describe your gender identity? * 4000408002'),
+    'How do you currently describe your gender identity?',
+  );
 });
 
 test('discovered question labels preserve employer capitalization', () => {

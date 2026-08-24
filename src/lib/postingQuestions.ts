@@ -60,6 +60,7 @@ import { isDeclaredAbsenceRefusal } from './questionDiscovery';
 import { answerReuseScope, savedAnswerFor, type AnswerReuseContext } from './answerReuse';
 import {
   dedupeQuestionMetadataBlockers,
+  discoveredQuestionNeedsExactOptionsBeforeResolution,
   questionMetadataBlockerForDiscovered,
   type QuestionMetadataBlocker,
 } from './questionMetadata';
@@ -178,7 +179,9 @@ export function postingQuestionInventoryFromDiscovered(
     // second representation of the same widget blocked. Use the shared submission normalizer so
     // discovery and submission agree on exactly which fields the portal adapter owns.
     if (portal && normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
-    const metadataBlocker = questionMetadataBlockerForDiscovered(field);
+    const metadataBlocker = questionMetadataBlockerForDiscovered(field, {
+      closedControlRequiresOptions: discoveredQuestionNeedsExactOptionsBeforeResolution(field),
+    });
     if (metadataBlocker) {
       metadataBlockers.push(metadataBlocker);
       continue;
@@ -242,6 +245,13 @@ function postingQuestionMetadataBlocker(
     required: question.required,
   }, {
     closedControlRequiresOptions,
+  });
+}
+
+function postingQuestionNeedsExactOptionsBeforeResolution(question: PostingQuestion): boolean {
+  return discoveredQuestionNeedsExactOptionsBeforeResolution({
+    inputType: question.input_type,
+    role: null,
   });
 }
 
@@ -322,7 +332,10 @@ export function readStoredPostingQuestionInventory(input: unknown): PostingQuest
     ? input
     : Array.isArray(record?.questions) ? record.questions : [];
   const questions = normalizedStoredPostingQuestions(records);
-  const derived = questions.flatMap((question) => postingQuestionMetadataBlocker(question) ?? []);
+  const derived = questions.flatMap((question) => postingQuestionMetadataBlocker(
+    question,
+    postingQuestionNeedsExactOptionsBeforeResolution(question),
+  ) ?? []);
   const metadataBlockers = dedupeQuestionMetadataBlockers([
     ...normalizedStoredMetadataBlockers(record?.metadata_blockers, false),
     ...normalizedStoredMetadataBlockers(records, true),
@@ -333,7 +346,10 @@ export function readStoredPostingQuestionInventory(input: unknown): PostingQuest
     : []));
   return {
     questions: questions.filter((question) => {
-      if (postingQuestionMetadataBlocker(question)) return false;
+      if (postingQuestionMetadataBlocker(
+        question,
+        postingQuestionNeedsExactOptionsBeforeResolution(question),
+      )) return false;
       return !blockedQuestionLabels.has(question.label.toLowerCase());
     }),
     metadata_blockers: metadataBlockers,

@@ -2480,6 +2480,49 @@ test('discovered GPA and major questions resolve from profile-backed academic fa
   );
 });
 
+test('a native closed control with no exact options cannot reuse a profile answer', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship asks for an education history.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'What is your GPA?',
+      selector: 'select[name="gpa_band"]',
+      durableSelector: 'select[name="gpa_band"]',
+      inputType: 'select-one',
+      maxLength: null,
+      options: null,
+      required: true,
+    }],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { gpa: '3.89' },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.questions, []);
+  assert.deepEqual(result.questionMetadataBlockers, [{
+    kind: 'missing_exact_options',
+    required: true,
+    portal_input_type: 'select-one',
+    control_id: 'name:gpa_band',
+    portal_selector: 'select[name="gpa_band"]',
+    question: 'What is your GPA?',
+  }]);
+  assert.equal(result.attentionReasons.some((reason) =>
+    reason.includes("could not read the employer's exact answer choices")), true);
+});
+
 /* REGRESSION (2026-08-21): known-answer text values were typed with no field.maxLength check at
  * all, unlike the essay-drafter path a few lines below in this same file, which always calls
  * fitToBudget(answer, field.maxLength ?? 100_000) before pushing a question. gpaAnswer's
@@ -2570,7 +2613,7 @@ test('managed Greenhouse education combobox labels are not replayed as text fiel
   ]);
 });
 
-test('existing reviewed choice answers do not keep direct selectors on retry', async () => {
+test('a native reviewed choice with unread options is quarantined before profile reuse', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship is based in San Francisco, California.',
     role: 'Software Engineering Intern',
@@ -2608,10 +2651,9 @@ test('existing reviewed choice answers do not keep direct selectors on retry', a
     'greenhouse',
   );
 
-  assert.equal(result.questions.length, 1);
-  assert.equal(result.questions[0]?.id, 'q-existing');
-  assert.equal(result.questions[0]?.answer, 'Yes');
-  assert.equal(result.questions[0]?.portal_selector, undefined);
+  assert.deepEqual(result.questions, []);
+  assert.equal(result.questionMetadataBlockers[0]?.kind, 'missing_exact_options');
+  assert.equal(result.questionMetadataBlockers[0]?.question, 'Are you currently enrolled in a degree program?');
 });
 
 test('rediscovered profile-backed questions replace stale drafted retry answers', async () => {
@@ -2666,14 +2708,17 @@ test('rediscovered profile-backed questions replace stale drafted retry answers'
     'greenhouse',
   );
 
-  assert.deepEqual(result.attentionReasons, []);
+  assert.equal(result.attentionReasons.some((reason) =>
+    reason.includes("could not read the employer's exact answer choices")), true);
+  assert.equal(result.attentionReasons.some((reason) =>
+    reason.includes('sensitive')), true);
   assert.deepEqual(
     result.questions.map((question) => ({ id: question.id, answer: question.answer, kind: question.kind })),
     [
       { id: 'degree-existing', answer: 'Bachelor\'s Degree', kind: 'required' },
-      { id: 'gender-existing', answer: 'Female', kind: 'required' },
     ],
   );
+  assert.equal(result.questionMetadataBlockers[0]?.question, 'How do you currently describe your gender identity?');
 });
 
 // ─── The prepare-time gate for account-walled portals ─────────────────────────
