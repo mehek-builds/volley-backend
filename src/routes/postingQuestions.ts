@@ -24,13 +24,12 @@ import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { isBrowserbaseConfigured, isManagedStratusProvider, runManagedBrowser } from '../lib/browserbase';
 import {
   attachManagedFieldOptions,
-  buildManagedDiscoveredOptionProbeActions,
+  buildManagedDiscoveredOptionProbeBatches,
   buildManagedPrescriptActions,
   canonicalMonitoredPortalUrl,
   detectPortal,
   managedOptionProbeAnalysis,
   managedOptionProbeControlId,
-  managedOptionProbeTargets,
   managedResultFieldOptions,
   managedResultSupportsDiscoveryRole,
   type SupportedPortal,
@@ -170,7 +169,8 @@ async function storeScan(
 }
 
 /**
- * Read the employer's form. One managed browser run, no fills, no upload, no screenshot.
+ * Read the employer's form. One discovery run plus bounded option probes, no fills, no upload,
+ * no screenshot.
  *
  * The option lists come back as separate extracts and are stitched onto the discovered questions
  * the same way the submission runner stitches them, because a closed list without its options is
@@ -178,6 +178,7 @@ async function storeScan(
  */
 export async function scanPostingQuestions(
   target: PostingTarget,
+  browserRunner: typeof runManagedBrowser = runManagedBrowser,
 ): Promise<{
   questions: PostingQuestion[];
   metadata_blockers: QuestionMetadataBlocker[];
@@ -185,38 +186,48 @@ export async function scanPostingQuestions(
 }> {
   const portal = target.portal;
   if (!portal) return { questions: [], metadata_blockers: [], status: 'failed' };
-  const result = await runManagedBrowser(target.applyUrl, buildManagedPrescriptActions(portal), { screenshot: false });
+  const result = await browserRunner(target.applyUrl, buildManagedPrescriptActions(portal), { screenshot: false });
   const scanFieldOptions = managedResultFieldOptions(result);
   const discoveryRoleCapability = managedResultSupportsDiscoveryRole(result);
   const discoveredRaw = (result.discovered ?? []) as DiscoveredQuestion[];
   const discoveredForOptionProbe = discoveredQuestionsForExactOptionProbe(discoveredRaw);
-  /* A second read, for the closed controls the scan could not name in advance.
+  /* Bounded follow-up reads, for the closed controls the scan could not name in advance.
    *
    * buildManagedPrescriptActions probes the four ids Greenhouse owns. An employer's own questions
    * carry ids only the live page knows, so their option lists can only be read after the DOM walk
    * has reported them. Read-only exactly like the pass above: open, read the listbox, Escape, and
-   * skipped entirely when there is nothing left to read. A failure leaves the stored scan saying
-   * what it said before, which is a control with no options rather than a wrong list. */
-  const probeActions = buildManagedDiscoveredOptionProbeActions(
+   * skipped entirely when there is nothing left to read. A failed batch removes its affected
+   * controls from the answerable list and records typed metadata blockers instead of guessing. */
+  const probeBatches = buildManagedDiscoveredOptionProbeBatches(
     portal,
     discoveredForOptionProbe,
     scanFieldOptions,
     discoveryRoleCapability,
   );
-  const probeResult = probeActions.length > 0
-    ? await runManagedBrowser(target.applyUrl, probeActions, { screenshot: false }).catch(() => null)
-    : null;
-  const probeFailures = probeActions.length > 0 && probeResult === null
-    ? [{
-      controlIds: managedOptionProbeTargets(portal, discoveredForOptionProbe, scanFieldOptions, discoveryRoleCapability),
-      reason: 'the bounded posting question option probe did not complete',
-    }]
-    : [];
+  const probeResults = [];
+  const probeFailures: Array<{ controlIds: string[]; reason: string }> = [];
+  for (const actions of probeBatches) {
+    const controlIds = [...new Set(actions.flatMap((action) => {
+      const label = action.label ?? '';
+      if (label.startsWith('options:')) return [label.slice('options:'.length)];
+      const closedControlId = label.match(/^closed_control:(.+)$/)?.[1];
+      return closedControlId ? [closedControlId] : [];
+    }))];
+    const probeResult = await browserRunner(target.applyUrl, actions, { screenshot: false })
+      .catch(() => null);
+    probeResults.push(probeResult);
+    if (probeResult === null) {
+      probeFailures.push({
+        controlIds,
+        reason: 'the bounded posting question option probe did not complete',
+      });
+    }
+  }
   const optionProbe = managedOptionProbeAnalysis(
     portal,
     discoveredForOptionProbe,
     scanFieldOptions,
-    [probeResult],
+    [result, ...probeResults],
     probeFailures,
     discoveryRoleCapability,
   );
