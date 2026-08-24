@@ -226,6 +226,10 @@ import {
   type QuestionMetadataBlocker,
 } from '../lib/questionMetadata';
 import {
+  normalizePaylocityDiscoveredField,
+  paylocityFieldIsFilledFromProfile,
+} from '../lib/paylocityFields';
+import {
   coverLetterCandidateContext,
   generateStoredCoverLetter,
   persistGeneratedCoverLetterBody,
@@ -1961,6 +1965,15 @@ export async function discoverAndResolveQuestions(
   const existingByLabel = new Map(
     current.questions.map((q) => [normalizeReviewQuestionLabel(q.question).toLowerCase(), q] as const),
   );
+  const existingBySelector = new Map<string, ApplicationReviewQuestion[]>();
+  for (const question of current.questions) {
+    const selector = durablePortalSelector(question.portal_selector);
+    if (!selector) continue;
+    existingBySelector.set(selector, [
+      ...(existingBySelector.get(selector) ?? []),
+      question,
+    ]);
+  }
   const questions: ApplicationReviewQuestion[] = [];
   const attentionReasons: string[] = [];
   /* Attention about a control the employer left OPTIONAL. Shown to her exactly like the rest,
@@ -2106,9 +2119,19 @@ export async function discoverAndResolveQuestions(
     ));
   };
 
-  for (const field of discovered) {
+  const paylocityPortal = portal === 'paylocity' || portal === 'controlled_paylocity';
+  for (const rawField of discovered) {
+    const field = paylocityPortal ? normalizePaylocityDiscoveredField(rawField) : rawField;
     const label = normalizeDiscoveredLabel(field.label);
     const reviewLabel = normalizeReviewQuestionLabel(field.label);
+    if (paylocityPortal && paylocityFieldIsFilledFromProfile(field, ap)) {
+      if (reviewLabel) invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+      const selector = durablePortalSelector(portalSelectorForField(field));
+      for (const stored of selector ? existingBySelector.get(selector) ?? [] : []) {
+        invalidatedQuestionKeys.add(normalizeReviewQuestionLabel(stored.question).toLowerCase());
+      }
+      continue;
+    }
     if (discoveredFieldIsFixedPortalProfileControl(portal, field)) continue;
     if (!label || !reviewLabel) {
       const metadataBlocker = questionMetadataBlockerForDiscovered(field);
@@ -3430,8 +3453,12 @@ async function prepareManaged(
   // provider's discover action reports no options at all, so a control offering "Computer Science"
   // was handed the stored major, matched nothing, and came back required-and-empty.
   const discoveryFieldOptions = managedResultFieldOptions(discoveryResult);
+  const normalizedDiscoveredFields = (discoveryResult?.discovered ?? []).map((field) =>
+    (portal === 'paylocity' || portal === 'controlled_paylocity')
+      ? normalizePaylocityDiscoveredField(field as DiscoveredQuestion)
+      : field as DiscoveredQuestion);
   const discoveredForOptionProbe = discoveredQuestionsForExactOptionProbe(
-    (discoveryResult?.discovered ?? []) as DiscoveredQuestion[],
+    normalizedDiscoveredFields,
   );
   /* THE THIRD STAGE, and the reason option snapping reaches every confirmed closed control.
    *
@@ -3580,7 +3607,7 @@ async function prepareManaged(
     },
     'Option probe outcome: how many controls were targeted and how many option lists came back',
   );
-  const failedFields = (discoveryResult?.discovered ?? []).flatMap((field) => {
+  const failedFields = normalizedDiscoveredFields.flatMap((field) => {
     const controlId = managedOptionProbeControlId(field);
     if (!controlId || !blockingOptionProbeFailedIds.has(controlId)) return [];
     return [{
@@ -3613,7 +3640,7 @@ async function prepareManaged(
       covered,
     );
   })();
-  const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
+  const discoveredFields = attachManagedFieldOptions(normalizedDiscoveredFields, fieldOptions)
     .filter((field) => {
       const controlId = managedOptionProbeControlId(field);
       return !controlId || !blockingOptionProbeFailedIds.has(controlId);
@@ -3719,7 +3746,7 @@ async function prepareManaged(
   );
   const optionProbeMetadataBlockers = questionMetadataBlockersForOptionProbeFailures(
     portal,
-    discoveryResult?.discovered ?? [],
+    normalizedDiscoveredFields,
     blockingOptionProbeFailures,
   );
   const questionMetadataBlockers = dedupeQuestionMetadataBlockers([

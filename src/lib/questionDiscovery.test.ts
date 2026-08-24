@@ -2136,6 +2136,37 @@ test('Workable suppresses only its built-in phone and address fields', () => {
   }
 });
 
+test('Paylocity stored questions keep exact applicant fields while removing provider handles', () => {
+  const input = [
+    {
+      id: 'address-line',
+      question: 'Address line 1 public-site-address-address-1',
+      answer: '',
+      portal_selector: '#public-site-address-address-1',
+    },
+    {
+      id: 'salary-type',
+      question: 'desired salary type info.desiredSalaryType',
+      answer: 'Hourly',
+      portal_selector: '[id="info.desiredSalaryType"]',
+    },
+    {
+      id: 'custom',
+      question: 'What interested you in this role?',
+      answer: 'The product and engineering scope.',
+      portal_selector: '#custom-question',
+    },
+  ];
+
+  for (const portal of ['paylocity', 'controlled_paylocity'] as const) {
+    assert.deepEqual(normalizeStoredPortalQuestions(input, portal), [
+      { ...input[0], question: 'Address line 1' },
+      { ...input[1], question: 'Desired salary type' },
+      input[2],
+    ]);
+  }
+});
+
 test('Recruitee drops built-in candidate controls captured under a section heading', () => {
   const input = [
     {
