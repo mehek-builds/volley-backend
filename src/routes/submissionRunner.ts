@@ -141,6 +141,7 @@ import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { documentAsksOpenToReuse, requiredDocumentAsks, type RequiredDocumentAsk } from '../lib/requiredDocuments';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess';
+import { storedGeneratedResumeBlobUrl } from '../lib/resumeArtifactVersions';
 import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
 import { PACKET_EXPIRED_REASON } from '../lib/packetResumeRestore';
 import { currentAcknowledgedPacketAudit, currentPacketAudit, packetAuditClientError } from '../lib/packetAuditService';
@@ -659,7 +660,13 @@ export async function referralSourceEvidenceForRow(row: ResumeRow): Promise<Refe
 
 type ResumePacketDependencies = {
   resolveObjectUrl: (objectKey: string) => Promise<string | null>;
-  fetchObject: (url: string) => Promise<{ ok: boolean; arrayBuffer: () => Promise<ArrayBuffer> }>;
+  fetchObject: (url: string) => Promise<{
+    ok: boolean;
+    status?: number;
+    arrayBuffer: () => Promise<ArrayBuffer>;
+  }>;
+  initialObjectUrl?: string;
+  waitBeforeRetry?: (delayMs: number) => Promise<void>;
 };
 
 /**
@@ -869,16 +876,35 @@ export async function resumeBytesForPacket(
   if (controlledTest && process.env.LITOS_ENABLE_TEST_PORTAL === 'true') {
     return Buffer.from('%PDF-1.4\n% Litos controlled submission fixture\n%%EOF\n');
   }
-  const blobUrl = await dependencies.resolveObjectUrl(objectKey);
+  let blobUrl = dependencies.initialObjectUrl?.trim()
+    || await dependencies.resolveObjectUrl(objectKey);
   /* Typed, because this is the retention sweep arriving rather than a malfunction. See
      PacketDocumentExpiredError for why an untyped throw here told the applicant to go and look for
      a confirmation of an application that was never filled in. Only the resolve is typed: a key that
      resolves to a URL which then fails to download is a live storage fault, not an expired packet,
      and the two owe different sentences. */
   if (!blobUrl) throw new PacketDocumentExpiredError('resume');
-  const response = await dependencies.fetchObject(blobUrl);
-  if (!response.ok) throw new Error('Generated resume file could not be downloaded');
-  return Buffer.from(await response.arrayBuffer());
+  const waitBeforeRetry = dependencies.waitBeforeRetry
+    ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  const retryDelays = [100, 400] as const;
+  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+    try {
+      const response = await dependencies.fetchObject(blobUrl);
+      if (response.ok) return Buffer.from(await response.arrayBuffer());
+    } catch {
+      // A failed body read and a failed request have the same safe outcome: retry the exact object,
+      // then stop before any employer action if storage remains unavailable.
+    }
+    if (attempt === retryDelays.length) break;
+    await waitBeforeRetry(retryDelays[attempt]);
+    try {
+      blobUrl = (await dependencies.resolveObjectUrl(objectKey)) || blobUrl;
+    } catch {
+      // Keep the already-authorized strong pointer for the next bounded attempt. Resolver failure
+      // is not evidence that the audited object disappeared after the first successful resolve.
+    }
+  }
+  throw new Error('Generated resume file could not be downloaded');
 }
 
 async function fetchStoredCoverLetter(url: string): Promise<Buffer> {
@@ -1012,7 +1038,18 @@ export async function buildPacket(
      file and re-issues all three records against it. By the time buildPacket runs the file exists,
      so a throw here means the file went missing AFTER the audit passed, which is a real anomaly and
      should stop the run rather than be papered over with unaudited bytes. */
-  const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest);
+  const storedResumeBlobUrl = controlledTest
+    ? null
+    : await storedGeneratedResumeBlobUrl({
+      userId: row.user_id,
+      generatedResumeId: row.id,
+      objectKey: row.resume_object_key,
+    });
+  const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest, {
+    initialObjectUrl: storedResumeBlobUrl ?? undefined,
+    resolveObjectUrl: resolveBlobUrl,
+    fetchObject: (url) => fetch(url),
+  });
   /* THE ATTACHED TRANSCRIPT, LOADED HERE AND NOT ALLOWED TO THROW.
    *
    * The cover letter below throws when its object cannot be resolved or fetched, and exactly one of
@@ -7014,7 +7051,7 @@ export async function finishSecurityCodeSubmission(
   try {
     await submit(activeRow, fastify, { securityCode: code, claimAlreadyHeld: true });
   } catch (error) {
-    fastify.log.error({ error, applicationId }, 'Security-code submission failed');
+    fastify.log.error({ err: error, applicationId }, 'Security-code submission failed');
     await fail(activeRow, error);
   }
   const refreshed = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
@@ -7073,7 +7110,7 @@ export async function processSubmissionApplication(
     }
     if (review?.status === 'submitting') await submit(activeRow, fastify);
   } catch (error) {
-    fastify.log.error({ error, applicationId: row.id }, 'Application runner step failed');
+    fastify.log.error({ err: error, applicationId: row.id }, 'Application runner step failed');
     const latest = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
     await fail(latest[0] ?? activeRow, error);
   }
@@ -7127,7 +7164,7 @@ export async function submissionRunnerRoutes(fastify: FastifyInstance) {
         await processSubmissionApplication(row.id, fastify, { unattended: true });
         processed += 1;
       } catch (error) {
-        fastify.log.error({ error, applicationId: row.id }, 'Application runner step failed');
+        fastify.log.error({ err: error, applicationId: row.id }, 'Application runner step failed');
         await fail(row, error);
       }
     }
