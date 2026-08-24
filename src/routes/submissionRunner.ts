@@ -814,6 +814,37 @@ function assertEmployerPageUrl(expected: string, observed: string | undefined): 
   if (issue) throw new Error(issue);
 }
 
+/** Private operator context for runner failures. Keep applicant values out of hosted logs. */
+export function privateRunnerStepDiagnostic(error: unknown): {
+  errorName: string;
+  errorCode?: string;
+  errorMessage: string;
+  errorFingerprint: string;
+} {
+  const candidate = error as { name?: unknown; code?: unknown; message?: unknown } | null;
+  const raw = typeof candidate?.message === 'string'
+    ? candidate.message
+    : 'Unknown application runner failure';
+  const errorName = typeof candidate?.name === 'string' && /^[A-Za-z][A-Za-z0-9_$]{0,79}$/.test(candidate.name)
+    ? candidate.name
+    : 'Error';
+  const errorCode = typeof candidate?.code === 'string' && /^[A-Z][A-Z0-9_]{0,79}$/.test(candidate.code)
+    ? candidate.code
+    : undefined;
+  const errorMessage = raw
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[url]')
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[email]')
+    .replace(/\+?\d(?:[\s().-]*\d){7,}/g, '[phone]')
+    .replace(/\b[A-Za-z0-9_-]{24,}\b/g, '[token]')
+    .slice(0, 300);
+  return {
+    errorName,
+    ...(errorCode ? { errorCode } : {}),
+    errorMessage,
+    errorFingerprint: createHash('sha256').update(raw).digest('hex').slice(0, 16),
+  };
+}
+
 async function holdPreparationForPacketDrift(input: {
   row: ResumeRow;
   current: ApplicationReviewState;
@@ -7125,7 +7156,11 @@ export async function processSubmissionApplication(
     }
     if (review?.status === 'submitting') await submit(activeRow, fastify);
   } catch (error) {
-    fastify.log.error({ err: error, applicationId: row.id }, 'Application runner step failed');
+    fastify.log.error({
+      err: error,
+      applicationId: row.id,
+      ...privateRunnerStepDiagnostic(error),
+    }, 'Application runner step failed');
     const latest = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
     await fail(latest[0] ?? activeRow, error);
   }
@@ -7179,7 +7214,11 @@ export async function submissionRunnerRoutes(fastify: FastifyInstance) {
         await processSubmissionApplication(row.id, fastify, { unattended: true });
         processed += 1;
       } catch (error) {
-        fastify.log.error({ err: error, applicationId: row.id }, 'Application runner step failed');
+        fastify.log.error({
+          err: error,
+          applicationId: row.id,
+          ...privateRunnerStepDiagnostic(error),
+        }, 'Application runner step failed');
         await fail(row, error);
       }
     }
