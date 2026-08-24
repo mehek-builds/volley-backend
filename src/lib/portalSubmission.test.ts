@@ -4456,6 +4456,7 @@ test('managed Workable US phone selects exact United States and proves national 
   assert.equal(actions[phoneIndex]?.value, '2135746270');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
   assert.equal(countryWaitIndex, phoneIndex + 1);
+  assert.equal(countryProofIndex, countryWaitIndex + 1);
   assert.equal(actions[countryProofIndex]?.attribute, undefined);
   assert.equal(actions[countryProofIndex]?.expectedValueIncludes, '+1');
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '1');
