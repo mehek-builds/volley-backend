@@ -5324,26 +5324,25 @@ function pushWorkableManagedPhoneActions(
       timeout: MANAGED_FILL_TIMEOUT_MS,
       requireUnique: true,
     });
-    // Prove the exact unique option while Workable's list is open. The widget removes the option
-    // from the DOM as part of the click, so a post-click selector can never be a reliable witness.
-    // The next action clicks this same exact selector, and both actions are required.
-    actions.push({
-      type: 'extract',
-      selector: plan.country.optionSelector,
-      attribute: 'data-dial-code',
-      label: 'filled_field:phone_country',
-      optional: false,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-      requireUnique: true,
-      requireNonEmpty: true,
-      expectedValueDigits: plan.country.dialCode,
-      stabilityWindowMs: 1_200,
-    });
+    // Workable omits the already-selected country from the reopened option list. That is common on
+    // the held review session: the preparation run selected +1, then the final approved run opens
+    // the same widget and sees no United States row to click. Try the exact unique option when it is
+    // offered, but make the selected trigger after the phone write the required source of truth.
+    // A wrong existing country with no matching option still fails closed at that final read.
     actions.push({
       type: 'click',
       selector: plan.country.optionSelector,
       label: 'phone_country_option',
-      optional: false,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+      requireUnique: true,
+    });
+    actions.push({
+      type: 'press',
+      selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
+      value: 'Escape',
+      label: 'phone_country_close',
+      optional: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
       requireUnique: true,
     });
@@ -5369,6 +5368,19 @@ function pushWorkableManagedPhoneActions(
     expectedValueDigits: plan.expectedDigits,
     stabilityWindowMs: 1_200,
   });
+  if (plan.country) {
+    actions.push({
+      type: 'extract',
+      selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
+      label: 'filled_field:phone_country',
+      optional: false,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+      requireUnique: true,
+      requireNonEmpty: true,
+      expectedValueDigits: plan.country.dialCode,
+      stabilityWindowMs: 1_200,
+    });
+  }
   return true;
 }
 
