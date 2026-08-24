@@ -77,6 +77,8 @@ export function attentionCategoriesForReasons(reasons: readonly string[]): Appli
      * as an application already sitting with an employer. */
     if (/security code was emailed|asked for a security code by email/.test(normalized)) {
       categories.add('security_code');
+    } else if (/^litos could not read the employer's exact (?:question text|answer choices)|^litos could not read the choices [\s\S]+ offers/.test(normalized)) {
+      categories.add('evidence_gap');
     } else if (/privacy notice before the application form opens|data consent/.test(normalized)) {
       categories.add('privacy_consent');
     } else if (/sign in|log in|make an account|create an account|account login/.test(normalized)) {

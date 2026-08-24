@@ -4,6 +4,7 @@ import { PACKET_VISIBLE_QUESTION_FIELDS, type PacketAudit } from './packetAudit'
 import type { RequiredDocumentAsk } from './requiredDocuments';
 import type { SubmissionStopRecord } from './submissionStop';
 import type { EmployerDeliveryBindings } from './employerDeliveryIdentity';
+import type { QuestionMetadataBlocker } from './questionMetadata';
 import {
   canonicalSupportedPortalUrl,
   detectPortal,
@@ -285,7 +286,8 @@ export function normalizeApplicationReviewQuestions(
      * her answer survives - and her row was stored before options existed, so first-wins on the
      * whole object dropped the menu on exactly the questions she is being asked to answer. The
      * later read is the fresher read of the employer's own control, so it wins when present. */
-    const options = question.options?.length ? question.options : existing.options;
+    const optionsMeasured = Object.prototype.hasOwnProperty.call(question, 'options');
+    const options = optionsMeasured ? (question.options ?? null) : existing.options;
     if ((question.required && !existing.required) || (!existing.answer.trim() && question.answer.trim())) {
       const next = {
         ...existing,
@@ -297,20 +299,20 @@ export function normalizeApplicationReviewQuestions(
         ...(portalSelector ? { portal_selector: portalSelector } : {}),
         ...(portalInputType ? { portal_input_type: portalInputType } : {}),
         ...(atsApiField ? { ats_api_field: atsApiField } : {}),
-        ...(options?.length ? { options } : {}),
+        ...(optionsMeasured ? { options } : {}),
       };
     } else if (
       (portalSelector && portalSelector !== existing.portal_selector)
       || (portalInputType && portalInputType !== existing.portal_input_type)
       || (atsApiField && atsApiField !== existing.ats_api_field)
-      || (options?.length && options !== existing.options)
+      || (optionsMeasured && options !== existing.options)
     ) {
       normalized[existingIndex] = {
         ...existing,
         ...(portalSelector ? { portal_selector: portalSelector } : {}),
         ...(portalInputType ? { portal_input_type: portalInputType } : {}),
         ...(atsApiField ? { ats_api_field: atsApiField } : {}),
-        ...(options?.length ? { options } : {}),
+        ...(optionsMeasured ? { options } : {}),
       };
     }
   }
@@ -801,6 +803,15 @@ export type ApplicationReviewState = {
   };
   attention_reason?: string;
   attention_categories?: ApplicationAttentionCategory[];
+  /**
+   * Exact employer-question metadata that the latest complete form read could not prove.
+   *
+   * This is structured separately from attention_reason so a missing question label cannot be
+   * presented as if it were the employer's question, and a closed control with no exact option
+   * inventory cannot be rendered as a free-text box. An empty array means a complete read measured
+   * no metadata gaps. Absence means this run did not complete discovery and made no such claim.
+   */
+  question_metadata_blockers?: QuestionMetadataBlocker[];
   /* THE APPLICANT'S OWN TICKS ON THE "Your turn" PANEL, keyed by the dashboard's checklist row id
    * (which is derived from the attention sentence, so the key names the sentence it is about).
    *

@@ -213,6 +213,17 @@ import type { ApplicationReviewQuestion } from '../lib/applicationReview';
 import { applicantChoseStoredAnswer } from '../lib/applicantAnswer';
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext, type JobCountry } from '../lib/jobLocation';
 import {
+  dedupeQuestionMetadataBlockers,
+  discoveredQuestionNeedsExactOptionsBeforeResolution,
+  discoveredQuestionsForExactOptionProbe,
+  discoveredQuestionControlType,
+  questionMetadataBlockerForDiscovered,
+  questionMetadataBlockersForOptionProbeFailures,
+  questionMetadataBlockerReason,
+  questionLabelIsGenericAnswerControl,
+  type QuestionMetadataBlocker,
+} from '../lib/questionMetadata';
+import {
   coverLetterCandidateContext,
   generateStoredCoverLetter,
   persistGeneratedCoverLetterBody,
@@ -817,6 +828,26 @@ async function holdPreparationForPacketDrift(input: {
     submission_claim_id: undefined,
   }));
   return true;
+}
+
+async function persistQuestionMetadataMeasurement(
+  row: ResumeRow,
+  runId: string,
+  blockers: readonly QuestionMetadataBlocker[],
+): Promise<void> {
+  const serialized = JSON.stringify([...blockers]);
+  await db.update(generated_resumes).set({
+    spec: sql`jsonb_set(
+      coalesce(${generated_resumes.spec}, '{}'::jsonb),
+      '{_review}',
+      coalesce(${generated_resumes.spec}->'_review', '{}'::jsonb)
+        || jsonb_build_object('question_metadata_blockers', ${serialized}::jsonb),
+      true
+    )`,
+  }).where(and(
+    eq(generated_resumes.id, row.id),
+    sql`${generated_resumes.spec}->'_review'->>'submission_run_id' = ${runId}`,
+  ));
 }
 
 /** Load the resume bytes independently from the rest of packet assembly so fixture isolation is testable. */
@@ -1548,6 +1579,19 @@ export function applicationFormWasReached(input: {
   return email.length > 0 && compactEvidenceText(input.text).includes(email);
 }
 
+export function questionMetadataMeasurementIsComplete(input: {
+  discoveryFailed: boolean;
+  filledFields?: readonly string[];
+  providerBlockers?: readonly string[];
+  discoveredQuestionCount?: number;
+  extracted?: ReadonlyArray<{ label?: string; selector?: string; value: string | null }>;
+  text?: string;
+  email?: string;
+}): boolean {
+  if (input.discoveryFailed) return false;
+  return applicationFormWasReached(input);
+}
+
 export function preparationEvidenceBlockers(
   result: {
     text?: string;
@@ -1834,11 +1878,7 @@ export { applicationContextForQuestionResolution } from '../lib/questionDiscover
 // browser dependency of its own, so both callers share one resolution path and can never drift on
 // what counts as an answerable question.
 export function discoveredControlInputType(field: Pick<DiscoveredQuestion, 'inputType' | 'role' | 'options'>): string {
-  const inputType = field.inputType.trim().toLowerCase();
-  const role = field.role?.trim().toLowerCase();
-  if (role === 'combobox') return 'combobox';
-  if (inputType === 'text' && usableOptions(field.options).length > 0) return 'combobox';
-  return inputType;
+  return discoveredQuestionControlType(field);
 }
 
 /**
@@ -1882,6 +1922,18 @@ export function compactMaterialQuestions(
   return [...selected.values()];
 }
 
+function applicantChoseStoredAnswerInRound(
+  question: { answer: string; answer_source?: string; answer_reviewed_at?: string },
+  questionsReviewedAt: string | undefined,
+): boolean {
+  const answerReviewedAt = question.answer_reviewed_at?.trim();
+  const reviewRound = questionsReviewedAt?.trim();
+  return applicantChoseStoredAnswer(question)
+    && Boolean(answerReviewedAt)
+    && Boolean(reviewRound)
+    && answerReviewedAt === reviewRound;
+}
+
 export async function discoverAndResolveQuestions(
   discovered: DiscoveredQuestion[],
   row: ResumeRow,
@@ -1897,7 +1949,13 @@ export async function discoverAndResolveQuestions(
    * savedAnswerFor for why the read side has to check again rather than trust the write side. */
   savedAnswers: ReadonlyMap<string, string> = new Map(),
   compactAnswers: ReadonlyMap<string, string> = new Map(),
-): Promise<{ questions: ApplicationReviewQuestion[]; attentionReasons: string[]; optionalAttentionReasons: string[]; invalidatedQuestionKeys: string[] }> {
+): Promise<{
+  questions: ApplicationReviewQuestion[];
+  attentionReasons: string[];
+  optionalAttentionReasons: string[];
+  invalidatedQuestionKeys: string[];
+  questionMetadataBlockers: QuestionMetadataBlocker[];
+}> {
   const existingByLabel = new Map(
     current.questions.map((q) => [normalizeReviewQuestionLabel(q.question).toLowerCase(), q] as const),
   );
@@ -1910,6 +1968,7 @@ export async function discoverAndResolveQuestions(
      not demand. A REQUIRED field's attention still parks, exactly as before. */
   const optionalAttentionReasons: string[] = [];
   const invalidatedQuestionKeys = new Set<string>();
+  const questionMetadataBlockers: QuestionMetadataBlocker[] = [];
 
   let bank: Awaited<ReturnType<typeof readExperienceBank>> | null = null;
   let declaredSkills: string[] = [];
@@ -1963,6 +2022,17 @@ export async function discoverAndResolveQuestions(
       : undefined;
   };
 
+  const genericStoredQuestionsBySelector = new Map<string, ApplicationReviewQuestion[]>();
+  for (const question of current.questions) {
+    if (!questionLabelIsGenericAnswerControl(question.question)) continue;
+    const selector = durablePortalSelector(question.portal_selector);
+    if (!selector) continue;
+    genericStoredQuestionsBySelector.set(selector, [
+      ...(genericStoredQuestionsBySelector.get(selector) ?? []),
+      question,
+    ]);
+  }
+
   /* R-096. A required field the applicant is the only one who can answer.
    *
    * This loop used to record a question ONLY when Litos had produced an answer for it, and drop the
@@ -2006,11 +2076,49 @@ export async function discoverAndResolveQuestions(
     ...(field.options?.length ? { options: [...field.options] } : {}),
   });
 
+  const surfaceUnansweredQuestion = (
+    field: DiscoveredQuestion,
+    reviewLabel: string,
+    existing: ApplicationReviewQuestion | undefined,
+    preserveExistingAnswer = false,
+    required = true,
+  ): void => {
+    const metadataBlocker = questionMetadataBlockerForDiscovered(field, {
+      closedControlRequiresOptions: true,
+    });
+    if (metadataBlocker) {
+      const measured = { ...metadataBlocker, required };
+      questionMetadataBlockers.push(measured);
+      (required ? attentionReasons : optionalAttentionReasons).push(
+        questionMetadataBlockerReason(measured),
+      );
+      invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+      return;
+    }
+    questions.push(unansweredRequiredQuestion(
+      field,
+      reviewLabel,
+      existing,
+      preserveExistingAnswer,
+      required,
+    ));
+  };
+
   for (const field of discovered) {
     const label = normalizeDiscoveredLabel(field.label);
     const reviewLabel = normalizeReviewQuestionLabel(field.label);
-    if (!label || !reviewLabel || normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
     if (discoveredFieldIsFixedPortalProfileControl(portal, field)) continue;
+    if (!label || !reviewLabel) {
+      const metadataBlocker = questionMetadataBlockerForDiscovered(field);
+      if (metadataBlocker) {
+        questionMetadataBlockers.push(metadataBlocker);
+        (metadataBlocker.required ? attentionReasons : optionalAttentionReasons).push(
+          questionMetadataBlockerReason(metadataBlocker),
+        );
+      }
+      continue;
+    }
+    if (normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
     /* A radio's own option, or a composite widget's whole rendered subtree, is not a question, and
      * recording one manufactures work the applicant cannot do: the Apply screen shows her "Yes" and
      * asks her to answer it. The same test runs on the pre-script's ingest, so the two surfaces
@@ -2023,7 +2131,53 @@ export async function discoverAndResolveQuestions(
     // Name and email are excluded: the fixed-field pass has already typed them into the page, and
     // making them "required answer missing" would block every application on data Litos supplied.
     const fieldIsRequired = discoveredFieldIsRequired(field) && !isCoreIdentityField(label);
-    const existing = existingByLabel.get(reviewLabel.toLowerCase());
+    const reviewKey = reviewLabel.toLowerCase();
+    const currentSelector = durablePortalSelector(portalSelectorForField(field));
+    const relabeledGenericQuestions = (currentSelector
+      ? genericStoredQuestionsBySelector.get(currentSelector) ?? []
+      : []).filter((question) => normalizeReviewQuestionLabel(question.question).toLowerCase() !== reviewKey);
+    for (const stale of relabeledGenericQuestions) {
+      invalidatedQuestionKeys.add(normalizeReviewQuestionLabel(stale.question).toLowerCase());
+    }
+    // A durable selector proves which control was relabeled, but it cannot prove the applicant saw
+    // the missing question text when she entered an earlier value. Retire the generic row and make
+    // the newly readable question earn a fresh answer under its real label.
+    const existing = existingByLabel.get(reviewKey);
+    const metadataBlocker = questionMetadataBlockerForDiscovered(field, {
+      closedControlRequiresOptions: discoveredQuestionNeedsExactOptionsBeforeResolution(field),
+    });
+    if (metadataBlocker) {
+      const measured = { ...metadataBlocker, required: fieldIsRequired };
+      const targetAttention = fieldIsRequired ? attentionReasons : optionalAttentionReasons;
+      questionMetadataBlockers.push(measured);
+      targetAttention.push(questionMetadataBlockerReason(measured));
+      if (metadataBlocker.kind === 'missing_exact_options') {
+        if (isRefusedQuestion(label)) {
+          targetAttention.push(WORK_ELIGIBILITY_QUESTION.test(label)
+            ? workEligibilitySkipReason(label)
+            : `sensitive question left for you: "${label.slice(0, 60)}"`);
+        } else if (isSelfDeclarationQuestion(label)) {
+          targetAttention.push(selfDeclarationSkipReason(label));
+        }
+      }
+      const currentSelector = portalSelectorForField(field);
+      if (metadataBlocker.kind === 'missing_exact_options'
+        && existing
+        && applicantChoseStoredAnswerInRound(existing, current.questions_reviewed_at)
+        && currentSelector
+        && existing.portal_selector === currentSelector) {
+        questions.push({
+          ...existing,
+          question: reviewLabel,
+          required: existing.required || fieldIsRequired,
+          portal_selector: currentSelector,
+          portal_input_type: discoveredControlInputType(field),
+        });
+      } else {
+        invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+      }
+      continue;
+    }
     // field.options is passed for one rule only: a declared absence of test scores is spoken in the
     // employer's own wording or not at all. See the parameter's note in lib/questionDiscovery.ts.
     const controlType = discoveredControlInputType(field);
@@ -2088,12 +2242,16 @@ export async function discoverAndResolveQuestions(
         ? gpaBareFallback
         : rawKnownValue;
     const offeredOptions = usableOptions(field.options);
+    const unreadClosedControl = questionMetadataBlockerForDiscovered(field, {
+      closedControlRequiresOptions: true,
+    });
     const reviewedOption = existing?.answer_source === 'applicant_review'
       ? offeredOptions.find((option) => option.trim().toLowerCase() === existing.answer.trim().toLowerCase())
       : undefined;
-    const reviewedAnswerStillFits = existing?.answer_source === 'applicant_review'
-      && existing.answer_reviewed_at === current.questions_reviewed_at
+    const reviewedAnswerStillFits = existing !== undefined
+      && applicantChoseStoredAnswerInRound(existing, current.questions_reviewed_at)
       && existing.answer.trim().length > 0
+      && unreadClosedControl?.kind !== 'missing_exact_options'
       && (
         (!(known && 'value' in known) && (offeredOptions.length === 0 || reviewedOption !== undefined))
         /* HER CURRENT-ROUND CHOICE OF AN OFFERED OPTION OUTRANKS A PROFILE VALUE THE CONTROL
@@ -2113,10 +2271,13 @@ export async function discoverAndResolveQuestions(
       questions.push({
         ...existing,
         question: reviewLabel,
-        answer: reviewedOption ?? existing.answer,
+        // The menu proves the applicant's value still selects an exact employer option. It does
+        // not authorize rewriting the value she reviewed to the employer's capitalization.
+        answer: existing.answer,
         required: existing.required || fieldIsRequired,
         portal_selector: portalSelectorForField(field),
         portal_input_type: controlType,
+        options: offeredOptions.length > 0 ? offeredOptions : null,
       });
       continue;
     }
@@ -2186,13 +2347,13 @@ export async function discoverAndResolveQuestions(
       && usableOptions(field.options).length > 0) {
       invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
       (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`none of the options exactly match your remembered answer, so this one is left for you: "${label.slice(0, 60)}"`);
-      questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
+      surfaceUnansweredQuestion(field, reviewLabel, existing, false, fieldIsRequired);
       continue;
     }
     if (known && 'skipReason' in known) {
       invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
       (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(known.skipReason);
-      questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
+      surfaceUnansweredQuestion(field, reviewLabel, existing, false, fieldIsRequired);
       continue;
     }
     if (!known && isRefusedQuestion(label)) {
@@ -2200,16 +2361,54 @@ export async function discoverAndResolveQuestions(
       (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(WORK_ELIGIBILITY_QUESTION.test(label)
         ? workEligibilitySkipReason(label)
         : `sensitive question left for you: "${label.slice(0, 60)}"`);
-      questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false, fieldIsRequired));
+      surfaceUnansweredQuestion(field, reviewLabel, existing, false, fieldIsRequired);
       continue;
     }
     if (isSelfDeclarationQuestion(label)) {
       if (!known) {
         invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
         (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(selfDeclarationSkipReason(label));
-        if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
+        if (fieldIsRequired) surfaceUnansweredQuestion(field, reviewLabel, existing);
         continue;
       }
+    }
+    /* A STORED MACHINE VALUE CANNOT STAND IN FOR AN UNREAD EMPLOYER MENU.
+     *
+     * A native select can be rediscovered after an earlier run wrote a machine answer while its
+     * current option inventory is absent. Replaying that stored text would turn missing metadata
+     * into apparent authority to fill a closed control. Profile-backed values retain the existing
+     * search-combobox path above, but anything that exists only on the old review row is quarantined
+     * until the employer's exact choices are measured again. A current-round applicant answer may
+     * remain visible, under the same exact-selector proof used by the placeholder-only branch, while
+     * the metadata blocker still holds the send.
+     *
+     * This sits after the refusal and self-declaration branches on purpose. Those branches explain
+     * why a question belongs to the applicant, and missing metadata must not erase that explanation.
+     */
+    if (unreadClosedControl?.kind === 'missing_exact_options'
+      && !(profileKnown && 'value' in profileKnown)) {
+      const measured = { ...unreadClosedControl, required: fieldIsRequired };
+      questionMetadataBlockers.push(measured);
+      (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(
+        questionMetadataBlockerReason(measured),
+      );
+      const selector = portalSelectorForField(field);
+      if (existing
+        && applicantChoseStoredAnswerInRound(existing, current.questions_reviewed_at)
+        && selector
+        && existing.portal_selector === selector) {
+        questions.push({
+          ...existing,
+          question: reviewLabel,
+          required: existing.required || fieldIsRequired,
+          portal_selector: selector,
+          portal_input_type: controlType,
+          options: null,
+        });
+      } else {
+        invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+      }
+      continue;
     }
     /* A COVER-LETTER TEXT BOX GETS THE LETTER LITOS ALREADY WRITES.
      *
@@ -2291,7 +2490,10 @@ export async function discoverAndResolveQuestions(
          * applicant-override reader, including the failed-probe exemptions, then treats as a
          * choice she made. Provenance follows the ANSWER: it survives only when the value is
          * still the one she reviewed. */
-        const provenanceStillHers = existing.answer_source === 'applicant_review'
+        const provenanceStillHers = applicantChoseStoredAnswerInRound(
+          existing,
+          current.questions_reviewed_at,
+        )
           && knownValue.trim() === existing.answer.trim();
         questions.push({
           ...existing,
@@ -2308,17 +2510,24 @@ export async function discoverAndResolveQuestions(
           /* The answer can come from the profile while the choices come from this live employer
            * control. Preserve both. Otherwise an already-known answer keeps its text but the
            * dashboard has no option list and renders the employer's select as a text box. */
-          ...(usableOptions(field.options).length > 0 ? { options: usableOptions(field.options) } : {}),
+          options: usableOptions(field.options).length > 0 ? usableOptions(field.options) : null,
           // Last, so a re-run over a packet whose provenance was stripped by a review merge stamps
           // the acceptance back on rather than inheriting a blank.
           ...consentTrail,
         });
       } else if (staleDraftedAnswer) {
         invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
-        if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, false));
+        if (fieldIsRequired) surfaceUnansweredQuestion(field, reviewLabel, existing, false);
       } else if (existing.answer.trim()) {
+        const provenanceStillHers = applicantChoseStoredAnswerInRound(
+          existing,
+          current.questions_reviewed_at,
+        );
         questions.push({
           ...existing,
+          ...(closedControl && existing.answer_source === 'applicant_review' && !provenanceStillHers
+            ? { answer_source: undefined, answer_reviewed_at: undefined }
+            : {}),
           question: reviewLabel,
           required: existing.required || fieldIsRequired,
           portal_selector: portalSelectorForField(field),
@@ -2327,10 +2536,10 @@ export async function discoverAndResolveQuestions(
            * the applicant's answer and refresh the display-only choices beside it. Without this,
            * every already-answered Greenhouse select was returned to the dashboard as a free-text
            * field even though the option probe had just read the exact allowed values. */
-          ...(usableOptions(field.options).length > 0 ? { options: usableOptions(field.options) } : {}),
+          options: usableOptions(field.options).length > 0 ? usableOptions(field.options) : null,
         });
       } else if (fieldIsRequired) {
-        questions.push(unansweredRequiredQuestion(field, reviewLabel, existing, true));
+        surfaceUnansweredQuestion(field, reviewLabel, existing, true);
       }
       continue; // already answered by the client or a prior run
     }
@@ -2371,7 +2580,7 @@ export async function discoverAndResolveQuestions(
       // "EXPORT CONTROLS - ...": not a field Litos knows, not an essay it can draft, and until now
       // dropped without even an attention reason. Required means the employer will not accept the
       // form without it, so it is the applicant's to answer and she has to be able to see it.
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
+      if (fieldIsRequired) surfaceUnansweredQuestion(field, reviewLabel, existing);
       continue;
     }
 
@@ -2386,7 +2595,7 @@ export async function discoverAndResolveQuestions(
       }
       if (bank.length === 0) {
         (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`open-ended question left for you (no experience bank on file): "${label.slice(0, 60)}"`);
-        if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
+        if (fieldIsRequired) surfaceUnansweredQuestion(field, reviewLabel, existing);
         continue;
       }
       const compactAnswer = compactAnswers.get(reviewLabel.toLowerCase());
@@ -2417,7 +2626,7 @@ export async function discoverAndResolveQuestions(
       const fitted = answer ? fitToBudget(answer, field.maxLength ?? 100_000) : null;
       if (!fitted) {
         (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`open-ended question left for you (could not draft a confident answer): "${label.slice(0, 60)}"`);
-        if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
+        if (fieldIsRequired) surfaceUnansweredQuestion(field, reviewLabel, existing);
         continue;
       }
       questions.push({ id: randomUUID(), question: reviewLabel, answer: fitted, kind: 'essay', required: fieldIsRequired, portal_selector: field.selector, portal_input_type: controlType });
@@ -2430,11 +2639,17 @@ export async function discoverAndResolveQuestions(
     } catch (error) {
       if (isBillingOrAuthFailure(error)) throw error; // this is a real outage, not a per-field skip
       (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`open-ended question left for you (draft generation failed): "${label.slice(0, 60)}"`);
-      if (fieldIsRequired) questions.push(unansweredRequiredQuestion(field, reviewLabel, existing));
+      if (fieldIsRequired) surfaceUnansweredQuestion(field, reviewLabel, existing);
     }
   }
 
-  return { questions, attentionReasons, optionalAttentionReasons, invalidatedQuestionKeys: [...invalidatedQuestionKeys] };
+  return {
+    questions,
+    attentionReasons,
+    optionalAttentionReasons,
+    invalidatedQuestionKeys: [...invalidatedQuestionKeys],
+    questionMetadataBlockers: dedupeQuestionMetadataBlockers(questionMetadataBlockers),
+  };
 }
 
 function applicationProfileForPacket(
@@ -2658,6 +2873,7 @@ export function mergeDiscoveredPortalQuestions(
   stored: readonly ApplicationReviewQuestion[],
   invalidatedQuestionKeys: readonly string[],
   invalidatedFieldIds: ReadonlySet<string> = new Set(),
+  questionsReviewedAt?: string,
 ): ApplicationReviewQuestion[] {
   const invalidated = new Set(invalidatedQuestionKeys);
   const kept = stored.filter((question) => {
@@ -2671,7 +2887,7 @@ export function mergeDiscoveredPortalQuestions(
     // could not be read this run. An answer she chose herself does not need the list read; a
     // stored machine answer does, because restoring it replays a value nobody stands behind
     // against a control nobody read. Measured on Jump Trading packet 2e593ac5, 2026-08-17 late.
-    return applicantChoseStoredAnswer(question);
+    return applicantChoseStoredAnswerInRound(question, questionsReviewedAt);
   });
   /* HER ANSWER LEADS THE COLLISION, because ordering here decides who wins one.
    *
@@ -2700,9 +2916,9 @@ export function mergeDiscoveredPortalQuestions(
    * which side won the answer, so this run's live selector still reaches the fill. Only the answer
    * and its provenance change hands. */
   return normalizeApplicationReviewQuestions([
-    ...kept.filter(applicantChoseStoredAnswer),
+    ...kept.filter((question) => applicantChoseStoredAnswerInRound(question, questionsReviewedAt)),
     ...discovered,
-    ...kept.filter((question) => !applicantChoseStoredAnswer(question)),
+    ...kept.filter((question) => !applicantChoseStoredAnswerInRound(question, questionsReviewedAt)),
   ]);
 }
 
@@ -3003,9 +3219,17 @@ export function managedActionDiagnosticsForLog(value: unknown): Array<Record<str
 export function coveredOptionProbeFailureIds(
   failures: readonly { controlId: string; reason: string }[],
   failedFields: readonly { controlId: string; label?: string }[],
-  storedQuestions: readonly { question: string; answer: string; answer_source?: string; portal_selector?: string }[] = [],
+  storedQuestions: readonly {
+    question: string;
+    answer: string;
+    answer_source?: string;
+    answer_reviewed_at?: string;
+    portal_selector?: string;
+  }[] = [],
+  questionsReviewedAt?: string,
 ): Set<string> {
-  const chosen = storedQuestions.filter((question) => applicantChoseStoredAnswer(question));
+  const chosen = storedQuestions.filter((question) =>
+    applicantChoseStoredAnswerInRound(question, questionsReviewedAt));
   const chosenLabels = new Set(chosen.map((question) => normalizeReviewQuestionLabel(question.question).toLowerCase()));
   /* SELECTOR-DERIVED IDS ONLY, deliberately narrower than managedOptionProbeControlId's full
    * reading. The id fallback that mines handles out of the LABEL text can cover a failure whose
@@ -3027,6 +3251,15 @@ export function coveredOptionProbeFailureIds(
     .map(({ controlId }) => controlId));
 }
 
+export function uncoveredRequiredOptionProbeFailures<T extends { controlId: string }>(
+  failures: readonly T[],
+  requiredControlIds: ReadonlySet<string>,
+  coveredControlIds: ReadonlySet<string>,
+): T[] {
+  return failures.filter(({ controlId }) =>
+    requiredControlIds.has(controlId) && !coveredControlIds.has(controlId));
+}
+
 export function optionProbeAttentionReasons(
   failures: readonly { controlId: string; reason: string }[],
   failedFields: readonly { controlId: string; label?: string }[],
@@ -3037,9 +3270,21 @@ export function optionProbeAttentionReasons(
    * still asks her to look, because the run could not read the list and cannot promise the option
    * text matched. Coverage matches the way the merge exemption matches: by the label key or the
    * probe control id of her stored record. */
-  storedQuestions: readonly { question: string; answer: string; answer_source?: string; portal_selector?: string }[] = [],
+  storedQuestions: readonly {
+    question: string;
+    answer: string;
+    answer_source?: string;
+    answer_reviewed_at?: string;
+    portal_selector?: string;
+  }[] = [],
+  questionsReviewedAt?: string,
 ): string[] {
-  const coveredIds = coveredOptionProbeFailureIds(failures, failedFields, storedQuestions);
+  const coveredIds = coveredOptionProbeFailureIds(
+    failures,
+    failedFields,
+    storedQuestions,
+    questionsReviewedAt,
+  );
   const labelById = new Map(failedFields.map((field) => [field.controlId, field.label?.trim()]));
   return failures.map(({ controlId, reason }) => {
     const label = labelById.get(controlId);
@@ -3183,6 +3428,9 @@ async function prepareManaged(
   // provider's discover action reports no options at all, so a control offering "Computer Science"
   // was handed the stored major, matched nothing, and came back required-and-empty.
   const discoveryFieldOptions = managedResultFieldOptions(discoveryResult);
+  const discoveredForOptionProbe = discoveredQuestionsForExactOptionProbe(
+    (discoveryResult?.discovered ?? []) as DiscoveredQuestion[],
+  );
   /* THE THIRD STAGE, and the reason option snapping reaches every confirmed closed control.
    *
    * The discovery pass probes four ids compiled into this repo, because those four are Greenhouse's
@@ -3205,7 +3453,7 @@ async function prepareManaged(
   const discoveryRoleCapability = managedResultSupportsDiscoveryRole(discoveryResult);
   const optionProbeBatches = buildManagedDiscoveredOptionProbeBatches(
     portal,
-    discoveryResult?.discovered ?? [],
+    discoveredForOptionProbe,
     discoveryFieldOptions,
     discoveryRoleCapability,
   );
@@ -3238,7 +3486,7 @@ async function prepareManaged(
   }
   const optionProbe = managedOptionProbeAnalysis(
     portal,
-    discoveryResult?.discovered ?? [],
+    discoveredForOptionProbe,
     discoveryFieldOptions,
     [discoveryResult, ...optionProbeResults],
     optionProbeBatchFailures,
@@ -3252,6 +3500,12 @@ async function prepareManaged(
     .filter(({ controlId }) => !searchFillableWindowedIds.has(controlId));
   const blockingOptionProbeFailedIds = new Set(
     blockingOptionProbeFailures.map(({ controlId }) => controlId),
+  );
+  const requiredOptionProbeControlIds = new Set(
+    discoveredForOptionProbe.flatMap((field) => {
+      const controlId = managedOptionProbeControlId(field);
+      return controlId && discoveredFieldIsRequired(field) ? [controlId] : [];
+    }),
   );
   /* NOT pushed into discoveryFailures. That array is the WHOLE-FORM honesty gate, and a per-control
    * read failure promoted into it made Litos tell her it could not read any of this form's questions
@@ -3275,7 +3529,7 @@ async function prepareManaged(
   const fieldOptions = optionProbe.options;
   const targetedControlIds = managedOptionProbeTargets(
     portal,
-    discoveryResult?.discovered ?? [],
+    discoveredForOptionProbe,
     undefined,
     discoveryRoleCapability,
   );
@@ -3335,13 +3589,27 @@ async function prepareManaged(
     }];
   });
   const storedQuestions = normalizeStoredPortalQuestions(current.questions, portal);
-  const optionProbeAttention = optionProbeAttentionReasons(blockingOptionProbeFailures, failedFields, storedQuestions);
+  const optionProbeAttention = optionProbeAttentionReasons(
+    blockingOptionProbeFailures,
+    failedFields,
+    storedQuestions,
+    current.questions_reviewed_at,
+  );
   /* The failed reads that are NOT excused by a reviewed answer. These are the ones that hold the
    * send; see the `safe` term below and coveredOptionProbeFailureIds for the one shared
    * derivation. */
   const uncoveredProbeFailures = (() => {
-    const covered = coveredOptionProbeFailureIds(blockingOptionProbeFailures, failedFields, storedQuestions);
-    return blockingOptionProbeFailures.filter(({ controlId }) => !covered.has(controlId));
+    const covered = coveredOptionProbeFailureIds(
+      blockingOptionProbeFailures,
+      failedFields,
+      storedQuestions,
+      current.questions_reviewed_at,
+    );
+    return uncoveredRequiredOptionProbeFailures(
+      blockingOptionProbeFailures,
+      requiredOptionProbeControlIds,
+      covered,
+    );
   })();
   const discoveredFields = attachManagedFieldOptions(discoveryResult?.discovered ?? [], fieldOptions)
     .filter((field) => {
@@ -3436,6 +3704,7 @@ async function prepareManaged(
     attentionReasons: discoveredAttentionReasons,
     optionalAttentionReasons: discoveryOptionalAttention,
     invalidatedQuestionKeys,
+    questionMetadataBlockers: discoveredQuestionMetadataBlockers,
   } = await discoverAndResolveQuestions(
     discoveredFields,
     coverLetterOutcome.row,
@@ -3446,6 +3715,26 @@ async function prepareManaged(
     savedAnswers,
     compactAnswers,
   );
+  const optionProbeMetadataBlockers = questionMetadataBlockersForOptionProbeFailures(
+    portal,
+    discoveryResult?.discovered ?? [],
+    blockingOptionProbeFailures,
+  );
+  const questionMetadataBlockers = dedupeQuestionMetadataBlockers([
+    ...discoveredQuestionMetadataBlockers,
+    ...optionProbeMetadataBlockers,
+  ]);
+  const discoveryMetadataMeasurementComplete = questionMetadataMeasurementIsComplete({
+    discoveryFailed: discoveryFailures.length > 0,
+    filledFields: discoveryResult?.filledFields,
+    providerBlockers: discoveryResult?.blockers,
+    discoveredQuestionCount: discoveryResult?.discovered?.length ?? 0,
+    extracted: discoveryResult?.extracted,
+    text: discoveryResult?.text,
+  });
+  if (discoveryMetadataMeasurementComplete) {
+    await persistQuestionMetadataMeasurement(row, runId, questionMetadataBlockers);
+  }
   /* A failed option probe must not take an applicant-chosen answer out of the packet.
    *
    * Measured on Jump Trading packet 2e593ac5, 2026-08-17 late: the graduation control's probe
@@ -3457,7 +3746,7 @@ async function prepareManaged(
    * Resolver-driven invalidation keys are untouched: those branches deliberately blank an answer
    * so she re-confirms it, and this exemption is only for the read failure. */
   const storedApplicantAnswerKeys = new Set(storedQuestions
-    .filter((question) => applicantChoseStoredAnswer(question))
+    .filter((question) => applicantChoseStoredAnswerInRound(question, current.questions_reviewed_at))
     .map((question) => normalizeReviewQuestionLabel(question.question).toLowerCase()));
   const failedQuestionKeys = failedFields
     .map((field) => normalizeReviewQuestionLabel(field.label).toLowerCase())
@@ -3515,6 +3804,7 @@ async function prepareManaged(
       storedQuestions,
       [...invalidatedQuestionKeys, ...failedQuestionKeys, ...staleRelabeledKeys],
       blockingOptionProbeFailedIds,
+      current.questions_reviewed_at,
     ),
     referralSourceForApplication(
       applicationProfile.referral_source_default,
@@ -3623,6 +3913,7 @@ async function prepareManaged(
       submission_run_id: runId,
       questions: mergedQuestions,
       managed_form_snapshot: managedFormSnapshot,
+      ...(discoveryMetadataMeasurementComplete ? { question_metadata_blockers: questionMetadataBlockers } : {}),
       ...(managedFormSnapshot.cover_letter_supported !== undefined
         ? { cover_letter_supported: managedFormSnapshot.cover_letter_supported }
         : {}),
@@ -3844,6 +4135,15 @@ async function prepareManaged(
    * most of its length preventing in other forms. Not safe means she sees the sentence and decides. */
   const transcriptAttention = transcriptOutcome.transcriptIssue ? [transcriptOutcome.transcriptIssue] : [];
   const filledFields = managedResultFilledFields(result);
+  const questionMetadataMeasurementComplete = questionMetadataMeasurementIsComplete({
+    discoveryFailed: discoveryFailures.length > 0,
+    filledFields,
+    providerBlockers: [...(result.blockers ?? []), ...(discoveryResult?.blockers ?? [])],
+    discoveredQuestionCount: discoveryResult?.discovered?.length ?? 0,
+    extracted: [...(result.extracted ?? []), ...(discoveryResult?.extracted ?? [])],
+    text: result.text,
+    email: packet.email,
+  });
   // Both passes count as evidence the form was reached. The discovery pass enumerates the live
   // inputs and probes the core fields, so a run whose fill pass came back empty can still have
   // proven the form was there - and a run where NEITHER pass saw anything has proven the opposite.
@@ -4180,6 +4480,7 @@ async function prepareManaged(
     verification: { status: verificationHandoff ? 'handoff' : 'not_needed' },
     questions: mergedQuestions,
     managed_form_snapshot: managedFormSnapshot,
+    ...(questionMetadataMeasurementComplete ? { question_metadata_blockers: questionMetadataBlockers } : {}),
     ...(managedFormSnapshot.cover_letter_supported !== undefined
       ? { cover_letter_supported: managedFormSnapshot.cover_letter_supported }
       : {}),
@@ -4687,6 +4988,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       questions: discoveredQuestions,
       attentionReasons: discoveryAttention,
       invalidatedQuestionKeys,
+      questionMetadataBlockers,
     } =
       await discoverAndResolveQuestions(
         discovered,
@@ -4698,7 +5000,20 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         await loadSavedAnswers(row.user_id),
         compactAnswers,
       );
-    const mergedQuestions = mergeDiscoveredPortalQuestions(discoveredQuestions, storedQuestions, invalidatedQuestionKeys);
+    const discoveryMetadataMeasurementComplete = questionMetadataMeasurementIsComplete({
+      discoveryFailed: discoveryFailures.length > 0,
+      discoveredQuestionCount: discovered.length,
+    });
+    if (discoveryMetadataMeasurementComplete) {
+      await persistQuestionMetadataMeasurement(row, runId, questionMetadataBlockers);
+    }
+    const mergedQuestions = mergeDiscoveredPortalQuestions(
+      discoveredQuestions,
+      storedQuestions,
+      invalidatedQuestionKeys,
+      new Set(),
+      current.questions_reviewed_at,
+    );
     /* The LAST thing that touches packet.questions before the fill on the next line, and it dropped
      * answer_source, which made applicantChoseAnswer false for every question here. See
      * packetQuestionsForFill for the measurement and for the three merged fixes it left inert. */
@@ -4725,6 +5040,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         browser_context_id: contextId,
         browser_session_id: session.id,
         questions: mergedQuestions,
+        ...(discoveryMetadataMeasurementComplete ? { question_metadata_blockers: questionMetadataBlockers } : {}),
         cover_letter_supported: coverLetterSupported,
         transcript_supported: transcriptSupported,
         ...(packet.applicantEmail ? { applicant_email: packet.applicantEmail } : {}),
@@ -4753,6 +5069,14 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     );
     const sanitizedBlockers = sanitizeProviderBlockers(result.blockers);
     const pageText = await page.locator('body').innerText({ timeout: 1_000 }).catch(() => '');
+    const questionMetadataMeasurementComplete = questionMetadataMeasurementIsComplete({
+      discoveryFailed: discoveryFailures.length > 0,
+      filledFields: result.filledFields,
+      providerBlockers: result.blockers,
+      discoveredQuestionCount: discovered.length,
+      text: pageText,
+      email: packet.email,
+    });
     // Same reach evidence as the managed path: the live-page question scan and the portal's own
     // required-field blockers both prove the form was in front of us, which is what separates
     // "reached it and left fields empty" from "never reached it".
@@ -4835,6 +5159,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         completed_at: verification.status === 'completed' ? new Date().toISOString() : undefined,
       },
       questions: mergedQuestions,
+      ...(questionMetadataMeasurementComplete ? { question_metadata_blockers: questionMetadataBlockers } : {}),
       cover_letter_supported: coverLetterSupported,
       // Same measurement as the managed path, off this path's own required-field scan. See
       // ApplicationReviewState.cover_letter_required.

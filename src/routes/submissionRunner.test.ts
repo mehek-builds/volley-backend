@@ -17,10 +17,12 @@ import {
   managedExtensionHandoffUrl,
   measuredRequiredDocuments,
   coveredOptionProbeFailureIds,
+  uncoveredRequiredOptionProbeFailures,
   optionProbeAttentionReasons,
   packetUsesControlledResumeFixture,
   FORM_NOT_REACHED_REASON,
   preparationEvidenceBlockers,
+  questionMetadataMeasurementIsComplete,
   reconcileManagedProviderBlockers,
   readMostRecentRole,
   normalizedPacketAuditQuestions,
@@ -1276,6 +1278,18 @@ test('attention categories distinguish captcha from document and attestation blo
     ]),
     ['evidence_gap', 'required_field'],
   );
+  assert.deepEqual(
+    attentionCategoriesForReasons([
+      'Litos could not read the choices "Will you require sponsorship?" offers, so it was left for you rather than answered with a guess (no stable list).',
+    ]),
+    ['evidence_gap'],
+  );
+  assert.deepEqual(
+    attentionCategoriesForReasons([
+      'Litos could not read the employer\'s exact answer choices for "Data consent and log in preference", so it did not guess at that field.',
+    ]),
+    ['evidence_gap'],
+  );
 });
 
 test('an empty LinkedIn field is a required field, not a document the employer wants uploaded', () => {
@@ -1468,6 +1482,25 @@ test('broken previews suppress duplicate core-field evidence noise', () => {
     ),
     ['CAPTCHA requires your attention'],
   );
+});
+
+test('question metadata is measured only after positive application-form reach evidence', () => {
+  assert.equal(questionMetadataMeasurementIsComplete({
+    discoveryFailed: false,
+    discoveredQuestionCount: 0,
+  }), false, 'a successful empty read must preserve the prior metadata measurement');
+  assert.equal(questionMetadataMeasurementIsComplete({
+    discoveryFailed: false,
+    discoveredQuestionCount: 1,
+  }), true, 'a discovered control proves the form was measured');
+  assert.equal(questionMetadataMeasurementIsComplete({
+    discoveryFailed: false,
+    filledFields: ['email'],
+  }), true, 'a later successful fill can complete an initially empty discovery measurement');
+  assert.equal(questionMetadataMeasurementIsComplete({
+    discoveryFailed: true,
+    discoveredQuestionCount: 1,
+  }), false, 'partial discovery evidence cannot clear metadata after a failed read');
 });
 
 test('non-CAPTCHA managed blocker reconciliation waits for normal evidence handling', () => {
@@ -2050,6 +2083,7 @@ test('portal country metadata reaches managed send resolution without borrowing 
     selector: 'select[name="work_authorized"]',
     inputType: 'select',
     maxLength: null,
+    options: ['Yes', 'No'],
   }];
   const applicationProfile: ApplicationProfileLike = {
     work_eligibility_by_country: [
@@ -2195,12 +2229,14 @@ test('select and radio discoveries relay a stored onsite commitment alongside st
         selector: 'select[name="question_1"]',
         inputType: 'select',
         maxLength: null,
+        options: ['Yes', 'No'],
       },
       {
         label: 'Are you currently enrolled in a degree program?',
         selector: 'input[name="question_2"][type="radio"]',
         inputType: 'radio',
         maxLength: null,
+        options: ['Yes', 'No'],
       },
     ],
     { user_id: 'user-1', job_context: { location: 'San Francisco, CA' } } as ResumeRow,
@@ -2229,8 +2265,8 @@ test('select and radio discoveries relay a stored onsite commitment alongside st
   // for her, by name, and the academic one is still resolved.
   const unasked = await discoverAndResolveQuestions(
     [
-      { label: 'Are you able to work onsite 4 days a week?', selector: 'select[name="question_1"]', inputType: 'select', maxLength: null },
-      { label: 'Are you currently enrolled in a degree program?', selector: 'input[name="question_2"][type="radio"]', inputType: 'radio', maxLength: null },
+      { label: 'Are you able to work onsite 4 days a week?', selector: 'select[name="question_1"]', inputType: 'select', maxLength: null, options: ['Yes', 'No'] },
+      { label: 'Are you currently enrolled in a degree program?', selector: 'input[name="question_2"][type="radio"]', inputType: 'radio', maxLength: null, options: ['Yes', 'No'] },
     ],
     { user_id: 'user-1' } as ResumeRow,
     current,
@@ -2444,6 +2480,49 @@ test('discovered GPA and major questions resolve from profile-backed academic fa
   );
 });
 
+test('a native closed control with no exact options cannot reuse a profile answer', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'This internship asks for an education history.',
+    role: 'Software Engineering Intern',
+    portal_url: 'https://example.greenhouse.io/jobs/123',
+    ats_name: 'greenhouse',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+
+  const result = await discoverAndResolveQuestions(
+    [{
+      label: 'What is your GPA?',
+      selector: 'select[name="gpa_band"]',
+      durableSelector: 'select[name="gpa_band"]',
+      inputType: 'select-one',
+      maxLength: null,
+      options: null,
+      required: true,
+    }],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    { gpa: '3.89' },
+    true,
+    'greenhouse',
+  );
+
+  assert.deepEqual(result.questions, []);
+  assert.deepEqual(result.questionMetadataBlockers, [{
+    kind: 'missing_exact_options',
+    required: true,
+    portal_input_type: 'select-one',
+    control_id: 'name:gpa_band',
+    portal_selector: 'select[name="gpa_band"]',
+    question: 'What is your GPA?',
+  }]);
+  assert.equal(result.attentionReasons.some((reason) =>
+    reason.includes("could not read the employer's exact answer choices")), true);
+});
+
 /* REGRESSION (2026-08-21): known-answer text values were typed with no field.maxLength check at
  * all, unlike the essay-drafter path a few lines below in this same file, which always calls
  * fitToBudget(answer, field.maxLength ?? 100_000) before pushing a question. gpaAnswer's
@@ -2534,7 +2613,7 @@ test('managed Greenhouse education combobox labels are not replayed as text fiel
   ]);
 });
 
-test('existing reviewed choice answers do not keep direct selectors on retry', async () => {
+test('a native reviewed choice with unread options is quarantined before profile reuse', async () => {
   const current: ApplicationReviewState = {
     jd_text: 'This internship is based in San Francisco, California.',
     role: 'Software Engineering Intern',
@@ -2572,10 +2651,9 @@ test('existing reviewed choice answers do not keep direct selectors on retry', a
     'greenhouse',
   );
 
-  assert.equal(result.questions.length, 1);
-  assert.equal(result.questions[0]?.id, 'q-existing');
-  assert.equal(result.questions[0]?.answer, 'Yes');
-  assert.equal(result.questions[0]?.portal_selector, undefined);
+  assert.deepEqual(result.questions, []);
+  assert.equal(result.questionMetadataBlockers[0]?.kind, 'missing_exact_options');
+  assert.equal(result.questionMetadataBlockers[0]?.question, 'Are you currently enrolled in a degree program?');
 });
 
 test('rediscovered profile-backed questions replace stale drafted retry answers', async () => {
@@ -2630,14 +2708,17 @@ test('rediscovered profile-backed questions replace stale drafted retry answers'
     'greenhouse',
   );
 
-  assert.deepEqual(result.attentionReasons, []);
+  assert.equal(result.attentionReasons.some((reason) =>
+    reason.includes("could not read the employer's exact answer choices")), true);
+  assert.equal(result.attentionReasons.some((reason) =>
+    reason.includes('sensitive')), true);
   assert.deepEqual(
     result.questions.map((question) => ({ id: question.id, answer: question.answer, kind: question.kind })),
     [
       { id: 'degree-existing', answer: 'Bachelor\'s Degree', kind: 'required' },
-      { id: 'gender-existing', answer: 'Female', kind: 'required' },
     ],
   );
+  assert.equal(result.questionMetadataBlockers[0]?.question, 'How do you currently describe your gender identity?');
 });
 
 // ─── The prepare-time gate for account-walled portals ─────────────────────────
@@ -2746,7 +2827,7 @@ const ANDURIL_ORPHAN_FIELDS = [
   { label: 'EXPORT CONTROLS - This position requires access to information and technology that is subject to U.S. export controls. Your responses to the questions below will be used solely to determine your eligibility under U.S. law to receive information and materials subject to U.S. export controls.* question_12114512007', selector: '[data-litos-discovered-16]', inputType: 'combobox', maxLength: null },
 ];
 
-test('every Anduril blocker with no question record now has one, with no answer invented', async () => {
+test('Anduril closed controls without exact options become typed metadata, not blank questions', async () => {
   const result = await discoverAndResolveQuestions(
     ANDURIL_ORPHAN_FIELDS,
     { user_id: 'user-1' } as ResumeRow,
@@ -2756,15 +2837,16 @@ test('every Anduril blocker with no question record now has one, with no answer 
     'greenhouse',
   );
 
+  assert.deepEqual(result.questions, []);
   for (const label of ['Discipline', 'What is your top location preference?', 'EXPORT CONTROLS']) {
-    const question = result.questions.find((item) => item.question.startsWith(label));
-    assert.ok(question, `no question record for ${label}`);
-    assert.equal(question.required, true, `${label} must be required so the dashboard offers an input`);
-    assert.equal(question.answer, '', `${label} must carry NO answer: Litos does not know it`);
+    const blocker = result.questionMetadataBlockers.find((item) => item.question?.startsWith(label));
+    assert.ok(blocker, `no metadata blocker for ${label}`);
+    assert.equal(blocker.kind, 'missing_exact_options');
+    assert.equal(blocker.required, true);
   }
 });
 
-test('the blocker the applicant used to be stuck on is now backed by a question with the same text', async () => {
+test('Anduril metadata blockers retain the employer question text for the dashboard', async () => {
   const result = await discoverAndResolveQuestions(
     ANDURIL_ORPHAN_FIELDS,
     { user_id: 'user-1' } as ResumeRow,
@@ -2774,14 +2856,12 @@ test('the blocker the applicant used to be stuck on is now backed by a question 
     'greenhouse',
   );
 
-  // The exact production pairing: the fill pass writes this sentence, and the dashboard suppresses
-  // the blocker line only when a question record carries the same field text. Before this fix the
-  // sentence appeared with nothing behind it.
-  for (const question of result.questions) {
-    const blocker = describeRequiredBlocker(question.question);
-    assert.ok(blocker.includes(question.question), blocker);
+  const reasons = result.attentionReasons.join('\n');
+  for (const blocker of result.questionMetadataBlockers) {
+    assert.ok(blocker.question);
+    assert.match(reasons, new RegExp(blocker.question.slice(0, 40).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   }
-  assert.equal(result.questions.length, 3);
+  assert.equal(result.questionMetadataBlockers.length, 3);
 });
 
 test('export controls is surfaced but never auto-answered, and neither is any self-declaration', async () => {
@@ -2799,11 +2879,14 @@ test('export controls is surfaced but never auto-answered, and neither is any se
     'greenhouse',
   );
 
-  assert.equal(result.questions.length, legalFields.length);
+  assert.equal(result.questions.length, 2);
   for (const question of result.questions) {
     assert.equal(question.answer, '', `${question.question} was auto-answered, which it must never be`);
     assert.equal(question.required, true);
   }
+  assert.equal(result.questionMetadataBlockers.length, 1);
+  assert.equal(result.questionMetadataBlockers[0]?.kind, 'missing_exact_options');
+  assert.match(result.questionMetadataBlockers[0]?.question ?? '', /^EXPORT CONTROLS/);
 });
 
 test('an optional field Litos cannot answer is still left alone, so submission is not blocked on it', async () => {
@@ -2841,10 +2924,10 @@ test('required-ness reaches the stored question, so the dashboard and the 422 st
     'greenhouse',
   );
 
-  const heardAbout = result.questions.find((question) => question.question.startsWith('How did you hear'));
+  const heardAbout = result.questionMetadataBlockers.find((blocker) => blocker.question?.startsWith('How did you hear'));
   assert.ok(heardAbout);
   assert.equal(heardAbout.required, true);
-  assert.equal(heardAbout.answer, '');
+  assert.equal(heardAbout.kind, 'missing_exact_options');
   assert.match(result.attentionReasons.join('\n'), /how you heard about this role is yours to answer/i);
 });
 
@@ -2868,13 +2951,106 @@ test('a stale answer is invalidated when the current resolver refuses the exact 
     'greenhouse',
   );
 
-  const question = result.questions.find((item) => item.question.startsWith('What is your top location'));
-  assert.ok(question, 'the required field must remain available for a fresh applicant answer');
-  assert.equal(question.answer, '');
-  assert.equal(question.id, 'q-existing');
+  assert.deepEqual(result.questions, []);
+  const blocker = result.questionMetadataBlockers.find((item) => item.question?.startsWith('What is your top location'));
+  assert.ok(blocker, 'the required field must remain visible as an exact-options metadata blocker');
   assert.ok(result.invalidatedQuestionKeys.includes('what is your top location preference?'));
   const merged = mergeDiscoveredPortalQuestions(result.questions, answered.questions, result.invalidatedQuestionKeys);
-  assert.equal(merged[0]?.answer, '', 'the later packet merge must not restore the stale value');
+  assert.deepEqual(merged, [], 'the later packet merge must not restore the stale value');
+});
+
+test('a stored machine answer cannot authorize a required closed control whose choices were unread', async () => {
+  const label = 'Primary programming language';
+  const current: ApplicationReviewState = {
+    jd_text: 'Build developer tooling.',
+    role: 'Software Engineer',
+    portal_url: 'https://jobs.lever.co/example/role',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'stale-machine-language',
+      question: label,
+      answer: 'Python',
+      kind: 'required',
+      required: true,
+      portal_selector: '#language',
+      portal_input_type: 'select-one',
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions([{
+    label: `${label}*`,
+    selector: '#language',
+    durableSelector: '#language',
+    inputType: 'select-one',
+    maxLength: null,
+    options: null,
+    required: true,
+  }], { user_id: 'user-1' } as ResumeRow, current, {}, true, 'lever');
+
+  assert.deepEqual(result.questions, [], 'the stale machine value must not reach the fill packet');
+  assert.deepEqual(result.questionMetadataBlockers, [{
+    kind: 'missing_exact_options',
+    required: true,
+    portal_input_type: 'select-one',
+    control_id: 'language',
+    portal_selector: '#language',
+    question: label,
+  }]);
+  assert.deepEqual(result.invalidatedQuestionKeys, [label.toLowerCase()]);
+});
+
+test('a current-round reviewed answer stays visible but cannot hide unread exact choices', async () => {
+  const label = 'Primary programming language';
+  const reviewedAt = '2026-08-23T12:00:00.000Z';
+  const current: ApplicationReviewState = {
+    jd_text: 'Build developer tooling.',
+    role: 'Software Engineer',
+    portal_url: 'https://jobs.lever.co/example/role',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'reviewed-language',
+      question: label,
+      answer: 'Python',
+      kind: 'required',
+      required: true,
+      portal_selector: '#language',
+      portal_input_type: 'select-one',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    }],
+    questions_reviewed_at: reviewedAt,
+    skipped_reasons: [],
+    updated_at: reviewedAt,
+  };
+  const result = await discoverAndResolveQuestions([{
+    label: `${label}*`,
+    selector: '#language',
+    durableSelector: '#language',
+    inputType: 'select-one',
+    maxLength: null,
+    options: null,
+    required: true,
+  }], { user_id: 'user-1' } as ResumeRow, current, {}, true, 'lever');
+
+  assert.equal(result.questions.length, 1);
+  assert.equal(result.questions[0]?.id, 'reviewed-language');
+  assert.equal(result.questions[0]?.answer, 'Python');
+  assert.equal(result.questions[0]?.answer_source, 'applicant_review');
+  assert.equal(result.questions[0]?.answer_reviewed_at, reviewedAt);
+  assert.deepEqual(result.questionMetadataBlockers, [{
+    kind: 'missing_exact_options',
+    required: true,
+    portal_input_type: 'select-one',
+    control_id: 'language',
+    portal_selector: '#language',
+    question: label,
+  }]);
+  assert.deepEqual(result.invalidatedQuestionKeys, []);
 });
 
 test('refused required and optional answers cannot re-enter a packet through the stored-question merge', async () => {
@@ -3042,6 +3218,7 @@ test('a stored applicant-reviewed answer survives a failed option probe on its c
     [stored],
     [],
     new Set([failedId]),
+    stored.answer_reviewed_at,
   );
   assert.equal(merged.length, 1, 'her reviewed answer must stay in the packet');
   assert.equal(merged[0]?.answer, 'Spring/Summer 2028');
@@ -3053,6 +3230,7 @@ test('a stored applicant-reviewed answer survives a failed option probe on its c
  * "left for you rather than answered with a guess": that sends her to hand-answer a filled field.
  * A failed control nobody answered keeps the original sentence unchanged. */
 test('the attention sentence for a probe-failed control she answered says her answer was typed', () => {
+  const reviewedAt = '2026-08-17T20:00:00.000Z';
   const failures = [
     { controlId: 'question_67595189', reason: 'windowed at the render cap' },
     { controlId: 'question_99', reason: 'windowed at the render cap' },
@@ -3065,9 +3243,10 @@ test('the attention sentence for a probe-failed control she answered says her an
     question: 'What is your expected graduation date?',
     answer: 'Spring/Summer 2028',
     answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
     portal_selector: '#question_67595189',
   }];
-  const reasons = optionProbeAttentionReasons(failures, failedFields, stored);
+  const reasons = optionProbeAttentionReasons(failures, failedFields, stored, reviewedAt);
   assert.match(reasons[0]!, /your reviewed answer was typed exactly as you wrote it/);
   assert.doesNotMatch(reasons[0]!, /left for you rather than answered with a guess/);
   assert.match(reasons[1]!, /left for you rather than answered with a guess/);
@@ -3082,6 +3261,7 @@ test('the attention sentence for a probe-failed control she answered says her an
  * filled_fields, and the row re-parked on the same sentence forever. An uncovered failure is a
  * question knowingly left blank and must keep holding the send. */
 test('a probe failure covered by her reviewed answer is excused from the wall, an uncovered one is not', () => {
+  const reviewedAt = '2026-08-17T20:00:00.000Z';
   const failures = [
     { controlId: 'question_67595189', reason: 'conflicting option lists across bounded reads' },
     { controlId: 'question_99', reason: 'windowed at the render cap' },
@@ -3094,16 +3274,32 @@ test('a probe failure covered by her reviewed answer is excused from the wall, a
     question: 'phone number',
     answer: '+1 213 574 6270',
     answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
     portal_selector: '#question_67595189',
   }];
-  const covered = coveredOptionProbeFailureIds(failures, failedFields, stored);
+  const covered = coveredOptionProbeFailureIds(failures, failedFields, stored, reviewedAt);
   assert.deepEqual([...covered], ['question_67595189']);
   // And it is the same judgement the sentences render, case for case.
-  const reasons = optionProbeAttentionReasons(failures, failedFields, stored);
+  const reasons = optionProbeAttentionReasons(failures, failedFields, stored, reviewedAt);
   assert.match(reasons[0]!, /your reviewed answer was typed exactly as you wrote it/);
   assert.match(reasons[1]!, /left for you rather than answered with a guess/);
   // Nobody answered anything: nothing is excused, every failure keeps its wall.
   assert.equal(coveredOptionProbeFailureIds(failures, failedFields, []).size, 0);
+  assert.equal(coveredOptionProbeFailureIds(
+    failures,
+    failedFields,
+    [{ ...stored[0], answer_reviewed_at: undefined }],
+    reviewedAt,
+  ).size, 0, 'a source token without a real matching review round cannot release a failed probe');
+  assert.deepEqual(
+    uncoveredRequiredOptionProbeFailures(
+      failures,
+      new Set(['question_67595189']),
+      new Set(),
+    ),
+    [failures[0]],
+    'an unread optional control remains metadata but cannot gate the send',
+  );
 });
 
 /* Provenance follows the ANSWER. Discovery replaces a reviewed answer with the resolver's value
@@ -3411,7 +3607,7 @@ test('neither prepare path can call a form safe on the strength of a scan that f
   // an advisory, not a hold - see coveredOptionProbeFailureIds and the covered-excusal test above.
   assert.match(runner, /\.\.\.optionProbeAttention,/);
   assert.match(runner, /&& uncoveredProbeFailures\.length === 0/);
-  assert.match(runner, /coveredOptionProbeFailureIds\(blockingOptionProbeFailures, failedFields, storedQuestions\)/);
+  assert.match(runner, /coveredOptionProbeFailureIds\([\s\S]{0,250}current\.questions_reviewed_at/);
 });
 
 /* THE IMC FIXTURE. Packet 920a6751, read off the live form on 2026-08-11.
@@ -4029,10 +4225,13 @@ test('an applicant-reviewed answer beats a freshly discovered one', () => {
    * label every run, and normalizeApplicationReviewQuestions is first-wins, so spreading
    * ...discovered first meant her choice lost every time. */
   const label = 'How did you hear about DV Trading?';
+  const reviewedAt = '2026-08-18T20:00:00.000Z';
   const merged = mergeDiscoveredPortalQuestions(
     [{ question: label, answer: 'Job board', required: true, portal_selector: '#question_8969957005', portal_input_type: 'combobox' } as any],
-    [{ question: label, answer: 'Other', answer_source: 'applicant_review', required: true } as any],
+    [{ question: label, answer: 'Other', answer_source: 'applicant_review', answer_reviewed_at: reviewedAt, required: true } as any],
     [],
+    new Set(),
+    reviewedAt,
   );
   const row = merged.find((q) => /hear about/i.test(q.question));
   assert.ok(row, 'the referral question must survive the merge');
@@ -4279,6 +4478,366 @@ test('every route verifier names the questions it hashes', async () => {
   }
 });
 
+test('DGA generic response furniture becomes typed metadata instead of an invented question', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'Support state and local campaigns.',
+    role: 'Technology Intern',
+    portal_url: 'https://jobs.lever.co/dga/abc',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'stale-machine-draft',
+      question: 'Type your response',
+      answer: 'Previously generated guess',
+      kind: 'essay',
+      required: true,
+      portal_selector: '#dga_response',
+      portal_input_type: 'textarea',
+      answer_source: 'applicant_review',
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions([
+    {
+      label: 'Type your response',
+      selector: '[data-litos-discovered-1]',
+      durableSelector: '#dga_response',
+      inputType: 'textarea',
+      maxLength: 500,
+      required: true,
+    },
+    {
+      label: 'Type your response',
+      selector: '[data-litos-discovered-1]',
+      durableSelector: '#dga_response',
+      inputType: 'textarea',
+      maxLength: 500,
+      required: true,
+    },
+    {
+      label: 'Do you have prior campaign experience?',
+      selector: '[data-litos-discovered-2]',
+      durableSelector: '#campaign_experience',
+      inputType: 'select-one',
+      maxLength: null,
+      options: ['Yes', 'No'],
+      required: true,
+    },
+    {
+      label: 'Will you require sponsorship for work authorization in the future?',
+      selector: '[data-litos-discovered-3]',
+      durableSelector: '#sponsorship',
+      inputType: 'select-one',
+      maxLength: null,
+      options: null,
+      required: true,
+    },
+    {
+      label: '',
+      selector: '[data-litos-discovered-4]',
+      durableSelector: '#optional_detail',
+      inputType: 'textarea',
+      maxLength: 500,
+      options: null,
+      required: false,
+    },
+  ], { user_id: 'user-1' } as ResumeRow, current, {}, true, 'lever');
+
+  assert.equal(result.questions.some((question) => question.question === 'Type your response'), false);
+  assert.equal(result.questions.some((question) => question.question === 'Do you have prior campaign experience?'), true);
+  assert.ok(result.questions.every((question) => question.answer === ''), 'no applicant answer may be invented');
+  assert.deepEqual(result.invalidatedQuestionKeys, [
+    'type your response',
+    'will you require sponsorship for work authorization in the future?',
+  ]);
+  assert.deepEqual(result.questionMetadataBlockers, [{
+    kind: 'missing_question_text',
+    required: true,
+    portal_input_type: 'textarea',
+    control_id: 'dga_response',
+    portal_selector: '#dga_response',
+  }, {
+    kind: 'missing_exact_options',
+    required: true,
+    portal_input_type: 'select-one',
+    control_id: 'sponsorship',
+    portal_selector: '#sponsorship',
+    question: 'Will you require sponsorship for work authorization in the future?',
+  }, {
+    kind: 'missing_question_text',
+    required: false,
+    portal_input_type: 'textarea',
+    control_id: 'optional_detail',
+    portal_selector: '#optional_detail',
+  }]);
+  assert.equal(result.optionalAttentionReasons.some((reason) =>
+    reason.includes('could not read the employer\'s exact question text')), true);
+  assert.deepEqual(attentionCategoriesForReasons(result.attentionReasons), [
+    'evidence_gap',
+    'sensitive_attestation',
+  ]);
+});
+
+test('a current-round DGA answer stays quarantined while its employer question text is missing', async () => {
+  const reviewedAt = '2026-08-23T12:00:00.000Z';
+  const current: ApplicationReviewState = {
+    jd_text: 'Support state and local campaigns.',
+    role: 'Technology Intern',
+    portal_url: 'https://jobs.lever.co/dga/abc',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'dga-current-answer',
+      question: 'Type your response',
+      answer: 'Previously entered response',
+      kind: 'essay',
+      required: true,
+      portal_selector: '#dga_response',
+      portal_input_type: 'textarea',
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    }],
+    questions_reviewed_at: reviewedAt,
+    skipped_reasons: [],
+    updated_at: reviewedAt,
+  };
+  const result = await discoverAndResolveQuestions([{
+    label: 'Type your response',
+    selector: '[data-litos-discovered-1]',
+    durableSelector: '#dga_response',
+    inputType: 'textarea',
+    maxLength: 500,
+    required: true,
+  }], { user_id: 'user-1' } as ResumeRow, current, {}, true, 'lever');
+
+  assert.deepEqual(result.questions, []);
+  assert.deepEqual(result.invalidatedQuestionKeys, ['type your response']);
+  assert.equal(result.questionMetadataBlockers[0]?.kind, 'missing_question_text');
+});
+
+test('DGA generic furniture is replaced without replaying an answer given under missing text', async () => {
+  const reviewedAt = '2026-08-23T12:00:00.000Z';
+  const stored: ApplicationReviewQuestion = {
+    id: 'dga-reviewed-response',
+    question: 'Type your response',
+    answer: 'I supported voter data quality checks.',
+    kind: 'essay',
+    required: true,
+    portal_selector: '#dga_response',
+    portal_input_type: 'textarea',
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+  };
+  const current: ApplicationReviewState = {
+    jd_text: 'Support state and local campaigns.',
+    role: 'Technology Intern',
+    portal_url: 'https://jobs.lever.co/dga/abc',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [stored],
+    questions_reviewed_at: reviewedAt,
+    skipped_reasons: [],
+    updated_at: reviewedAt,
+  };
+  const result = await discoverAndResolveQuestions([{
+    label: 'Describe your experience supporting campaign data quality.',
+    selector: '[data-litos-discovered-1]',
+    durableSelector: '#dga_response',
+    inputType: 'textarea',
+    maxLength: 500,
+    required: true,
+  }], { user_id: 'user-1' } as ResumeRow, current, {}, true, 'lever');
+  const merged = mergeDiscoveredPortalQuestions(
+    result.questions,
+    current.questions,
+    result.invalidatedQuestionKeys,
+    new Set(),
+    reviewedAt,
+  );
+
+  assert.deepEqual(result.invalidatedQuestionKeys, ['type your response']);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0]?.question, 'Describe your experience supporting campaign data quality.');
+  assert.equal(merged[0]?.answer, '');
+  assert.equal(merged[0]?.answer_source, undefined);
+  assert.equal(merged[0]?.answer_reviewed_at, undefined);
+});
+
+test('Akuna and Jump current-round reviewed choices gain exact options without answer mutation', async () => {
+  const cases = [
+    {
+      company: 'Akuna',
+      label: 'Have you ever applied to a full time or internship position with Akuna in the past?',
+      id: 'akuna-reviewed',
+      answer: 'No',
+    },
+    {
+      company: 'Jump Trading',
+      label: 'Are you currently subject to a restrictive covenant, non-compete, or notice period?',
+      id: 'jump-reviewed',
+      answer: 'no',
+    },
+  ];
+  for (const item of cases) {
+    const reviewedAt = '2026-08-23T12:00:00.000Z';
+    const current: ApplicationReviewState = {
+      jd_text: `${item.company} internship.`,
+      role: 'Intern',
+      portal_url: 'https://job-boards.greenhouse.io/example/jobs/1',
+      ats_name: 'greenhouse',
+      status: 'ready_to_submit',
+      edited_terms: [],
+      questions: [{
+        id: item.id,
+        question: item.label,
+        answer: item.answer,
+        kind: 'required',
+        required: true,
+        answer_source: 'applicant_review',
+        answer_reviewed_at: reviewedAt,
+      }],
+      questions_reviewed_at: reviewedAt,
+      skipped_reasons: [],
+      updated_at: new Date().toISOString(),
+    };
+    const result = await discoverAndResolveQuestions([{
+      label: item.label,
+      selector: '#question_123456',
+      durableSelector: '#question_123456',
+      inputType: 'select-one',
+      maxLength: null,
+      options: ['Yes', 'No'],
+      required: true,
+    }], { user_id: 'user-1' } as ResumeRow, current, {}, true, 'greenhouse');
+
+    const question = result.questions[0];
+    assert.equal(question?.id, item.id, item.company);
+    assert.equal(question?.answer, item.answer, item.company);
+    assert.equal(question?.answer_source, 'applicant_review', item.company);
+    assert.equal(question?.answer_reviewed_at, reviewedAt, item.company);
+    assert.deepEqual(question?.options, ['Yes', 'No'], item.company);
+    assert.deepEqual(result.questionMetadataBlockers, [], item.company);
+  }
+});
+
+test('a current-round reviewed answer clears stale choices when the employer changes to free text', async () => {
+  const reviewedAt = '2026-08-23T12:00:00.000Z';
+  const label = 'Describe your preferred project type';
+  const stored: ApplicationReviewQuestion = {
+    id: 'reviewed-project-type',
+    question: label,
+    answer: 'Developer tooling',
+    kind: 'required',
+    required: true,
+    answer_source: 'applicant_review',
+    answer_reviewed_at: reviewedAt,
+    portal_input_type: 'select-one',
+    options: ['Product', 'Infrastructure'],
+  };
+  const current: ApplicationReviewState = {
+    jd_text: 'Build developer tools.',
+    role: 'Software Engineer',
+    portal_url: 'https://jobs.lever.co/example/1',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [stored],
+    questions_reviewed_at: reviewedAt,
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const discovered = await discoverAndResolveQuestions([{
+    label,
+    selector: '#project_type',
+    durableSelector: '#project_type',
+    inputType: 'textarea',
+    maxLength: 500,
+    options: null,
+    required: true,
+  }], { user_id: 'user-1' } as ResumeRow, current, {}, true, 'lever');
+  const merged = mergeDiscoveredPortalQuestions(
+    discovered.questions,
+    current.questions,
+    discovered.invalidatedQuestionKeys,
+    new Set(),
+    reviewedAt,
+  );
+
+  assert.equal(merged[0]?.answer, stored.answer);
+  assert.equal(merged[0]?.answer_source, 'applicant_review');
+  assert.equal(merged[0]?.portal_input_type, 'textarea');
+  assert.equal(merged[0]?.options, null);
+});
+
+test('a legacy closed-choice source token preserves text but cannot mint current-round provenance', async () => {
+  const label = 'Describe your preferred project type';
+  const current: ApplicationReviewState = {
+    jd_text: 'Build developer tools.',
+    role: 'Software Engineer',
+    portal_url: 'https://jobs.lever.co/example/1',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'legacy-project-type',
+      question: label,
+      answer: 'Developer tooling',
+      kind: 'required',
+      required: true,
+      answer_source: 'applicant_review',
+      portal_input_type: 'select-one',
+      options: ['Developer tooling', 'Product'],
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions([{
+    label,
+    selector: '#project_type',
+    durableSelector: '#project_type',
+    inputType: 'select-one',
+    maxLength: null,
+    options: ['Developer tooling', 'Product'],
+    required: true,
+  }], { user_id: 'user-1' } as ResumeRow, current, {}, true, 'lever');
+
+  assert.equal(result.questions[0]?.answer, 'Developer tooling');
+  assert.equal(result.questions[0]?.answer_source, undefined);
+  assert.equal(result.questions[0]?.answer_reviewed_at, undefined);
+});
+
+test('complete metadata measurements persist while failed discovery preserves the prior measurement', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const writes = runner.match(/MetadataMeasurementComplete \? \{ question_metadata_blockers: questionMetadataBlockers \} : \{\}/g) ?? [];
+  assert.equal(writes.length, 4, 'both prepare paths must persist the measured list in the drift hold and final review');
+  assert.doesNotMatch(runner, /question_metadata_blockers:\s*\[\]/, 'a failed discovery must not claim measured-clear metadata');
+  assert.match(
+    runner,
+    /questionMetadataBlockersForOptionProbeFailures\(\s*portal,\s*discoveryResult\?\.discovered \?\? \[\],\s*blockingOptionProbeFailures/,
+    'every blocking probe failure from the raw discovery must remain visible in the metadata inventory',
+  );
+  const helperStart = runner.indexOf('async function persistQuestionMetadataMeasurement(');
+  const helperEnd = runner.indexOf('\n}\n', helperStart);
+  const helper = runner.slice(helperStart, helperEnd);
+  assert.match(helper, /jsonb_build_object\('question_metadata_blockers'/);
+  assert.doesNotMatch(helper, /nextReview|writeReview/,
+    'the measurement write must not roll active run status or session fields back to an older snapshot');
+  const callNeedle = 'await persistQuestionMetadataMeasurement(row, runId, questionMetadataBlockers)';
+  const firstCall = runner.indexOf(callNeedle, helperEnd);
+  const secondCall = runner.indexOf(callNeedle, firstCall + callNeedle.length);
+  assert.ok(firstCall > helperEnd && secondCall > firstCall, 'both prepare paths must persist before fill');
+  assert.ok(firstCall < runner.indexOf('if (await holdPreparationForPacketDrift({', firstCall));
+  assert.ok(secondCall < runner.indexOf('let result = await fillPortal(page, portal, packet)', secondCall));
+  assert.match(runner, /const discoveryMetadataMeasurementComplete = questionMetadataMeasurementIsComplete\(\{/);
+  assert.match(runner, /discoveryFailed: discoveryFailures\.length > 0/);
+  assert.match(helper, /submission_run_id' = \$\{runId\}/,
+    'a stale run must not overwrite a newer run\'s metadata measurement');
+});
+
 /* THE REVIEWED OPTION THE PROFILE CANNOT EXPRESS, measured live on the Mytos Lever form
  * (packet 16f1c744, 2026-08-20). The degree-classification select offers UK honours rows and GPA
  * rows; she reviewed and chose "GPA 3.5-3.8", byte for byte an offered option, and the profile's
@@ -4329,6 +4888,11 @@ test('a current-round reviewed option stands when the profile value matches noth
   const question = result.questions.find((q) => q.question.toLowerCase().startsWith('what was your degree classification'));
   assert.equal(question?.answer, 'GPA 3.5-3.8');
   assert.equal(question?.answer_source, 'applicant_review');
+  assert.deepEqual(question?.options, [
+    'First-Class Honours (First or 1st) (70% and above)',
+    'Upper Second-Class Honours (2:1, 2.i) (60-70%)',
+    'GPA 3.0-3.4', 'GPA 3.5-3.8', 'GPA 3.9+', 'Other',
+  ]);
   assert.deepEqual(result.attentionReasons, []);
 });
 

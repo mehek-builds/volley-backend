@@ -5,13 +5,22 @@ import {
   POSTING_QUESTIONS_FAILED_TTL_MS,
   POSTING_QUESTIONS_TTL_MS,
   postingQuestionsAreFresh,
+  postingQuestionInventoryFromDiscovered,
+  postingQuestionInventoryStatus,
   postingQuestionsFromDiscovered,
   prescriptAskExplanation,
+  readStoredPostingQuestionInventory,
   resolvePrescript,
+  storedPostingQuestionInventory,
   type PostingQuestion,
 } from './postingQuestions';
 import { savedAnswerKey } from './answerReuse';
 import type { ApplicationProfileLike } from './questionDiscovery';
+import {
+  dedupeQuestionMetadataBlockers,
+  discoveredQuestionsForExactOptionProbe,
+  questionMetadataBlockersForOptionProbeFailures,
+} from './questionMetadata';
 
 const HOUR = 60 * 60 * 1000;
 
@@ -131,6 +140,257 @@ test('one Workable checkbox question unions options discovered from separate con
   assert.equal(stored[0].required, true);
 });
 
+test('DGA generic response furniture becomes typed missing question text metadata', () => {
+  const inventory = postingQuestionInventoryFromDiscovered([
+    {
+      label: 'Type your response',
+      selector: '[data-litos-discovered-9]',
+      durableSelector: '#dga_response',
+      inputType: 'textarea',
+      maxLength: 500,
+      required: true,
+    },
+  ], 'lever');
+
+  assert.deepEqual(inventory.questions, []);
+  assert.deepEqual(inventory.metadata_blockers, [{
+    kind: 'missing_question_text',
+    required: true,
+    portal_input_type: 'textarea',
+    control_id: 'dga_response',
+    portal_selector: '#dga_response',
+  }]);
+  assert.equal(postingQuestionInventoryStatus(inventory), 'metadata_incomplete');
+});
+
+test('generic answer furniture without a verb also becomes missing question text metadata', () => {
+  for (const label of ['Your response', 'Your answer', 'Response']) {
+    const inventory = postingQuestionInventoryFromDiscovered([{
+      label,
+      selector: '[data-litos-discovered-11]',
+      durableSelector: '#dga_response',
+      inputType: 'textarea',
+      maxLength: 500,
+      required: true,
+    }], 'lever');
+    assert.deepEqual(inventory.questions, [], label);
+    assert.equal(inventory.metadata_blockers[0]?.kind, 'missing_question_text', label);
+  }
+});
+
+test('optional unlabeled controls remain explicit metadata gaps', () => {
+  const inventory = postingQuestionInventoryFromDiscovered([{
+    label: '',
+    selector: '[data-litos-discovered-10]',
+    durableSelector: '#optional_detail',
+    inputType: 'textarea',
+    maxLength: 500,
+    required: false,
+  }], 'lever');
+
+  assert.deepEqual(inventory.questions, []);
+  assert.deepEqual(inventory.metadata_blockers, [{
+    kind: 'missing_question_text',
+    required: false,
+    portal_input_type: 'textarea',
+    control_id: 'optional_detail',
+    portal_selector: '#optional_detail',
+  }]);
+  assert.equal(postingQuestionInventoryStatus(inventory), 'metadata_incomplete');
+});
+
+test('Akuna and Jump failed option probes become exact-choice blockers without guessing', () => {
+  const failedField = {
+    label: 'Will you be subject to a non-compete or notice period?',
+    selector: '#question_123',
+    durableSelector: '#question_123',
+    inputType: 'select-one',
+    maxLength: null,
+    options: ['Select...'],
+    required: true,
+  };
+  const fixedPhoneField = {
+    label: 'Phone',
+    selector: '#phone',
+    durableSelector: '#phone',
+    inputType: 'select-one',
+    maxLength: null,
+    options: null,
+    required: true,
+  };
+  const answerTokenField = {
+    label: 'Yes',
+    selector: '#question_789',
+    durableSelector: '#question_789',
+    inputType: 'select-one',
+    maxLength: null,
+    options: null,
+    required: true,
+  };
+  const unlabeledField = {
+    label: '',
+    selector: '#question_blank',
+    durableSelector: '#question_blank',
+    inputType: 'select-one',
+    maxLength: null,
+    options: null,
+    required: true,
+  };
+  const blockers = questionMetadataBlockersForOptionProbeFailures(
+    'greenhouse',
+    [failedField, fixedPhoneField, answerTokenField, unlabeledField],
+    [{ controlId: 'question_123' }, { controlId: 'phone' }, { controlId: 'question_789' }, { controlId: 'question_blank' }],
+  );
+  assert.deepEqual(blockers, [{
+    kind: 'missing_exact_options',
+    required: true,
+    portal_input_type: 'select-one',
+    control_id: 'question_123',
+    portal_selector: '#question_123',
+    question: 'Will you be subject to a non-compete or notice period?',
+  }, {
+    kind: 'missing_question_text',
+    required: true,
+    portal_input_type: 'select-one',
+    control_id: 'question_blank',
+    portal_selector: '#question_blank',
+  }]);
+  assert.equal(postingQuestionInventoryStatus({ questions: [], metadata_blockers: blockers }), 'metadata_incomplete');
+
+  const placeholderOnly = postingQuestionInventoryFromDiscovered([failedField], 'greenhouse');
+  assert.deepEqual(placeholderOnly.questions, []);
+  assert.deepEqual(placeholderOnly.metadata_blockers, [blockers[0]]);
+  assert.equal(postingQuestionInventoryStatus(placeholderOnly), 'metadata_incomplete');
+
+  const unread = postingQuestionInventoryFromDiscovered([{
+    ...failedField,
+    options: null,
+  }], 'greenhouse');
+  assert.deepEqual(unread.questions, []);
+  assert.deepEqual(unread.metadata_blockers, [blockers[0]]);
+  assert.equal(postingQuestionInventoryStatus(unread), 'metadata_incomplete');
+  const unresolvedUnread = resolvePrescript(unread.questions, {}, new Map());
+  assert.deepEqual(unresolvedUnread.ask, []);
+  assert.deepEqual(unresolvedUnread.metadata_blockers, []);
+
+  const customPlaceholderOnly = postingQuestionInventoryFromDiscovered([{
+    ...failedField,
+    inputType: 'text',
+    role: 'combobox',
+  }], 'greenhouse');
+  assert.deepEqual(customPlaceholderOnly.questions, []);
+  assert.deepEqual(customPlaceholderOnly.metadata_blockers, [{
+    ...blockers[0],
+    portal_input_type: 'combobox',
+  }]);
+  assert.equal(postingQuestionInventoryStatus(customPlaceholderOnly), 'metadata_incomplete');
+
+  const exact = postingQuestionInventoryFromDiscovered([
+    {
+      label: 'Have you ever applied to Akuna in the past?',
+      selector: '#question_456',
+      durableSelector: '#question_456',
+      inputType: 'select-one',
+      maxLength: null,
+      options: ['Yes', 'No'],
+      required: true,
+    },
+  ], 'greenhouse');
+  assert.deepEqual(exact.metadata_blockers, []);
+  assert.deepEqual(exact.questions[0]?.options, ['Yes', 'No']);
+  assert.equal(postingQuestionInventoryStatus(exact), 'ok');
+});
+
+test('placeholder-only Akuna and Jump controls are reopened for an exact option probe', () => {
+  const fields = [{
+    label: 'Will you be subject to a non-compete or notice period?',
+    selector: '#question_123',
+    durableSelector: '#question_123',
+    inputType: 'text',
+    role: 'combobox',
+    maxLength: null,
+    options: ['Select...'],
+    required: true,
+  }, {
+    label: 'Describe your experience',
+    selector: '#essay',
+    durableSelector: '#essay',
+    inputType: 'textarea',
+    maxLength: 500,
+    options: null,
+    required: true,
+  }];
+  const normalized = discoveredQuestionsForExactOptionProbe(fields);
+
+  assert.equal(normalized[0]?.options, null);
+  assert.equal(normalized[1], fields[1], 'open text controls must remain untouched');
+});
+
+test('typed metadata blockers persist as tagged array records while legacy rows remain readable', () => {
+  const blocker = {
+    kind: 'missing_exact_options' as const,
+    required: true,
+    portal_input_type: 'select-one',
+    question: 'Will you be subject to a non-compete or notice period?',
+  };
+  const encoded = storedPostingQuestionInventory([], [blocker]);
+  assert.equal(Array.isArray(encoded), true, 'existing JSON-array corpus readers must keep working');
+  assert.equal(encoded[0] && 'record_type' in encoded[0] ? encoded[0].record_type : undefined, 'question_metadata_blocker_v1');
+  assert.deepEqual(readStoredPostingQuestionInventory(encoded), {
+    questions: [],
+    metadata_blockers: [blocker],
+  });
+  const rollbackResolution = resolvePrescript(encoded as unknown as PostingQuestion[], {}, new Map());
+  assert.deepEqual(rollbackResolution.ask, []);
+  assert.equal(rollbackResolution.metadata_blockers.length, 1);
+
+  const legacy = readStoredPostingQuestionInventory([
+    question({
+      label: 'Will you be subject to a non-compete or notice period?',
+      input_type: 'select-one',
+      options: null,
+    }),
+  ]);
+  assert.deepEqual(legacy.questions, []);
+  assert.deepEqual(legacy.metadata_blockers, [{
+    kind: 'missing_exact_options',
+    required: true,
+    portal_input_type: 'select-one',
+    question: 'Will you be subject to a non-compete or notice period?',
+  }]);
+});
+
+test('metadata blocker dedupe enriches partial identities without collapsing distinct controls', () => {
+  const base = {
+    kind: 'missing_exact_options' as const,
+    required: false,
+    portal_input_type: 'select-one',
+    question: 'Choose a preference',
+  };
+  const enriched = dedupeQuestionMetadataBlockers([
+    { ...base, control_id: 'question_1', portal_selector: '#question_1' },
+    { ...base, required: true, portal_selector: '#question_1' },
+  ]);
+  assert.deepEqual(enriched, [{
+    ...base,
+    required: true,
+    control_id: 'question_1',
+    portal_selector: '#question_1',
+  }]);
+
+  const distinct = dedupeQuestionMetadataBlockers([
+    { ...base, control_id: 'question_1', portal_selector: '#question_1' },
+    { ...base, control_id: 'question_2', portal_selector: '#question_2' },
+    base,
+  ]);
+  assert.equal(distinct.length, 3);
+  assert.deepEqual(distinct.map((item) => item.control_id ?? null), [
+    'question_1',
+    'question_2',
+    null,
+  ]);
+});
+
 test('Workable fixed phone and address controls are not applicant questions', () => {
   const stored = postingQuestionsFromDiscovered([
     { label: 'Phone +971', selector: 'input[name="phone"]', inputType: 'tel', maxLength: null, options: null, required: true },
@@ -164,6 +424,8 @@ test('a scan is believed for a fortnight, and a scan that reached nothing for si
   assert.ok(!postingQuestionsAreFresh({ apply_url: url, discovery_status: 'ok', discovered_at: at(15 * 24 * HOUR) }, url, now));
   assert.ok(postingQuestionsAreFresh({ apply_url: url, discovery_status: 'form_not_reached', discovered_at: at(5 * HOUR) }, url, now));
   assert.ok(!postingQuestionsAreFresh({ apply_url: url, discovery_status: 'form_not_reached', discovered_at: at(7 * HOUR) }, url, now));
+  assert.ok(postingQuestionsAreFresh({ apply_url: url, discovery_status: 'metadata_incomplete', discovered_at: at(5 * HOUR) }, url, now));
+  assert.ok(!postingQuestionsAreFresh({ apply_url: url, discovery_status: 'metadata_incomplete', discovered_at: at(7 * HOUR) }, url, now));
   assert.ok(!postingQuestionsAreFresh(null, url, now));
   // A poll rewrote apply_url, so the questions came from a different page. Age is irrelevant.
   assert.ok(!postingQuestionsAreFresh({ apply_url: `${url}?gh_src=x`, discovery_status: 'ok', discovered_at: at(1 * HOUR) }, url, now));
@@ -447,9 +709,9 @@ test('the bare privacy labels are questions and are never filtered out', () => {
   );
 });
 
-test('short and unusual employer labels are not mistaken for options', () => {
+test('short and unusual employer labels are preserved or named in exact-metadata blockers', () => {
   // No minimum length, and no "must contain a verb" rule: these are all real field names.
-  const stored = postingQuestionsFromDiscovered([
+  const inventory = postingQuestionInventoryFromDiscovered([
     { label: 'GPA', selector: '#a', inputType: 'text', maxLength: null, options: null, required: true },
     { label: 'School', selector: '#b', inputType: 'combobox', maxLength: null, options: null, required: true },
     { label: 'Major', selector: '#c', inputType: 'combobox', maxLength: null, options: null, required: true },
@@ -459,7 +721,14 @@ test('short and unusual employer labels are not mistaken for options', () => {
     { label: 'Offer Deadlines', selector: '#g', inputType: 'text', maxLength: null, options: null, required: false },
   ]);
   assert.deepEqual(
-    stored.map((item) => item.label),
-    ['GPA', 'School', 'Major', 'Race', 'Veteran status', 'Other', 'Offer Deadlines'],
+    inventory.questions.map((item) => item.label),
+    ['GPA', 'School', 'Major', 'Race', 'Other', 'Offer Deadlines'],
   );
+  assert.deepEqual(inventory.metadata_blockers, [{
+    kind: 'missing_exact_options',
+    required: false,
+    portal_input_type: 'select',
+    control_id: 'e',
+    question: 'Veteran status',
+  }]);
 });

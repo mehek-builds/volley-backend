@@ -117,6 +117,7 @@ assert.deepEqual(await boardInventoryMetrics(), {
   surfacedPostings: 3,
   surfacedGroupedRoles: 2,
   surfacedSponsorOnly: 1,
+  surfacedInternships: 0,
 });
 
 // The production cron starts from an empty database after deployment. Prove that the checked-in
