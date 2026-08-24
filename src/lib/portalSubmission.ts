@@ -1171,9 +1171,9 @@ const RECEIPT_PROOF_RE = /thank you|thanks for your application|application (?:h
 const MANAGED_FILL_TIMEOUT_MS = 10_000;
 // Workable can briefly remove the complete phone subtree while React reconciles an international
 // value. The normal 10 second miss budget is right for unknown selectors, but too short for a
-// selector that was just proven and is expected to remount. Keep the longer budget scoped to the
-// two post-write visibility barriers. The exact value and dial-code extracts remain required.
-const WORKABLE_PHONE_REMOUNT_TIMEOUT_MS = 30_000;
+// selector that was just proven and is expected to remount. Twenty seconds is the managed-provider
+// ceiling. Keep it scoped to these post-write barriers, with exact value reads still required.
+const WORKABLE_PHONE_REMOUNT_TIMEOUT_MS = 20_000;
 
 function managedFill(
   actions: ManagedBrowserAction[],
@@ -5170,6 +5170,12 @@ const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
   + 'button[aria-label="Telephone country code"][aria-controls]:visible';
+// The open trigger carries aria-controls. Workable drops that attribute after a phone-value write
+// remounts the closed widget, although the exact labelled +dial-code control remains visible. Keep
+// interaction bound to the stricter selector above and use this broader shape only for readback.
+const WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR =
+  'div[role="combobox"][aria-label="Telephone country code"]:visible, '
+  + 'button[aria-label="Telephone country code"]:visible';
 // Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
 // city input before the visible address autocomplete on current forms, so a plain comma list can
 // still pick the wrong control. The city arm exists only when no visible address control exists.
@@ -5387,14 +5393,14 @@ function pushWorkableManagedPhoneActions(
   if (plan.country) {
     actions.push({
       type: 'waitForSelector',
-      selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
+      selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
       label: 'workable_phone_country_visible',
       optional: false,
       timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
     });
     actions.push({
       type: 'extract',
-      selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
+      selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
       label: 'filled_field:phone_country',
       optional: false,
       timeout: MANAGED_FILL_TIMEOUT_MS,
