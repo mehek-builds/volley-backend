@@ -6323,6 +6323,13 @@ export function isProviderHandleOnly(value: string): boolean {
 }
 
 function collapseRepeatedLabel(value: string): string {
+  const requiredMarkerParts = value.match(/^(.*?)\s+\*\s+(.*?)$/u);
+  if (requiredMarkerParts) {
+    const comparable = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (comparable(requiredMarkerParts[1] ?? '') === comparable(requiredMarkerParts[2] ?? '')) {
+      return (requiredMarkerParts[1] ?? '').replace(/[\s*.,;:!?]+$/u, '').trim();
+    }
+  }
   const words = value.trim().split(/\s+/).filter(Boolean);
   if (words.length < 2 || words.length % 2 !== 0) return value;
   const half = words.length / 2;
