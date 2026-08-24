@@ -22,6 +22,7 @@ let backendPool: { end(): Promise<void> };
 let backendDb: any;
 let appendEditedResumeArtifactVersion: typeof import('../lib/resumeArtifactVersions').appendEditedResumeArtifactVersion;
 let linkGeneratedPacketToCanonicalApplication: typeof import('../lib/resumeArtifactVersions').linkGeneratedPacketToCanonicalApplication;
+let storedGeneratedResumeBlobUrl: typeof import('../lib/resumeArtifactVersions').storedGeneratedResumeBlobUrl;
 let findOwnedDownloadSource: typeof import('../lib/downloadDocumentRecovery').findOwnedDownloadSource;
 let recoverOwnedGeneratedDocument: typeof import('../lib/downloadDocumentRecovery').recoverOwnedGeneratedDocument;
 let immutableDocumentContentHash: typeof import('../lib/immutableDocumentHash').immutableDocumentContentHash;
@@ -63,7 +64,11 @@ before(async () => {
   process.env.DATABASE_URL = `postgresql://postgres:postgres@localhost/postgres?host=${socketDir}`;
   process.env.JWT_SIGNING_SECRET = JWT_SECRET;
   ({ db: backendDb, pool: backendPool } = await import('../db'));
-  ({ appendEditedResumeArtifactVersion, linkGeneratedPacketToCanonicalApplication } = await import('../lib/resumeArtifactVersions'));
+  ({
+    appendEditedResumeArtifactVersion,
+    linkGeneratedPacketToCanonicalApplication,
+    storedGeneratedResumeBlobUrl,
+  } = await import('../lib/resumeArtifactVersions'));
   ({ findOwnedDownloadSource, recoverOwnedGeneratedDocument } = await import('../lib/downloadDocumentRecovery'));
   ({ immutableDocumentContentHash } = await import('../lib/immutableDocumentHash'));
   ({ resolveOwnedCoverLetterTarget } = await import('./coverLetter'));
@@ -105,6 +110,73 @@ after(async () => {
   rmSync(socketDir, { recursive: true, force: true });
   for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
   Object.assign(process.env, savedEnv);
+});
+
+test('packet resume reads the strong immutable blob URL only for its exact owner and object key', async () => {
+  const userId = '20be0955-e703-4599-92c8-bc5aa52cbf65';
+  const otherUserId = 'f90c7fa9-9442-4672-9711-b7ec548c5c8d';
+  const resumeId = 'dc15124e-f5c1-420e-ae88-09424edb27bd';
+  const artifactId = '4c66a586-7e50-459f-be3e-266505139e73';
+  const objectKey = 'users/strong-pointer/resume.pdf';
+  const versionUrl = 'https://blob.example/immutable-resume.pdf';
+  const artifactUrl = 'https://blob.example/current-resume.pdf';
+  const storedSpec = { summary: 'Exact packet' };
+
+  await backendDb.insert(schema.users).values([
+    { id: userId, email: 'strong-pointer@example.test' },
+    { id: otherUserId, email: 'other-pointer@example.test' },
+  ]);
+  await backendDb.insert(schema.generated_resumes).values({
+    id: resumeId,
+    user_id: userId,
+    job_context: { company: 'Example', role: 'Engineer' },
+    spec: storedSpec,
+    resume_object_key: objectKey,
+  });
+  await backendDb.insert(schema.artifacts).values({
+    id: artifactId,
+    user_id: userId,
+    legacy_generated_resume_id: resumeId,
+    kind: 'tailored_resume',
+    structured_content: storedSpec,
+    rendered_object_key: objectKey,
+    rendered_blob_url: artifactUrl,
+    source: 'ai_tailored',
+  });
+  await backendDb.insert(schema.artifact_versions).values({
+    artifact_id: artifactId,
+    version_number: 1,
+    generation_source: 'ai_tailored',
+    content_hash: 'strong-pointer-content',
+    structured_content: storedSpec,
+    rendered_object_key: objectKey,
+    rendered_blob_url: versionUrl,
+  });
+
+  assert.equal(await storedGeneratedResumeBlobUrl({
+    userId,
+    generatedResumeId: resumeId,
+    objectKey,
+  }), versionUrl);
+  assert.equal(await storedGeneratedResumeBlobUrl({
+    userId: otherUserId,
+    generatedResumeId: resumeId,
+    objectKey,
+  }), null);
+  assert.equal(await storedGeneratedResumeBlobUrl({
+    userId,
+    generatedResumeId: resumeId,
+    objectKey: 'users/strong-pointer/other.pdf',
+  }), null);
+
+  await backendDb.update(schema.artifact_versions)
+    .set({ rendered_blob_url: null })
+    .where(eq(schema.artifact_versions.artifact_id, artifactId));
+  assert.equal(await storedGeneratedResumeBlobUrl({
+    userId,
+    generatedResumeId: resumeId,
+    objectKey,
+  }), artifactUrl);
 });
 
 test('manual outcome route is owner scoped, origin bound, idempotent, and monotonic without entitlements', async () => {

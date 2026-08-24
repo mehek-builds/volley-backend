@@ -11,6 +11,42 @@ import { immutableDocumentContentHash } from './immutableDocumentHash';
 
 type ArtifactVersionTransaction = Pick<typeof db, 'select' | 'insert' | 'update'>;
 
+/**
+ * Return the immutable blob URL stored beside the exact generated-resume object key.
+ *
+ * The generated packet table intentionally keeps only an object key. Resolving that key through
+ * Vercel Blob list() is an eventually consistent lookup, while both the canonical artifact and its
+ * immutable versions keep the strong URL returned by put(). Submission should use that strong
+ * pointer when it exists, but it must be scoped to the packet owner and legacy packet id so an
+ * arbitrary object key can never become a cross-account read capability.
+ */
+export async function storedGeneratedResumeBlobUrl(
+  input: { userId: string; generatedResumeId: string; objectKey: string },
+  database: Pick<typeof db, 'select'> = db,
+): Promise<string | null> {
+  const [version] = await database.select({ blobUrl: artifact_versions.rendered_blob_url })
+    .from(artifact_versions)
+    .innerJoin(artifacts, eq(artifact_versions.artifact_id, artifacts.id))
+    .where(and(
+      eq(artifacts.user_id, input.userId),
+      eq(artifacts.legacy_generated_resume_id, input.generatedResumeId),
+      eq(artifact_versions.rendered_object_key, input.objectKey),
+    ))
+    .limit(1);
+  const versionUrl = version?.blobUrl?.trim();
+  if (versionUrl) return versionUrl;
+
+  const [artifact] = await database.select({ blobUrl: artifacts.rendered_blob_url })
+    .from(artifacts)
+    .where(and(
+      eq(artifacts.user_id, input.userId),
+      eq(artifacts.legacy_generated_resume_id, input.generatedResumeId),
+      eq(artifacts.rendered_object_key, input.objectKey),
+    ))
+    .limit(1);
+  return artifact?.blobUrl?.trim() || null;
+}
+
 export async function linkGeneratedPacketToCanonicalApplication(
   tx: ArtifactVersionTransaction,
   input: {

@@ -2000,6 +2000,7 @@ test('a key that resolves but fails to download is NOT an expired packet', () =>
     () => resumeBytesForPacket('users/user-1/resumes/present.pdf', false, {
       resolveObjectUrl: async () => 'https://blob.example.test/present.pdf',
       fetchObject: async () => ({ ok: false, arrayBuffer: async () => new ArrayBuffer(0) }),
+      waitBeforeRetry: async () => {},
     }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
@@ -2008,6 +2009,56 @@ test('a key that resolves but fails to download is NOT an expired packet', () =>
       return true;
     },
   );
+});
+
+test('resume packet download retries a transient object read and re-resolves the exact key', async () => {
+  const resolvedUrls = [
+    'https://blob.example.test/stored-pointer.pdf',
+    'https://blob.example.test/refreshed-pointer.pdf',
+  ];
+  const fetchedUrls: string[] = [];
+  const waited: number[] = [];
+  let resolveCalls = 0;
+  const bytes = await resumeBytesForPacket('users/user-1/resumes/retry.pdf', false, {
+    initialObjectUrl: resolvedUrls[0],
+    resolveObjectUrl: async (key) => {
+      assert.equal(key, 'users/user-1/resumes/retry.pdf');
+      resolveCalls += 1;
+      return resolvedUrls[1];
+    },
+    fetchObject: async (url) => {
+      fetchedUrls.push(url);
+      return fetchedUrls.length === 1
+        ? { ok: false, status: 503, arrayBuffer: async () => new ArrayBuffer(0) }
+        : { ok: true, status: 200, arrayBuffer: async () => new Uint8Array([37, 80, 68, 70]).buffer };
+    },
+    waitBeforeRetry: async (delayMs) => { waited.push(delayMs); },
+  });
+
+  assert.equal(bytes.toString('utf8'), '%PDF');
+  assert.deepEqual(fetchedUrls, resolvedUrls);
+  assert.equal(resolveCalls, 1);
+  assert.deepEqual(waited, [100]);
+});
+
+test('resume packet download retries a failed response body without changing packet bytes', async () => {
+  let attempts = 0;
+  const bytes = await resumeBytesForPacket('users/user-1/resumes/body-retry.pdf', false, {
+    resolveObjectUrl: async () => 'https://blob.example.test/body-retry.pdf',
+    fetchObject: async () => ({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('socket closed during body read');
+        return new Uint8Array([37, 80, 68, 70]).buffer;
+      },
+    }),
+    waitBeforeRetry: async () => {},
+  });
+
+  assert.equal(bytes.toString('utf8'), '%PDF');
+  assert.equal(attempts, 2);
 });
 
 test('the cover-letter degrade never swallows an expired resume', () => {

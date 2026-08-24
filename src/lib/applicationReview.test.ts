@@ -97,9 +97,9 @@ describe('application review metadata', () => {
       failedFields: [],
     }), /at most 80 controls/);
     assert.throws(() => normalizeManagedFormSnapshot({
-      fieldOptions: { field: Array.from({ length: 513 }, (_, index) => `Option ${index}`) },
+      fieldOptions: { field: Array.from({ length: 4_097 }, (_, index) => `Option ${index}`) },
       failedFields: [],
-    }), /at most 512 options/);
+    }), /at most 4096 options/);
     assert.throws(() => normalizeManagedFormSnapshot({
       fieldOptions: Object.fromEntries(Array.from({ length: 80 }, (_, index) => [`field_${index}`, ['Yes']])),
       failedFields: [{ controlId: 'different_control', label: 'Different control' }],
@@ -130,6 +130,16 @@ describe('application review metadata', () => {
         transcript_supported: true,
       },
     }), /transcript capability differs/);
+  });
+
+  test('managed form snapshots preserve large exact employer school inventories', () => {
+    const schools = Array.from({ length: 1_500 }, (_, index) => `Fixture University ${index}`);
+    const snapshot = normalizeManagedFormSnapshot({
+      fieldOptions: { current_school: schools },
+      failedFields: [],
+    });
+
+    assert.deepEqual(snapshot.field_options.current_school, schools);
   });
 
   test('managed prepare persists one snapshot and every later packet rebuild restores it', () => {

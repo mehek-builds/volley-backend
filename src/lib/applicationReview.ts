@@ -702,7 +702,10 @@ export type ManagedFormSnapshotV1 = {
 };
 
 const MANAGED_FORM_SNAPSHOT_MAX_CONTROLS = 80;
-const MANAGED_FORM_SNAPSHOT_MAX_OPTIONS_PER_CONTROL = 512;
+/* Greenhouse school inventories routinely exceed 512 exact employer options. Keep the per-control
+ * bound high enough to preserve those closed lists, while the independent 512 KiB snapshot limit
+ * below remains the final payload-size guard. */
+const MANAGED_FORM_SNAPSHOT_MAX_OPTIONS_PER_CONTROL = 4_096;
 const MANAGED_FORM_SNAPSHOT_MAX_CONTROL_ID_LENGTH = 500;
 const MANAGED_FORM_SNAPSHOT_MAX_SELECTOR_LENGTH = 500;
 const MANAGED_FORM_SNAPSHOT_MAX_LABEL_LENGTH = 2_000;
