@@ -4394,8 +4394,8 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   });
   assert.deepEqual(actions[countryWaitIndex], {
     type: 'waitForSelector',
-    selector: 'div[role="combobox"][aria-label="Telephone country code"]:visible, '
-      + 'button[aria-label="Telephone country code"]:visible',
+    selector: 'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) '
+      + '.iti:has(input[name="phone"][type="tel"]:visible) .iti__selected-dial-code:visible',
     label: 'workable_phone_country_visible',
     optional: false,
     timeout: 20_000,
@@ -4404,8 +4404,8 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
   assert.equal(
     actions[countryProofIndex]?.selector,
-    'div[role="combobox"][aria-label="Telephone country code"]:visible, '
-      + 'button[aria-label="Telephone country code"]:visible',
+    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) '
+      + '.iti:has(input[name="phone"][type="tel"]:visible) .iti__selected-dial-code:visible',
   );
   assert.equal(actions[countryProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
@@ -4448,8 +4448,8 @@ test('managed Workable waits through phone remounts before its final value proof
   assert.equal(countryProofIndex, countryWaitIndex + 1);
   assert.equal(
     countryProof?.selector,
-    'div[role="combobox"][aria-label="Telephone country code"]:visible, '
-      + 'button[aria-label="Telephone country code"]:visible',
+    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) '
+      + '.iti:has(input[name="phone"][type="tel"]:visible) .iti__selected-dial-code:visible',
   );
   assert.equal(countryProof?.attribute, undefined);
   assert.equal(countryProof?.optional, false);
@@ -4503,8 +4503,8 @@ test('managed Workable US phone selects exact United States and proves national 
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '1');
   assert.equal(
     actions[countryProofIndex]?.selector,
-    'div[role="combobox"][aria-label="Telephone country code"]:visible, '
-      + 'button[aria-label="Telephone country code"]:visible',
+    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) '
+      + '.iti:has(input[name="phone"][type="tel"]:visible) .iti__selected-dial-code:visible',
   );
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
