@@ -23,6 +23,159 @@
  * when she gets there, and what Litos will do with either answer.
  */
 import type { ApplicationReviewState } from './applicationReview';
+import {
+  exactFinalSubmitChooserPolicy,
+  type FinalSubmitChooserPolicy,
+} from './finalSubmitChooserPolicy';
+
+export type ManagedFinalSubmitChooser = {
+  version: 1;
+  policyName: 'litos-final-submit';
+  policyVersion: 3 | 4;
+  grammarHash: string;
+  submitKind: 'application' | 'verification';
+  outcome: 'selected' | 'no_submit_control' | 'ambiguous_submit';
+  candidateCount: number;
+  viableCandidateCount: number;
+  topScore: number | null;
+  topScoreCount: number;
+  addressedScopeCount: number;
+  bareSendCandidateCount: number;
+};
+
+type ManagedChooserResult = {
+  finalSubmitChooser?: unknown;
+  exactPageUrlProof?: unknown;
+  screenshot?: unknown;
+  submitOutcome?: unknown;
+  securityCodeAttempt?: unknown;
+  requiredFieldConfirmation?: unknown;
+  blockedSubmits?: unknown;
+  url?: unknown;
+};
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> => (
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+);
+
+const hasExactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean => (
+  Object.keys(value).sort().join(',') === [...keys].sort().join(',')
+);
+
+const boundedInteger = (value: unknown, max = 5_000): value is number => (
+  Number.isInteger(value) && (value as number) >= 0 && (value as number) <= max
+);
+
+/**
+ * Read the privacy-safe chooser telemetry only when every field agrees with the exact requested
+ * policy and with the chooser's own outcome. Null means absent or malformed, never no candidates.
+ */
+export function readManagedFinalSubmitChooser(
+  result: ManagedChooserResult | null | undefined,
+  expectedPolicy: FinalSubmitChooserPolicy,
+  expectedSubmitKind: 'application' | 'verification',
+): ManagedFinalSubmitChooser | null {
+  const exactPolicy = exactFinalSubmitChooserPolicy(expectedPolicy);
+  const raw = result?.finalSubmitChooser;
+  if (!exactPolicy || !isObjectRecord(raw) || !hasExactKeys(raw, [
+    'version', 'policyName', 'policyVersion', 'grammarHash', 'submitKind', 'outcome',
+    'candidateCount', 'viableCandidateCount', 'topScore', 'topScoreCount',
+    'addressedScopeCount', 'bareSendCandidateCount',
+  ])) return null;
+  if (raw.version !== 1
+    || raw.policyName !== exactPolicy.name
+    || raw.policyVersion !== exactPolicy.version
+    || raw.grammarHash !== exactPolicy.grammarHash
+    || raw.submitKind !== expectedSubmitKind
+    || (raw.outcome !== 'selected'
+      && raw.outcome !== 'no_submit_control'
+      && raw.outcome !== 'ambiguous_submit')) return null;
+  if (!boundedInteger(raw.candidateCount)
+    || !boundedInteger(raw.viableCandidateCount)
+    || !boundedInteger(raw.topScoreCount)
+    || !boundedInteger(raw.addressedScopeCount)
+    || !boundedInteger(raw.bareSendCandidateCount)
+    || raw.viableCandidateCount > raw.candidateCount
+    || (raw.topScore !== null && (typeof raw.topScore !== 'number'
+      || !Number.isInteger(raw.topScore) || raw.topScore < 0 || raw.topScore > 3))) {
+    return null;
+  }
+  if (raw.outcome === 'selected'
+    && (raw.viableCandidateCount < 1 || raw.topScore === null || raw.topScoreCount !== 1)) return null;
+  if (raw.outcome === 'no_submit_control'
+    && (raw.viableCandidateCount !== 0 || raw.topScore !== null || raw.topScoreCount !== 0)) return null;
+  if (raw.outcome === 'ambiguous_submit'
+    && (raw.viableCandidateCount < 2 || raw.topScore === null
+      || raw.topScoreCount < 2 || raw.topScoreCount > raw.viableCandidateCount)) return null;
+  if (raw.policyVersion === 3 && (raw.topScore === 0 || raw.bareSendCandidateCount !== 0)) return null;
+  if (raw.topScore === 0 && (raw.policyVersion !== 4 || raw.submitKind !== 'application'
+    || raw.bareSendCandidateCount < 1 || raw.addressedScopeCount !== 1
+    || raw.topScoreCount !== raw.viableCandidateCount)) return null;
+  return raw as ManagedFinalSubmitChooser;
+}
+
+function canonicalProofUrl(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  try {
+    const url = new URL(value);
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password) return null;
+    url.hash = '';
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
+function hasPngScreenshot(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length < 16 || value.length > 30_000_000
+    || !/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) return false;
+  const bytes = Buffer.from(value, 'base64');
+  return bytes.length >= 8
+    && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+    && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a;
+}
+
+export type ManagedFinalSubmitNoClick = {
+  outcome: 'no_submit_control' | 'ambiguous_submit';
+  chooser: ManagedFinalSubmitChooser;
+};
+
+/**
+ * Evidence strong enough to release an application claim. Every fact is pre-click and independent:
+ * exact chooser telemetry, exact URL proof at the chooser boundary, a PNG of that page, the runner's
+ * not-attempted outcome, zero guarded submits, and no required-field pass that could say clicked.
+ */
+export function readManagedFinalSubmitNoClick(
+  result: ManagedChooserResult | null | undefined,
+  expectedPolicy: FinalSubmitChooserPolicy,
+  expectedSubmitKind: 'application' | 'verification',
+  expectedPageUrl: string,
+): ManagedFinalSubmitNoClick | null {
+  const chooser = readManagedFinalSubmitChooser(result, expectedPolicy, expectedSubmitKind);
+  if (!chooser || (chooser.outcome !== 'no_submit_control' && chooser.outcome !== 'ambiguous_submit')) return null;
+  const expected = canonicalProofUrl(expectedPageUrl);
+  const proof = result?.exactPageUrlProof;
+  if (!expected || !isObjectRecord(proof) || !hasExactKeys(proof, [
+    'expected', 'beforeActions', 'beforeApplicantData', 'beforeFinalChooser', 'beforeSubmit',
+  ])) return null;
+  if (canonicalProofUrl(proof.expected) !== expected
+    || canonicalProofUrl(proof.beforeActions) !== expected
+    || canonicalProofUrl(proof.beforeApplicantData) !== expected
+    || canonicalProofUrl(proof.beforeFinalChooser) !== expected
+    || proof.beforeSubmit !== null
+    || canonicalProofUrl(result?.url) !== expected) return null;
+  const outcome = result?.submitOutcome;
+  if (!isObjectRecord(outcome) || !hasExactKeys(outcome, [
+    'pressed', 'state', 'source', 'evidence', 'message', 'formStillPresent',
+  ]) || outcome.pressed !== false || outcome.state !== 'not_attempted'
+    || outcome.source !== null || outcome.evidence !== null || outcome.message !== null
+    || outcome.formStillPresent !== null) return null;
+  if (!hasPngScreenshot(result?.screenshot)
+    || result?.securityCodeAttempt !== null
+    || result?.requiredFieldConfirmation !== null
+    || result?.blockedSubmits !== 0) return null;
+  return { outcome: chooser.outcome, chooser };
+}
 
 /** Why an outcome could not be established. Mirrors the review field so the two cannot drift. */
 export type UnverifiedCause = NonNullable<ApplicationReviewState['unverified_submission']>['cause'];
@@ -438,11 +591,9 @@ export function unwrapThrownErrorMessage(message: string): string {
  * checks in submissionProvablyNotSent and fell to its last line, which asked this function about a
  * stored `Error: Atomic submit control was missing or ambiguous` and got false.
  *
- * ONE PREDICATE, TWO FAILURES, and the second one is why the row was ever stuck. This is also the
- * test fail() uses to decide whether to take the preClickNoSubmitReview early return - the branch PR
- * 494 added to RELEASE the claim at write time. The wrapped form missed there first, so the run
- * landed at needs_attention still wearing its claim; then it missed again at read time, so the
- * reopen could not lift it. Fixing the format fixes both ends at once.
+ * This predicate now exists only for historical rows written before the typed submission_stop
+ * record. A current run cannot use prose to release its claim. Its no-click result must pass the v4
+ * evidence validator and arrive at the writer as a NoSubmitControlError.
  *
  * STILL EXACT AND STILL ANCHORED. Everything an adversarial read of the old key probed is still
  * refused: a lowercase copy, a trailing period, a one-character truncation, an appended stack, an

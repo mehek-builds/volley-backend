@@ -1,11 +1,22 @@
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { getVercelOidcToken } from '@vercel/oidc';
 import { createHash } from 'node:crypto';
-import { FINAL_SUBMIT_CHOOSER_POLICY, type FinalSubmitChooserPolicy } from './finalSubmitChooserPolicy';
+import {
+  exactFinalSubmitChooserPolicy,
+  FINAL_SUBMIT_CHOOSER_POLICY,
+  FINAL_SUBMIT_CHOOSER_POLICY_V4,
+  type FinalSubmitChooserPolicy,
+} from './finalSubmitChooserPolicy';
+import {
+  readManagedFinalSubmitChooser,
+  type ManagedFinalSubmitChooser,
+} from './managedSubmitOutcome';
 
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
 export const MANAGED_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY;
+/** Managed application v4 policy. Its caller gate is narrower than managed submissions generally. */
+export const MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY_V4;
 /** Stratus result capability that proves discovered controls include their live DOM role. */
 export const MANAGED_DISCOVERY_ROLE_CAPABILITY = 'discovery-control-role-v1';
 /**
@@ -16,6 +27,8 @@ export const MANAGED_DISCOVERY_ROLE_CAPABILITY = 'discovery-control-role-v1';
 export const MANAGED_EXTRACT_ASSERTIONS_CAPABILITY = 'extract-assertions-v1';
 /** The remote runner verifies the exact posting URL before any action and again at the submit click. */
 export const MANAGED_EXACT_PAGE_URL_CAPABILITY = 'exact-page-url-v1';
+/** Stratus v4 containment and form-binding capability for the measured native submit path. */
+export const MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY = 'atomic-submit-v4';
 /**
  * Stratus result capability that proves an `extract` carrying `requireVisible` was answered by a
  * real layout read, one entry per match that is painting something, rather than by the ordinary
@@ -98,6 +111,8 @@ export type ManagedBrowserAction = {
   securityCode?: string;
   /** confirmAndSubmit only. Exact hash-free posting URL required at the two irreversible boundaries. */
   expectedPageUrl?: string;
+  /** atomic-submit-v4 capability only. Durable selector for exactly one native application form. */
+  applicationScopeSelector?: string;
 };
 
 // One entry per text-shaped custom question the 'discover' action found on the live page.
@@ -178,6 +193,7 @@ export type ManagedBrowserResult = {
     expected: string;
     beforeActions: string;
     beforeApplicantData: string;
+    beforeFinalChooser?: string | null;
     beforeSubmit: string | null;
   };
   extracted?: Array<{
@@ -224,6 +240,8 @@ export type ManagedBrowserResult = {
     message?: string | null;
     formStillPresent?: boolean | null;
   } | null;
+  /** Privacy-safe structural result from the managed final-control chooser. */
+  finalSubmitChooser?: ManagedFinalSubmitChooser | null;
   /* Whether the run is holding a second phase open for a security-code continuation. The RUNNER
    * decides this, because it is the only party that has seen the page; the caller used to guess it
    * from a text sweep that reads an employer's own "check your email for confirmation" as a
@@ -268,7 +286,8 @@ export type ManagedBrowserResult = {
       retries: number;
       unresolved: string[];
       submissionOutcome: 'clicked' | 'blocked';
-      blockerReason?: 'submit_node_replaced' | 'ambiguous_submit' | 'form_identity_changed' | 'no_submit_control';
+      blockerReason?: 'submit_node_replaced' | 'ambiguous_submit' | 'form_identity_changed'
+        | 'no_submit_control' | 'submit_chooser_changed';
     }>;
   } | null;
 };
@@ -298,20 +317,38 @@ type SessionResponse = {
 const STRATUS_SELECTOR_MAX_LENGTH = 500;
 
 function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
+  if (action.type !== 'requireCapability' && action.applicationScopeSelector !== undefined) {
+    throw new Error('Managed application scope selector requires the atomic submit v4 capability');
+  }
   if (action.type === 'requireCapability') {
     if (action.value !== MANAGED_EXTRACT_ASSERTIONS_CAPABILITY
-      && action.value !== MANAGED_EXACT_PAGE_URL_CAPABILITY) {
+      && action.value !== MANAGED_EXACT_PAGE_URL_CAPABILITY
+      && action.value !== MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY) {
       throw new Error('Managed Stratus runner capability requirement is invalid');
     }
+    let normalized = action;
+    if (action.applicationScopeSelector !== undefined) {
+      if (action.value !== MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY) {
+        throw new Error('Managed application scope selector requires the atomic submit v4 capability');
+      }
+      const applicationScopeSelector = action.applicationScopeSelector.trim();
+      if (!applicationScopeSelector || applicationScopeSelector.length > STRATUS_SELECTOR_MAX_LENGTH) {
+        throw new Error('Managed application scope selector is invalid');
+      }
+      normalized = { ...normalized, applicationScopeSelector };
+    }
     if (action.expectedPageUrl !== undefined) {
+      if (action.value !== MANAGED_EXACT_PAGE_URL_CAPABILITY) {
+        throw new Error('Managed employer page URL requires the exact page URL capability');
+      }
       const expectedPageUrl = new URL(action.expectedPageUrl);
       expectedPageUrl.hash = '';
       if (!/^https?:$/.test(expectedPageUrl.protocol)) {
         throw new Error('Managed employer page URL must use HTTP or HTTPS');
       }
-      return { ...action, expectedPageUrl: expectedPageUrl.href };
+      return { ...normalized, expectedPageUrl: expectedPageUrl.href };
     }
-    return action;
+    return normalized;
   }
   if (action.type === 'discover' && !action.selector?.trim()) {
     return { ...action, selector: 'body' };
@@ -325,12 +362,7 @@ function stratusAction(action: ManagedBrowserAction): ManagedBrowserAction {
     if (action.maxRetries !== 0 && action.maxRetries !== 1) {
       throw new Error('Managed required-field confirmation maxRetries must be 0 or 1');
     }
-    if (!action.chooserPolicy
-      || action.chooserPolicy.name !== FINAL_SUBMIT_CHOOSER_POLICY.name
-      || action.chooserPolicy.version !== FINAL_SUBMIT_CHOOSER_POLICY.version
-      || action.chooserPolicy.finalPattern !== FINAL_SUBMIT_CHOOSER_POLICY.finalPattern
-      || action.chooserPolicy.exclusionPattern !== FINAL_SUBMIT_CHOOSER_POLICY.exclusionPattern
-      || action.chooserPolicy.grammarHash !== FINAL_SUBMIT_CHOOSER_POLICY.grammarHash) {
+    if (!exactFinalSubmitChooserPolicy(action.chooserPolicy)) {
       throw new Error('Managed final-submit chooser policy is invalid');
     }
     if (action.expectedPageUrl !== undefined) {
@@ -370,6 +402,30 @@ function normalizeStratusActions(actions: ManagedBrowserAction[]): ManagedBrowse
   if (invalidRequired.length > 0) {
     throw new Error(`Managed Stratus action has an invalid selector; action_audit=${managedActionAudit(invalidRequired)}`);
   }
+  const exactPageUrlActions = outbound.filter((action) => action.type === 'requireCapability'
+    && action.value === MANAGED_EXACT_PAGE_URL_CAPABILITY);
+  const atomicSubmitV4Actions = outbound.filter((action) => action.type === 'requireCapability'
+    && action.value === MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY);
+  const v4SubmitActions = outbound.filter((action) => action.type === 'confirmAndSubmit'
+    && action.chooserPolicy?.version === 4);
+  if (atomicSubmitV4Actions.length > 0 && v4SubmitActions.length === 0) {
+    throw new Error('Managed atomic submit v4 capability requires a chooser v4 submit');
+  }
+  for (const action of outbound) {
+    if (action.type !== 'confirmAndSubmit' || action.chooserPolicy?.version !== 4) continue;
+    const exactPageUrlAction = exactPageUrlActions[0];
+    if (!action.expectedPageUrl || exactPageUrlActions.length !== 1
+      || exactPageUrlAction?.optional !== false
+      || exactPageUrlAction.expectedPageUrl !== action.expectedPageUrl) {
+      throw new Error('Managed final-submit chooser policy v4 requires an exact employer page URL boundary');
+    }
+    const atomicSubmitV4Action = atomicSubmitV4Actions[0];
+    if (atomicSubmitV4Actions.length !== 1
+      || atomicSubmitV4Action?.optional !== false
+      || !atomicSubmitV4Action.applicationScopeSelector) {
+      throw new Error('Managed final-submit chooser policy v4 requires one exact application form boundary');
+    }
+  }
   return outbound;
 }
 
@@ -390,11 +446,25 @@ function assertRequiredManagedCapabilities(
     const canonicalExpected = expected ? new URL(expected) : null;
     if (canonicalExpected) canonicalExpected.hash = '';
     const proof = result.exactPageUrlProof;
+    const v4ChooserAction = actions.find((action) => action.type === 'confirmAndSubmit'
+      && action.chooserPolicy?.version === 4);
+    const chooserReported = result.finalSubmitChooser !== undefined && result.finalSubmitChooser !== null;
     if (!canonicalExpected || proof?.expected !== canonicalExpected.href
       || proof.beforeActions !== canonicalExpected.href
       || proof.beforeApplicantData !== canonicalExpected.href
+      || (chooserReported && proof.beforeFinalChooser !== canonicalExpected.href)
       || (result.submitOutcome?.pressed === true && proof.beforeSubmit !== canonicalExpected.href)) {
       throw new Error('Managed Stratus result did not prove the exact employer page URL boundaries');
+    }
+    if (v4ChooserAction) {
+      const chooser = readManagedFinalSubmitChooser(
+        result,
+        v4ChooserAction.chooserPolicy!,
+        v4ChooserAction.submitKind!,
+      );
+      if (chooserReported ? !chooser : result.humanVerification?.kind !== 'security_code') {
+        throw new Error('Managed Stratus result did not prove the final-submit chooser outcome');
+      }
     }
   }
 }
@@ -449,6 +519,15 @@ function managedActionAudit(actions: ManagedBrowserAction[]): string {
     }))
     .sort((a, b) => b.length - a.length)
     .slice(0, 3);
+  const applicationScopes = actions
+    .filter((action) => action.applicationScopeSelector?.trim())
+    .map((action) => ({
+      type: action.type,
+      capability: preview(action.value),
+      optional: action.optional,
+      length: action.applicationScopeSelector?.length ?? 0,
+      selector: preview(action.applicationScopeSelector),
+    }));
   const typeCounts = actions.reduce<Record<string, number>>((counts, action) => {
     counts[action.type] = (counts[action.type] ?? 0) + 1;
     return counts;
@@ -459,6 +538,7 @@ function managedActionAudit(actions: ManagedBrowserAction[]): string {
     selectorless,
     tooLong,
     maxSelectors,
+    applicationScopes,
   });
 }
 

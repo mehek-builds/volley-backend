@@ -113,12 +113,14 @@ import {
   ManagedActionBudgetError,
   ManagedConfirmationUnprovenError,
   ManagedRequiredFieldConfirmationError,
+  assertManagedApplicationFinalSubmitSelected,
+  assertManagedApplicationSubmitConsistency,
   assertManagedRequiredFieldsConfirmed,
+  managedApplicationUsesAtomicSubmitV4,
   managedApplicationProofIsRequired,
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import {
-  isManagedNoSubmitControl,
   isManagedRunTimeout,
   managedSubmitVerdict,
   observeManagedReceiptOnce,
@@ -5693,6 +5695,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * renders one after a submit has been refused. So a code cannot be attached to this list. It is
      * attached to the CONTINUATION below, which runs on the very DOM this submit produced. */
     const initialActions = buildManagedPortalActions(portal, packet, true, applicationUrl);
+    const atomicSubmitV4 = managedApplicationUsesAtomicSubmitV4(portal, applicationUrl);
     /* NO continuationCheckpoint, AND THE COMMENT THAT USED TO SIT HERE WAS SIMPLY WRONG.
      *
      * It said "an ordinary unknown receipt does not offer a continuation, so it needs an explicit
@@ -5737,7 +5740,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     // before submit. Require its per-field proof as well: an older runner that ignores or does not
     // understand the protocol must not be allowed to turn a silent fill into a submitted state.
     if (managedApplicationProofIsRequired(initialChallenge, initialSubmitOutcome)) {
+      if (atomicSubmitV4) assertManagedApplicationFinalSubmitSelected(result, applicationUrl);
       assertManagedRequiredFieldsConfirmed(result, 'application');
+      if (atomicSubmitV4) assertManagedApplicationSubmitConsistency(result, applicationUrl);
     }
     let receiptResult = result;
     let verification: ApplicationReviewState['verification'] = { status: 'not_needed' };
@@ -6778,7 +6783,10 @@ export function submissionFailureReview(
      submit control the click PROVABLY did not happen, so uncertainAfterClaim's "check the portal
      or your email" is the one thing that must not be said: there is no receipt to find. This is
      the routine outcome on a multi-step first page, not an edge case. */
-  const noSubmitControl = error instanceof NoSubmitControlError || isManagedNoSubmitControl(message);
+  /* A managed no-control stop reaches this branch only after the v4 telemetry, exact URL proof,
+     screenshot, and no-click result were validated and converted to the typed error. The legacy
+     runner sentence is not proof and stays on the unverified path. */
+  const noSubmitControl = error instanceof NoSubmitControlError;
   /* A MEMBER OF THAT FAMILY THAT IS NOT A MISSING BUTTON. The run found the submit control, bound
      it uniquely, and withheld the press because a required answer could not be confirmed. The
      pre-click classification above is right and is kept, including the release and everything

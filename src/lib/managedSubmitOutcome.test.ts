@@ -13,9 +13,15 @@ import {
   managedSubmitVerdict,
   observeManagedReceiptOnce as observeManagedReceiptOnceWithBinding,
   pressReachedOnlyChallengePlatform,
+  readManagedFinalSubmitChooser,
+  readManagedFinalSubmitNoClick,
   readManagedSubmitOutcome,
   unverifiedSubmissionReason,
 } from './managedSubmitOutcome';
+import {
+  FINAL_SUBMIT_CHOOSER_POLICY_V3,
+  FINAL_SUBMIT_CHOOSER_POLICY_V4,
+} from './finalSubmitChooserPolicy';
 import { submitRequestDisposition } from './submissionSafety';
 import { duplicateAmong, type SubmittedTwinRow } from './duplicateApplication';
 import { attentionCategoriesForReasons } from './submissionTerminalCause';
@@ -48,6 +54,176 @@ const ASHBY_CONFIRMED = {
     formStillPresent: false,
   },
 };
+
+const ONE_PIXEL_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const CHOOSER_URL = 'https://apply.workable.com/example/j/ABC123/';
+
+function chooserResult(overrides: Record<string, unknown> = {}) {
+  return {
+    title: 'Apply',
+    url: CHOOSER_URL,
+    text: 'Application',
+    screenshot: ONE_PIXEL_PNG,
+    blockedSubmits: 0,
+    exactPageUrlProof: {
+      expected: CHOOSER_URL,
+      beforeActions: CHOOSER_URL,
+      beforeApplicantData: CHOOSER_URL,
+      beforeFinalChooser: CHOOSER_URL,
+      beforeSubmit: null,
+    },
+    submitOutcome: {
+      pressed: false,
+      state: 'not_attempted',
+      source: null,
+      evidence: null,
+      message: null,
+      formStillPresent: null,
+    },
+    securityCodeAttempt: null,
+    requiredFieldConfirmation: null,
+    finalSubmitChooser: {
+      version: 1,
+      policyName: 'litos-final-submit',
+      policyVersion: 4,
+      grammarHash: FINAL_SUBMIT_CHOOSER_POLICY_V4.grammarHash,
+      submitKind: 'application',
+      outcome: 'no_submit_control',
+      candidateCount: 0,
+      viableCandidateCount: 0,
+      topScore: null,
+      topScoreCount: 0,
+      addressedScopeCount: 1,
+      bareSendCandidateCount: 0,
+    },
+    ...overrides,
+  };
+}
+
+describe('managed final-submit chooser telemetry', () => {
+  test('accepts byte-bound v4 no-control evidence and exact v3 telemetry while old continuations drain', () => {
+    const v4 = chooserResult();
+    assert.equal(
+      readManagedFinalSubmitChooser(v4, FINAL_SUBMIT_CHOOSER_POLICY_V4, 'application')?.outcome,
+      'no_submit_control',
+    );
+    const v3 = chooserResult({
+      finalSubmitChooser: {
+        ...v4.finalSubmitChooser,
+        policyVersion: 3,
+        grammarHash: FINAL_SUBMIT_CHOOSER_POLICY_V3.grammarHash,
+      },
+    });
+    assert.equal(
+      readManagedFinalSubmitChooser(v3, FINAL_SUBMIT_CHOOSER_POLICY_V3, 'application')?.policyVersion,
+      3,
+    );
+  });
+
+  test('rejects policy drift, extra fields, impossible counts, and v3 bare-Send claims', () => {
+    const base = chooserResult();
+    for (const finalSubmitChooser of [
+      { ...base.finalSubmitChooser, grammarHash: '0'.repeat(64) },
+      { ...base.finalSubmitChooser, extra: true },
+      { ...base.finalSubmitChooser, viableCandidateCount: 1 },
+      { ...base.finalSubmitChooser, outcome: 'ambiguous_submit', viableCandidateCount: 1, topScore: 1, topScoreCount: 1 },
+      {
+        ...base.finalSubmitChooser,
+        outcome: 'selected',
+        candidateCount: 2,
+        viableCandidateCount: 2,
+        topScore: 0,
+        topScoreCount: 1,
+        bareSendCandidateCount: 1,
+      },
+      {
+        ...base.finalSubmitChooser,
+        policyVersion: 3,
+        grammarHash: FINAL_SUBMIT_CHOOSER_POLICY_V3.grammarHash,
+        bareSendCandidateCount: 1,
+      },
+    ]) {
+      const policy = finalSubmitChooser.policyVersion === 3
+        ? FINAL_SUBMIT_CHOOSER_POLICY_V3
+        : FINAL_SUBMIT_CHOOSER_POLICY_V4;
+      assert.equal(readManagedFinalSubmitChooser(
+        chooserResult({ finalSubmitChooser }),
+        policy,
+        'application',
+      ), null);
+    }
+  });
+
+  test('releases only a screenshot-backed exact-URL no-click with no clicked pass', () => {
+    const result = chooserResult();
+    assert.equal(
+      readManagedFinalSubmitNoClick(
+        result,
+        FINAL_SUBMIT_CHOOSER_POLICY_V4,
+        'application',
+        CHOOSER_URL,
+      )?.outcome,
+      'no_submit_control',
+    );
+    const contradictions = [
+      { screenshot: null },
+      { url: 'https://apply.workable.com/example/j/OTHER/' },
+      { exactPageUrlProof: { ...result.exactPageUrlProof, beforeFinalChooser: null } },
+      { exactPageUrlProof: { ...result.exactPageUrlProof, beforeSubmit: CHOOSER_URL } },
+      { submitOutcome: { ...result.submitOutcome, pressed: true } },
+      { securityCodeAttempt: { supplied: true, entered: true, outcome: 'confirmed', resubmitted: true } },
+      { requiredFieldConfirmation: { version: 2, status: 'confirmed', passes: [{ submissionOutcome: 'clicked' }] } },
+      { blockedSubmits: 1 },
+    ];
+    for (const contradiction of contradictions) {
+      assert.equal(readManagedFinalSubmitNoClick(
+        chooserResult(contradiction),
+        FINAL_SUBMIT_CHOOSER_POLICY_V4,
+        'application',
+        CHOOSER_URL,
+      ), null);
+    }
+  });
+
+  test('accepts internally consistent ambiguity but never turns a selected result into no-click', () => {
+    const base = chooserResult();
+    const ambiguous = chooserResult({
+      finalSubmitChooser: {
+        ...base.finalSubmitChooser,
+        outcome: 'ambiguous_submit',
+        candidateCount: 2,
+        viableCandidateCount: 2,
+        topScore: 0,
+        topScoreCount: 2,
+        bareSendCandidateCount: 2,
+      },
+    });
+    assert.equal(readManagedFinalSubmitNoClick(
+      ambiguous,
+      FINAL_SUBMIT_CHOOSER_POLICY_V4,
+      'application',
+      CHOOSER_URL,
+    )?.outcome, 'ambiguous_submit');
+    const selected = chooserResult({
+      finalSubmitChooser: {
+        ...base.finalSubmitChooser,
+        outcome: 'selected',
+        candidateCount: 1,
+        viableCandidateCount: 1,
+        topScore: 0,
+        topScoreCount: 1,
+        addressedScopeCount: 1,
+        bareSendCandidateCount: 1,
+      },
+    });
+    assert.equal(readManagedFinalSubmitNoClick(
+      selected,
+      FINAL_SUBMIT_CHOOSER_POLICY_V4,
+      'application',
+      CHOOSER_URL,
+    ), null);
+  });
+});
 
 describe('the run reads the outcome off the page, and the caller keys off that', () => {
   test('Ashby’s own success state is a confirmation, and it says what proved it', () => {
@@ -947,11 +1123,23 @@ describe('the send path is wired to the reading, not to the scrape', () => {
       'a run that died without reporting cannot prove where it stopped');
   });
 
-  test('a managed chooser stop uses the no-submit copy and releases the stale claim', async () => {
+  test('a typed managed chooser stop uses the no-submit copy and releases the stale claim', async () => {
     const { submissionFailureReview } = await import('../routes/submissionRunner');
+    const { assertManagedApplicationFinalSubmitSelected, NoSubmitControlError } = await import('./portalSubmission');
+    let stopped: unknown;
+    try {
+      assertManagedApplicationFinalSubmitSelected(
+        chooserResult() as Parameters<typeof assertManagedApplicationFinalSubmitSelected>[0],
+        CHOOSER_URL,
+      );
+    } catch (error) {
+      stopped = error;
+    }
+    assert.ok(stopped instanceof NoSubmitControlError,
+      'only the exact v4 no-click evidence reader may mint this release error');
     const persisted = submissionFailureReview(
       claimedRunningRow(),
-      new Error('Atomic submit control was missing or ambiguous'),
+      stopped,
     );
     assert.equal(persisted.submission_claimed_at, undefined);
     assert.equal(persisted.submission_stop?.reason, 'no_submit_control');

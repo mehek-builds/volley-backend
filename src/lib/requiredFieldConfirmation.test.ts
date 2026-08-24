@@ -1,15 +1,26 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { MANAGED_SUBMIT_CHOOSER_POLICY, runManagedBrowser, type ManagedBrowserResult } from './browserbase';
+import {
+  MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
+  MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
+  MANAGED_EXACT_PAGE_URL_CAPABILITY,
+  MANAGED_SUBMIT_CHOOSER_POLICY,
+  runManagedBrowser,
+  type ManagedBrowserResult,
+} from './browserbase';
 import { reparseThroughPlaywrightSerialization } from './playwrightSerializationRoundTrip';
 import {
+  assertManagedApplicationFinalSubmitSelected,
+  assertManagedApplicationSubmitConsistency,
   assertManagedRequiredFieldsConfirmed,
   AUTONOMOUS_PORTAL_FAMILIES,
   buildManagedPortalActions,
   COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT,
   MANAGED_ACTION_LIMIT,
   MANAGED_FINAL_SUBMIT_SELECTOR,
+  MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
+  managedApplicationUsesAtomicSubmitV4,
   managedApplicationProofIsRequired,
   ManagedActionBudgetError,
   ManagedConfirmationUnprovenError,
@@ -19,6 +30,53 @@ import {
   type SubmissionPacket,
   type SupportedPortal,
 } from './portalSubmission';
+
+const FINAL_CHOOSER_URL = 'https://apply.workable.com/example/j/ABC123/';
+const FINAL_CHOOSER_SCREENSHOT = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+function finalChooserNoClick(
+  outcome: 'no_submit_control' | 'ambiguous_submit' = 'no_submit_control',
+): ManagedBrowserResult {
+  const ambiguous = outcome === 'ambiguous_submit';
+  return {
+    title: 'Apply',
+    url: FINAL_CHOOSER_URL,
+    text: 'Application',
+    screenshot: FINAL_CHOOSER_SCREENSHOT,
+    blockedSubmits: 0,
+    exactPageUrlProof: {
+      expected: FINAL_CHOOSER_URL,
+      beforeActions: FINAL_CHOOSER_URL,
+      beforeApplicantData: FINAL_CHOOSER_URL,
+      beforeFinalChooser: FINAL_CHOOSER_URL,
+      beforeSubmit: null,
+    },
+    finalSubmitChooser: {
+      version: 1 as const,
+      policyName: 'litos-final-submit' as const,
+      policyVersion: 4 as const,
+      grammarHash: MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY.grammarHash,
+      submitKind: 'application' as const,
+      outcome,
+      candidateCount: ambiguous ? 2 : 0,
+      viableCandidateCount: ambiguous ? 2 : 0,
+      topScore: ambiguous ? 1 : null,
+      topScoreCount: ambiguous ? 2 : 0,
+      addressedScopeCount: 1,
+      bareSendCandidateCount: 0,
+    },
+    submitOutcome: {
+      pressed: false,
+      state: 'not_attempted' as const,
+      source: null,
+      evidence: null,
+      message: null,
+      formStillPresent: null,
+    },
+    securityCodeAttempt: null,
+    requiredFieldConfirmation: null,
+  };
+}
 
 const packet: SubmissionPacket = {
   fullName: 'Taylor Example',
@@ -62,7 +120,7 @@ function proof(
   };
 }
 
-test('every autonomous managed submit reserves a mandatory confirmation barrier immediately before submit', () => {
+test('every managed application submit defaults to v3 and reserves its confirmation barrier', () => {
   for (const family of AUTONOMOUS_PORTAL_FAMILIES) {
     const actions = buildManagedPortalActions(family as SupportedPortal, packet, true);
     assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${family} exceeded the managed action limit`);
@@ -80,6 +138,142 @@ test('every autonomous managed submit reserves a mandatory confirmation barrier 
     assert.equal(actions.filter((action) => action.type === 'click'
       && action.selector === MANAGED_FINAL_SUBMIT_SELECTOR).length, 0);
   }
+});
+
+test('only one exact native Workable application route emits the cross-repo v4 contract', () => {
+  const applicationUrl = 'https://apply.workable.com/example/j/ABC123/apply';
+  const actions = buildManagedPortalActions('workable', packet, true, applicationUrl);
+  const exactCapabilities = actions.filter((action) => action.type === 'requireCapability'
+    && action.value === MANAGED_EXACT_PAGE_URL_CAPABILITY);
+  const atomicCapabilities = actions.filter((action) => action.type === 'requireCapability'
+    && action.value === MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY);
+  assert.deepEqual(exactCapabilities, [{
+    type: 'requireCapability',
+    value: MANAGED_EXACT_PAGE_URL_CAPABILITY,
+    optional: false,
+    expectedPageUrl: applicationUrl,
+  }]);
+  assert.equal(
+    MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
+    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"])',
+  );
+  assert.deepEqual(atomicCapabilities, [{
+    type: 'requireCapability',
+    value: MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
+    optional: false,
+    applicationScopeSelector: MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
+  }]);
+  assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
+  assert.equal(actions.at(-1)?.chooserPolicy, MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY);
+  assert.equal(actions.at(-1)?.expectedPageUrl, applicationUrl);
+  assert.equal(actions.filter((action) => action.type === 'confirmAndSubmit').length, 1);
+  assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'
+    && action.chooserPolicy?.version === 3), false,
+  'a v4 refusal has no v3 submit action to fall through to in the same run');
+});
+
+test('a production Workable v4 invalid phone stops cleanly before any Stratus request', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    throw new Error('network should be unreachable');
+  }) as typeof fetch;
+
+  try {
+    const applicationUrl = 'https://apply.workable.com/example/j/ABC123/apply';
+    await assert.rejects(
+      async () => {
+        const actions = buildManagedPortalActions('workable', {
+          ...packet,
+          phone: '+442071234567',
+        }, true, applicationUrl);
+        await runManagedBrowser(applicationUrl, actions, { allowSubmit: true });
+      },
+      (error: unknown) => error instanceof ManagedRequiredFieldConfirmationError
+        && error.fields.includes('Phone')
+        && /exact Workable country and national value/.test(error.message)
+        && !/atomic submit v4 capability requires/.test(error.message),
+    );
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('host, family, and application route all have to match before managed v4 is selected', () => {
+  const v4Urls = [
+    'https://apply.workable.com/example/j/ABC123/apply',
+    'https://apply.workable.com/j/ABC123/apply/',
+    'https://apply.workable.com/example/j/ABC123/apply?source=litos',
+  ];
+  for (const url of v4Urls) {
+    assert.equal(managedApplicationUsesAtomicSubmitV4('workable', url), true, url);
+    assert.equal(buildManagedPortalActions('workable', packet, true, url).at(-1)?.chooserPolicy?.version, 4, url);
+  }
+
+  const v3Cases: Array<[SupportedPortal, string]> = [
+    ['workable', 'https://apply.workable.com/example/j/ABC123/'],
+    ['workable', 'https://apply.workable.com/example/j/ABC123/apply/extra'],
+    ['workable', 'https://www.workable.com/example/j/ABC123/apply'],
+    ['workable', 'https://apply.workable.com.evil.example/example/j/ABC123/apply'],
+    ['workable', 'https://apply.workable.com:444/example/j/ABC123/apply'],
+    ['workable', 'http://apply.workable.com/example/j/ABC123/apply'],
+    ['controlled_workable', 'https://qa.example.test/qa/portal-submission?board=workable'],
+    ['greenhouse', 'https://job-boards.greenhouse.io/example/jobs/123'],
+    ['lever', 'https://jobs.lever.co/example/123'],
+    ['ashby', 'https://jobs.ashbyhq.com/example/123/application'],
+  ];
+  for (const [portal, url] of v3Cases) {
+    assert.equal(managedApplicationUsesAtomicSubmitV4(portal, url), false, `${portal}: ${url}`);
+    const actions = buildManagedPortalActions(portal, packet, true, url);
+    const submit = actions.find((action) => action.type === 'confirmAndSubmit');
+    if (submit) assert.equal(submit.chooserPolicy, MANAGED_SUBMIT_CHOOSER_POLICY, `${portal}: ${url}`);
+    assert.equal(actions.some((action) => action.value === MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY), false);
+  }
+});
+
+test('Workable v4 budget pressure keeps both required boundaries or blocks before submit', () => {
+  const applicationUrl = 'https://apply.workable.com/example/j/ABC123/apply';
+  let completed = 0;
+  let blocked = 0;
+  for (let count = 100; count <= 120; count += 1) {
+    const crowded: SubmissionPacket = {
+      ...packet,
+      questions: Array.from({ length: count }, (_, index) => ({
+        question: `Required Workable screener ${index}`,
+        answer: `Reviewed answer ${index}`,
+      })),
+    };
+    try {
+      const actions = buildManagedPortalActions('workable', crowded, true, applicationUrl);
+      assert.deepEqual(
+        actions.filter((action) => action.type === 'requireCapability'
+          && (action.value === MANAGED_EXACT_PAGE_URL_CAPABILITY
+            || action.value === MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY))
+          .map((action) => action.value),
+        [MANAGED_EXACT_PAGE_URL_CAPABILITY, MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY],
+        `the ${count}-question v4 list lost a required capability during budget trimming`,
+      );
+      assert.equal(actions.at(-1)?.type, 'confirmAndSubmit');
+      assert.equal(actions.at(-1)?.chooserPolicy, MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY);
+      completed += 1;
+    } catch (error) {
+      assert.ok(error instanceof ManagedActionBudgetError, `unexpected failure at ${count} questions`);
+      assert.equal(error.submitActionAppended, false);
+      blocked += 1;
+    }
+  }
+  assert.ok(completed > 0, 'the measured v4 form must fit below the protected budget boundary');
+  assert.ok(blocked > 0, 'the fixture must exercise the fail-closed protected budget boundary');
 });
 
 test('confirmation is bound to the exact final-submit chooser instead of the first form on the page', () => {
@@ -185,6 +379,99 @@ test('the pressed half of the skip is what catches an unproven send at a code wa
   assert.equal(check(standingWall, true), 'caught', 'the regression let this one through');
   assert.equal(check(null, true), 'caught');
   assert.equal(check(standingWall, false), 'skipped');
+});
+
+test('v4 routes only fully proved no-control and ambiguity results to the pre-click stop', () => {
+  for (const outcome of ['no_submit_control', 'ambiguous_submit'] as const) {
+    assert.throws(
+      () => assertManagedApplicationFinalSubmitSelected(finalChooserNoClick(outcome), FINAL_CHOOSER_URL),
+      (error: unknown) => error instanceof NoSubmitControlError
+        && !(error instanceof ManagedConfirmationUnprovenError),
+    );
+  }
+  assert.throws(
+    () => assertManagedApplicationFinalSubmitSelected(
+      { ...finalChooserNoClick(), screenshot: null },
+      FINAL_CHOOSER_URL,
+    ),
+    (error: unknown) => error instanceof ManagedConfirmationUnprovenError
+      && !(error instanceof NoSubmitControlError),
+  );
+});
+
+test('a later chooser change with blocked confirmation evidence stays unverified', () => {
+  const changedAfterConfirmation = {
+    ...finalChooserNoClick(),
+    ...proof([], {
+      status: 'blocked',
+      submissionOutcome: 'blocked',
+      blockerReason: 'submit_chooser_changed',
+    }),
+  };
+  assert.throws(
+    () => assertManagedApplicationFinalSubmitSelected(changedAfterConfirmation, FINAL_CHOOSER_URL),
+    (error: unknown) => error instanceof ManagedConfirmationUnprovenError
+      && !(error instanceof NoSubmitControlError),
+  );
+});
+
+test('the Stratus v4 re-chooser blocker token is a valid blocked confirmation proof', () => {
+  const changed = proof([], {
+    status: 'blocked',
+    submissionOutcome: 'blocked',
+    blockerReason: 'submit_chooser_changed',
+  });
+  assert.throws(
+    () => assertManagedRequiredFieldsConfirmed(changed, 'application'),
+    (error: unknown) => error instanceof ManagedRequiredFieldConfirmationError
+      && error.fields.includes('submit_chooser_changed'),
+  );
+});
+
+test('a selected v4 chooser and clicked pass require a matching top-level click and URL boundary', () => {
+  const selected = finalChooserNoClick();
+  selected.finalSubmitChooser = {
+    ...selected.finalSubmitChooser!,
+    outcome: 'selected',
+    candidateCount: 1,
+    viableCandidateCount: 1,
+    topScore: 1,
+    topScoreCount: 1,
+  };
+  Object.assign(selected, proof([]));
+  selected.submitOutcome = {
+    pressed: true,
+    state: 'unknown',
+    source: null,
+    evidence: null,
+    message: null,
+    formStillPresent: null,
+  };
+  selected.exactPageUrlProof!.beforeSubmit = FINAL_CHOOSER_URL;
+  assert.doesNotThrow(() => assertManagedApplicationFinalSubmitSelected(selected, FINAL_CHOOSER_URL));
+  assert.doesNotThrow(() => assertManagedRequiredFieldsConfirmed(selected, 'application'));
+  assert.doesNotThrow(() => assertManagedApplicationSubmitConsistency(selected, FINAL_CHOOSER_URL));
+
+  for (const contradiction of [
+    {
+      ...selected,
+      submitOutcome: { ...selected.submitOutcome!, pressed: false, state: 'not_attempted' as const },
+    },
+    {
+      ...selected,
+      submitOutcome: { ...selected.submitOutcome!, state: 'not_attempted' as const },
+    },
+    {
+      ...selected,
+      exactPageUrlProof: { ...selected.exactPageUrlProof!, beforeSubmit: null },
+    },
+  ]) {
+    assert.throws(
+      () => assertManagedApplicationSubmitConsistency(contradiction, FINAL_CHOOSER_URL),
+      (error: unknown) => error instanceof ManagedConfirmationUnprovenError
+        && !(error instanceof NoSubmitControlError),
+    );
+  }
 });
 
 test('a replaced submit node cannot satisfy the atomic scope proof', () => {
@@ -739,10 +1026,26 @@ test('submission runner requires confirmation proof before any receipt can be re
      security-code challenge. It used to be declared 'verification' whenever a code was in hand, and
      that declaration was the shape of the defect: a verification submit types the code before it
      clicks, and on a page that has not been submitted yet there is no code control to type into. */
-  const barrier = source.indexOf("assertManagedRequiredFieldsConfirmed(result, 'application')");
-  const receipt = source.indexOf("const receipt = verdict.kind === 'confirmed'", barrier);
-  assert.ok(barrier >= 0);
-  assert.ok(receipt > barrier);
+  const policyGate = source.indexOf('const atomicSubmitV4 = managedApplicationUsesAtomicSubmitV4(portal, applicationUrl)');
+  const chooser = source.indexOf('if (atomicSubmitV4) assertManagedApplicationFinalSubmitSelected(result, applicationUrl)');
+  const barrier = source.indexOf("assertManagedRequiredFieldsConfirmed(result, 'application')", chooser);
+  const consistency = source.indexOf('if (atomicSubmitV4) assertManagedApplicationSubmitConsistency(result, applicationUrl)', barrier);
+  const receipt = source.indexOf("const receipt = verdict.kind === 'confirmed'", consistency);
+  assert.ok(policyGate >= 0);
+  assert.ok(chooser > policyGate);
+  assert.ok(barrier > chooser);
+  assert.ok(consistency > barrier);
+  assert.ok(receipt > consistency);
+  const proofBlock = source.slice(
+    source.lastIndexOf('if (managedApplicationProofIsRequired', chooser),
+    source.indexOf('let receiptResult = result;', consistency),
+  );
+  assert.match(proofBlock, /if \(atomicSubmitV4\) assertManagedApplicationFinalSubmitSelected/);
+  assert.match(proofBlock, /assertManagedRequiredFieldsConfirmed\(result, 'application'\)/,
+    'v3 still requires the shared confirmation proof');
+  assert.match(proofBlock, /if \(atomicSubmitV4\) assertManagedApplicationSubmitConsistency/);
+  assert.equal((proofBlock.match(/buildManagedPortalActions/g) ?? []).length, 0,
+    'a v4 refusal cannot rebuild the same run with a v3 action list');
 });
 
 /* THE SUPPLIED-CODE CONTINUATION IS GONE, AND THAT IS THE FIX RATHER THAN A REGRESSION.

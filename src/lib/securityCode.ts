@@ -1,5 +1,10 @@
 import { createHash } from 'node:crypto';
-import { managedActionsWithExactPageUrl, type ManagedBrowserAction, type ManagedBrowserResult } from './browserbase';
+import {
+  managedActionsWithExactPageUrl,
+  MANAGED_SUBMIT_CHOOSER_POLICY,
+  type ManagedBrowserAction,
+  type ManagedBrowserResult,
+} from './browserbase';
 import type { ApplicationReviewState, SecurityCodeAttempt, SecurityCodeState } from './applicationReview';
 
 /**
@@ -187,6 +192,7 @@ export function withSecurityCode(
   }
   last.securityCode = code;
   last.submitKind = 'verification';
+  last.chooserPolicy = MANAGED_SUBMIT_CHOOSER_POLICY;
   return next;
 }
 
@@ -195,10 +201,10 @@ export function withSecurityCode(
  * carrying the code, run as a continuation of the browser that is already looking at the challenge.
  *
  * IT IS THE PACKET'S OWN SUBMIT ACTION, not a second copy of one. buildManagedPortalActions ends in
- * an atomic submit whose selector, chooser policy, contract version and retry budget the runner
- * validates field by field and rejects outright on any mismatch. Writing those out again here would
- * be a fifth place they have to agree, and the runner's answer to a disagreement is to refuse the
- * whole run - so the list is derived from the one production already built.
+ * an atomic submit whose selector, contract version and retry budget the runner validates field by
+ * field and rejects outright on any mismatch. The verification continuation deliberately replaces
+ * the application's v4 chooser with the stable v3 verification policy. Everything else is derived
+ * from the one production already built.
  *
  * Returns null when the packet's list does not end in an atomic submit. That is the same upstream
  * gate withSecurityCode respects: a packet Litos may not auto-submit does not become submittable by

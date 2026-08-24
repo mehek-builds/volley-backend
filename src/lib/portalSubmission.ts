@@ -1,8 +1,10 @@
 import type { Page } from 'playwright-core';
 import {
+  MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
   MANAGED_DISCOVERY_ROLE_CAPABILITY,
   MANAGED_EXACT_PAGE_URL_CAPABILITY,
   MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
+  MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
   MANAGED_SUBMIT_CHOOSER_POLICY,
   type ManagedBrowserAction,
   type ManagedBrowserResult,
@@ -37,6 +39,10 @@ import type { ElementHandle, Locator } from 'playwright-core';
 import { browserApplicationCapability, type BrowserApplicationFamily } from './browserApplicationCapabilities';
 import { isControlledTestPortalUrl } from './controlledTestPortal';
 import { chooseCanonicalFinalSubmit } from './finalSubmitChooserPolicy';
+import {
+  readManagedFinalSubmitChooser,
+  readManagedFinalSubmitNoClick,
+} from './managedSubmitOutcome';
 import {
   SUBMIT_READINESS_ASTERISK_LEGEND,
   SUBMIT_READINESS_ASTERISK_MARK,
@@ -4713,6 +4719,11 @@ function isProtectedManagedAction(
   protectedActionBases: ReadonlySet<string> = new Set(),
 ): boolean {
   if (!action) return false;
+  // A required capability is a fail-closed boundary on the action list that follows it, not budget
+  // available for a field attempt. In particular, dropping either Workable v4 capability while
+  // retaining confirmAndSubmit turns a valid build into a request local normalization must refuse.
+  // Keep every required runner contract intact through all generic and tail budget passes.
+  if (action.type === 'requireCapability') return true;
   if (action.type === 'discover') return true;
   const label = action.label ?? '';
   const base = managedActionLabelBase(action);
@@ -5110,6 +5121,8 @@ export function budgetDroppedReviewedQuestions(
 // whichever comes first and can file the resume as the candidate's headshot. `data-ui="resume"` is
 // the stable, correct hook. Same two-file-input hazard the extension's adapters/ashby.ts documents.
 const WORKABLE_RESUME_SELECTOR = 'input[type="file"][data-ui="resume"]';
+export const MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR =
+  'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"])';
 const WORKABLE_ADDRESS_SELECTOR = 'input[name="address"]:visible';
 const WORKABLE_LEGACY_CITY_SELECTOR = 'input[name="city"]:visible';
 const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
@@ -5132,6 +5145,27 @@ const WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR =
 const WORKABLE_APPLICATION_FORM_READY_SELECTOR =
   `input[name="firstname"], input[name="email"], ${WORKABLE_RESUME_SELECTOR}`;
 const WORKABLE_CHOICE_UNCONFIRMED_ATTR = 'data-litos-choice-unconfirmed-v1';
+
+/**
+ * Chooser v4 is enabled only on the measured native Workable application route.
+ * Every other managed application submit retains chooser v3.
+ */
+export function managedApplicationUsesAtomicSubmitV4(
+  portal: SupportedPortal,
+  expectedPageUrl: string | undefined,
+): boolean {
+  if (portalFamily(portal) !== 'workable' || !expectedPageUrl) return false;
+  try {
+    const url = new URL(expectedPageUrl);
+    return url.protocol === 'https:'
+      && url.host.toLowerCase() === 'apply.workable.com'
+      && !url.username
+      && !url.password
+      && /^\/(?:[^/]+\/)?j\/[^/]+\/apply\/?$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
 
 function pushWorkableManagedPreflightActions(actions: ManagedBrowserAction[]) {
   actions.push({
@@ -7160,8 +7194,14 @@ export function buildManagedPortalActions(
   // so even a reviewed question carrying a malicious selector must not create an action against the
   // login, CAPTCHA, or privacy gate that happens to be on screen.
   if (ACCOUNT_WALLED_FAMILIES.has(family)) return [];
+  const atomicSubmitV4 = submit && managedApplicationUsesAtomicSubmitV4(portal, expectedPageUrl);
   const actions: ManagedBrowserAction[] = submit && expectedPageUrl
-    ? [{ type: 'requireCapability', value: MANAGED_EXACT_PAGE_URL_CAPABILITY, optional: false }]
+    ? [{
+      type: 'requireCapability',
+      value: MANAGED_EXACT_PAGE_URL_CAPABILITY,
+      optional: false,
+      expectedPageUrl,
+    }]
     : [];
   let workablePhoneReadyForSubmit = true;
   /* The one consent control this run may tick, or null for "park at the handoff exactly as today".
@@ -7427,6 +7467,27 @@ export function buildManagedPortalActions(
   if (family === 'workable') {
     workablePhoneReadyForSubmit = pushWorkableManagedPhoneActions(actions, packet.phone);
   }
+  /* Atomic v4 is a promise that this same list ends in its one chooser-v4 submit action. Do not
+   * advertise it until every builder-side submit gate has passed. In particular, a nonempty phone
+   * that cannot be split into an exact Workable country and national value used to leave this
+   * capability in a no-submit list, which browserbase correctly rejected as a malformed contract
+   * before Stratus was called. This typed stop is the intended pre-click result instead. */
+  if (atomicSubmitV4 && !workablePhoneReadyForSubmit) {
+    throw new ManagedRequiredFieldConfirmationError(
+      [workablePhoneBlockerLabel(packet.phone)],
+      'Litos did not press submit: the saved phone number could not be mapped to an exact Workable country and national value',
+    );
+  }
+  if (atomicSubmitV4) {
+    // Keep both required boundaries at the front of the wire list even though this capability is
+    // emitted only after the builder has proved that the corresponding v4 submit will be appended.
+    actions.splice(1, 0, {
+      type: 'requireCapability',
+      value: MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
+      optional: false,
+      applicationScopeSelector: MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
+    });
+  }
   // Prepare only. The submit path makes the standalone probe call above this one and reads its
   // evidence from there, so repeating the reads inside the submit action list would spend budget on
   // a page that is about to be clicked anyway. On prepare there is no probe call at all, and this is
@@ -7573,9 +7634,10 @@ export function buildManagedPortalActions(
     actions.push({
       type: 'confirmAndSubmit',
       // This is a candidate set, not an instruction to click its first match. The v2 runner applies
-      // the same semantic final-control chooser used on the direct path, binds the chosen node and
-      // closest form through opaque fingerprints, confirms that form, then clicks that exact node
-      // inside this action. It blocks on ambiguity, replacement, or a changed form identity.
+      // the versioned semantic final-control chooser, binds the chosen node and closest form through
+      // opaque fingerprints, confirms that form, then clicks that exact node inside this action.
+      // Only the measured native Workable path may admit bare Send after its DOM scope proof.
+      // Every other managed submit and the direct path retain v3.
       selector: MANAGED_FINAL_SUBMIT_SELECTOR,
       label: 'required_field_confirmation',
       optional: false,
@@ -7583,7 +7645,9 @@ export function buildManagedPortalActions(
       maxRetries: 1,
       contractVersion: 2,
       submitKind: 'application',
-      chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
+      chooserPolicy: atomicSubmitV4
+        ? MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY
+        : MANAGED_SUBMIT_CHOOSER_POLICY,
       ...(expectedPageUrl ? { expectedPageUrl } : {}),
     });
   }
@@ -10462,6 +10526,83 @@ export class ManagedConfirmationUnprovenError extends Error {
   }
 }
 
+/**
+ * Route the v4 chooser result before reading required-field proof. A selected control continues to
+ * the ordinary confirmation barrier. A fully evidenced no-click becomes the existing typed
+ * pre-click stop. Missing, malformed, or contradictory evidence keeps the claim as unverified.
+ */
+export function assertManagedApplicationFinalSubmitSelected(
+  result: ManagedBrowserResult,
+  expectedPageUrl: string,
+): void {
+  const chooser = readManagedFinalSubmitChooser(
+    result,
+    MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
+    'application',
+  );
+  if (!chooser) {
+    throw new ManagedConfirmationUnprovenError(
+      'Litos could not read the managed final-submit chooser proof, so whether submit was pressed is unknown',
+    );
+  }
+  if (chooser.outcome === 'selected') return;
+  const noClick = readManagedFinalSubmitNoClick(
+    result,
+    MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
+    'application',
+    expectedPageUrl,
+  );
+  if (!noClick) {
+    throw new ManagedConfirmationUnprovenError(
+      'Litos could not prove the managed final-submit chooser stopped before the click, so whether submit was pressed is unknown',
+    );
+  }
+  throw new NoSubmitControlError(noClick.outcome === 'ambiguous_submit'
+    ? 'Litos found more than one equally likely application send control and did not press either one'
+    : 'Litos could not find a control that safely sends this application, so it did not press submit');
+}
+
+/**
+ * Cross-check the three independent records of a completed managed application click. This runs
+ * only after the chooser and required-field proof have each passed their exact validators. A
+ * selected chooser and a confirmed clicked pass cannot become a receipt unless the top-level
+ * outcome also says the click occurred and the URL boundary was proved immediately before it.
+ */
+export function assertManagedApplicationSubmitConsistency(
+  result: ManagedBrowserResult,
+  expectedPageUrl: string,
+): void {
+  const chooser = readManagedFinalSubmitChooser(
+    result,
+    MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
+    'application',
+  );
+  const proof = result.requiredFieldConfirmation;
+  const pass = Array.isArray(proof?.passes) && proof.passes.length === 1 ? proof.passes[0] : null;
+  let expected: string | null = null;
+  try {
+    const url = new URL(expectedPageUrl);
+    if (/^https?:$/.test(url.protocol) && !url.username && !url.password) {
+      url.hash = '';
+      expected = url.href;
+    }
+  } catch {
+    expected = null;
+  }
+  if (chooser?.outcome !== 'selected'
+    || proof?.version !== 2 || proof.status !== 'confirmed'
+    || pass?.submitKind !== 'application' || pass.submissionOutcome !== 'clicked'
+    || result.submitOutcome?.pressed !== true
+    || (result.submitOutcome.state !== 'confirmed'
+      && result.submitOutcome.state !== 'rejected'
+      && result.submitOutcome.state !== 'unknown')
+    || !expected || result.exactPageUrlProof?.beforeSubmit !== expected) {
+    throw new ManagedConfirmationUnprovenError(
+      'Litos could not reconcile the managed chooser, click proof, and exact pre-submit URL, so whether submit was pressed is unknown',
+    );
+  }
+}
+
 const REQUIRED_CONFIRMATION_FIELD_TYPES = new Set([
   'text', 'date', 'select', 'react-select', 'radio', 'checkbox', 'file', 'custom',
 ]);
@@ -10704,6 +10845,7 @@ export function assertManagedRequiredFieldsConfirmed(
     }
     const blockerReasons = new Set([
       'submit_node_replaced', 'ambiguous_submit', 'form_identity_changed', 'no_submit_control',
+      'submit_chooser_changed',
     ]);
     if (pass.blockerReason !== undefined
       && (typeof pass.blockerReason !== 'string' || !blockerReasons.has(pass.blockerReason))) {
