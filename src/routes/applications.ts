@@ -2614,12 +2614,6 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     async (request: FastifyRequest, reply: FastifyReply) => {
       const row = await ownedResume(request, reply);
       if (!row) return;
-      const automaticSubmission = await requireFeature(
-        request.jwtPayload!.userId,
-        'automatic_submission',
-        'dashboard_automatic_submission',
-      );
-      if (!automaticSubmission.allowed) return reply.status(402).send(automaticSubmission.denial);
       const stored = row.spec as StoredSpec;
       const current = readApplicationReview(stored);
       if (!current || current.status !== 'ready_for_final_approval') {

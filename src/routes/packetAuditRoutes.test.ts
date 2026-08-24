@@ -135,6 +135,15 @@ test('every employer-bound path names the current packet audit gate', () => {
   assert.ok(runnerAudit >= 0 && employerClaim > runnerAudit);
 });
 
+test('reviewed per-application approval stays free while unattended submission remains entitled', () => {
+  const approve = routeSlice("'/applications/:id/submission/approve'", "registerWorkdayVerificationRoute");
+  assert.doesNotMatch(approve, /requireFeature|automatic_submission|dashboard_automatic_submission/);
+  assert.match(approve, /submission_authorization:[\s\S]*source: 'per_application_approval'/);
+
+  const extensionStart = routeSlice("'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
+  assert.match(extensionStart, /requireFeature\([\s\S]*?'automatic_submission'/);
+});
+
 test('submission polling hides a retained handoff when the current packet identity is no longer valid', () => {
   assert.match(applications, /review\.status === 'filling' \|\| review\.status === 'needs_attention'[\s\S]*currentAcknowledgedPacketAudit\(row[,)]/);
   assert.match(applications, /handoff_packet_valid = audit\.valid/);
