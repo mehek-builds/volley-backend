@@ -2356,6 +2356,47 @@ export async function discoverAndResolveQuestions(
         continue;
       }
     }
+    /* A STORED MACHINE VALUE CANNOT STAND IN FOR AN UNREAD EMPLOYER MENU.
+     *
+     * A native select can be rediscovered after an earlier run wrote a machine answer while its
+     * current option inventory is absent. Replaying that stored text would turn missing metadata
+     * into apparent authority to fill a closed control. Profile-backed values retain the existing
+     * search-combobox path above, but anything that exists only on the old review row is quarantined
+     * until the employer's exact choices are measured again. A current-round applicant answer may
+     * remain visible, under the same exact-selector proof used by the placeholder-only branch, while
+     * the metadata blocker still holds the send.
+     *
+     * This sits after the refusal and self-declaration branches on purpose. Those branches explain
+     * why a question belongs to the applicant, and missing metadata must not erase that explanation.
+     */
+    const unreadClosedControl = questionMetadataBlockerForDiscovered(field, {
+      closedControlRequiresOptions: true,
+    });
+    if (unreadClosedControl?.kind === 'missing_exact_options'
+      && !(profileKnown && 'value' in profileKnown)) {
+      const measured = { ...unreadClosedControl, required: fieldIsRequired };
+      questionMetadataBlockers.push(measured);
+      (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(
+        questionMetadataBlockerReason(measured),
+      );
+      const selector = portalSelectorForField(field);
+      if (existing
+        && applicantChoseStoredAnswerInRound(existing, current.questions_reviewed_at)
+        && selector
+        && existing.portal_selector === selector) {
+        questions.push({
+          ...existing,
+          question: reviewLabel,
+          required: existing.required || fieldIsRequired,
+          portal_selector: selector,
+          portal_input_type: controlType,
+          options: null,
+        });
+      } else {
+        invalidatedQuestionKeys.add(reviewLabel.toLowerCase());
+      }
+      continue;
+    }
     /* A COVER-LETTER TEXT BOX GETS THE LETTER LITOS ALREADY WRITES.
      *
      * Measured live on Quandela (Workable, 2026-08-20): discovery stored a required "cover letter"

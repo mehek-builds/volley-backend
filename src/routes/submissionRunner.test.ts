@@ -2914,6 +2914,49 @@ test('a stale answer is invalidated when the current resolver refuses the exact 
   assert.deepEqual(merged, [], 'the later packet merge must not restore the stale value');
 });
 
+test('a stored machine answer cannot authorize a required closed control whose choices were unread', async () => {
+  const label = 'Primary programming language';
+  const current: ApplicationReviewState = {
+    jd_text: 'Build developer tooling.',
+    role: 'Software Engineer',
+    portal_url: 'https://jobs.lever.co/example/role',
+    ats_name: 'lever',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'stale-machine-language',
+      question: label,
+      answer: 'Python',
+      kind: 'required',
+      required: true,
+      portal_selector: '#language',
+      portal_input_type: 'select-one',
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions([{
+    label: `${label}*`,
+    selector: '#language',
+    durableSelector: '#language',
+    inputType: 'select-one',
+    maxLength: null,
+    options: null,
+    required: true,
+  }], { user_id: 'user-1' } as ResumeRow, current, {}, true, 'lever');
+
+  assert.deepEqual(result.questions, [], 'the stale machine value must not reach the fill packet');
+  assert.deepEqual(result.questionMetadataBlockers, [{
+    kind: 'missing_exact_options',
+    required: true,
+    portal_input_type: 'select-one',
+    control_id: 'language',
+    portal_selector: '#language',
+    question: label,
+  }]);
+  assert.deepEqual(result.invalidatedQuestionKeys, [label.toLowerCase()]);
+});
+
 test('refused required and optional answers cannot re-enter a packet through the stored-question merge', async () => {
   const fields = [
     { label: 'Are you able to work onsite in our office five days per week?* question_1', selector: '#q1', inputType: 'select', maxLength: null, options: ['Yes', 'No'] },
