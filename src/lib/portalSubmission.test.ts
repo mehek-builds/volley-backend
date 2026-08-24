@@ -4316,6 +4316,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   const capabilityIndex = actions.findIndex((action) => action.type === 'requireCapability');
   const countryOptionIndex = actions.findIndex((action) => action.label === 'phone_country_option');
   const phoneIndex = actions.findIndex((action) => action.type === 'fill' && action.label === 'phone');
+  const countryWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_dial_code_visible');
   const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
   const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
 
@@ -4325,7 +4326,8 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(countryOpenIndex, lateCookieClearedIndex + 1);
   assert.ok(countryOptionIndex > countryOpenIndex);
   assert.ok(phoneIndex > countryOptionIndex);
-  assert.equal(countryProofIndex, phoneIndex + 1);
+  assert.equal(countryWaitIndex, phoneIndex + 1);
+  assert.equal(countryProofIndex, countryWaitIndex + 1);
   assert.ok(phoneProofIndex > countryProofIndex);
   assert.deepEqual(actions[countryOpenIndex], {
     type: 'click',
@@ -4369,11 +4371,19 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneIndex]?.value, '0567417451');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
   assert.equal(actions[phoneIndex]?.optional, false);
-  assert.equal(actions[countryProofIndex]?.attribute, 'data-dial-code');
+  assert.deepEqual(actions[countryWaitIndex], {
+    type: 'waitForSelector',
+    selector: 'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) [class*="iti__selected-dial-code"]:visible',
+    label: 'workable_phone_dial_code_visible',
+    optional: false,
+    timeout: 10_000,
+  });
+  assert.equal(actions[countryProofIndex]?.attribute, undefined);
+  assert.equal(actions[countryProofIndex]?.expectedValueIncludes, '+971');
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
   assert.equal(
     actions[countryProofIndex]?.selector,
-    '[role="option"][data-country-code="ae"][data-dial-code="971"][aria-selected="true"]',
+    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) [class*="iti__selected-dial-code"]:visible',
   );
   assert.equal(actions[countryProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
@@ -4385,12 +4395,13 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
 });
 
-test('managed Workable reads the hidden selected option without a visibility wait', () => {
+test('managed Workable proves the visible dial code after the transient option list unmounts', () => {
   const actions = buildManagedPortalActions('workable', {
     ...capturePacket,
     phone: '+1 213 574 6270',
   });
   const countryOpen = actions.find((action) => action.label === 'phone_country_open');
+  const countryWait = actions.find((action) => action.label === 'workable_phone_dial_code_visible');
   const countryProof = actions.find((action) => action.label === 'filled_field:phone_country');
 
   assert.equal(
@@ -4398,14 +4409,18 @@ test('managed Workable reads the hidden selected option without a visibility wai
     'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
       + 'button[aria-label="Telephone country code"][aria-controls]:visible',
   );
-  assert.equal(actions.some((action) => action.label === 'workable_phone_country_selected'), false);
+  assert.equal(
+    countryWait?.selector,
+    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) [class*="iti__selected-dial-code"]:visible',
+  );
+  assert.equal(countryWait?.optional, false);
   assert.equal(
     countryProof?.selector,
-    '[role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"]',
+    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) [class*="iti__selected-dial-code"]:visible',
   );
-  assert.doesNotMatch(countryProof?.selector ?? '', /:visible/);
-  assert.equal(countryProof?.attribute, 'data-dial-code');
+  assert.equal(countryProof?.attribute, undefined);
   assert.equal(countryProof?.requireUnique, true);
+  assert.equal(countryProof?.expectedValueIncludes, '+1');
   assert.equal(countryProof?.expectedValueDigits, '1');
 });
 
@@ -4423,6 +4438,7 @@ test('managed Workable US phone selects exact United States and proves national 
   const countryOpenIndex = actions.findIndex((action) => action.label === 'phone_country_open');
   const countryOptionIndex = actions.findIndex((action) => action.label === 'phone_country_option');
   const phoneIndex = actions.findIndex((action) => action.type === 'fill' && action.label === 'phone');
+  const countryWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_dial_code_visible');
   const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
   const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
 
@@ -4439,12 +4455,14 @@ test('managed Workable US phone selects exact United States and proves national 
   });
   assert.equal(actions[phoneIndex]?.value, '2135746270');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
-  assert.equal(countryProofIndex, phoneIndex + 1);
-  assert.equal(actions[countryProofIndex]?.attribute, 'data-dial-code');
+  assert.equal(countryWaitIndex, phoneIndex + 1);
+  assert.equal(countryProofIndex, countryWaitIndex + 1);
+  assert.equal(actions[countryProofIndex]?.attribute, undefined);
+  assert.equal(actions[countryProofIndex]?.expectedValueIncludes, '+1');
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '1');
   assert.equal(
     actions[countryProofIndex]?.selector,
-    '[role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"]',
+    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) [class*="iti__selected-dial-code"]:visible',
   );
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);

@@ -4778,7 +4778,7 @@ function isProtectedManagedAction(
   // whether the transcript upload took the resume's control. A trim that dropped it would leave the
   // run unable to tell a resume that is still attached from one that was replaced, which is the
   // exact silence this read was added to break.
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_assertion_capability$|teamtailor_resume_upload_complete$)/
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_(?:assertion_capability|dial_code_visible)$|teamtailor_resume_upload_complete$)/
     .test(label);
 }
 
@@ -5165,6 +5165,11 @@ const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
   + 'button[aria-label="Telephone country code"][aria-controls]:visible';
+// The option list is an opening-time control, not durable selected-state evidence. Current Workable
+// unmounts that list after the phone input settles while retaining the visible intl-tel-input dial
+// code beside the number. Read that exact, applicant-visible value from the application form.
+const WORKABLE_PHONE_COUNTRY_VALUE_SELECTOR =
+  `${MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR} [class*="iti__selected-dial-code"]:visible`;
 // Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
 // city input before the visible address autocomplete on current forms, so a plain comma list can
 // still pick the wrong control. The city arm exists only when no visible address control exists.
@@ -5225,7 +5230,6 @@ type WorkablePhoneCountryPlan = {
   dialCode: string;
   displayedDialCode: string;
   optionSelector: string;
-  selectedOptionSelector: string;
 };
 
 type WorkablePhonePlan = {
@@ -5246,11 +5250,6 @@ function digitsOnly(value: string | null | undefined): string {
 function workablePhoneCountryOptionSelector(countryCode: string, dialCode: string): string {
   return `[role="option"][data-country-code="${countryCode}"][data-dial-code="${dialCode}"]`
     + `[id$="__item-${countryCode}"]:visible`;
-}
-
-function workablePhoneCountrySelectedOptionSelector(countryCode: string, dialCode: string): string {
-  return `[role="option"][data-country-code="${countryCode}"][data-dial-code="${dialCode}"]`
-    + '[aria-selected="true"]';
 }
 
 function workablePhonePlan(phone: string | undefined): WorkablePhonePlan | null {
@@ -5277,7 +5276,6 @@ function workablePhonePlan(phone: string | undefined): WorkablePhonePlan | null 
       dialCode: spec.dialCode,
       displayedDialCode,
       optionSelector: workablePhoneCountryOptionSelector(spec.countryCode, spec.dialCode),
-      selectedOptionSelector: workablePhoneCountrySelectedOptionSelector(spec.countryCode, spec.dialCode),
     },
   };
 }
@@ -5350,18 +5348,25 @@ function pushWorkableManagedPhoneActions(
     requireUnique: true,
   });
   if (plan.country) {
-    // Workable keeps the selected option mounted but hidden after the listbox closes. A visibility
-    // wait therefore times out even though aria-selected and the exact dial code are already
-    // present. Read that hidden submitted state directly and use the extract stability window.
+    // Workable unmounts the option list after the number fill, so its transient aria-selected row
+    // cannot be the final proof. The selected dial code remains visibly rendered beside the phone
+    // input and is the exact state the employer will receive.
+    actions.push({
+      type: 'waitForSelector',
+      selector: WORKABLE_PHONE_COUNTRY_VALUE_SELECTOR,
+      label: 'workable_phone_dial_code_visible',
+      optional: false,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
     actions.push({
       type: 'extract',
-      selector: plan.country.selectedOptionSelector,
-      attribute: 'data-dial-code',
+      selector: WORKABLE_PHONE_COUNTRY_VALUE_SELECTOR,
       label: 'filled_field:phone_country',
       optional: false,
       timeout: MANAGED_FILL_TIMEOUT_MS,
       requireUnique: true,
       requireNonEmpty: true,
+      expectedValueIncludes: plan.country.displayedDialCode,
       expectedValueDigits: plan.country.dialCode,
       stabilityWindowMs: 1_200,
     });
