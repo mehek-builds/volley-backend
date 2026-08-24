@@ -5225,7 +5225,6 @@ type WorkablePhoneCountryPlan = {
   dialCode: string;
   displayedDialCode: string;
   optionSelector: string;
-  selectedOptionSelector: string;
 };
 
 type WorkablePhonePlan = {
@@ -5246,11 +5245,6 @@ function digitsOnly(value: string | null | undefined): string {
 function workablePhoneCountryOptionSelector(countryCode: string, dialCode: string): string {
   return `[role="option"][data-country-code="${countryCode}"][data-dial-code="${dialCode}"]`
     + `[id$="__item-${countryCode}"]:visible`;
-}
-
-function workablePhoneCountrySelectedOptionSelector(countryCode: string, dialCode: string): string {
-  return `[role="option"][data-country-code="${countryCode}"][data-dial-code="${dialCode}"]`
-    + '[aria-selected="true"]';
 }
 
 function workablePhonePlan(phone: string | undefined): WorkablePhonePlan | null {
@@ -5277,7 +5271,6 @@ function workablePhonePlan(phone: string | undefined): WorkablePhonePlan | null 
       dialCode: spec.dialCode,
       displayedDialCode,
       optionSelector: workablePhoneCountryOptionSelector(spec.countryCode, spec.dialCode),
-      selectedOptionSelector: workablePhoneCountrySelectedOptionSelector(spec.countryCode, spec.dialCode),
     },
   };
 }
@@ -5331,21 +5324,12 @@ function pushWorkableManagedPhoneActions(
       timeout: MANAGED_FILL_TIMEOUT_MS,
       requireUnique: true,
     });
-    actions.push({
-      type: 'click',
-      selector: plan.country.optionSelector,
-      label: 'phone_country_option',
-      optional: false,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-      requireUnique: true,
-    });
-    // Workable mounts the exact selected option immediately after the country click, then can
-    // unmount the option list while the phone input settles. Prove the exact country while that
-    // widget-owned state is available. The following phone extract proves that the later number
-    // fill also persisted, and the atomic submit binding covers the final form payload.
+    // Prove the exact unique option while Workable's list is open. The widget removes the option
+    // from the DOM as part of the click, so a post-click selector can never be a reliable witness.
+    // The next action clicks this same exact selector, and both actions are required.
     actions.push({
       type: 'extract',
-      selector: plan.country.selectedOptionSelector,
+      selector: plan.country.optionSelector,
       attribute: 'data-dial-code',
       label: 'filled_field:phone_country',
       optional: false,
@@ -5354,6 +5338,14 @@ function pushWorkableManagedPhoneActions(
       requireNonEmpty: true,
       expectedValueDigits: plan.country.dialCode,
       stabilityWindowMs: 1_200,
+    });
+    actions.push({
+      type: 'click',
+      selector: plan.country.optionSelector,
+      label: 'phone_country_option',
+      optional: false,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+      requireUnique: true,
     });
   }
   actions.push({

@@ -4323,9 +4323,9 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(lateCookieDeclineIndex, capabilityIndex + 1);
   assert.equal(lateCookieClearedIndex, lateCookieDeclineIndex + 1);
   assert.equal(countryOpenIndex, lateCookieClearedIndex + 1);
-  assert.ok(countryOptionIndex > countryOpenIndex);
-  assert.equal(countryProofIndex, countryOptionIndex + 1);
-  assert.equal(phoneIndex, countryProofIndex + 1);
+  assert.equal(countryProofIndex, countryOpenIndex + 1);
+  assert.equal(countryOptionIndex, countryProofIndex + 1);
+  assert.equal(phoneIndex, countryOptionIndex + 1);
   assert.equal(phoneProofIndex, phoneIndex + 1);
   assert.deepEqual(actions[countryOpenIndex], {
     type: 'click',
@@ -4373,7 +4373,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
   assert.equal(
     actions[countryProofIndex]?.selector,
-    '[role="option"][data-country-code="ae"][data-dial-code="971"][aria-selected="true"]',
+    '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible',
   );
   assert.equal(actions[countryProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
@@ -4385,7 +4385,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
 });
 
-test('managed Workable proves the exact selected country before the transient option list unmounts', () => {
+test('managed Workable proves the exact country option before clicking the transient list item', () => {
   const actions = buildManagedPortalActions('workable', {
     ...capturePacket,
     phone: '+1 213 574 6270',
@@ -4401,7 +4401,7 @@ test('managed Workable proves the exact selected country before the transient op
   assert.equal(actions.some((action) => action.label === 'workable_phone_dial_code_visible'), false);
   assert.equal(
     countryProof?.selector,
-    '[role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"]',
+    '[role="option"][data-country-code="us"][data-dial-code="1"][id$="__item-us"]:visible',
   );
   assert.equal(countryProof?.attribute, 'data-dial-code');
   assert.equal(countryProof?.requireUnique, true);
@@ -4427,7 +4427,8 @@ test('managed Workable US phone selects exact United States and proves national 
 
   assert.equal(lateCookieClearedIndex, lateCookieDeclineIndex + 1);
   assert.equal(countryOpenIndex, lateCookieClearedIndex + 1);
-  assert.equal(countryOptionIndex, countryOpenIndex + 1);
+  assert.equal(countryProofIndex, countryOpenIndex + 1);
+  assert.equal(countryOptionIndex, countryProofIndex + 1);
   assert.deepEqual(actions[countryOptionIndex], {
     type: 'click',
     selector: '[role="option"][data-country-code="us"][data-dial-code="1"][id$="__item-us"]:visible',
@@ -4436,15 +4437,14 @@ test('managed Workable US phone selects exact United States and proves national 
     timeout: 10_000,
     requireUnique: true,
   });
-  assert.equal(countryProofIndex, countryOptionIndex + 1);
-  assert.equal(phoneIndex, countryProofIndex + 1);
+  assert.equal(phoneIndex, countryOptionIndex + 1);
   assert.equal(actions[phoneIndex]?.value, '2135746270');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.attribute, 'data-dial-code');
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '1');
   assert.equal(
     actions[countryProofIndex]?.selector,
-    '[role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"]',
+    '[role="option"][data-country-code="us"][data-dial-code="1"][id$="__item-us"]:visible',
   );
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
