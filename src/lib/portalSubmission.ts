@@ -34,6 +34,7 @@ import {
   profileAnswerAliases,
   resolveProfileField,
   selfIdentificationDeclineWording,
+  usableOptions,
 } from './profileFieldResolution';
 import type { ElementHandle, Locator } from 'playwright-core';
 import { browserApplicationCapability, type BrowserApplicationFamily } from './browserApplicationCapabilities';
@@ -65,6 +66,10 @@ import {
   postingCountryFromJobContext,
   type JobCountry,
 } from './jobLocation';
+import {
+  paylocityCountryIsUnitedStates,
+  paylocityFieldIsOpenTextAutocomplete,
+} from './paylocityFields';
 
 // Portal field ids legitimately contain CSS-syntax characters (Greenhouse uses UUIDs, others use
 // dots and colons), so they are matched with the [id="..."] attribute form rather than #id. Inside
@@ -1329,13 +1334,21 @@ export function ripplingListboxSelector(inputId: string): string {
   return `[id="${quoteAttr(inputId)}-list"]`;
 }
 
+/* Paylocity's built-in dropdown ids are stable, but its popup id is not. The control does expose
+ * aria-expanded while its one listbox is open, so the selector keeps the control id in the proof
+ * and refuses to read a listbox unless that exact control says it owns an open popup. */
+export function paylocityListboxSelector(inputId: string): string {
+  return `body:has([id="${quoteAttr(inputId)}"][aria-expanded="true"]) [role="listbox"]:visible`;
+}
+
 function optionProbeIdForSelector(selector: string | undefined): string | undefined {
   // Matched on the SELECTOR as well as the label because the provider echoes `{selector, value}`
   // and drops `label` entirely (managed-browser.js), so the selector is the only key that is
   // guaranteed to come back.
   return selector?.match(/^\[id="react-select-(.+)-listbox"\]$/)?.[1]
     ?? selector?.match(/^\[id="(.+)-list"\]$/)?.[1]
-    ?? selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_-]*)"\]:is\(select\)$/)?.[1];
+    ?? selector?.match(/^body:has\(\[id="([A-Za-z][A-Za-z0-9_.:-]*)"\]\[aria-expanded="true"\]\) \[role="listbox"\]:visible$/)?.[1]
+    ?? selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_.:-]*)"\]:is\(select\)$/)?.[1];
 }
 
 /**
@@ -1537,16 +1550,19 @@ export const MANAGED_OPTION_PROBE_MAX_CONTROLS = 80;
  */
 const MANAGED_OPTION_PROBE_SKIP_IDS = new Set<string>(['country', 'candidate-location']);
 const MANAGED_FIXED_CLOSED_CONTROL_IDS = new Set<string>(GREENHOUSE_OPTION_PROBE_IDS);
+const PAYLOCITY_OPTION_PROBE_SKIP_IDS = new Set<string>(['public-site-address-country']);
 
-/** `#question_37228964002` or `[id="school--0"]`, and nothing that is not a plain id selector. */
+/** `#question_37228964002`, `#info\\.desiredSalaryType`, or `[id="school--0"]`. */
 function controlIdFromDiscoveredSelector(selector: string | undefined | null): string | undefined {
   const trimmed = (selector ?? '').trim();
   if (!trimmed) return undefined;
   // Rejects the escaped array-name selectors Greenhouse gives checkbox groups
   // (`#question_67998838\[\]_731437070`): a checkbox group has no listbox, so probing it would spend
   // three actions to read nothing.
-  return trimmed.match(/^#([A-Za-z][A-Za-z0-9_-]*)$/)?.[1]
-    ?? trimmed.match(/^(?:[a-z][a-z0-9-]*)?\[id="([A-Za-z][A-Za-z0-9_-]*)"\]$/i)?.[1];
+  const hashId = trimmed.match(/^#([A-Za-z](?:[A-Za-z0-9_-]|\\[.:-])*)$/)?.[1]
+    ?.replace(/\\([.:-])/g, '$1');
+  return hashId
+    ?? trimmed.match(/^(?:[a-z][a-z0-9-]*)?\[id="([A-Za-z][A-Za-z0-9_.:-]*)"\]$/i)?.[1];
 }
 
 const MANAGED_OPTION_NAME_KEY_PREFIX = 'name:';
@@ -1681,22 +1697,27 @@ export type ManagedOptionProbeTarget = {
 function managedOptionProbeTarget(
   field: { label: string; selector?: string; durableSelector?: string | null; inputType?: string; role?: string | null; required?: boolean },
   discoveryRoleCapability = false,
-  greenhouseFamily = false,
+  portal?: SupportedPortal,
 ): ManagedOptionProbeTarget | undefined {
   const controlId = managedOptionProbeControlId(field);
+  const family = portal ? portalFamily(portal) : undefined;
   // A stable name is enough to join discovery options to the later packet. It is not a DOM id and
   // cannot be interpolated into Greenhouse's id-based React-select probe selectors.
   if (!controlId
     || controlId.startsWith(MANAGED_OPTION_NAME_KEY_PREFIX)
     || controlId.startsWith(MANAGED_OPTION_SELECTOR_KEY_PREFIX)
-    || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)) return undefined;
+    || MANAGED_OPTION_PROBE_SKIP_IDS.has(controlId)
+    || (family === 'paylocity' && (
+      PAYLOCITY_OPTION_PROBE_SKIP_IDS.has(controlId)
+      || paylocityFieldIsOpenTextAutocomplete(field)
+    ))) return undefined;
   const inputType = (field.inputType ?? '').trim().toLowerCase();
   const role = (field.role ?? '').trim().toLowerCase();
   const kind = /^select(?:-one|-multiple)?$/.test(inputType) ? 'native' : 'custom';
   const expectsClosed = kind === 'native'
     || /^(?:combobox|listbox)$/.test(inputType)
     || (discoveryRoleCapability && /^(?:combobox|listbox)$/.test(role))
-    || (greenhouseFamily && /^question_\d+$/.test(controlId) && isGreenhouseReactSelectQuestion(field.label))
+    || (family === 'greenhouse' && /^question_\d+$/.test(controlId) && isGreenhouseReactSelectQuestion(field.label))
     || MANAGED_FIXED_CLOSED_CONTROL_IDS.has(controlId);
   // Greenhouse's education row mixes React-selects with a plain text graduation-year input. The
   // shared `--0` suffix identifies a row, not a closed control. In particular, end-year--0 must be
@@ -1731,19 +1752,18 @@ export function managedOptionProbeTargets(
    * employer does not offer ('No' into a list reading 'I am not a protected veteran' - measured
    * on Easy Dynamics, 2026-08-20). The probe machinery is family-agnostic; only the popup's id
    * shape differs, and ripplingListboxSelector carries it. */
-  if (portalFamily(portal) !== 'greenhouse' && portalFamily(portal) !== 'rippling') return [];
+  if (!['greenhouse', 'rippling', 'paylocity'].includes(portalFamily(portal))) return [];
   // A hardcoded education probe is only "already read" when it returned a usable list. Loading,
   // empty and windowed reads are absent from alreadyRead and must enter this fail-closed stage.
   const seen = new Set<string>();
   for (const [inputId, options] of Object.entries(alreadyRead)) {
-    if (options.length > 0) seen.add(inputId);
+    if (usableOptions(options).length > 0) seen.add(inputId);
   }
   const required: ManagedOptionProbeTarget[] = [];
   const optional: ManagedOptionProbeTarget[] = [];
-  const greenhouseFamily = portalFamily(portal) === 'greenhouse';
   for (const field of discovered) {
-    if (field.options && field.options.length > 0) continue;
-    const target = managedOptionProbeTarget(field, discoveryRoleCapability, greenhouseFamily);
+    if (usableOptions(field.options).length > 0) continue;
+    const target = managedOptionProbeTarget(field, discoveryRoleCapability, portal);
     if (!target || seen.has(target.controlId)) continue;
     seen.add(target.controlId);
     (target.required ? required : optional).push(target);
@@ -1759,9 +1779,8 @@ function detailedManagedOptionProbeTargets(
 ): ManagedOptionProbeTarget[] {
   const ids = managedOptionProbeTargets(portal, discovered, alreadyRead, discoveryRoleCapability);
   const byId = new Map<string, ManagedOptionProbeTarget>();
-  const greenhouseFamily = portalFamily(portal) === 'greenhouse';
   for (const field of discovered) {
-    const target = managedOptionProbeTarget(field, discoveryRoleCapability, greenhouseFamily);
+    const target = managedOptionProbeTarget(field, discoveryRoleCapability, portal);
     if (target && !byId.has(target.controlId)) byId.set(target.controlId, target);
   }
   return ids.flatMap((id) => byId.get(id) ?? []);
@@ -1801,7 +1820,9 @@ function pushDiscoveredOptionProbe(actions: ManagedBrowserAction[], target: Mana
       type: 'extract',
       selector: portal && portalFamily(portal) === 'rippling'
         ? ripplingListboxSelector(target.controlId)
-        : reactSelectListboxSelector(target.controlId),
+        : portal && portalFamily(portal) === 'paylocity'
+          ? paylocityListboxSelector(target.controlId)
+          : reactSelectListboxSelector(target.controlId),
       label: `${MANAGED_OPTION_EXTRACT_PREFIX}${target.controlId}`,
       optional: true,
       timeout: MANAGED_FILL_TIMEOUT_MS,
@@ -1915,7 +1936,7 @@ export function managedOptionProbeAnalysis(
   const invalidReads = new Map<string, Set<string>>();
   for (const result of results) {
     for (const item of result?.extracted ?? []) {
-      const closedId = item.selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_-]*)"\]:is\(\[role="combobox"\],\[aria-haspopup="listbox"\]\)$/)?.[1];
+      const closedId = item.selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_.:-]*)"\]:is\(\[role="combobox"\],\[aria-haspopup="listbox"\]\)$/)?.[1];
       if (closedId && managedExtractedValue(item.value)) closedIds.add(closedId);
       const id = typeof item.label === 'string' && item.label.startsWith(MANAGED_OPTION_EXTRACT_PREFIX)
         ? item.label.slice(MANAGED_OPTION_EXTRACT_PREFIX.length)
@@ -2723,6 +2744,18 @@ function managedSelect(
 ) {
   if (!value) return;
   actions.push({ type: 'select', selector, value, label, optional, timeout });
+}
+
+function managedFillByLabelText(
+  actions: ManagedBrowserAction[],
+  text: string,
+  value: string | undefined,
+  label: string,
+  optional = true,
+  timeout = MANAGED_FILL_TIMEOUT_MS,
+) {
+  if (!value) return;
+  actions.push({ type: 'fillByLabelText', text, value, label, optional, timeout });
 }
 
 // The resume upload is always optional + bounded. On a real ATS form the file input is present and
@@ -6860,12 +6893,22 @@ function pushFixedFieldActions(
     // self-identification belongs to the student alone and is never inferred or auto-answered.
   } else if (family === 'paylocity') {
     const parts = packet.fullName.trim().split(/\s+/);
+    const profile = packet.applicationProfile ?? {};
     managedFill(actions, paylocityId('info.firstName'), parts[0], 'first_name');
     managedFill(actions, paylocityId('info.lastName'), parts.slice(1).join(' '), 'last_name');
     managedFill(actions, paylocityId('info.email'), packet.email, 'email');
     managedFill(actions, paylocityId('info.cellPhone'), packet.phone, 'phone');
+    managedFill(actions, paylocityId('info.preferredName'), profile.preferred_first_name, 'preferred_name');
     managedFill(actions, paylocityId('info.linkedIn'), packet.linkedinUrl, 'linkedin');
-    managedFill(actions, '#public-site-address-city', packet.city, 'location');
+    /* Country and state are ARIA comboboxes on Paylocity, not plain text fields. The runner's
+     * semantic label action selects only an exact offered value and verifies what remained in the
+     * control. A non-US address never touches the explicitly US-only state control. */
+    managedFillByLabelText(actions, 'Country', profile.address_country, 'address_country');
+    if (paylocityCountryIsUnitedStates(profile.address_country)) {
+      managedFillByLabelText(actions, 'State', profile.address_state, 'address_state');
+    }
+    managedFill(actions, '#public-site-address-city', profile.address_city ?? packet.city, 'location');
+    managedFill(actions, '#public-site-address-zip', profile.address_zip, 'postal_code');
     managedUpload(actions, PAYLOCITY_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, PAYLOCITY_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
     // Work history and education live on step ONE and were previously skipped entirely, which is
@@ -6884,8 +6927,8 @@ function pushFixedFieldActions(
     // NOT touched: #useAttachedResumeToFillOutApplication. Paylocity offers to parse the uploaded
     // resume back into the form, which would race our own fills and overwrite them with whatever its
     // parser inferred. Leaving it unchecked keeps the profile the single source of truth.
-    // Also not filled: the required address-1/county/state/zip block. The packet carries only `city`,
-    // so those surface as required-field blockers for the human rather than being invented here.
+    // Address line 1 and county have no stored profile facts. They remain exact dashboard questions
+    // and are never inferred from the city, state, or postal code.
   } else if (family === 'rippling') {
     const parts = packet.fullName.trim().split(/\s+/);
     managedFill(actions, '[data-testid="input-first_name"]', parts[0], 'first_name');

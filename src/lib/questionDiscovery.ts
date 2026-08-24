@@ -32,6 +32,7 @@ import {
 } from './availabilityWindow';
 import type { CountryWorkEligibility } from './workEligibility';
 import { eligibilityForCountry, namedCountryCodes } from './workEligibility';
+import { paylocityCanonicalFieldLabel } from './paylocityFields';
 
 // R-055 fix: the dashboard-driven submission flow used to never discover a posting's custom
 // questions (GPA, sponsorship, GitHub, essays, ...) - only the Chrome extension did, client-side.
@@ -6604,7 +6605,10 @@ export function normalizeStoredPortalQuestions<T extends {
   const normalized: T[] = [];
   const indexByLabel = new Map<string, number>();
   for (const question of questions) {
-    const label = normalizeDiscoveredLabel(question.question);
+    const discoveredLabel = normalizeDiscoveredLabel(question.question);
+    const label = (portal === 'paylocity' || portal === 'controlled_paylocity')
+      ? paylocityCanonicalFieldLabel({ selector: question.portal_selector }) ?? discoveredLabel
+      : discoveredLabel;
     if (!label || isFixedPortalProfileField(portal, label)) continue;
     if ((portal === 'recruitee' || portal === 'manual_recruitee')
       && recruiteeFixedCandidateSelector(question.portal_selector)) continue;
