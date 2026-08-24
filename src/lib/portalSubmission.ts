@@ -5225,6 +5225,7 @@ type WorkablePhoneCountryPlan = {
   dialCode: string;
   displayedDialCode: string;
   optionSelector: string;
+  selectedOptionSelector: string;
 };
 
 type WorkablePhonePlan = {
@@ -5245,6 +5246,11 @@ function digitsOnly(value: string | null | undefined): string {
 function workablePhoneCountryOptionSelector(countryCode: string, dialCode: string): string {
   return `[role="option"][data-country-code="${countryCode}"][data-dial-code="${dialCode}"]`
     + `[id$="__item-${countryCode}"]:visible`;
+}
+
+function workablePhoneCountrySelectedOptionSelector(countryCode: string, dialCode: string): string {
+  return `[role="option"][data-country-code="${countryCode}"][data-dial-code="${dialCode}"]`
+    + '[aria-selected="true"]';
 }
 
 function workablePhonePlan(phone: string | undefined): WorkablePhonePlan | null {
@@ -5271,6 +5277,7 @@ function workablePhonePlan(phone: string | undefined): WorkablePhonePlan | null 
       dialCode: spec.dialCode,
       displayedDialCode,
       optionSelector: workablePhoneCountryOptionSelector(spec.countryCode, spec.dialCode),
+      selectedOptionSelector: workablePhoneCountrySelectedOptionSelector(spec.countryCode, spec.dialCode),
     },
   };
 }
@@ -5345,13 +5352,13 @@ function pushWorkableManagedPhoneActions(
   if (plan.country) {
     actions.push({
       type: 'extract',
-      selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
+      selector: plan.country.selectedOptionSelector,
+      attribute: 'data-dial-code',
       label: 'filled_field:phone_country',
       optional: false,
       timeout: MANAGED_FILL_TIMEOUT_MS,
       requireUnique: true,
       requireNonEmpty: true,
-      expectedValueIncludes: plan.country.displayedDialCode,
       expectedValueDigits: plan.country.dialCode,
       stabilityWindowMs: 1_200,
     });

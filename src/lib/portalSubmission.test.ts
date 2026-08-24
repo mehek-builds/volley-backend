@@ -4369,12 +4369,11 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneIndex]?.value, '0567417451');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
   assert.equal(actions[phoneIndex]?.optional, false);
-  assert.equal(actions[countryProofIndex]?.expectedValueIncludes, '+971');
+  assert.equal(actions[countryProofIndex]?.attribute, 'data-dial-code');
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
   assert.equal(
     actions[countryProofIndex]?.selector,
-    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
-      + 'button[aria-label="Telephone country code"][aria-controls]:visible',
+    '[role="option"][data-country-code="ae"][data-dial-code="971"][aria-selected="true"]',
   );
   assert.equal(actions[countryProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
@@ -4416,8 +4415,12 @@ test('managed Workable US phone selects exact United States and proves national 
   });
   assert.equal(actions[phoneIndex]?.value, '2135746270');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
-  assert.equal(actions[countryProofIndex]?.expectedValueIncludes, '+1');
+  assert.equal(actions[countryProofIndex]?.attribute, 'data-dial-code');
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '1');
+  assert.equal(
+    actions[countryProofIndex]?.selector,
+    '[role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"]',
+  );
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
   assert.equal(actions[phoneProofIndex]?.expectedValueDigits, '2135746270');
