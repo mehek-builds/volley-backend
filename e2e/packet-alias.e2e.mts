@@ -15,9 +15,8 @@
  *
  * WHAT IS NOT: POST /resume/generate is not called over HTTP. Reaching its alias code needs a live
  * Anthropic call, a PDF render and a blob upload, for the same reason e2e/README.md gives for
- * applied-badge.e2e.mts. The BEFORE side instead runs main's own gate, and refuses to run at all
- * unless it still finds that gate in `git show origin/main:src/routes/resume.ts`, so it cannot
- * quietly become a story about code that no longer exists.
+ * applied-badge.e2e.mts. The test verifies that origin/main invokes the shared plan without an
+ * application-link gate, then exercises that plan and the real alias foreign key directly.
  */
 process.env.VERCEL = '1';
 process.env.LOG_LEVEL = 'silent';
@@ -35,7 +34,7 @@ import { execFileSync } from 'node:child_process';
 const { db, pool } = await import('../src/db/index.ts');
 const { users, generated_resumes, application_email_aliases } = await import('../src/db/schema.ts');
 const { eq } = await import('drizzle-orm');
-const { applicationAliasFor, applicationForwardingAddress, ensureApplicationEmailAlias } =
+const { applicationForwardingAddress, ensureApplicationEmailAlias } =
   await import('../src/lib/applicationEmail.ts');
 const { planPacketApplicantEmail } = await import('../src/lib/packetApplicantEmail.ts');
 const { applicationAliasDeliverability } = await import('../src/lib/applicationEmailDeliverability.ts');
@@ -68,53 +67,18 @@ const deliverable = async () => ({
   checked_at: new Date().toISOString(),
 });
 
-/**
- * MAIN'S GATE, restated, and verified against main's own source before it is trusted.
- *
- * `application` is the optional request field. Everything below is `git show
- * origin/main:src/routes/resume.ts` lines 485 to 518, with the four expressions kept in order.
- */
-async function mainWouldWriteAlias(input: {
-  userId: string;
-  resumeId: string;
-  contactEmail: string;
-  application: { portal_url: string; ats_name: string } | undefined;
-}): Promise<{ aliasAttempted: boolean; pinned: boolean }> {
-  const aliasDeliverability = input.application && input.contactEmail ? await deliverable() : null;
-  const litosApplicationAlias = aliasDeliverability?.deliverable
-    ? applicationAliasFor(input.userId, input.resumeId)
-    : null;
-  const aliasForwardTo = litosApplicationAlias && input.contactEmail
-    ? await applicationForwardingAddress(input.userId, input.contactEmail)
-    : null;
-  const applicationEmail = litosApplicationAlias && aliasForwardTo
-    ? { alias: litosApplicationAlias, forwards_to: aliasForwardTo, mode: 'litos_application_alias' as const }
-    : null;
-  const pinned = Boolean(input.application && input.contactEmail);
-  if (applicationEmail) {
-    await ensureApplicationEmailAlias({
-      userId: input.userId,
-      applicationId: input.resumeId,
-      forwardTo: applicationEmail.forwards_to,
-    });
-  }
-  return { aliasAttempted: Boolean(applicationEmail), pinned };
-}
-
-function assertMainStillHasTheGate() {
+function assertMainPlansEveryPacketAlias() {
   const source = execFileSync('git', ['show', 'origin/main:src/routes/resume.ts'], { encoding: 'utf8' });
-  const expected = [
-    /const aliasDeliverability = body\.application && contactOfRecord\.email/,
-    /const litosApplicationAlias = aliasDeliverability\?\.deliverable \? applicationAliasFor\(userId, resumeId\) : null;/,
-    /const pinnedApplicantEmail: ApplicantEmailChoice \| null = body\.application && applicationContact\.email/,
-    /if \(applicationEmail\) \{\s*await ensureApplicationEmailAlias\(\{/,
-  ];
-  for (const pattern of expected) {
-    if (!pattern.test(source)) {
-      throw new Error(`REFUSING TO RUN: origin/main no longer contains ${pattern}. Re-read the route before trusting the BEFORE side.`);
-    }
+  const planStart = source.indexOf('const applicantEmailPlan = await planPacketApplicantEmail({');
+  const planEnd = source.indexOf('const applicationContact = contactOfRecord;', planStart);
+  if (planStart < 0 || planEnd < planStart) {
+    throw new Error('REFUSING TO RUN: origin/main no longer exposes the packet email plan where expected.');
   }
-  console.log('origin/main still carries the body.application gate this test measures');
+  const planBlock = source.slice(planStart, planEnd);
+  assert.match(planBlock, /contactEmail: contactOfRecord\.email/);
+  assert.doesNotMatch(planBlock, /body\.application\s*&&/);
+  assert.match(source, /if \(persisted && applicationEmail\) \{[\s\S]*?ensureApplicationEmailAlias\(\{/);
+  console.log('origin/main plans a tracked address without requiring a portal link');
 }
 
 async function seedUser(email: string | null): Promise<string> {
@@ -154,39 +118,12 @@ function check(label: string, fn: () => void) {
 }
 
 await assertThrowawayDatabase();
-assertMainStillHasTheGate();
+assertMainPlansEveryPacketAlias();
 await db.delete(application_email_aliases);
 await db.delete(generated_resumes);
 await db.delete(users);
 
-// ── BEFORE: main, generating the packet the dashboard generates before it knows the apply URL ──
-console.log('\nBEFORE (origin/main): a packet generated with no portal link');
-{
-  const userId = await seedUser(CONTACT);
-  const resumeId = await seedPacket(userId);
-  const outcome = await mainWouldWriteAlias({ userId, resumeId, contactEmail: CONTACT, application: undefined });
-  const count = await aliasRowCount(resumeId);
-  check('main writes no alias row', () => assert.equal(count, 0));
-  check('main pins no applicant email decision', () => assert.equal(outcome.pinned, false));
-  console.log(`       alias rows for this packet: ${count}`);
-}
-
-console.log('\nBEFORE (origin/main): the same packet, generated WITH a portal link');
-{
-  const userId = await seedUser(`with-portal-${CONTACT}`);
-  const resumeId = await seedPacket(userId);
-  await mainWouldWriteAlias({
-    userId,
-    resumeId,
-    contactEmail: CONTACT,
-    application: { portal_url: 'https://job-boards.greenhouse.io/flowtraders/jobs/8047166', ats_name: 'greenhouse' },
-  });
-  const count = await aliasRowCount(resumeId);
-  check('main writes an alias row only when the link happened to be known', () => assert.equal(count, 1));
-}
-
-// ── AFTER: this branch, same packet, same absent portal link ──────────────────────────────────
-console.log('\nAFTER (this branch): a packet generated with no portal link');
+console.log('\nCURRENT: a packet generated before its portal link is known');
 let trackedAddress = '';
 {
   const userId = await seedUser(`after-${CONTACT}`);
