@@ -2061,6 +2061,28 @@ test('resume packet download retries a failed response body without changing pac
   assert.equal(attempts, 2);
 });
 
+test('resume packet reuses the exact audited bytes without another storage read', async () => {
+  const audited = Buffer.from('%PDF-1.4\nexact audited packet\n%%EOF\n');
+  let resolveCalls = 0;
+  let fetchCalls = 0;
+  const bytes = await resumeBytesForPacket('users/user-1/resumes/audited.pdf', false, {
+    verifiedBytes: audited,
+    resolveObjectUrl: async () => {
+      resolveCalls += 1;
+      throw new Error('must not resolve after audit');
+    },
+    fetchObject: async () => {
+      fetchCalls += 1;
+      throw new Error('must not fetch after audit');
+    },
+  });
+
+  audited.fill(0);
+  assert.equal(bytes.toString('utf8'), '%PDF-1.4\nexact audited packet\n%%EOF\n');
+  assert.equal(resolveCalls, 0);
+  assert.equal(fetchCalls, 0);
+});
+
 test('the cover-letter degrade never swallows an expired resume', () => {
   /* buildPacket loads both documents, so an expired RESUME lands in the cover-letter catch too.
      Degrading it there logged a resume failure as an attachment problem and then re-entered
@@ -2094,7 +2116,7 @@ test('managed prepare and final or security-code submit rebuild controlled packe
   const managedBody = submitBody.slice(managedStart, directStart);
   assert.match(
     managedBody,
-    /const builtPacket = await buildPacket\(\s*row,\s*packetUsesControlledResumeFixture\(portal\),\s*packetAudit\.questions,\s*\)/,
+    /const builtPacket = await buildPacket\(\s*row,\s*packetUsesControlledResumeFixture\(portal\),\s*packetAudit\.questions,\s*false,\s*packetAudit\.pdfBytes,\s*\)/,
   );
   assert.match(
     managedBody,
