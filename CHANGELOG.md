@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Managed application email receiving proofs now renew through append-only signed delivery events
+  before the seven-day health window expires.
+- Workable submissions can retain and promote exact same-job receipt evidence across the public
+  short-link redirect and the delayed no-click continuation.
+
 ## [1.1.0] - 2026-08-02
 
 ### Added
