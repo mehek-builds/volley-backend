@@ -5165,6 +5165,12 @@ const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
   + 'button[aria-label="Telephone country code"][aria-controls]:visible';
+// Workable removes aria-controls, and on some variants swaps the closed trigger to a button,
+// immediately after an exact country option is selected. Keep the opening selector strict, but
+// prove the persisted closed value against both measured trigger shapes.
+const WORKABLE_PHONE_COUNTRY_VALUE_SELECTOR =
+  'div[role="combobox"][aria-label="Telephone country code"]:visible, '
+  + 'button[aria-label="Telephone country code"]:visible';
 // Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
 // city input before the visible address autocomplete on current forms, so a plain comma list can
 // still pick the wrong control. The city arm exists only when no visible address control exists.
@@ -5345,7 +5351,7 @@ function pushWorkableManagedPhoneActions(
   if (plan.country) {
     actions.push({
       type: 'extract',
-      selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
+      selector: WORKABLE_PHONE_COUNTRY_VALUE_SELECTOR,
       label: 'filled_field:phone_country',
       optional: false,
       timeout: MANAGED_FILL_TIMEOUT_MS,
