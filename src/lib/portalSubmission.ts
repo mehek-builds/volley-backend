@@ -5163,7 +5163,8 @@ const WORKABLE_ADDRESS_SELECTOR = 'input[name="address"]:visible';
 const WORKABLE_LEGACY_CITY_SELECTOR = 'input[name="city"]:visible';
 const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
-  'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible';
+  'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
+  + 'button[aria-label="Telephone country code"][aria-controls]:visible';
 // Workable removes aria-controls, and on some variants swaps the closed trigger to a button,
 // immediately after an exact country option is selected. Keep the opening selector strict, but
 // prove the persisted closed value against both measured trigger shapes.
