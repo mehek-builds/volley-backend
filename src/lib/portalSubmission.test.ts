@@ -42,6 +42,7 @@ import {
   MANAGED_OPTION_PROBE_ACTIONS_PER_CONTROL,
   MANAGED_OPTION_PROBE_MAX_CONTROLS,
   reactSelectListboxSelector,
+  paylocityListboxSelector,
   GREENHOUSE_OPTION_PROBE_IDS,
   MANAGED_ACTION_LIMIT,
   MANAGED_CONSENT_TICK_GUARD_LABEL,
@@ -4611,6 +4612,54 @@ test('Paylocity matches its dotted ids by attribute, since #info.firstName is in
   assert.doesNotMatch(first!.selector!, /#info\./, 'a #id selector cannot match an id containing a dot');
 });
 
+test('Paylocity fills every saved built-in profile fact and never treats a UAE address as a US state', () => {
+  const actions = buildManagedPortalActions('paylocity', {
+    ...capturePacket,
+    applicationProfile: {
+      phone: capturePacket.phone,
+      preferred_first_name: 'Taylor',
+      linkedin_url: capturePacket.linkedinUrl,
+      address_country: 'United Arab Emirates',
+      address_city: 'Dubai',
+      address_state: 'Dubai',
+      address_zip: '00000',
+    },
+  }, true);
+
+  assert.equal(actions.find((action) => action.label === 'preferred_name')?.selector, '[id="info.preferredName"]');
+  assert.equal(actions.some((action) => action.label === 'home_phone'), false, 'a mobile number is not proof of a home number');
+  assert.deepEqual(actions.find((action) => action.label === 'address_country'), {
+    type: 'fillByLabelText',
+    text: 'Country',
+    value: 'United Arab Emirates',
+    label: 'address_country',
+    optional: true,
+    timeout: 10_000,
+  });
+  assert.equal(actions.find((action) => action.label === 'location')?.value, 'Dubai');
+  assert.equal(actions.find((action) => action.label === 'postal_code')?.value, '00000');
+  assert.equal(actions.some((action) => action.label === 'address_state'), false);
+
+  const usActions = buildManagedPortalActions('paylocity', {
+    ...capturePacket,
+    applicationProfile: {
+      phone: capturePacket.phone,
+      address_country: 'United States',
+      address_city: 'Los Angeles',
+      address_state: 'California',
+      address_zip: '90007',
+    },
+  }, true);
+  assert.deepEqual(usActions.find((action) => action.label === 'address_state'), {
+    type: 'fillByLabelText',
+    text: 'State',
+    value: 'California',
+    label: 'address_state',
+    optional: true,
+    timeout: 10_000,
+  });
+});
+
 test('Paylocity walks its wizard, but every click is label-scoped and can never hit the terminal submit', () => {
   // Paylocity reuses the id #btn-submit for BOTH "Next Step" and the final submit, so an advance
   // selector that matches on the id alone would press Submit on the last step. Scoping by visible
@@ -7434,6 +7483,77 @@ test('a native select is read without clicking and resolves from its exact optio
     extracted: [{ selector: '[id="question_12345678"]:is(select)', value: IMC_HIGH_SCHOOL_OPTIONS.join('\n') }],
   }], [], true);
   assert.deepEqual(analysis.options.question_12345678, IMC_HIGH_SCHOOL_OPTIONS);
+  assert.deepEqual(analysis.failures, []);
+});
+
+test('Paylocity probes dotted built-in dropdown ids and skips its open address autocomplete', () => {
+  const discovered = [
+    {
+      label: 'Desired salary type',
+      selector: '[data-litos-discovered-1]',
+      durableSelector: '#info\\.desiredSalaryType',
+      inputType: 'text',
+      role: 'combobox',
+      options: ['Select...'],
+      required: true,
+    },
+    {
+      label: 'Address line 1 public-site-address-address-1',
+      selector: '[data-litos-discovered-2]',
+      durableSelector: '#public-site-address-address-1',
+      inputType: 'text',
+      role: 'combobox',
+      required: true,
+    },
+    {
+      label: 'Country United States public-site-address-country',
+      selector: '[data-litos-discovered-3]',
+      durableSelector: '#public-site-address-country',
+      inputType: 'text',
+      role: 'combobox',
+      required: true,
+    },
+    {
+      label: 'State Select a state public-site-address-us-state',
+      selector: '[data-litos-discovered-4]',
+      durableSelector: '#public-site-address-us-state',
+      inputType: 'text',
+      role: 'combobox',
+      required: true,
+    },
+  ];
+
+  assert.deepEqual(
+    managedOptionProbeTargets('paylocity', discovered, {}, true),
+    ['info.desiredSalaryType'],
+  );
+  const actions = buildManagedDiscoveredOptionProbeActions('paylocity', discovered, {}, true);
+  assert.equal(
+    actions.find((action) => action.label === `${MANAGED_OPTION_EXTRACT_PREFIX}info.desiredSalaryType`)?.selector,
+    paylocityListboxSelector('info.desiredSalaryType'),
+  );
+});
+
+test('Paylocity option evidence returns to the exact dotted control', () => {
+  const discovered = [{
+    label: 'Desired salary type',
+    selector: '[data-litos-discovered-1]',
+    durableSelector: '#info\\.desiredSalaryType',
+    inputType: 'text',
+    role: 'combobox',
+    required: true,
+  }];
+  const identitySelector = '[id="info.desiredSalaryType"]:is([role="combobox"],[aria-haspopup="listbox"])';
+  const analysis = managedOptionProbeAnalysis('paylocity', discovered, {}, [{
+    title: '', url: '', text: '',
+    extracted: [
+      { selector: identitySelector, value: 'info.desiredSalaryType' },
+      { selector: paylocityListboxSelector('info.desiredSalaryType'), value: 'Hourly\nSalary' },
+      { selector: paylocityListboxSelector('info.desiredSalaryType'), value: 'Hourly\nSalary' },
+    ],
+  }], [], true);
+
+  assert.deepEqual(analysis.options['info.desiredSalaryType'], ['Hourly', 'Salary']);
   assert.deepEqual(analysis.failures, []);
 });
 
