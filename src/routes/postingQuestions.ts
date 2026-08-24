@@ -60,7 +60,7 @@ import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '
 const paramsSchema = z.object({ jobId: z.string().uuid() });
 
 /** The board row a pre-script is about, plus what is needed to open its form. */
-type PostingTarget = {
+export type PostingTarget = {
   applyUrl: string;
   portal: SupportedPortal | null;
   company: string;
@@ -317,7 +317,7 @@ async function resolveFor(userId: string, questions: PostingQuestion[], target: 
   });
 }
 
-function prescriptResponse(
+export function prescriptResponse(
   jobId: string,
   target: PostingTarget,
   questions: PostingQuestion[],

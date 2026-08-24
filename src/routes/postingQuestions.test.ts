@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { buildManagedPrescriptActions, buildManagedDiscoveryActions } from '../lib/portalSubmission';
+import { resolvePrescript, type PostingQuestion } from '../lib/postingQuestions';
+import { prescriptResponse, type PostingTarget } from './postingQuestions';
 
 const ROUTE = readFileSync('src/routes/postingQuestions.ts', 'utf8');
 
@@ -91,6 +93,78 @@ test('the response lists only the questions that need her, and counts the rest',
   // The answer travelling to the client for an ask is either blank or something she typed herself.
   // Nothing on this endpoint drafts, and nothing infers.
   assert.doesNotMatch(ROUTE, /draftApplicationAnswer/);
+});
+
+const responseTarget: PostingTarget = {
+  applyUrl: 'https://job-boards.greenhouse.io/example/jobs/123',
+  portal: 'greenhouse',
+  company: 'Example',
+  title: 'Software Engineering Intern',
+  description: 'Build reliable systems.',
+  location: 'Chicago, Illinois',
+};
+
+test('the DGA wire response exposes a typed blocker and never invents a question', () => {
+  const blocker = {
+    kind: 'missing_question_text' as const,
+    required: true,
+    portal_input_type: 'textarea',
+    control_id: 'dga_response',
+    portal_selector: '#dga_response',
+  };
+  const response = prescriptResponse(
+    '00000000-0000-4000-8000-000000000001',
+    { ...responseTarget, portal: 'lever', company: 'DGA', applyUrl: 'https://jobs.lever.co/dga/abc' },
+    [],
+    [blocker],
+    'metadata_incomplete',
+    new Date('2026-08-23T12:00:00.000Z'),
+    true,
+    { questions: [], ask: [], metadata_blockers: [] },
+  );
+
+  assert.equal(response.discovery_status, 'metadata_incomplete');
+  assert.deepEqual(response.metadata_blockers, [blocker]);
+  assert.deepEqual(response.ask, []);
+  assert.equal(response.question_count, 0);
+});
+
+test('the Akuna and Jump wire responses carry exact employer choices to the dashboard', () => {
+  const cases = [{
+    company: 'Akuna',
+    question: 'Have you ever applied to a full time or internship position with Akuna in the past?',
+  }, {
+    company: 'Jump Trading',
+    question: 'Are you currently subject to a restrictive covenant, non-compete, or notice period?',
+  }];
+  for (const item of cases) {
+    const questions: PostingQuestion[] = [{
+      label: item.question,
+      input_type: 'select-one',
+      options: ['Yes', 'No'],
+      required: true,
+      max_length: null,
+    }];
+    const resolution = resolvePrescript(questions, {}, new Map(), { company: item.company });
+    const response = prescriptResponse(
+      '00000000-0000-4000-8000-000000000002',
+      { ...responseTarget, company: item.company },
+      questions,
+      [],
+      'ok',
+      new Date('2026-08-23T12:00:00.000Z'),
+      true,
+      resolution,
+    );
+
+    assert.equal(response.discovery_status, 'ok', item.company);
+    assert.deepEqual(response.metadata_blockers, [], item.company);
+    assert.equal(response.ask[0]?.question, item.question, item.company);
+    assert.deepEqual(response.ask[0]?.options, ['Yes', 'No'], item.company);
+    assert.equal(response.ask[0]?.answer, '', item.company);
+    assert.equal(response.ask[0]?.required, true, item.company);
+    assert.ok(response.ask[0]?.explanation, item.company);
+  }
 });
 
 test('the endpoint is authenticated and takes a board posting id', () => {
