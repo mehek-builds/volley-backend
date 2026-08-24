@@ -1172,8 +1172,8 @@ const MANAGED_FILL_TIMEOUT_MS = 10_000;
 // Workable can briefly remove the complete phone subtree while React reconciles an international
 // value. The normal 10 second miss budget is right for unknown selectors, but too short for a
 // selector that was just proven and is expected to remount. Twenty seconds is the managed-provider
-// ceiling. Keep it scoped to these post-write barriers, with exact value reads still required.
-const WORKABLE_PHONE_REMOUNT_TIMEOUT_MS = 20_000;
+// ceiling. Keep it scoped to these post-write readbacks, with exact value reads still required.
+const WORKABLE_PHONE_READBACK_TIMEOUT_MS = 20_000;
 
 function managedFill(
   actions: ManagedBrowserAction[],
@@ -5367,24 +5367,17 @@ function pushWorkableManagedPhoneActions(
     timeout: MANAGED_FILL_TIMEOUT_MS,
     requireUnique: true,
   });
-  // Workable remounts its React phone subtree after a value commit. A fill can therefore verify the
-  // old node and then leave a short interval with no visible input before the replacement mounts.
-  // Wait on the stable selector before the separate evidence read instead of treating that remount
-  // interval as a provider-session failure.
-  actions.push({
-    type: 'waitForSelector',
-    selector: WORKABLE_PHONE_SELECTOR,
-    label: 'workable_phone_value_visible',
-    optional: false,
-    timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
-  });
+  // Workable remounts its React phone subtree after a value commit. The asserted extract primitive
+  // polls a zero-match interval until its timeout, then binds the unique replacement control and
+  // proves the stable exact value. A separate visibility wait can race a second remount and adds no
+  // evidence, so keep readiness and proof atomic in this action.
   actions.push({
     type: 'extract',
     selector: WORKABLE_PHONE_SELECTOR,
     attribute: 'value',
     label: 'filled_field:phone',
     optional: false,
-    timeout: MANAGED_FILL_TIMEOUT_MS,
+    timeout: WORKABLE_PHONE_READBACK_TIMEOUT_MS,
     requireUnique: true,
     requireNonEmpty: true,
     expectedValueDigits: plan.expectedDigits,
@@ -5392,18 +5385,11 @@ function pushWorkableManagedPhoneActions(
   });
   if (plan.country) {
     actions.push({
-      type: 'waitForSelector',
-      selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
-      label: 'workable_phone_country_visible',
-      optional: false,
-      timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
-    });
-    actions.push({
       type: 'extract',
       selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
       label: 'filled_field:phone_country',
       optional: false,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
+      timeout: WORKABLE_PHONE_READBACK_TIMEOUT_MS,
       requireUnique: true,
       requireNonEmpty: true,
       expectedValueDigits: plan.country.dialCode,
