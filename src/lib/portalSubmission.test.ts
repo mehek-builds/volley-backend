@@ -4509,6 +4509,17 @@ test('a Rippling posting URL maps to its /apply form, and an /apply URL passes t
   assert.equal(portalApplicationUrl('rippling', application), application);
 });
 
+test('a Paylocity Details URL maps to its Apply form, and an Apply URL passes through', () => {
+  const posting = 'https://recruiting.paylocity.com/recruiting/jobs/Details/2950251/Celerant-Tech/Software-Developer-Intern';
+  const application = 'https://recruiting.paylocity.com/recruiting/jobs/Apply/2950251/Celerant-Tech/Software-Developer-Intern';
+  assert.equal(portalApplicationUrl('paylocity', posting), application);
+  assert.equal(portalApplicationUrl('paylocity', application), application);
+  assert.equal(
+    portalApplicationUrl('paylocity', 'https://recruiting.paylocity.com/recruiting/jobs/Details/not-a-job/Celerant-Tech'),
+    'https://recruiting.paylocity.com/recruiting/jobs/Details/not-a-job/Celerant-Tech',
+  );
+});
+
 /* Measured live 2026-08-20: a managed run sent to a bare Lever posting page filled nothing and
    parked with "could not confirm it reached this company's application form". Every earlier Lever
    send went through the extension, so the runner had never been handed this URL shape. The

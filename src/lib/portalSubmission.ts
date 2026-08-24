@@ -8261,6 +8261,13 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   if (family === 'workable' && /^\/(?:[^/]+\/)?j\/[^/]+\/?$/i.test(url.pathname)) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
   }
+  /* Paylocity stores job links on /Details/, while its candidate form uses the otherwise identical
+   * /Apply/ route. The adapter and field selectors were measured on that form route, so sending a
+   * managed run to the saved detail page leaves every application control out of reach. Keep this
+   * conversion numeric-job-id bounded and leave an existing Apply route unchanged. */
+  if (family === 'paylocity' && /^\/recruiting\/jobs\/details\/\d+(?:\/.*)?$/i.test(url.pathname)) {
+    url.pathname = url.pathname.replace(/\/details\//i, '/Apply/');
+  }
   /* A Rippling posting URL (ats.rippling.com/<tenant>/jobs/<id>) is the JD page; the form lives at
    * /apply. Measured live 2026-08-19 on a real tenant: the runner navigated to the JD page, found
    * no controls, and parked with "did not record an email field / a resume upload / the applicant
