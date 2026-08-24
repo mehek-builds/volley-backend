@@ -4390,7 +4390,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
     selector: 'input[name="phone"][type="tel"]:visible',
     label: 'workable_phone_value_visible',
     optional: false,
-    timeout: 10_000,
+    timeout: 30_000,
   });
   assert.deepEqual(actions[countryWaitIndex], {
     type: 'waitForSelector',
@@ -4398,7 +4398,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
       + 'button[aria-label="Telephone country code"][aria-controls]:visible',
     label: 'workable_phone_country_visible',
     optional: false,
-    timeout: 10_000,
+    timeout: 30_000,
   });
   assert.equal(actions[countryProofIndex]?.attribute, undefined);
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
@@ -4456,6 +4456,8 @@ test('managed Workable waits through phone remounts before its final value proof
   assert.equal(countryProof?.requireNonEmpty, true);
   assert.equal(countryProof?.requireUnique, true);
   assert.equal(countryProof?.expectedValueDigits, '1');
+  assert.equal(actions[phoneWaitIndex]?.timeout, 30_000);
+  assert.equal(actions[countryWaitIndex]?.timeout, 30_000);
 });
 
 test('managed Workable US phone selects exact United States and proves national digits', () => {
