@@ -40,11 +40,10 @@ const CANONICAL_LABEL_BY_ID: Readonly<Record<string, string>> = {
   'public-site-address-country': 'Country',
 };
 
-/* Paylocity renders these built-in controls with visual required markers that its generic DOM
- * attributes do not expose. The address block was captured as all-required across tenants, and the
- * remaining controls are the required rows on the live Celerant form. Treating a tenant's optional
- * row as required only asks the applicant one extra question; treating a required row as optional
- * lets the wizard advance with an employer field blank. */
+/* Paylocity renders these built-in controls with visible required copy that its generic discovery
+ * output did not carry in the live Celerant capture. The stable provider ids identify those rows.
+ * Treating a tenant's optional row as required only asks the applicant one extra question; treating
+ * a required row as optional lets the wizard advance with an employer field blank. */
 const REQUIRED_FIELD_IDS = new Set<string>([
   'info.dateAvailableToStart',
   'info.minimumDesiredSalary',

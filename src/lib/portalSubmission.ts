@@ -1550,7 +1550,10 @@ export const MANAGED_OPTION_PROBE_MAX_CONTROLS = 80;
  */
 const MANAGED_OPTION_PROBE_SKIP_IDS = new Set<string>(['country', 'candidate-location']);
 const MANAGED_FIXED_CLOSED_CONTROL_IDS = new Set<string>(GREENHOUSE_OPTION_PROBE_IDS);
-const PAYLOCITY_OPTION_PROBE_SKIP_IDS = new Set<string>(['public-site-address-country']);
+const PAYLOCITY_OPTION_PROBE_SKIP_IDS = new Set<string>([
+  'public-site-address-country',
+  'public-site-address-us-state',
+]);
 
 /** `#question_37228964002`, `#info\\.desiredSalaryType`, or `[id="school--0"]`. */
 function controlIdFromDiscoveredSelector(selector: string | undefined | null): string | undefined {

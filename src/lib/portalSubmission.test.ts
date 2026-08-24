@@ -4639,6 +4639,25 @@ test('Paylocity fills every saved built-in profile fact and never treats a UAE a
   assert.equal(actions.find((action) => action.label === 'location')?.value, 'Dubai');
   assert.equal(actions.find((action) => action.label === 'postal_code')?.value, '00000');
   assert.equal(actions.some((action) => action.label === 'address_state'), false);
+
+  const usActions = buildManagedPortalActions('paylocity', {
+    ...capturePacket,
+    applicationProfile: {
+      phone: capturePacket.phone,
+      address_country: 'United States',
+      address_city: 'Los Angeles',
+      address_state: 'California',
+      address_zip: '90007',
+    },
+  }, true);
+  assert.deepEqual(usActions.find((action) => action.label === 'address_state'), {
+    type: 'fillByLabelText',
+    text: 'State',
+    value: 'California',
+    label: 'address_state',
+    optional: true,
+    timeout: 10_000,
+  });
 });
 
 test('Paylocity walks its wizard, but every click is label-scoped and can never hit the terminal submit', () => {
@@ -7490,6 +7509,14 @@ test('Paylocity probes dotted built-in dropdown ids and skips its open address a
       label: 'Country United States public-site-address-country',
       selector: '[data-litos-discovered-3]',
       durableSelector: '#public-site-address-country',
+      inputType: 'text',
+      role: 'combobox',
+      required: true,
+    },
+    {
+      label: 'State Select a state public-site-address-us-state',
+      selector: '[data-litos-discovered-4]',
+      durableSelector: '#public-site-address-us-state',
       inputType: 'text',
       role: 'combobox',
       required: true,
