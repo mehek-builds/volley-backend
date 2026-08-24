@@ -474,6 +474,48 @@ test('a selected v4 chooser and clicked pass require a matching top-level click 
   }
 });
 
+test('a selected Workable short link freezes its tenant URL through the final click', () => {
+  const expected = 'https://apply.workable.com/j/20e78cba92/apply';
+  const resolved = 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply';
+  const selected = finalChooserNoClick();
+  selected.finalSubmitChooser = {
+    ...selected.finalSubmitChooser!,
+    outcome: 'selected',
+    candidateCount: 1,
+    viableCandidateCount: 1,
+    topScore: 1,
+    topScoreCount: 1,
+  };
+  Object.assign(selected, proof([]));
+  selected.submitOutcome = {
+    pressed: true,
+    state: 'unknown',
+    source: null,
+    evidence: null,
+    message: null,
+    formStillPresent: null,
+  };
+  selected.exactPageUrlProof = {
+    expected,
+    beforeActions: resolved,
+    beforeApplicantData: resolved,
+    beforeFinalChooser: resolved,
+    beforeSubmit: resolved,
+  };
+  selected.url = resolved;
+  assert.doesNotThrow(() => assertManagedApplicationSubmitConsistency(selected, expected));
+  assert.throws(
+    () => assertManagedApplicationSubmitConsistency({
+      ...selected,
+      exactPageUrlProof: {
+        ...selected.exactPageUrlProof!,
+        beforeSubmit: 'https://apply.workable.com/another-tenant/j/20E78CBA92/apply',
+      },
+    }, expected),
+    (error: unknown) => error instanceof ManagedConfirmationUnprovenError,
+  );
+});
+
 test('a replaced submit node cannot satisfy the atomic scope proof', () => {
   const replaced = proof([]) as { requiredFieldConfirmation: Record<string, unknown> };
   const replacedPass = (replaced.requiredFieldConfirmation.passes as Array<Record<string, unknown>>)[0]!;

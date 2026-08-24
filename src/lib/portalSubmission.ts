@@ -44,6 +44,7 @@ import {
   readManagedFinalSubmitChooser,
   readManagedFinalSubmitNoClick,
 } from './managedSubmitOutcome';
+import { resolvedApprovedApplicationPageUrl } from './workableApplicationUrl';
 import {
   SUBMIT_READINESS_ASTERISK_LEGEND,
   SUBMIT_READINESS_ASTERISK_MARK,
@@ -10694,6 +10695,9 @@ export function assertManagedApplicationSubmitConsistency(
   } catch {
     expected = null;
   }
+  const resolvedBoundary = expected && typeof result.exactPageUrlProof?.beforeActions === 'string'
+    ? resolvedApprovedApplicationPageUrl(expected, result.exactPageUrlProof.beforeActions)
+    : null;
   if (chooser?.outcome !== 'selected'
     || proof?.version !== 2 || proof.status !== 'confirmed'
     || pass?.submitKind !== 'application' || pass.submissionOutcome !== 'clicked'
@@ -10701,7 +10705,9 @@ export function assertManagedApplicationSubmitConsistency(
     || (result.submitOutcome.state !== 'confirmed'
       && result.submitOutcome.state !== 'rejected'
       && result.submitOutcome.state !== 'unknown')
-    || !expected || result.exactPageUrlProof?.beforeSubmit !== expected) {
+    || !resolvedBoundary
+    || result.exactPageUrlProof?.expected !== expected
+    || result.exactPageUrlProof?.beforeSubmit !== resolvedBoundary) {
     throw new ManagedConfirmationUnprovenError(
       'Litos could not reconcile the managed chooser, click proof, and exact pre-submit URL, so whether submit was pressed is unknown',
     );

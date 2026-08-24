@@ -27,6 +27,10 @@ import {
   exactFinalSubmitChooserPolicy,
   type FinalSubmitChooserPolicy,
 } from './finalSubmitChooserPolicy';
+import {
+  readWorkableApplicationUrl,
+  resolvedApprovedApplicationPageUrl,
+} from './workableApplicationUrl';
 
 export type ManagedFinalSubmitChooser = {
   version: 1;
@@ -158,12 +162,15 @@ export function readManagedFinalSubmitNoClick(
   if (!expected || !isObjectRecord(proof) || !hasExactKeys(proof, [
     'expected', 'beforeActions', 'beforeApplicantData', 'beforeFinalChooser', 'beforeSubmit',
   ])) return null;
+  const resolvedBoundary = typeof proof.beforeActions === 'string'
+    ? resolvedApprovedApplicationPageUrl(expected, proof.beforeActions)
+    : null;
   if (canonicalProofUrl(proof.expected) !== expected
-    || canonicalProofUrl(proof.beforeActions) !== expected
-    || canonicalProofUrl(proof.beforeApplicantData) !== expected
-    || canonicalProofUrl(proof.beforeFinalChooser) !== expected
+    || !resolvedBoundary
+    || canonicalProofUrl(proof.beforeApplicantData) !== resolvedBoundary
+    || canonicalProofUrl(proof.beforeFinalChooser) !== resolvedBoundary
     || proof.beforeSubmit !== null
-    || canonicalProofUrl(result?.url) !== expected) return null;
+    || canonicalProofUrl(result?.url) !== resolvedBoundary) return null;
   const outcome = result?.submitOutcome;
   if (!isObjectRecord(outcome) || !hasExactKeys(outcome, [
     'pressed', 'state', 'source', 'evidence', 'message', 'formStillPresent',
@@ -369,7 +376,7 @@ type ManagedAtsBinding = {
   origin: string;
   tenant: string;
   jobToken: string;
-  shape: 'ashby_path' | 'greenhouse_jobs_path' | 'greenhouse_embed_query' | 'workable_apply_path';
+  shape: 'ashby_path' | 'greenhouse_jobs_path' | 'greenhouse_embed_query' | 'workable_bare_apply_path' | 'workable_apply_path';
 };
 
 function exactQueryIdentity(url: URL): { tenant: string; jobToken: string } | null {
@@ -412,9 +419,15 @@ function managedAtsBinding(result: ManagedReceiptResult): ManagedAtsBinding | nu
     }
   }
   if (host === 'apply.workable.com') {
-    const match = url.pathname.match(/^\/([A-Za-z0-9][A-Za-z0-9-]{0,99})\/j\/([A-F0-9]{10})\/apply\/?$/);
-    return match
-      ? { family: 'workable', origin: url.origin, tenant: match[1], jobToken: match[2], shape: 'workable_apply_path' }
+    const identity = readWorkableApplicationUrl(url);
+    return identity
+      ? {
+          family: 'workable',
+          origin: identity.origin,
+          tenant: identity.tenant ?? '',
+          jobToken: identity.jobToken,
+          shape: identity.shape === 'bare' ? 'workable_bare_apply_path' : 'workable_apply_path',
+        }
       : null;
   }
   return null;
@@ -445,9 +458,15 @@ function observedAtsIdentity(result: ManagedReceiptResult, family: ManagedAtsFam
     }
   }
   if (family === 'workable' && host === 'apply.workable.com') {
-    const match = url.pathname.match(/^\/([A-Za-z0-9][A-Za-z0-9-]{0,99})\/j\/([A-F0-9]{10})\/apply\/?$/);
-    return match
-      ? { family, origin: url.origin, tenant: match[1], jobToken: match[2], shape: 'workable_apply_path' }
+    const identity = readWorkableApplicationUrl(url);
+    return identity?.shape === 'tenant'
+      ? {
+          family,
+          origin: identity.origin,
+          tenant: identity.tenant!,
+          jobToken: identity.jobToken,
+          shape: 'workable_apply_path',
+        }
       : null;
   }
   return null;
@@ -460,6 +479,25 @@ function sameAtsBinding(left: ManagedAtsBinding | null, right: ManagedAtsBinding
     && left.tenant === right.tenant
     && left.jobToken === right.jobToken
     && left.shape === right.shape;
+}
+
+function heldAtsBinding(
+  initial: ManagedAtsBinding | null,
+  expected: ManagedAtsBinding | null,
+): ManagedAtsBinding | null {
+  if (sameAtsBinding(initial, expected)) return initial;
+  /* Workable's supported public feed can provide /j/<token>/apply. Workable redirects that URL to
+   * its canonical /<tenant>/j/<token>/apply page before Stratus reports the initial result. Accept
+   * only this one controlled shape transition on the same Workable origin and exact token, then
+   * freeze the canonical initial tenant for every observed receipt check that follows. */
+  return initial?.family === 'workable'
+    && initial.shape === 'workable_apply_path'
+    && expected?.family === 'workable'
+    && expected.shape === 'workable_bare_apply_path'
+    && initial.origin === expected.origin
+    && initial.jobToken === expected.jobToken
+    ? initial
+    : null;
 }
 
 function exactAtsReceipt(
@@ -541,7 +579,8 @@ export async function observeManagedReceiptOnce<T extends ManagedReceiptResult>(
   if (initialOutcome?.pressed !== true || initialOutcome.state !== 'unknown') return unchanged();
   const expectedBinding = managedAtsBinding({ url: input.expectedApplicationUrl });
   const initialBinding = managedAtsBinding(input.initial);
-  if (!sameAtsBinding(initialBinding, expectedBinding)) return unchanged();
+  const receiptBinding = heldAtsBinding(initialBinding, expectedBinding);
+  if (!receiptBinding) return unchanged();
   if (input.initial.humanVerification != null || input.initial.continuationOffered !== true) return unchanged();
   const token = input.initial.continuationToken;
   const expiresAt = input.initial.continuationExpiresAt;
@@ -559,9 +598,8 @@ export async function observeManagedReceiptOnce<T extends ManagedReceiptResult>(
   const observedOutcome = readManagedSubmitOutcome(observed);
   const atsTerminal = observedOutcome?.pressed === true
     && (observedOutcome.state === 'confirmed' || observedOutcome.state === 'rejected')
-    && !!expectedBinding
-    && exactAtsReceipt(observed, observedOutcome, expectedBinding);
-  const heldPageMatches = sameAtsBinding(managedAtsBinding(observed), expectedBinding);
+    && exactAtsReceipt(observed, observedOutcome, receiptBinding);
+  const heldPageMatches = sameAtsBinding(managedAtsBinding(observed), receiptBinding);
   const evidenceResult = observed.screenshot && (atsTerminal || heldPageMatches) ? observed : input.initial;
   return {
     receiptResult: atsTerminal ? observed : input.initial,

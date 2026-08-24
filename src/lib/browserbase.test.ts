@@ -834,7 +834,8 @@ test('managed Stratus proves the exact employer URL before actions and before a 
   const previousFetch = globalThis.fetch;
   process.env.STRATUS_API_KEY = 'private-key';
   process.env.STRATUS_BASE_URL = 'https://stratus.example';
-  const expectedPageUrl = 'https://apply.workable.com/example/j/ABC123/apply?source=litos';
+  const expectedPageUrl = 'https://apply.workable.com/j/20e78cba92/apply?source=litos';
+  const resolvedPageUrl = 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply?source=litos';
   let proofMatches = true;
   let chooserReported = true;
   let advertiseAtomicCapability = true;
@@ -867,10 +868,10 @@ test('managed Stratus proves the exact employer URL before actions and before a 
         ],
         exactPageUrlProof: {
           expected: expectedPageUrl,
-          beforeActions: expectedPageUrl,
-          beforeApplicantData: expectedPageUrl,
-          beforeFinalChooser: expectedPageUrl,
-          beforeSubmit: proofMatches ? expectedPageUrl : 'https://jobs.example.com/postings/other',
+          beforeActions: resolvedPageUrl,
+          beforeApplicantData: resolvedPageUrl,
+          beforeFinalChooser: resolvedPageUrl,
+          beforeSubmit: proofMatches ? resolvedPageUrl : 'https://jobs.example.com/postings/other',
         },
         ...(chooserReported ? { finalSubmitChooser: {
           version: 1,

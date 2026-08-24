@@ -11,6 +11,7 @@ import {
   readManagedFinalSubmitChooser,
   type ManagedFinalSubmitChooser,
 } from './managedSubmitOutcome';
+import { resolvedApprovedApplicationPageUrl } from './workableApplicationUrl';
 
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
@@ -544,11 +545,14 @@ function assertRequiredManagedCapabilities(
     const v4ChooserAction = actions.find((action) => action.type === 'confirmAndSubmit'
       && action.chooserPolicy?.version === 4);
     const chooserReported = result.finalSubmitChooser !== undefined && result.finalSubmitChooser !== null;
+    const resolvedBoundary = canonicalExpected && typeof proof?.beforeActions === 'string'
+      ? resolvedApprovedApplicationPageUrl(canonicalExpected, proof.beforeActions)
+      : null;
     if (!canonicalExpected || proof?.expected !== canonicalExpected.href
-      || proof.beforeActions !== canonicalExpected.href
-      || proof.beforeApplicantData !== canonicalExpected.href
-      || (chooserReported && proof.beforeFinalChooser !== canonicalExpected.href)
-      || (result.submitOutcome?.pressed === true && proof.beforeSubmit !== canonicalExpected.href)) {
+      || !resolvedBoundary
+      || proof.beforeApplicantData !== resolvedBoundary
+      || (chooserReported && proof.beforeFinalChooser !== resolvedBoundary)
+      || (result.submitOutcome?.pressed === true && proof.beforeSubmit !== resolvedBoundary)) {
       throw new Error('Managed Stratus result did not prove the exact employer page URL boundaries');
     }
     if (v4ChooserAction) {

@@ -54,6 +54,7 @@ import {
   runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
 } from '../lib/browserbase';
+import { resolvedApprovedApplicationPageUrl } from '../lib/workableApplicationUrl';
 import {
   blockersIncludeCaptcha,
   CAPTCHA_BLOCKER,
@@ -801,7 +802,7 @@ export function employerPageUrlIssue(expected: string, observed: string | undefi
     const observedUrl = new URL(observed ?? '');
     expectedUrl.hash = '';
     observedUrl.hash = '';
-    return expectedUrl.href === observedUrl.href
+    return resolvedApprovedApplicationPageUrl(expectedUrl, observedUrl)
       ? null
       : 'the employer page redirected away from the approved destination';
   } catch {
