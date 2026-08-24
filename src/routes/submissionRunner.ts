@@ -169,7 +169,6 @@ import {
   type ApplicantGroundingFacts,
 } from '../llm/applicationAnswer';
 import { generateCompactApplicationMaterials, type CompactMaterialQuestion } from '../llm/applicationMaterials';
-import { isBillingOrAuthFailure } from './resume';
 import {
   completeEmailVerificationIfPresent,
   managedResultNeedsEmailVerification,
@@ -2556,7 +2555,8 @@ export async function discoverAndResolveQuestions(
           continue;
         }
       } catch (error) {
-        if (isBillingOrAuthFailure(error)) throw error; // a real outage, not a per-field skip
+        // A model outage does not make a saved packet unsafe. Fall through to the ordinary
+        // unanswered-question path, which blocks required fields and ignores optional ones.
       }
     }
     /* THE DRAFTER NEVER WRITES PROSE INTO A CONTROL THAT OFFERS A LIST.
@@ -2739,7 +2739,6 @@ export async function discoverAndResolveQuestions(
         (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`AI-drafted answer needs your review before this goes out: "${label.slice(0, 60)}"`);
       }
     } catch (error) {
-      if (isBillingOrAuthFailure(error)) throw error; // this is a real outage, not a per-field skip
       (fieldIsRequired ? attentionReasons : optionalAttentionReasons).push(`open-ended question left for you (draft generation failed): "${label.slice(0, 60)}"`);
       if (fieldIsRequired) surfaceUnansweredQuestion(field, reviewLabel, existing);
     }
@@ -3781,9 +3780,8 @@ async function prepareManaged(
       }
     }
   } catch (error) {
-    if (isBillingOrAuthFailure(error)) throw error;
-    // A malformed or transient bundle falls back item by item to the generators that were already
-    // on this path. The application still gets the same quality behavior at the old call count.
+    // Any unavailable model falls back item by item. Required prose becomes a dashboard question;
+    // optional prose stays optional. Existing reviewed answers never need a healthy model.
     fastify.log.warn({ error, applicationId: row.id }, 'Compact generation failed, using dedicated generators');
   }
   const coverLetterOutcome = await packetForCoverLetterCapability(
@@ -5078,7 +5076,6 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
         }
       }
     } catch (error) {
-      if (isBillingOrAuthFailure(error)) throw error;
       fastify.log.warn({ error, applicationId: row.id }, 'Compact generation failed, using dedicated generators');
     }
     const builtOutcome = await packetForCoverLetterCapability(

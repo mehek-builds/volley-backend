@@ -493,6 +493,30 @@ test('managed provider blockers pass through the proven referral filter before t
   );
 });
 
+test('application preparation degrades model outages into question blockers instead of aborting', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const resolverStart = source.indexOf('export async function discoverAndResolveQuestions(');
+  const resolverEnd = source.indexOf('\nfunction applicationProfileForPacket', resolverStart);
+  const managedStart = source.indexOf('async function prepareManaged(');
+  const managedEnd = source.indexOf('\nasync function prepareManagedAttendedAccountGate', managedStart);
+  const directStart = source.indexOf('async function prepare(');
+  const directEnd = source.indexOf('\nasync function prepareControlled', directStart);
+
+  assert.ok(resolverStart > 0 && resolverEnd > resolverStart);
+  assert.ok(managedStart > 0 && managedEnd > managedStart);
+  assert.ok(directStart > 0 && directEnd > directStart);
+
+  const resolver = source.slice(resolverStart, resolverEnd);
+  const managed = source.slice(managedStart, managedEnd);
+  const direct = source.slice(directStart, directEnd);
+  assert.doesNotMatch(resolver, /isBillingOrAuthFailure/);
+  assert.match(resolver, /open-ended question left for you \(draft generation failed\)/);
+  for (const preparation of [managed, direct]) {
+    assert.doesNotMatch(preparation, /isBillingOrAuthFailure/);
+    assert.match(preparation, /Compact generation failed, using dedicated generators/);
+  }
+});
+
 test('only a windowed fixed school list with an exact stored school may use search fill', () => {
   const failures = [
     { controlId: 'school--0', reason: 'the option list was windowed at the render cap' },
