@@ -32,6 +32,7 @@ import {
   assertManagedRequiredFieldsConfirmed,
   CaptchaUnresolvedError,
   ManagedActionBudgetError,
+  ManagedConfirmationUnprovenError,
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import { isManagedNoSubmitControl, submissionProvablyNotSent, unwrapThrownErrorMessage } from '../lib/managedSubmitOutcome';
@@ -134,6 +135,19 @@ describe('every post-claim stop leaves the row with a way out', () => {
     assert.equal(persisted.unverified_submission?.cause, 'no_confirmation_state');
   });
 
+  test('malformed managed chooser evidence keeps the claim for unverified resolution', () => {
+    const persisted = submissionFailureReview(
+      claimedRunning(),
+      new ManagedConfirmationUnprovenError(
+        'Litos could not prove the managed final-submit chooser stopped before the click',
+      ),
+    );
+    assert.equal(persisted.submission_stop?.before_click, false);
+    assert.equal(persisted.submission_claimed_at, CLAIMED_AT);
+    assert.ok(exitIsTheUnverifiedResolutionRoute(persisted));
+    assert.equal(persisted.unverified_submission?.cause, 'no_confirmation_state');
+  });
+
   /* THE TWO HALVES OF THE RULE, stated directly rather than inferred from the four cases above. */
 
   test('a stop that cannot be proven pre-click keeps the claim and still gets a door', () => {
@@ -202,9 +216,8 @@ describe('every post-claim stop leaves the row with a way out', () => {
  * `; action_audit=` suffix is appended only to messages containing "selector", which this one does
  * not.
  *
- * ONE PREDICATE, TWO FAILURES. It is also what fail() asks before taking the branch that RELEASES
- * the claim, so the wrapped form missed at the writer first (which is why the row was ever stuck)
- * and again at the reader (which is why PR 497 could not lift it).
+ * The predicate remains only as a compatibility reader for rows written before typed stop records.
+ * A current writer cannot use this prose as no-click proof and is pinned separately below.
  */
 describe('the pre-click reopen key matches the stored form and nothing looser', () => {
   test('the wrapper a thrown error crosses the Stratus boundary with is stripped', () => {
@@ -287,16 +300,15 @@ describe('the pre-click reopen key matches the stored form and nothing looser', 
     } as Parameters<typeof submissionProvablyNotSent>[0]), false);
   });
 
-  test('the writer releases the claim on the wrapped form too, so this cannot recur', () => {
-    /* The durable half. Even if the sentence is reworded tomorrow, the typed stop record is what the
-       reopen reads, and it is written from the error TYPE rather than from its text. */
+  test('a new legacy ambiguity string stays unverified without the typed v4 proof', () => {
     const wrapped = submissionFailureReview(
       claimedRunning(),
       new Error('Error: Atomic submit control was missing or ambiguous'),
     );
-    assert.equal(wrapped.submission_claimed_at, undefined, 'PR 494 must fire on the stored form');
-    assert.equal(wrapped.submission_stop?.reason, 'no_submit_control');
-    assert.equal(wrapped.submission_stop?.before_click, true);
+    assert.equal(wrapped.submission_claimed_at, CLAIMED_AT);
+    assert.equal(wrapped.submission_stop?.reason, 'unclassified');
+    assert.equal(wrapped.submission_stop?.before_click, false);
+    assert.ok(exitIsTheUnverifiedResolutionRoute(wrapped));
   });
 
   test('the typed record reopens a row whose message nobody recognises', () => {

@@ -5,18 +5,31 @@ import {
   browserDeliveryRuntimeIdentity,
   continueManagedBrowser,
   isBrowserbaseConfigured,
+  MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
+  MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
   MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
   MANAGED_EXACT_PAGE_URL_CAPABILITY,
+  MANAGED_SUBMIT_CHOOSER_POLICY,
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
   runManagedBrowser,
 } from './browserbase';
 import { observeManagedReceiptOnce } from './managedSubmitOutcome';
-import { buildManagedDiscoveryActions, buildManagedPortalActions } from './portalSubmission';
+import {
+  buildManagedDiscoveryActions,
+  buildManagedPortalActions,
+  MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
+} from './portalSubmission';
 
 function assertStratusSafeActions(actions: Array<Record<string, unknown>>) {
   for (const action of actions) {
+    if (action.type === 'requireCapability') {
+      if (action.value === MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY) {
+        assert.equal(action.applicationScopeSelector, MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR);
+      }
+      continue;
+    }
     assert.equal(typeof action.selector, 'string', JSON.stringify(action));
     assert.ok(String(action.selector).trim().length > 0, JSON.stringify(action));
     assert.ok(String(action.selector).length <= 500, JSON.stringify(action));
@@ -502,6 +515,48 @@ test('managed Stratus selector errors include a sanitized outbound action audit'
   else process.env.STRATUS_BASE_URL = previousUrl;
 });
 
+test('managed Stratus selector audits include the v4 form boundary without applicant values', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  const applicationUrl = 'https://apply.workable.com/example/j/ABC123/apply';
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: { message: 'Each selector must be a non-empty string no longer than 500 characters' },
+  }), {
+    status: 400,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+
+  try {
+    const actions = buildManagedPortalActions('workable', {
+      fullName: 'Private Applicant',
+      email: 'private@example.com',
+      resume: Buffer.from('private resume bytes'),
+      resumeName: 'private-resume.pdf',
+      questions: [],
+    }, true, applicationUrl);
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, actions, { allowSubmit: true }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /"applicationScopes":\[\{/);
+        assert.match(error.message, /"capability":"atomic-submit-v4"/);
+        assert.match(error.message, /form:has\(input\[name=\\"firstname\\"\]\)/);
+        assert.doesNotMatch(error.message, /Private Applicant|private@example\.com|private resume bytes/);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
 test('managed Stratus drops optional invalid selectors and rejects required invalid selectors locally', async () => {
   const previousKey = process.env.STRATUS_API_KEY;
   const previousUrl = process.env.STRATUS_BASE_URL;
@@ -625,28 +680,58 @@ test('managed Stratus proves the exact employer URL before actions and before a 
   const previousFetch = globalThis.fetch;
   process.env.STRATUS_API_KEY = 'private-key';
   process.env.STRATUS_BASE_URL = 'https://stratus.example';
-  const expectedPageUrl = 'https://jobs.example.com/postings/cbs-123?source=litos';
+  const expectedPageUrl = 'https://apply.workable.com/example/j/ABC123/apply?source=litos';
   let proofMatches = true;
+  let chooserReported = true;
+  let advertiseAtomicCapability = true;
   globalThis.fetch = (async (_input, init) => {
     const body = JSON.parse(String(init?.body)) as { actions: Array<Record<string, unknown>> };
-    assert.deepEqual(body.actions.slice(0, 1), [{
-      type: 'requireCapability',
-      value: MANAGED_EXACT_PAGE_URL_CAPABILITY,
-      optional: false,
-    }]);
+    assert.deepEqual(body.actions.slice(0, 2), [
+      {
+        type: 'requireCapability',
+        value: MANAGED_EXACT_PAGE_URL_CAPABILITY,
+        optional: false,
+        expectedPageUrl,
+      },
+      {
+        type: 'requireCapability',
+        value: MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
+        optional: false,
+        applicationScopeSelector: MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
+      },
+    ]);
     assert.equal(body.actions.at(-1)?.expectedPageUrl, expectedPageUrl);
+    assert.deepEqual(body.actions.at(-1)?.chooserPolicy, MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY);
     return new Response(JSON.stringify({
       run: {
         title: 'Submitted',
         url: 'https://jobs.example.com/receipt',
         text: 'Thank you',
-        capabilities: [MANAGED_EXACT_PAGE_URL_CAPABILITY],
+        capabilities: [
+          MANAGED_EXACT_PAGE_URL_CAPABILITY,
+          ...(advertiseAtomicCapability ? [MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY] : []),
+        ],
         exactPageUrlProof: {
           expected: expectedPageUrl,
           beforeActions: expectedPageUrl,
           beforeApplicantData: expectedPageUrl,
+          beforeFinalChooser: expectedPageUrl,
           beforeSubmit: proofMatches ? expectedPageUrl : 'https://jobs.example.com/postings/other',
         },
+        ...(chooserReported ? { finalSubmitChooser: {
+          version: 1,
+          policyName: 'litos-final-submit',
+          policyVersion: 4,
+          grammarHash: 'ee6697971965f0ab360f77da88d935a58b0b7af8ea412ad5d5b3813e9cc11263',
+          submitKind: 'application',
+          outcome: 'selected',
+          candidateCount: 1,
+          viableCandidateCount: 1,
+          topScore: 1,
+          topScoreCount: 1,
+          addressedScopeCount: 1,
+          bareSendCandidateCount: 0,
+        } } : {}),
         submitOutcome: { pressed: true, state: 'confirmed' },
       },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -659,12 +744,24 @@ test('managed Stratus proves the exact employer URL before actions and before a 
     resumeName: 'resume.pdf',
     questions: [],
   };
-  const actions = buildManagedPortalActions('greenhouse', packet, true, expectedPageUrl);
+  const actions = buildManagedPortalActions('workable', packet, true, expectedPageUrl);
   await runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true });
   proofMatches = false;
   await assert.rejects(
     runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true }),
     /did not prove the exact employer page URL boundaries/,
+  );
+  proofMatches = true;
+  chooserReported = false;
+  await assert.rejects(
+    runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true }),
+    /did not prove the final-submit chooser outcome/,
+  );
+  chooserReported = true;
+  advertiseAtomicCapability = false;
+  await assert.rejects(
+    runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true }),
+    /did not advertise required runner capability: atomic-submit-v4/,
   );
 
   globalThis.fetch = previousFetch;
@@ -672,6 +769,124 @@ test('managed Stratus proves the exact employer URL before actions and before a 
   else process.env.STRATUS_API_KEY = previousKey;
   if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
   else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('managed chooser v4 refuses to leave the process without both exact boundaries', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    throw new Error('network should be unreachable');
+  }) as typeof fetch;
+  try {
+    const applicationUrl = 'https://apply.workable.com/example/j/ABC123/apply';
+    const actions = buildManagedPortalActions('workable', {
+      fullName: 'Taylor Example',
+      email: 'taylor@example.com',
+      resume: Buffer.from('pdf'),
+      resumeName: 'resume.pdf',
+      questions: [],
+    }, true, applicationUrl);
+    const exactIndex = actions.findIndex((action) => action.type === 'requireCapability'
+      && action.value === MANAGED_EXACT_PAGE_URL_CAPABILITY);
+    const atomicIndex = actions.findIndex((action) => action.type === 'requireCapability'
+      && action.value === MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY);
+    assert.ok(exactIndex >= 0);
+    assert.ok(atomicIndex >= 0);
+    const missingExact = actions.filter((_action, index) => index !== exactIndex);
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, missingExact, { allowSubmit: true }),
+      /policy v4 requires an exact employer page URL boundary/,
+    );
+    const mismatchedBoundary = actions.map((action, index) => index === exactIndex ? {
+      ...action,
+      expectedPageUrl: 'https://apply.workable.com/example/j/OTHER/',
+    } : { ...action });
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, mismatchedBoundary, { allowSubmit: true }),
+      /policy v4 requires an exact employer page URL boundary/,
+    );
+    const optionalBoundary = actions.map((action, index) => index === exactIndex
+      ? { ...action, optional: true }
+      : { ...action });
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, optionalBoundary, { allowSubmit: true }),
+      /policy v4 requires an exact employer page URL boundary/,
+    );
+    const duplicateBoundary = actions.map((action) => ({ ...action }));
+    duplicateBoundary.splice(exactIndex + 1, 0, { ...actions[exactIndex]! });
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, duplicateBoundary, { allowSubmit: true }),
+      /policy v4 requires an exact employer page URL boundary/,
+    );
+    const missingAtomic = actions.filter((_action, index) => index !== atomicIndex);
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, missingAtomic, { allowSubmit: true }),
+      /policy v4 requires one exact application form boundary/,
+    );
+    const optionalAtomic = actions.map((action, index) => index === atomicIndex
+      ? { ...action, optional: true }
+      : { ...action });
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, optionalAtomic, { allowSubmit: true }),
+      /policy v4 requires one exact application form boundary/,
+    );
+    const missingScope = actions.map((action, index) => index === atomicIndex
+      ? { type: action.type, value: action.value, optional: action.optional }
+      : { ...action });
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, missingScope, { allowSubmit: true }),
+      /policy v4 requires one exact application form boundary/,
+    );
+    const duplicateAtomic = actions.map((action) => ({ ...action }));
+    duplicateAtomic.splice(atomicIndex + 1, 0, { ...actions[atomicIndex]! });
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, duplicateAtomic, { allowSubmit: true }),
+      /policy v4 requires one exact application form boundary/,
+    );
+    const wrongCapability = actions.map((action, index) => index === atomicIndex
+      ? {
+        ...action,
+        value: MANAGED_EXACT_PAGE_URL_CAPABILITY,
+        expectedPageUrl: applicationUrl,
+      }
+      : { ...action });
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, wrongCapability, { allowSubmit: true }),
+      /application scope selector requires the atomic submit v4 capability/,
+    );
+    const scopeOnFill = actions.map((action) => ({ ...action }));
+    const fillIndex = scopeOnFill.findIndex((action) => action.type === 'fill');
+    scopeOnFill[fillIndex] = {
+      ...scopeOnFill[fillIndex]!,
+      applicationScopeSelector: MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
+    };
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, scopeOnFill, { allowSubmit: true }),
+      /application scope selector requires the atomic submit v4 capability/,
+    );
+    const v3WithAtomicOnly = actions
+      .filter((_action, index) => index === atomicIndex || _action.type !== 'confirmAndSubmit')
+      .concat({
+        ...actions.at(-1)!,
+        chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
+      });
+    await assert.rejects(
+      runManagedBrowser(applicationUrl, v3WithAtomicOnly, { allowSubmit: true }),
+      /atomic submit v4 capability requires a chooser v4 submit/,
+    );
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
 });
 
 test('managed prepare and continuation actions bind the exact page without consuming a browser action', () => {
@@ -696,10 +911,42 @@ test('managed Stratus Greenhouse builder payloads are selector-safe after normal
   const previousFetch = globalThis.fetch;
   process.env.STRATUS_API_KEY = 'private-key';
   process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  const applicationUrl = 'https://job-boards.greenhouse.io/embed/job_app?for=akunacapital&token=8018893';
   const capturedBodies: Array<{ actions?: Array<Record<string, unknown>> }> = [];
   globalThis.fetch = (async (_input, init) => {
-    capturedBodies.push(JSON.parse(String(init?.body)));
-    return new Response(JSON.stringify({ run: { title: 'Complete', url: 'https://portal.example/complete', text: 'Thank you' } }), {
+    const body = JSON.parse(String(init?.body)) as { actions?: Array<Record<string, unknown>> };
+    capturedBodies.push(body);
+    const submits = body.actions?.some((action) => action.type === 'confirmAndSubmit') ?? false;
+    return new Response(JSON.stringify({ run: {
+      title: 'Complete',
+      url: submits ? 'https://portal.example/complete' : applicationUrl,
+      text: 'Thank you',
+      ...(submits ? {
+        capabilities: [MANAGED_EXACT_PAGE_URL_CAPABILITY],
+        exactPageUrlProof: {
+          expected: applicationUrl,
+          beforeActions: applicationUrl,
+          beforeApplicantData: applicationUrl,
+          beforeFinalChooser: applicationUrl,
+          beforeSubmit: applicationUrl,
+        },
+        finalSubmitChooser: {
+          version: 1,
+          policyName: 'litos-final-submit',
+          policyVersion: 3,
+          grammarHash: MANAGED_SUBMIT_CHOOSER_POLICY.grammarHash,
+          submitKind: 'application',
+          outcome: 'selected',
+          candidateCount: 1,
+          viableCandidateCount: 1,
+          topScore: 1,
+          topScoreCount: 1,
+          addressedScopeCount: 1,
+          bareSendCandidateCount: 0,
+        },
+        submitOutcome: { pressed: true, state: 'confirmed' },
+      } : {}),
+    } }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -726,8 +973,8 @@ test('managed Stratus Greenhouse builder payloads are selector-safe after normal
     questions: [{ question: 'Why this role?', answer: 'I enjoy full stack engineering.' }],
   };
 
-  await runManagedBrowser('https://job-boards.greenhouse.io/embed/job_app?for=akunacapital&token=8018893', buildManagedDiscoveryActions('greenhouse', packet));
-  await runManagedBrowser('https://job-boards.greenhouse.io/embed/job_app?for=akunacapital&token=8018893', buildManagedPortalActions('greenhouse', packet, true));
+  await runManagedBrowser(applicationUrl, buildManagedDiscoveryActions('greenhouse', packet));
+  await runManagedBrowser(applicationUrl, buildManagedPortalActions('greenhouse', packet, true, applicationUrl));
 
   assert.equal(capturedBodies.length, 2);
   for (const body of capturedBodies) {

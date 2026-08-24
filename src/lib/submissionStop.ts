@@ -75,11 +75,10 @@ export type SubmissionStopRecord = {
  * before any submit control is pressed. Nothing is added here on the strength of a sentence saying
  * nothing was sent: the test is where in the code the throw is, not what the copy claims.
  *
- * EVERY MEMBER IS BACKED BY AN ERROR TYPE OR AN EXACT-MATCH CONSTANT, and that is the membership
- * rule rather than an accident of the current list. NoSubmitControlError, CaptchaUnresolvedError,
- * ManagedActionBudgetError, PacketDocumentExpiredError and ApplicantEmailRegenerationRequiredError
- * are `instanceof` checks; the one string test that reaches this set, isManagedNoSubmitControl, is
- * equality against a single constant after one wrapper is stripped.
+ * EVERY MEMBER IS BACKED BY AN ERROR TYPE, and that is the membership rule rather than an accident
+ * of the current list. NoSubmitControlError, CaptchaUnresolvedError, ManagedActionBudgetError,
+ * PacketDocumentExpiredError and ApplicantEmailRegenerationRequiredError are `instanceof` checks.
+ * Managed no-control prose never reaches this set on a current run.
  *
  * 'provider_unconfigured' IS DELIBERATELY ABSENT, and it was here until review caught it. It is
  * derived from a loose alternation that includes the bare word `browserbase`, and the text it runs

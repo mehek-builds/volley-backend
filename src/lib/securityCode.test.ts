@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFile } from 'node:fs/promises';
 import type { ApplicationReviewState } from './applicationReview';
-import { managedApplicationSubmitOptions, type ManagedBrowserAction } from './browserbase';
+import {
+  managedApplicationSubmitOptions,
+  MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
+  MANAGED_SUBMIT_CHOOSER_POLICY,
+  type ManagedBrowserAction,
+} from './browserbase';
 import { applyReviewPatch } from './applicationStall';
 import { submitRequestDisposition, resumeEditDisposition } from './submissionSafety';
 import {
@@ -374,6 +379,7 @@ test('the code rides a continuation carrying the packet\'s own submit action, an
     maxRetries: 1,
     label: 'final_submit',
     optional: false,
+    chooserPolicy: MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY,
   };
   const packetActions: ManagedBrowserAction[] = [
     { type: 'fill', selector: '#email', value: 'a@b.com' },
@@ -396,10 +402,12 @@ test('the code rides a continuation carrying the packet\'s own submit action, an
   assert.equal(actions[1].type, 'confirmAndSubmit');
   assert.equal(actions[1].securityCode, 'TPHJrFMJ');
   assert.equal(actions[1].submitKind, 'verification');
+  assert.equal(actions[1].chooserPolicy, MANAGED_SUBMIT_CHOOSER_POLICY);
+  assert.equal(actions[1].chooserPolicy?.version, 3);
   assert.equal(actions[1].expectedPageUrl, challengeUrl);
   // Derived from the packet's own submit action rather than written out again. The runner validates
-  // selector, contract version, retry budget and chooser policy field by field and refuses the whole
-  // run on any mismatch, so a second hand-written copy is a fifth place they all have to agree.
+  // selector, contract version and retry budget field by field and refuses the whole run on any
+  // mismatch. Verification alone replaces application v4 with the stable v3 chooser policy.
   assert.equal(actions[1].selector, submitAction.selector);
   assert.equal(actions[1].maxRetries, submitAction.maxRetries);
   assert.equal(actions[1].contractVersion, 2);
