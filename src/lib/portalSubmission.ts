@@ -5163,7 +5163,8 @@ const WORKABLE_ADDRESS_SELECTOR = 'input[name="address"]:visible';
 const WORKABLE_LEGACY_CITY_SELECTOR = 'input[name="city"]:visible';
 const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
-  'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible';
+  'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
+  + 'button[aria-label="Telephone country code"][aria-controls]:visible';
 // Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
 // city input before the visible address autocomplete on current forms, so a plain comma list can
 // still pick the wrong control. The city arm exists only when no visible address control exists.
