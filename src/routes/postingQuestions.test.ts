@@ -1,9 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { buildManagedPrescriptActions, buildManagedDiscoveryActions } from '../lib/portalSubmission';
+import {
+  MANAGED_DISCOVERY_ROLE_CAPABILITY,
+  type ManagedBrowserAction,
+  type ManagedBrowserResult,
+} from '../lib/browserbase';
+import {
+  MANAGED_ACTION_LIMIT,
+  buildManagedPrescriptActions,
+  buildManagedDiscoveryActions,
+} from '../lib/portalSubmission';
 import { resolvePrescript, type PostingQuestion } from '../lib/postingQuestions';
-import { prescriptResponse, type PostingTarget } from './postingQuestions';
+import { prescriptResponse, scanPostingQuestions, type PostingTarget } from './postingQuestions';
 
 const ROUTE = readFileSync('src/routes/postingQuestions.ts', 'utf8');
 
@@ -43,13 +52,72 @@ test('a portal with no react-select comboboxes costs one action', () => {
 test('dynamic role probing stays off unless this exact Stratus result advertises the role wire', () => {
   assert.match(ROUTE, /const discoveryRoleCapability = managedResultSupportsDiscoveryRole\(result\)/);
   assert.match(ROUTE, /const discoveredForOptionProbe = discoveredQuestionsForExactOptionProbe\(discoveredRaw\)/);
-  assert.match(ROUTE, /buildManagedDiscoveredOptionProbeActions\([\s\S]{0,300}discoveryRoleCapability/);
+  assert.match(ROUTE, /buildManagedDiscoveredOptionProbeBatches\([\s\S]{0,300}discoveryRoleCapability/);
   assert.match(ROUTE, /managedOptionProbeAnalysis\([\s\S]{0,300}discoveryRoleCapability/);
+});
+
+test('the posting scan executes every bounded option-probe batch', async () => {
+  const discovered = Array.from({ length: 25 }, (_, index) => {
+    const controlId = `question_8${String(index).padStart(7, '0')}`;
+    return {
+      label: `Question ${index + 1}*`,
+      selector: `#${controlId}`,
+      inputType: 'text',
+      role: 'combobox',
+      required: true,
+      maxLength: null,
+    };
+  });
+  const calls: ManagedBrowserAction[][] = [];
+  const browserRunner = async (
+    _url: string,
+    actions: ManagedBrowserAction[],
+  ): Promise<ManagedBrowserResult> => {
+    calls.push(actions);
+    if (calls.length === 1) {
+      return {
+        title: 'Application',
+        url: responseTarget.applyUrl,
+        text: '',
+        capabilities: [MANAGED_DISCOVERY_ROLE_CAPABILITY],
+        discovered,
+      };
+    }
+    return {
+      title: 'Application',
+      url: responseTarget.applyUrl,
+      text: '',
+      extracted: actions.flatMap((action) => {
+        if (action.type !== 'extract') return [];
+        const controlId = action.label?.startsWith('closed_control:')
+          ? action.label.slice('closed_control:'.length)
+          : action.label?.startsWith('options:')
+            ? action.label.slice('options:'.length)
+            : null;
+        if (!controlId || !action.selector) return [];
+        return [{
+          selector: action.selector,
+          label: action.label,
+          value: action.label?.startsWith('closed_control:') ? controlId : 'Yes\nNo',
+        }];
+      }),
+    };
+  };
+
+  const result = await scanPostingQuestions(responseTarget, browserRunner);
+
+  assert.equal(calls.length, 3, 'one discovery plus two option-probe batches must run');
+  assert.equal(calls.slice(1).every((actions) => actions.length <= MANAGED_ACTION_LIMIT), true);
+  assert.equal(result.status, 'ok');
+  assert.deepEqual(result.metadata_blockers, []);
+  assert.equal(result.questions.length, 25);
+  assert.equal(result.questions.every((question) => question.options?.join('|') === 'Yes|No'), true);
 });
 
 test('the scan asks for no screenshot', () => {
   // runManagedBrowser renders a full-page PNG by default and nothing on this path would look at it.
-  assert.match(ROUTE, /runManagedBrowser\(\s*target\.applyUrl,\s*buildManagedPrescriptActions\(portal\),\s*\{ screenshot: false \}\s*\)/);
+  assert.match(ROUTE, /browserRunner\(target\.applyUrl, buildManagedPrescriptActions\(portal\), \{ screenshot: false \}\)/);
+  assert.match(ROUTE, /browserRunner\(target\.applyUrl, actions, \{ screenshot: false \}\)/);
 });
 
 test('a scan runs only on a cache miss, and only behind an hourly ceiling', () => {
