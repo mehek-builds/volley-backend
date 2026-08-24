@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { buildManagedPrescriptActions, buildManagedDiscoveryActions } from '../lib/portalSubmission';
+import { resolvePrescript, type PostingQuestion } from '../lib/postingQuestions';
+import { prescriptResponse, type PostingTarget } from './postingQuestions';
 
 const ROUTE = readFileSync('src/routes/postingQuestions.ts', 'utf8');
 
@@ -39,7 +41,10 @@ test('a portal with no react-select comboboxes costs one action', () => {
 });
 
 test('dynamic role probing stays off unless this exact Stratus result advertises the role wire', () => {
-  assert.match(ROUTE, /buildManagedDiscoveredOptionProbeActions\([\s\S]{0,300}managedResultSupportsDiscoveryRole\(result\)/);
+  assert.match(ROUTE, /const discoveryRoleCapability = managedResultSupportsDiscoveryRole\(result\)/);
+  assert.match(ROUTE, /const discoveredForOptionProbe = discoveredQuestionsForExactOptionProbe\(discoveredRaw\)/);
+  assert.match(ROUTE, /buildManagedDiscoveredOptionProbeActions\([\s\S]{0,300}discoveryRoleCapability/);
+  assert.match(ROUTE, /managedOptionProbeAnalysis\([\s\S]{0,300}discoveryRoleCapability/);
 });
 
 test('the scan asks for no screenshot', () => {
@@ -59,7 +64,20 @@ test('a scan runs only on a cache miss, and only behind an hourly ceiling', () =
 test('a page that produced no controls is stored as a result, not as an empty form', () => {
   // Otherwise the next applicant on the same posting is told this form asks nothing, for a
   // fortnight, on the strength of one page that would not load.
-  assert.match(ROUTE, /questions\.length > 0 \? 'ok' : 'form_not_reached'/);
+  assert.match(ROUTE, /postingQuestionInventoryStatus\(inventory\)/);
+  assert.doesNotMatch(ROUTE, /questions\.length > 0 \? 'ok'/);
+});
+
+test('incomplete exact metadata is persisted and returned as a typed blocker', () => {
+  assert.match(ROUTE, /questionMetadataBlockersForOptionProbeFailures\([\s\S]{0,200}optionProbe\.failures/);
+  assert.match(ROUTE, /!optionProbe\.failedIds\.has\(controlId\)/);
+  assert.match(ROUTE, /storedPostingQuestionInventory\(questions, metadataBlockers\)/);
+  assert.match(ROUTE, /readStoredPostingQuestionInventory\(row\.questions\)/);
+  assert.match(ROUTE, /const measuredStatus = postingQuestionInventoryStatus\(inventory\)/);
+  assert.match(ROUTE, /storedStatus === 'ok' && measuredStatus === 'metadata_incomplete'/);
+  const response = ROUTE.slice(ROUTE.indexOf('function prescriptResponse('));
+  assert.match(response, /metadata_blockers: responseMetadataBlockers/);
+  assert.match(response, /status === 'ok' && responseMetadataBlockers\.length > 0/);
 });
 
 test('a missing table degrades to "nothing cached" rather than a 500', () => {
@@ -75,6 +93,78 @@ test('the response lists only the questions that need her, and counts the rest',
   // The answer travelling to the client for an ask is either blank or something she typed herself.
   // Nothing on this endpoint drafts, and nothing infers.
   assert.doesNotMatch(ROUTE, /draftApplicationAnswer/);
+});
+
+const responseTarget: PostingTarget = {
+  applyUrl: 'https://job-boards.greenhouse.io/example/jobs/123',
+  portal: 'greenhouse',
+  company: 'Example',
+  title: 'Software Engineering Intern',
+  description: 'Build reliable systems.',
+  location: 'Chicago, Illinois',
+};
+
+test('the DGA wire response exposes a typed blocker and never invents a question', () => {
+  const blocker = {
+    kind: 'missing_question_text' as const,
+    required: true,
+    portal_input_type: 'textarea',
+    control_id: 'dga_response',
+    portal_selector: '#dga_response',
+  };
+  const response = prescriptResponse(
+    '00000000-0000-4000-8000-000000000001',
+    { ...responseTarget, portal: 'lever', company: 'DGA', applyUrl: 'https://jobs.lever.co/dga/abc' },
+    [],
+    [blocker],
+    'metadata_incomplete',
+    new Date('2026-08-23T12:00:00.000Z'),
+    true,
+    { questions: [], ask: [], metadata_blockers: [] },
+  );
+
+  assert.equal(response.discovery_status, 'metadata_incomplete');
+  assert.deepEqual(response.metadata_blockers, [blocker]);
+  assert.deepEqual(response.ask, []);
+  assert.equal(response.question_count, 0);
+});
+
+test('the Akuna and Jump wire responses carry exact employer choices to the dashboard', () => {
+  const cases = [{
+    company: 'Akuna',
+    question: 'Have you ever applied to a full time or internship position with Akuna in the past?',
+  }, {
+    company: 'Jump Trading',
+    question: 'Are you currently subject to a restrictive covenant, non-compete, or notice period?',
+  }];
+  for (const item of cases) {
+    const questions: PostingQuestion[] = [{
+      label: item.question,
+      input_type: 'select-one',
+      options: ['Yes', 'No'],
+      required: true,
+      max_length: null,
+    }];
+    const resolution = resolvePrescript(questions, {}, new Map(), { company: item.company });
+    const response = prescriptResponse(
+      '00000000-0000-4000-8000-000000000002',
+      { ...responseTarget, company: item.company },
+      questions,
+      [],
+      'ok',
+      new Date('2026-08-23T12:00:00.000Z'),
+      true,
+      resolution,
+    );
+
+    assert.equal(response.discovery_status, 'ok', item.company);
+    assert.deepEqual(response.metadata_blockers, [], item.company);
+    assert.equal(response.ask[0]?.question, item.question, item.company);
+    assert.deepEqual(response.ask[0]?.options, ['Yes', 'No'], item.company);
+    assert.equal(response.ask[0]?.answer, '', item.company);
+    assert.equal(response.ask[0]?.required, true, item.company);
+    assert.ok(response.ask[0]?.explanation, item.company);
+  }
 });
 
 test('the endpoint is authenticated and takes a board posting id', () => {

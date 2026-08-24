@@ -218,6 +218,14 @@ describe('application review metadata', () => {
       status: 'resume_ready' as const,
       edited_terms: ['workflow'],
       questions: [],
+      question_metadata_blockers: [{
+        kind: 'missing_exact_options' as const,
+        required: true,
+        portal_input_type: 'select-one',
+        control_id: 'question_123',
+        portal_selector: '#question_123',
+        question: 'Will you require sponsorship in the future?',
+      }],
       skipped_reasons: [],
       updated_at: '2026-07-21T00:00:00.000Z',
     };

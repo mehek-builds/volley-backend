@@ -384,6 +384,13 @@ test('the not-reached sentence is categorized apart from an evidence gap', async
   );
 });
 
+test('legacy multiline option-read failures remain evidence gaps', async () => {
+  const { attentionCategoriesForReasons } = await import('../lib/submissionTerminalCause');
+  assert.deepEqual(attentionCategoriesForReasons([
+    'Litos could not read the choices Data consent\nfor this application offers.',
+  ]), ['evidence_gap']);
+});
+
 /* ---- an expired packet is a promise being kept, and must be categorised as one ---- */
 
 test('an expired packet is categorised as packet_expired, not as a document the employer wants', () => {

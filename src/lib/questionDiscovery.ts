@@ -6252,6 +6252,7 @@ export function isCoreIdentityField(label: string): boolean {
 
 const INLINE_UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const GREENHOUSE_QUESTION_HANDLE_RE = /\bquestion_\d+\b/gi;
+const GREENHOUSE_TRAILING_LONG_NUMERIC_HANDLE_RE = /\s*\*?\s+\d{8,14}\s*$/u;
 const GREENHOUSE_TRAILING_NUMERIC_HANDLE_RE = /\s*\*?\s+\d{2,5}\s*$/u;
 // Greenhouse's repeated-section handles: degree--0, school--0, discipline--0, start-month--0,
 // end-year--1. Discovery concatenates the control's `name` and `id` onto the visible label, so
@@ -6293,6 +6294,7 @@ const TRAILING_ANSWER_PLACEHOLDER_RE = /\s+(?:type|enter|write)\s+(?:your\s+)?(?
 const PROVIDER_HANDLE_STRIPPERS: readonly RegExp[] = [
   INLINE_UUID_RE,
   GREENHOUSE_QUESTION_HANDLE_RE,
+  GREENHOUSE_TRAILING_LONG_NUMERIC_HANDLE_RE,
   GREENHOUSE_SECTION_HANDLE_RE,
   EMPTY_BRACKET_HANDLE_RE,
   LEVER_CARD_HANDLE_RE,
@@ -6321,6 +6323,13 @@ export function isProviderHandleOnly(value: string): boolean {
 }
 
 function collapseRepeatedLabel(value: string): string {
+  const requiredMarkerParts = value.match(/^(.*?)\s+\*\s+(.*?)$/u);
+  if (requiredMarkerParts) {
+    const comparable = (part: string) => part.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (comparable(requiredMarkerParts[1] ?? '') === comparable(requiredMarkerParts[2] ?? '')) {
+      return (requiredMarkerParts[1] ?? '').replace(/[\s*.,;:!?]+$/u, '').trim();
+    }
+  }
   const words = value.trim().split(/\s+/).filter(Boolean);
   if (words.length < 2 || words.length % 2 !== 0) return value;
   const half = words.length / 2;

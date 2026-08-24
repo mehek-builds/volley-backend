@@ -404,6 +404,152 @@ test('contact unlock ownership and trial charging commit once across an exact co
     .filter((row) => row.user_id === user.id).length, 2);
 });
 
+test('contact unlock batch charges only rows inserted when one contact already exists', async () => {
+  const user = await trialUser('contact-unlock-partial-conflict@example.test');
+  await db.insert(schema.companies).values({ domain: 'partial-unlock.example', name: 'Partial Unlock' });
+  const existingContactId = randomUUID();
+  const newContactId = randomUUID();
+  await db.insert(schema.contacts).values([
+    { id: existingContactId, full_name: 'Existing Contact', company_domain: 'partial-unlock.example' },
+    { id: newContactId, full_name: 'New Contact', company_domain: 'partial-unlock.example' },
+  ]);
+  await db.insert(schema.user_contact_unlocks).values({
+    user_id: user.id,
+    contact_id: existingContactId,
+    company_scope_key: 'domain:partial-unlock.example',
+    source: 'earlier-operation',
+    unlocked_at: new Date(),
+  });
+  const reservation = await entitlements.reserveEntitledUsage({
+    userId: user.id,
+    kind: 'contact',
+    idempotencyKey: 'partial-conflict-contact-operation',
+    trigger: 'contact_discovery',
+    companyScopeKey: 'domain:partial-unlock.example',
+    companyName: 'Partial Unlock',
+    units: 2,
+  });
+  assert.equal(reservation.allowed, true);
+  if (!reservation.allowed) return;
+
+  const inserted = await entitlements.commitContactUnlocks({
+    userId: user.id,
+    companyScopeKey: 'domain:partial-unlock.example',
+    contactIds: [existingContactId, newContactId],
+    source: 'partial-conflict-test',
+    reservationId: reservation.reservationId,
+  });
+
+  assert.equal(inserted, 1);
+  const unlocks = (await db.select().from(schema.user_contact_unlocks))
+    .filter((row) => row.user_id === user.id);
+  assert.equal(unlocks.length, 2);
+  const companyUsage = (await db.select().from(schema.trial_company_usage))
+    .find((row) => row.user_id === user.id && row.company_scope_key === 'domain:partial-unlock.example');
+  assert.equal(companyUsage?.contacts_used, 1);
+  const savedReservation = (await db.select().from(schema.entitlement_usage_reservations))
+    .find((row) => row.id === reservation.reservationId);
+  assert.equal(savedReservation?.status, 'committed');
+  assert.equal(savedReservation?.units, 1);
+});
+
+test('contact unlock batch releases a fresh reservation without charging when every row conflicts', async () => {
+  const user = await trialUser('contact-unlock-all-conflict@example.test');
+  await db.insert(schema.companies).values({ domain: 'all-conflict.example', name: 'All Conflict' });
+  const contactIds = [randomUUID(), randomUUID()];
+  await db.insert(schema.contacts).values(contactIds.map((id, index) => ({
+    id,
+    full_name: `Existing Conflict ${index}`,
+    company_domain: 'all-conflict.example',
+  })));
+  await db.insert(schema.user_contact_unlocks).values(contactIds.map((contactId) => ({
+    user_id: user.id,
+    contact_id: contactId,
+    company_scope_key: 'domain:all-conflict.example',
+    source: 'earlier-operation',
+    unlocked_at: new Date(),
+  })));
+  const reservation = await entitlements.reserveEntitledUsage({
+    userId: user.id,
+    kind: 'contact',
+    idempotencyKey: 'all-conflict-contact-operation',
+    trigger: 'contact_discovery',
+    companyScopeKey: 'domain:all-conflict.example',
+    companyName: 'All Conflict',
+    units: 2,
+  });
+  assert.equal(reservation.allowed, true);
+  if (!reservation.allowed) return;
+  const activeReservation = (await db.select().from(schema.entitlement_usage_reservations))
+    .find((row) => row.id === reservation.reservationId);
+  assert.equal(activeReservation?.status, 'reserved');
+
+  const inserted = await entitlements.commitContactUnlocks({
+    userId: user.id,
+    companyScopeKey: 'domain:all-conflict.example',
+    contactIds,
+    source: 'all-conflict-test',
+    reservationId: reservation.reservationId,
+  });
+
+  assert.equal(inserted, 0);
+  assert.equal((await db.select().from(schema.user_contact_unlocks))
+    .filter((row) => row.user_id === user.id).length, 2);
+  assert.equal((await db.select().from(schema.trial_company_usage))
+    .filter((row) => row.user_id === user.id).length, 0);
+  const savedReservation = (await db.select().from(schema.entitlement_usage_reservations))
+    .find((row) => row.id === reservation.reservationId);
+  assert.equal(savedReservation?.status, 'released');
+  assert.equal(savedReservation?.units, 0);
+  assert.equal(savedReservation?.committed_at, null);
+  assert.ok(savedReservation?.released_at);
+  assert.equal(savedReservation?.trial_company_usage_id, null);
+});
+
+test('contact unlock batch foreign-key failure leaves unlocks, quota, and reservation unchanged', async () => {
+  const user = await trialUser('contact-unlock-batch-rollback@example.test');
+  await db.insert(schema.companies).values({ domain: 'batch-rollback.example', name: 'Batch Rollback' });
+  const validContactId = randomUUID();
+  await db.insert(schema.contacts).values({
+    id: validContactId,
+    full_name: 'Valid Batch Contact',
+    company_domain: 'batch-rollback.example',
+  });
+  const reservation = await entitlements.reserveEntitledUsage({
+    userId: user.id,
+    kind: 'contact',
+    idempotencyKey: 'batch-rollback-contact-operation',
+    trigger: 'contact_discovery',
+    companyScopeKey: 'domain:batch-rollback.example',
+    companyName: 'Batch Rollback',
+    units: 2,
+  });
+  assert.equal(reservation.allowed, true);
+  if (!reservation.allowed) return;
+
+  await assert.rejects(entitlements.commitContactUnlocks({
+    userId: user.id,
+    companyScopeKey: 'domain:batch-rollback.example',
+    contactIds: [validContactId, randomUUID()],
+    source: 'batch-rollback-test',
+    reservationId: reservation.reservationId,
+  }), (error: Error & { cause?: { code?: string } }) => error.cause?.code === '23503');
+
+  assert.equal((await db.select().from(schema.user_contact_unlocks))
+    .filter((row) => row.user_id === user.id).length, 0);
+  const companyUsage = (await db.select().from(schema.trial_company_usage))
+    .find((row) => row.user_id === user.id && row.company_scope_key === 'domain:batch-rollback.example');
+  assert.equal(companyUsage?.contacts_used, 0);
+  assert.equal(companyUsage?.drafts_used, 0);
+  const savedReservation = (await db.select().from(schema.entitlement_usage_reservations))
+    .find((row) => row.id === reservation.reservationId);
+  assert.equal(savedReservation?.status, 'reserved');
+  assert.equal(savedReservation?.units, 2);
+  assert.equal(savedReservation?.committed_at, null);
+  assert.equal(savedReservation?.released_at, null);
+  assert.equal(savedReservation?.trial_company_usage_id, companyUsage?.id);
+});
+
 test('one operation id cannot cross company or application scope', async () => {
   const user = await trialUser('idempotency-scope@example.test');
   const companyReservation = await entitlements.reserveEntitledUsage({

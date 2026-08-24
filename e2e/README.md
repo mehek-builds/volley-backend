@@ -35,10 +35,10 @@ the employer's form and Litos cannot read the security code the employer mails b
 
 It connects to `litos_alias_e2e` and deletes from three tables on every run.
 
-The BEFORE side runs `origin/main`'s own `body.application` gate and refuses to start unless it
-still finds that gate in `git show origin/main:src/routes/resume.ts`, so the comparison cannot
-quietly become a story about code that no longer exists. The AFTER side runs the real
-`planPacketApplicantEmail` and the real `ensureApplicationEmailAlias` against the real foreign key.
+The test refuses to start unless `origin/main` still calls `planPacketApplicantEmail` without an
+`application`-link gate and persists the resulting identity through `ensureApplicationEmailAlias`.
+It then runs both real helpers against the real foreign key, including a packet created before its
+portal link is known.
 
 `POST /resume/generate` is not called over HTTP here either, for the same reason as below: its
 alias code sits behind a live Anthropic call, a PDF render and a blob upload.

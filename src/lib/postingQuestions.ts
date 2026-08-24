@@ -54,10 +54,16 @@ import {
   type DiscoveredQuestion,
 } from './questionDiscovery';
 import type { SupportedPortal } from './portalSubmission';
-import { consentAcceptanceValue } from './profileFieldResolution';
+import { consentAcceptanceValue, usableOptions } from './profileFieldResolution';
 import { isSelfDeclarationQuestion, selfDeclarationSkipReason } from './selfDeclaration';
 import { isDeclaredAbsenceRefusal } from './questionDiscovery';
 import { answerReuseScope, savedAnswerFor, type AnswerReuseContext } from './answerReuse';
+import {
+  dedupeQuestionMetadataBlockers,
+  discoveredQuestionNeedsExactOptionsBeforeResolution,
+  questionMetadataBlockerForDiscovered,
+  type QuestionMetadataBlocker,
+} from './questionMetadata';
 
 /** One control on an employer's application form, as the pre-script remembers it. */
 export type PostingQuestion = {
@@ -73,13 +79,32 @@ export type PostingQuestion = {
   max_length: number | null;
 };
 
-export type PostingQuestionsDiscoveryStatus = 'ok' | 'form_not_reached' | 'failed';
+export type PostingQuestionsDiscoveryStatus = 'ok' | 'form_not_reached' | 'metadata_incomplete' | 'failed';
+
+export type PostingQuestionInventory = {
+  questions: PostingQuestion[];
+  metadata_blockers: QuestionMetadataBlocker[];
+};
+
+export const POSTING_QUESTION_METADATA_BLOCKER_RECORD = 'question_metadata_blocker_v1' as const;
+
+export type StoredPostingQuestionMetadataBlocker = {
+  record_type: typeof POSTING_QUESTION_METADATA_BLOCKER_RECORD;
+  label: '';
+  input_type: 'text';
+  options: null;
+  required: false;
+  max_length: null;
+  metadata_blocker: QuestionMetadataBlocker;
+};
+
+export type StoredPostingQuestionInventory = Array<PostingQuestion | StoredPostingQuestionMetadataBlocker>;
 
 export type PostingQuestionsRecord = {
   job_id: string;
   apply_url: string;
   portal: string | null;
-  questions: PostingQuestion[];
+  questions: StoredPostingQuestionInventory;
   discovery_status: PostingQuestionsDiscoveryStatus;
   discovered_at: Date;
 };
@@ -127,31 +152,41 @@ export function postingQuestionsAreFresh(
  * the packet on every run, and carrying them into the pre-script would turn "here is what only you
  * can answer" into a list that opens with her own name.
  */
-export function postingQuestionsFromDiscovered(
+export function postingQuestionInventoryFromDiscovered(
   discovered: readonly DiscoveredQuestion[],
   portal?: SupportedPortal | null,
-): PostingQuestion[] {
+): PostingQuestionInventory {
   const byLabel = new Map<string, PostingQuestion>();
+  const metadataBlockers: QuestionMetadataBlocker[] = [];
   for (const field of discovered) {
     const raw = field?.label ?? '';
     const label = normalizeReviewQuestionLabel(raw);
-    if (!label) continue;
     if (isCoreIdentityField(normalizeDiscoveredLabel(raw))) continue;
+    if (portal && discoveredFieldIsFixedPortalProfileControl(portal, field)) continue;
+    if (!label) {
+      const metadataBlocker = questionMetadataBlockerForDiscovered(field);
+      if (metadataBlocker) metadataBlockers.push(metadataBlocker);
+      continue;
+    }
     /* A radio's own option, or a widget's rendered subtree, is not a question. Tested on BOTH the
      * raw label and the normalized one: the handle strippers turn Lever's "Yes cards[<uuid>][field0]"
      * into "Yes", which is what makes the answer-token vocabulary able to see it at all, while the
      * widget-subtree markers live in punctuation the normalizer collapses. */
     if (discoveredFieldIsNotAQuestion({ label: raw, options: field.options })) continue;
     if (discoveredFieldIsNotAQuestion({ label, options: field.options })) continue;
-    if (portal && discoveredFieldIsFixedPortalProfileControl(portal, field)) continue;
     // Portal-owned fixed fields are filled from the packet before reviewed questions run. Keeping
     // one in the pre-script asks the applicant for data Litos already has, and can also leave a
     // second representation of the same widget blocked. Use the shared submission normalizer so
     // discovery and submission agree on exactly which fields the portal adapter owns.
     if (portal && normalizeStoredPortalQuestions([{ question: label, answer: '' }], portal).length === 0) continue;
-    const options = Array.isArray(field.options)
-      ? [...new Set(field.options.map((option) => (option ?? '').trim()).filter(Boolean))]
-      : [];
+    const metadataBlocker = questionMetadataBlockerForDiscovered(field, {
+      closedControlRequiresOptions: discoveredQuestionNeedsExactOptionsBeforeResolution(field),
+    });
+    if (metadataBlocker) {
+      metadataBlockers.push(metadataBlocker);
+      continue;
+    }
+    const options = usableOptions(field.options);
     const next: PostingQuestion = {
       label,
       input_type: (field.inputType ?? 'text').trim() || 'text',
@@ -183,7 +218,153 @@ export function postingQuestionsFromDiscovered(
       max_length: existing.max_length ?? next.max_length,
     });
   }
-  return [...byLabel.values()];
+  return {
+    questions: [...byLabel.values()],
+    metadata_blockers: dedupeQuestionMetadataBlockers(metadataBlockers),
+  };
+}
+
+export function postingQuestionsFromDiscovered(
+  discovered: readonly DiscoveredQuestion[],
+  portal?: SupportedPortal | null,
+): PostingQuestion[] {
+  return postingQuestionInventoryFromDiscovered(discovered, portal).questions;
+}
+
+function postingQuestionMetadataBlocker(
+  question: PostingQuestion,
+  closedControlRequiresOptions = false,
+): QuestionMetadataBlocker | null {
+  return questionMetadataBlockerForDiscovered({
+    label: question.label,
+    selector: '',
+    durableSelector: null,
+    inputType: question.input_type,
+    role: null,
+    options: question.options,
+    required: question.required,
+  }, {
+    closedControlRequiresOptions,
+  });
+}
+
+function postingQuestionNeedsExactOptionsBeforeResolution(question: PostingQuestion): boolean {
+  return discoveredQuestionNeedsExactOptionsBeforeResolution({
+    inputType: question.input_type,
+    role: null,
+  });
+}
+
+function normalizedStoredMetadataBlockers(input: unknown, tagged: boolean): QuestionMetadataBlocker[] {
+  if (!Array.isArray(input)) return [];
+  return input.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const record = item as Record<string, unknown>;
+    if (tagged && record.record_type !== POSTING_QUESTION_METADATA_BLOCKER_RECORD) return [];
+    const candidate = tagged ? record.metadata_blocker : record;
+    if (!candidate || typeof candidate !== 'object') return [];
+    const blocker = candidate as Record<string, unknown>;
+    if (blocker.kind !== 'missing_question_text' && blocker.kind !== 'missing_exact_options') return [];
+    if (typeof blocker.required !== 'boolean' || typeof blocker.portal_input_type !== 'string') return [];
+    return [{
+      kind: blocker.kind,
+      required: blocker.required,
+      portal_input_type: blocker.portal_input_type,
+      ...(typeof blocker.control_id === 'string' && blocker.control_id.trim()
+        ? { control_id: blocker.control_id.trim() }
+        : {}),
+      ...(typeof blocker.portal_selector === 'string' && blocker.portal_selector.trim()
+        ? { portal_selector: blocker.portal_selector.trim() }
+        : {}),
+      ...(typeof blocker.question === 'string' && blocker.question.trim()
+        ? { question: blocker.question.trim() }
+        : {}),
+    }];
+  });
+}
+
+function normalizedStoredPostingQuestions(input: unknown): PostingQuestion[] {
+  if (!Array.isArray(input)) return [];
+  return input.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const record = item as Record<string, unknown>;
+    if (typeof record.label !== 'string' || !record.label.trim()) return [];
+    const options = Array.isArray(record.options)
+      ? [...new Set(record.options.flatMap((option) => typeof option === 'string' && option.trim() ? [option.trim()] : []))]
+      : [];
+    return [{
+      label: record.label.trim(),
+      input_type: typeof record.input_type === 'string' && record.input_type.trim()
+        ? record.input_type.trim()
+        : 'text',
+      options: options.length > 0 ? options : null,
+      required: record.required === true,
+      max_length: typeof record.max_length === 'number' && record.max_length > 0
+        ? record.max_length
+        : null,
+    }];
+  });
+}
+
+export function storedPostingQuestionInventory(
+  questions: readonly PostingQuestion[],
+  metadataBlockers: readonly QuestionMetadataBlocker[],
+): StoredPostingQuestionInventory {
+  return [
+    ...questions,
+    ...dedupeQuestionMetadataBlockers(metadataBlockers).map((blocker) => ({
+      record_type: POSTING_QUESTION_METADATA_BLOCKER_RECORD,
+      label: '' as const,
+      input_type: 'text' as const,
+      options: null,
+      required: false as const,
+      max_length: null,
+      metadata_blocker: blocker,
+    })),
+  ];
+}
+
+export function readStoredPostingQuestionInventory(input: unknown): PostingQuestionInventory {
+  const record = input && typeof input === 'object' && !Array.isArray(input)
+    ? input as Record<string, unknown>
+    : null;
+  const records = Array.isArray(input)
+    ? input
+    : Array.isArray(record?.questions) ? record.questions : [];
+  const questions = normalizedStoredPostingQuestions(records);
+  const derived = questions.flatMap((question) => postingQuestionMetadataBlocker(
+    question,
+    postingQuestionNeedsExactOptionsBeforeResolution(question),
+  ) ?? []);
+  const metadataBlockers = dedupeQuestionMetadataBlockers([
+    ...normalizedStoredMetadataBlockers(record?.metadata_blockers, false),
+    ...normalizedStoredMetadataBlockers(records, true),
+    ...derived,
+  ]);
+  const blockedQuestionLabels = new Set(metadataBlockers.flatMap((blocker) => blocker.question
+    ? [blocker.question.toLowerCase()]
+    : []));
+  return {
+    questions: questions.filter((question) => {
+      if (postingQuestionMetadataBlocker(
+        question,
+        postingQuestionNeedsExactOptionsBeforeResolution(question),
+      )) return false;
+      return !blockedQuestionLabels.has(question.label.toLowerCase());
+    }),
+    metadata_blockers: metadataBlockers,
+  };
+}
+
+export function postingQuestionInventoryStatus(
+  inventory: PostingQuestionInventory,
+): PostingQuestionsDiscoveryStatus {
+  if (inventory.metadata_blockers.length > 0) return 'metadata_incomplete';
+  if (inventory.questions.some((question) =>
+    postingQuestionMetadataBlocker(question, true)?.kind === 'missing_exact_options')) {
+    return 'metadata_incomplete';
+  }
+  return inventory.questions.length > 0 ? 'ok' : 'form_not_reached';
 }
 
 /** Why a question is being put in front of the applicant. Drives the copy beside it. */
@@ -224,6 +405,7 @@ export type PrescriptResolution = {
   questions: PrescriptQuestion[];
   /** The subset with ask === true, in form order. What the Apply screen shows. */
   ask: PrescriptQuestion[];
+  metadata_blockers: QuestionMetadataBlocker[];
 };
 
 /**
@@ -259,6 +441,7 @@ export function resolvePrescript(
 ): PrescriptResolution {
   const reuseContext: AnswerReuseContext = { company: context.company };
   const out: PrescriptQuestion[] = [];
+  const metadataBlockers: QuestionMetadataBlocker[] = [];
 
   for (const question of questions) {
     const label = question.label;
@@ -292,6 +475,13 @@ export function resolvePrescript(
     }
 
     if (isSelfDeclarationQuestion(label)) {
+      if (remembered === undefined) {
+        const blocker = postingQuestionMetadataBlocker(question, true);
+        if (blocker) {
+          metadataBlockers.push(blocker);
+          continue;
+        }
+      }
       out.push({
         ...base,
         ask: remembered === undefined,
@@ -324,6 +514,12 @@ export function resolvePrescript(
       continue;
     }
 
+    const metadataBlocker = postingQuestionMetadataBlocker(question, true);
+    if (metadataBlocker) {
+      metadataBlockers.push(metadataBlocker);
+      continue;
+    }
+
     // Not answerable from anything on file. Optional fields are left alone exactly as the runner
     // leaves them: a form Litos cannot complete is a stall, and a form it merely did not embellish
     // is a submitted application.
@@ -342,7 +538,11 @@ export function resolvePrescript(
     out.push({ ...base, ask: true, reason, answer: '', remembered: false });
   }
 
-  return { questions: out, ask: out.filter((item) => item.ask) };
+  return {
+    questions: out,
+    ask: out.filter((item) => item.ask),
+    metadata_blockers: dedupeQuestionMetadataBlockers(metadataBlockers),
+  };
 }
 
 /**
