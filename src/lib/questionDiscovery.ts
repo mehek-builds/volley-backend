@@ -6542,7 +6542,8 @@ function isFixedPortalProfileField(portal: SupportedPortal, label: string): bool
   }
   if (portal === 'workable' || portal === 'controlled_workable') {
     const builtIn = label.trim().replace(/^\s*\*+\s*/u, '').replace(/\s*\(optional\)\s*$/i, '').trim();
-    return /^address(?:\s+address){0,2}$/i.test(builtIn)
+    return /^telephone country code$/i.test(builtIn)
+      || /^address(?:\s+address){0,2}$/i.test(builtIn)
       || /^phone(?:\s+\+\d{1,4})?(?:\s+phone)?$/i.test(builtIn);
   }
   if (portal === 'smartrecruiters') {
@@ -6573,6 +6574,16 @@ function recruiteeFixedCandidateSelector(selector: string | null | undefined): b
     || /^input\[id=(?:"|')?input-candidate\.(?:name|email|phone)(?:-[\w-]+)?(?:"|')?\]$/i.test(normalized);
 }
 
+function pinpointFixedApplicationSelector(selector: string | null | undefined): boolean {
+  const normalized = selector?.trim() ?? '';
+  if (!normalized) return false;
+  const match = normalized.match(
+    /^(?:input)?\[name=(?:"([^"]+)"|'([^']+)')\](?:\[type=(?:"text"|'text'|text)\])?$/i,
+  );
+  const name = match?.[1] ?? match?.[2] ?? '';
+  return /^application_form\[application\]\[(?:first_name|last_name|email|phone|town|linkedin_url)\]$/i.test(name);
+}
+
 /**
  * Whether discovery captured one of Recruitee's built-in candidate controls under a section
  * heading instead of the control's own label.
@@ -6587,9 +6598,15 @@ export function discoveredFieldIsFixedPortalProfileControl(
   field: Pick<DiscoveredQuestion, 'label' | 'selector' | 'durableSelector'>,
 ): boolean {
   if (isFixedPortalProfileField(portal, normalizeDiscoveredLabel(field.label))) return true;
-  if (portal !== 'recruitee' && portal !== 'manual_recruitee') return false;
-  return recruiteeFixedCandidateSelector(field.durableSelector)
-    || recruiteeFixedCandidateSelector(field.selector);
+  if (portal === 'recruitee' || portal === 'manual_recruitee') {
+    return recruiteeFixedCandidateSelector(field.durableSelector)
+      || recruiteeFixedCandidateSelector(field.selector);
+  }
+  if (portal === 'pinpoint') {
+    return pinpointFixedApplicationSelector(field.durableSelector)
+      || pinpointFixedApplicationSelector(field.selector);
+  }
+  return false;
 }
 
 /** Normalize legacy provider labels and remove controls already owned by fixed portal selectors. */
@@ -6608,6 +6625,7 @@ export function normalizeStoredPortalQuestions<T extends {
     if (!label || isFixedPortalProfileField(portal, label)) continue;
     if ((portal === 'recruitee' || portal === 'manual_recruitee')
       && recruiteeFixedCandidateSelector(question.portal_selector)) continue;
+    if (portal === 'pinpoint' && pinpointFixedApplicationSelector(question.portal_selector)) continue;
     const reviewLabel = normalizeReviewQuestionLabel(label);
     if (!reviewLabel) continue;
     const key = reviewLabel.toLowerCase();
