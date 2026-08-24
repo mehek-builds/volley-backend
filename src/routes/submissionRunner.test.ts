@@ -643,6 +643,176 @@ test('CBS Recruitee salutation becomes one required blank question with the empl
   });
 });
 
+test('Paylocity removes saved address facts and surfaces only exact applicant-owned fields', async () => {
+  const current: ApplicationReviewState = {
+    jd_text: 'Software developer internship.',
+    role: 'Software Developer Intern',
+    portal_url: 'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/2950251',
+    ats_name: 'paylocity',
+    status: 'ready_to_submit',
+    edited_terms: [],
+    questions: [{
+      id: 'old-country',
+      question: 'country united states public-site-address-country',
+      answer: 'United Arab Emirates',
+      kind: 'required',
+      required: true,
+      portal_selector: '#public-site-address-country',
+      portal_input_type: 'text',
+    }],
+    skipped_reasons: [],
+    updated_at: new Date().toISOString(),
+  };
+  const result = await discoverAndResolveQuestions(
+    [
+      {
+        label: 'country united states public-site-address-country',
+        selector: '[data-litos-discovered-1]',
+        durableSelector: '#public-site-address-country',
+        inputType: 'text',
+        role: 'combobox',
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'city public-site-address-city',
+        selector: '[data-litos-discovered-2]',
+        durableSelector: '#public-site-address-city',
+        inputType: 'text',
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'state select a state public-site-address-us-state',
+        selector: '[data-litos-discovered-3]',
+        durableSelector: '#public-site-address-us-state',
+        inputType: 'text',
+        role: 'combobox',
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'zip code public-site-address-zip',
+        selector: '[data-litos-discovered-4]',
+        durableSelector: '#public-site-address-zip',
+        inputType: 'text',
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'address line 1 public-site-address-address-1',
+        selector: '[data-litos-discovered-5]',
+        durableSelector: '#public-site-address-address-1',
+        inputType: 'text',
+        role: 'combobox',
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'county public-site-address-county',
+        selector: '[data-litos-discovered-6]',
+        durableSelector: '#public-site-address-county',
+        inputType: 'text',
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'dateAvailableToStart info.dateAvailableToStart',
+        selector: '[data-litos-discovered-7]',
+        durableSelector: '#info\\.dateAvailableToStart',
+        inputType: 'date',
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'desired salary type',
+        selector: '[data-litos-discovered-8]',
+        durableSelector: '#info\\.desiredSalaryType',
+        inputType: 'text',
+        role: 'combobox',
+        options: ['Hourly', 'Salary'],
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'minimumDesiredSalary info.minimumDesiredSalary',
+        selector: '[data-litos-discovered-9]',
+        durableSelector: '#info\\.minimumDesiredSalary',
+        inputType: 'text',
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'maximumDesiredSalary info.maximumDesiredSalary',
+        selector: '[data-litos-discovered-10]',
+        durableSelector: '#info\\.maximumDesiredSalary',
+        inputType: 'text',
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'Have you applied for a job with US before?',
+        selector: '[data-litos-discovered-11]',
+        durableSelector: '#info\\.haveYouAppliedWithUsBefore',
+        inputType: 'text',
+        role: 'combobox',
+        options: ['Yes', 'No'],
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'We may use sms during the hiring process. do you give US permission to text you?',
+        selector: '[data-litos-discovered-12]',
+        durableSelector: '#info\\.smsOptedIn',
+        inputType: 'text',
+        role: 'combobox',
+        options: ['Yes', 'No'],
+        maxLength: null,
+        required: false,
+      },
+      {
+        label: 'Have you worked with US before?',
+        selector: '[data-litos-discovered-13]',
+        durableSelector: '#info\\.haveYouWorkedWithUsBefore',
+        inputType: 'text',
+        role: 'combobox',
+        options: ['Yes', 'No'],
+        maxLength: null,
+        required: false,
+      },
+    ],
+    { user_id: 'user-1' } as ResumeRow,
+    current,
+    {
+      address_country: 'United Arab Emirates',
+      address_city: 'Dubai',
+      address_state: 'Dubai',
+      address_zip: '00000',
+    },
+    true,
+    'paylocity',
+  );
+
+  assert.deepEqual(result.questions.map((question) => ({
+    question: question.question,
+    required: question.required,
+    portal_input_type: question.portal_input_type,
+    options: question.options ?? null,
+  })), [
+    { question: 'Address line 1', required: true, portal_input_type: 'text', options: null },
+    { question: 'County', required: true, portal_input_type: 'text', options: null },
+    { question: 'Available to start', required: true, portal_input_type: 'date', options: null },
+    { question: 'Desired salary type', required: true, portal_input_type: 'combobox', options: ['Hourly', 'Salary'] },
+    { question: 'Salary range (minimum)', required: true, portal_input_type: 'text', options: null },
+    { question: 'Salary range (maximum)', required: true, portal_input_type: 'text', options: null },
+    { question: 'Have you applied for a job with US before?', required: true, portal_input_type: 'combobox', options: ['Yes', 'No'] },
+    { question: 'We may use sms during the hiring process. do you give US permission to text you?', required: true, portal_input_type: 'combobox', options: ['Yes', 'No'] },
+    { question: 'Have you worked with US before?', required: true, portal_input_type: 'combobox', options: ['Yes', 'No'] },
+  ]);
+  assert.deepEqual(result.questionMetadataBlockers, []);
+  assert.ok(result.invalidatedQuestionKeys.includes('country'));
+});
+
 test('CBS legacy Recruitee phone produces one normalized audit and acknowledgement binding', async () => {
   const custom = {
     id: 'custom',
@@ -4817,8 +4987,8 @@ test('complete metadata measurements persist while failed discovery preserves th
   assert.doesNotMatch(runner, /question_metadata_blockers:\s*\[\]/, 'a failed discovery must not claim measured-clear metadata');
   assert.match(
     runner,
-    /questionMetadataBlockersForOptionProbeFailures\(\s*portal,\s*discoveryResult\?\.discovered \?\? \[\],\s*blockingOptionProbeFailures/,
-    'every blocking probe failure from the raw discovery must remain visible in the metadata inventory',
+    /questionMetadataBlockersForOptionProbeFailures\(\s*portal,\s*normalizedDiscoveredFields,\s*blockingOptionProbeFailures/,
+    'every blocking probe failure from provider-normalized discovery must remain visible in the metadata inventory',
   );
   const helperStart = runner.indexOf('async function persistQuestionMetadataMeasurement(');
   const helperEnd = runner.indexOf('\n}\n', helperStart);
