@@ -4778,7 +4778,7 @@ function isProtectedManagedAction(
   // whether the transcript upload took the resume's control. A trim that dropped it would leave the
   // run unable to tell a resume that is still attached from one that was replaced, which is the
   // exact silence this read was added to break.
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_assertion_capability$|teamtailor_resume_upload_complete$)/
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_(?:assertion_capability|value_visible|country_visible)$|teamtailor_resume_upload_complete$)/
     .test(label);
 }
 
@@ -5356,6 +5356,17 @@ function pushWorkableManagedPhoneActions(
     timeout: MANAGED_FILL_TIMEOUT_MS,
     requireUnique: true,
   });
+  // Workable remounts its React phone subtree after a value commit. A fill can therefore verify the
+  // old node and then leave a short interval with no visible input before the replacement mounts.
+  // Wait on the stable selector before the separate evidence read instead of treating that remount
+  // interval as a provider-session failure.
+  actions.push({
+    type: 'waitForSelector',
+    selector: WORKABLE_PHONE_SELECTOR,
+    label: 'workable_phone_value_visible',
+    optional: false,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
   actions.push({
     type: 'extract',
     selector: WORKABLE_PHONE_SELECTOR,
@@ -5369,6 +5380,13 @@ function pushWorkableManagedPhoneActions(
     stabilityWindowMs: 1_200,
   });
   if (plan.country) {
+    actions.push({
+      type: 'waitForSelector',
+      selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
+      label: 'workable_phone_country_visible',
+      optional: false,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
     actions.push({
       type: 'extract',
       selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
