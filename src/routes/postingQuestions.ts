@@ -26,21 +26,32 @@ import {
   attachManagedFieldOptions,
   buildManagedDiscoveredOptionProbeActions,
   buildManagedPrescriptActions,
-  mergeManagedFieldOptions,
   canonicalMonitoredPortalUrl,
   detectPortal,
+  managedOptionProbeAnalysis,
+  managedOptionProbeControlId,
+  managedOptionProbeTargets,
   managedResultFieldOptions,
   managedResultSupportsDiscoveryRole,
   type SupportedPortal,
 } from '../lib/portalSubmission';
 import {
   postingQuestionsAreFresh,
-  postingQuestionsFromDiscovered,
+  postingQuestionInventoryFromDiscovered,
+  postingQuestionInventoryStatus,
   prescriptAskExplanation,
+  readStoredPostingQuestionInventory,
   resolvePrescript,
+  storedPostingQuestionInventory,
   type PostingQuestion,
   type PostingQuestionsDiscoveryStatus,
 } from '../lib/postingQuestions';
+import {
+  dedupeQuestionMetadataBlockers,
+  discoveredQuestionsForExactOptionProbe,
+  questionMetadataBlockersForOptionProbeFailures,
+  type QuestionMetadataBlocker,
+} from '../lib/questionMetadata';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { loadSavedAnswers } from '../lib/savedAnswerStore';
 import type { DiscoveredQuestion } from '../lib/questionDiscovery';
@@ -93,6 +104,7 @@ type StoredScan = {
   apply_url: string;
   portal: string | null;
   questions: PostingQuestion[];
+  metadata_blockers: QuestionMetadataBlocker[];
   discovery_status: PostingQuestionsDiscoveryStatus;
   discovered_at: Date;
 };
@@ -102,11 +114,17 @@ async function loadStoredScan(jobId: string): Promise<StoredScan | null> {
     const [row] = await db.select().from(posting_questions)
       .where(eq(posting_questions.job_id, jobId)).limit(1);
     if (!row) return null;
+    const inventory = readStoredPostingQuestionInventory(row.questions);
+    const storedStatus = row.discovery_status as PostingQuestionsDiscoveryStatus;
+    const measuredStatus = postingQuestionInventoryStatus(inventory);
     return {
       apply_url: row.apply_url,
       portal: row.portal,
-      questions: Array.isArray(row.questions) ? (row.questions as PostingQuestion[]) : [],
-      discovery_status: row.discovery_status as PostingQuestionsDiscoveryStatus,
+      questions: inventory.questions,
+      metadata_blockers: inventory.metadata_blockers,
+      discovery_status: storedStatus === 'ok' && measuredStatus === 'metadata_incomplete'
+        ? 'metadata_incomplete'
+        : storedStatus,
       discovered_at: row.discovered_at,
     };
   } catch (error) {
@@ -121,6 +139,7 @@ async function storeScan(
   jobId: string,
   target: PostingTarget,
   questions: PostingQuestion[],
+  metadataBlockers: QuestionMetadataBlocker[],
   status: PostingQuestionsDiscoveryStatus,
 ): Promise<void> {
   const now = new Date();
@@ -129,7 +148,7 @@ async function storeScan(
       job_id: jobId,
       apply_url: target.applyUrl,
       portal: target.portal,
-      questions,
+      questions: storedPostingQuestionInventory(questions, metadataBlockers),
       discovery_status: status,
       discovered_at: now,
       scan_count: 1,
@@ -159,11 +178,18 @@ async function storeScan(
  */
 export async function scanPostingQuestions(
   target: PostingTarget,
-): Promise<{ questions: PostingQuestion[]; status: PostingQuestionsDiscoveryStatus }> {
+): Promise<{
+  questions: PostingQuestion[];
+  metadata_blockers: QuestionMetadataBlocker[];
+  status: PostingQuestionsDiscoveryStatus;
+}> {
   const portal = target.portal;
-  if (!portal) return { questions: [], status: 'failed' };
+  if (!portal) return { questions: [], metadata_blockers: [], status: 'failed' };
   const result = await runManagedBrowser(target.applyUrl, buildManagedPrescriptActions(portal), { screenshot: false });
   const scanFieldOptions = managedResultFieldOptions(result);
+  const discoveryRoleCapability = managedResultSupportsDiscoveryRole(result);
+  const discoveredRaw = (result.discovered ?? []) as DiscoveredQuestion[];
+  const discoveredForOptionProbe = discoveredQuestionsForExactOptionProbe(discoveredRaw);
   /* A second read, for the closed controls the scan could not name in advance.
    *
    * buildManagedPrescriptActions probes the four ids Greenhouse owns. An employer's own questions
@@ -173,21 +199,50 @@ export async function scanPostingQuestions(
    * what it said before, which is a control with no options rather than a wrong list. */
   const probeActions = buildManagedDiscoveredOptionProbeActions(
     portal,
-    result.discovered ?? [],
+    discoveredForOptionProbe,
     scanFieldOptions,
-    managedResultSupportsDiscoveryRole(result),
+    discoveryRoleCapability,
   );
   const probeResult = probeActions.length > 0
     ? await runManagedBrowser(target.applyUrl, probeActions, { screenshot: false }).catch(() => null)
     : null;
-  const discovered = attachManagedFieldOptions(
-    (result.discovered ?? []) as DiscoveredQuestion[],
-    mergeManagedFieldOptions(scanFieldOptions, managedResultFieldOptions(probeResult)),
+  const probeFailures = probeActions.length > 0 && probeResult === null
+    ? [{
+      controlIds: managedOptionProbeTargets(portal, discoveredForOptionProbe, scanFieldOptions, discoveryRoleCapability),
+      reason: 'the bounded posting question option probe did not complete',
+    }]
+    : [];
+  const optionProbe = managedOptionProbeAnalysis(
+    portal,
+    discoveredForOptionProbe,
+    scanFieldOptions,
+    [probeResult],
+    probeFailures,
+    discoveryRoleCapability,
   );
-  const questions = postingQuestionsFromDiscovered(discovered, portal);
+  const discovered = attachManagedFieldOptions(discoveredRaw, optionProbe.options);
+  const probeMetadataBlockers = questionMetadataBlockersForOptionProbeFailures(
+    portal,
+    discoveredRaw,
+    optionProbe.failures,
+  );
+  const inventoryWithoutProbeFailures = postingQuestionInventoryFromDiscovered(
+    discovered.filter((field) => {
+      const controlId = managedOptionProbeControlId(field);
+      return !controlId || !optionProbe.failedIds.has(controlId);
+    }),
+    portal,
+  );
+  const inventory = {
+    questions: inventoryWithoutProbeFailures.questions,
+    metadata_blockers: dedupeQuestionMetadataBlockers([
+      ...inventoryWithoutProbeFailures.metadata_blockers,
+      ...probeMetadataBlockers,
+    ]),
+  };
   // Zero controls is not "this form has no questions". It is a page this run could not read, and
   // storing it as a good scan would tell every later applicant the form is empty for a fortnight.
-  return { questions, status: questions.length > 0 ? 'ok' : 'form_not_reached' };
+  return { ...inventory, status: postingQuestionInventoryStatus(inventory) };
 }
 
 export async function postingQuestionsRoutes(fastify: FastifyInstance) {
@@ -206,6 +261,7 @@ export async function postingQuestionsRoutes(fastify: FastifyInstance) {
 
     const stored = await loadStoredScan(params.jobId);
     let questions = stored?.questions ?? [];
+    let metadataBlockers = stored?.metadata_blockers ?? [];
     let status: PostingQuestionsDiscoveryStatus = stored?.discovery_status ?? 'failed';
     let scanned = false;
 
@@ -214,7 +270,7 @@ export async function postingQuestionsRoutes(fastify: FastifyInstance) {
         // No browser on this deployment. Answer honestly with whatever is cached rather than 503:
         // an empty pre-script means the Apply screen asks nothing extra, which is exactly today's
         // behaviour, and a 503 would break Apply on a deployment where it currently works.
-        return reply.status(200).send(prescriptResponse(params.jobId, target, questions, status, stored?.discovered_at ?? null, false, await resolveFor(userId, questions, target)));
+        return reply.status(200).send(prescriptResponse(params.jobId, target, questions, metadataBlockers, status, stored?.discovered_at ?? null, false, await resolveFor(userId, questions, target)));
       }
       // A managed browser run per call would be a loop waiting to happen if the client retried, so
       // it sits behind the same hourly ceiling as the other browser-backed endpoint.
@@ -224,23 +280,25 @@ export async function postingQuestionsRoutes(fastify: FastifyInstance) {
       try {
         const scan = await scanPostingQuestions(target);
         questions = scan.questions;
+        metadataBlockers = scan.metadata_blockers;
         status = scan.status;
         scanned = true;
-        await storeScan(params.jobId, target, questions, status);
+        await storeScan(params.jobId, target, questions, metadataBlockers, status);
       } catch (err) {
         fastify.log.warn({ err, userId, jobId: params.jobId }, 'posting question pre-scan failed');
         // Keep whatever was cached. A failed scan must not empty a good one.
         if (!stored) {
           questions = [];
+          metadataBlockers = [];
           status = 'failed';
-          await storeScan(params.jobId, target, [], 'failed');
+          await storeScan(params.jobId, target, [], [], 'failed');
         }
       }
     }
 
     const resolution = await resolveFor(userId, questions, target);
     return reply.status(200).send(
-      prescriptResponse(params.jobId, target, questions, status, scanned ? new Date() : (stored?.discovered_at ?? null), scanned, resolution),
+      prescriptResponse(params.jobId, target, questions, metadataBlockers, status, scanned ? new Date() : (stored?.discovered_at ?? null), scanned, resolution),
     );
   });
 }
@@ -263,21 +321,29 @@ function prescriptResponse(
   jobId: string,
   target: PostingTarget,
   questions: PostingQuestion[],
+  metadataBlockers: QuestionMetadataBlocker[],
   status: PostingQuestionsDiscoveryStatus,
   discoveredAt: Date | null,
   scanned: boolean,
   resolution: ReturnType<typeof resolvePrescript>,
 ) {
+  const responseMetadataBlockers = dedupeQuestionMetadataBlockers([
+    ...metadataBlockers,
+    ...resolution.metadata_blockers,
+  ]);
   return {
     job_id: jobId,
     company: target.company,
     role: target.title,
     apply_url: target.applyUrl,
     portal: target.portal,
-    discovery_status: status,
+    discovery_status: status === 'ok' && responseMetadataBlockers.length > 0
+      ? 'metadata_incomplete'
+      : status,
     discovered_at: discoveredAt ? discoveredAt.toISOString() : null,
     scanned_now: scanned,
     question_count: questions.length,
+    metadata_blockers: responseMetadataBlockers,
     /* Only the questions that need her. The ones Litos already answers are counted above and not
      * listed: this screen exists to be the shortest possible interruption, and a list of forty
      * fields with thirty-two of them already filled is not that. */

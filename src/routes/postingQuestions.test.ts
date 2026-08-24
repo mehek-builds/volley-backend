@@ -39,7 +39,10 @@ test('a portal with no react-select comboboxes costs one action', () => {
 });
 
 test('dynamic role probing stays off unless this exact Stratus result advertises the role wire', () => {
-  assert.match(ROUTE, /buildManagedDiscoveredOptionProbeActions\([\s\S]{0,300}managedResultSupportsDiscoveryRole\(result\)/);
+  assert.match(ROUTE, /const discoveryRoleCapability = managedResultSupportsDiscoveryRole\(result\)/);
+  assert.match(ROUTE, /const discoveredForOptionProbe = discoveredQuestionsForExactOptionProbe\(discoveredRaw\)/);
+  assert.match(ROUTE, /buildManagedDiscoveredOptionProbeActions\([\s\S]{0,300}discoveryRoleCapability/);
+  assert.match(ROUTE, /managedOptionProbeAnalysis\([\s\S]{0,300}discoveryRoleCapability/);
 });
 
 test('the scan asks for no screenshot', () => {
@@ -59,7 +62,20 @@ test('a scan runs only on a cache miss, and only behind an hourly ceiling', () =
 test('a page that produced no controls is stored as a result, not as an empty form', () => {
   // Otherwise the next applicant on the same posting is told this form asks nothing, for a
   // fortnight, on the strength of one page that would not load.
-  assert.match(ROUTE, /questions\.length > 0 \? 'ok' : 'form_not_reached'/);
+  assert.match(ROUTE, /postingQuestionInventoryStatus\(inventory\)/);
+  assert.doesNotMatch(ROUTE, /questions\.length > 0 \? 'ok'/);
+});
+
+test('incomplete exact metadata is persisted and returned as a typed blocker', () => {
+  assert.match(ROUTE, /questionMetadataBlockersForOptionProbeFailures\([\s\S]{0,200}optionProbe\.failures/);
+  assert.match(ROUTE, /!optionProbe\.failedIds\.has\(controlId\)/);
+  assert.match(ROUTE, /storedPostingQuestionInventory\(questions, metadataBlockers\)/);
+  assert.match(ROUTE, /readStoredPostingQuestionInventory\(row\.questions\)/);
+  assert.match(ROUTE, /const measuredStatus = postingQuestionInventoryStatus\(inventory\)/);
+  assert.match(ROUTE, /storedStatus === 'ok' && measuredStatus === 'metadata_incomplete'/);
+  const response = ROUTE.slice(ROUTE.indexOf('function prescriptResponse('));
+  assert.match(response, /metadata_blockers: responseMetadataBlockers/);
+  assert.match(response, /status === 'ok' && responseMetadataBlockers\.length > 0/);
 });
 
 test('a missing table degrades to "nothing cached" rather than a 500', () => {

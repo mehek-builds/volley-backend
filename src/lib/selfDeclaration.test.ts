@@ -93,5 +93,5 @@ test('a refused declaration still becomes a question she can answer, when the em
   assert.match(gate, /\(fieldIsRequired \? attentionReasons : optionalAttentionReasons\)\.push\(selfDeclarationSkipReason\(label\)\)/);
   // Refusing without surfacing the field is what made a required attestation a wall: Litos would
   // not answer it and she had nowhere to.
-  assert.match(gate, /if \(fieldIsRequired\) questions\.push\(unansweredRequiredQuestion\(field, reviewLabel, existing\)\)/);
+  assert.match(gate, /if \(fieldIsRequired\) surfaceUnansweredQuestion\(field, reviewLabel, existing\)/);
 });

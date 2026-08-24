@@ -1802,13 +1802,15 @@ export const posting_questions = pgTable('posting_questions', {
   apply_url: text('apply_url').notNull(),
   // The detected SupportedPortal at scan time, e.g. 'greenhouse'. Null when detection failed.
   portal: text('portal'),
-  /* PostingQuestion[]: { label, input_type, options, required, max_length }.
+  /* StoredPostingQuestionInventory: PostingQuestion and tagged metadata-blocker records in one
+   * JSON array, preserving the array contract used by corpus and diagnostic queries.
    *
    * The employer's own words, normalized only by normalizeReviewQuestionLabel. No answers, no
    * per-user classification, no skip reasons: every one of those depends on who is applying, and
-   * baking one applicant's verdict into a shared row is how a cache becomes a wrong answer. */
+   * baking one applicant's verdict into a shared row is how a cache becomes a wrong answer. Legacy
+   * rows containing only PostingQuestion records remain readable. */
   questions: jsonb('questions').notNull(),
-  /* 'ok' | 'form_not_reached' | 'failed'. A scan that found nothing is a RESULT and is stored as
+  /* 'ok' | 'form_not_reached' | 'metadata_incomplete' | 'failed'. A scan that found nothing is a RESULT and is stored as
    * one, so the next applicant on the same posting does not pay for the same empty browser run.
    * It is stored with a shorter life than a good scan (see postingQuestions.ts), because
    * "we could not reach the form" is usually about the moment rather than the posting. */
