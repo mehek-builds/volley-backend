@@ -36,6 +36,7 @@ import {
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import { isManagedNoSubmitControl, submissionProvablyNotSent, unwrapThrownErrorMessage } from '../lib/managedSubmitOutcome';
+import { ManagedBrowserPreSubmitCrashError } from '../lib/browserbase';
 import { submitRequestDisposition } from '../lib/submissionSafety';
 
 const CLAIMED_AT = '2026-08-11T12:00:00.000Z';
@@ -120,6 +121,28 @@ describe('every post-claim stop leaves the row with a way out', () => {
     assert.ok(exitIsTheUnverifiedResolutionRoute(persisted),
       'exit: POST /applications/:id/submission/unverified');
     assert.equal(persisted.unverified_submission?.cause, 'provider_error');
+  });
+
+  test('durable chooser-v4 pre-submit crash progress releases the claim for a safe retry', () => {
+    const persisted = submissionFailureReview(
+      claimedRunning(),
+      new ManagedBrowserPreSubmitCrashError('Sandbox browser run failed', {
+        version: 1,
+        phase: 0,
+        stage: 'phase_started',
+        submitPressed: false,
+        applicationSubmitPressed: false,
+        verificationSubmitPressed: false,
+        submitKind: 'application',
+        policyVersion: 4,
+      }),
+    );
+    assert.equal(persisted.status, 'needs_attention');
+    assert.equal(persisted.submission_stop?.reason, 'provider_session_failure_before_submit');
+    assert.equal(persisted.submission_stop?.before_click, true);
+    assert.ok(exitIsAnOrdinaryRerun(persisted), 'exit: POST /applications/:id/submit-request');
+    assert.equal(persisted.unverified_submission, undefined);
+    assert.match(persisted.attention_reason || '', /Nothing was sent/);
   });
 
   test('a generic throw exits by the unverified-resolution route, keeping its lock', () => {

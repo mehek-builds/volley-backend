@@ -292,7 +292,79 @@ export type ManagedBrowserResult = {
   } | null;
 };
 
-type ManagedBrowserError = string | { message?: string; code?: string };
+export type ManagedBrowserRunProgress = {
+  version: 1;
+  phase: 0 | 1;
+  stage: 'launch' | 'phase_started' | 'submit_activation_started'
+    | 'submit_blocked' | 'submit_released' | 'result_written';
+  submitPressed: boolean;
+  applicationSubmitPressed: boolean;
+  verificationSubmitPressed: boolean;
+  submitKind: 'application' | 'verification' | null;
+  policyVersion: 3 | 4 | null;
+};
+
+type ManagedBrowserError = string | {
+  message?: string;
+  code?: string;
+  runProgress?: unknown;
+};
+
+/**
+ * A chooser-v4 sandbox crash whose last durable checkpoint proves the employer transport was still
+ * contained. Only this typed error may turn a provider crash into a retryable pre-submit stop.
+ */
+export class ManagedBrowserPreSubmitCrashError extends Error {
+  readonly code = 'SANDBOX_RUN_FAILED';
+  readonly runProgress: ManagedBrowserRunProgress;
+
+  constructor(message: string, runProgress: ManagedBrowserRunProgress) {
+    super(message);
+    this.name = 'ManagedBrowserPreSubmitCrashError';
+    this.runProgress = runProgress;
+  }
+}
+
+function managedBrowserRunProgress(value: unknown): ManagedBrowserRunProgress | null {
+  if (!value || typeof value !== 'object') return null;
+  const input = value as Record<string, unknown>;
+  const stages = new Set([
+    'launch', 'phase_started', 'submit_activation_started',
+    'submit_blocked', 'submit_released', 'result_written',
+  ]);
+  if (input.version !== 1
+    || (input.phase !== 0 && input.phase !== 1)
+    || typeof input.stage !== 'string' || !stages.has(input.stage)
+    || typeof input.submitPressed !== 'boolean'
+    || typeof input.applicationSubmitPressed !== 'boolean'
+    || typeof input.verificationSubmitPressed !== 'boolean'
+    || (input.submitKind !== null && input.submitKind !== 'application' && input.submitKind !== 'verification')
+    || (input.policyVersion !== null && input.policyVersion !== 3 && input.policyVersion !== 4)) return null;
+  return input as ManagedBrowserRunProgress;
+}
+
+function managedBrowserRequestError(
+  error: ManagedBrowserError | undefined,
+  status: number,
+  actions: ManagedBrowserAction[] = [],
+): Error {
+  const message = managedBrowserErrorMessage(error, status, actions);
+  if (error && typeof error === 'object' && error.code === 'SANDBOX_RUN_FAILED') {
+    const progress = managedBrowserRunProgress(error.runProgress);
+    const transportStillContained = progress?.version === 1
+      && progress.phase === 0
+      && progress.policyVersion === 4
+      && progress.submitKind === 'application'
+      && (progress.stage === 'phase_started' || progress.stage === 'submit_blocked')
+      && progress.submitPressed === false
+      && progress.applicationSubmitPressed === false
+      && progress.verificationSubmitPressed === false;
+    if (progress && transportStillContained) {
+      return new ManagedBrowserPreSubmitCrashError(message, progress);
+    }
+  }
+  return new Error(message);
+}
 
 function managedBrowserErrorMessage(
   error: ManagedBrowserError | undefined,
@@ -689,7 +761,7 @@ export async function runManagedBrowser(
   });
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
   if (!response.ok || !payload.run) {
-    throw new Error(managedBrowserErrorMessage(payload.error, response.status, outboundActions));
+    throw managedBrowserRequestError(payload.error, response.status, outboundActions);
   }
   assertRequiredManagedCapabilities(payload.run, outboundActions);
   return payload.run;
@@ -725,7 +797,7 @@ export async function continueManagedBrowser(
   });
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
   if (!response.ok || !payload.run) {
-    throw new Error(managedBrowserErrorMessage(payload.error, response.status, outboundActions));
+    throw managedBrowserRequestError(payload.error, response.status, outboundActions);
   }
   assertRequiredManagedCapabilities(payload.run, outboundActions);
   return payload.run;

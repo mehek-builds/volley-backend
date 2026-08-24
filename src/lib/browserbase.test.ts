@@ -13,6 +13,7 @@ import {
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
+  ManagedBrowserPreSubmitCrashError,
   runManagedBrowser,
 } from './browserbase';
 import { observeManagedReceiptOnce } from './managedSubmitOutcome';
@@ -469,6 +470,58 @@ test('managed Stratus surfaces structured provider errors as readable messages',
   await assert.rejects(
     runManagedBrowser('https://portal.example/apply', []),
     /Portal field selector timed out/,
+  );
+
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('managed Stratus types only durable chooser-v4 pre-submit crash progress as retryable', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  const progress = {
+    version: 1,
+    phase: 0,
+    stage: 'phase_started',
+    submitPressed: false,
+    applicationSubmitPressed: false,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+  };
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: { code: 'SANDBOX_RUN_FAILED', message: 'Sandbox browser run failed', runProgress: progress },
+  }), {
+    status: 502,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', []),
+    (error: unknown) => error instanceof ManagedBrowserPreSubmitCrashError
+      && error.runProgress.stage === 'phase_started',
+  );
+
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: {
+      code: 'SANDBOX_RUN_FAILED',
+      message: 'Sandbox browser run failed',
+      runProgress: { ...progress, stage: 'submit_activation_started' },
+    },
+  }), {
+    status: 502,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', []),
+    (error: unknown) => error instanceof Error
+      && !(error instanceof ManagedBrowserPreSubmitCrashError),
   );
 
   globalThis.fetch = previousFetch;

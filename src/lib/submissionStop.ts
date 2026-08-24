@@ -47,6 +47,8 @@ export type SubmissionStopReason =
   | 'confirmation_unproven'
   /** The sandbox stream closed or stopped accepting commands. Where in the run is unknown. */
   | 'provider_session_failure'
+  /** Chooser v4 durably reported that transport containment still held when the sandbox crashed. */
+  | 'provider_session_failure_before_submit'
   /** The managed run was cut off before it reported anything. Where in the run is unknown. */
   | 'run_timed_out'
   /** Anything else. Deliberately not guessed at, and never treated as pre-click. */
@@ -94,6 +96,7 @@ const PRECEDES_CLICK: ReadonlySet<SubmissionStopReason> = new Set<SubmissionStop
   'action_budget',
   'packet_document_expired',
   'applicant_email_regeneration',
+  'provider_session_failure_before_submit',
 ]);
 
 export function stopReasonPrecedesClick(reason: SubmissionStopReason): boolean {
@@ -114,6 +117,7 @@ export function classifySubmissionStop(input: {
   packetDocumentExpired: boolean;
   actionBudget: boolean;
   confirmationUnproven: boolean;
+  providerSessionFailureBeforeSubmit: boolean;
   providerSessionFailure: boolean;
   runTimedOut: boolean;
   providerUnconfigured: boolean;
@@ -126,6 +130,7 @@ export function classifySubmissionStop(input: {
   if (input.actionBudget) return 'action_budget';
   if (input.noSubmitControl) return 'no_submit_control';
   if (input.confirmationUnproven) return 'confirmation_unproven';
+  if (input.providerSessionFailureBeforeSubmit) return 'provider_session_failure_before_submit';
   if (input.providerSessionFailure) return 'provider_session_failure';
   if (input.providerUnconfigured) return 'provider_unconfigured';
   return 'unclassified';

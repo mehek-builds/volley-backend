@@ -50,6 +50,7 @@ import {
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
+  ManagedBrowserPreSubmitCrashError,
   runManagedBrowser,
 } from '../lib/browserbase';
 import {
@@ -6793,7 +6794,8 @@ export function submissionFailureReview(
 ): ApplicationReviewState {
   const message = error instanceof Error ? error.message : 'Submission runner failed';
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
-  const providerSessionFailure = isProviderSessionFailureMessage(message);
+  const providerSessionFailureBeforeSubmit = error instanceof ManagedBrowserPreSubmitCrashError;
+  const providerSessionFailure = providerSessionFailureBeforeSubmit || isProviderSessionFailureMessage(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
   const stoppedAt = now();
 
@@ -6847,6 +6849,7 @@ export function submissionFailureReview(
       packetDocumentExpired,
       actionBudget: actionBudgetStop !== null,
       confirmationUnproven,
+      providerSessionFailureBeforeSubmit,
       providerSessionFailure,
       runTimedOut,
       providerUnconfigured: externalGate,
