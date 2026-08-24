@@ -2230,12 +2230,16 @@ export async function discoverAndResolveQuestions(
         ? gpaBareFallback
         : rawKnownValue;
     const offeredOptions = usableOptions(field.options);
+    const unreadClosedControl = questionMetadataBlockerForDiscovered(field, {
+      closedControlRequiresOptions: true,
+    });
     const reviewedOption = existing?.answer_source === 'applicant_review'
       ? offeredOptions.find((option) => option.trim().toLowerCase() === existing.answer.trim().toLowerCase())
       : undefined;
     const reviewedAnswerStillFits = existing !== undefined
       && applicantChoseStoredAnswerInRound(existing, current.questions_reviewed_at)
       && existing.answer.trim().length > 0
+      && unreadClosedControl?.kind !== 'missing_exact_options'
       && (
         (!(known && 'value' in known) && (offeredOptions.length === 0 || reviewedOption !== undefined))
         /* HER CURRENT-ROUND CHOICE OF AN OFFERED OPTION OUTRANKS A PROFILE VALUE THE CONTROL
@@ -2369,9 +2373,6 @@ export async function discoverAndResolveQuestions(
      * This sits after the refusal and self-declaration branches on purpose. Those branches explain
      * why a question belongs to the applicant, and missing metadata must not erase that explanation.
      */
-    const unreadClosedControl = questionMetadataBlockerForDiscovered(field, {
-      closedControlRequiresOptions: true,
-    });
     if (unreadClosedControl?.kind === 'missing_exact_options'
       && !(profileKnown && 'value' in profileKnown)) {
       const measured = { ...unreadClosedControl, required: fieldIsRequired };
