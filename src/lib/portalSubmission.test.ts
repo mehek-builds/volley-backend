@@ -1204,7 +1204,8 @@ function workablePhoneUploadFixture(
       if (selector === 'body:not(:has(div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"])):not(:has(div[data-ui="backdrop"]))') {
         return cookieOverlayCleared;
       }
-      if (selector === 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible') {
+      if (selector === 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
+        + 'button[aria-label="Telephone country code"][aria-controls]:visible') {
         return countryTrigger;
       }
       if (selector === '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible') {
@@ -1265,7 +1266,8 @@ test('direct Workable phone is selected and refilled after resume autofill clear
   assert.equal(fixture.countryText(), '+971');
   assert.equal(fixture.phoneValue(), '0567417451');
   assert.ok(fixture.queriedSelectors.includes(
-    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible',
+    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
+      + 'button[aria-label="Telephone country code"][aria-controls]:visible',
   ));
   assert.equal(fixture.queriedSelectors.includes(
     'button[aria-label="Telephone country code"][aria-controls]:visible',
@@ -4327,7 +4329,8 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.ok(phoneProofIndex > countryProofIndex);
   assert.deepEqual(actions[countryOpenIndex], {
     type: 'click',
-    selector: 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible',
+    selector: 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
+      + 'button[aria-label="Telephone country code"][aria-controls]:visible',
     label: 'phone_country_open',
     optional: false,
     timeout: 10_000,
@@ -4370,7 +4373,8 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
   assert.equal(
     actions[countryProofIndex]?.selector,
-    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible',
+    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
+      + 'button[aria-label="Telephone country code"][aria-controls]:visible',
   );
   assert.equal(actions[countryProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
