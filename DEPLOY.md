@@ -72,7 +72,7 @@ Set these for Production (and Preview if you want):
 | `LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON` | JSON array of allowlisted Greenhouse, Ashby, or Lever submit channels; references key env names, never raw secrets |
 | `LITOS_APPLICATION_EMAIL_ROUTE_MODE` | nonsecret route selector: `managed_resend`, `custom_domain`, or `mailbox` |
 | `LITOS_RESEND_MANAGED_RECEIVING_DOMAIN` | exact one-label `*.resend.app` receiving domain selected by `managed_resend` |
-| `LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN` | hidden 32+ character random token deriving the exact one-time managed receiving canary recipient |
+| `LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN` | stable hidden 32+ character random token deriving the dedicated managed receiving canary recipient |
 | `LITOS_APPLICATION_EMAIL_DOMAIN` | domain that receives employer application mail for generated aliases, for example `apply.trylitos.com` |
 | `LITOS_APPLICATION_EMAIL_MAILBOX` | rollback mailbox route using plus-addressed per-application aliases |
 | `LITOS_APPLICATION_EMAIL_ALIAS_SECRET` | stable secret used to mint opaque per-application alias local parts |
@@ -347,7 +347,7 @@ job-board reads can work without this, but application POSTs still need an allow
 `LITOS_RESEND_MANAGED_RECEIVING_DOMAIN`; the legacy `LITOS_APPLICATION_EMAIL_DOMAIN` and
 `LITOS_APPLICATION_EMAIL_MAILBOX` values may remain deployed for rollback and are ignored until
 their matching mode is selected. Managed receiving remains disabled until a fresh, signed
-`email.received` webhook for the exact one-time canary recipient stores a recent durable proof, and
+`email.received` webhook for the exact dedicated canary recipient stores a recent durable proof, and
 the exact active `email.received` webhook is verified. The proof is bound to mode, domain, alias
 secret, canary token, endpoint, webhook signing secret, and Receiving API key, so rotating any of
 them fails closed. The proof is stored only after the canary content can be fetched through Resend's
@@ -382,7 +382,7 @@ That script registers `email.received` for
 `https://student-outreach-backend.vercel.app/webhooks/application-email/inbound` and stores the
 returned signing secret in Vercel as `RESEND_WEBHOOK_SECRET`.
 
-The managed receiving proof table has a separate additive migration:
+The managed receiving proof table and append-only route index have a separate migration:
 
 ```bash
 npm run db:application-email-receiving-proof
@@ -391,9 +391,11 @@ npm run db:application-email-receiving-proof
 After its workflow is present on `main`, an operator may run
 `Application email receiving proof migration` from GitHub Actions. The workflow refuses non-main
 refs, reads the database connection only from `SCHEMA_CHECK_DATABASE_URL`, and applies only the
-idempotent `application_email_receiving_proofs` table and its two indexes.
+idempotent `application_email_receiving_proofs` schema. It removes the obsolete unique
+`route_fingerprint` index, creates a non-unique lookup index, and verifies that provider message
+hashes remain unique while multiple immutable proof events can exist for one route.
 
-After applying that migration, configure a fresh hidden canary token before enabling managed
+After applying that migration, configure a stable hidden canary token before enabling managed
 receiving. The setup command sends the random token to Vercel over stdin and never prints the token
 or derived recipient. It does not deploy or send a canary by itself:
 
@@ -401,12 +403,15 @@ or derived recipient. It does not deploy or send a canary by itself:
 npm run setup:application-email-receiving-canary
 ```
 
-After a deployment containing that token, deliver one canary to the exact derived recipient using
-a trusted operator-only process. Proof storage first reads the canary through the configured
-Receiving API key. The signed webhook records only a message-ID hash, route
-fingerprint, proof version, domain, and timestamp. Health, errors, logs, and the database never
-contain the canary recipient or token. A proof expires after seven days; rotate the one-time token
-and repeat the canary when renewing it.
+After a deployment containing that token, invoke `/internal/managed-receiving-canary` through the
+authorized cron or operator route and wait for the signed inbound webhook. Proof storage first reads
+the canary through the configured Receiving API key. The signed webhook records only a message-ID
+hash, route fingerprint, proof version, domain, and timestamp. Health, errors, logs, and the database
+never contain the canary recipient or token. The daily 15:00 UTC cron reuses the dedicated recipient
+when the newest proof enters its two-day refresh window. An ordinary accepted inbound delivery on
+the managed domain may renew the same append-only proof ledger during that window. Each proof event
+expires after seven days, but the canary token does not. Rotate it only after exposure or an intended
+route reconfiguration, then establish a new proof for the new route fingerprint.
 
 **Why a hand deploy used to report `null`.** Measured 2026-08-04 across the last 12 production
 deployments: Vercel fills the `VERCEL_GIT_*` variables from the **GitHub integration's** metadata,
