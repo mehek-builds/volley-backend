@@ -4373,7 +4373,8 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneIndex]?.optional, false);
   assert.deepEqual(actions[countryWaitIndex], {
     type: 'waitForSelector',
-    selector: 'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) [class*="iti__selected-dial-code"]:visible',
+    selector: 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
+      + 'button[aria-label="Telephone country code"][aria-controls]:visible',
     label: 'workable_phone_dial_code_visible',
     optional: false,
     timeout: 10_000,
@@ -4383,7 +4384,8 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
   assert.equal(
     actions[countryProofIndex]?.selector,
-    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) [class*="iti__selected-dial-code"]:visible',
+    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
+      + 'button[aria-label="Telephone country code"][aria-controls]:visible',
   );
   assert.equal(actions[countryProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
@@ -4395,7 +4397,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
 });
 
-test('managed Workable proves the visible dial code after the transient option list unmounts', () => {
+test('managed Workable proves the visible country trigger after the transient option list unmounts', () => {
   const actions = buildManagedPortalActions('workable', {
     ...capturePacket,
     phone: '+1 213 574 6270',
@@ -4411,12 +4413,12 @@ test('managed Workable proves the visible dial code after the transient option l
   );
   assert.equal(
     countryWait?.selector,
-    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) [class*="iti__selected-dial-code"]:visible',
+    countryOpen?.selector,
   );
   assert.equal(countryWait?.optional, false);
   assert.equal(
     countryProof?.selector,
-    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) [class*="iti__selected-dial-code"]:visible',
+    countryOpen?.selector,
   );
   assert.equal(countryProof?.attribute, undefined);
   assert.equal(countryProof?.requireUnique, true);
@@ -4462,7 +4464,8 @@ test('managed Workable US phone selects exact United States and proves national 
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '1');
   assert.equal(
     actions[countryProofIndex]?.selector,
-    'form:has(input[name="firstname"]):has(input[name="email"]):has(input[type="file"][data-ui="resume"]) [class*="iti__selected-dial-code"]:visible',
+    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
+      + 'button[aria-label="Telephone country code"][aria-controls]:visible',
   );
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
