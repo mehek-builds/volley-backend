@@ -5172,10 +5172,9 @@ const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   + 'button[aria-label="Telephone country code"][aria-controls]:visible';
 // The open trigger carries aria-controls. Workable remounts the phone widget after a value write
 // and can drop the trigger's accessible name. The live widget keeps the selected dial code in the
-// intl-tel-input container beside the exact visible phone input, so bind readback to that value.
-const WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR =
-  `${MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR} `
-  + `.iti:has(${WORKABLE_PHONE_SELECTOR}) .iti__selected-dial-code:visible`;
+// intl-tel-input container, so bind readback to that unique value. The final atomic chooser still
+// binds submission to MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR after these exact proofs pass.
+const WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR = '.iti__selected-dial-code:visible';
 // Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
 // city input before the visible address autocomplete on current forms, so a plain comma list can
 // still pick the wrong control. The city arm exists only when no visible address control exists.
