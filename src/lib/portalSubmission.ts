@@ -5165,11 +5165,11 @@ const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
   + 'button[aria-label="Telephone country code"][aria-controls]:visible';
-// The option list is an opening-time control, not durable selected-state evidence. Current Workable
-// unmounts that list after the phone input settles while retaining the visible intl-tel-input dial
-// code beside the number. Read that exact, applicant-visible value from the application form.
-const WORKABLE_PHONE_COUNTRY_VALUE_SELECTOR =
-  `${MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR} [class*="iti__selected-dial-code"]:visible`;
+// The option list is an opening-time control, not durable selected-state evidence. Workable also
+// changes the private intl-tel-input class structure between renders. The same labelled country
+// trigger that opened successfully remains visible beside the number and exposes the selected dial
+// code, so it is the stable applicant-visible value to prove after the phone input settles.
+const WORKABLE_PHONE_COUNTRY_VALUE_SELECTOR = WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR;
 // Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
 // city input before the visible address autocomplete on current forms, so a plain comma list can
 // still pick the wrong control. The city arm exists only when no visible address control exists.
@@ -5349,8 +5349,8 @@ function pushWorkableManagedPhoneActions(
   });
   if (plan.country) {
     // Workable unmounts the option list after the number fill, so its transient aria-selected row
-    // cannot be the final proof. The selected dial code remains visibly rendered beside the phone
-    // input and is the exact state the employer will receive.
+    // cannot be the final proof. Re-read the same visible country trigger that the runner already
+    // proved it could activate, and verify its settled dial code before submission.
     actions.push({
       type: 'waitForSelector',
       selector: WORKABLE_PHONE_COUNTRY_VALUE_SELECTOR,
