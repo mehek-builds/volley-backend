@@ -4373,7 +4373,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneIndex]?.optional, false);
   assert.deepEqual(actions[countryWaitIndex], {
     type: 'waitForSelector',
-    selector: '[role="option"][data-country-code="ae"][data-dial-code="971"][aria-selected="true"]',
+    selector: 'body:has([role="option"][data-country-code="ae"][data-dial-code="971"][aria-selected="true"])',
     label: 'workable_phone_country_selected',
     optional: false,
     timeout: 10_000,
@@ -4410,10 +4410,13 @@ test('managed Workable proves the selected option after the trigger closes or ch
   );
   assert.equal(
     countryWait?.selector,
-    '[role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"]',
+    'body:has([role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"])',
   );
   assert.equal(countryWait?.optional, false);
-  assert.equal(countryProof?.selector, countryWait?.selector);
+  assert.equal(
+    countryProof?.selector,
+    '[role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"]',
+  );
   assert.equal(countryProof?.attribute, 'data-dial-code');
   assert.equal(countryProof?.requireUnique, true);
   assert.equal(countryProof?.expectedValueDigits, '1');
