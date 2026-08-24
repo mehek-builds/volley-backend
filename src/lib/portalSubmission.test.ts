@@ -4316,7 +4316,6 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   const capabilityIndex = actions.findIndex((action) => action.type === 'requireCapability');
   const countryOptionIndex = actions.findIndex((action) => action.label === 'phone_country_option');
   const phoneIndex = actions.findIndex((action) => action.type === 'fill' && action.label === 'phone');
-  const countryWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_country_selected');
   const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
   const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
 
@@ -4326,8 +4325,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(countryOpenIndex, lateCookieClearedIndex + 1);
   assert.ok(countryOptionIndex > countryOpenIndex);
   assert.ok(phoneIndex > countryOptionIndex);
-  assert.equal(countryWaitIndex, phoneIndex + 1);
-  assert.equal(countryProofIndex, countryWaitIndex + 1);
+  assert.equal(countryProofIndex, phoneIndex + 1);
   assert.ok(phoneProofIndex > countryProofIndex);
   assert.deepEqual(actions[countryOpenIndex], {
     type: 'click',
@@ -4371,13 +4369,6 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneIndex]?.value, '0567417451');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
   assert.equal(actions[phoneIndex]?.optional, false);
-  assert.deepEqual(actions[countryWaitIndex], {
-    type: 'waitForSelector',
-    selector: 'body:has([role="option"][data-country-code="ae"][data-dial-code="971"][aria-selected="true"])',
-    label: 'workable_phone_country_selected',
-    optional: false,
-    timeout: 10_000,
-  });
   assert.equal(actions[countryProofIndex]?.attribute, 'data-dial-code');
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
   assert.equal(
@@ -4394,13 +4385,12 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
 });
 
-test('managed Workable proves the selected option after the trigger closes or changes element type', () => {
+test('managed Workable reads the hidden selected option without a visibility wait', () => {
   const actions = buildManagedPortalActions('workable', {
     ...capturePacket,
     phone: '+1 213 574 6270',
   });
   const countryOpen = actions.find((action) => action.label === 'phone_country_open');
-  const countryWait = actions.find((action) => action.label === 'workable_phone_country_selected');
   const countryProof = actions.find((action) => action.label === 'filled_field:phone_country');
 
   assert.equal(
@@ -4408,15 +4398,12 @@ test('managed Workable proves the selected option after the trigger closes or ch
     'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
       + 'button[aria-label="Telephone country code"][aria-controls]:visible',
   );
-  assert.equal(
-    countryWait?.selector,
-    'body:has([role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"])',
-  );
-  assert.equal(countryWait?.optional, false);
+  assert.equal(actions.some((action) => action.label === 'workable_phone_country_selected'), false);
   assert.equal(
     countryProof?.selector,
     '[role="option"][data-country-code="us"][data-dial-code="1"][aria-selected="true"]',
   );
+  assert.doesNotMatch(countryProof?.selector ?? '', /:visible/);
   assert.equal(countryProof?.attribute, 'data-dial-code');
   assert.equal(countryProof?.requireUnique, true);
   assert.equal(countryProof?.expectedValueDigits, '1');
@@ -4436,7 +4423,6 @@ test('managed Workable US phone selects exact United States and proves national 
   const countryOpenIndex = actions.findIndex((action) => action.label === 'phone_country_open');
   const countryOptionIndex = actions.findIndex((action) => action.label === 'phone_country_option');
   const phoneIndex = actions.findIndex((action) => action.type === 'fill' && action.label === 'phone');
-  const countryWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_country_selected');
   const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
   const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
 
@@ -4453,7 +4439,7 @@ test('managed Workable US phone selects exact United States and proves national 
   });
   assert.equal(actions[phoneIndex]?.value, '2135746270');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
-  assert.equal(countryWaitIndex, phoneIndex + 1);
+  assert.equal(countryProofIndex, phoneIndex + 1);
   assert.equal(actions[countryProofIndex]?.attribute, 'data-dial-code');
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '1');
   assert.equal(
