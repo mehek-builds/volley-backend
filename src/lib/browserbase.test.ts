@@ -14,6 +14,7 @@ import {
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
   ManagedBrowserPreSubmitCrashError,
+  runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
 } from './browserbase';
 import { observeManagedReceiptOnce } from './managedSubmitOutcome';
@@ -77,6 +78,106 @@ test('managed continuation evidence is stable, bounded, and rejects invalid toke
   assert.equal(managedContinuationFingerprint(token), managedContinuationFingerprint(token));
   assert.notEqual(managedContinuationFingerprint(token), managedContinuationFingerprint('B'.repeat(43)));
   assert.throws(() => managedContinuationFingerprint('too-short'), /continuation token is invalid/);
+});
+
+test('a proven pre-submit crash gets one authorized retry', async () => {
+  const progress = {
+    version: 1 as const,
+    phase: 0 as const,
+    stage: 'phase_started' as const,
+    submitPressed: false,
+    applicationSubmitPressed: false,
+    verificationSubmitPressed: false,
+    submitKind: 'application' as const,
+    policyVersion: 4 as const,
+  };
+  let runs = 0;
+  let authorizationReads = 0;
+  const outcome = await runWithManagedPreSubmitCrashRetry(
+    async () => {
+      runs += 1;
+      if (runs === 1) throw new ManagedBrowserPreSubmitCrashError('sandbox closed', progress);
+      return 'receipt';
+    },
+    async () => {
+      authorizationReads += 1;
+      return true;
+    },
+  );
+
+  assert.deepEqual(outcome, { kind: 'completed', result: 'receipt', retried: true });
+  assert.equal(runs, 2);
+  assert.equal(authorizationReads, 1);
+});
+
+test('a revoked authorization stops a proven pre-submit retry', async () => {
+  const error = new ManagedBrowserPreSubmitCrashError('sandbox closed', {
+    version: 1,
+    phase: 0,
+    stage: 'submit_blocked',
+    submitPressed: false,
+    applicationSubmitPressed: false,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+  });
+  let runs = 0;
+  const outcome = await runWithManagedPreSubmitCrashRetry(
+    async () => {
+      runs += 1;
+      throw error;
+    },
+    async () => false,
+  );
+
+  assert.equal(outcome.kind, 'authorization_revoked');
+  if (outcome.kind === 'authorization_revoked') assert.equal(outcome.error, error);
+  assert.equal(runs, 1);
+});
+
+test('an uncertain provider failure is never retried', async () => {
+  let runs = 0;
+  let authorizationReads = 0;
+  await assert.rejects(
+    runWithManagedPreSubmitCrashRetry(
+      async () => {
+        runs += 1;
+        throw new Error('sandbox stream was closed');
+      },
+      async () => {
+        authorizationReads += 1;
+        return true;
+      },
+    ),
+    /sandbox stream was closed/,
+  );
+  assert.equal(runs, 1);
+  assert.equal(authorizationReads, 0);
+});
+
+test('a second proven pre-submit crash escapes instead of looping', async () => {
+  const error = new ManagedBrowserPreSubmitCrashError('sandbox closed again', {
+    version: 1,
+    phase: 0,
+    stage: 'phase_started',
+    submitPressed: false,
+    applicationSubmitPressed: false,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+  });
+  let runs = 0;
+  await assert.rejects(
+    runWithManagedPreSubmitCrashRetry(
+      async () => {
+        runs += 1;
+        throw error;
+      },
+      async () => true,
+    ),
+    (thrown: unknown) => thrown === error,
+  );
+  assert.equal(runs, 2);
 });
 
 test('session body disables CAPTCHA solving and restricts navigation to the portal host', () => {

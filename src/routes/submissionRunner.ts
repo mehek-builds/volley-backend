@@ -51,6 +51,7 @@ import {
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
   ManagedBrowserPreSubmitCrashError,
+  runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
 } from '../lib/browserbase';
 import {
@@ -5783,11 +5784,25 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * keepAlive stayed true and sandbox.stop() was skipped in the finally of every successful
      * submission, leaking one sandbox per application while the runner waited on a continuation
      * nothing was going to send. */
-    const result = await runManagedBrowser(
-      applicationUrl,
-      initialActions,
-      managedApplicationSubmitOptions(SECURITY_CODE_CONTINUATION_TTL_SECONDS),
+    const submitRun = await runWithManagedPreSubmitCrashRetry(
+      () => runManagedBrowser(
+        applicationUrl,
+        initialActions,
+        managedApplicationSubmitOptions(SECURITY_CODE_CONTINUATION_TTL_SECONDS),
+      ),
+      () => authorizationValidAtClick(row, claimedReview),
     );
+    if (submitRun.kind === 'authorization_revoked') {
+      await holdRevokedSubmission(row, claimedReview);
+      return;
+    }
+    if (submitRun.retried) {
+      fastify.log.warn(
+        { applicationId: row.id },
+        'Managed application recovered after one proven pre-submit sandbox crash retry',
+      );
+    }
+    const result = submitRun.result;
     const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);
     const initialSubmitOutcome = readManagedSubmitOutcome(result);
     const initialChallenge = securityCodeChallengeMatchesRecipient(initialChallengeCandidate, packet.email)

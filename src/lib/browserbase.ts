@@ -325,6 +325,29 @@ export class ManagedBrowserPreSubmitCrashError extends Error {
   }
 }
 
+export type ManagedPreSubmitCrashRetryResult<T> =
+  | { kind: 'completed'; result: T; retried: boolean }
+  | { kind: 'authorization_revoked'; error: ManagedBrowserPreSubmitCrashError };
+
+/**
+ * Retry one chooser-v4 crash only when Stratus proved the application submit transport was still
+ * contained. The caller owns the fresh authorization read because revocation between sandboxes
+ * must stop the retry. A second crash or any untyped failure escapes unchanged, so this helper can
+ * never turn an uncertain click into another employer transmission.
+ */
+export async function runWithManagedPreSubmitCrashRetry<T>(
+  run: () => Promise<T>,
+  retryAuthorized: () => Promise<boolean>,
+): Promise<ManagedPreSubmitCrashRetryResult<T>> {
+  try {
+    return { kind: 'completed', result: await run(), retried: false };
+  } catch (error) {
+    if (!(error instanceof ManagedBrowserPreSubmitCrashError)) throw error;
+    if (!await retryAuthorized()) return { kind: 'authorization_revoked', error };
+    return { kind: 'completed', result: await run(), retried: true };
+  }
+}
+
 function managedBrowserRunProgress(value: unknown): ManagedBrowserRunProgress | null {
   if (!value || typeof value !== 'object') return null;
   const input = value as Record<string, unknown>;
