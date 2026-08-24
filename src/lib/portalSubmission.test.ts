@@ -5272,6 +5272,39 @@ test('a teamtailor tenant that binds consent to the press submits under the gran
   assert.equal(managedImpliedConsentSubmitLicence('teamtailor', { ...impliedPacket, employerName: '' }), null);
 });
 
+test('Teamtailor submit waits for the asynchronous resume upload to finish', () => {
+  const packet = {
+    ...capturePacket,
+    employerName: 'Fully',
+    applicationProfile: breezyGrantedProfile,
+  };
+  const submitActions = buildManagedPortalActions('teamtailor', packet, true);
+  const uploadIndex = submitActions.findIndex(
+    (action) => action.type === 'upload' && action.label === 'resume',
+  );
+  const completionIndex = submitActions.findIndex(
+    (action) => action.label === 'teamtailor_resume_upload_complete',
+  );
+
+  assert.ok(uploadIndex >= 0);
+  assert.equal(completionIndex, uploadIndex + 1);
+  assert.deepEqual(submitActions[completionIndex], {
+    type: 'waitForSelector',
+    selector: '#upload_resume_field '
+      + '[data-forms--inputs--upload-preview-target="name"]:not(.hidden):visible '
+      + 'a[data-dz-name]:visible',
+    label: 'teamtailor_resume_upload_complete',
+    optional: false,
+    timeout: 10_000,
+  });
+  assert.equal(
+    buildManagedPortalActions('teamtailor', packet, false)
+      .some((action) => action.label === 'teamtailor_resume_upload_complete'),
+    false,
+    'preparation remains non-blocking when a branded page has no upload control',
+  );
+});
+
 test('the blocker naming the tick-covered consent control is excused, and only that one', () => {
   /* The live Transparent Hiring deadlock, 2026-08-20: the fill run leaves the consent untouched by
    * design, the readiness gate reads it back as required-and-still-empty, and the row parks one
