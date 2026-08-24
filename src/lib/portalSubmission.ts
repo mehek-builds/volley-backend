@@ -5166,10 +5166,11 @@ const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
   + 'button[aria-label="Telephone country code"][aria-controls]:visible';
 // The option list is an opening-time control, not durable selected-state evidence. Workable also
-// changes the private intl-tel-input class structure between renders. The same labelled country
-// trigger that opened successfully remains visible beside the number and exposes the selected dial
-// code, so it is the stable applicant-visible value to prove after the phone input settles.
-const WORKABLE_PHONE_COUNTRY_VALUE_SELECTOR = WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR;
+// replaces the labelled country trigger and changes private intl-tel-input classes after the phone
+// settles. The stable phone-input parent still contains the applicant-visible dial code but not the
+// input's value text, so it proves the country independently from the national-number readback.
+const WORKABLE_PHONE_COUNTRY_VALUE_SELECTOR =
+  `${MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR} *:has(> ${WORKABLE_PHONE_SELECTOR}):visible`;
 // Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
 // city input before the visible address autocomplete on current forms, so a plain comma list can
 // still pick the wrong control. The city arm exists only when no visible address control exists.
@@ -5348,9 +5349,9 @@ function pushWorkableManagedPhoneActions(
     requireUnique: true,
   });
   if (plan.country) {
-    // Workable unmounts the option list after the number fill, so its transient aria-selected row
-    // cannot be the final proof. Re-read the same visible country trigger that the runner already
-    // proved it could activate, and verify its settled dial code before submission.
+    // Workable unmounts the option list and replaces the opening trigger after the number fill, so
+    // neither can be final proof. Read the stable visible phone container and verify its settled
+    // dial code separately from the national-number input before submission.
     actions.push({
       type: 'waitForSelector',
       selector: WORKABLE_PHONE_COUNTRY_VALUE_SELECTOR,
