@@ -4778,7 +4778,7 @@ function isProtectedManagedAction(
   // whether the transcript upload took the resume's control. A trim that dropped it would leave the
   // run unable to tell a resume that is still attached from one that was replaced, which is the
   // exact silence this read was added to break.
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_(?:assertion_capability|country_selected)$)/
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_assertion_capability$)/
     .test(label);
 }
 
@@ -5350,16 +5350,9 @@ function pushWorkableManagedPhoneActions(
     requireUnique: true,
   });
   if (plan.country) {
-    // Workable can remount its phone widget after the number fill. The visible trigger may be
-    // temporarily absent or change element type, while the selected option is the exact state the
-    // widget will submit. Wait for that state to settle, then read its dial-code attribute.
-    actions.push({
-      type: 'waitForSelector',
-      selector: plan.country.selectedOptionSelector,
-      label: 'workable_phone_country_selected',
-      optional: false,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
+    // Workable keeps the selected option mounted but hidden after the listbox closes. A visibility
+    // wait therefore times out even though aria-selected and the exact dial code are already
+    // present. Read that hidden submitted state directly and use the extract stability window.
     actions.push({
       type: 'extract',
       selector: plan.country.selectedOptionSelector,
