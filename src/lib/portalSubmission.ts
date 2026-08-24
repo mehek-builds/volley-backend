@@ -1169,6 +1169,11 @@ const RECEIPT_PROOF_RE = /thank you|thanks for your application|application (?:h
 // when the selector is genuinely wrong. Applied by default to every managedFill/managedUpload and
 // to the reviewed-question fills, so no one action can ever spend 30s.
 const MANAGED_FILL_TIMEOUT_MS = 10_000;
+// Workable can briefly remove the complete phone subtree while React reconciles an international
+// value. The normal 10 second miss budget is right for unknown selectors, but too short for a
+// selector that was just proven and is expected to remount. Keep the longer budget scoped to the
+// two post-write visibility barriers. The exact value and dial-code extracts remain required.
+const WORKABLE_PHONE_REMOUNT_TIMEOUT_MS = 30_000;
 
 function managedFill(
   actions: ManagedBrowserAction[],
@@ -5365,7 +5370,7 @@ function pushWorkableManagedPhoneActions(
     selector: WORKABLE_PHONE_SELECTOR,
     label: 'workable_phone_value_visible',
     optional: false,
-    timeout: MANAGED_FILL_TIMEOUT_MS,
+    timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
   });
   actions.push({
     type: 'extract',
@@ -5385,7 +5390,7 @@ function pushWorkableManagedPhoneActions(
       selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
       label: 'workable_phone_country_visible',
       optional: false,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
+      timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
     });
     actions.push({
       type: 'extract',
