@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   classifyField,
   DISCOVER_QUESTIONS_SCRIPT,
+  discoveredFieldIsFixedPortalProfileControl,
   discoveredFieldIsRequired,
   eeoAnswer,
   isCoreIdentityField,
@@ -2119,15 +2120,18 @@ test('Ashby fixed profile fields never reappear as editable custom questions', (
 test('Workable suppresses only its built-in phone and address fields', () => {
   const input = [
     { id: 'phone', question: 'Phone +971', answer: '+971 50 123 4567' },
+    { id: 'phone-country', question: 'Telephone country code', answer: 'United Arab Emirates (+971)' },
     { id: 'address', question: 'Address', answer: 'Dubai' },
     { id: 'custom-location', question: 'Where are you currently located?', answer: 'Dubai' },
     { id: 'custom-address', question: 'What is your current mailing address?', answer: 'Dubai' },
+    { id: 'custom-phone-country', question: 'What is your telephone country code?', answer: 'United Arab Emirates (+971)' },
   ];
 
   for (const portal of ['workable', 'controlled_workable'] as const) {
     assert.deepEqual(normalizeStoredPortalQuestions(input, portal), [
       { id: 'custom-location', question: 'Where are you currently located?', answer: 'Dubai' },
       { id: 'custom-address', question: 'What is your current mailing address?', answer: 'Dubai' },
+      { id: 'custom-phone-country', question: 'What is your telephone country code?', answer: 'United Arab Emirates (+971)' },
     ]);
   }
 });
@@ -2214,6 +2218,63 @@ test('Recruitee generated id churn leaves packet-visible custom questions unchan
     packetAuditSha256(packetVisibleQuestions(normalized[0])),
     packetAuditSha256(packetVisibleQuestions(normalized[1])),
   );
+});
+
+test('Pinpoint drops only fixed application controls captured under a section heading', () => {
+  const sectionHeading = "1. Personal details We'll need these details in order to be able to contact you. Apply with LinkedIn";
+  const fixedSelectors = [
+    'input[name="application_form[application][first_name]"]',
+    'input[name="application_form[application][last_name]"]',
+    'input[name="application_form[application][email]"]',
+    'input[name="application_form[application][phone]"]',
+    'input[name="application_form[application][town]"]',
+    'input[name="application_form[application][linkedin_url]"]',
+    'input[name="application_form[application][linkedin_url]"][type="text"]',
+  ];
+
+  for (const selector of fixedSelectors) {
+    assert.equal(discoveredFieldIsFixedPortalProfileControl('pinpoint', {
+      label: sectionHeading,
+      selector,
+      durableSelector: selector,
+    }), true);
+  }
+
+  const custom = {
+    id: 'custom',
+    question: 'Why do you want to join our trainee programme?',
+    answer: 'Reviewed answer',
+    portal_selector: 'textarea[name="application_form[application][answers][motivation]"]',
+  };
+  const consent = {
+    id: 'consent',
+    question: sectionHeading,
+    answer: '',
+    portal_selector: 'input[name="application_form[application][process_information]"]',
+  };
+  const unboundHeading = {
+    id: 'unbound-heading',
+    question: sectionHeading,
+    answer: '',
+    portal_selector: 'input[name="application_form[application][answers][linkedin_note]"]',
+  };
+  const fixedLinkedIn = {
+    id: 'linkedin',
+    question: sectionHeading,
+    answer: 'https://www.linkedin.com/in/mehekmandal/',
+    portal_selector: 'input[name="application_form[application][linkedin_url]"]',
+  };
+
+  assert.deepEqual(
+    normalizeStoredPortalQuestions([fixedLinkedIn, custom, consent, unboundHeading], 'pinpoint'),
+    [custom, consent],
+  );
+  assert.deepEqual(normalizeStoredPortalQuestions([unboundHeading], 'pinpoint'), [unboundHeading]);
+  assert.equal(discoveredFieldIsFixedPortalProfileControl('pinpoint', {
+    label: sectionHeading,
+    selector: unboundHeading.portal_selector,
+    durableSelector: unboundHeading.portal_selector,
+  }), false);
 });
 
 test('review question labels are never empty or longer than the managed runner limit', () => {
