@@ -4778,7 +4778,7 @@ function isProtectedManagedAction(
   // whether the transcript upload took the resume's control. A trim that dropped it would leave the
   // run unable to tell a resume that is still attached from one that was replaced, which is the
   // exact silence this read was added to break.
-  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_(?:assertion_capability|country_selected)$)/
+  return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_(?:assertion_capability|country_selected)$|teamtailor_resume_upload_complete$)/
     .test(label);
 }
 
@@ -5533,6 +5533,9 @@ const RECRUITEE_COVER_LETTER_SELECTOR = 'input[type="file"][name="candidate.cove
 
 // Captured from Teamtailor and AICOM tenant forms on 2026-08-09.
 const TEAMTAILOR_RESUME_SELECTOR = '#upload_resume_field input[type="file"]';
+const TEAMTAILOR_RESUME_UPLOAD_COMPLETE_SELECTOR =
+  '#upload_resume_field [data-forms--inputs--upload-preview-target="name"]:not(.hidden):visible '
+  + 'a[data-dz-name]:visible';
 // Neither captured Teamtailor form exposed a dedicated cover-letter file input. Never let a broad
 // file selector replace the resume with the cover letter.
 const TEAMTAILOR_COVER_LETTER_SELECTOR = 'input[type="file"][name="teamtailorCoverLetterThatDoesNotExist"]';
@@ -6738,7 +6741,7 @@ function pushFixedFieldActions(
   actions: ManagedBrowserAction[],
   portal: SupportedPortal,
   packet: SubmissionPacket,
-  options: { probeOptions?: boolean } = {},
+  options: { probeOptions?: boolean; submit?: boolean } = {},
 ) {
   const family = portalFamily(portal);
   // Nothing to fill, so nothing is pushed. Returning an EMPTY action list rather than attempting the
@@ -7014,6 +7017,20 @@ function pushFixedFieldActions(
     managedFill(actions, 'input[name="candidate[email]"]', packet.email, 'email');
     managedFill(actions, 'input[name="candidate[phone]"]', packet.phone, 'phone');
     managedUpload(actions, TEAMTAILOR_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    if (options.submit && packet.resume && packet.resumeName) {
+      // Teamtailor uploads the file asynchronously after setInputFiles returns. Its submit control
+      // stays disabled while the progress card says "Uploading..." and the completed filename row
+      // is still hidden. A submit run must wait for that positive completed state before choosing
+      // a final control. Discovery and preparation remain non-blocking when the upload input is not
+      // present, preserving their existing blocker-card behavior.
+      actions.push({
+        type: 'waitForSelector',
+        selector: TEAMTAILOR_RESUME_UPLOAD_COMPLETE_SELECTOR,
+        label: 'teamtailor_resume_upload_complete',
+        optional: false,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+    }
     managedUpload(actions, TEAMTAILOR_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
     // candidate[consent_given] is never filled HERE: on a submit run holding the standing
     // consent-acceptance permission it is ticked by the guarded consent-tick block immediately
@@ -7272,7 +7289,7 @@ export function buildManagedPortalActions(
    * Computed only for a submit run: a prepare or fill run never ticks a consent, because the tick
    * exists solely to clear the way for the submit press that follows it in the same action list. */
   const consentTick = submit ? managedConsentTickPlan(portal, packet) : null;
-  pushFixedFieldActions(actions, portal, packet);
+  pushFixedFieldActions(actions, portal, packet, { submit });
   // These three integrations are structurally fixed-field-only. SuccessFactors has no reachable
   // form at all, while Zoho Recruit and Bullhorn have only the exact identity and resume controls
   // mapped above. A stale or malicious reviewed-question packet must never widen that surface.
