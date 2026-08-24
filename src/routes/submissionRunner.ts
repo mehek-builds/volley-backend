@@ -666,6 +666,7 @@ type ResumePacketDependencies = {
     status?: number;
     arrayBuffer: () => Promise<ArrayBuffer>;
   }>;
+  verifiedBytes?: Buffer;
   initialObjectUrl?: string;
   waitBeforeRetry?: (delayMs: number) => Promise<void>;
 };
@@ -908,6 +909,10 @@ export async function resumeBytesForPacket(
   if (controlledTest && process.env.LITOS_ENABLE_TEST_PORTAL === 'true') {
     return Buffer.from('%PDF-1.4\n% Litos controlled submission fixture\n%%EOF\n');
   }
+  /* currentPacketAudit already downloaded and hash-verified these exact bytes. Reuse that same
+     immutable copy for the employer packet instead of making a second Blob request between the
+     audit and the fill. The copy keeps later packet assembly from mutating the cache-owned Buffer. */
+  if (dependencies.verifiedBytes !== undefined) return Buffer.from(dependencies.verifiedBytes);
   let blobUrl = dependencies.initialObjectUrl?.trim()
     || await dependencies.resolveObjectUrl(objectKey);
   /* Typed, because this is the retention sweep arriving rather than a malfunction. See
@@ -1043,6 +1048,7 @@ export async function buildPacket(
   controlledTest = false,
   verifiedQuestionSnapshot?: readonly ApplicationReviewQuestion[],
   strictStoredAttachments = false,
+  verifiedResumeBytes?: Buffer,
 ): Promise<SubmissionPacket> {
   const stored = row.spec as StoredSpec;
   const contact = (stored._contact ?? {}) as Record<string, unknown>;
@@ -1078,6 +1084,7 @@ export async function buildPacket(
       objectKey: row.resume_object_key,
     });
   const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest, {
+    verifiedBytes: verifiedResumeBytes,
     initialObjectUrl: storedResumeBlobUrl ?? undefined,
     resolveObjectUrl: resolveBlobUrl,
     fetchObject: (url) => fetch(url),
@@ -3430,6 +3437,7 @@ async function prepareManaged(
   authorization: StandingAuthorization,
   audit: PacketAudit,
   verifiedQuestions: readonly ApplicationReviewQuestion[],
+  verifiedResumeBytes: Buffer,
 ) {
   const priorManagedFormSnapshot = readManagedFormSnapshot(current);
   await writeReview(row, nextReview(current, {
@@ -3444,7 +3452,13 @@ async function prepareManaged(
   // and its whole job is to read the page; carrying a file there would spend an upload action on a
   // control this run has not yet established exists.
   let packet = packetForEmployerDelivery(
-    await buildPacket(row, packetUsesControlledResumeFixture(portal), verifiedQuestions),
+    await buildPacket(
+      row,
+      packetUsesControlledResumeFixture(portal),
+      verifiedQuestions,
+      false,
+      verifiedResumeBytes,
+    ),
     current,
     'browser',
   );
@@ -4948,11 +4962,18 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       authorization,
       packetAudit.audit,
       packetAudit.questions,
+      packetAudit.pdfBytes,
     );
     return;
   }
   const initialDirectPacket = packetForEmployerDelivery(
-    await buildPacket(row, packetUsesControlledResumeFixture(portal), packetAudit.questions),
+    await buildPacket(
+      row,
+      packetUsesControlledResumeFixture(portal),
+      packetAudit.questions,
+      false,
+      packetAudit.pdfBytes,
+    ),
     current,
     'browser',
   );
@@ -5718,6 +5739,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       row,
       packetUsesControlledResumeFixture(portal),
       packetAudit.questions,
+      false,
+      packetAudit.pdfBytes,
     );
     const packet = packetForEmployerDelivery(builtPacket, claimedReview, 'browser');
     const envelope = employerDeliveryEnvelope({
@@ -6410,7 +6433,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
   }
   if (!claimedReview.browser_session_id) throw new Error('The prepared run is missing its session.');
   const directPortal = detectPortal(claimedReview.portal_url!);
-  const directBuiltPacket = await buildPacket(row, false, packetAudit.questions);
+  const directBuiltPacket = await buildPacket(row, false, packetAudit.questions, false, packetAudit.pdfBytes);
   const directPacket = packetForEmployerDelivery(directBuiltPacket, claimedReview, 'browser');
   const directEnvelope = employerDeliveryEnvelope({
     channel: browserEmployerDeliveryChannel(browserDeliveryRuntimeIdentity().provider),
