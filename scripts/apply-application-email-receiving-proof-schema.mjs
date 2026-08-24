@@ -24,7 +24,10 @@ async function main() {
       )
     `);
     await client.query(`
-      create unique index if not exists application_email_receiving_proofs_route_fingerprint_unique
+      drop index if exists application_email_receiving_proofs_route_fingerprint_unique
+    `);
+    await client.query(`
+      create index if not exists application_email_receiving_proofs_route_fingerprint_idx
       on application_email_receiving_proofs(route_fingerprint)
     `);
     await client.query(`
@@ -40,6 +43,26 @@ async function main() {
     const required = ['provider_message_hash', 'route_fingerprint', 'proof_version', 'domain', 'verified_at', 'created_at'];
     const missing = required.filter((column) => !present.has(column));
     if (missing.length > 0) throw new Error(`Receiving proof columns still missing: ${missing.join(', ')}`);
+
+    const indexResult = await client.query(`
+      select indexname, indexdef from pg_indexes
+      where schemaname = current_schema() and tablename = 'application_email_receiving_proofs'
+    `);
+    const indexes = indexResult.rows.map((row) => ({
+      name: String(row.indexname),
+      definition: String(row.indexdef).replace(/"/g, ''),
+    }));
+    const providerMessageIsUnique = indexes.some((item) =>
+      /\bunique\b/i.test(item.definition) && /\(provider_message_hash\)/i.test(item.definition));
+    if (!providerMessageIsUnique) throw new Error('Receiving proof provider_message_hash is not uniquely indexed');
+
+    const routeIndex = indexes.find((item) => item.name === 'application_email_receiving_proofs_route_fingerprint_idx');
+    if (!routeIndex || /\bunique\b/i.test(routeIndex.definition)) {
+      throw new Error('Receiving proof route_fingerprint append-only index is missing or unique');
+    }
+    const obsoleteUnique = indexes.find((item) =>
+      /\bunique\b/i.test(item.definition) && /\(route_fingerprint\)/i.test(item.definition));
+    if (obsoleteUnique) throw new Error(`Receiving proof route_fingerprint is still unique: ${obsoleteUnique.name}`);
   } catch (error) {
     await client.query('rollback').catch(() => undefined);
     throw error;

@@ -1,5 +1,5 @@
 import { createHash } from 'crypto';
-import { and, eq, gte } from 'drizzle-orm';
+import { and, eq, gte, lte } from 'drizzle-orm';
 import { db } from '../db';
 import { application_email_receiving_proofs } from '../db/schema';
 import {
@@ -21,7 +21,7 @@ export type ManagedReceivingProof = {
 
 export type ManagedReceivingProofStore = {
   findByMessageHash(hash: string): Promise<ManagedReceivingProof | null>;
-  findCurrent(routeFingerprint: string, domain: string, proofVersion: number, notBefore: Date): Promise<ManagedReceivingProof | null>;
+  findCurrent(routeFingerprint: string, domain: string, proofVersion: number, notBefore: Date, notAfter: Date): Promise<ManagedReceivingProof | null>;
   insert(proof: ManagedReceivingProof): Promise<boolean>;
 };
 
@@ -45,7 +45,7 @@ function resendWebhookSigningSecret(): string | null {
   return process.env.RESEND_WEBHOOK_SECRET?.trim() || null;
 }
 
-/** Exact one-time recipient, deliberately never returned by health or error responses. */
+/** Exact dedicated recipient, deliberately never returned by health or error responses. */
 export function configuredManagedReceivingCanaryRecipient(): string | null {
   const route = applicationEmailRouteSelection();
   const token = canaryToken();
@@ -68,8 +68,8 @@ export function managedReceivingProofRouteFingerprint(): string | null {
   return hash(`managed-receiving-proof-v${MANAGED_RECEIVING_PROOF_VERSION}:${route.mode}:${route.domain}:${secret}:${token}:${endpoint}:${signingSecret}:${receivingKey}`);
 }
 
-/** Version 1 omitted endpoint and signing-secret binding. It is never health evidence, but checking
- * its fingerprint prevents reusing an already-consumed one-time recipient during this upgrade. */
+/** Version 1 omitted endpoint and signing-secret binding. It is never health evidence, and its
+ * fingerprint forces token rotation before the same recipient can prove the stronger version. */
 function legacyManagedReceivingProofRouteFingerprint(): string | null {
   const route = applicationEmailRouteSelection();
   const secret = aliasSecret();
@@ -101,12 +101,13 @@ export const databaseManagedReceivingProofStore: ManagedReceivingProofStore = {
       .limit(1);
     return rows[0] ?? null;
   },
-  async findCurrent(routeFingerprint, domain, proofVersion, notBefore) {
+  async findCurrent(routeFingerprint, domain, proofVersion, notBefore, notAfter) {
     const rows = await db.select().from(application_email_receiving_proofs).where(and(
       eq(application_email_receiving_proofs.route_fingerprint, routeFingerprint),
       eq(application_email_receiving_proofs.domain, domain),
       eq(application_email_receiving_proofs.proof_version, proofVersion),
       gte(application_email_receiving_proofs.verified_at, notBefore),
+      lte(application_email_receiving_proofs.verified_at, notAfter),
     )).limit(1);
     return rows[0] ?? null;
   },
@@ -121,6 +122,7 @@ export const databaseManagedReceivingProofStore: ManagedReceivingProofStore = {
 export type SignedResendCanaryEvent = {
   emailId: string;
   recipients: string[];
+  receivedAt?: Date;
 };
 
 export type ManagedCanaryAcceptance =
@@ -166,11 +168,12 @@ export async function acceptSignedManagedReceivingCanary(
 
 
   const legacyFingerprint = legacyManagedReceivingProofRouteFingerprint();
-  if (legacyFingerprint && await store.findCurrent(legacyFingerprint, domain, 1, new Date(0))) {
+  const latestPossibleDate = new Date(8_640_000_000_000_000);
+  if (legacyFingerprint && await store.findCurrent(legacyFingerprint, domain, 1, new Date(0), latestPossibleDate)) {
     return { kind: 'rejected' };
   }
   const routeOnlyFingerprint = routeOnlyManagedReceivingProofRouteFingerprint();
-  if (routeOnlyFingerprint && await store.findCurrent(routeOnlyFingerprint, domain, 2, new Date(0))) {
+  if (routeOnlyFingerprint && await store.findCurrent(routeOnlyFingerprint, domain, 2, new Date(0), latestPossibleDate)) {
     return { kind: 'rejected' };
   }
 
@@ -179,13 +182,13 @@ export async function acceptSignedManagedReceivingCanary(
     route_fingerprint: routeFingerprint,
     proof_version: MANAGED_RECEIVING_PROOF_VERSION,
     domain,
-    verified_at: options.now ?? new Date(),
+    verified_at: options.now ?? event.receivedAt ?? new Date(),
   };
   const inserted = await store.insert(proof);
   if (inserted) return { kind: 'accepted', replay: false };
 
-  // A concurrent replay can lose the insert race. It is idempotent only when the durable row is
-  // exactly the proof this signed event would have written.
+  // If a concurrent replay wins the insert race, accept only when durable
+  // state now contains exactly the proof this signed event would have written.
   const raced = await store.findByMessageHash(providerMessageHash);
   const sameProof = raced?.route_fingerprint === routeFingerprint
     && raced.domain === domain
@@ -212,12 +215,12 @@ export async function acceptSignedManagedReceivingCanary(
  * endpoint (the caller checks this), addressed to our configured managed receiving domain, and whose
  * content the receiving key can actually read.
  *
- * WHAT IS GIVEN UP, precisely: the canary recipient is secret and one-time, which stops a third
- * party who learns an address from mailing it to manufacture proof. That protection is already
- * carried by the Svix signature - a third party cannot make Resend sign a delivery to our endpoint -
- * and replay is covered twice over, by Svix's timestamp window and by the provider_message_hash
- * dedupe below. The recipient-domain test keeps a delivery for some OTHER domain from vouching for
- * this one, which is the property the canary's address shape was really enforcing.
+ * WHAT IS GIVEN UP, precisely: the dedicated canary recipient is reusable, so the scheduled canary
+ * can renew the proof it exists to maintain. Someone who learns an address can mail it, but cannot
+ * make Resend sign a delivery to our endpoint. Stale replay is rejected by Svix's timestamp window.
+ * Every provider hash is stored immutably, which makes all retries idempotent, while the provider's
+ * signed receivedAt keeps delayed delivery from inventing a newer proof time. The recipient-domain
+ * test keeps a delivery for some OTHER domain from vouching for this one.
  */
 export async function recordManagedReceivingProofFromDelivery(
   event: SignedResendCanaryEvent,
@@ -252,12 +255,16 @@ export async function recordManagedReceivingProofFromDelivery(
       && existing.proof_version === MANAGED_RECEIVING_PROOF_VERSION;
   }
 
+  /* Each signed provider delivery is an immutable proof event. The old unique route-fingerprint
+   * index admitted the first event, then silently refused every later one and let health expire
+   * after seven days. The provider-message primary key is the replay guard; multiple events for the
+   * same route are the evidence history recentManagedReceivingProof is designed to search. */
   return store.insert({
     provider_message_hash: providerMessageHash,
     route_fingerprint: routeFingerprint,
     proof_version: MANAGED_RECEIVING_PROOF_VERSION,
     domain,
-    verified_at: options.now ?? new Date(),
+    verified_at: options.now ?? event.receivedAt ?? new Date(),
   });
 }
 
@@ -271,7 +278,7 @@ export async function recentManagedReceivingProof(options: {
   const now = options.now ?? new Date();
   const notBefore = new Date(now.getTime() - MANAGED_RECEIVING_PROOF_MAX_AGE_MS);
   const proof = await (options.store ?? databaseManagedReceivingProofStore)
-    .findCurrent(routeFingerprint, route.domain, MANAGED_RECEIVING_PROOF_VERSION, notBefore);
+    .findCurrent(routeFingerprint, route.domain, MANAGED_RECEIVING_PROOF_VERSION, notBefore, now);
   return Boolean(proof
     && proof.route_fingerprint === routeFingerprint
     && proof.domain === route.domain

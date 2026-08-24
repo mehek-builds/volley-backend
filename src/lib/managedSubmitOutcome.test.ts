@@ -435,6 +435,108 @@ describe('an unknown pressed result gets one bounded read-only receipt observati
     assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'confirmed');
   });
 
+  test('measured Workable success state promotes only the exact bound tenant and job', async () => {
+    const initial = {
+      ...unknown,
+      url: 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/',
+    };
+    const observed = atsResult({
+      title: 'Thank you!',
+      url: 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/?success',
+      text: 'Your application has been submitted successfully.',
+      submitOutcome: {
+        pressed: true,
+        state: 'confirmed',
+        source: 'ats_state',
+        evidence: '[data-ui="successful-submit"]',
+        message: 'Your application has been submitted successfully.',
+        formStillPresent: false,
+      },
+    });
+    const result = await observeManagedReceiptOnce({
+      initial,
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: async () => observed,
+    });
+    assert.equal(result.receiptResult, observed);
+    assert.equal(result.evidenceResult, observed);
+    assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'confirmed');
+  });
+
+  test('Workable continuation refuses missing success state, another job, and generic status prose', async () => {
+    const initial = {
+      ...unknown,
+      url: 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/',
+    };
+    const exactOutcome = {
+      pressed: true,
+      state: 'confirmed',
+      source: 'ats_state',
+      evidence: '[data-ui="successful-submit"]',
+      message: 'Your application has been submitted successfully.',
+      formStillPresent: false,
+    };
+    for (const observed of [
+      atsResult({
+        url: 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/',
+        submitOutcome: exactOutcome,
+      }),
+      atsResult({
+        url: 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/?success&source=retry',
+        submitOutcome: exactOutcome,
+      }),
+      atsResult({
+        url: 'https://apply.workable.com/max-borges-agency/j/AAAAAAAAAA/apply/?success',
+        submitOutcome: exactOutcome,
+      }),
+      atsResult({
+        url: 'https://apply.workable.com/another-tenant/j/20E78CBA92/apply/?success',
+        submitOutcome: exactOutcome,
+      }),
+      atsResult({
+        url: 'https://apply.workable.com/max-borges-agency/j/20e78cba92/apply/?success',
+        submitOutcome: exactOutcome,
+      }),
+      atsResult({
+        url: 'https://careers.example.test/max-borges-agency/j/20E78CBA92/apply/?success',
+        submitOutcome: exactOutcome,
+      }),
+      atsResult({
+        url: 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/?success',
+        submitOutcome: { ...exactOutcome, source: 'live_region', evidence: 'status' },
+      }),
+      atsResult({
+        url: 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/?success',
+        submitOutcome: { ...exactOutcome, formStillPresent: true },
+      }),
+    ]) {
+      const result = await observeManagedReceiptOnce({
+        initial,
+        nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+        observe: async () => observed,
+      });
+      assert.equal(result.receiptResult, initial);
+      assert.equal(managedSubmitVerdict(result.receiptResult).kind, 'unverified');
+    }
+  });
+
+  test('a Workable expected-application mismatch cannot consume the observation token', async () => {
+    const initial = {
+      ...unknown,
+      url: 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply/',
+    };
+    let calls = 0;
+    const result = await observeManagedReceiptOnce({
+      initial,
+      expectedApplicationUrl: 'https://apply.workable.com/another-tenant/j/20E78CBA92/apply/',
+      nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
+      observe: async () => { calls += 1; return initial; },
+    });
+    assert.equal(calls, 0);
+    assert.equal(result.attempted, false);
+    assert.equal(result.receiptResult, initial);
+  });
+
   test('kos.ai Ashby promotes only its published success container from the exact held run', async () => {
     const observed = atsResult({
       title: 'Application submitted',

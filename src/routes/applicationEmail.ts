@@ -188,6 +188,7 @@ export function signedResendCanaryEvent(body: unknown): SignedResendCanaryEvent 
   return {
     emailId: resend.data.data.email_id,
     recipients: resend.data.data.to,
+    ...(resend.data.data.created_at ? { receivedAt: new Date(resend.data.data.created_at) } : {}),
   };
 }
 
@@ -382,14 +383,14 @@ export async function applicationEmailRoutes(fastify: FastifyInstance) {
              *
              * This branch answered a bare 400 and logged nothing, and on 2026-08-17 that cost a whole
              * diagnosis: three signed deliveries were refused here and the only way to tell a
-             * consumed one-time recipient (the v1/v2 fingerprint guards in
+             * obsolete recipient binding (the v1/v2 fingerprint guards in
              * acceptSignedManagedReceivingCanary, which require a NEW canary token) from a
              * recipient-shape mismatch was to read the source and guess. The recipient carries the
              * canary token so it is never logged; the recipient COUNT is the distinguishing fact and
              * carries no secret. */
             fastify.log.error(
               { branch: 'canary_rejected', recipient_count: event.recipients.length, has_email_id: Boolean(event.emailId.trim()) },
-              'inbound receiving proof REFUSED: the signed canary was rejected. recipient_count other than 1 means the delivery was copied or carried a foreign recipient; recipient_count of 1 narrows it to a durable-row guard - either this provider message already stored a DIFFERENT proof, or a v1/v2 fingerprint row marks this one-time recipient as consumed, which needs a NEW LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN rather than a retry',
+              'inbound receiving proof REFUSED: the signed canary was rejected. recipient_count other than 1 means the delivery was copied or carried a foreign recipient; recipient_count of 1 narrows it to a durable-row guard - either this provider message already stored a DIFFERENT proof, or a v1/v2 fingerprint row binds the old proof version and needs a NEW LITOS_RESEND_MANAGED_RECEIVING_CANARY_TOKEN rather than a retry',
             );
             return reply.status(400).send({ error: 'Invalid receiving proof' });
           }

@@ -90,7 +90,7 @@ export async function managedReceivingProofNeedsRefresh(options: {
     now.getTime() - (MANAGED_RECEIVING_PROOF_MAX_AGE_MS - MANAGED_RECEIVING_CANARY_REFRESH_LEAD_MS),
   );
   const proof = await (options.store ?? databaseManagedReceivingProofStore)
-    .findCurrent(fingerprint, route.domain, MANAGED_RECEIVING_PROOF_VERSION, notBefore);
+    .findCurrent(fingerprint, route.domain, MANAGED_RECEIVING_PROOF_VERSION, notBefore, now);
   return !proof;
 }
 

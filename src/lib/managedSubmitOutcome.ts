@@ -362,14 +362,14 @@ type ManagedReceiptResult = MaybeOutcome & {
   humanVerification?: unknown;
 };
 
-type ManagedAtsFamily = 'ashby' | 'greenhouse';
+type ManagedAtsFamily = 'ashby' | 'greenhouse' | 'workable';
 
 type ManagedAtsBinding = {
   family: ManagedAtsFamily;
   origin: string;
   tenant: string;
   jobToken: string;
-  shape: 'ashby_path' | 'greenhouse_jobs_path' | 'greenhouse_embed_query';
+  shape: 'ashby_path' | 'greenhouse_jobs_path' | 'greenhouse_embed_query' | 'workable_apply_path';
 };
 
 function exactQueryIdentity(url: URL): { tenant: string; jobToken: string } | null {
@@ -411,6 +411,12 @@ function managedAtsBinding(result: ManagedReceiptResult): ManagedAtsBinding | nu
       return identity ? { family: 'greenhouse', origin: url.origin, ...identity, shape: 'greenhouse_embed_query' } : null;
     }
   }
+  if (host === 'apply.workable.com') {
+    const match = url.pathname.match(/^\/([A-Za-z0-9][A-Za-z0-9-]{0,99})\/j\/([A-F0-9]{10})\/apply\/?$/);
+    return match
+      ? { family: 'workable', origin: url.origin, tenant: match[1], jobToken: match[2], shape: 'workable_apply_path' }
+      : null;
+  }
   return null;
 }
 
@@ -437,6 +443,12 @@ function observedAtsIdentity(result: ManagedReceiptResult, family: ManagedAtsFam
       const identity = exactQueryIdentity(url);
       return identity ? { family, origin: url.origin, ...identity, shape: 'greenhouse_embed_query' } : null;
     }
+  }
+  if (family === 'workable' && host === 'apply.workable.com') {
+    const match = url.pathname.match(/^\/([A-Za-z0-9][A-Za-z0-9-]{0,99})\/j\/([A-F0-9]{10})\/apply\/?$/);
+    return match
+      ? { family, origin: url.origin, tenant: match[1], jobToken: match[2], shape: 'workable_apply_path' }
+      : null;
   }
   return null;
 }
@@ -473,6 +485,13 @@ function exactAtsReceipt(
     }
     return false;
   }
+  if (expected.family === 'workable') {
+    return url.search === '?success'
+      && outcome.state === 'confirmed'
+      && outcome.source === 'ats_state'
+      && outcome.evidence === '[data-ui="successful-submit"]'
+      && outcome.formStillPresent === false;
+  }
   const greenhousePath = /\/(?:application_)?confirmation\/?$/.test(url.pathname);
   return expected.family === 'greenhouse'
     && greenhousePath
@@ -496,9 +515,10 @@ export type ManagedReceiptObservation<T extends ManagedReceiptResult> = {
  * Re-read an exact held Stratus page once when its first post-click verdict is still unknown.
  *
  * This helper owns the fail-closed boundary. It accepts only the ATS hooks the runner already
- * publishes for Ashby's success/failure containers and Greenhouse's confirmation route. A live
- * region, body text, another unknown result, or a continuation failure can improve the screenshot
- * shown to the applicant, but none of them can turn the row into submitted or refused.
+ * publishes for Ashby's success/failure containers, Greenhouse's confirmation route, and
+ * Workable's successful-submit state on the exact bound job. A generic live region, body text,
+ * another unknown result, or a continuation failure can improve the screenshot shown to the
+ * applicant, but none of them can turn the row into submitted or refused.
  *
  * The observer receives only the capability copied from this exact result. It receives no URL and
  * no action list, so it cannot reopen the employer page or press Send a second time. Stratus binds

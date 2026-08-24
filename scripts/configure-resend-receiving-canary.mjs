@@ -3,7 +3,7 @@
 import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
-// Generates a fresh one-time canary token and sends it to Vercel over stdin. The token and derived
+// Generates a fresh dedicated canary token and sends it to Vercel over stdin. The token and derived
 // recipient never appear in argv, stdout, stderr, or a file. This script only configures the token;
 // it deliberately does not deploy or send mail.
 const token = randomBytes(32).toString('base64url').toLowerCase();

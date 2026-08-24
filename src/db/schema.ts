@@ -1560,9 +1560,9 @@ export const application_email_messages = pgTable('application_email_messages', 
 }));
 
 // ---- application_email_receiving_proofs ----
-// A provider-key-independent proof that Resend delivered one exact, operator-configured canary to
-// the selected managed receiving route. The webhook handler writes only hashes and routing facts:
-// never the canary recipient, provider payload, message body, headers, or signing secrets.
+// Append-only provider-key-independent evidence that Resend delivered signed messages to the
+// selected managed receiving route. The webhook handler writes only hashes and routing facts:
+// never recipients, provider payloads, message bodies, headers, or signing secrets.
 export const application_email_receiving_proofs = pgTable('application_email_receiving_proofs', {
   provider_message_hash: text('provider_message_hash').primaryKey(),
   route_fingerprint: text('route_fingerprint').notNull(),
@@ -1571,7 +1571,7 @@ export const application_email_receiving_proofs = pgTable('application_email_rec
   verified_at: timestamp('verified_at', { withTimezone: true }).notNull(),
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (t) => ({
-  routeFingerprintUnique: uniqueIndex('application_email_receiving_proofs_route_fingerprint_unique')
+  routeFingerprintIdx: index('application_email_receiving_proofs_route_fingerprint_idx')
     .on(t.route_fingerprint),
   verifiedAtIdx: index('application_email_receiving_proofs_verified_at_idx').on(t.verified_at),
 }));

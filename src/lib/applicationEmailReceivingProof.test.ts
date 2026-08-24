@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   acceptSignedManagedReceivingCanary,
   configuredManagedReceivingCanaryRecipient,
+  managedReceivingProviderMessageHash,
   managedReceivingProofRouteFingerprint,
   recentManagedReceivingProof,
   recordManagedReceivingProofFromDelivery,
@@ -23,16 +24,16 @@ class MemoryProofStore implements ManagedReceivingProofStore {
     return this.rows.find((row) => row.provider_message_hash === hash) ?? null;
   }
 
-  async findCurrent(routeFingerprint: string, domain: string, proofVersion: number, notBefore: Date) {
+  async findCurrent(routeFingerprint: string, domain: string, proofVersion: number, notBefore: Date, notAfter: Date) {
     return this.rows.find((row) => row.route_fingerprint === routeFingerprint
       && row.domain === domain
       && row.proof_version === proofVersion
-      && row.verified_at >= notBefore) ?? null;
+      && row.verified_at >= notBefore
+      && row.verified_at <= notAfter) ?? null;
   }
 
   async insert(proof: ManagedReceivingProof) {
-    if (this.rows.some((row) => row.provider_message_hash === proof.provider_message_hash
-      || row.route_fingerprint === proof.route_fingerprint)) return false;
+    if (this.rows.some((row) => row.provider_message_hash === proof.provider_message_hash)) return false;
     this.rows.push(proof);
     return true;
   }
@@ -111,7 +112,10 @@ test('accepts, minimally stores, and idempotently replays the exact signed canar
     assert.ok(!serialized.includes(RECIPIENT));
     assert.ok(!serialized.includes('provider-message-one'));
     assert.ok(!serialized.includes('proof-alias-secret'));
-    assert.deepEqual(await acceptReadableCanary(event, { store, now }), {
+    assert.deepEqual(await acceptReadableCanary(event, {
+      store,
+      now: new Date('2026-08-09T03:05:00.000Z'),
+    }), {
       kind: 'accepted', replay: true,
     });
     assert.equal(store.rows[0]!.verified_at.toISOString(), now.toISOString());
@@ -141,7 +145,7 @@ test('never persists proof when the provider cannot read the signed canary conte
   });
 });
 
-test('rejects copied, foreign, old, and second-use canary deliveries', async () => {
+test('rejects copied, foreign, and old canary deliveries but renews from a later scheduled canary', async () => {
   await withManagedProofEnv(async () => {
     const store = new MemoryProofStore();
     assert.deepEqual(await acceptReadableCanary({
@@ -153,12 +157,20 @@ test('rejects copied, foreign, old, and second-use canary deliveries', async () 
     assert.deepEqual(await acceptReadableCanary({
       emailId: 'copied', recipients: [RECIPIENT, 'copy@example.com'],
     }, { store }), { kind: 'rejected' });
-    assert.equal((await acceptReadableCanary({
+    const firstAt = new Date('2026-08-17T12:00:00.000Z');
+    const renewedAt = new Date('2026-08-24T12:01:00.000Z');
+    assert.deepEqual(await acceptReadableCanary({
       emailId: 'first', recipients: [RECIPIENT],
-    }, { store })).kind, 'accepted');
+    }, { store, now: firstAt }), { kind: 'accepted', replay: false });
     assert.deepEqual(await acceptReadableCanary({
       emailId: 'second', recipients: [RECIPIENT],
-    }, { store }), { kind: 'rejected' });
+    }, { store, now: renewedAt }), { kind: 'accepted', replay: false });
+    assert.equal(store.rows.length, 2);
+    assert.equal(store.rows[1].verified_at.toISOString(), renewedAt.toISOString());
+    assert.equal(await recentManagedReceivingProof({
+      store,
+      now: new Date(renewedAt.getTime() + 1_000),
+    }), true);
   });
 });
 
@@ -197,7 +209,7 @@ test('mode, domain, alias-secret, endpoint, signing-secret, receiving-key, and c
   });
 });
 
-test('version-one proof is never health evidence and cannot reuse its one-time recipient', async () => {
+test('version-one proof is never health evidence and requires token rotation before upgrade', async () => {
   await withManagedProofEnv(async () => {
     const store = new MemoryProofStore();
     const legacyFingerprint = createHash('sha256')
@@ -272,6 +284,9 @@ test('migration and setup keep proof minimal and canary material out of output a
     assert.match(migration, new RegExp(column));
   }
   assert.doesNotMatch(migration, /\b(subject|body|headers|recipient|raw_json|secret)\b/i);
+  assert.match(migration, /drop index if exists application_email_receiving_proofs_route_fingerprint_unique/i);
+  assert.match(migration, /create index if not exists application_email_receiving_proofs_route_fingerprint_idx/i);
+  assert.doesNotMatch(migration, /create unique index if not exists application_email_receiving_proofs_route_fingerprint/i);
 
   const setup = readFileSync('scripts/configure-resend-receiving-canary.mjs', 'utf8');
   assert.match(setup, /randomBytes\(32\)/);
@@ -341,9 +356,80 @@ test('the same provider message is idempotent rather than a second proof row', a
       emailId: 'resend-inbound-4',
       recipients: [`app-abc123@${DOMAIN}`],
     };
-    const opts = { store, assertContentReadable: async () => {} };
-    assert.equal(await recordManagedReceivingProofFromDelivery(args, opts), true);
-    assert.equal(await recordManagedReceivingProofFromDelivery(args, opts), true);
+    const firstAt = new Date('2026-08-24T12:00:00.000Z');
+    assert.equal(await recordManagedReceivingProofFromDelivery(args, {
+      store, assertContentReadable: async () => {}, now: firstAt,
+    }), true);
+    assert.equal(await recordManagedReceivingProofFromDelivery(args, {
+      store, assertContentReadable: async () => {}, now: new Date('2026-08-24T12:05:00.000Z'),
+    }), true);
+    assert.equal(store.rows.length, 1);
+    assert.equal(store.rows[0].verified_at.toISOString(), firstAt.toISOString());
+  });
+});
+
+test('a later accepted delivery renews the same route after its seven-day proof expires', async () => {
+  await withManagedProofEnv(async () => {
+    const store = new MemoryProofStore();
+    const firstVerifiedAt = new Date('2026-08-17T12:00:00.000Z');
+    const renewedAt = new Date('2026-08-24T12:01:00.000Z');
+
+    assert.equal(await recordManagedReceivingProofFromDelivery(
+      { emailId: 'resend-inbound-old', recipients: [`app-abc123@${DOMAIN}`] },
+      { store, assertContentReadable: async () => {}, now: firstVerifiedAt },
+    ), true);
+    assert.equal(await recentManagedReceivingProof({ store, now: renewedAt }), false);
+
+    assert.equal(await recordManagedReceivingProofFromDelivery(
+      { emailId: 'resend-inbound-new', recipients: [`app-def456@${DOMAIN}`] },
+      { store, assertContentReadable: async () => {}, now: renewedAt },
+    ), true);
+    assert.equal(store.rows.length, 2);
+    assert.equal(store.rows[1].verified_at.toISOString(), renewedAt.toISOString());
+    assert.equal(
+      store.rows[0].provider_message_hash,
+      managedReceivingProviderMessageHash('resend-inbound-old'),
+      'the first immutable event remains available for replay detection',
+    );
+
+    assert.equal(await recordManagedReceivingProofFromDelivery(
+      { emailId: 'resend-inbound-old', recipients: [`app-abc123@${DOMAIN}`] },
+      { store, assertContentReadable: async () => {}, now: new Date('2026-08-24T12:02:00.000Z') },
+    ), true);
+    assert.equal(store.rows.length, 2);
+
+    assert.equal(await recordManagedReceivingProofFromDelivery(
+      { emailId: 'resend-inbound-new', recipients: [`app-def456@${DOMAIN}`] },
+      { store, assertContentReadable: async () => {}, now: new Date('2026-08-24T12:03:00.000Z') },
+    ), true);
+    assert.equal(store.rows.length, 2, 'replaying the later event is idempotent too');
+
+    assert.equal(await recordManagedReceivingProofFromDelivery(
+      { emailId: 'resend-inbound-out-of-order', recipients: [`app-ghi789@${DOMAIN}`] },
+      { store, assertContentReadable: async () => {}, now: new Date('2026-08-24T11:59:00.000Z') },
+    ), true);
+    assert.equal(store.rows.length, 3);
+    assert.equal(await recentManagedReceivingProof({
+      store,
+      now: new Date(renewedAt.getTime() + 1_000),
+    }), true);
+  });
+});
+
+test('one provider message cannot prove a different route fingerprint after configuration changes', async () => {
+  await withManagedProofEnv(async () => {
+    const store = new MemoryProofStore();
+    const event = { emailId: 'route-bound-message', recipients: [`app-abc123@${DOMAIN}`] };
+    assert.equal(await recordManagedReceivingProofFromDelivery(
+      event,
+      { store, assertContentReadable: async () => {} },
+    ), true);
+
+    process.env.LITOS_APPLICATION_EMAIL_ALIAS_SECRET = 'rotated-alias-secret';
+    assert.equal(await recordManagedReceivingProofFromDelivery(
+      event,
+      { store, assertContentReadable: async () => {} },
+    ), false);
     assert.equal(store.rows.length, 1);
   });
 });
@@ -357,5 +443,21 @@ test('a delivery records nothing when the route is not managed Resend', async ()
       { store, assertContentReadable: async () => {} },
     ), false);
     assert.equal(store.rows.length, 0);
+  });
+});
+
+test('a delayed webhook uses the provider-signed receive time instead of extending proof at retry time', async () => {
+  await withManagedProofEnv(async () => {
+    const store = new MemoryProofStore();
+    const receivedAt = new Date('2026-08-17T12:00:00.000Z');
+    assert.equal(await recordManagedReceivingProofFromDelivery(
+      {
+        emailId: 'delayed-provider-webhook',
+        recipients: [`app-abc123@${DOMAIN}`],
+        receivedAt,
+      },
+      { store, assertContentReadable: async () => {} },
+    ), true);
+    assert.equal(store.rows[0].verified_at.toISOString(), receivedAt.toISOString());
   });
 });
