@@ -5355,7 +5355,7 @@ function pushWorkableManagedPhoneActions(
     // widget will submit. Wait for that state to settle, then read its dial-code attribute.
     actions.push({
       type: 'waitForSelector',
-      selector: plan.country.selectedOptionSelector,
+      selector: `body:has(${plan.country.selectedOptionSelector})`,
       label: 'workable_phone_country_selected',
       optional: false,
       timeout: MANAGED_FILL_TIMEOUT_MS,
