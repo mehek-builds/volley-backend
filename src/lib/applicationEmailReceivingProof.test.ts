@@ -19,12 +19,20 @@ const RECIPIENT = `litos-proof-${TOKEN}@${DOMAIN}`;
 
 class MemoryProofStore implements ManagedReceivingProofStore {
   rows: ManagedReceivingProof[] = [];
+  findCurrentCalls: Array<{
+    routeFingerprint: string;
+    domain: string;
+    proofVersion: number;
+    notBefore: Date;
+    notAfter: Date;
+  }> = [];
 
   async findByMessageHash(hash: string) {
     return this.rows.find((row) => row.provider_message_hash === hash) ?? null;
   }
 
   async findCurrent(routeFingerprint: string, domain: string, proofVersion: number, notBefore: Date, notAfter: Date) {
+    this.findCurrentCalls.push({ routeFingerprint, domain, proofVersion, notBefore, notAfter });
     return this.rows.find((row) => row.route_fingerprint === routeFingerprint
       && row.domain === domain
       && row.proof_version === proofVersion
@@ -251,6 +259,25 @@ test('route-only version-two proof is never health evidence and forces a new can
       emailId: 'new-message-same-version-two-recipient', recipients: [RECIPIENT],
     }, { store }), { kind: 'rejected' });
     assert.equal(store.rows.length, 1);
+  });
+});
+
+test('legacy proof lookup uses a four-digit timestamp bound accepted by PostgreSQL', async () => {
+  await withManagedProofEnv(async () => {
+    const store = new MemoryProofStore();
+    assert.deepEqual(await acceptReadableCanary({
+      emailId: 'postgres-bound-message', recipients: [RECIPIENT],
+    }, { store, now: new Date('2026-08-25T19:36:00.000Z') }), {
+      kind: 'accepted', replay: false,
+    });
+
+    const legacyQueries = store.findCurrentCalls.filter((call) => call.proofVersion === 1 || call.proofVersion === 2);
+    assert.equal(legacyQueries.length, 2);
+    for (const query of legacyQueries) {
+      assert.equal(query.notBefore.toISOString(), '1970-01-01T00:00:00.000Z');
+      assert.equal(query.notAfter.toISOString(), '9999-12-31T23:59:59.999Z');
+      assert.doesNotMatch(query.notAfter.toISOString(), /^\+/);
+    }
   });
 });
 

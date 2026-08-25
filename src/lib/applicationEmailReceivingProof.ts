@@ -10,6 +10,7 @@ import { assertResendReceivedEmailReadable, resendReceivingApiKey } from './rese
 
 export const MANAGED_RECEIVING_PROOF_VERSION = 3;
 export const MANAGED_RECEIVING_PROOF_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const POSTGRES_SAFE_PROOF_UPPER_BOUND = new Date('9999-12-31T23:59:59.999Z');
 
 export type ManagedReceivingProof = {
   provider_message_hash: string;
@@ -168,12 +169,18 @@ export async function acceptSignedManagedReceivingCanary(
 
 
   const legacyFingerprint = legacyManagedReceivingProofRouteFingerprint();
-  const latestPossibleDate = new Date(8_640_000_000_000_000);
-  if (legacyFingerprint && await store.findCurrent(legacyFingerprint, domain, 1, new Date(0), latestPossibleDate)) {
+  // JavaScript's maximum Date serializes with a signed six-digit year (`+275760...`). PostgreSQL's
+  // timestamptz input rejects that ISO form before it can inspect the legacy row. A four-digit
+  // sentinel remains far beyond every real proof while being portable through node-postgres.
+  if (legacyFingerprint && await store.findCurrent(
+    legacyFingerprint, domain, 1, new Date(0), POSTGRES_SAFE_PROOF_UPPER_BOUND,
+  )) {
     return { kind: 'rejected' };
   }
   const routeOnlyFingerprint = routeOnlyManagedReceivingProofRouteFingerprint();
-  if (routeOnlyFingerprint && await store.findCurrent(routeOnlyFingerprint, domain, 2, new Date(0), latestPossibleDate)) {
+  if (routeOnlyFingerprint && await store.findCurrent(
+    routeOnlyFingerprint, domain, 2, new Date(0), POSTGRES_SAFE_PROOF_UPPER_BOUND,
+  )) {
     return { kind: 'rejected' };
   }
 
