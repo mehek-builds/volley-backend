@@ -1,6 +1,36 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { canGenerateCoverLetter, storedCoverLetter, storedCoverLetterReuseDisposition } from './coverLetterService';
+
+test('legacy persistence proves the transaction writable before Blob work and retries read-only backends', () => {
+  const source = readFileSync('src/lib/coverLetterService.ts', 'utf8');
+  const persistence = source.slice(
+    source.indexOf('async function persistCoverLetter('),
+    source.indexOf('export async function generateStoredCoverLetter('),
+  );
+  const render = persistence.indexOf('const pdf = await renderCoverLetterPdf(');
+  const runner = persistence.indexOf('const runPersistTransaction = (database: typeof db) => database.transaction(async (tx) => {');
+  const packetLock = persistence.indexOf('const [currentPacket] = await tx.select()');
+  const applicationLock = persistence.indexOf('const [canonicalApplication] = await tx.select()');
+  const upload = persistence.indexOf('const storedBlob = await put(');
+  const firstMutation = persistence.indexOf('const [storedArtifact] = await tx.insert(artifacts)');
+  const retry = persistence.indexOf('const persisted = await withReadOnlyRetry(');
+  const directFallback = persistence.indexOf('onExhausted: () => withDedicatedDatabase');
+  const cleanup = persistence.indexOf('if (blobState.current) await del(');
+
+  assert.ok(render >= 0 && render < runner);
+  assert.ok(runner >= 0 && runner < packetLock);
+  assert.ok(packetLock >= 0 && packetLock < applicationLock);
+  assert.ok(applicationLock >= 0 && applicationLock < upload);
+  assert.ok(upload >= 0 && upload < firstMutation);
+  assert.ok(firstMutation >= 0 && firstMutation < retry);
+  assert.ok(retry >= 0 && retry < directFallback);
+  assert.ok(directFallback >= 0 && directFallback < cleanup);
+  assert.match(persistence, /\.limit\(1\)\.for\('update'\);[\s\S]*\.limit\(1\)\.for\('update'\);[\s\S]*const storedBlob = await put\(/);
+  assert.match(persistence, /withReadOnlyRetry\(\s*\(\) => runPersistTransaction\(db\)/);
+  assert.match(persistence, /onExhausted: \(\) => withDedicatedDatabase\(\(directDb\) =>/);
+});
 
 test('cover letters are not generated before an attachment field is detected', () => {
   assert.equal(canGenerateCoverLetter(undefined), false);
