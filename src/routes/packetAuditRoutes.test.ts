@@ -68,6 +68,91 @@ test('packet cover-letter reconciliation retries read-only transactions without 
   );
 });
 
+test('cover-letter persistence proves read-only state before Blob work in its retried transaction', () => {
+  const start = canonicalCoverLetters.indexOf('async function persistCanonicalBody(');
+  const end = canonicalCoverLetters.indexOf('export async function generateCanonicalCoverLetter(', start);
+  assert.ok(start >= 0 && end > start, 'canonical cover-letter persistence slice was not found');
+  const persistence = canonicalCoverLetters.slice(start, end);
+  const render = persistence.indexOf('dependencies.renderPdf(');
+  const transaction = persistence.indexOf('const runPersistTransaction =');
+  const lockedRead = persistence.indexOf('lockedApplication(tx,', transaction);
+  const upload = persistence.indexOf('dependencies.putObject(', lockedRead);
+  const firstMutation = persistence.indexOf('tx.update(application_artifacts)', transaction);
+  const retry = persistence.indexOf('stored = await withReadOnlyRetry(');
+  const directFallback = persistence.indexOf('onExhausted: () => withDedicatedDatabase');
+  const directTransaction = persistence.indexOf('runPersistTransaction(directDb)');
+  const cleanup = persistence.indexOf('dependencies.deleteObject(blobState.current.url)', retry);
+
+  assert.ok(render >= 0 && transaction > render && lockedRead > transaction && upload > lockedRead
+    && firstMutation > upload && retry > firstMutation
+    && directFallback > retry && directTransaction > directFallback && cleanup > directTransaction,
+  'the lock must reject a read-only transaction before Blob upload, with cleanup after final failure');
+  assert.match(persistence, /withReadOnlyRetry\(\s*\(\) => runPersistTransaction\(db\)/);
+  assert.match(persistence, /onExhausted: \(\) => withDedicatedDatabase/);
+  assert.match(persistence, /runPersistTransaction\(directDb\)/);
+  assert.doesNotMatch(
+    persistence.slice(transaction, retry),
+    /dependencies\.(?:renderPdf|deleteObject)/,
+    'rendering and cleanup must remain outside the retried transaction',
+  );
+});
+
+test('the canonical cover-letter lock proves writability before any data-dependent read', () => {
+  const start = canonicalCoverLetters.indexOf('async function lockedApplication(');
+  const end = canonicalCoverLetters.indexOf('function packetCoverLetterForArtifact(', start);
+  assert.ok(start >= 0 && end > start, 'canonical cover-letter lock helper slice was not found');
+  const lock = canonicalCoverLetters.slice(start, end);
+  const writerProof = lock.indexOf("where(sql`false`).for('update')");
+  const candidateRead = lock.indexOf('const [candidate] = await tx.select()');
+  const packetLock = lock.indexOf(".limit(1).for('update')", candidateRead);
+  const applicationLock = lock.indexOf(".limit(1).for('update')", packetLock + 1);
+
+  assert.ok(writerProof >= 0 && candidateRead > writerProof && packetLock > candidateRead
+    && applicationLock > packetLock,
+  'writability must be proved before the unlocked lookup while preserving packet-before-application lock order');
+});
+
+test('every canonical cover-letter mutation has a direct-writer fallback', () => {
+  const expectations = [
+    ['reuseCanonicalCoverLetter', 'runReuseTransaction'],
+    ['uploadCanonicalCoverLetter', 'runUploadTransaction'],
+    ['deleteCanonicalCoverLetters', 'runDeleteTransaction'],
+  ] as const;
+
+  for (const [exportName, transactionName] of expectations) {
+    const start = canonicalCoverLetters.indexOf(`export async function ${exportName}(`);
+    const nextExport = canonicalCoverLetters.indexOf('\nexport ', start + 1);
+    const end = nextExport > start ? nextExport : canonicalCoverLetters.length;
+    assert.ok(start >= 0 && end > start, `${exportName} slice was not found`);
+    const mutation = canonicalCoverLetters.slice(start, end);
+    assert.match(mutation, new RegExp(`withReadOnlyRetry\\(\\s*\\(\\) => ${transactionName}\\(db\\)`));
+    assert.match(mutation, /onExhausted: \(\) => withDedicatedDatabase/);
+    assert.match(mutation, new RegExp(`${transactionName}\\(directDb\\)`));
+  }
+});
+
+test('cover-letter upload proves read-only state before Blob work in its retried transaction', () => {
+  const start = canonicalCoverLetters.indexOf('export async function uploadCanonicalCoverLetter(');
+  const end = canonicalCoverLetters.indexOf('export async function deleteCanonicalCoverLetters(', start);
+  assert.ok(start >= 0 && end > start, 'canonical cover-letter upload slice was not found');
+  const upload = canonicalCoverLetters.slice(start, end);
+  const transaction = upload.indexOf('const runUploadTransaction =');
+  const lockedRead = upload.indexOf('lockedApplication(tx,', transaction);
+  const blobWrite = upload.indexOf('dependencies.putObject(', lockedRead);
+  const firstMutation = upload.indexOf('tx.update(application_artifacts)', transaction);
+  const retry = upload.indexOf('stored = await withReadOnlyRetry(');
+  const cleanup = upload.indexOf('dependencies.deleteObject(blobState.current.url)', retry);
+
+  assert.ok(transaction >= 0 && lockedRead > transaction && blobWrite > lockedRead
+    && firstMutation > blobWrite && retry > firstMutation && cleanup > retry,
+  'upload must lock before Blob work and clean up only after all writer retries fail');
+  assert.doesNotMatch(
+    upload.slice(transaction, retry),
+    /dependencies\.deleteObject/,
+    'cleanup must remain outside the retried transaction',
+  );
+});
+
 test('extension packet refuses missing, stale, or unacknowledged server audit before disclosure', () => {
   const route = routeSlice("'/applications/:id/submission/extension-packet'", "'/applications/:id/submission/extension-start'");
   const audit = route.indexOf('currentAcknowledgedPacketAudit(row');

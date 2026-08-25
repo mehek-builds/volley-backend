@@ -2,7 +2,8 @@ import { del, put } from '@vercel/blob';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { and, eq, sql } from 'drizzle-orm';
-import { db } from '../db/index';
+import { db, withDedicatedDatabase } from '../db/index';
+import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import {
   application_artifacts,
   applications,
@@ -126,7 +127,7 @@ async function persistCoverLetter(
   const generatedAt = new Date().toISOString();
   const blobState: { current?: { pathname: string; url: string } } = {};
   try {
-    const stored = await db.transaction(async (tx) => {
+    const runPersistTransaction = (database: typeof db) => database.transaction(async (tx) => {
       const [currentPacket] = await tx.select().from(generated_resumes).where(and(
         eq(generated_resumes.id, row.id),
         eq(generated_resumes.user_id, row.user_id),
@@ -208,8 +209,22 @@ async function persistCoverLetter(
       if (!changed[0]) throw new CanonicalCoverLetterConflictError();
       return artifact;
     });
+    const persisted = await withReadOnlyRetry(
+      () => runPersistTransaction(db),
+      {
+        onRetry: (retryAttempt) => console.warn(
+          `[cover-letter] legacy persistence transaction reached a read-only backend; retrying on a fresh pooled connection (attempt ${retryAttempt})`,
+        ),
+        onExhausted: () => withDedicatedDatabase((directDb) => {
+          console.warn(
+            '[cover-letter] pooled legacy persistence transactions stayed read-only; retrying on the direct database endpoint',
+          );
+          return runPersistTransaction(directDb);
+        }),
+      },
+    );
     if (!blobState.current) throw new Error('Cover letter persistence returned no blob');
-    return { cover_letter: stored, blob_url: blobState.current.url };
+    return { cover_letter: persisted, blob_url: blobState.current.url };
   } catch (error) {
     if (blobState.current) await del(blobState.current.url).catch(() => undefined);
     throw error;

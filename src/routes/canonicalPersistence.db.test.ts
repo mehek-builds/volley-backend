@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
+import { after, before, mock, test } from 'node:test';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -651,6 +651,84 @@ test('an owned cover letter can be reused across applications and is deleted onl
   assert.equal((await backendDb.select().from(schema.artifact_versions))
     .filter((row: typeof schema.artifact_versions.$inferSelect) => row.artifact_id === artifactId).length, 0);
   assert.equal(await findOwnedDownloadSource(userId, 'users/cover-letter-reuse/source.pdf'), null);
+});
+
+test('canonical cover-letter save reaches the direct writer without Blob work on read-only pooled attempts', async () => {
+  const userId = randomUUID();
+  const applicationId = randomUUID();
+  const packetId = randomUUID();
+  await dbInsertUser(userId, 'cover-letter-direct-writer@example.test');
+  await backendDb.insert(schema.profiles).values({
+    user_id: userId,
+    parsed_json: { full_name: 'Mehek Mandal', resume_email: 'mehek@example.test' },
+  });
+  await backendDb.insert(schema.generated_resumes).values({
+    id: packetId,
+    user_id: userId,
+    job_context: { company: 'Direct Writer', role: 'Engineer' },
+    resume_object_key: `users/${userId}/resume.pdf`,
+    spec: {
+      summary: 'Saved packet',
+      _review: { status: 'needs_attention', jd_text: 'Build reliable systems.', questions: [] },
+    },
+  });
+  const [application] = await backendDb.insert(schema.applications).values({
+    id: applicationId,
+    user_id: userId,
+    legacy_generated_resume_id: packetId,
+    company_scope_key: 'domain:direct-writer.example',
+    company_name: 'Direct Writer',
+    role: 'Engineer',
+    source_surface: 'dashboard',
+    application_fingerprint: `test:${applicationId}`,
+  }).returning();
+
+  const events: string[] = [];
+  let deleteCalls = 0;
+  const storage = {
+    renderPdf: async () => Buffer.from('%PDF direct-writer cover letter'),
+    putObject: async () => {
+      events.push('blob_write');
+      return {
+        pathname: `users/${userId}/direct-writer-cover-letter.pdf`,
+        url: `https://blob.example/${userId}-direct-writer-cover-letter.pdf`,
+      };
+    },
+    deleteObject: async () => { deleteCalls += 1; },
+  };
+  const realTransaction = backendDb.transaction.bind(backendDb);
+  const transactionMock = mock.method(
+    backendDb,
+    'transaction',
+    async (callback: (tx: any) => Promise<unknown>, config?: unknown) => realTransaction(async (tx: any) => {
+      events.push('pooled_read_only');
+      await tx.execute(sql`SET TRANSACTION READ ONLY`);
+      return callback(tx);
+    }, config),
+  );
+
+  let saved;
+  try {
+    saved = await saveCanonicalCoverLetter(application, 'Edited cover letter.', storage);
+  } finally {
+    transactionMock.mock.restore();
+  }
+
+  assert.equal(transactionMock.mock.callCount(), 3);
+  assert.deepEqual(events, ['pooled_read_only', 'pooled_read_only', 'pooled_read_only', 'blob_write']);
+  assert.equal(deleteCalls, 0);
+  assert.equal(saved.cover_letter.body, 'Edited cover letter.');
+  assert.equal(saved.blob_url, `https://blob.example/${userId}-direct-writer-cover-letter.pdf`);
+  const [packet] = await backendDb.select().from(schema.generated_resumes)
+    .where(eq(schema.generated_resumes.id, packetId)).limit(1);
+  const packetCoverLetter = (packet.spec as Record<string, any>)._cover_letter;
+  assert.equal(packetCoverLetter.artifact_id, saved.cover_letter.artifact_id);
+  assert.equal(packetCoverLetter.object_key, `users/${userId}/direct-writer-cover-letter.pdf`);
+  const selected = (await backendDb.select().from(schema.application_artifacts))
+    .filter((link: typeof schema.application_artifacts.$inferSelect) => link.application_id === applicationId
+      && link.purpose === 'cover_letter' && link.selected);
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].artifact_id, saved.cover_letter.artifact_id);
 });
 
 test('concurrent canonical cover-letter selections leave one selected artifact and the same exact packet pointer', async () => {

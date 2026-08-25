@@ -88,6 +88,10 @@ async function lockedApplication(
   userId: string,
   applicationId: string,
 ): Promise<LockedCanonicalApplication> {
+  // Prove this checkout is writable before an unlocked lookup can mistake replica lag for a
+  // missing application. PostgreSQL rejects every SELECT FOR UPDATE in a read-only transaction,
+  // even when the predicate returns no rows, so this has no row-lock side effect on the writer.
+  await tx.select({ id: applications.id }).from(applications).where(sql`false`).for('update');
   const [candidate] = await tx.select().from(applications).where(and(
     eq(applications.id, applicationId),
     eq(applications.user_id, userId),
@@ -437,7 +441,7 @@ export async function reuseCanonicalCoverLetter(input: {
   applicationId: string;
   artifactId: string;
 }) {
-  return db.transaction(async (tx) => {
+  const runReuseTransaction = (database: typeof db) => database.transaction(async (tx) => {
     const locked = await lockedApplication(tx, input.userId, input.applicationId);
     const [owned] = await tx.select({ artifact: artifacts }).from(artifacts).where(and(
         eq(artifacts.id, input.artifactId),
@@ -466,6 +470,20 @@ export async function reuseCanonicalCoverLetter(input: {
     await mirrorCoverLetterToLegacyPacket(tx, locked, owned.artifact);
     return { row: owned.artifact, cover_letter: publicCoverLetter(owned.artifact) };
   });
+  return withReadOnlyRetry(
+    () => runReuseTransaction(db),
+    {
+      onRetry: (retryAttempt) => console.warn(
+        `[cover-letter] reuse transaction reached a read-only backend; retrying on a fresh pooled connection (attempt ${retryAttempt})`,
+      ),
+      onExhausted: () => withDedicatedDatabase((directDb) => {
+        console.warn(
+          '[cover-letter] pooled reuse transactions stayed read-only; retrying on the direct database endpoint',
+        );
+        return runReuseTransaction(directDb);
+      }),
+    },
+  );
 }
 
 async function candidateContext(userId: string) {
@@ -527,8 +545,9 @@ async function persistCanonicalBody(input: {
     file_name: fileName,
   };
   const blobState: { current?: { pathname: string; url: string } } = {};
+  let stored: typeof artifacts.$inferSelect;
   try {
-    const stored = await db.transaction(async (tx) => {
+    const runPersistTransaction = (database: typeof db) => database.transaction(async (tx) => {
       const locked = await lockedApplication(tx, input.application.user_id, input.application.id);
       const storedBlob = await dependencies.putObject(
         `users/${input.application.user_id}/resumes/${input.application.id}-cover-letter-${artifactId}.pdf`,
@@ -571,16 +590,30 @@ async function persistCanonicalBody(input: {
         selected: true,
       });
       const [row] = await tx.select().from(artifacts).where(eq(artifacts.id, artifactId)).limit(1);
-      if (row) await mirrorCoverLetterToLegacyPacket(tx, locked, row);
+      if (!row) throw new Error('Cover letter persistence returned no artifact');
+      await mirrorCoverLetterToLegacyPacket(tx, locked, row);
       return row;
     });
-    if (!stored) throw new Error('Cover letter persistence returned no artifact');
-    if (!blobState.current) throw new Error('Cover letter persistence returned no blob');
-    return { cover_letter: publicCoverLetter(stored), blob_url: blobState.current.url };
+    stored = await withReadOnlyRetry(
+      () => runPersistTransaction(db),
+      {
+        onRetry: (retryAttempt) => console.warn(
+          `[cover-letter] persistence transaction reached a read-only backend; retrying on a fresh pooled connection (attempt ${retryAttempt})`,
+        ),
+        onExhausted: () => withDedicatedDatabase((directDb) => {
+          console.warn(
+            '[cover-letter] pooled persistence transactions stayed read-only; retrying on the direct database endpoint',
+          );
+          return runPersistTransaction(directDb);
+        }),
+      },
+    );
   } catch (error) {
     if (blobState.current) await dependencies.deleteObject(blobState.current.url).catch(() => undefined);
     throw error;
   }
+  if (!blobState.current) throw new Error('Cover letter persistence returned no blob');
+  return { cover_letter: publicCoverLetter(stored), blob_url: blobState.current.url };
 }
 
 export async function generateCanonicalCoverLetter(input: {
@@ -656,8 +689,9 @@ export async function uploadCanonicalCoverLetter(input: {
     uploaded: true,
   };
   const blobState: { current?: { pathname: string; url: string } } = {};
+  let stored: typeof artifacts.$inferSelect;
   try {
-    const stored = await db.transaction(async (tx) => {
+    const runUploadTransaction = (database: typeof db) => database.transaction(async (tx) => {
       const locked = await lockedApplication(tx, input.application.user_id, input.application.id);
       const storedBlob = await dependencies.putObject(
         `users/${input.application.user_id}/documents/${artifactId}-${safeName}`,
@@ -696,16 +730,30 @@ export async function uploadCanonicalCoverLetter(input: {
         selected: true,
       });
       const [row] = await tx.select().from(artifacts).where(eq(artifacts.id, artifactId)).limit(1);
-      if (row) await mirrorCoverLetterToLegacyPacket(tx, locked, row);
+      if (!row) throw new Error('Cover letter upload returned no artifact');
+      await mirrorCoverLetterToLegacyPacket(tx, locked, row);
       return row;
     });
-    if (!stored) throw new Error('Cover letter upload returned no artifact');
-    if (!blobState.current) throw new Error('Cover letter upload returned no blob');
-    return { cover_letter: publicCoverLetter(stored), blob_url: blobState.current.url };
+    stored = await withReadOnlyRetry(
+      () => runUploadTransaction(db),
+      {
+        onRetry: (retryAttempt) => console.warn(
+          `[cover-letter] upload transaction reached a read-only backend; retrying on a fresh pooled connection (attempt ${retryAttempt})`,
+        ),
+        onExhausted: () => withDedicatedDatabase((directDb) => {
+          console.warn(
+            '[cover-letter] pooled upload transactions stayed read-only; retrying on the direct database endpoint',
+          );
+          return runUploadTransaction(directDb);
+        }),
+      },
+    );
   } catch (error) {
     if (blobState.current) await dependencies.deleteObject(blobState.current.url).catch(() => undefined);
     throw error;
   }
+  if (!blobState.current) throw new Error('Cover letter upload returned no blob');
+  return { cover_letter: publicCoverLetter(stored), blob_url: blobState.current.url };
 }
 
 export async function deleteCanonicalCoverLetters(input: {
@@ -714,7 +762,7 @@ export async function deleteCanonicalCoverLetters(input: {
   legacyPacketId?: string | null;
 }) {
   const now = new Date();
-  const result = await db.transaction(async (tx) => {
+  const runDeleteTransaction = (database: typeof db) => database.transaction(async (tx) => {
     const locked = await lockedApplication(tx, input.userId, input.applicationId);
     const { application } = locked;
     const rows = await tx.select({ artifact: artifacts }).from(application_artifacts)
@@ -755,6 +803,20 @@ export async function deleteCanonicalCoverLetters(input: {
     await mirrorCoverLetterToLegacyPacket(tx, locked, null);
     return { rows, deletedArtifactIds };
   });
+  const result = await withReadOnlyRetry(
+    () => runDeleteTransaction(db),
+    {
+      onRetry: (retryAttempt) => console.warn(
+        `[cover-letter] delete transaction reached a read-only backend; retrying on a fresh pooled connection (attempt ${retryAttempt})`,
+      ),
+      onExhausted: () => withDedicatedDatabase((directDb) => {
+        console.warn(
+          '[cover-letter] pooled delete transactions stayed read-only; retrying on the direct database endpoint',
+        );
+        return runDeleteTransaction(directDb);
+      }),
+    },
+  );
   for (const row of result.rows) {
     if (!result.deletedArtifactIds.has(row.artifact.id)) continue;
     const url = row.artifact.rendered_blob_url
