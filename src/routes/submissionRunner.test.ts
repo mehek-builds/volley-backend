@@ -1190,6 +1190,24 @@ test('an observed employer redirect cannot pass an approved destination check', 
   assert.match(employerPageUrlIssue('https://boards.example.com/jobs/1', undefined) ?? '', /valid approved destination/);
 });
 
+test('the supported Workable short link can resolve only to its exact tenant job URL', () => {
+  const bare = 'https://apply.workable.com/j/20e78cba92/apply?source=litos#apply';
+  assert.equal(
+    employerPageUrlIssue(bare, 'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply?source=litos'),
+    null,
+  );
+  for (const observed of [
+    'https://apply.workable.com/max-borges-agency/j/AAAAAAAAAA/apply?source=litos',
+    'https://apply.workable.com/max-borges-agency/j/20E78CBA92/apply?source=other',
+    'https://apply.workable.com/another-tenant/j/20E78CBA92/apply?source=litos/extra',
+    'https://user:pass@apply.workable.com/max-borges-agency/j/20E78CBA92/apply?source=litos',
+    'http://apply.workable.com/max-borges-agency/j/20E78CBA92/apply?source=litos',
+    'https://careers.example.com/max-borges-agency/j/20E78CBA92/apply?source=litos',
+  ]) {
+    assert.match(employerPageUrlIssue(bare, observed) ?? '', /redirected away/, observed);
+  }
+});
+
 test('every managed applicant-data run binds the exact live posting URL', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
   const start = source.indexOf('async function prepareManaged(');

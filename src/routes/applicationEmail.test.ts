@@ -78,11 +78,16 @@ test('signed Resend canary parsing uses only the signed envelope and rejects oth
     data: {
       email_id: 'received-id',
       to: ['Exact@Managed.Resend.App'],
+      created_at: '2026-08-24T12:00:00.000Z',
       body: 'must never be needed for proof',
       headers: { authorization: 'must never be stored' },
     },
   })));
-  assert.deepEqual(event, { emailId: 'received-id', recipients: ['Exact@Managed.Resend.App'] });
+  assert.deepEqual(event, {
+    emailId: 'received-id',
+    recipients: ['Exact@Managed.Resend.App'],
+    receivedAt: new Date('2026-08-24T12:00:00.000Z'),
+  });
   assert.equal(signedResendCanaryEvent({ type: 'email.sent', data: { email_id: 'x', to: ['a@b.com'] } }), null);
   assert.equal(signedResendCanaryEvent(Buffer.from('not-json')), null);
 });

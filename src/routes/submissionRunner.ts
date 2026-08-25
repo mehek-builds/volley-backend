@@ -54,6 +54,7 @@ import {
   runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
 } from '../lib/browserbase';
+import { resolvedApprovedApplicationPageUrl } from '../lib/workableApplicationUrl';
 import {
   blockersIncludeCaptcha,
   CAPTCHA_BLOCKER,
@@ -801,7 +802,7 @@ export function employerPageUrlIssue(expected: string, observed: string | undefi
     const observedUrl = new URL(observed ?? '');
     expectedUrl.hash = '';
     observedUrl.hash = '';
-    return expectedUrl.href === observedUrl.href
+    return resolvedApprovedApplicationPageUrl(expectedUrl, observedUrl)
       ? null
       : 'the employer page redirected away from the approved destination';
   } catch {
@@ -6110,17 +6111,18 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     }
     /* ONE READ-ONLY SECOND LOOK, ONLY WHEN THE CLICK LANDED AND THE FIRST VERDICT WAS UNKNOWN.
      *
-     * Ashby and Greenhouse both replace their application UI after the request completes. The
-     * runner waits a bounded three seconds, but two production sends reached that deadline between
-     * the click and the ATS state transition. They were written as terminal unverified rows even
-     * though the exact browser page was still alive behind the continuation capability this request
-     * had already asked Stratus to create.
+     * Ashby, Greenhouse, and Workable replace their application UI after the request completes. The
+     * runner watches for a bounded 30 seconds, but a production transition can still land after its
+     * first reading. Without this second look, that delayed receipt becomes a terminal unverified
+     * row even though the exact browser page is still alive behind the continuation capability this
+     * request already asked Stratus to create.
      *
      * The observer receives no URL and the continuation receives an empty action list. It cannot
      * reopen, navigate, click, or submit. It only lets Stratus run its existing ATS readers on the
-     * same Page once more. The helper accepts only Ashby's published success/failure containers or
-     * Greenhouse's confirmation route; timeout, weak page text, and a second unknown keep the
-     * original unverified verdict. An uncertain submit is never retried. */
+     * same Page once more. The helper accepts only Ashby's published success/failure containers,
+     * Greenhouse's confirmation route, or Workable's exact bound successful-submit state. Timeout,
+     * weak page text, and a second unknown keep the original unverified verdict. An uncertain submit
+     * is never retried. */
     let receiptEvidenceResult = receiptResult;
     let delayedObservedChallenge = false;
     if (!initialChallenge) {

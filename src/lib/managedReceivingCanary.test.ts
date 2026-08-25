@@ -26,14 +26,16 @@ class MemoryStore implements ManagedReceivingProofStore {
     return this.rows.find((row) => row.provider_message_hash === hash) ?? null;
   }
 
-  async findCurrent(routeFingerprint: string, domain: string, proofVersion: number, notBefore: Date) {
+  async findCurrent(routeFingerprint: string, domain: string, proofVersion: number, notBefore: Date, notAfter: Date) {
     return this.rows.find((row) => row.route_fingerprint === routeFingerprint
       && row.domain === domain
       && row.proof_version === proofVersion
-      && row.verified_at >= notBefore) ?? null;
+      && row.verified_at >= notBefore
+      && row.verified_at <= notAfter) ?? null;
   }
 
   async insert(proof: ManagedReceivingProof) {
+    if (this.rows.some((row) => row.provider_message_hash === proof.provider_message_hash)) return false;
     this.rows.push(proof);
     return true;
   }
@@ -126,6 +128,12 @@ test('asks for a refresh two days before expiry, while the proof is still valid'
       store: new MemoryStore([proofAged(4 * DAY_MS, fingerprint)]),
       now: NOW,
     }), false);
+
+    // A future-dated row is not current evidence and must not suppress the healing canary.
+    assert.equal(await managedReceivingProofNeedsRefresh({
+      store: new MemoryStore([proofAged(-DAY_MS, fingerprint)]),
+      now: NOW,
+    }), true);
   });
 });
 
