@@ -1,4 +1,16 @@
 import type { SubmissionPacket } from './portalSubmission';
+import {
+  greenhousePostingFromUrl,
+  greenhousePublicApplicationSchemaForPosting,
+  greenhousePublicQuestionLabelKey,
+} from './greenhousePublicApplication';
+
+export {
+  greenhousePostingFromUrl,
+  greenhousePublicApplicationSchema,
+  greenhousePublicQuestionLabelKey,
+  type GreenhousePublicApplicationSchema,
+} from './greenhousePublicApplication';
 
 export type AtsSubmissionChannelProvider =
   | 'unknown'
@@ -89,8 +101,6 @@ type SubmitOptions = {
 };
 
 const CHANNEL_CONFIG_ENV = 'LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON';
-const GREENHOUSE_JOB_BOARD_HOSTS = new Set(['boards.greenhouse.io', 'job-boards.greenhouse.io', 'job-boards.eu.greenhouse.io']);
-const GREENHOUSE_EMBED_TOKEN_HOSTS = GREENHOUSE_JOB_BOARD_HOSTS;
 const SUPPORTED_CHANNELS = new Set<AtsSubmissionChannelProvider>([
   'greenhouse',
   'ashby',
@@ -174,27 +184,6 @@ function unavailableAssessment(posting: PostingRef, reason: string): AtsSubmissi
     board_token: posting.tenant,
     job_id: posting.jobId,
   };
-}
-
-export function greenhousePostingFromUrl(rawUrl: string | undefined): { boardToken: string; jobId: string } | null {
-  const url = parsedHttpsUrl(rawUrl);
-  if (!url) return null;
-  const host = url.hostname.toLowerCase();
-  const parts = pathParts(url);
-  if (
-    GREENHOUSE_JOB_BOARD_HOSTS.has(host)
-    && parts.length >= 3
-    && parts[1] === 'jobs'
-    && /^\d+$/.test(parts[2])
-  ) {
-    return { boardToken: parts[0], jobId: parts[2] };
-  }
-  if (GREENHOUSE_EMBED_TOKEN_HOSTS.has(host) && parts[0] === 'embed' && parts[1] === 'job_app') {
-    const token = url.searchParams.get('token');
-    const boardToken = url.searchParams.get('for') ?? url.searchParams.get('b');
-    if (token && /^\d+$/.test(token) && boardToken) return { boardToken, jobId: token };
-  }
-  return null;
 }
 
 export function ashbyPostingFromUrl(rawUrl: string | undefined): { organization: string; jobPostingId: string } | null {
@@ -497,57 +486,13 @@ function appendMappedQuestionFields(form: FormData, packet: SubmissionPacket) {
   }
 }
 
-function normalizedAtsQuestionLabel(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .replace(/\s+\*$/, '')
-    .trim()
-    .toLowerCase();
-  return normalized || undefined;
-}
-
-function greenhouseQuestionFieldName(value: unknown): string | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const record = value as Record<string, unknown>;
-  const fields = Array.isArray(record.fields) ? record.fields : [];
-  for (const field of fields) {
-    if (!field || typeof field !== 'object' || Array.isArray(field)) continue;
-    const candidate = trimmed((field as Record<string, unknown>).name)
-      ?? trimmed((field as Record<string, unknown>).id);
-    if (candidate) return candidate;
-  }
-  return undefined;
-}
-
 async function greenhousePublicQuestionFieldMap(
   posting: { boardToken: string; jobId: string },
   fetchImpl: typeof fetch,
 ): Promise<Map<string, string>> {
-  const response = await fetchImpl(
-    `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(posting.boardToken)}/jobs/${encodeURIComponent(posting.jobId)}?questions=true`,
-    { method: 'GET' },
-  );
-  if (!response.ok) return new Map();
-  let parsed: unknown;
-  try {
-    parsed = await response.json();
-  } catch {
-    return new Map();
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return new Map();
-  const questions = Array.isArray((parsed as Record<string, unknown>).questions)
-    ? (parsed as Record<string, unknown>).questions as unknown[]
-    : [];
+  const schema = await greenhousePublicApplicationSchemaForPosting(posting, fetchImpl);
   const fields = new Map<string, string>();
-  for (const question of questions) {
-    if (!question || typeof question !== 'object' || Array.isArray(question)) continue;
-    const record = question as Record<string, unknown>;
-    const label = normalizedAtsQuestionLabel(record.label);
-    const fieldName = greenhouseQuestionFieldName(record);
-    if (label && fieldName) fields.set(label, fieldName);
-  }
+  for (const [label, fieldName] of Object.entries(schema?.fieldNamesByLabel ?? {})) fields.set(label, fieldName);
   return fields;
 }
 
@@ -565,8 +510,8 @@ async function appendGreenhouseQuestionFields(
   for (const item of packet.questions) {
     if (!item.answer.trim()) continue;
     const directField = item.atsApiField?.trim();
-    const publicField = normalizedAtsQuestionLabel(item.question)
-      ? fieldMap.get(normalizedAtsQuestionLabel(item.question)!)
+    const publicField = greenhousePublicQuestionLabelKey(item.question)
+      ? fieldMap.get(greenhousePublicQuestionLabelKey(item.question)!)
       : undefined;
     const field = directField ?? publicField;
     if (!field) {

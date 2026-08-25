@@ -43,6 +43,8 @@ import {
   transportVerifiedBuiltPacket,
   verifiedBuiltPacketIssues,
   managedActionDiagnosticsForLog,
+  stableManagedDocumentCapability,
+  managedFormSnapshotWithStableCapabilities,
 } from './submissionRunner';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
@@ -1077,6 +1079,11 @@ test('a post-gate profile rebuild cannot reach transport, while the exact audite
     answer: '+971 50 111 1111',
     kind: 'required',
     required: true,
+    portal_selector: '#question_67595575\\[\\]',
+    portal_input_type: 'combobox',
+    ats_api_field: 'question_67595575[]',
+    answer_option_source: '+971 50 111 1111',
+    answer_source: 'applicant_review',
   }];
   const packetForPhone = (phone: string, jdText = 'Consulting role'): SubmissionPacket => ({
     fullName: 'Mehek Mandal',
@@ -1096,16 +1103,7 @@ test('a post-gate profile rebuild cannot reach transport, while the exact audite
       },
       application_profile: { phone },
     },
-    questions: [{
-      question: 'Phone number',
-      answer: '+971 50 111 1111',
-      portalSelector: undefined,
-      portalInputType: undefined,
-      atsApiField: undefined,
-      answerOptionSource: undefined,
-      answerSource: undefined,
-      required: true,
-    }],
+    questions: packetQuestionsForFill(questions),
   });
   const approvedPacket = packetForPhone('+971 50 111 1111');
   const envelope = employerDeliveryEnvelope({
@@ -4325,8 +4323,13 @@ test('buildPacket refreshes stored answers and carries the option derivation ont
     'both branches must use one question-to-packet projection');
   assert.match(
     source,
-    /function submissionPacketQuestions\([\s\S]{0,700}?answerOptionSource: item\.answer_option_source,/,
+    /export function packetQuestionsForFill\([\s\S]{0,900}?answerOptionSource: q\.answer_option_source,/,
     'the derivation has to reach the packet, or the fill cannot tell a read option from a profile value',
+  );
+  assert.match(
+    source,
+    /function submissionPacketQuestions\([\s\S]{0,300}?return packetQuestionsForFill\(questions\);/,
+    'every packet path must delegate to the same complete question projection',
   );
 });
 
@@ -4338,14 +4341,13 @@ test('managed discovery keeps option provenance on the packet used by the real f
   const prepareBody = source.slice(prepareStart, prepareEnd);
   assert.match(
     prepareBody,
-    /packet\.questions = mergedQuestions\.map\(\(q\) => \(\{[\s\S]{0,1200}?answerOptionSource: q\.answer_option_source,/,
-    'the discovery-to-fill rebuild must not strip the measured option before the action builder sees it',
+    /packet\.questions = packetQuestionsForFill\(mergedQuestions\);/,
+    'the discovery-to-fill rebuild must use the same complete projection as every audited packet',
   );
-  const mapping = prepareBody.match(/packet\.questions = mergedQuestions\.map\(\(q\) => \(\{[\s\S]*?\}\)\);/)?.[0] ?? '';
   assert.ok(
-    mapping.indexOf('answerOptionSource: q.answer_option_source')
+    prepareBody.indexOf('packet.questions = packetQuestionsForFill(mergedQuestions);')
       < prepareBody.indexOf('const fillActions = buildManagedPortalActions(portal, packet)'),
-    'option provenance must be restored before the production fill actions are built',
+    'the complete packet question projection must run before production fill actions are built',
   );
 });
 
@@ -4490,6 +4492,9 @@ test('packetQuestionsForFill carries her provenance through to the fill', () => 
       answer_source: 'applicant_review',
       portal_selector: '#question_17808234008',
       portal_input_type: 'combobox',
+      ats_api_field: 'question_17808234008',
+      answer_option_source: 'Job board',
+      required: true,
     },
     { question: 'Will you require sponsorship?', answer: 'Yes' },
   ]);
@@ -4498,9 +4503,91 @@ test('packetQuestionsForFill carries her provenance through to the fill', () => 
   assert.equal(referral.answer, 'Other');
   assert.equal(referral.portalSelector, '#question_17808234008');
   assert.equal(referral.portalInputType, 'combobox');
+  assert.equal(referral.atsApiField, 'question_17808234008');
+  assert.equal(referral.answerOptionSource, 'Job board');
+  assert.equal(referral.required, true);
   // An answer nobody reviewed stays unattributed. The bug was a dropped field, not a missing default.
   assert.equal(plain.answerSource, undefined);
   assert.equal(plain.answer, 'Yes');
+});
+
+test('managed document capability uses valid public schema and otherwise keeps positive evidence', () => {
+  assert.equal(stableManagedDocumentCapability({
+    authoritative: false,
+    discovered: true,
+    prior: true,
+    current: true,
+  }), false, 'a complete employer schema may clear stale positive evidence');
+  assert.equal(stableManagedDocumentCapability({
+    authoritative: true,
+    discovered: false,
+    prior: false,
+    current: false,
+  }), true, 'a complete employer schema is authoritative even when the DOM extract is late');
+  assert.equal(stableManagedDocumentCapability({
+    discovered: false,
+    prior: true,
+    current: false,
+  }), true, 'an omitted optional DOM extract cannot downgrade a prior positive read');
+  assert.equal(stableManagedDocumentCapability({
+    discovered: true,
+    prior: false,
+    current: false,
+  }), true, 'a current positive DOM read remains usable during a public schema outage');
+  assert.equal(stableManagedDocumentCapability({
+    discovered: false,
+    prior: undefined,
+    current: false,
+  }), false);
+});
+
+test('managed snapshot keeps prior inventory but persists authoritative document capability', () => {
+  const priorFalse = managedFormSnapshotWithStableCapabilities({
+    discoveryFailed: false,
+    fieldOptions: { degree: ['Bachelor’s'] },
+    failedFields: [{ controlId: 'school', label: 'School', selector: '#school' }],
+    coverLetterSupported: false,
+    transcriptSupported: true,
+  });
+  const repairedTrue = managedFormSnapshotWithStableCapabilities({
+    discoveryFailed: true,
+    fieldOptions: { ignored: ['transient'] },
+    failedFields: [],
+    prior: priorFalse,
+    coverLetterSupported: true,
+    transcriptSupported: false,
+  });
+  assert.deepEqual(repairedTrue.field_options, priorFalse.field_options);
+  assert.deepEqual(repairedTrue.failed_fields, priorFalse.failed_fields);
+  assert.equal(repairedTrue.cover_letter_supported, true);
+  assert.equal(repairedTrue.transcript_supported, false);
+
+  const clearedFalse = managedFormSnapshotWithStableCapabilities({
+    discoveryFailed: true,
+    prior: repairedTrue,
+    coverLetterSupported: false,
+    transcriptSupported: true,
+  });
+  assert.deepEqual(clearedFalse.field_options, repairedTrue.field_options);
+  assert.deepEqual(clearedFalse.failed_fields, repairedTrue.failed_fields);
+  assert.equal(clearedFalse.cover_letter_supported, false);
+  assert.equal(clearedFalse.transcript_supported, true);
+});
+
+test('managed Greenhouse preparation enriches only live discoveries from the neutral public schema', () => {
+  const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  assert.match(runner, /from '\.\.\/lib\/greenhousePublicApplication'/);
+  assert.doesNotMatch(runner, /from '\.\.\/lib\/atsSubmissionChannels'/);
+  assert.match(
+    runner,
+    /mergeManagedFieldOptions\(\s*managedResultFieldOptions\(discoveryResult\),\s*greenhouseSchema\?\.fieldOptions,\s*\)/,
+    'the stable public list must win when a transient DOM list names the same control',
+  );
+  assert.match(
+    runner,
+    /const normalizedDiscoveredFields = \(discoveryResult\?\.discovered \?\? \[\]\)\.map[\s\S]{0,700}greenhouseSchema\.optionsByLabel/,
+    'public schema options must attach only while mapping fields the live page discovered',
+  );
 });
 
 test('an applicant-reviewed answer beats a freshly discovered one', () => {

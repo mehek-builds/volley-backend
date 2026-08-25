@@ -7335,8 +7335,24 @@ test('the control id comes off the selector first and the label second', () => {
   );
   assert.equal(managedOptionProbeControlId({ label: 'discipline* discipline--0', selector: '[data-litos-discovered-8]' }), 'discipline--0');
   assert.equal(managedOptionProbeControlId({ label: 'website website question_12114508007', selector: '[data-litos-discovered-11]' }), 'question_12114508007');
-  // A checkbox GROUP has no listbox, and its selector is the escaped array name. Three actions spent
-  // on it read nothing.
+  // A bare array name can be one real React-select control. Jump's degree picker is the measured
+  // shape, and the brackets remain part of its id and of its public-schema field name.
+  assert.equal(
+    managedOptionProbeControlId({
+      label: 'What degree are you currently pursuing?',
+      selector: '#question_67595575\\[\\]',
+    }),
+    'question_67595575[]',
+  );
+  assert.equal(
+    managedOptionProbeControlId({
+      label: 'What degree are you currently pursuing?',
+      selector: '[id="question_67595575[]"]',
+    }),
+    'question_67595575[]',
+  );
+  // One checkbox OPTION has no listbox. Its escaped array name carries an option-value suffix, so
+  // it remains outside the probe even though the bare array group above is a valid control.
   assert.equal(managedOptionProbeControlId({ label: 'In which settings have you used C++?', selector: '#question_67998838\\[\\]_731437070' }), undefined);
   // A year inside a question is not a handle. Measured on Virtu: "Will you be ready for full-time
   // employment in 2028?".
@@ -7448,6 +7464,52 @@ test('the backend consumes the real Stratus text-plus-combobox-role wire shape',
     'role metadata without the advertised runner capability cannot activate dynamic probing');
   assert.deepEqual(managedOptionProbeTargets('greenhouse', [{ ...fromStratus, role: null }], {}, true), [],
     'a dynamic text input is not closed unless the deployed runner reports its DOM role');
+});
+
+test('a bare Greenhouse array combobox keeps its identity through planning, readback and attachment', () => {
+  const degree = {
+    label: 'What degree are you currently pursuing?* question_67595575[]',
+    selector: '#question_67595575\\[\\]',
+    inputType: 'text',
+    role: 'combobox',
+    maxLength: null,
+    options: null,
+    required: true,
+  };
+  assert.deepEqual(
+    managedOptionProbeTargets('greenhouse', [degree], {}, true),
+    ['question_67595575[]'],
+  );
+
+  const actions = buildManagedDiscoveredOptionProbeActions('greenhouse', [degree], {}, true);
+  const identitySelector = '[id="question_67595575[]"]:is([role="combobox"],[aria-haspopup="listbox"])';
+  assert.ok(actions.some((action) => action.label === 'closed_control:question_67595575[]'
+    && action.selector === identitySelector));
+  assert.ok(actions.some((action) => action.label === 'options:question_67595575[]'
+    && action.selector === reactSelectListboxSelector('question_67595575[]')));
+
+  const options = ['Bachelor’s', 'Master’s', 'PhD', 'Postdoc'];
+  const result = {
+    title: 'Apply',
+    url: 'https://job-boards.greenhouse.io/jumptrading/jobs/8003019',
+    text: '',
+    // Stratus can omit action labels, so both joins below are deliberately selector-only.
+    extracted: [
+      { selector: identitySelector, value: 'question_67595575[]' },
+      { selector: reactSelectListboxSelector('question_67595575[]'), value: options.join('\n') },
+    ],
+  };
+  const analysis = managedOptionProbeAnalysis(
+    'greenhouse',
+    [degree],
+    {},
+    [result],
+    [],
+    true,
+  );
+  assert.deepEqual(analysis.failures, []);
+  assert.deepEqual(analysis.options['question_67595575[]'], options);
+  assert.deepEqual(attachManagedFieldOptions([degree], analysis.options)[0]?.options, options);
 });
 
 test('recognized Greenhouse choice questions are probed when the provider omits the role', () => {

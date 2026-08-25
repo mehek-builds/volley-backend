@@ -156,7 +156,7 @@ describe('application review metadata', () => {
     assert.match(build, /const managedFormSnapshot = readManagedFormSnapshot\(review\)/);
     assert.match(build, /fieldOptions: managedFormSnapshot\.field_options/);
     assert.match(build, /failedFields: managedFormSnapshot\.failed_fields/);
-    assert.match(prepare, /const managedFormSnapshot = [\s\S]*?normalizeManagedFormSnapshot\(/);
+    assert.match(prepare, /const managedFormSnapshot = managedFormSnapshotWithStableCapabilities\(\{/);
     assert.match(prepare, /packet\.fieldOptions = managedFormSnapshot\.field_options/);
     assert.match(prepare, /packet\.failedFields = managedFormSnapshot\.failed_fields/);
     assert.ok((prepare.match(/managed_form_snapshot: managedFormSnapshot/g) ?? []).length >= 2,

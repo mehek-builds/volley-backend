@@ -271,6 +271,10 @@ test('configured Greenhouse channel maps reviewed answers from public Job Board 
     if (String(url).includes('questions=true')) {
       return new Response(JSON.stringify({
         questions: [
+          { label: 'First Name', fields: [{ name: 'first_name', type: 'input_text' }] },
+          { label: 'Last Name', fields: [{ name: 'last_name', type: 'input_text' }] },
+          { label: 'Email', fields: [{ name: 'email', type: 'input_text' }] },
+          { label: 'Resume/CV', fields: [{ name: 'resume', type: 'input_file' }] },
           {
             label: 'Are you currently eligible to legally work in the United States?\n',
             fields: [{ name: 'question_31609742003' }],

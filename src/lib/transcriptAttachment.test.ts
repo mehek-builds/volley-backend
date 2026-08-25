@@ -571,7 +571,10 @@ test('transcript_supported is written by both prepares and read by all three sub
     'the direct prepare must bind and persist its measured capability');
   assert.equal(runner.match(/transcript_supported: managedFormSnapshot\.transcript_supported/g)?.length, 2,
     'the managed prepare must mirror the exact bounded snapshot capability at both writes');
-  assert.match(runner, /const transcriptSupported = managedResultHasTranscriptUpload\(discoveryResult, portal\)/);
+  assert.match(
+    runner,
+    /const transcriptSupported = stableManagedDocumentCapability\(\{[\s\S]{0,300}?discovered: managedResultHasTranscriptUpload\(discoveryResult, portal\)/,
+  );
   assert.match(runner, /const transcriptSupported = await hasTranscriptUpload\(page, portal\)/);
 
   /* THE MANAGED WRITE IS GUARDED ON THE SNAPSHOT HAVING A CAPABILITY, and that guard is the whole
