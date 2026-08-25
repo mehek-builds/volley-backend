@@ -144,6 +144,9 @@ export const MIGRATION_PENDING_COLUMNS: ReadonlySet<string> = new Set([
   'automatic_account_creation_enabled',
   'automatic_account_creation_consented_at',
   'automatic_account_creation_consent_version',
+  // scripts/apply-job-first-entry-migration.mjs
+  'job_first_entry',
+  'pinned_onboarding_job_id',
 ]);
 
 /**
@@ -418,11 +421,28 @@ export function onboardingStepFrom(input: {
   hasSetupGaps?: boolean;
   /** The screen has been PUT IN FRONT OF the student before, answered or skipped. */
   gapsAsked?: boolean;
+  /** users.job_first_entry: this account was created from a /browse-jobs posting rather than
+   *  through the front door, and its whole point is speed to that posting's tailored resume.
+   *  Swaps the order below so resume leads instead of focus, and stops this gate from holding
+   *  the student on 'focus' at all - see the route handler for where 'focus' is served instead,
+   *  once the application sequence (which spends the pinned job) has also resolved. */
+  jobFirstEntry?: boolean;
 }): Step {
   /* The impact review no longer derives a step of its own: it is part of the resume screen now,
      because reviewing the strongest bullet from a resume is part of handing over that resume. The
      completed short-circuit therefore no longer has to hold it open either. */
   if (input.completed) return 'done';
+  /* JOB-FIRST ACCOUNTS SKIP THIS GATE'S OWN FOCUS CHECK ENTIRELY, not just reorder it.
+     The whole reason someone arrives with job_first_entry set is that they already told Litos
+     which posting they want tailored to, by clicking it - asking them to pick target roles before
+     showing them that resume would re-ask a question their click already answered. 'focus' is not
+     skipped forever, only moved: the route handler serves it once more, after the application
+     sequence (which is what actually spends the pinned job) has itself resolved to 'done', so it
+     stays a required step and simply lands where it stops being in the way. */
+  if (input.jobFirstEntry) {
+    if (!input.hasResume) return 'resume';
+    return 'done';
+  }
   /* FOCUS LEADS. A resume upload is the heaviest act in the flow and it used to be the front door;
      roles is three taps and it is now what a student meets first.
      The ordering is only safe because the focus screen no longer needs a resume to draw itself.
@@ -863,6 +883,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // depends on, not an optional detail screen. But the gate is the STORED SPEC, so a student who
     // rebuilds or hand-edits later never gets sent back here, and an account created before this
     // shipped derives 'base' exactly once and then moves on for good.
+    const jobFirstEntry = !!user.job_first_entry;
     const derivedStep = onboardingStepFrom({
       completed: !!user.onboarding_completed_at,
       hasResume: has_resume,
@@ -875,6 +896,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       // for why each part is needed.
       hasSetupGaps: hasSetupGapsFrom(gaps, target?.role_types),
       gapsAsked: gapsAskedFrom(appProfile),
+      jobFirstEntry,
     });
     const includesGaps = includesGapsStepFrom(gaps, appProfile, target?.role_types);
     const flow = await onboardingFlowLedger(userId);
@@ -946,9 +968,26 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
        rail draws with no position at all, which is the exact failure #285 documents.
        Reachable whenever the gate catches an account that already finished setup. */
     const includesApplicationSteps = inApplicationSequence || gatedStep !== step;
+    /* JOB-FIRST FOCUS, TACKED ON AFTER EVERYTHING ELSE INCLUDING THE CARD GATE.
+       onboardingStepFrom skipped this account's own focus check outright, so 'gaps' and 'plan'
+       above never had to reason about it. It only surfaces once gatedStep has independently
+       resolved to 'done' - meaning the application sequence AND the card gate have both cleared
+       - so paying still comes before it, and it never displaces 'plan' the way it would if this
+       lived inside the card-gate check itself. Computed here rather than folded into `step`
+       above because `includesApplicationSteps` just above needs the PRE-tack-on comparison: this
+       is a profile-fact gate like `has_focus`, not a ledger-driven application step, and mixing
+       the two would make the rail's "does this flow include X" reasoning wrong for a step that
+       was never part of the ledger to begin with. */
+    const servedStep = jobFirstEntry && !has_focus && gatedStep === 'done' ? 'focus' : gatedStep;
 
     return reply.status(200).send({
-      step: gatedStep,
+      step: servedStep,
+      /* The specific posting this account is entitled to spend its one free build on, from
+         wherever it clicked in on /browse-jobs. Only meaningful while the match step is still
+         ahead: the client uses it to skip the ranked-board algorithm and build against exactly
+         the job the student chose, and it stops mattering (and gets cleared) the moment 'match'
+         is acknowledged. Never surfaced for an ordinary account. */
+      pinned_target_job_id: jobFirstEntry ? (user.pinned_onboarding_job_id ?? null) : null,
       flow_version: CURRENT_ONBOARDING_FLOW_VERSION,
       flow_completed: flowCompleted,
       requires_onboarding: requiresOnboarding,
@@ -1181,6 +1220,14 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
         step: parsed.data.step,
         disposition: parsed.data.disposition,
       }).onConflictDoNothing();
+      /* Best-effort, and inside the same transaction rather than a fire-and-forget after it: the
+         match screen has now been acknowledged, so whatever job was pinned for this account has
+         either been built or been declined - either way, a later reload must not offer it again.
+         Scoped to 'match' specifically, not every step, because pinned_onboarding_job_id has no
+         meaning past that screen. */
+      if (parsed.data.step === 'match') {
+        await tx.update(users).set({ pinned_onboarding_job_id: null }).where(eq(users.id, userId));
+      }
     });
     return reply.status(200).send({ ok: true, ...parsed.data });
   });

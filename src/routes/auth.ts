@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { createRemoteJWKSet, jwtVerify, SignJWT, type JWTPayload as JoseJWTPayload } from 'jose';
 import { createHash, randomInt } from 'node:crypto';
 import { db, withDedicatedDatabase } from '../db/index';
-import { users, email_verification_codes } from '../db/schema';
+import { users, email_verification_codes, monitored_jobs } from '../db/schema';
 import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { allowHourly, rateLimitedReply, LIMITS, TRIAL_DAYS } from '../middleware/quota';
@@ -33,6 +33,12 @@ const verifyBodySchema = z.object({
 
 const guestBodySchema = z.object({
   idempotency_key: z.string().uuid(),
+  /* Set only when the guest session was opened by clicking a specific /browse-jobs posting
+     rather than through the front door. monitored_jobs.id is a uuid column, so this is a uuid
+     shape check up front - not trust, that still comes from the table lookup below - it just
+     means a malformed value 400s here instead of throwing "invalid input syntax for type uuid"
+     out of that query. */
+  target_job_id: z.string().uuid().optional(),
 });
 
 const googleBodySchema = z.object({
@@ -387,6 +393,20 @@ export async function authRoutes(fastify: FastifyInstance) {
       const ipAllowed = await allowHourly(`ip:${request.ip}`, 'guest-create-ip', 3);
       if (!ipAllowed) return rateLimitedReply(reply);
 
+      /* Checked before the write, not trusted from the request: a client-chosen id that does not
+         name a real, active posting must not pin an account to something /jobs/:id will 404 on
+         the moment the match step tries to build it. A miss degrades to the ordinary guest flow
+         rather than failing the whole sign-up - the click still deserves an account even if the
+         board moved under it. */
+      const targetJobId = parsed.data.target_job_id;
+      const pinnedJob = targetJobId
+        ? await db.select({ id: monitored_jobs.id })
+            .from(monitored_jobs)
+            .where(and(eq(monitored_jobs.id, targetJobId), eq(monitored_jobs.is_active, true)))
+            .limit(1)
+        : [];
+      const jobFirstEntry = pinnedJob.length === 1;
+
       const now = new Date();
       /* A guest has no email and no card, so a guest cannot start a trial at
          all any more. The guest session itself is unchanged -- it still lasts
@@ -405,6 +425,8 @@ export async function authRoutes(fastify: FastifyInstance) {
           ...signupTrialGrant(),
           guest_expires_at,
           created_at: now,
+          job_first_entry: jobFirstEntry,
+          pinned_onboarding_job_id: jobFirstEntry ? targetJobId : null,
         })
         .onConflictDoNothing({ target: users.guest_key_hash })
         .returning();
