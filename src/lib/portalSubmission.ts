@@ -1353,8 +1353,8 @@ function optionProbeIdForSelector(selector: string | undefined): string | undefi
   // guaranteed to come back.
   return selector?.match(/^\[id="react-select-(.+)-listbox"\]$/)?.[1]
     ?? selector?.match(/^\[id="(.+)-list"\]$/)?.[1]
-    ?? selector?.match(/^body:has\(\[id="([A-Za-z][A-Za-z0-9_.:-]*)"\]\[aria-expanded="true"\]\) \[role="listbox"\]:visible$/)?.[1]
-    ?? selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_.:-]*)"\]:is\(select\)$/)?.[1];
+    ?? selector?.match(/^body:has\(\[id="([A-Za-z][A-Za-z0-9_.:\[\]-]*)"\]\[aria-expanded="true"\]\) \[role="listbox"\]:visible$/)?.[1]
+    ?? selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_.:\[\]-]*)"\]:is\(select\)$/)?.[1];
 }
 
 /**
@@ -1565,8 +1565,18 @@ const PAYLOCITY_OPTION_PROBE_SKIP_IDS = new Set<string>([
 function controlIdFromDiscoveredSelector(selector: string | undefined | null): string | undefined {
   const trimmed = (selector ?? '').trim();
   if (!trimmed) return undefined;
-  // Rejects the escaped array-name selectors Greenhouse gives checkbox groups
-  // (`#question_67998838\[\]_731437070`): a checkbox group has no listbox, so probing it would spend
+  /* A bare Greenhouse array id can be a real multi-select combobox. Jump Trading's degree control
+   * is `#question_67595575\[\]`, reports role combobox, and its four exact options are also
+   * published under the field name `question_67595575[]` by the Greenhouse Job Board API. Keep the
+   * brackets in the inventory key so that public options, discovery, and fill all name one control.
+   * Per-option checkbox ids still carry a numeric suffix and remain excluded below. */
+  const greenhouseArrayGroup = trimmed.match(/^#(question_\d+)\\\[\\\]$/)?.[1]
+    ?? trimmed.match(/^(?:[a-z][a-z0-9-]*)?\[id=["'](question_\d+\[\])["']\]$/i)?.[1];
+  if (greenhouseArrayGroup) {
+    return greenhouseArrayGroup.endsWith('[]') ? greenhouseArrayGroup : `${greenhouseArrayGroup}[]`;
+  }
+  // Rejects the escaped per-option selectors Greenhouse gives checkbox groups
+  // (`#question_67998838\[\]_731437070`): a checkbox has no listbox, so probing it would spend
   // three actions to read nothing.
   const hashId = trimmed.match(/^#([A-Za-z](?:[A-Za-z0-9_-]|\\[.:-])*)$/)?.[1]
     ?.replace(/\\([.:-])/g, '$1');
@@ -1945,7 +1955,10 @@ export function managedOptionProbeAnalysis(
   const invalidReads = new Map<string, Set<string>>();
   for (const result of results) {
     for (const item of result?.extracted ?? []) {
-      const closedId = item.selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_.:-]*)"\]:is\(\[role="combobox"\],\[aria-haspopup="listbox"\]\)$/)?.[1];
+      // Generated attribute selectors keep Greenhouse's literal `[]` group suffix inside quotes.
+      // Accept that suffix here too, or the planner can target the control and read its options but
+      // the analysis then discards its own identity proof as though no closed control was present.
+      const closedId = item.selector?.match(/^\[id="([A-Za-z0-9][A-Za-z0-9_.:\[\]-]*)"\]:is\(\[role="combobox"\],\[aria-haspopup="listbox"\]\)$/)?.[1];
       if (closedId && managedExtractedValue(item.value)) closedIds.add(closedId);
       const id = typeof item.label === 'string' && item.label.startsWith(MANAGED_OPTION_EXTRACT_PREFIX)
         ? item.label.slice(MANAGED_OPTION_EXTRACT_PREFIX.length)

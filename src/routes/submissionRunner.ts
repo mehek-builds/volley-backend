@@ -76,6 +76,7 @@ import {
   managedUnexplainedAnswers,
   managedUnexplainedAnswerReasons,
   managedResultFieldOptions,
+  mergeManagedFieldOptions,
   managedResultSupportsDiscoveryRole,
   CaptchaUnresolvedError,
   clickFinalSubmit,
@@ -123,6 +124,10 @@ import {
   managedApplicationProofIsRequired,
   NoSubmitControlError,
 } from '../lib/portalSubmission';
+import {
+  greenhousePublicApplicationSchema,
+  greenhousePublicQuestionLabelKey,
+} from '../lib/greenhousePublicApplication';
 import {
   isManagedRunTimeout,
   managedSubmitVerdict,
@@ -705,37 +710,61 @@ export function packetUsesControlledResumeFixture(portal: SupportedPortal): bool
  * label under every profile shape, including the packet-style injected one. Neither rewrites her
  * answer. This map did.
  */
+type PacketQuestionSource = Pick<ApplicationReviewQuestion, 'question' | 'answer'>
+  & Partial<Pick<ApplicationReviewQuestion,
+    | 'required'
+    | 'portal_selector'
+    | 'portal_input_type'
+    | 'ats_api_field'
+    | 'answer_option_source'
+    | 'answer_source'>>;
+
 export function packetQuestionsForFill(
-  mergedQuestions: readonly {
-    question: string;
-    answer: string;
-    answer_source?: string;
-    portal_selector?: string;
-    portal_input_type?: string;
-  }[],
-): { question: string; answer: string; answerSource?: string; portalSelector?: string; portalInputType?: string }[] {
+  mergedQuestions: readonly PacketQuestionSource[],
+): SubmissionPacket['questions'] {
   return mergedQuestions.map((q) => ({
     question: q.question,
     answer: q.answer,
-    answerSource: q.answer_source,
     portalSelector: q.portal_selector,
     portalInputType: q.portal_input_type,
+    atsApiField: q.ats_api_field,
+    answerOptionSource: q.answer_option_source,
+    answerSource: q.answer_source,
+    required: q.required,
   }));
 }
 
 function submissionPacketQuestions(
   questions: readonly ApplicationReviewQuestion[],
 ): SubmissionPacket['questions'] {
-  return questions.map((item) => ({
-    question: item.question,
-    answer: item.answer,
-    portalSelector: item.portal_selector,
-    portalInputType: item.portal_input_type,
-    atsApiField: item.ats_api_field,
-    answerOptionSource: item.answer_option_source,
-    answerSource: item.answer_source,
-    required: item.required,
-  }));
+  return packetQuestionsForFill(questions);
+}
+
+export function stableManagedDocumentCapability(input: {
+  authoritative?: boolean;
+  discovered: boolean;
+  prior?: boolean;
+  current?: boolean;
+}): boolean {
+  if (input.authoritative !== undefined) return input.authoritative;
+  if (input.discovered) return true;
+  return input.prior ?? input.current ?? false;
+}
+
+export function managedFormSnapshotWithStableCapabilities(input: {
+  discoveryFailed: boolean;
+  fieldOptions?: SubmissionPacket['fieldOptions'];
+  failedFields?: SubmissionPacket['failedFields'];
+  prior?: ReturnType<typeof normalizeManagedFormSnapshot>;
+  coverLetterSupported: boolean;
+  transcriptSupported: boolean;
+}): ReturnType<typeof normalizeManagedFormSnapshot> {
+  return normalizeManagedFormSnapshot({
+    fieldOptions: input.discoveryFailed ? input.prior?.field_options : input.fieldOptions,
+    failedFields: input.discoveryFailed ? input.prior?.failed_fields : input.failedFields,
+    coverLetterSupported: input.coverLetterSupported,
+    transcriptSupported: input.transcriptSupported,
+  });
 }
 
 /**
@@ -3532,15 +3561,48 @@ async function prepareManaged(
     progress_stage: 'Reading the company questions',
     progress_updated_at: new Date().toISOString(),
   }));
+  /* Greenhouse publishes the exact form schema for this posting. Use it as a second read beside
+   * the live DOM, never instead of the live page: a question still has to be discovered on the
+   * employer form before it enters the packet. The public schema supplies the stable option list
+   * for array-named multi-selects that Stratus sees as one combobox, and the stable document
+   * capability that otherwise alternates when an optional file input finishes mounting late. */
+  let greenhouseSchema: Awaited<ReturnType<typeof greenhousePublicApplicationSchema>> = null;
+  if (portal === 'greenhouse') {
+    try {
+      greenhouseSchema = await greenhousePublicApplicationSchema(applicationUrl);
+      if (greenhouseSchema) {
+        fastify.log.info({
+          applicationId: row.id,
+          publicOptionFieldCount: Object.keys(greenhouseSchema.fieldOptions).length,
+          coverLetterSupported: greenhouseSchema.coverLetterSupported,
+          transcriptSupported: greenhouseSchema.transcriptSupported,
+        }, 'Read the employer-published Greenhouse form schema');
+      }
+    } catch (error) {
+      fastify.log.warn({
+        applicationId: row.id,
+        errorName: error instanceof Error ? error.name : 'UnknownError',
+      }, 'Could not read the employer-published Greenhouse form schema, keeping the live DOM read');
+    }
+  }
   // The closed lists' REAL option texts, read off the live page by the discovery pass. Without
   // these, resolveProfileField's option snapping (PR #361) is inert on this path: the managed
   // provider's discover action reports no options at all, so a control offering "Computer Science"
   // was handed the stored major, matched nothing, and came back required-and-empty.
-  const discoveryFieldOptions = managedResultFieldOptions(discoveryResult);
+  const discoveryFieldOptions = mergeManagedFieldOptions(
+    managedResultFieldOptions(discoveryResult),
+    greenhouseSchema?.fieldOptions,
+  );
   const normalizedDiscoveredFields = (discoveryResult?.discovered ?? []).map((field) =>
     (portal === 'paylocity' || portal === 'controlled_paylocity')
       ? normalizePaylocityDiscoveredField(field as DiscoveredQuestion)
-      : field as DiscoveredQuestion);
+      : field as DiscoveredQuestion)
+    .map((field) => {
+      if (!greenhouseSchema) return field;
+      const labelKey = greenhousePublicQuestionLabelKey(normalizeDiscoveredLabel(field.label));
+      const options = labelKey ? greenhouseSchema.optionsByLabel[labelKey] : undefined;
+      return options?.length ? { ...field, options } : field;
+    });
   const discoveredForOptionProbe = discoveredQuestionsForExactOptionProbe(
     normalizedDiscoveredFields,
   );
@@ -3735,10 +3797,12 @@ async function prepareManaged(
     packet,
   );
   const savedAnswers = await loadSavedAnswers(row.user_id);
-  const coverLetterCapability = discoveryFailures.length === 0
-    ? managedResultHasCoverLetterUpload(discoveryResult, portal)
-    : priorManagedFormSnapshot?.cover_letter_supported ?? current.cover_letter_supported;
-  const coverLetterSupported = coverLetterCapability === true;
+  const coverLetterSupported = stableManagedDocumentCapability({
+    authoritative: greenhouseSchema?.coverLetterSupported,
+    discovered: managedResultHasCoverLetterUpload(discoveryResult, portal),
+    prior: priorManagedFormSnapshot?.cover_letter_supported,
+    current: current.cover_letter_supported,
+  });
   let compactAnswers: ReadonlyMap<string, string> = new Map();
   let packetRow = row;
   try {
@@ -3794,13 +3858,15 @@ async function prepareManaged(
   /* The same question about the second document, off the same discovery read, and applied to the
    * packet the cover-letter step just produced rather than to a rebuild - see
    * packetForTranscriptCapability for why a rebuild here would be handed the wrong row. */
-  const transcriptSupported = managedResultHasTranscriptUpload(discoveryResult, portal);
-  const transcriptCapability = discoveryFailures.length === 0
-    ? transcriptSupported
-    : priorManagedFormSnapshot?.transcript_supported ?? current.transcript_supported;
+  const transcriptSupported = stableManagedDocumentCapability({
+    authoritative: greenhouseSchema?.transcriptSupported,
+    discovered: managedResultHasTranscriptUpload(discoveryResult, portal),
+    prior: priorManagedFormSnapshot?.transcript_supported,
+    current: current.transcript_supported,
+  });
   const transcriptOutcome = packetForTranscriptCapability(
     coverLetterOutcome.packet,
-    transcriptCapability === true,
+    transcriptSupported,
   );
   if (coverLetterOutcome.packet.transcriptUnavailableReason) {
     // The raw reason to the log, the fixed sentence to the applicant, same split as the cover
@@ -3972,36 +4038,18 @@ async function prepareManaged(
     discoveryOptionalAttention,
     mergedQuestions,
   );
-  packet.questions = mergedQuestions.map((q) => ({
-    question: q.question,
-    answer: q.answer,
-    portalSelector: q.portal_selector,
-    portalInputType: q.portal_input_type,
-    // buildPacket carries this and this map silently did not, so a discovery rebuild lost the ATS
-    // API binding on every managed run. The two maps must stay field-for-field.
-    atsApiField: q.ats_api_field,
-    /* Discovery rebuilds the packet immediately before the real fill. Keep the measured option
-     * provenance here just as buildPacket does above, or every managed run loses the only fact
-     * that distinguishes a dropdown answer from plain text at the last handoff. That made IMC's
-     * graduation range, GPA band and consent selects take the text path even though discovery had
-     * read their option lists and resolved exact answers. */
-    answerOptionSource: q.answer_option_source,
-    answerSource: q.answer_source,
-    // The required flag rides along for the same reason as in buildPacket: the budget trim gives
-    // up an explicitly optional question's chains before a required question's only attempt.
-    required: q.required,
-  }));
+  packet.questions = packetQuestionsForFill(mergedQuestions);
   // The fill run gets the same option lists, so the fixed education comboboxes type an exact option
   // instead of the profile's own phrasing. It only ever gets ONE attempt at a react-select (a second
   // click closes the menu the first one opened), so the first value has to be the right one.
-  const managedFormSnapshot = discoveryFailures.length > 0 && priorManagedFormSnapshot
-    ? priorManagedFormSnapshot
-    : normalizeManagedFormSnapshot({
-      fieldOptions: discoveryFailures.length === 0 ? fieldOptions : {},
-      failedFields: discoveryFailures.length === 0 ? failedFields : [],
-      coverLetterSupported: coverLetterCapability,
-      transcriptSupported: transcriptCapability,
-    });
+  const managedFormSnapshot = managedFormSnapshotWithStableCapabilities({
+    discoveryFailed: discoveryFailures.length > 0,
+    fieldOptions,
+    failedFields,
+    prior: priorManagedFormSnapshot,
+    coverLetterSupported,
+    transcriptSupported,
+  });
   packet.fieldOptions = managedFormSnapshot.field_options;
   packet.failedFields = managedFormSnapshot.failed_fields;
 
