@@ -172,6 +172,27 @@ test('resume edits re-render current phone and residence while preserving packet
   assert.match(editRoute, /renderResumePdf\(edited, \{ \.\.\.contact, full_name: contact\.full_name \}/);
 });
 
+test('resume edit transaction retries read-only pool failures on the direct writer without repeating uploads', () => {
+  const editRoute = routeSlice("'/applications/:id/resume'", "'/applications/:id/review'");
+  const upload = editRoute.indexOf('const blob = await put(');
+  const transaction = editRoute.indexOf('const runResumeEditTransaction =');
+  const transactionEnd = editRoute.indexOf('\n\n      let updated:', transaction);
+  const retry = editRoute.indexOf('updated = await withReadOnlyRetry(');
+  const directFallback = editRoute.indexOf('withDedicatedDatabase((directDb) =>');
+  const directTransaction = editRoute.indexOf('runResumeEditTransaction(directDb)');
+  const cleanup = editRoute.indexOf('await del(blob.url).catch', retry);
+
+  assert.ok(upload >= 0 && transaction > upload && transactionEnd > transaction && retry > transactionEnd
+    && directFallback > retry && directTransaction > directFallback && cleanup > directTransaction,
+  'one uploaded PDF must be reused across the database-only retries and cleaned up after final failure');
+  assert.match(editRoute, /withReadOnlyRetry\(\s*\(\) => runResumeEditTransaction\(db\)/);
+  assert.match(editRoute, /onExhausted: \(\) => withDedicatedDatabase/);
+  assert.doesNotMatch(editRoute.slice(retry, cleanup), /await put\(/,
+    'the retry callback must not repeat an external Blob write');
+  assert.doesNotMatch(editRoute.slice(transaction, transactionEnd), /\b(?:put|del|fetch)\s*\(/,
+    'the whole-transaction retry callback must remain free of external network and storage side effects');
+});
+
 /* THE CONSTRUCTOR AND THE VERIFIER MUST BE LOOKING AT ONE PACKET.
  *
  * On 2026-08-13, three merges that taught resolvers to ANSWER questions they had previously left

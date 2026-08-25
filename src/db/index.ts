@@ -156,13 +156,13 @@ const pool = new Pool({
  * which is nearly all of them: the profile and resume writes that failed in the incident all go
  * through this path.
  *
- * TRANSACTIONS ARE DELIBERATELY NOT COVERED, and this is the honest limit of the fix. `db.transaction`
- * checks a client out of the pool and issues its statements on THAT client, so they never reach
- * here. Retrying an individual statement inside a transaction the failure already aborted would
- * only earn a 25P02, and retrying the whole callback would re-run whatever side effects it had
- * performed before the write. Either is worse than the loud failure a transaction gets today. The
- * routes that matter for the incident are single statements; `PUT /profile/recent-experience` is a
- * transaction and will still fail on a read-only backend, which is the known gap.
+ * TRANSACTIONS ARE DELIBERATELY NOT COVERED here. `db.transaction` checks a client out of the pool
+ * and issues its statements on THAT client, so they never reach this wrapper. Retrying an individual
+ * statement inside a transaction the failure already aborted would only earn a 25P02. Retrying the
+ * whole callback is safe only when the callback has no external side effects. Those call sites opt
+ * in locally, including quota counters, accepted-code authentication, and application resume edits.
+ * Other transaction callbacks upload files, so a global transaction retry would duplicate external
+ * writes and leak storage objects.
  *
  * TWO CALL SHAPES ARE PASSED STRAIGHT THROUGH, because neither returns a promise this could await:
  *

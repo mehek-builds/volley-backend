@@ -4,7 +4,8 @@ import { del, put } from '@vercel/blob';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { db } from '../db/index';
+import { db, withDedicatedDatabase } from '../db/index';
+import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import { applyReviewPatch, settleStall } from '../lib/applicationStall';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
@@ -1598,31 +1599,48 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           layoutOmissions: rendered.omissions,
         },
       };
+      const runResumeEditTransaction = (database: typeof db) => database.transaction(async (tx) => {
+        const changed = await tx
+          .update(generated_resumes)
+          .set({ spec: updatedSpec, resume_object_key: blob.pathname })
+          .where(and(
+            eq(generated_resumes.id, row.id),
+            eq(generated_resumes.user_id, userId),
+            sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+            sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
+            sql`${generated_resumes.spec}->'_review'->>'status' = ${review.status}`,
+          ))
+          .returning({ id: generated_resumes.id });
+        if (changed.length === 0) return changed;
+        await appendEditedResumeArtifactVersion(tx, {
+          userId,
+          legacyGeneratedResumeId: row.id,
+          structuredContent: updatedSpec,
+          jobContext: row.job_context,
+          renderedObjectKey: blob.pathname,
+          renderedBlobUrl: blob.url,
+        });
+        return changed;
+      });
+
       let updated: Array<{ id: string }>;
       try {
-        updated = await db.transaction(async (tx) => {
-          const changed = await tx
-            .update(generated_resumes)
-            .set({ spec: updatedSpec, resume_object_key: blob.pathname })
-            .where(and(
-              eq(generated_resumes.id, row.id),
-              eq(generated_resumes.user_id, userId),
-              sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-              sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
-              sql`${generated_resumes.spec}->'_review'->>'status' = ${review.status}`,
-            ))
-            .returning({ id: generated_resumes.id });
-          if (changed.length === 0) return changed;
-          await appendEditedResumeArtifactVersion(tx, {
-            userId,
-            legacyGeneratedResumeId: row.id,
-            structuredContent: updatedSpec,
-            jobContext: row.job_context,
-            renderedObjectKey: blob.pathname,
-            renderedBlobUrl: blob.url,
-          });
-          return changed;
-        });
+        updated = await withReadOnlyRetry(
+          () => runResumeEditTransaction(db),
+          {
+            onRetry: (attempt) => request.log.warn(
+              { attempt, applicationId: row.id },
+              'Resume edit transaction reached a read-only backend; retrying on a fresh pooled connection',
+            ),
+            onExhausted: () => withDedicatedDatabase((directDb) => {
+              request.log.warn(
+                { applicationId: row.id },
+                'Resume edit pooled transactions stayed read-only; retrying on the direct database endpoint',
+              );
+              return runResumeEditTransaction(directDb);
+            }),
+          },
+        );
       } catch (error) {
         await del(blob.url).catch(() => undefined);
         throw error;
