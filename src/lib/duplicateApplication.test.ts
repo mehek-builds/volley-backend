@@ -7,6 +7,7 @@ import {
   duplicateAmong,
   duplicateApplicationReason,
   duplicateApplicationResponse,
+  isLegacyUnverifiedAttemptReason,
   postingIdentity,
   type SubmittedTwinRow,
 } from './duplicateApplication';
@@ -167,6 +168,30 @@ describe('the verdict over a set of already-submitted applications', () => {
     assert.deepEqual(duplicateAmong(akunaContext(), AKUNA_DIRECT_URL, []), { kind: 'clear' });
   });
 
+  test('legacy unverified-attempt prose blocks a modern retry as unverified', () => {
+    const url = 'https://jobs.ashbyhq.com/deepgram/dc8693b5-72ce-4ca3-ab15-9c8434d35da1/application';
+    const context = {
+      company: 'Deepgram',
+      role: 'Software Engineering- Internship (Fall 2026/Summer 2027)',
+    };
+    const verdict = duplicateAmong(context, url, [submitted({
+      id: '4bfd5827-5518-4fb6-8fae-4b79f3e0cde0',
+      job_context: context,
+      portal_url: url,
+      submitted_at: null,
+      unverified_at: null,
+      legacy_unverified_attempt: true,
+    })]);
+
+    assert.equal(verdict.kind, 'duplicate');
+    if (verdict.kind !== 'duplicate') return;
+    assert.equal(verdict.match.application_id, '4bfd5827-5518-4fb6-8fae-4b79f3e0cde0');
+    assert.equal(verdict.match.certainty, 'unverified');
+    assert.equal(verdict.match.basis, 'ats_posting');
+    assert.match(verdict.reason, /employer may already have that application/i);
+    assert.deepEqual(attentionCategoriesForReasons([verdict.reason]), ['unverified_submission']);
+  });
+
   test('a packet that shares no key with anything submitted says so', () => {
     const verdict = duplicateAmong({}, undefined, [submitted()]);
     assert.deepEqual(verdict, { kind: 'unidentifiable' });
@@ -203,6 +228,33 @@ describe('the verdict over a set of already-submitted applications', () => {
       duplicate_of: 'd26aca4c-db65-4f07-a69e-811d85c52cf9',
       matched_on: 'ats_posting',
     });
+  });
+});
+
+describe('legacy unverified-attempt recognition', () => {
+  const productionReason = 'The final submission was attempted, but Litos could not verify the employer confirmation. Check the portal or your email before trying again.';
+
+  test('recognizes the production sentence despite casing or surrounding whitespace', () => {
+    assert.equal(isLegacyUnverifiedAttemptReason(productionReason), true);
+    assert.equal(isLegacyUnverifiedAttemptReason(`  ${productionReason.toUpperCase()}  `), true);
+  });
+
+  test('does not widen generic verification failures into possible employer sends', () => {
+    assert.equal(isLegacyUnverifiedAttemptReason('Litos could not verify the employer confirmation before submit.'), false);
+    assert.equal(isLegacyUnverifiedAttemptReason('The final submission was not attempted.'), false);
+    assert.equal(isLegacyUnverifiedAttemptReason(undefined), false);
+  });
+
+  test('the database predicate uses the same marker and excludes structured records', async () => {
+    const source = await readFile('src/lib/duplicateApplication.ts', 'utf8');
+    const predicateAt = source.indexOf('function legacyUnverifiedAttempt()');
+    assert.ok(predicateAt > 0, 'legacy predicate is missing');
+    const predicate = source.slice(predicateAt, source.indexOf('\n}', predicateAt) + 2);
+    assert.match(predicate, /jsonb_typeof/);
+    assert.match(predicate, /unverified_submission/);
+    assert.match(predicate, /attention_reason/);
+    assert.match(source, /or \$\{legacyUnverifiedAttempt\(\)\}/);
+    assert.match(source, /legacy_unverified_attempt: sql<boolean>`\$\{legacyUnverifiedAttempt\(\)\}`/);
   });
 });
 

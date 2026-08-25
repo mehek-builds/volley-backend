@@ -81,3 +81,25 @@ export function resumeContactOfRecord(sources: ResumeContactSources): ContactHea
     portfolio_url: text(requested.portfolio_url) ?? fromProfile('portfolio_url'),
   };
 }
+
+/**
+ * Refresh mutable contact facts when an applicant explicitly saves an existing packet again.
+ *
+ * The generated resume remains frozen until the applicant uses the resume edit path. Once they do,
+ * preserving an older profile phone or residence would create a newly rendered PDF that disagrees
+ * with the current employer-form packet. Name, email, and links remain packet-specific here. They
+ * have separate identity and ownership checks, so this helper changes only the two profile facts
+ * the managed form also reads live at fill time.
+ */
+export function refreshResumeContactFromProfile(
+  stored: ContactHeader,
+  profile: Record<string, unknown> | undefined,
+): ContactHeader {
+  const phone = text(profile?.['phone']);
+  const location = resumeHeaderLocation(profile);
+  return {
+    ...stored,
+    ...(phone ? { phone } : {}),
+    ...(location ? { location } : {}),
+  };
+}

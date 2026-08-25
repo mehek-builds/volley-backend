@@ -156,8 +156,20 @@ test('resume edits refuse a stale personal email before rendering or storing a r
   assert.ok(identityCheck >= 0);
   assert.ok(identityCheck < editRoute.indexOf('await renderResumePdf'));
   assert.ok(identityCheck < editRoute.indexOf('await put('));
-  assert.match(editRoute, /!resumePacketEmailIsCurrent\(contact\.email, currentResumeEmail\)/);
+  assert.match(editRoute, /!resumePacketEmailIsCurrent\(storedContact\.email, currentResumeEmail\)/);
   assert.match(editRoute, /resume_email_regeneration_required/);
+});
+
+test('resume edits re-render current phone and residence while preserving packet identity', () => {
+  const editRoute = routeSlice("'/applications/:id/resume'", "'/applications/:id/review'");
+  const profileRead = editRoute.indexOf('loadApplicationProfileLike(userId)');
+  const contactRefresh = editRoute.indexOf('refreshResumeContactFromProfile(');
+  const render = editRoute.indexOf('await renderResumePdf');
+  const stored = editRoute.indexOf('_contact: contact');
+
+  assert.ok(profileRead >= 0 && contactRefresh > profileRead && render > contactRefresh && stored > render);
+  assert.match(editRoute, /refreshResumeContactFromProfile\([\s\S]*storedContact[\s\S]*applicationProfile/);
+  assert.match(editRoute, /renderResumePdf\(edited, \{ \.\.\.contact, full_name: contact\.full_name \}/);
 });
 
 /* THE CONSTRUCTOR AND THE VERIFIER MUST BE LOOKING AT ONE PACKET.
