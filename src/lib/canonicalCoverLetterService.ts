@@ -2,7 +2,8 @@ import { del, put } from '@vercel/blob';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
-import { db } from '../db';
+import { db, withDedicatedDatabase } from '../db';
+import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import {
   application_artifacts,
   applications,
@@ -292,7 +293,7 @@ async function reconcileCanonicalCoverLetterAttempt(
 
   try {
     await dependencies.beforeLock?.(attempt);
-    return await db.transaction(async (tx) => {
+    const runReconcileTransaction = (database: typeof db) => database.transaction(async (tx) => {
       const locked = await lockedApplication(tx, row.user_id, application.id);
       const current = await selectedCoverLetterInTransaction(tx, locked.application);
       if (!sameArtifactPointer(selected, current)) throw new CanonicalCoverLetterSelectionMovedError();
@@ -332,6 +333,20 @@ async function reconcileCanonicalCoverLetterAttempt(
       if (!mirrored) throw new CanonicalCoverLetterConflictError();
       return mirrored;
     });
+    return await withReadOnlyRetry(
+      () => runReconcileTransaction(db),
+      {
+        onRetry: (retryAttempt) => console.warn(
+          `[cover-letter] reconcile transaction reached a read-only backend; retrying on a fresh pooled connection (attempt ${retryAttempt})`,
+        ),
+        onExhausted: () => withDedicatedDatabase((directDb) => {
+          console.warn(
+            '[cover-letter] pooled reconcile transactions stayed read-only; retrying on the direct database endpoint',
+          );
+          return runReconcileTransaction(directDb);
+        }),
+      },
+    );
   } catch (error) {
     if (restoredBlob) await dependencies.deleteObject(restoredBlob.url).catch(() => undefined);
     if (error instanceof CanonicalCoverLetterSelectionMovedError && attempt < 1) {

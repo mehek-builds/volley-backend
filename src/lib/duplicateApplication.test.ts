@@ -324,7 +324,7 @@ describe('every path that can write status submitted is behind the guard', () =>
     assert.ok(routeAt > 0);
     const body = source.slice(routeAt, source.indexOf("'/applications/:id/submission/extension-outcome'"));
     const guardAt = body.indexOf('refuseDuplicateApplication');
-    const claimAt = body.indexOf('db.transaction');
+    const claimAt = body.indexOf('const runExtensionStartTransaction =');
     assert.ok(guardAt > 0, 'extension-start does not consult the duplicate guard');
     assert.ok(
       guardAt < claimAt,
