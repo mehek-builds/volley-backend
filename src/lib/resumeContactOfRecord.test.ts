@@ -11,7 +11,11 @@
 
 import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
-import { resumeContactOfRecord, resumeHeaderLocation } from './resumeContactOfRecord';
+import {
+  refreshResumeContactFromProfile,
+  resumeContactOfRecord,
+  resumeHeaderLocation,
+} from './resumeContactOfRecord';
 import { contactLine } from '../engine/resumeRender';
 
 const LOS_ANGELES = { address_city: 'Los Angeles', address_state: 'CA' };
@@ -81,6 +85,39 @@ describe('resumeContactOfRecord', () => {
   test('no address anywhere leaves the field empty rather than inventing one', () => {
     const contact = resumeContactOfRecord({ requested: { full_name: 'Test Applicant' }, profile: {} });
     assert.equal(contact.location, undefined);
+  });
+});
+
+describe('refreshResumeContactFromProfile', () => {
+  test('current phone and residence replace stale packet values', () => {
+    const refreshed = refreshResumeContactFromProfile({
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+971 56 741 7451',
+      location: 'Dubai, Dubai',
+      linkedin_url: 'https://www.linkedin.com/in/test',
+    }, {
+      phone: '+1 213 574 6270',
+      address_city: 'Los Angeles',
+      address_state: 'California',
+      address_country: 'United States',
+    });
+
+    assert.equal(refreshed.phone, '+1 213 574 6270');
+    assert.equal(refreshed.location, 'Los Angeles, California');
+    assert.equal(refreshed.email, 'resume@example.com');
+    assert.equal(refreshed.linkedin_url, 'https://www.linkedin.com/in/test');
+  });
+
+  test('missing current values do not erase usable packet contact facts', () => {
+    const stored = {
+      full_name: 'Test Applicant',
+      email: 'resume@example.com',
+      phone: '+1 213 574 6270',
+      location: 'Los Angeles, California',
+    };
+
+    assert.deepEqual(refreshResumeContactFromProfile(stored, {}), stored);
   });
 });
 

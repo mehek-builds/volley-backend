@@ -107,6 +107,7 @@ import { createAndPersistPacketAudit, currentAcknowledgedPacketAudit, currentPac
 import { verifyStoredPacketAuditAcknowledgement } from '../lib/packetAudit';
 import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
 import { resumeEmailOfRecord, resumePacketEmailIsCurrent } from '../lib/resumeEmail';
+import { refreshResumeContactFromProfile } from '../lib/resumeContactOfRecord';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { reconcileCanonicalCoverLetterForPacket } from '../lib/canonicalCoverLetterService';
 
@@ -1456,22 +1457,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
 
       const stored = row.spec as StoredSpec;
       const review = readApplicationReview(stored);
-      const contact = stored._contact as {
+      const storedContact = stored._contact as {
         full_name?: string;
         email?: string;
         phone?: string;
+        location?: string;
         linkedin_url?: string;
         github_url?: string;
         portfolio_url?: string;
       } | undefined;
-      if (!review?.jd_text || !contact?.full_name) {
+      if (!review?.jd_text || !storedContact?.full_name) {
         return reply.status(409).send({ error: 'This older resume cannot be edited in the dashboard. Generate it again first.' });
       }
-      /* Same refusal as the pre-send check, and for the same reason: this route re-renders the PDF
-         from the STORED contact block, so editing a bullet on one of the contactless packets would
-         write a fresh, still-contactless file over the old one. Editing cannot add an address; only
-         regenerating reads the account again. */
-      if (!hasContactRoute({ ...contact, full_name: contact.full_name })) {
+      /* Same refusal as the pre-send check, and for the same reason: refreshing the current profile
+         can replace a stale phone or residence, but it cannot safely repair a packet that never had
+         either contact route. Those older packets must still be regenerated. */
+      if (!hasContactRoute({ ...storedContact, full_name: storedContact.full_name })) {
         return reply.status(409).send({ error: 'This resume was made without an email address or a phone number on it. Generate it again to add your contact details, then edit it.' });
       }
       if (resumeEditDisposition(review.status, Boolean(review.submission_claimed_at)) !== 'start') {
@@ -1482,15 +1483,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
 
       const userId = request.jwtPayload!.userId;
-      const bank = await readExperienceBankOrSeedFromBaseResume(userId);
-      const profileRows = await db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1);
+      const [bank, profileRows, applicationProfile] = await Promise.all([
+        readExperienceBankOrSeedFromBaseResume(userId),
+        db.select().from(profiles).where(eq(profiles.user_id, userId)).limit(1),
+        loadApplicationProfileLike(userId),
+      ]);
       const currentResumeEmail = resumeEmailOfRecord(profileRows[0]?.parsed_json);
-      if (!resumePacketEmailIsCurrent(contact.email, currentResumeEmail)) {
+      if (!resumePacketEmailIsCurrent(storedContact.email, currentResumeEmail)) {
         return reply.status(409).send({
           error: 'Your personal resume email changed or is missing. Regenerate this application before editing it.',
           code: 'resume_email_regeneration_required',
         });
       }
+      const contact = refreshResumeContactFromProfile(
+        { ...storedContact, full_name: storedContact.full_name },
+        applicationProfile as Record<string, unknown>,
+      );
       const parsed = profileRows[0]?.parsed_json as {
         school?: string;
         degree?: string;

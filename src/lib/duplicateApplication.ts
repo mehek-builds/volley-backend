@@ -171,7 +171,37 @@ export type SubmittedTwinRow = {
   /* When a submit on this row was pressed and lost, and nobody has looked yet. Null on every row
    * that is either cleanly submitted or cleanly not. */
   unverified_at?: string | null;
+  /* Older runners recorded the uncertain press only as attention_reason prose. Those rows have no
+   * unverified_submission object and therefore no timestamp, but they carry the same duplicate-send
+   * risk until the applicant resolves the earlier attempt. */
+  legacy_unverified_attempt?: boolean;
 };
+
+/* THE LEGACY UNVERIFIED MARKER.
+ *
+ * Before unverified_submission existed, the runner persisted this exact leading sentence in
+ * attention_reason after a final press it could not confirm. Deepgram 4bfd5827 is the production
+ * witness: status needs_attention, pipeline_stage null, no structured attempt, and this prose still
+ * present. The modern duplicate query otherwise cannot see it and permits a second send.
+ *
+ * Prefix matching preserves the fixed first sentence while allowing the older writer's follow-up
+ * guidance to vary. It is deliberately narrower than words such as "attempted" or "could not
+ * verify", which also occur in safe pre-submit failures. */
+const LEGACY_UNVERIFIED_ATTEMPT_PREFIX =
+  'the final submission was attempted, but litos could not verify the employer confirmation.';
+
+export function isLegacyUnverifiedAttemptReason(value: unknown): boolean {
+  return typeof value === 'string'
+    && value.trim().toLowerCase().startsWith(LEGACY_UNVERIFIED_ATTEMPT_PREFIX);
+}
+
+function legacyUnverifiedAttempt() {
+  return sql`(
+    coalesce(jsonb_typeof(${generated_resumes.spec}->'_review'->'unverified_submission'), 'null') = 'null'
+    and lower(btrim(coalesce(${generated_resumes.spec}->'_review'->>'attention_reason', '')))
+      like ${`${LEGACY_UNVERIFIED_ATTEMPT_PREFIX}%`}
+  )`;
+}
 
 /**
  * THE PREDICATE FOR "THIS ROW ALREADY GOT TO AN EMPLOYER", written once.
@@ -187,7 +217,8 @@ function alreadyAtEmployer() {
   return sql`(${generated_resumes.spec}->'_review'->>'status' = 'submitted'
     or ${generated_resumes.pipeline_stage} = 'applied'
     or (${generated_resumes.spec}->'_review'->'unverified_submission' is not null
-      and ${generated_resumes.spec}->'_review'->'unverified_submission'->>'resolution' is null))`;
+      and ${generated_resumes.spec}->'_review'->'unverified_submission'->>'resolution' is null)
+    or ${legacyUnverifiedAttempt()})`;
 }
 
 /**
@@ -219,6 +250,7 @@ async function submittedApplications(userId: string, excludeId: string): Promise
          reason to refuse anything. */
       unverified_at: sql<string | null>`case when ${generated_resumes.spec}->'_review'->'unverified_submission'->>'resolution' is null
         then ${generated_resumes.spec}->'_review'->'unverified_submission'->>'at' end`,
+      legacy_unverified_attempt: sql<boolean>`${legacyUnverifiedAttempt()}`,
     })
     .from(generated_resumes)
     .where(and(
@@ -324,7 +356,8 @@ export function duplicateAmong(
     /* A row can be both: submitted earlier AND carrying an unresolved record from a later attempt.
        Submitted wins, because a receipt is certainty and the sentence for certainty is the stronger
        and simpler of the two. */
-    const certainty = row.submitted_at || !row.unverified_at ? 'submitted' as const : 'unverified' as const;
+    const hasUnverifiedEvidence = Boolean(row.unverified_at || row.legacy_unverified_attempt);
+    const certainty = row.submitted_at || !hasUnverifiedEvidence ? 'submitted' as const : 'unverified' as const;
     const match: DuplicateApplicationMatch = {
       application_id: row.id,
       company: company || mineNames.company,
