@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const applications = readFileSync('src/routes/applications.ts', 'utf8');
+const canonicalCoverLetters = readFileSync('src/lib/canonicalCoverLetterService.ts', 'utf8');
 const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
 const resume = readFileSync('src/routes/resume.ts', 'utf8');
 
@@ -37,6 +38,34 @@ test('packet audit endpoint is owner scoped and persists only with exact packet 
   assert.ok(terminalRefusal >= 0 && canonicalCoverLetter > terminalRefusal
     && reviewRead > canonicalCoverLetter && packetBuild > reviewRead,
     'historical canonical cover-letter selection must be mirrored before audit build but never rewrite sent history');
+});
+
+test('packet cover-letter reconciliation retries read-only transactions without repeating Blob recovery', () => {
+  const start = canonicalCoverLetters.indexOf('async function reconcileCanonicalCoverLetterAttempt(');
+  const end = canonicalCoverLetters.indexOf('export async function reuseCanonicalCoverLetter(', start);
+  assert.ok(start >= 0 && end > start, 'canonical cover-letter reconciliation slice was not found');
+  const reconciliation = canonicalCoverLetters.slice(start, end);
+  const recover = reconciliation.indexOf('dependencies.recoverDocument({');
+  const upload = reconciliation.indexOf('dependencies.putObject(restoredKey, recovered.buffer)');
+  const beforeLock = reconciliation.indexOf('dependencies.beforeLock?.(attempt)');
+  const transaction = reconciliation.indexOf('const runReconcileTransaction =');
+  const retry = reconciliation.indexOf('return await withReadOnlyRetry(');
+  const directFallback = reconciliation.indexOf('onExhausted: () => withDedicatedDatabase');
+  const directTransaction = reconciliation.indexOf('runReconcileTransaction(directDb)');
+  const cleanup = reconciliation.indexOf('dependencies.deleteObject(restoredBlob.url)', retry);
+
+  assert.ok(recover >= 0 && upload > recover && beforeLock > upload && transaction > beforeLock
+    && retry > transaction && directFallback > retry && directTransaction > directFallback
+    && cleanup > directTransaction,
+  'one recovered cover-letter Blob must be reused across the database-only retries and cleaned up after final failure');
+  assert.match(reconciliation, /withReadOnlyRetry\(\s*\(\) => runReconcileTransaction\(db\)/);
+  assert.match(reconciliation, /onExhausted: \(\) => withDedicatedDatabase/);
+  assert.match(reconciliation, /runReconcileTransaction\(directDb\)/);
+  assert.doesNotMatch(
+    reconciliation.slice(transaction, retry),
+    /dependencies\.(?:resolveObjectUrl|recoverDocument|putObject|deleteObject|beforeLock)/,
+    'the whole-transaction retry callback must remain free of external Blob and hook side effects',
+  );
 });
 
 test('extension packet refuses missing, stale, or unacknowledged server audit before disclosure', () => {
@@ -133,6 +162,30 @@ test('every employer-bound path names the current packet audit gate', () => {
   const runnerAudit = runnerSubmit.indexOf('verifiedPacketForRun(row, current, currentAcknowledgedPacketAudit)');
   const employerClaim = runnerSubmit.indexOf('claimSubmission(');
   assert.ok(runnerAudit >= 0 && employerClaim > runnerAudit);
+});
+
+test('extension start retries read-only transactions without repeating external prechecks', () => {
+  const route = routeSlice("'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
+  const packetAudit = route.indexOf('currentAcknowledgedPacketAudit(precheckRow');
+  const duplicateCheck = route.indexOf('refuseDuplicateApplication(precheckRow');
+  const resumeVerification = route.indexOf('preSendResumeVerificationIssues(');
+  const transaction = route.indexOf('const runExtensionStartTransaction =');
+  const retry = route.indexOf('const result = await withReadOnlyRetry(');
+  const directFallback = route.indexOf('onExhausted: () => withDedicatedDatabase');
+  const directTransaction = route.indexOf('runExtensionStartTransaction(directDb)');
+
+  assert.ok(packetAudit >= 0 && duplicateCheck > packetAudit && resumeVerification > duplicateCheck
+    && transaction > resumeVerification && retry > transaction && directFallback > retry
+    && directTransaction > directFallback,
+  'packet audit, duplicate detection, and resume verification must complete once before database-only retries');
+  assert.match(route, /withReadOnlyRetry\(\s*\(\) => runExtensionStartTransaction\(db\)/);
+  assert.match(route, /onExhausted: \(\) => withDedicatedDatabase/);
+  assert.match(route, /runExtensionStartTransaction\(directDb\)/);
+  assert.doesNotMatch(
+    route.slice(transaction, retry),
+    /currentAcknowledgedPacketAudit|refuseDuplicateApplication|preSendResumeVerificationIssues|\b(?:fetch|put|del)\s*\(/,
+    'the whole-transaction retry callback must remain free of external audit, duplicate, network, and storage effects',
+  );
 });
 
 test('reviewed per-application approval stays free while unattended submission remains entitled', () => {

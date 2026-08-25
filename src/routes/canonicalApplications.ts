@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { db } from '../db';
+import { db, withDedicatedDatabase } from '../db';
+import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import {
   application_artifacts,
   application_submission_events,
@@ -579,7 +580,7 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
       application: typeof applications.$inferSelect;
     };
     try {
-      const result = await db.transaction(async (tx): Promise<OutcomeResult> => {
+      const runManualSubmissionOutcomeTransaction = (database: typeof db) => database.transaction(async (tx): Promise<OutcomeResult> => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`manual-submission:${userId}:${parsed.data.event_id}`}, 0::bigint))`);
         const [currentApplication] = await tx.select().from(applications).where(and(
           eq(applications.id, application.id),
@@ -659,6 +660,22 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
         }).returning();
         return { idempotent: false, event: createdEvent, application: updatedApplication };
       });
+      const result = await withReadOnlyRetry(
+        () => runManualSubmissionOutcomeTransaction(db),
+        {
+          onRetry: (attempt) => request.log.warn(
+            { attempt, applicationId: application.id, eventId: parsed.data.event_id },
+            'Manual submission outcome transaction reached a read-only backend; retrying on a fresh pooled connection',
+          ),
+          onExhausted: () => withDedicatedDatabase((directDb) => {
+            request.log.warn(
+              { applicationId: application.id, eventId: parsed.data.event_id },
+              'Pooled manual submission outcome transactions stayed read-only; retrying on the direct database endpoint',
+            );
+            return runManualSubmissionOutcomeTransaction(directDb);
+          }),
+        },
+      );
       return reply.header('Cache-Control', 'private, no-store').send({
         application_id: result.application.id,
         event_id: result.event.event_id,

@@ -1232,7 +1232,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           });
         }
       }
-      const result = await db.transaction(async (tx) => {
+      const runExtensionStartTransaction = (database: typeof db) => database.transaction(async (tx) => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${userId}))`);
         const rows = await tx.select().from(generated_resumes).where(and(
           eq(generated_resumes.id, params.data.id),
@@ -1345,6 +1345,22 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         )).returning({ id: generated_resumes.id });
         return updated.length ? { kind: 'started' as const, row, claimId, next } : { kind: 'changed' as const };
       });
+      const result = await withReadOnlyRetry(
+        () => runExtensionStartTransaction(db),
+        {
+          onRetry: (attempt) => request.log.warn(
+            { attempt, applicationId: params.data.id },
+            'Extension start transaction reached a read-only backend; retrying on a fresh pooled connection',
+          ),
+          onExhausted: () => withDedicatedDatabase((directDb) => {
+            request.log.warn(
+              { applicationId: params.data.id },
+              'Extension start pooled transactions stayed read-only; retrying on the direct database endpoint',
+            );
+            return runExtensionStartTransaction(directDb);
+          }),
+        },
+      );
       if (result.kind === 'not_found') return reply.status(404).send({ error: 'Application not found' });
       if (result.kind === 'no_review') return reply.status(409).send({ error: 'Application review is not available for this resume' });
       if (result.kind === 'consent_required') return reply.status(403).send({ error: 'Automatic submission is turned off' });

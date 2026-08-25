@@ -123,6 +123,34 @@ describe('canonical Free application contract', () => {
     assert.doesNotMatch(route, /automatic_submission|requireFeature|reserveEntitledUsage/);
   });
 
+  test('retries native submission outcome transactions without replaying external work', () => {
+    const source = readFileSync('src/routes/canonicalApplications.ts', 'utf8');
+    const route = source.slice(
+      source.indexOf("fastify.post('/applications/:id/manual-submission-outcome'"),
+      source.indexOf("fastify.get('/applications/:id/fill-data'"),
+    );
+    const originValidation = route.indexOf('canonicalPortalIdentity(finalUrl)');
+    const transaction = route.indexOf('const runManualSubmissionOutcomeTransaction =');
+    const retry = route.indexOf('const result = await withReadOnlyRetry(');
+    const directFallback = route.indexOf('onExhausted: () => withDedicatedDatabase');
+    const directTransaction = route.indexOf('runManualSubmissionOutcomeTransaction(directDb)');
+    const response = route.indexOf("return reply.header('Cache-Control'", retry);
+
+    assert.ok(originValidation >= 0 && transaction > originValidation && retry > transaction
+      && directFallback > retry && directTransaction > directFallback && response > directTransaction,
+    'URL validation and response serialization must stay outside the retried database transaction');
+    assert.match(route, /withReadOnlyRetry\(\s*\(\) => runManualSubmissionOutcomeTransaction\(db\)/);
+    assert.match(route, /onExhausted: \(\) => withDedicatedDatabase/);
+    assert.match(route, /runManualSubmissionOutcomeTransaction\(directDb\)/);
+
+    const transactionBody = route.slice(transaction, retry);
+    assert.doesNotMatch(
+      transactionBody,
+      /await\s+(?!tx\.)|\b(?:fetch|putObject|deleteObject|sendEmail|enqueue|publish)\s*\(/,
+      'the whole-transaction retry callback must remain free of non-database awaited or external side effects',
+    );
+  });
+
   test('allows base and tailored resume artifacts but not unrelated generated documents', () => {
     assert.equal(isResumeArtifactKind('resume'), true);
     assert.equal(isResumeArtifactKind('tailored_resume'), true);
