@@ -1086,6 +1086,22 @@ function standardizedTestAnswer(
     if (ap.standardized_test_type === 'None') {
       const none = noScoreOptionFor(options);
       if (none) return { value: none };
+      /* NO WAY TO SAY IT ON THIS LIST, so say that, rather than returning a word the list cannot
+       * take. The two branches directly above already do exactly this; this one fell through to
+       * `{ value: 'None' }` instead, and on a CLOSED control that is not an answer at all - the
+       * downstream matcher finds no option spelled "None", leaves the control blank, and the run
+       * parks with nothing on the row explaining why.
+       *
+       * MEASURED, IMC Trading's Greenhouse form, 2026-08-26: "Select your standardized test score
+       * type" offers ACT, SAT and Other. The applicant has declared she has no scores, so all three
+       * are false - "Other" claims a different exam she also did not sit - and a silent blank was
+       * the only outcome available. declaredNone turns that into the refusal the Apply screen can
+       * read back through isDeclaredAbsenceRefusal and show her as a decision, not a failure.
+       *
+       * An OPEN control is untouched: with no option list, `noScoreOptionFor` returns null but
+       * typing the word "None" into a text box is a true and accepted answer, so the fall-through
+       * below still applies there. */
+      if (options && options.length > 0) return declaredNone('standardized test type');
     }
     return { value: ap.standardized_test_type };
   }

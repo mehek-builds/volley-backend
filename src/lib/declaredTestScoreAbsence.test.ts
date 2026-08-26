@@ -23,6 +23,7 @@ import {
   NO_SCORE_OPTION_TEXTS,
   REFUSAL_OPTION_TEXTS,
   comparableTestOption,
+  isDeclaredAbsenceRefusal,
   noScoreOptionFor,
   refreshKnownQuestionAnswers,
   resolveKnownAnswer,
@@ -361,5 +362,47 @@ describe('the Apply screen tells the two states apart', () => {
     const row = resolvePrescript([question(SAT, IMC_SAT_OPTIONS)], ABSENT, {} as never).questions[0];
     assert.equal(row.ask, false);
     assert.equal(row.answer, "I don't have SAT score");
+  });
+});
+
+/* THE FOURTH SHAPE, and the one that made a declared absence invisible AGAIN - this time on the
+ * TYPE question rather than the two score questions this file was written for.
+ *
+ * MEASURED on IMC Trading's Greenhouse form, 2026-08-26. "Select your standardized test score type"
+ * offers ACT, SAT and Other. All three are false for her: she declared no scores, and "Other"
+ * claims a different exam she also did not sit. The type branch had no equivalent of the score
+ * branches' declaredNone arm, so it returned the literal word "None" - which is not on that list,
+ * so the closed-list matcher found nothing, left the control blank, and the run parked with nothing
+ * on the row saying why. A blank and a refusal look identical to the applicant; only one of them
+ * tells her she has already answered this.
+ */
+describe('the type question on a list with no way to say none', () => {
+  const declaredNone: ApplicationProfileLike = { standardized_test_type: 'None' };
+  const TYPE_LABEL = 'Select your standardized test score type';
+
+  test('refuses rather than returning a word the list cannot take', () => {
+    const answer = resolveKnownAnswer(TYPE_LABEL, 'radio', declaredNone, undefined, undefined, undefined, ['ACT', 'SAT', 'Other']);
+    assert.ok(answer && 'skipReason' in answer, 'a closed list with no none-option must refuse');
+    assert.ok(isDeclaredAbsenceRefusal(answer.skipReason), 'and it must be the DECLARED ABSENCE refusal, not a never-asked one');
+  });
+
+  test('still answers when the list does offer a way to say it', () => {
+    for (const list of [['SAT', 'ACT', 'Neither'], ['SAT', 'ACT', 'None'], ['SAT', 'ACT', 'I have no test scores']]) {
+      const answer = resolveKnownAnswer(TYPE_LABEL, 'radio', declaredNone, undefined, undefined, undefined, list);
+      assert.ok(answer && 'value' in answer, `expected an answer for ${JSON.stringify(list)}`);
+      assert.equal(answer.value, list[2], 'and in the employer\'s own spelling of it');
+    }
+  });
+
+  test('an OPEN control is untouched, because typing None there is a true answer', () => {
+    // No option list: the word itself is accepted, and the refusal above must not reach this.
+    assert.deepEqual(resolveKnownAnswer(TYPE_LABEL, 'text', declaredNone, undefined), { value: 'None' });
+  });
+
+  test('a declared TYPE is still never respelled', () => {
+    // Only 'None' survives translation. 'SAT' must come back as 'SAT' whatever else is on the list.
+    const sat: ApplicationProfileLike = { standardized_test_type: 'SAT' };
+    const answer = resolveKnownAnswer(TYPE_LABEL, 'radio', sat, undefined, undefined, undefined, ['ACT', 'SAT', 'Other']);
+    assert.deepEqual(answer, { value: 'SAT' });
   });
 });
