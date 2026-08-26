@@ -40,6 +40,7 @@ import {
   managedSearchFillableWindowedFailureIds,
   truthfulOtherChoice,
   employerPageUrlIssue,
+  packetDriftAttentionReason,
   transportVerifiedBuiltPacket,
   verifiedBuiltPacketIssues,
   managedActionDiagnosticsForLog,
@@ -5403,4 +5404,47 @@ test('the greenhouse closed banner is believed even when the page looks reached'
   assert.equal(blockers.length, 1);
   assert.match(blockers[0], /taken this posting down/);
   assert.match(blockers[0], /no longer open/);
+});
+
+/* THE DRIFT HOLD NAMES WHAT MOVED, to the applicant and to the log. Before this, a packet parked
+ * for drift carried the same sentence whichever binding moved, the specific issue list was
+ * discarded on the spot, and the applicant's only move was to re-approve and land in the same
+ * hold - the Databricks P-1588 packet measured exactly that round on 2026-08-26. The reason must
+ * name the moved binding in her words, and both prepare-path holds must put the exact issue
+ * strings on a log line, because a recurring drift nobody can see is indistinguishable from a
+ * broken send button. */
+test('packet drift parks with the moved binding named, and both holds log the issues', () => {
+  assert.equal(
+    packetDriftAttentionReason(['application questions changed after packet approval']),
+    'This application changed after you approved the exact packet Litos prepared, so it was not sent.'
+    + ' What changed: the application questions.'
+    + ' Open it to review the current one and send from there.',
+  );
+  assert.equal(
+    packetDriftAttentionReason([
+      'resume file changed after packet approval',
+      'applicant snapshot changed after packet approval',
+    ]),
+    'This application changed after you approved the exact packet Litos prepared, so it was not sent.'
+    + ' What changed: the resume file, your saved profile details.'
+    + ' Open it to review the current one and send from there.',
+  );
+  // An issue string this map has never heard of still yields an applicant-safe phrase, never the
+  // raw operator token - the same rule packetAuditClientError enforces for verdict codes.
+  assert.match(
+    packetDriftAttentionReason(['employer delivery binding changed after packet approval']),
+    / What changed: how Litos reaches this employer\./,
+  );
+
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const hold = source.slice(
+    source.indexOf('async function holdPreparationForPacketDrift'),
+    source.indexOf('async function persistQuestionMetadataMeasurement'),
+  );
+  assert.match(hold, /input\.log\.warn\(/, 'the hold must put the drift on a log line');
+  assert.match(hold, /packetDriftIssues: issues/, 'the log line must carry the exact issue strings');
+  assert.match(hold, /attention_reason: packetDriftAttentionReason\(issues\)/,
+    'the applicant sentence must come from the issue list, not a fixed string');
+  const callSites = source.match(/holdPreparationForPacketDrift\(\{[\s\S]{0,700}?log: fastify\.log,/g) ?? [];
+  assert.equal(callSites.length, 2, 'both prepare-path holds must pass the logger');
 });

@@ -882,6 +882,28 @@ export function privateRunnerStepDiagnostic(error: unknown): {
   };
 }
 
+/* THE APPLICANT'S SENTENCE FOR EACH DRIFT BINDING, keyed by verifiedBuiltPacketIssues' exact
+ * strings. Those strings are for operators and thrown errors; an applicant who is told only "it
+ * changed" reopens the packet, sees nothing different, approves, and lands here again - the same
+ * shape as the four-round Easy Dynamics loop of 2026-08-20, except this time nothing anywhere said
+ * WHICH binding moved. Naming the moved part is what lets her (or us) break the cycle. */
+const APPLICANT_PACKET_DRIFT_PHRASES: Record<string, string> = {
+  'applicant snapshot changed after packet approval': 'your saved profile details',
+  'job description changed after packet approval': 'the job description',
+  'applicant email changed after packet approval': 'the application email',
+  'resume file changed after packet approval': 'the resume file',
+  'application questions changed after packet approval': 'the application questions',
+};
+
+export function packetDriftAttentionReason(issues: readonly string[]): string {
+  const phrases = [...new Set(issues.map((issue) =>
+    APPLICANT_PACKET_DRIFT_PHRASES[issue] ?? 'how Litos reaches this employer'))];
+  const what = phrases.length > 0 ? ` What changed: ${phrases.join(', ')}.` : '';
+  return 'This application changed after you approved the exact packet Litos prepared, so it was not sent.'
+    + what
+    + ' Open it to review the current one and send from there.';
+}
+
 async function holdPreparationForPacketDrift(input: {
   row: ResumeRow;
   current: ApplicationReviewState;
@@ -891,6 +913,7 @@ async function holdPreparationForPacketDrift(input: {
   mode: EmployerPacketDeliveryMode;
   envelope: EmployerDeliveryEnvelope;
   patch: Partial<ApplicationReviewState>;
+  log: FastifyInstance['log'];
 }): Promise<boolean> {
   const issues = verifiedBuiltPacketIssues(
     input.packet,
@@ -900,10 +923,17 @@ async function holdPreparationForPacketDrift(input: {
     input.envelope,
   );
   if (issues.length === 0) return false;
+  /* The issue strings are static English naming a binding, never applicant values, so they are
+   * safe for hosted logs - and without this line the drift class is invisible: the run parks, the
+   * applicant re-approves, and no record anywhere says which binding kept moving. */
+  input.log.warn(
+    { applicationId: input.row.id, runId: input.patch.submission_run_id, packetDriftIssues: issues },
+    'Application preparation withheld because the built packet drifted from the acknowledged audit',
+  );
   await writeReview(input.row, nextReview(input.current, {
     ...input.patch,
     status: 'needs_attention',
-    attention_reason: 'This application changed after you approved the exact packet Litos prepared, so it was not sent. Open it to review the current one and send from there.',
+    attention_reason: packetDriftAttentionReason(issues),
     attention_categories: ['evidence_gap'],
     packet_audit_acknowledgement: undefined,
     submission_authorization: undefined,
@@ -4076,6 +4106,7 @@ async function prepareManaged(
     verifiedQuestions,
     mode: 'browser',
     envelope: measuredPrepareEnvelope,
+    log: fastify.log,
     patch: {
       submission_run_id: runId,
       questions: mergedQuestions,
@@ -5208,6 +5239,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       verifiedQuestions: packetAudit.questions,
       mode: 'browser',
       envelope: directPrepareEnvelope,
+      log: fastify.log,
       patch: {
         submission_run_id: runId,
         browser_context_id: contextId,
