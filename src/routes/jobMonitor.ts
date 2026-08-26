@@ -241,7 +241,8 @@ export const TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS = 5_000;
  * carry, which is why the daily cron reports surfaced postings and grouped roles on every run.
  *
  * WHAT NOW GOVERNS THE NUMBER is how long an untouched DATE stays believable, which is the same
- * argument INTERNSHIP_FRESHNESS_DAYS was already set on, and it is why the two are now equal.
+ * argument INTERNSHIP_FRESHNESS_DAYS rests on. Internships keep the longer window - 180 against
+ * this 90 - because their dates go untouched for longer still.
  *
  * THIS DOES NOT SURFACE CLOSED POSTINGS. `is_active` is a separate predicate and the poll's sweep
  * flips it the moment a posting leaves its board, so a 90-day window can still only show reqs the
@@ -249,10 +250,12 @@ export const TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS = 5_000;
  * how long a dead posting survives.
  *
  * WHAT TO WATCH, and it is no longer supply: a longer window cannot thin the board, so the headroom
- * warnings should now sit far above their lines. The cost moved to STORAGE. The purge is derived
- * from this constant, so rows are kept for 180 days rather than 28 on a 512 MB database, and the
- * numbers that matter on the daily run are purged_postings and the table's own size. If it becomes
- * a problem, the honest fix is a tighter purge multiple, not a quietly narrowed window.
+ * warnings should now sit far above their lines. The cost moved to STORAGE, and both purges are
+ * derived, so widening a window silently doubles a retention: ordinary rows are kept 180 days
+ * against the old 28, and internships 360 against the old 180. That is close to a year of rows on a
+ * 512 MB database. purged_postings and the table's own size are the numbers that matter on the
+ * daily run, and if they turn bad the honest fix is a tighter purge multiple - breaking the exact
+ * doubling - not a quietly narrowed window.
  *
  * Greenhouse note: `posted_at` is Greenhouse's `updated_at` (it publishes no create date), so for
  * 77% of the board this is "changed in the last 90 days" rather than "posted". That is a deliberate
@@ -263,13 +266,12 @@ export const TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS = 5_000;
 export const JOB_FRESHNESS_DAYS = 90;
 
 /**
- * HOW LONG AN INTERNSHIP STAYS ON THE BOARD. Ninety days.
+ * HOW LONG AN INTERNSHIP STAYS ON THE BOARD. A hundred and eighty days.
  *
- * EQUAL TO THE BOARD WINDOW SINCE 2026-08-26, and therefore currently a no-op: every internship this
- * branch would admit is already admitted by the general one. Kept, and kept exported, because it
- * encodes a DIFFERENT rule that was measured on its own, and the moment the board window is narrowed
- * again - which it has been twice - deleting it would silently take internships down with it. A
- * branch that costs one boolean is the cheap half of that bargain.
+ * TWICE THE BOARD WINDOW, restored to that ratio on 2026-08-26 (Mehek's call) in the same breath as
+ * the board moved 14 -> 90. For a few minutes the two were equal at 90 and this branch admitted
+ * nothing the general one did not; 180 makes it load-bearing again, which is the state the code was
+ * written for and the state its test asserts.
  *
  * WHY THE RULE IS ITS OWN: an internship req is posted once and stays open for months, and NOBODY
  * EVER RE-SAVES IT. Greenhouse publishes no create date so `posted_at` is its `updated_at`, and a
@@ -281,16 +283,21 @@ export const JOB_FRESHNESS_DAYS = 90;
  * Measured 2026-08-03, which is what set the number: 367 internships were open across our sources
  * and only 170 were inside 14 days. The window alone was costing 54% of internship supply.
  *
- * THIS DOES NOT SURFACE CLOSED INTERNSHIPS. `is_active` is a separate predicate and the poll's
- * sweep flips it the moment a posting leaves its board, so a 90-day window can still only show reqs
- * the employer is listing today. The window governs how long an untouched DATE stays believable,
- * not how long a dead posting survives.
+ * THIS DOES NOT SURFACE CLOSED INTERNSHIPS, and at this length that sentence is carrying more
+ * weight than it used to. `is_active` is a separate predicate and the poll's sweep flips it the
+ * moment a posting leaves its board, so even a 180-day window can only show reqs the employer is
+ * listing TODAY. The window governs how long an untouched DATE stays believable, not how long a
+ * dead posting survives. Without that sweep this number would be indefensible; with it, the worst
+ * case is a live req whose date is old, which is exactly the internship case.
  *
- * Ninety is a season, chosen against the shape of the thing: summer hiring opens Aug-Oct and runs
- * interviews into the winter, so a shorter window still drops live autumn reqs, while a longer one
- * starts surfacing reqs whose date can no longer be told apart from abandoned.
+ * A HUNDRED AND EIGHTY IS THE CYCLE, not a season. Ninety was chosen to span the Aug-Oct opening
+ * and the interviews that run into winter. 180 spans the whole of it: a summer-2027 req posted in
+ * August is still shown in February, by which time the employer has either closed it - and the
+ * sweep has already removed it - or is still hiring against it. What it gives up is the ability to
+ * read anything into the date at all, which is why the board card says FOUND or UPDATED rather than
+ * POSTED wherever the employer did not publish a real publish date.
  */
-export const INTERNSHIP_FRESHNESS_DAYS = 90;
+export const INTERNSHIP_FRESHNESS_DAYS = 180;
 
 /**
  * The window, which is now two windows.
@@ -301,8 +308,9 @@ export const INTERNSHIP_FRESHNESS_DAYS = 90;
  * widening the board window widens the dashboard's job feed by the same amount: that is the design,
  * not a side effect.
  *
- * The two windows are the same LENGTH today (90 and 90) and the internship branch is consequently
- * inert. Written as two anyway, because they are two rules: see INTERNSHIP_FRESHNESS_DAYS.
+ * Two windows, two lengths: 90 for the board and 180 for internships, so the second branch decides
+ * a real set of rows rather than restating the first. See INTERNSHIP_FRESHNESS_DAYS for why an
+ * internship's date ages differently from everything else's.
  */
 function freshnessPredicate() {
   return sql`(

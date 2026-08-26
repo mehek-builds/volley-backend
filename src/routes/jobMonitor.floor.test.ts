@@ -273,20 +273,19 @@ test('internship supply is never grown by loosening what counts as an internship
   assert.equal(resolveEmploymentType('Software Engineering Co-Op'), 'Internship');
 });
 
-test('internships get a ninety-day window, and the purge honours it', async () => {
+test('internships get a window twice the board\'s, and the purge honours it', async () => {
   const {
     INTERNSHIP_FRESHNESS_DAYS,
     PURGE_INTERNSHIPS_OLDER_THAN_DAYS,
     JOB_FRESHNESS_DAYS: boardWindow,
   } = await import('./jobMonitor');
-  assert.equal(INTERNSHIP_FRESHNESS_DAYS, 90);
-  /* NOT `>`. The board window moved to 90 on 2026-08-26, so the two are equal and this branch admits
-     nothing the general one does not - it is inert, and asserting it is strictly longer would now be
-     asserting a fiction. `>=` is the property that actually has to hold: an internship may never be
-     dropped sooner than an ordinary posting, which is the one way this could silently regress if the
-     board window is widened again without the internship window following. */
-  assert.ok(INTERNSHIP_FRESHNESS_DAYS >= boardWindow,
-    'an internship must never age off the board before an ordinary posting would');
+  assert.equal(INTERNSHIP_FRESHNESS_DAYS, 180);
+  /* STRICTLY longer, which is the whole reason the branch exists. It briefly was not: the board
+     window moved 14 -> 90 on 2026-08-26 while this still read 90, and for those minutes the branch
+     admitted nothing the general one did not. 180 restored the gap. If a later change makes these
+     equal again, this line should fail rather than quietly pass - an inert branch reads like a rule
+     that is being enforced. */
+  assert.ok(INTERNSHIP_FRESHNESS_DAYS > boardWindow, 'the whole point is that it is longer');
 
   /* The purge must keep a full internship window of slack, exactly as the board window does.
      Purging internships on the BOARD's schedule would delete the row nightly and re-fetch it each
