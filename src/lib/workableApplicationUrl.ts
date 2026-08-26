@@ -65,6 +65,24 @@ export function isWorkableCanonicalApplicationRedirect(
     && from.search === to.search;
 }
 
+/**
+ * Query params carry a posting's identity (Greenhouse's ?for=<board>&token=<jobId>) and can never
+ * be dropped, but some ATS front ends re-serialize their own address bar after mount, reordering
+ * the same params they were given - confirmed live on Redwood Materials (3/3 identical
+ * "employer page redirected away from the approved destination" failures, same applicationId, via
+ * backend logs). Sorting by key-then-value can only make two URLs compare equal if their param
+ * SETS were already identical, so a genuinely different board or job id still fails every
+ * exact-page-url check this feeds. Mutates the URL in place, mirroring
+ * stratus-browser-cloud's own canonicalPageUrl so both sides of every comparison agree on one sort.
+ */
+export function sortManagedPageUrlParams(url: URL): void {
+  const params = [...url.searchParams.entries()].sort(
+    ([keyA, valueA], [keyB, valueB]) => (keyA < keyB ? -1 : keyA > keyB ? 1 : (valueA < valueB ? -1 : valueA > valueB ? 1 : 0))
+  );
+  url.search = '';
+  for (const [key, value] of params) url.searchParams.append(key, value);
+}
+
 /** Return the exact observed boundary only when it is the approved URL or Workable's one redirect. */
 export function resolvedApprovedApplicationPageUrl(
   expected: string | URL,

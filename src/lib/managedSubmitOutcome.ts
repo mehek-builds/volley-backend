@@ -30,6 +30,7 @@ import {
 import {
   readWorkableApplicationUrl,
   resolvedApprovedApplicationPageUrl,
+  sortManagedPageUrlParams,
 } from './workableApplicationUrl';
 
 export type ManagedFinalSubmitChooser = {
@@ -124,6 +125,7 @@ function canonicalProofUrl(value: unknown): string | null {
     const url = new URL(value);
     if (!/^https?:$/.test(url.protocol) || url.username || url.password) return null;
     url.hash = '';
+    sortManagedPageUrlParams(url);
     return url.href;
   } catch {
     return null;
