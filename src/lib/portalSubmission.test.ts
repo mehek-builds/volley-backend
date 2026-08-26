@@ -779,6 +779,29 @@ test('Greenhouse managed fill selects phone country and city comboboxes', () => 
   ]);
 });
 
+test('Greenhouse location autocomplete preserves the structured state in managed and direct fills', async () => {
+  const packet = {
+    fullName: 'Mehek Mandal',
+    email: 'app-jump@example.test',
+    phone: '+12135746270',
+    city: 'Los Angeles',
+    country: 'United States',
+    applicationProfile: { address_state: 'California' },
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [],
+  };
+  const actions = buildManagedPortalActions('greenhouse', packet);
+  assert.equal(
+    actions.find((action) => action.type === 'fill' && action.label === 'location')?.value,
+    'Los Angeles, California, United States',
+  );
+
+  const { page, values } = directFillPage(['#candidate-location']);
+  await fillPortal(page, 'greenhouse', packet);
+  assert.equal(values.get('#candidate-location'), 'Los Angeles, California, United States');
+});
+
 function directFillPage(
   selectors: string[],
   behavior: {

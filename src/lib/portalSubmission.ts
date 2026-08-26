@@ -1148,11 +1148,29 @@ const readFieldGroupDialCodes = new Function(
 
 function greenhouseLocationSearch(packet: SubmissionPacket): string | undefined {
   if (!packet.city) return undefined;
-  if (!packet.country) return packet.city;
   const city = packet.city.trim();
-  const country = packet.country.trim();
-  if (!city || !country || city.toLowerCase().includes(country.toLowerCase())) return city;
-  return `${city}, ${country}`;
+  const state = packet.applicationProfile?.address_state?.trim();
+  const country = packet.country?.trim();
+  if (!city) return undefined;
+
+  /* Greenhouse's current location control is a places autocomplete. The search string has to name
+   * the same place as the row the geocoder returns, because the managed chooser intentionally will
+   * not pick a merely similar option. The owner Jump packet measured on 2026-08-26 carried the
+   * structured location Los Angeles / California / United States, but this helper discarded the
+   * state and searched for "Los Angeles, United States". Greenhouse returned the full city, state,
+   * country row, so the chooser correctly refused the incomplete value and left Location (City)
+   * required and empty.
+   *
+   * Preserve each structured address component once. Packets without a state keep their existing
+   * city-country query, and already-composed city values do not gain duplicate suffixes. */
+  const parts = [city];
+  for (const component of [state, country]) {
+    if (!component) continue;
+    const normalized = component.toLowerCase();
+    if (parts.some((part) => part.toLowerCase().split(',').map((value) => value.trim()).includes(normalized))) continue;
+    parts.push(component);
+  }
+  return parts.join(', ');
 }
 
 function receiptReference(body: string): string | undefined {
