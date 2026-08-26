@@ -206,6 +206,20 @@ export const users = pgTable('users', {
      spent, and it is spent exactly once because the claim is a conditional UPDATE. See
      src/lib/onboardingBuildGrant.ts. */
   onboarding_build_granted_at: timestamp('onboarding_build_granted_at', { withTimezone: true }),
+  /* Set once, at creation, for an account that started from a specific /browse-jobs posting
+     rather than through the front door. Permanent even after pinned_onboarding_job_id below is
+     spent and cleared: onboardingStepFrom reads THIS to keep resume ordered ahead of focus for
+     the rest of this account's setup, not the pin's continued presence. See
+     scripts/apply-job-first-entry-migration.mjs. */
+  job_first_entry: boolean('job_first_entry').default(false).notNull(),
+  /* The specific posting a job-first account is entitled to spend its one free build on. Set at
+     guest creation, read by the match step in place of the ranked-board algorithm, and cleared
+     (best-effort) once /onboarding/flow/steps acknowledges 'match' so a later reload never
+     re-offers a job the student has already moved past. Null for every ordinary account.
+     uuid, not text: this always holds a monitored_jobs.id, and matching that column's own type
+     is what keeps a future join against it (e.g. the match step's own lookup) a plain indexed
+     equality instead of a cast that can silently defeat monitored_jobs' primary-key index. */
+  pinned_onboarding_job_id: uuid('pinned_onboarding_job_id'),
   // The exact answer given, kept for the record and for the settings screen to explain itself.
   sponsorship_answer: text('sponsorship_answer'),
   // The settings toggle. Independent of the declaration and strictly additive: someone who did not

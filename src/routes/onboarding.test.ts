@@ -176,6 +176,42 @@ describe('onboarding step order', () => {
   });
 });
 
+describe('job-first entry (from a /browse-jobs posting)', () => {
+  const ready = {
+    completed: false,
+    hasResume: true,
+    hasFocus: true,
+    hasSponsorshipAnswer: true,
+    hasBaseResume: true,
+  };
+
+  test('resume leads, not focus, when the account arrived from a specific posting', () => {
+    assert.equal(
+      onboardingStepFrom({ ...ready, hasResume: false, hasFocus: false, jobFirstEntry: true }),
+      'resume',
+    );
+  });
+
+  test('missing focus alone does not hold a job-first account on this gate at all', () => {
+    // The whole point of clicking a posting is skipping straight to the resume upload for it.
+    // onboardingStepFrom resolves 'done' here; the route handler is what tacks 'focus' onto the
+    // very end, once the application sequence has spent the pinned job.
+    assert.equal(onboardingStepFrom({ ...ready, hasFocus: false, jobFirstEntry: true }), 'done');
+  });
+
+  test('an ordinary account is unaffected by the flag being merely absent or false', () => {
+    assert.equal(onboardingStepFrom({ ...ready, hasResume: false, hasFocus: false }), 'focus');
+    assert.equal(
+      onboardingStepFrom({ ...ready, hasResume: false, hasFocus: false, jobFirstEntry: false }),
+      'focus',
+    );
+  });
+
+  test('completion still short-circuits everything, job-first or not', () => {
+    assert.equal(onboardingStepFrom({ ...ready, completed: true, jobFirstEntry: true }), 'done');
+  });
+});
+
 describe('version 3 walkthrough replay', () => {
   test('an existing account reviews every core screen even when its data is already complete', () => {
     const steps = replaySteps(false);
