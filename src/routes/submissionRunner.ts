@@ -767,6 +767,70 @@ export function managedFormSnapshotWithStableCapabilities(input: {
   });
 }
 
+/* A DOCUMENTED OPTION SNAP IS THE ACKNOWLEDGED ANSWER, not a change to it.
+ *
+ * The prepare pass resolves closed-choice answers against the LIVE option lists and types the
+ * employer's exact phrasing, recording the value it snapped FROM in answer_option_source (the
+ * ANSWER-CLAIM contract in applicationReview.ts: "this value was snapped for profile value X").
+ * The audit-side reading resolves the same questions without those lists, so its answers keep the
+ * acknowledged phrasing and no snap claim. Byte-comparing the two parked every single round on
+ * fee9f00c (Greenhouse: gpa + three EEO selects), c4413bff and 6de82956 (Lever: three education
+ * comboboxes, plus form order), 2026-08-26 - the questionsDrift diagnostic showed added:[],
+ * removed:[], with only `answer` and `answerOptionSource` moving, which is the snap's exact
+ * signature and nobody else's.
+ *
+ * So a packet question is accepted against its acknowledged counterpart when it is byte-equal, OR
+ * when the ONLY moved fields are answer and answerOptionSource and the snap claim names the
+ * acknowledged answer byte-for-byte (trimmed). Anything else - a different value, an undocumented
+ * rewrite, a question added or dropped - still refuses. Order is compared as a multiset because
+ * the live form's own sequence is not applicant content; what she approved is the set of answers.
+ */
+/* answer and answerOptionSource move together in a snap; answerSource may only be DROPPED by one.
+ * The applicant's review claim is keyed on the byte-identity of the answer (APPLICANT_CLAIM_FIELDS
+ * in applicationReview.ts), so the snap that rephrases her answer rightly sheds the claim - but a
+ * packet that MINTS a claim the acknowledged reading never held is asserting she reviewed a value
+ * she did not, and refuses. */
+const SNAP_EXEMPT_FIELDS = new Set(['answer', 'answerOptionSource', 'answerSource']);
+
+function packetQuestionEqualsAcknowledged(
+  packetQ: SubmissionPacket['questions'][number],
+  verifiedQ: SubmissionPacket['questions'][number],
+): boolean {
+  if (isDeepStrictEqual(packetQ, verifiedQ)) return true;
+  const fields = new Set([...Object.keys(packetQ), ...Object.keys(verifiedQ)]) as Set<keyof typeof packetQ>;
+  for (const field of fields) {
+    if (SNAP_EXEMPT_FIELDS.has(field)) continue;
+    if (!isDeepStrictEqual(packetQ[field], verifiedQ[field])) return false;
+  }
+  if (packetQ.answerSource !== undefined && !isDeepStrictEqual(packetQ.answerSource, verifiedQ.answerSource)) {
+    return false;
+  }
+  const snapClaim = typeof packetQ.answerOptionSource === 'string' ? packetQ.answerOptionSource.trim() : '';
+  const acknowledged = typeof verifiedQ.answer === 'string' ? verifiedQ.answer.trim() : '';
+  return snapClaim.length > 0
+    && snapClaim === acknowledged
+    && typeof packetQ.answer === 'string'
+    && packetQ.answer.trim().length > 0;
+}
+
+export function packetQuestionsMatchAcknowledged(
+  packetQuestions: SubmissionPacket['questions'],
+  verifiedProjected: SubmissionPacket['questions'],
+): boolean {
+  if (packetQuestions.length !== verifiedProjected.length) return false;
+  const unmatched = [...verifiedProjected];
+  for (const packetQ of packetQuestions) {
+    // Exact matches claim their twin first so a snap cannot steal a duplicate label's exact pair.
+    let index = unmatched.findIndex((verifiedQ) => isDeepStrictEqual(packetQ, verifiedQ));
+    if (index === -1) {
+      index = unmatched.findIndex((verifiedQ) => packetQuestionEqualsAcknowledged(packetQ, verifiedQ));
+    }
+    if (index === -1) return false;
+    unmatched.splice(index, 1);
+  }
+  return unmatched.length === 0;
+}
+
 /**
  * Compare the exact packet about to cross the employer boundary with the audit that authorized it.
  * The caller must send this same object after the check, never rebuild it.
@@ -792,11 +856,27 @@ export function verifiedBuiltPacketIssues(
     || createHash('sha256').update(packet.resume).digest('hex') !== audit.bindings.pdf.sha256) {
     issues.push('resume file changed after packet approval');
   }
-  if (!isDeepStrictEqual(packet.questions, submissionPacketQuestions(verifiedQuestions))) {
+  const verifiedProjected = submissionPacketQuestions(verifiedQuestions);
+  const questionsMatch = packetQuestionsMatchAcknowledged(packet.questions, verifiedProjected);
+  if (!questionsMatch) {
     issues.push('application questions changed after packet approval');
   }
   const deliveryIssue = employerDeliveryBindingIssue(packet, audit.bindings.employerDelivery, mode, envelope);
-  if (deliveryIssue) issues.push(deliveryIssue);
+  if (deliveryIssue) {
+    /* The delivery sha hashes the whole projection, questions included, so documented snaps fail
+     * it even though the gate above just accepted them. Substituting the acknowledged questions
+     * back and re-hashing tests the strongest remaining claim: every OTHER byte of the payload and
+     * envelope is exactly what the audit bound. A live form whose options, capabilities or
+     * destination actually moved still mismatches here and still parks. */
+    const snapOnly = questionsMatch
+      && employerDeliveryBindingIssue(
+        { ...packet, questions: verifiedProjected },
+        audit.bindings.employerDelivery,
+        mode,
+        envelope,
+      ) === null;
+    if (!snapOnly) issues.push(deliveryIssue);
+  }
   return issues;
 }
 

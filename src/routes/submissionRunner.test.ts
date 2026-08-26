@@ -41,6 +41,7 @@ import {
   truthfulOtherChoice,
   employerPageUrlIssue,
   packetDriftAttentionReason,
+  packetQuestionsMatchAcknowledged,
   transportVerifiedBuiltPacket,
   verifiedBuiltPacketIssues,
   managedActionDiagnosticsForLog,
@@ -5447,4 +5448,128 @@ test('packet drift parks with the moved binding named, and both holds log the is
     'the applicant sentence must come from the issue list, not a fixed string');
   const callSites = source.match(/holdPreparationForPacketDrift\(\{[\s\S]{0,700}?log: fastify\.log,/g) ?? [];
   assert.equal(callSites.length, 2, 'both prepare-path holds must pass the logger');
+});
+
+/* THE SNAP THE GATE MUST ACCEPT, AND EVERY REWRITE IT MUST STILL REFUSE. Prepare resolves
+ * closed-choice answers against the live option lists and types the employer's exact phrasing,
+ * recording the value it snapped from in answer_option_source. The audit-side reading has no such
+ * lists, so byte-comparing the two parked every round: measured on fee9f00c (Greenhouse gpa +
+ * three EEO selects), c4413bff and 6de82956 (Lever education comboboxes, plus form order),
+ * 2026-08-26, identically on every attempt. A documented snap of the acknowledged answer IS the
+ * acknowledged answer; an undocumented rewrite, a snap claiming a value she never approved, or a
+ * payload whose other bytes moved must all still refuse. */
+test('a documented option snap of the acknowledged answer passes the drift gate; rewrites refuse', () => {
+  const resume = Buffer.from('%PDF-1.4\nsnap gate\n%%EOF\n');
+  const questions: ApplicationReviewQuestion[] = [{
+    id: 'degree',
+    question: 'What degree are you currently pursuing?',
+    answer: 'Bachelor of Science',
+    kind: 'required',
+    required: true,
+    portal_selector: '#degree',
+    portal_input_type: 'combobox',
+    answer_source: 'applicant_review',
+  }, {
+    id: 'veteran',
+    question: 'Veteran status',
+    answer: 'I am not a veteran',
+    kind: 'required',
+    required: true,
+    portal_selector: '#veteran_status',
+    portal_input_type: 'combobox',
+  }];
+  const basePacket: SubmissionPacket = {
+    fullName: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    jdText: 'Engineering internship',
+    resume,
+    resumeName: 'resume.pdf',
+    applicantSnapshot: {
+      profile: {
+        full_name: 'Mehek Mandal',
+        email: 'mehek@example.com',
+        experience: [],
+        skills: [],
+        school: 'USC',
+        grad_year: 2028,
+      },
+      application_profile: {},
+    },
+    questions: packetQuestionsForFill(questions),
+  };
+  const envelope = employerDeliveryEnvelope({
+    channel: 'controlled_browser',
+    destinationUrl: 'https://example.com/apply',
+    portalFamily: 'controlled_test',
+  });
+  const audit: PacketAudit = createPacketAudit({
+    ownerId: 'owner-1',
+    applicationId: 'application-1',
+    jdText: basePacket.jdText ?? '',
+    spec: {},
+    jobContext: { company: 'Example', role: 'Intern' },
+    questions,
+    applicantSnapshot: basePacket.applicantSnapshot,
+    resumeEmail: 'resume-alias@example.com',
+    applicantEmail: basePacket.email,
+    employerDelivery: createEmployerDeliveryBindings(basePacket, {}, { mode: 'full', envelope }),
+    pdfObjectKey: 'users/owner-1/resumes/application-1.pdf',
+    pdfBytes: basePacket.resume,
+    editedTerms: [],
+    clauses: [{ text: basePacket.jdText ?? '', start: 0, end: basePacket.jdText?.length ?? 0, verdict: 'unscoreable' }],
+    rejected: [],
+    degraded: false,
+    terms: { covered: [], missing: [], edited: [] },
+  });
+
+  const projected = packetQuestionsForFill(questions);
+  const snap = (q: (typeof projected)[number], employerPhrasing: string) => ({
+    ...q,
+    answer: employerPhrasing,
+    answerSource: undefined,
+    answerOptionSource: q.answer,
+  });
+
+  // The live signature itself: answers snapped to the employer's exact options, order rearranged.
+  const snappedPacket: SubmissionPacket = {
+    ...basePacket,
+    questions: [snap(projected[1], 'I am not a protected veteran'), snap(projected[0], "Bachelor's Degree")],
+  };
+  assert.deepEqual(verifiedBuiltPacketIssues(snappedPacket, audit, questions, 'full', envelope), []);
+
+  // A snap claiming a value she never approved is a rewrite, and both bindings refuse it.
+  const foreignSnap: SubmissionPacket = {
+    ...basePacket,
+    questions: [projected[0], { ...projected[1], answer: 'I am a veteran', answerOptionSource: 'some other value' }],
+  };
+  assert.deepEqual(verifiedBuiltPacketIssues(foreignSnap, audit, questions, 'full', envelope), [
+    'application questions changed after packet approval',
+    'full employer-delivery payload changed after packet approval',
+  ]);
+
+  // An undocumented rewrite - no snap claim at all - still refuses.
+  const bareRewrite: SubmissionPacket = {
+    ...basePacket,
+    questions: [projected[0], { ...projected[1], answer: 'I am a veteran' }],
+  };
+  assert.equal(
+    verifiedBuiltPacketIssues(bareRewrite, audit, questions, 'full', envelope)
+      .includes('application questions changed after packet approval'),
+    true,
+  );
+
+  // Snapped answers with any OTHER payload byte moved: the substituted re-hash catches it and the
+  // delivery binding still refuses, exactly as fail-closed demands.
+  const snappedWithNewOptions: SubmissionPacket = {
+    ...snappedPacket,
+    fieldOptions: { degree: ["Bachelor's Degree", "Master's Degree"] },
+  };
+  assert.deepEqual(verifiedBuiltPacketIssues(snappedWithNewOptions, audit, questions, 'full', envelope), [
+    'full employer-delivery payload changed after packet approval',
+  ]);
+
+  // The multiset rule alone: same content reordered matches; a dropped or added question never does.
+  assert.equal(packetQuestionsMatchAcknowledged([projected[1], projected[0]], projected), true);
+  assert.equal(packetQuestionsMatchAcknowledged([projected[0]], projected), false);
+  assert.equal(packetQuestionsMatchAcknowledged([...projected, projected[0]], projected), false);
 });
