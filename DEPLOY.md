@@ -68,6 +68,7 @@ Set these for Production (and Preview if you want):
 | `APOLLO_API_KEY` | your Apollo key (optional fallback) |
 | `INTERNAL_CRON_SECRET` | random secret shared with the GitHub Actions job-monitor workflow |
 | `JOB_MONITOR_SOURCES_JSON` | optional JSON array of extra Greenhouse, Lever, Ashby, or Workable boards loaded by each daily monitor run |
+| `SUBMISSION_CUTOVER_MODE` | submission migration fence: `off`, `drain`, or `freeze`; unset is `off`, and any other nonempty value fails closed to effective `freeze` |
 | `LITOS_ATS_API_SUBMISSION_ENABLED` | set to literal `true` only when employer-authorized ATS submission channels may POST applications |
 | `LITOS_EMPLOYER_API_SUBMISSION_CHANNELS_JSON` | JSON array of allowlisted Greenhouse, Ashby, or Lever submit channels; references key env names, never raw secrets |
 | `LITOS_APPLICATION_EMAIL_ROUTE_MODE` | nonsecret route selector: `managed_resend`, `custom_domain`, or `mailbox` |
@@ -96,6 +97,62 @@ Set these for Production (and Preview if you want):
 | `UPSTASH_REDIS_REST_URL` | optional, turns on the ranking cache's shared tier; see below |
 | `UPSTASH_REDIS_REST_TOKEN` | optional, pairs with the URL above |
 | `NODE_ENV` | `production` |
+
+### Submission ledger cutover fence
+
+This fence must be deployed before the submission-attempt ledger migration. Deploy PR0 first with
+`SUBMISSION_CUTOVER_MODE=off`, then verify that the exact PR0 revision is live and reports
+`{"mode":"off","config_valid":true}`. Do not combine the first fence deployment with a production
+drain. A Vercel environment change reaches the running service only after a deployment.
+
+Promote the same PR0 revision with `SUBMISSION_CUTOVER_MODE=drain`. Capture and verify the health
+response only after that deployment is live:
+
+```bash
+EXPECTED_REVISION="<PR0 merge commit SHA>"
+CUTOVER_JSON="$(curl -sS https://student-outreach-backend.vercel.app/health)"
+CUTOVER_REVISION="$(jq -er '.revision' <<<"$CUTOVER_JSON")"
+test "$CUTOVER_REVISION" = "$EXPECTED_REVISION"
+jq -e '.submission_cutover == {"mode":"drain","config_valid":true}' <<<"$CUTOVER_JSON"
+```
+
+Keep `drain` active for at least 310 seconds, then require the same revision and cutover state
+again:
+
+```bash
+sleep 310
+curl -sS https://student-outreach-backend.vercel.app/health \
+  | jq -e --arg revision "$CUTOVER_REVISION" \
+    '.revision == $revision and .submission_cutover == {"mode":"drain","config_valid":true}'
+```
+
+Drain refuses every application mutation, application detail read, resume route, dashboard
+bootstrap, and internal worker while leaving only the exact existing-attempt evidence sinks,
+application list reads, inbound application mail, and legacy autofill evidence available. The
+310-second wait clears old backend requests, but it does not prove that external capabilities are
+gone.
+
+Quiesce Stratus separately. Terminate every accepted Stratus run, or wait at least eight minutes
+after its last accepted work. Then enumerate and terminate every retained Browserbase session. If
+session enumeration or termination cannot be proven, wait the full 60-minute Browserbase maximum
+from the last session creation. Eight minutes is not a substitute for the Browserbase step. Confirm
+there are no future handoff expiries or recently active claims. Never clear a claim to make a check
+pass. Employer pages already open in a person's own browser have no revocable lease, so the legacy
+backfill must preserve each persistent sign that one may have been exposed as an unresolved hold.
+
+Next, promote the same PR0 revision with `SUBMISSION_CUTOVER_MODE=freeze`. Verify the exact revision
+and `{"mode":"freeze","config_valid":true}`, wait another 310 seconds, then verify that same frozen
+revision again. Freeze also refuses application and resume mutations, including evidence sinks and
+the inbound application-email webhook. The webhook must be replayed after the ledger-aware backend
+is live.
+
+Run the stable-state preflight and ledger migration only while that exact frozen revision remains
+live. Keep freeze active while deploying Stratus correlation, the ledger-aware backend, and both
+clients. Unfreeze Stratus first and run its correlated canary. Then switch the backend to `off`,
+verify the exact ledger-aware revision and off mode, replay inbound application confirmations
+idempotently, and run the controlled application canary. Never replay into a frozen webhook. Never
+continue when health reports `config_valid:false`; that means an invalid nonempty value took effect
+as freeze.
 
 ### The ranking cache's shared tier is OPTIONAL and ships OFF
 

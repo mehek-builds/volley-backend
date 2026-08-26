@@ -59,6 +59,7 @@ import { applicationEmailHealth } from './lib/applicationEmail';
 import { applicationEmailRouteSelection } from './lib/applicationEmailRoute';
 import { warmApplicationAliasDeliverability } from './lib/applicationEmailDeliverability';
 import { aggregateServiceHealthStatus } from './lib/serviceHealth';
+import { createSubmissionCutoverHook, resolveSubmissionCutover } from './lib/submissionCutover';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -126,6 +127,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
     },
   });
 
+  const submissionCutover = resolveSubmissionCutover(process.env.SUBMISSION_CUTOVER_MODE);
   // CORS: only known browser origins, instead of reflecting whatever origin calls. The
   // danger being closed is arbitrary WEBSITES reading API responses cross-origin; every
   // authed call carries an Authorization header, so it is preflighted and an unlisted
@@ -178,6 +180,13 @@ export async function buildApp(options: BuildAppOptions = {}) {
       });
     },
   });
+
+  // This root hook follows only CORS, so browser clients can read its 503 response. It still runs
+  // before multipart parsing, rate limiting, authentication, database work, provider calls, or
+  // capability-token creation. Off mode installs no hook and leaves the request pipeline unchanged.
+  if (submissionCutover.mode !== 'off') {
+    fastify.addHook('onRequest', createSubmissionCutoverHook(submissionCutover));
+  }
 
   // Multipart support for resume uploads
   await fastify.register(multipart, {
@@ -388,6 +397,9 @@ export async function buildApp(options: BuildAppOptions = {}) {
         configured_channels: configuredAtsSubmissionChannels().length,
       },
       application_email: applicationEmail,
+      // Effective state only. An invalid nonempty environment value fails closed to freeze, while
+      // the value itself stays out of this unauthenticated response.
+      submission_cutover: submissionCutover,
       ts: new Date().toISOString(),
     });
   });

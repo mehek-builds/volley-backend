@@ -126,6 +126,112 @@ test('/health identifies the deployable service and revision contract', async ()
   );
 });
 
+test('submission cutover runs before auth and publishes only its effective configuration', async () => {
+  const saved = process.env.SUBMISSION_CUTOVER_MODE;
+  const opened: App[] = [];
+  const { buildApp } = await import('./index');
+  const appFor = async (mode: string) => {
+    process.env.SUBMISSION_CUTOVER_MODE = mode;
+    const app = await buildApp(HEALTH_TEST_OPTIONS);
+    await app.ready();
+    opened.push(app);
+    return app;
+  };
+  const applicationId = '11111111-2222-4333-8444-555555555555';
+
+  try {
+    const off = await appFor('off');
+    const ordinaryUnauthorized = await off.inject({
+      method: 'POST',
+      url: `/applications/${applicationId}/submit-request`,
+    });
+    assert.equal(ordinaryUnauthorized.statusCode, 401, 'off mode preserves the route auth boundary');
+
+    const drain = await appFor('drain');
+    const fenced = await drain.inject({
+      method: 'POST',
+      url: `/applications/${applicationId}/submit-request/?source=cutover-test`,
+      headers: { origin: SITE_ORIGIN },
+    });
+    assert.equal(fenced.statusCode, 503, 'the cutover response wins over the missing-auth response');
+    assert.equal(fenced.json().code, 'SUBMISSION_CUTOVER_DRAINING');
+    assert.equal(fenced.headers['cache-control'], 'no-store');
+    assert.match(String(fenced.headers['retry-after']), /^\d+$/);
+    assert.equal(typeof fenced.json().retry_after_seconds, 'number');
+    assert.equal(fenced.headers['ratelimit-limit'], undefined, 'the cutover hook runs before rate limiting');
+    assert.equal(fenced.headers['access-control-allow-origin'], SITE_ORIGIN, 'browser clients can read the fence');
+
+    const prospectiveIssuer = await drain.inject({
+      method: 'POST',
+      url: `/applications/${applicationId}/manual-submission-start`,
+    });
+    assert.equal(prospectiveIssuer.statusCode, 503, 'future issuers are fenced before route registration');
+    assert.equal(prospectiveIssuer.json().code, 'SUBMISSION_CUTOVER_DRAINING');
+
+    for (const request of [
+      { method: 'POST' as const, url: `/applications/${applicationId}/future-issuer` },
+      { method: 'POST' as const, url: `/applications/${applicationId}/packet-audit` },
+      { method: 'POST' as const, url: '/resume/generate' },
+      { method: 'GET' as const, url: '/resume/history' },
+      { method: 'GET' as const, url: '/dashboard/bootstrap' },
+      { method: 'POST' as const, url: '/internal/future-submission-worker' },
+    ]) {
+      const response = await drain.inject(request);
+      assert.equal(response.statusCode, 503, `${request.method} ${request.url}`);
+      assert.equal(response.json().code, 'SUBMISSION_CUTOVER_DRAINING');
+    }
+
+    const evidenceSink = await drain.inject({
+      method: 'POST',
+      url: `/applications/${applicationId}/submission/extension-outcome`,
+    });
+    assert.equal(evidenceSink.statusCode, 401, 'drain leaves the existing-attempt evidence sink open');
+
+    const legacyAutofillEvidence = await drain.inject({
+      method: 'POST',
+      url: '/autofill/event',
+    });
+    assert.equal(legacyAutofillEvidence.statusCode, 401, 'drain leaves legacy submit telemetry open');
+
+    const preflight = await drain.inject({
+      method: 'OPTIONS',
+      url: `/applications/${applicationId}/submit-request`,
+      headers: {
+        origin: SITE_ORIGIN,
+        'access-control-request-method': 'POST',
+      },
+    });
+    assert.notEqual(preflight.statusCode, 503, 'OPTIONS must never be fenced');
+
+    const drainHealth = await drain.inject({ method: 'GET', url: '/health' });
+    assert.deepEqual(drainHealth.json().submission_cutover, { mode: 'drain', config_valid: true });
+
+    const invalidValue = 'invalid-value-must-not-be-echoed';
+    const invalid = await appFor(invalidValue);
+    const invalidHealth = await invalid.inject({ method: 'GET', url: '/health' });
+    assert.deepEqual(invalidHealth.json().submission_cutover, { mode: 'freeze', config_valid: false });
+    assert.ok(!invalidHealth.body.includes(invalidValue), 'the public health response must not echo config input');
+
+    const frozenSink = await invalid.inject({
+      method: 'POST',
+      url: `/applications/${applicationId}/submission/extension-outcome`,
+    });
+    assert.equal(frozenSink.statusCode, 503);
+    assert.equal(frozenSink.json().code, 'SUBMISSION_CUTOVER_FROZEN');
+
+    const frozenLegacyAutofill = await invalid.inject({
+      method: 'POST',
+      url: '/autofill/event',
+    });
+    assert.equal(frozenLegacyAutofill.statusCode, 503);
+    assert.equal(frozenLegacyAutofill.json().code, 'SUBMISSION_CUTOVER_FROZEN');
+  } finally {
+    await Promise.all(opened.map((app) => app.close()));
+    if (saved === undefined) delete process.env.SUBMISSION_CUTOVER_MODE;
+    else process.env.SUBMISSION_CUTOVER_MODE = saved;
+  }
+});
+
 /* The whole reason /health carries this field: L2 is enabled purely by two environment variables,
    and with them unset rankingCache.ts is a correct, silent no-op that re-reads the ranking pool out
    of Neon on every cold start. That read exhausted Neon's transfer allowance on 2026-08-04. Whether
