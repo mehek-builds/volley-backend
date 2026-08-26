@@ -2,6 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { requirementLineCoverage } from '../routes/jdMatch';
 import {
   segmentJd,
   extractJdTerms,
@@ -2125,6 +2126,73 @@ describe('route registration', () => {
    * packet, not a job row, and a packet has never stored a location. Passing the id and resolving
    * it here is what covers packets that already exist.
    */
+  /* THE EMPLOYER'S OWN NAME IS NOT A REQUIREMENT, and the route is what makes sure the engine can
+     tell. selfReferenceTokens can only delete a company it is given, and this route backfilled
+     `location` from the job row while leaving `company` to the caller. Measured on a Databricks-
+     shaped posting: 4 terms with the company supplied, 5 without, the fifth being `databricks`
+     presented to the student as something her resume is missing. */
+  /* THE DENOMINATOR WAS SELF-FULFILLING. term_count counts what the extractor RECOGNISED and was
+     being read as what the posting ASKED FOR, so a requirement it could not tokenize left the
+     numerator and denominator together and failing to read one could only ever raise the score.
+     Measured live 2026-08-26: a Databricks PM internship stating roughly eight things printed
+     "3 of 3 requirements we counted" beside a score of 100. These pin the three behaviours that
+     make the new count trustworthy: it fires on a prose-heavy posting, it stays SILENT on a posting
+     that genuinely states nothing (otherwise the caption lies in the other direction and the
+     refusal copy stops being true), and its four-word floor under-counts rather than over-counts. */
+  test('requirement-line coverage reports lines the extractor could not read', () => {
+    const jd = [
+      'What we look for:',
+      'Pursuing a bachelor degree in computer science or a related engineering field',
+      'You have some first hand experience with SQL and/or Python',
+      'You use analytical skills to make data-driven decisions',
+      'You can make complex topics simple and communicate nuance to partners',
+    ].join('\n');
+    const coverage = requirementLineCoverage(jd, {});
+    assert.ok(coverage.read > 0, `expected some lines read, saw ${JSON.stringify(coverage)}`);
+    assert.ok(coverage.unread > 0, `the two prose requirements should be unread, saw ${JSON.stringify(coverage)}`);
+  });
+
+  test('a posting that genuinely states nothing reports nothing unread', () => {
+    /* Dispositions are not requirements a resume can answer, and the engine already declines to
+       score them. Counting them as "we could not read this" would invent a complaint. */
+    const jd = [
+      'What we look for:',
+      'You are curious and passionate about markets',
+      'You thrive in a fast-paced environment',
+      'You are a team player who values low ego',
+    ].join('\n');
+    assert.equal(requirementLineCoverage(jd, {}).unread, 0);
+  });
+
+  test('the four-word floor under-counts rather than inventing unread requirements', () => {
+    const jd = ['Minimum Qualifications:', 'Experience with Python', 'Familiarity with Docker'].join('\n');
+    const coverage = requirementLineCoverage(jd, {});
+    assert.equal(coverage.unread, 0, `a terse posting must not report phantom unread lines, saw ${JSON.stringify(coverage)}`);
+  });
+
+  test('POST /jd-match backfills the company from the posting, the way it already backfills location', () => {
+    const route = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
+    assert.match(route, /company:\s*body\.job_context\?\.company \?\?\s*posting\?\.company_name/);
+    assert.match(route, /company_name: career_page_sources\.company_name/);
+  });
+
+  test('the engine drops the company name once it is given one', () => {
+    const jd = [
+      'About Databricks',
+      'Databricks is a data and AI company.',
+      'Minimum Qualifications:',
+      'Pursuing a bachelor degree in computer science',
+      'First hand experience with SQL',
+      'You have used Databricks or a similar platform',
+    ].join('\n');
+    const without = extractJdTerms(jd).map((t) => t.term);
+    const withCompany = extractJdTerms(jd, { company: 'Databricks' }).map((t) => t.term);
+    assert.ok(without.includes('databricks'), `expected the company to survive without context, saw ${JSON.stringify(without)}`);
+    assert.ok(!withCompany.includes('databricks'), `expected the company to be dropped, saw ${JSON.stringify(withCompany)}`);
+    // And it must not take real requirements with it.
+    assert.ok(withCompany.includes('computer science'), JSON.stringify(withCompany));
+  });
+
   test('POST /jd-match resolves the posting location from job_id when the caller has no location', () => {
     const routeFile = readFileSync(path.join(__dirname, '..', 'routes', 'jdMatch.ts'), 'utf8');
     assert.match(routeFile, /job_id: z\.string\(\)\.uuid\(\)\.nullish\(\)/, 'the schema must accept an id');
