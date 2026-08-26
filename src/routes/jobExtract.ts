@@ -19,24 +19,59 @@ export function clipJdText(rawText: string | undefined | null): string {
 }
 
 const WORKABLE_APPLICATION_PATH = /^\/((?:[a-z0-9][a-z0-9._-]*\/)?j\/[a-z0-9]+)\/apply\/?$/i;
+const LEVER_APPLICATION_PATH = /^\/([^/]+)\/([^/]+)\/apply\/?$/i;
+const LEVER_HOSTS = new Set(['jobs.lever.co', 'jobs.eu.lever.co']);
 
 /**
- * Workable's application route contains form labels, not the job description. Read the exact job
- * overview for extraction while leaving the caller's application URL untouched for submission.
+ * An application route contains form labels, not the job description. Read the exact job overview
+ * for extraction while leaving the caller's application URL untouched for submission.
+ *
+ * PER ATS, NEVER A BLANKET RULE. It is tempting to strip a trailing `/apply` from anything, and it
+ * is wrong: a path segment means whatever the board says it means, and a rewrite that guesses would
+ * silently extract the wrong page rather than fail. Each board gets its own shape, and a URL that
+ * matches none is returned untouched so the guard below can still refuse what comes back.
+ *
+ * LEVER was added 2026-08-27 on live evidence. A Belvedere Trading packet stored
+ * `jobs.lever.co/{org}/{id}/apply` as its portal_url and froze 20,000 characters of that form as
+ * its job description, of which a `Name of School` select holding roughly three thousand university
+ * names consumed the entire cap. It scored 1 of 12 with a gap list of `Japanese Red`, `Red Cross`,
+ * `Nursing`, `British Columbia`, `LinkedIn URL` and `Loading`, every one a dropdown option or a
+ * form label. Lever's overview is the same path without the trailing `/apply`.
+ *
+ * This matters beyond new extractions: a repair that re-extracts a broken row from its STORED
+ * portal_url gets the form again on any row whose stored URL is the apply route, so without this
+ * the row cannot be repaired from the data it already has.
  */
 export function jobDescriptionSourceUrl(rawUrl: string): string {
   const url = new URL(rawUrl);
-  if (url.origin !== 'https://apply.workable.com') return rawUrl;
 
-  const workableApplication = url.pathname.match(WORKABLE_APPLICATION_PATH);
-  if (!workableApplication) return rawUrl;
+  if (url.origin === 'https://apply.workable.com') {
+    const workableApplication = url.pathname.match(WORKABLE_APPLICATION_PATH);
+    if (!workableApplication) return rawUrl;
 
-  const [, overviewPath] = workableApplication;
-  url.pathname = `/${overviewPath}/`;
-  // These values belong to the application form and are not needed to identify its job overview.
-  url.search = '';
-  url.hash = '';
-  return url.toString();
+    const [, overviewPath] = workableApplication;
+    url.pathname = `/${overviewPath}/`;
+    // These values belong to the application form and are not needed to identify its job overview.
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  }
+
+  if (url.protocol === 'https:' && LEVER_HOSTS.has(url.host)) {
+    const leverApplication = url.pathname.match(LEVER_APPLICATION_PATH);
+    if (!leverApplication) return rawUrl;
+
+    const [, org, postingId] = leverApplication;
+    url.pathname = `/${org}/${postingId}`;
+    /* Dropped for the same reason as Workable's: `lever-source` and friends are application-form
+       and tracking state, not part of what identifies the posting. Safe because this helper feeds
+       extraction ONLY - the submission path uses the caller's original URL untouched. */
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  }
+
+  return rawUrl;
 }
 
 export async function jobExtractRoutes(fastify: FastifyInstance) {

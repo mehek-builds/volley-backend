@@ -96,6 +96,47 @@ describe('jobDescriptionSourceUrl', () => {
     );
   });
 
+  /* LEVER, added 2026-08-27 on live evidence: a Belvedere Trading packet stored
+     jobs.lever.co/{org}/{id}/apply as its portal_url and froze 20,000 characters of that form as
+     its job description. Lever's overview is the same path without the trailing /apply. */
+  test('reads a Lever application URL from its job overview instead of the candidate form', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://jobs.lever.co/belvederetrading/10746b3d-1760-4573-9b63-b93f5a5e4fc0/apply'),
+      'https://jobs.lever.co/belvederetrading/10746b3d-1760-4573-9b63-b93f5a5e4fc0',
+    );
+  });
+
+  test('drops tracking state when moving to the Lever overview', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://jobs.lever.co/acme/abc123/apply?lever-source=LinkedIn#form'),
+      'https://jobs.lever.co/acme/abc123',
+    );
+  });
+
+  test('reads a Lever EU application URL the same way', () => {
+    assert.equal(
+      jobDescriptionSourceUrl('https://jobs.eu.lever.co/acme/abc123/apply'),
+      'https://jobs.eu.lever.co/acme/abc123',
+    );
+  });
+
+  test('leaves a Lever overview URL alone, so a good URL is never rewritten', () => {
+    const overview = 'https://jobs.lever.co/acme/abc123';
+    assert.equal(jobDescriptionSourceUrl(overview), overview);
+  });
+
+  /* The rewrite is per ATS on purpose. A trailing /apply means whatever the board says it means, so
+     a blanket strip would silently extract the wrong page on a host we have never checked. */
+  test('does not strip a trailing apply segment on an unknown host', () => {
+    const other = 'https://careers.example.com/engineering/123/apply';
+    assert.equal(jobDescriptionSourceUrl(other), other);
+  });
+
+  test('does not rewrite a two-segment Lever path that is not an application route', () => {
+    const notApply = 'https://jobs.lever.co/acme/apply';
+    assert.equal(jobDescriptionSourceUrl(notApply), notApply);
+  });
+
   test('does not rewrite non-form Workable paths or other origins', () => {
     for (const url of [
       'https://apply.workable.com/remote-recruitment/j/D4CA268A39/',
