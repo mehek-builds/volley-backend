@@ -83,6 +83,8 @@
     "db:application-email": "node scripts/apply-application-email-schema.mjs",
     "db:application-email-forwarding": "node scripts/apply-application-email-forwarding-schema.mjs",
     "db:application-email-receiving-proof": "node scripts/apply-application-email-receiving-proof-schema.mjs",
+    "db:submission-attempt-ledger": "node scripts/apply-submission-attempt-ledger-schema.mjs",
+    "test:submission-attempt-ledger-migration": "node --test scripts/submission-attempt-ledger-migration-contract.test.mjs",
     "db:application-facts": "node scripts/apply-application-facts-schema.mjs",
     "db:country-work-eligibility": "node scripts/apply-country-work-eligibility-schema.mjs",
     "db:availability-window": "node scripts/apply-availability-window-schema.mjs",
