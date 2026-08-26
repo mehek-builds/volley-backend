@@ -44,7 +44,7 @@ import {
   readManagedFinalSubmitChooser,
   readManagedFinalSubmitNoClick,
 } from './managedSubmitOutcome';
-import { resolvedApprovedApplicationPageUrl } from './workableApplicationUrl';
+import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from './workableApplicationUrl';
 import {
   SUBMIT_READINESS_ASTERISK_LEGEND,
   SUBMIT_READINESS_ASTERISK_MARK,
@@ -10889,6 +10889,7 @@ export function assertManagedApplicationSubmitConsistency(
     const url = new URL(expectedPageUrl);
     if (/^https?:$/.test(url.protocol) && !url.username && !url.password) {
       url.hash = '';
+      sortManagedPageUrlParams(url);
       expected = url.href;
     }
   } catch {

@@ -11,7 +11,7 @@ import {
   readManagedFinalSubmitChooser,
   type ManagedFinalSubmitChooser,
 } from './managedSubmitOutcome';
-import { resolvedApprovedApplicationPageUrl } from './workableApplicationUrl';
+import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from './workableApplicationUrl';
 
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
@@ -540,7 +540,10 @@ function assertRequiredManagedCapabilities(
   if (required.includes(MANAGED_EXACT_PAGE_URL_CAPABILITY)) {
     const expected = actions.find((action) => action.expectedPageUrl)?.expectedPageUrl;
     const canonicalExpected = expected ? new URL(expected) : null;
-    if (canonicalExpected) canonicalExpected.hash = '';
+    if (canonicalExpected) {
+      canonicalExpected.hash = '';
+      sortManagedPageUrlParams(canonicalExpected);
+    }
     const proof = result.exactPageUrlProof;
     const v4ChooserAction = actions.find((action) => action.type === 'confirmAndSubmit'
       && action.chooserPolicy?.version === 4);

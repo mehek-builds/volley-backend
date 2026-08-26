@@ -54,7 +54,7 @@ import {
   runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
 } from '../lib/browserbase';
-import { resolvedApprovedApplicationPageUrl } from '../lib/workableApplicationUrl';
+import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from '../lib/workableApplicationUrl';
 import {
   blockersIncludeCaptcha,
   CAPTCHA_BLOCKER,
@@ -831,6 +831,13 @@ export function employerPageUrlIssue(expected: string, observed: string | undefi
     const observedUrl = new URL(observed ?? '');
     expectedUrl.hash = '';
     observedUrl.hash = '';
+    /* observedUrl comes straight from this process's own page.url(), not through Stratus's managed
+     * sandbox, so nothing upstream has already normalized param order the way the managed-run
+     * proof does - some ATS front ends (Greenhouse's embed bootstrap, confirmed live on Redwood
+     * Materials) re-serialize the same params in a different order after mount, so both sides need
+     * the same sort or a page that never moved can still fail here. */
+    sortManagedPageUrlParams(expectedUrl);
+    sortManagedPageUrlParams(observedUrl);
     return resolvedApprovedApplicationPageUrl(expectedUrl, observedUrl)
       ? null
       : 'the employer page redirected away from the approved destination';

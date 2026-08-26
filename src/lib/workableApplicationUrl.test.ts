@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   readWorkableApplicationUrl,
   resolvedApprovedApplicationPageUrl,
+  sortManagedPageUrlParams,
 } from './workableApplicationUrl';
 
 test('Workable URL identity accepts its public short link and canonical tenant shape', () => {
@@ -47,4 +48,34 @@ test('a canonical Workable tenant URL cannot change tenant under the redirect ex
     ),
     null,
   );
+});
+
+/* Greenhouse's embed URL (?for=<board>&token=<jobId>) re-serializes its own query string after
+ * mount, reordering the same params it was given. Regression coverage for the false-refusal this
+ * caused live on Redwood Materials ("the employer page redirected away from the approved
+ * destination", 3/3 identical failures via backend logs). */
+test('sortManagedPageUrlParams tolerates reordering but changes a genuinely different param set', () => {
+  const asGiven = new URL('https://boards.greenhouse.io/embed/job_app?for=redwood&token=123456');
+  const asReordered = new URL('https://boards.greenhouse.io/embed/job_app?token=123456&for=redwood');
+  sortManagedPageUrlParams(asGiven);
+  sortManagedPageUrlParams(asReordered);
+  assert.equal(asGiven.href, asReordered.href);
+
+  const differentBoard = new URL('https://boards.greenhouse.io/embed/job_app?for=other&token=123456');
+  sortManagedPageUrlParams(differentBoard);
+  assert.notEqual(differentBoard.href, asGiven.href);
+
+  const differentJob = new URL('https://boards.greenhouse.io/embed/job_app?for=redwood&token=999999');
+  sortManagedPageUrlParams(differentJob);
+  assert.notEqual(differentJob.href, asGiven.href);
+});
+
+test('a reordered Greenhouse query string resolves as the approved boundary, not a redirect away from it', () => {
+  const expected = 'https://boards.greenhouse.io/embed/job_app?for=redwood&token=123456';
+  const observedAfterReorder = 'https://boards.greenhouse.io/embed/job_app?token=123456&for=redwood';
+  const expectedUrl = new URL(expected);
+  const observedUrl = new URL(observedAfterReorder);
+  sortManagedPageUrlParams(expectedUrl);
+  sortManagedPageUrlParams(observedUrl);
+  assert.equal(resolvedApprovedApplicationPageUrl(expectedUrl, observedUrl), observedUrl.href);
 });
