@@ -4592,9 +4592,14 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
    * node that is present-but-not-visible can never satisfy `:visible`. The proof of the phone is the
    * EXTRACT below, not this wait - the assertions on requireNonEmpty and expectedValueDigits a few
    * lines down are what must never move. */
+  /* NO `:visible` on the readback, and that is the fix rather than an oversight. The FILL below
+   * keeps it - typing must reach a control she could have typed into - but the barrier and the
+   * evidence read only need the VALUE. Measured on Pony.ai 2026-08-26: the fill matched one visible
+   * node, and the readback found zero a moment later, because intl-tel-input re-renders its input on
+   * commit. The proof is unweakened: requireUnique, requireNonEmpty and expectedValueDigits below. */
   assert.deepEqual(actions[phoneWaitIndex], {
     type: 'waitForSelector',
-    selector: 'input[name="phone"][type="tel"]:visible',
+    selector: 'input[name="phone"][type="tel"]',
     label: 'workable_phone_value_visible',
     optional: true,
     timeout: 4_000,

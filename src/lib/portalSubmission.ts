@@ -5245,6 +5245,26 @@ export const MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR =
 const WORKABLE_ADDRESS_SELECTOR = 'input[name="address"]:visible';
 const WORKABLE_LEGACY_CITY_SELECTOR = 'input[name="city"]:visible';
 const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
+/* THE SAME CONTROL, READ RATHER THAN TYPED INTO, AND VISIBILITY IS NOT PART OF THE FACT.
+ *
+ * MEASURED on Pony.ai's Workable form, 2026-08-26, stratus fingerprint 94dbba09171c165b:
+ *
+ *     filled_field:phone: expected exactly one match for
+ *     input[name="phone"][type="tel"]:visible, found 0
+ *
+ * The FILL with the identical selector had already succeeded - `phone` is in the run's filled_fields
+ * beside first_name, last_name, email, location and resume - so exactly one visible match existed
+ * when the value was typed, and none existed a moment later. `:visible` is the only clause that can
+ * flip from one to zero while the field still holds the value, and Workable's phone widget is
+ * intl-tel-input (its country readback is `.iti__selected-dial-code`), which re-renders its input
+ * subtree on commit. The 20s barrier could never outwait that either: this was never timing, the
+ * node simply stops being VISIBLE.
+ *
+ * A readback does not need visibility. It needs the value, and it still proves it: both consumers
+ * keep requireUnique, requireNonEmpty and expectedValueDigits, so a phone that did not land, landed
+ * twice, or landed wrong still refuses. The FILL keeps `:visible`, because typing has to reach a
+ * control the applicant could have typed into. */
+const WORKABLE_PHONE_READBACK_SELECTOR = 'input[name="phone"][type="tel"]';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
   + 'button[aria-label="Telephone country code"][aria-controls]:visible';
@@ -5464,14 +5484,14 @@ function pushWorkableManagedPhoneActions(
    * sentence about the phone rather than about the browser. */
   actions.push({
     type: 'waitForSelector',
-    selector: WORKABLE_PHONE_SELECTOR,
+    selector: WORKABLE_PHONE_READBACK_SELECTOR,
     label: 'workable_phone_value_visible',
     optional: true,
     timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
   });
   actions.push({
     type: 'extract',
-    selector: WORKABLE_PHONE_SELECTOR,
+    selector: WORKABLE_PHONE_READBACK_SELECTOR,
     attribute: 'value',
     label: 'filled_field:phone',
     optional: false,
