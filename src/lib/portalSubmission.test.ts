@@ -4592,14 +4592,18 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
    * node that is present-but-not-visible can never satisfy `:visible`. The proof of the phone is the
    * EXTRACT below, not this wait - the assertions on requireNonEmpty and expectedValueDigits a few
    * lines down are what must never move. */
-  /* NO `:visible` on the readback, and that is the fix rather than an oversight. The FILL below
-   * keeps it - typing must reach a control she could have typed into - but the barrier and the
-   * evidence read only need the VALUE. Measured on Pony.ai 2026-08-26: the fill matched one visible
-   * node, and the readback found zero a moment later, because intl-tel-input re-renders its input on
-   * commit. The proof is unweakened: requireUnique, requireNonEmpty and expectedValueDigits below. */
+  /* THE READBACK BINDS TO THE WIDGET CONTAINER, NOT TO THE FORM'S NAME. The FILL above keeps
+   * `input[name="phone"][type="tel"]:visible` - typing must reach a control she could have typed
+   * into - but by the time the value is read back, intl-tel-input has re-rendered the control and
+   * taken `name="phone"` off it. Measured on Pony.ai across four send attempts: `:visible` found
+   * zero, then `[type="tel"]` found zero, then on 2026-08-27 the bare name found zero too (run
+   * 8c81e9ad), while that run's own captured form image showed the field on screen holding the
+   * right digits. `.iti` is what survives, and the country proof below already stakes a required
+   * extract on the same contract. The proof is unweakened: requireUnique, requireNonEmpty and
+   * expectedValueDigits below, so a form with no intl-tel-input matches zero and still refuses. */
   assert.deepEqual(actions[phoneWaitIndex], {
     type: 'waitForSelector',
-    selector: 'input[name="phone"]',
+    selector: '.iti input[type="tel"]',
     label: 'workable_phone_value_visible',
     optional: true,
     timeout: 4_000,

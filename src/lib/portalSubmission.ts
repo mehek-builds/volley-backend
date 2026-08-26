@@ -5273,12 +5273,28 @@ const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
  * reason this selector is now the WEAKEST claim that still identifies the field: the name the form
  * gave it, and nothing else.
  *
- * The name is the right thing to keep. It is what the employer's own form submits under, so a
- * control carrying it IS the phone this application will send - whatever `type` intl-tel-input has
- * re-rendered it into. And the count still has to be one: requireUnique means a second `name="phone"`
- * node (a hidden E.164 twin, say) refuses rather than guessing which one to believe, and says so in
- * a message that names the count. */
-const WORKABLE_PHONE_READBACK_SELECTOR = 'input[name="phone"]';
+ * AND THE NAME IS GONE TOO. Shipped as 81ef0bd and re-run 2026-08-27, submission run
+ * 8c81e9ad-c993-4c7e-a3e3-4f3f77ed9284: `filled_field:phone: expected exactly one match for
+ * input[name="phone"], found 0` - with `phone` again in that run's filled_fields, and the run's own
+ * captured form image showing the field on screen holding 2135746270 behind a +1 flag. The control
+ * is present, visible and correct at the moment the readback runs; it simply no longer carries
+ * `name="phone"`. intl-tel-input has taken the name off the control it re-rendered. That is the
+ * fourth reading of this failure refuted by measurement: timing, then visibility, then type, now
+ * the name itself. And the runner already re-counts a zero-match asserted extract until its own
+ * timeout, so a node that was coming back under this name would have been found.
+ *
+ * What survives the re-render is the widget's container. Workable's phone control IS intl-tel-input,
+ * which is not an assumption added here: the country readback on the very next extract binds to
+ * `.iti__selected-dial-code` with optional false, so this file already rests a required proof on the
+ * same `.iti` contract. Reading the tel input inside that container adds nothing that was not
+ * already load-bearing one line down, and it names the control the applicant can actually see.
+ *
+ * NOTHING IS WEAKENED. Both consumers keep requireUnique, requireNonEmpty and expectedValueDigits
+ * pinned to the planned number, so a phone that did not land, landed twice, or landed wrong still
+ * refuses - and a form with no intl-tel-input matches zero and refuses too, rather than passing by
+ * default. `[type="tel"]` is what excludes any hidden E.164 twin the widget parks in the same
+ * container, so the count stays one. */
+const WORKABLE_PHONE_READBACK_SELECTOR = '.iti input[type="tel"]';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
   + 'button[aria-label="Telephone country code"][aria-controls]:visible';
