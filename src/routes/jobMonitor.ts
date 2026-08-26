@@ -222,42 +222,61 @@ export const MONITOR_METRICS_STATEMENT_TIMEOUT_MS = 30_000;
 export const TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS = 5_000;
 
 /**
- * ONLY POSTINGS FROM THE LAST FOURTEEN DAYS ARE SHOWN.
+ * ONLY POSTINGS FROM THE LAST THREE MONTHS ARE SHOWN.
  *
- * FOURTEEN IS STRUCTURAL, NOT A ROUND NUMBER. Hiring is weekday work: measured on this board on
- * 2026-07-28, weekdays carry 700-3,500 postings a day while **Saturday carries 143 and Sunday 22**.
- * A window shorter than a week therefore changes size depending on which days it happens to cover -
- * a rolling 3-day window measured 3,917 on a Tuesday and would hold roughly 2,000 on a Monday, when
- * it spans Sat+Sun+Mon. A 14-day window contains exactly two Saturdays and two Sundays, so the
- * weekend dip is fully absorbed while roles remain discoverable long enough to meet the grouped
- * inventory floor.
+ * NINETY DAYS, Mehek's call on 2026-08-26, and the third value this constant has held: seven days,
+ * then fourteen, now a season.
+ *
+ * WHAT THE EARLIER NUMBERS WERE SOLVING, kept because it is the reason none of them can be restored
+ * casually. Hiring is weekday work: measured on this board on 2026-07-28, weekdays carry 700-3,500
+ * postings a day while **Saturday carries 143 and Sunday 22**. A window shorter than a week
+ * therefore changes size depending on which days it happens to cover - a rolling 3-day window
+ * measured 3,917 on a Tuesday and would hold roughly 2,000 on a Monday, when it spans Sat+Sun+Mon.
+ * Fourteen days fixed that by containing exactly two Saturdays and two Sundays. Ninety contains
+ * twelve or thirteen of each, so the weekend shape has stopped being what governs the number.
  *
  * Measured windows before the 10,000-job commitment: 3d = 3,917, 4d = 6,927, 5d = 7,815,
- * 7d = 9,664, and 14d = 12,516. The longer window is the immediate supply stabilizer while
- * Workable and additional reviewed sources build durable headroom.
+ * 7d = 9,664, and 14d = 12,516. NINETY WAS NOT MEASURED BEFORE IT SHIPPED - state that plainly
+ * rather than implying a number that was never taken. What it will hold is whatever the sources
+ * carry, which is why the daily cron reports surfaced postings and grouped roles on every run.
  *
- * WHAT WOULD MAKE THIS UNSUSTAINABLE, and what the cron watches for: weekly posting volume falling
- * (a hiring slowdown, or the December lull), or sources decaying as board tokens rotate. Either
- * shows up as surfaced postings and grouped roles trending toward their warning thresholds in the
- * daily cron response, which is why both numbers are reported on every run.
+ * WHAT NOW GOVERNS THE NUMBER is how long an untouched DATE stays believable, which is the same
+ * argument INTERNSHIP_FRESHNESS_DAYS was already set on, and it is why the two are now equal.
+ *
+ * THIS DOES NOT SURFACE CLOSED POSTINGS. `is_active` is a separate predicate and the poll's sweep
+ * flips it the moment a posting leaves its board, so a 90-day window can still only show reqs the
+ * employer is listing today. The window governs how long an untouched date stays believable, not
+ * how long a dead posting survives.
+ *
+ * WHAT TO WATCH, and it is no longer supply: a longer window cannot thin the board, so the headroom
+ * warnings should now sit far above their lines. The cost moved to STORAGE. The purge is derived
+ * from this constant, so rows are kept for 180 days rather than 28 on a 512 MB database, and the
+ * numbers that matter on the daily run are purged_postings and the table's own size. If it becomes
+ * a problem, the honest fix is a tighter purge multiple, not a quietly narrowed window.
  *
  * Greenhouse note: `posted_at` is Greenhouse's `updated_at` (it publishes no create date), so for
- * 77% of the board this is "changed in the last 14 days" rather than "posted". That is a deliberate
+ * 77% of the board this is "changed in the last 90 days" rather than "posted". That is a deliberate
  * call, and it is why the board card says UPDATED for Greenhouse rows and POSTED for Lever/Ashby.
  * Do not collapse those two words - claiming a publish date we do not have is the one thing the
  * board's copy tests exist to prevent.
  */
-export const JOB_FRESHNESS_DAYS = 14;
+export const JOB_FRESHNESS_DAYS = 90;
 
 /**
- * HOW LONG AN INTERNSHIP STAYS ON THE BOARD. Ninety days, not fourteen.
+ * HOW LONG AN INTERNSHIP STAYS ON THE BOARD. Ninety days.
  *
- * An internship req is posted once and stays open for months, and NOBODY EVER RE-SAVES IT. That is
- * the whole difference. Greenhouse publishes no create date so `posted_at` is its `updated_at`, and
- * a full-time req is edited often enough to keep re-entering a 14-day window; an internship posted
- * in the August burst is untouched from then until it closes. So it aged out of the board in
- * mid-September while still open, and still the most valuable posting on the board for the student
- * it was written for.
+ * EQUAL TO THE BOARD WINDOW SINCE 2026-08-26, and therefore currently a no-op: every internship this
+ * branch would admit is already admitted by the general one. Kept, and kept exported, because it
+ * encodes a DIFFERENT rule that was measured on its own, and the moment the board window is narrowed
+ * again - which it has been twice - deleting it would silently take internships down with it. A
+ * branch that costs one boolean is the cheap half of that bargain.
+ *
+ * WHY THE RULE IS ITS OWN: an internship req is posted once and stays open for months, and NOBODY
+ * EVER RE-SAVES IT. Greenhouse publishes no create date so `posted_at` is its `updated_at`, and a
+ * full-time req is edited often enough to keep re-entering a short window; an internship posted in
+ * the August burst is untouched from then until it closes. Under the old 14-day board window it aged
+ * out in mid-September while still open, and still the most valuable posting on the board for the
+ * student it was written for.
  *
  * Measured 2026-08-03, which is what set the number: 367 internships were open across our sources
  * and only 170 were inside 14 days. The window alone was costing 54% of internship supply.
@@ -278,7 +297,12 @@ export const INTERNSHIP_FRESHNESS_DAYS = 90;
  *
  * Still ONE helper, for the reason the single-window version was: `/jobs`, `/jobs/grouped`,
  * `/jobs/facets` and `surfacedJobCount()` all call it, and a second copy of this rule is precisely
- * how the floor check ends up watching a number no visitor ever sees.
+ * how the floor check ends up watching a number no visitor ever sees. One helper is also why
+ * widening the board window widens the dashboard's job feed by the same amount: that is the design,
+ * not a side effect.
+ *
+ * The two windows are the same LENGTH today (90 and 90) and the internship branch is consequently
+ * inert. Written as two anyway, because they are two rules: see INTERNSHIP_FRESHNESS_DAYS.
  */
 function freshnessPredicate() {
   return sql`(
@@ -1188,9 +1212,9 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
      * different facts and only the first one is a fault. */
     /* Two cutoffs, matching freshnessPredicate. The ingest gate is the THIRD place the window is
        enforced (read, purge, here) and the one that decides what exists at all: an internship the
-       poll refuses to store can never be shown by a longer read window, so leaving this at 14 days
-       would make the other two changes inert. The employment type is resolved by the normalizers
-       before this point, which is what lets the gate ask. */
+       poll refuses to store can never be shown by a longer read window, so leaving this behind the
+       constants would make the other two changes inert. The employment type is resolved by the
+       normalizers before this point, which is what lets the gate ask. */
     const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 86_400_000);
     const internshipCutoff = new Date(Date.now() - INTERNSHIP_FRESHNESS_DAYS * 86_400_000);
     const fresh = jobs
@@ -2346,7 +2370,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       minimum_sponsor_surfaced_jobs: MINIMUM_SPONSOR_SURFACED_JOBS,
       /* THE SUSTAINABILITY CHECK, run every day rather than once.
        *
-       * Whether the 14-day window keeps both postings and grouped roles above their warning lines
+       * Whether the 90-day window keeps both postings and grouped roles above their warning lines
        * depends on hiring volume and sources still resolving. Reporting both makes the answer
        * observable instead of relying on a one-time measurement.
        *

@@ -130,9 +130,13 @@ test('the floor and the autonomy rule are enforced against the same set of porta
   assert.ok(POLLABLE_JOB_BOARDS.length > 0, 'no pollable boards means the floor can never be met');
 });
 
-test('the freshness window is fourteen days', () => {
-  assert.equal(JOB_FRESHNESS_DAYS, 14);
-  assert.ok(JOB_FRESHNESS_DAYS >= 14, 'the immediate rollout requires a full two-week window');
+test('the freshness window is three months', () => {
+  assert.equal(JOB_FRESHNESS_DAYS, 90);
+  /* The floor under the value, not a restatement of it. Hiring is weekday work - Saturday carries
+     143 postings against a weekday 700-3,500 - so any window that does not span whole weeks changes
+     size depending on which days it covers. Fourteen was the smallest number that absorbed that;
+     nothing may take the window back under it without deliberately editing this line. */
+  assert.ok(JOB_FRESHNESS_DAYS >= 14, 'a window under two weeks is resized by the weekend it covers');
 });
 
 test('posting and grouped-role warnings are evaluated together', () => {
@@ -223,7 +227,9 @@ test('the purge keeps a full window of slack, so it cannot fight the poller', ()
   // test green - it was asserting its own arithmetic rather than the code's.
   assert.ok(PURGE_POSTINGS_OLDER_THAN_DAYS > JOB_FRESHNESS_DAYS,
     'purging at or inside the window churns rows the poller keeps restoring');
-  assert.equal(PURGE_POSTINGS_OLDER_THAN_DAYS, 28);
+  // 180, because the slack is a full window and the window is now 90. This is the storage cost of
+  // the longer board window, pinned as a number so it is noticed rather than inferred.
+  assert.equal(PURGE_POSTINGS_OLDER_THAN_DAYS, 180);
 });
 
 test('the internship commitment is pinned at 2,000 and is not yet a 5xx', async () => {
@@ -274,7 +280,13 @@ test('internships get a ninety-day window, and the purge honours it', async () =
     JOB_FRESHNESS_DAYS: boardWindow,
   } = await import('./jobMonitor');
   assert.equal(INTERNSHIP_FRESHNESS_DAYS, 90);
-  assert.ok(INTERNSHIP_FRESHNESS_DAYS > boardWindow, 'the whole point is that it is longer');
+  /* NOT `>`. The board window moved to 90 on 2026-08-26, so the two are equal and this branch admits
+     nothing the general one does not - it is inert, and asserting it is strictly longer would now be
+     asserting a fiction. `>=` is the property that actually has to hold: an internship may never be
+     dropped sooner than an ordinary posting, which is the one way this could silently regress if the
+     board window is widened again without the internship window following. */
+  assert.ok(INTERNSHIP_FRESHNESS_DAYS >= boardWindow,
+    'an internship must never age off the board before an ordinary posting would');
 
   /* The purge must keep a full internship window of slack, exactly as the board window does.
      Purging internships on the BOARD's schedule would delete the row nightly and re-fetch it each
