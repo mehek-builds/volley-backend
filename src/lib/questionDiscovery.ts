@@ -1,4 +1,8 @@
 import type { Page } from 'playwright-core';
+import {
+  referralAnswer as referrerDeclarationAnswer,
+  graduationWindowAnswer as graduationWindowDeclarationAnswer,
+} from './heldAnswerQuestions';
 import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
@@ -5329,6 +5333,18 @@ function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
     && !KEYWORD_SUBJECT_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))
     && !SCHOOL_ATTRIBUTE_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))) return 'school';
   if (/\bwhich\s+(?:school|university|college|institution)\b|\b(?:school|university|college|institution)\s+(?:name|(?:you\s+|are\s+you\s+)?(?:currently\s+)?(?:attend(?:ing|ed)?|enrolled(?:\s+in)?))\b|\bname\s+of\s+(?:your\s+)?(?:school|university|college|institution)\b|^university\s*\/\s*institution\b/i.test(l)) return 'school';
+  /* THE SAME REQUEST WITH A PARTICIPLE IN THE WAY.
+   *
+   * "Please inform the name of your attending or graduated school or university" - Mercari's
+   * Workable form, read live 2026-08-26. The branch above needs the school noun to follow "name of
+   * your" directly, and two participles sit in between, so a school Litos has on file came back to
+   * the applicant as a question. The words allowed in that gap say WHICH school rather than some
+   * attribute OF one, which is what keeps this from reaching "name of your university email
+   * address" - and both guards the branch above relies on are applied here for the same reason it
+   * applies them: an explicit pattern that returns early never reaches labelNamesProfileField. */
+  if (/\bname\s+of\s+(?:the\s+|your\s+)?(?:(?:current(?:ly)?|most\s+recent|latest|last|previous|prior|attending|attended|graduated?|graduating|enrolled)\s+(?:or\s+)?){1,3}(?:school|university|college|institution)\b/i.test(l)
+    && !KEYWORD_SUBJECT_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))
+    && !SCHOOL_ATTRIBUTE_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))) return 'school';
   if (MAJOR_QUESTION.test(l)) return 'major';
   if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
   if (EDUCATION_ATTENDANCE_DATE_QUESTION.test(l)) {
@@ -5878,21 +5894,56 @@ function priorEmployerAnswer(label: string, ap: ApplicationProfileLike): { value
    * Cost Infrastructure" while the form says "Traeco", and an exact match answers "No" to an
    * employer she is currently at. employerMatchesTarget is anchored at the first token precisely
    * so that "Tone" still cannot match "Tonee". */
-  /* STILL "Yes" OR SILENCE, NEVER "No", and this was re-tested on 2026-08-09 rather than assumed.
-   *
-   * Redwood Materials' "Have you ever worked for Redwood Materials?" is refused while the profile
-   * holds an employment record that plainly does not contain Redwood, and returning "No" from that
-   * record was tried here and reverted. The record is NOT EXHAUSTIVE and was measured not to be:
-   * `employer_history` is scraped out of parsed_json.experience and held 4 of the owner's 9
-   * organisations, so the same reasoning that produces "No" about Redwood produces "No" about a
-   * company she works at today. governmentEmployment.test.ts pins all three cases.
-   *
-   * `prior_application_employers` does not rescue it either. That column is a list of employers she
-   * has APPLIED to, which she maintains and where `[]` does mean none. This question is about
-   * having been EMPLOYED, and answering one from the other would be a statement about her work
-   * history built out of her application history. */
   const knownMatch = history.some((employer) => employerMatchesTarget(employer, target));
-  return knownMatch ? { value: 'Yes' } : null;
+  if (knownMatch) return { value: 'Yes' };
+
+  /* "No" FROM THE FULL RECORD, AND ONLY ONCE EVERY GUARD ABOVE HAS PASSED.
+   *
+   * THE HISTORY OF THIS LINE MATTERS, because it returned silence for a year and the reason was
+   * sound. Returning "No" was tried on 2026-08-09 and reverted: `employer_history` is scraped out
+   * of parsed_json.experience and was measured holding 4 of the owner's 9 organisations, so a "No"
+   * built on it could deny a job she actually had - the worst answer this file can produce, since
+   * it is a false statement to an employer rather than a missing one.
+   *
+   * WHAT CHANGED IS THE RECORD, NOT THE APPETITE FOR RISK. declaredEmployers no longer reads that
+   * 4-of-9 scrape alone; it unions it with the experience bank, which is the record she authored
+   * herself and which held all 9. Asked on 2026-08-26 which she wanted, the owner chose exactly
+   * this: answer from the full record, keep the guards.
+   *
+   * AND THE GUARDS ARE WHAT MAKE IT SAFE. Everything ambiguous has already returned above -
+   * a composite target ("Databricks or any subsidiary", "Goldman Sachs or its affiliates") via
+   * isSinglePlainEmployerTarget, a generic one ("any employer in this industry") via the article
+   * test, and anything under five characters. What is left below is the near miss, which is the one
+   * ambiguity a token-anchored match cannot see: the form's "Tone" is not her "Tonee" by token, and
+   * answering "No" to it would deny the company she founded over one letter. An overlapping spelling
+   * is not a different employer, it is an unresolved one, so it goes back to her.
+   *
+   * `prior_application_employers` still does not participate. That column lists employers she has
+   * APPLIED to; answering an employment question from it would build a claim about her work history
+   * out of her application history. */
+  /* WHAT "ABSENT" HAS TO MEAN BEFORE IT CAN MEAN "NO".
+   *
+   * `history` above is JOB entries only, which is right for proving a Yes and far too narrow for
+   * proving a No. The bank also holds projects and leadership roles, and an organisation she names
+   * there is one she HAS a relationship with - "have you ever worked for Spark SC" is not a question
+   * her own record answers in the negative just because the entry is typed `leadership`. Every
+   * organisation she has mentioned, whatever its type, therefore blocks the negative.
+   *
+   * The near miss blocks it too, in both shapes the corpus produced: a prefix relation ("SoFia"
+   * against "SoFi") and a shared first token ("Traeco Labs" against "Traeco - AI Agent Cost
+   * Infrastructure"). employerMatchesTarget is anchored precisely so those do not count as a match,
+   * and the same anchoring means they must not count as a MISS either - an overlapping name is an
+   * unresolved employer, not a different one. */
+  const mentioned = [
+    ...history,
+    ...(ap.experience_bank ?? []).map((entry) => normalizeEmployerName(entry.org)),
+  ].filter(Boolean);
+  const firstToken = (value: string): string => value.split(' ')[0] ?? '';
+  const unresolved = mentioned.some((org) => org.startsWith(target)
+    || target.startsWith(org)
+    || firstToken(org) === firstToken(target));
+  if (unresolved) return null;
+  return { value: 'No' };
 }
 
 /* Where she LIVES, which is a stored fact, kept strictly apart from where she will WORK, which is
@@ -7131,6 +7182,7 @@ export async function discoverPageQuestions(page: Page): Promise<DiscoveredQuest
 // Resolves a discovered question's answer from the stored profile, without touching the LLM.
 // Returns null for anything that isn't a confidently-known field (including every refused
 // question), so the caller can fall through to the essay drafter or leave it for the human.
+
 export function resolveKnownAnswer(
   label: string,
   inputType: string,
@@ -7192,8 +7244,31 @@ export function resolveKnownAnswer(
   const politicallyExposed = politicallyExposedAnswer(label, ap);
   if (politicallyExposed) return politicallyExposed;
 
+
+  /* QUESTIONS LITOS ALREADY HOLDS THE ANSWER TO, up here with the other self-declarations and for
+   * the same reason: a broad rule further down answers them wrongly or holds them.
+   *
+   * MEASURED on Mercari's Workable form, 2026-08-26, where four of fifteen questions parked.
+   *
+   * ABOVE siblingQuestionRefusal DELIBERATELY. That guard holds a compound question because one
+   * control carrying two statements cannot be answered by one value, and it read the referral label
+   * "if this is a referral, enter the employee's name; if it is not, please enter na" as exactly
+   * that. But a compound of the form "if A do X, if not A do Y" is determinate the moment A is
+   * known, and her standing answer is that she is not referred - so the label states its own answer
+   * and the guard was holding a question Litos could complete. The rules below only ever return
+   * that determinate branch; anything they cannot settle returns null and falls through to the
+   * guard exactly as before.
+   *
+   * See lib/heldAnswerQuestions.ts for what each rule refuses. */
+  const referrerDeclaration = referrerDeclarationAnswer(label, options);
+  if (referrerDeclaration) return referrerDeclaration;
+
+  const graduationWindow = graduationWindowDeclarationAnswer(label, ap.grad_date, options);
+  if (graduationWindow) return graduationWindow;
+
   const siblingRefusal = siblingQuestionRefusal(label, jdText);
   if (siblingRefusal) return siblingRefusal;
+
 
   /* Up here for the same reason as the two above it, and AFTER them on purpose: the PEP question
    * and Astranis's export-control paragraph both contain the word "government", and both are

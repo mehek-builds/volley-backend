@@ -1296,7 +1296,8 @@ test('live-audit profile labels beat generic wording and stay out of drafts', ()
     value: 'Yes',
   });
   const samsara = resolveKnownAnswer('Have you previously worked at Samsara?', 'select', profile, undefined);
-  assert.ok(samsara && 'skipReason' in samsara);
+  // Absent from the full record and nothing like it: answered No. The near miss below still holds.
+  assert.deepEqual(samsara, { value: 'No' });
   const nearMissPriorEmployer = resolveKnownAnswer('Have you previously worked at Tone?', 'select', profile, undefined);
   assert.ok(nearMissPriorEmployer && 'skipReason' in nearMissPriorEmployer && nearMissPriorEmployer.skipReason.startsWith('prior employer'));
   const genericPriorEmployer = resolveKnownAnswer('Have you previously worked at any employer in this industry?', 'select', profile, undefined);
@@ -1768,14 +1769,20 @@ test('Databricks export-control checkbox questions are not inferred from profile
   );
 });
 
-test('Databricks prior employer questions answer only a proven positive', () => {
+/* Rewritten 2026-08-26. This pinned "Yes or silence, never No", which was right while
+   declaredEmployers read only the 4-of-9 parsed scrape. It now unions the experience bank she
+   authored, and the owner asked for the negative to be answered from that fuller record. What the
+   test still pins - and what matters more than the flip - is that every AMBIGUOUS shape below is
+   unchanged: a composite target, a subsidiary, a generic one and a near miss all still go to her. */
+test('Databricks prior employer questions answer No from the full record and hold every ambiguity', () => {
   const absent = resolveKnownAnswer(
       'Do you currently or have you previously worked for Databricks in the past?',
       'combobox',
       { employer_history: ['SoFi', 'Traeco', 'Tonee'] },
       undefined,
   );
-  assert.ok(absent && 'skipReason' in absent);
+  // Unambiguous and absent from the full record: answered rather than handed back.
+  assert.deepEqual(absent, { value: 'No' });
   assert.deepEqual(
     resolveKnownAnswer(
       'Do you currently or have you previously worked for Databricks in the past?',
