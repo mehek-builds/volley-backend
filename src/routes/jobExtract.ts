@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { requireAuth } from '../middleware/auth';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { isBrowserbaseConfigured, isManagedStratusProvider, runManagedBrowser } from '../lib/browserbase';
+import { leadRequirementCandidates } from '../engine/leadAlignment';
 
 // Bounded so a page with an unusually large DOM (or a hostile one padding its text node) cannot
 // blow past resumeGenerateBodySchema's jd_text cap (100_000) once the frontend forwards this
@@ -119,6 +120,68 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
       return reply.status(502).send({
         error: 'That page returned no readable text. Paste the job description manually instead.',
         code: 'job_extract_empty',
+      });
+    }
+
+    /* NON-EMPTY WAS NEVER THE RIGHT BAR, and this route already knew it for one board: the Workable
+     * rewrite above exists because "Workable's application route contains form labels, not the job
+     * description". The rewrite only knows one board, and `extract: 'body'` reaches the same shape
+     * by several routes: a company-hosted embed (Jane Street, below) and, confirmed on a second
+     * account the same night, a plain Lever apply route. Do not read this as a company-hosted-board
+     * problem. What the shapes share is that the URL was an APPLICATION page, and on those the body
+     * is a consent banner, site nav, the FORM, and a footer, with the description nowhere in it.
+     *
+     * Observed live 2026-08-26 on packet 496cff97, a Jane Street Software Engineer Internship:
+     * 3,696 characters and 78 lines, of which the posting contributed a title and a location. The
+     * rest was the banner, the top nav, `* Required fields`, `Legal first name`, `Email
+     * confirmation`, the pronoun list, `How did you hear about us?`, `Select an option`, and the
+     * legal footer. It passed the non-empty check, was frozen into the packet, and the review
+     * screen scored it 0 of 5 with "Not much overlap" beside it, which reads as "your resume is a
+     * poor match" when the truth is "we never read the posting".
+     *
+     * WHAT IS ASKED HERE IS THE QUESTION THE REST OF THE SYSTEM ALREADY ASKS. leadAlignment refuses
+     * to cite a lead requirement when the frozen description "contains no supported primary ask",
+     * and calls that unscoreable job fit rather than a defect. Downstream already recognises this
+     * page as not-a-description; extraction simply never checked, so the packet got built anyway.
+     * Reusing that exact predicate is deliberate: a second private heuristic here would drift from
+     * the one that decides what a requirement is everywhere else.
+     *
+     * A POSTING THAT CARRIES ITS FORM INLINE IS NOT AFFECTED, which is the case that matters most
+     * because most Greenhouse pages are exactly that. The test is whether any ask survives, not
+     * whether form labels are present: measured on a real posting with its application form
+     * appended, 7 asks; on the same posting alone, 5; on the Jane Street page, 0.
+     *
+     * Refusing costs the operator one paste. Accepting costs a frozen packet scored against a form,
+     * junk requirement terms drawn from dropdown options, and a gap list built out of them. The
+     * 502 contract documented above is the designed route for a page this run cannot read. */
+    if (leadRequirementCandidates(jdText).length === 0) {
+      /* CHECKED ON THE CLIPPED TEXT, DELIBERATELY, because the clipped text is what gets frozen into
+         the packet and scored. Validating result.text instead would let a page pass on requirements
+         that MAX_JD_TEXT_CHARS then cuts away, which is the failure this guard exists to stop.
+         Separating the two cases costs one more call and makes the distinction visible in the log:
+         a Lever posting seen on another account filled all 20,000 characters with a `Name of School`
+         dropdown of roughly three thousand university names, so a page whose description sits below
+         a long <select> is a real shape, not a hypothetical, and it wants a different diagnosis from
+         a page that never had a description at all. The operator is told the same thing either way
+         because the remedy is the same paste. */
+      const fullText = (result.text ?? '').trim();
+      const truncated = fullText.length > jdText.length;
+      // Only worth asking when text was actually cut: otherwise the two inputs are the same string.
+      const descriptionPushedPastCap = truncated && leadRequirementCandidates(fullText).length > 0;
+      fastify.log.warn(
+        {
+          userId,
+          job_url: body.job_url,
+          extraction_url: extractionUrl,
+          textLen: jdText.length,
+          truncated,
+          reason: descriptionPushedPastCap ? 'description_pushed_past_cap' : 'page_states_no_requirement',
+        },
+        'job description extraction returned no stated requirement',
+      );
+      return reply.status(502).send({
+        error: 'That page looks like an application form rather than a job description. Paste the job description manually instead.',
+        code: descriptionPushedPastCap ? 'job_extract_truncated_past_description' : 'job_extract_no_requirements',
       });
     }
 

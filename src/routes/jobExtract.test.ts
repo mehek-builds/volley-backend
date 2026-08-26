@@ -1,11 +1,14 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   jobExtractBodySchema,
   clipJdText,
   jobDescriptionSourceUrl,
   MAX_JD_TEXT_CHARS,
 } from './jobExtract';
+import { leadRequirementCandidates } from '../engine/leadAlignment';
 
 // POST /jobs/extract lets "New application" go from a pasted URL to a reviewable JD without a
 // side-channel copy-paste step (2026-07-24 product decision). No live network/DB in the test env
@@ -106,5 +109,104 @@ describe('jobDescriptionSourceUrl', () => {
     ]) {
       assert.equal(jobDescriptionSourceUrl(url), url);
     }
+  });
+});
+
+/* A PAGE OF FORM LABELS IS NOT A JOB DESCRIPTION, and non-empty was the only bar until 2026-08-26.
+ *
+ * Packet 496cff97, a Jane Street Software Engineer Internship, was frozen with 3,696 characters and
+ * 78 lines in which the posting contributed a title and a location. The rest was a consent banner,
+ * the site's top nav, `* Required fields`, `Legal first name`, `Email confirmation`, the pronoun
+ * list, `How did you hear about us?`, `Select an option`, and the legal footer. The review screen
+ * scored it 0 of 5 with "Not much overlap", which a student reads as "your resume is a poor match"
+ * when the truth is that the posting was never read.
+ *
+ * The route already rewrote Workable application URLs for this exact reason; company-hosted boards
+ * reach the same shape by a path no URL rewrite recognises, so the check has to be on what came
+ * back rather than on where it was asked for. */
+describe('a form-only page is refused rather than frozen into a packet', () => {
+  const JANE_STREET_FORM_ONLY = [
+    'Jane Street Group, LLC uses cookies and similar technologies, including third-party cookies, on this Site to provide basic functionalities and perform analytics.',
+    'ACCEPT ALL', 'REJECT ALL',
+    'WHO WE ARE', 'WHAT WE DO', 'THE LATEST', 'CULTURE', 'JOIN JANE STREET',
+    'OPEN ROLES', 'PROGRAMS AND EVENTS', 'INTERNSHIPS', 'INTERVIEWING',
+    'Join Jane Street', 'Open roles', 'Job description', 'Apply',
+    'Software Engineer Internship, May-August', 'New York, Summer Internship', 'Job description',
+    '* Required fields', 'Legal first name *', 'Preferred first name', 'Legal last name *',
+    'Email *', 'Email confirmation *', 'Phone *',
+    'Pronouns (Select one or more.)', 'she/her/hers', 'he/him/his', 'they/them/theirs',
+    'Current or most recent employer *', 'How did you hear about us? *', 'Select an option',
+    'Have you interviewed with Jane Street before? *', 'Yes', 'No',
+    'Submit', 'Jane Street is an Equal Opportunity Employer',
+  ].join('\n');
+
+  const REAL_POSTING = [
+    'What we look for:',
+    'Pursuing a bachelor degree in computer science or a related engineering field, graduating in 2028',
+    'You have some first hand experience with SQL and/or Python',
+    'You use analytical skills to make data-driven decisions',
+  ].join('\n');
+
+  const APPLICATION_FORM = [
+    'Apply for this job', '* Required fields', 'First Name *', 'Last Name *', 'Email *',
+    'Resume/CV *', 'LinkedIn Profile', 'How did you hear about us? *', 'Select an option',
+    'Submit Application',
+  ].join('\n');
+
+  test('the live Jane Street page states no requirement at all', () => {
+    assert.deepEqual(leadRequirementCandidates(JANE_STREET_FORM_ONLY), []);
+  });
+
+  test('a real posting does state requirements', () => {
+    assert.ok(leadRequirementCandidates(REAL_POSTING).length > 0);
+  });
+
+  /* THE CASE THAT MUST NOT REGRESS. Most Greenhouse pages carry the description and the application
+     form on one page, so a check that keyed on "are form labels present" would refuse nearly every
+     posting the route is for. The predicate is whether any ask SURVIVES, not whether a form is
+     there beside it. */
+  test('a real posting is still accepted when its application form sits on the same page', () => {
+    const withForm = `${REAL_POSTING}\n${APPLICATION_FORM}`;
+    assert.ok(
+      leadRequirementCandidates(withForm).length >= leadRequirementCandidates(REAL_POSTING).length,
+      'appending a form must not remove asks',
+    );
+  });
+
+  /* TRUNCATION IS A CO-CONSPIRATOR, confirmed on a second account the same night: a Lever posting
+     filled all 20,000 characters with a `Name of School` dropdown of roughly three thousand
+     university names, so the description never made it into the captured text at all. That is why
+     the guard runs on the CLIPPED string rather than on what the browser returned: the clipped
+     string is what gets frozen and scored, and validating the full text would let a page pass on
+     requirements the cap then removes. */
+  test('a page whose requirements are cut away by the cap is still refused', () => {
+    const dropdown = Array.from({ length: 4000 }, (_, i) => `University Number ${i}`).join('\n');
+    const page = `${APPLICATION_FORM}\n${dropdown}\n${REAL_POSTING}`;
+    assert.ok(page.length > MAX_JD_TEXT_CHARS, 'fixture must exceed the cap to exercise this');
+    // The full page does state requirements; the clipped one does not, and the clipped one is what
+    // would be stored.
+    assert.ok(leadRequirementCandidates(page).length > 0, 'full text should still contain the asks');
+    assert.deepEqual(leadRequirementCandidates(clipJdText(page)), []);
+  });
+
+  test('the route separates a cut-off description from a page that never had one', () => {
+    const route = readFileSync(path.join(__dirname, 'jobExtract.ts'), 'utf8');
+    assert.match(route, /descriptionPushedPastCap/);
+    assert.match(route, /job_extract_truncated_past_description/);
+    // The distinction must be drawn from the FULL text, or it cannot tell the two apart at all.
+    assert.match(route, /leadRequirementCandidates\(fullText\)\.length > 0/);
+  });
+
+  test('the route refuses on no stated requirement, using the documented paste-manually contract', () => {
+    const route = readFileSync(path.join(__dirname, 'jobExtract.ts'), 'utf8');
+    assert.match(route, /leadRequirementCandidates\(jdText\)\.length === 0/);
+    assert.match(route, /'job_extract_no_requirements'/);
+    // 502 is what the route's own docblock tells callers means "fall back to the manual paste field".
+    assert.match(route, /job_extract_no_requirements[\s\S]{0,80}|status\(502\)[\s\S]{0,400}job_extract_no_requirements/);
+    // The refusal must come AFTER the empty check, so an empty page keeps its own clearer message.
+    assert.ok(
+      route.indexOf("job_extract_empty") < route.indexOf("job_extract_no_requirements"),
+      'the empty-page refusal must stay ahead of the form-only one',
+    );
   });
 });
