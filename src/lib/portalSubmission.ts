@@ -5428,15 +5428,29 @@ function pushWorkableManagedPhoneActions(
     timeout: MANAGED_FILL_TIMEOUT_MS,
     requireUnique: true,
   });
-  // Workable remounts its React phone subtree after a value commit. A fill can therefore verify the
-  // old node and then leave a short interval with no visible input before the replacement mounts.
-  // Wait on the stable selector before the separate evidence read instead of treating that remount
-  // interval as a provider-session failure.
+  /* Workable remounts its React phone subtree after a value commit. A fill can therefore verify the
+   * old node and then leave a short interval with no visible input before the replacement mounts.
+   * Wait on the stable selector before the separate evidence read instead of treating that remount
+   * interval as a provider-session failure.
+   *
+   * OPTIONAL, because non-optional made this wait CAUSE the failure it was written to prevent.
+   * MEASURED on Pony.ai's Workable form 2026-08-26, four consecutive send attempts, stratus
+   * fingerprint 0913d5abde9ba637: `page.waitForSelector: Timeout 20000ms exceeded` with
+   * submitPressed false, so the whole application died here and the applicant was told Litos had hit
+   * "a temporary secure-browser error" - the exact provider-session sentence this comment says the
+   * wait exists to avoid. The selector demands `:visible`, and a replacement that mounts
+   * present-but-not-visible can never satisfy it, so no timeout value would have helped.
+   *
+   * NOTHING IS WEAKENED BY THIS, and that is the whole reason it is safe: this action settles the
+   * page, it does not prove anything. The extract on the very next line is the evidence gate and is
+   * untouched - optional false, requireUnique, requireNonEmpty, and expectedValueDigits pinned to
+   * the planned number. A phone that genuinely did not land still fails there, and fails with a
+   * sentence about the phone rather than about the browser. */
   actions.push({
     type: 'waitForSelector',
     selector: WORKABLE_PHONE_SELECTOR,
     label: 'workable_phone_value_visible',
-    optional: false,
+    optional: true,
     timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
   });
   actions.push({
@@ -5452,11 +5466,14 @@ function pushWorkableManagedPhoneActions(
     stabilityWindowMs: 1_200,
   });
   if (plan.country) {
+    /* Same shape, same reason, same protection: the country readback extract below keeps
+     * optional false with requireNonEmpty and expectedValueDigits on the dial code, so the fact is
+     * still proved. Only the settling wait stands down. */
     actions.push({
       type: 'waitForSelector',
       selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
       label: 'workable_phone_country_visible',
-      optional: false,
+      optional: true,
       timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
     });
     actions.push({

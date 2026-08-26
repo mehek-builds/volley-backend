@@ -4586,18 +4586,24 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneIndex]?.value, '0567417451');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
   assert.equal(actions[phoneIndex]?.optional, false);
+  /* OPTIONAL since 2026-08-26. Non-optional made these settling waits CAUSE the provider-session
+   * failure they were written to prevent: four consecutive Pony.ai send attempts died on
+   * `page.waitForSelector: Timeout 20000ms exceeded` with submitPressed false, because a remounted
+   * node that is present-but-not-visible can never satisfy `:visible`. The proof of the phone is the
+   * EXTRACT below, not this wait - the assertions on requireNonEmpty and expectedValueDigits a few
+   * lines down are what must never move. */
   assert.deepEqual(actions[phoneWaitIndex], {
     type: 'waitForSelector',
     selector: 'input[name="phone"][type="tel"]:visible',
     label: 'workable_phone_value_visible',
-    optional: false,
+    optional: true,
     timeout: 20_000,
   });
   assert.deepEqual(actions[countryWaitIndex], {
     type: 'waitForSelector',
     selector: '.iti__selected-dial-code:visible',
     label: 'workable_phone_country_visible',
-    optional: false,
+    optional: true,
     timeout: 20_000,
   });
   assert.equal(actions[countryProofIndex]?.attribute, undefined);
