@@ -1638,6 +1638,31 @@ function greenhouseCheckboxOptionInventoryKey(
   return id ? `${MANAGED_OPTION_SELECTOR_KEY_PREFIX}${trimmed}` : undefined;
 }
 
+/**
+ * The shared Greenhouse field name behind one checkbox or radio option selector.
+ *
+ * Greenhouse's public application schema publishes the complete option inventory under a group
+ * name such as `question_67595579[]`, while browser discovery identifies one concrete option as
+ * `#question_67595579\[\]_728374231` or `input[id="question_67595579[]_728374231"]`.
+ * Those are two identities for the same question. Keep the numeric option suffix out of the join
+ * key so reviewed answers can be decomposed only against the employer's complete exact list.
+ */
+function greenhouseChoiceGroupNameFromSelector(
+  selector: string | undefined | null,
+): string | undefined {
+  const trimmed = (selector ?? '').trim();
+  if (!trimmed) return undefined;
+  const unescaped = trimmed.replace(/\\([\[\]])/g, '$1');
+  const optionId = unescaped.match(/^#(question_\d+\[\]_\d+)$/i)?.[1]
+    ?? unescaped.match(
+      /^(?:[a-z][a-z0-9-]*)?\[id=["'](question_\d+\[\]_\d+)["']\]$/i,
+    )?.[1];
+  if (optionId) return optionId.replace(/_\d+$/, '');
+  return unescaped.match(
+    /^(?:[a-z][a-z0-9-]*)?\[name=["'](question_\d+\[\])["']\](?:\[value=["'][^"']+["']\])?$/i,
+  )?.[1];
+}
+
 function managedOptionInventoryKeyFromSelector(
   selector: string | undefined | null,
 ): string | undefined {
@@ -2366,8 +2391,13 @@ function packetReadOptionsForQuestion(
 ): string[] | undefined {
   const selector = reviewQuestionPortalSelector(item);
   const controlId = managedOptionInventoryKeyFromSelector(selector);
+  const greenhouseGroupName = greenhouseChoiceGroupNameFromSelector(selector);
   const options = (selector ? packet.fieldOptions?.[selector] : undefined)
-    ?? (controlId ? packet.fieldOptions?.[controlId] : undefined);
+    ?? (controlId ? packet.fieldOptions?.[controlId] : undefined)
+    ?? (greenhouseGroupName ? packet.fieldOptions?.[greenhouseGroupName] : undefined)
+    ?? (greenhouseGroupName
+      ? packet.fieldOptions?.[`${MANAGED_OPTION_NAME_KEY_PREFIX}${greenhouseGroupName}`]
+      : undefined);
   return options && options.length > 0 ? options : undefined;
 }
 
@@ -7438,11 +7468,31 @@ export function buildManagedPortalActions(
       }
       if (/^(?:checkbox|radio)$/i.test(portalInputType ?? '')) {
         if (portalFamily(portal) === 'greenhouse') {
-          const offered = /^checkbox$/i.test(portalInputType ?? '')
-            ? packetReadOptionsForQuestion(packet, item)
+          const greenhouseGroupName = /^checkbox$/i.test(portalInputType ?? '')
+            ? greenhouseChoiceGroupNameFromSelector(rawPortalSelector)
             : undefined;
+          const offered = /^checkbox$/i.test(portalInputType ?? '') ? currentOptions : undefined;
           const values = offered ? exactChoiceOptionValues(answer, offered) : null;
-          if (offered) {
+          if (greenhouseGroupName) {
+            if (!values) {
+              if (submit) {
+                throw new ManagedRequiredFieldConfirmationError(
+                  [questionText],
+                  `Litos did not press submit: the reviewed selection for "${questionText}" could not be matched to one exact Greenhouse option set`,
+                );
+              }
+              continue;
+            }
+            for (const value of values) {
+              pushScopedQuestionChoiceActions(
+                actions,
+                questionText,
+                value,
+                'question',
+                { includeSelectFallbacks: false },
+              );
+            }
+          } else if (offered) {
             // One exact scoped action per reviewed value. The managed runner uses check(), not a
             // toggle, so a later language or experience-setting option preserves the earlier ones.
             // When the live list cannot prove one decomposition, emit nothing rather than guess
@@ -8780,6 +8830,113 @@ async function waitForDirectWidget(page: Page, milliseconds: number): Promise<vo
   if (typeof wait === 'function') await wait.call(page, milliseconds).catch(() => undefined);
 }
 
+async function directChoiceLabels(control: Locator): Promise<string[]> {
+  const renderedLabels = await control.evaluate((element) => {
+    const input = element as unknown as {
+      labels?: ArrayLike<{ innerText?: string; textContent?: string | null }>;
+      getAttribute(name: string): string | null;
+    };
+    const labels = Array.from(input.labels ?? []);
+    const texts = labels.map((label) => (
+      typeof label.innerText === 'string' ? label.innerText : (label.textContent ?? '')
+    ));
+    const ariaLabel = input.getAttribute('aria-label');
+    if (ariaLabel) texts.push(ariaLabel);
+    return texts;
+  }).catch(() => [] as string[]);
+  return [...new Set(renderedLabels.map((label) => label.trim()).filter(Boolean))];
+}
+
+async function markDirectChoiceUnconfirmed(control: Locator, active: boolean): Promise<boolean> {
+  return control.evaluate((element, state) => {
+    const node = element as unknown as {
+      setAttribute(name: string, value: string): void;
+      removeAttribute(name: string): void;
+    };
+    if (state.active) node.setAttribute(state.attribute, 'true');
+    else node.removeAttribute(state.attribute);
+  }, { attribute: WORKABLE_CHOICE_UNCONFIRMED_ATTR, active }).then(() => true).catch(() => false);
+}
+
+async function clearDirectChoiceUnconfirmed(
+  choices: ReadonlyArray<{ control: Locator }>,
+): Promise<boolean> {
+  let cleared = true;
+  for (const choice of choices) {
+    if (!await markDirectChoiceUnconfirmed(choice.control, false)) cleared = false;
+  }
+  return cleared;
+}
+
+async function fillExactGreenhouseCheckboxGroup(
+  page: Page,
+  groupName: string,
+  answer: string,
+  offeredOptions: readonly string[],
+): Promise<boolean> {
+  const values = exactChoiceOptionValues(answer, offeredOptions);
+  if (!values) return false;
+  const controls = page.locator(
+    `input[type="checkbox"][name="${quoteAttr(groupName)}"]`,
+  );
+  const controlCount = await controls.count().catch(() => 0);
+  if (controlCount === 0) return false;
+
+  const choices: Array<{ control: Locator; labels: string[] }> = [];
+  for (let index = 0; index < controlCount; index += 1) {
+    const control = controls.nth(index);
+    if (!(await control.isVisible().catch(() => false))) return false;
+    const labels = await directChoiceLabels(control);
+    if (labels.length === 0) return false;
+    choices.push({ control, labels });
+  }
+
+  const selected: Locator[] = [];
+  for (const value of values) {
+    const normalizedValue = normalizedChoiceOption(value);
+    const matching = choices.filter((choice) => choice.labels.some(
+      (label) => normalizedChoiceOption(label) === normalizedValue,
+    ));
+    if (matching.length !== 1 || selected.includes(matching[0].control)) return false;
+    selected.push(matching[0].control);
+  }
+
+  const snapshots: Array<{ control: Locator; checked: boolean }> = [];
+  for (const choice of choices) {
+    const checked = await choice.control.isChecked().catch(() => null);
+    if (checked === null) return false;
+    snapshots.push({ control: choice.control, checked });
+  }
+  try {
+    for (const choice of choices) {
+      if (!await markDirectChoiceUnconfirmed(choice.control, true)) return false;
+    }
+
+    for (const choice of choices) {
+      if (!await setDirectChoiceState(choice.control, selected.includes(choice.control))) {
+        if (!await restoreDirectChoiceStates(snapshots)) {
+          throw new Error('Greenhouse choice replay could not restore its previous selection state');
+        }
+        return false;
+      }
+    }
+    for (const choice of choices) {
+      if (await choice.control.isChecked().catch(() => null) !== selected.includes(choice.control)) {
+        if (!await restoreDirectChoiceStates(snapshots)) {
+          throw new Error('Greenhouse choice replay could not restore its previous selection state');
+        }
+        return false;
+      }
+    }
+    return true;
+  } finally {
+    if (!await clearDirectChoiceUnconfirmed(choices)
+      && !await clearDirectChoiceUnconfirmed(choices)) {
+      throw new Error('Greenhouse choice replay could not clear its unconfirmed state');
+    }
+  }
+}
+
 /**
  * Workable choice groups point at the exact question label with aria-labelledby. Resolve that
  * relationship in both directions and refuse duplicate text instead of borrowing a nearby group.
@@ -8871,20 +9028,7 @@ async function fillExactWorkableChoice(
   for (let index = 0; index < (await controls.count().catch(() => 0)); index += 1) {
     const candidate = controls.nth(index);
     if (!(await candidate.isVisible().catch(() => false))) continue;
-    const renderedLabels = await candidate.evaluate((element) => {
-      const input = element as unknown as {
-        labels?: ArrayLike<{ innerText?: string; textContent?: string | null }>;
-        getAttribute(name: string): string | null;
-      };
-      const labels = Array.from(input.labels ?? []);
-      const texts = labels.map((label) => (
-        typeof label.innerText === 'string' ? label.innerText : (label.textContent ?? '')
-      ));
-      const ariaLabel = input.getAttribute('aria-label');
-      if (ariaLabel) texts.push(ariaLabel);
-      return texts;
-    }).catch(() => [] as string[]);
-    const labels = [...new Set(renderedLabels.map((label) => label.trim()).filter(Boolean))];
+    const labels = await directChoiceLabels(candidate);
     if (labels.length > 0) choices.push({ control: candidate, labels });
   }
   const offered = choices.flatMap((choice) => choice.labels);
@@ -9028,7 +9172,13 @@ async function fillExactWorkableCombobox(
   return markWorkableChoiceUnconfirmed(widget, false);
 }
 
-async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet: SubmissionPacket, out: string[]) {
+async function fillReviewedQuestions(
+  page: Page,
+  portal: SupportedPortal,
+  packet: SubmissionPacket,
+  out: string[],
+): Promise<string[]> {
+  const blockers: string[] = [];
   for (const item of packet.questions) {
     const answer = greenhouseReviewedQuestionAnswer(item, packet);
     if (!answer.trim()) continue;
@@ -9040,6 +9190,20 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
     const portalInputType = reviewQuestionPortalInputType(item);
     if (/^(?:checkbox|radio)$/i.test(portalInputType ?? '')) {
       if (portalFamily(portal) === 'greenhouse') {
+        const groupName = /^checkbox$/i.test(portalInputType ?? '')
+          ? greenhouseChoiceGroupNameFromSelector(reviewQuestionPortalSelector(item))
+          : undefined;
+        const offered = groupName ? packetReadOptionsForQuestion(packet, item) : undefined;
+        if (groupName) {
+          if (offered && await fillExactGreenhouseCheckboxGroup(page, groupName, answer, offered)) {
+            out.push(`question_checkbox:${questionText.slice(0, 80)}`);
+          } else {
+            blockers.push(
+              `Litos could not safely apply or verify the reviewed selection for "${questionText}"`,
+            );
+          }
+          continue;
+        }
         for (const selector of greenhouseCheckboxOptionSelectors(questionText, answer)) {
           const field = page.locator(selector).first();
           if ((await field.count()) > 0 && (await field.isVisible().catch(() => false))) {
@@ -9111,6 +9275,7 @@ async function fillReviewedQuestions(page: Page, portal: SupportedPortal, packet
       out.push(`question:${questionText.slice(0, 80)}`);
     }
   }
+  return blockers;
 }
 
 async function fillResolvedRequiredField(
@@ -9422,15 +9587,18 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
       claims,
     );
   }
-  if (family !== 'zoho_recruit' && family !== 'bullhorn' && family !== 'bamboohr') {
-    await fillReviewedQuestions(page, portal, packet, filledFields);
-  }
+  const reviewedQuestionBlockers = family !== 'zoho_recruit'
+    && family !== 'bullhorn'
+    && family !== 'bamboohr'
+    ? await fillReviewedQuestions(page, portal, packet, filledFields)
+    : [];
 
   const blockers: string[] = [];
   /* A document that was NOT uploaded because its only control already held another one. First,
    * because it is the sentence that explains an application she will otherwise read as complete,
    * and because it is the whole justification for the upload having been skipped. */
   blockers.push(...claims.conflicts);
+  blockers.push(...reviewedQuestionBlockers);
   if (CONSENT_GATED_FAMILIES.has(family) || ACCOUNT_WALLED_FAMILIES.has(family) || family === 'zoho_recruit' || family === 'bullhorn') {
     blockers.push(portalHandoffReason(portal)!);
   }

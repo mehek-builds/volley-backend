@@ -51,6 +51,7 @@ import {
   consentTickCoveredBlockers,
   managedImpliedConsentSubmitLicence,
   ManagedActionBudgetError,
+  ManagedRequiredFieldConfirmationError,
   budgetDroppedReviewedQuestions,
   reviewedQuestionsWithoutActions,
   PORTAL_FAMILIES,
@@ -983,6 +984,177 @@ function oneWorkableLocator(overrides: Record<string, unknown> = {}): any {
   locator.nth = (index: number) => index === 0 ? locator : absentWorkableLocator();
   return locator;
 }
+
+function directGreenhouseChoiceFixture(
+  groupName: string,
+  labels: readonly string[],
+  initiallyChecked: readonly string[] = [],
+  failSelectionFor?: string,
+) {
+  const checked = new Set(initiallyChecked);
+  const unconfirmed = new Set<string>();
+  const choices = labels.map((label) => oneWorkableLocator({
+    evaluate: async (_callback: unknown, state?: { active?: boolean }) => {
+      if (state && typeof state.active === 'boolean') {
+        if (state.active) unconfirmed.add(label);
+        else unconfirmed.delete(label);
+        return undefined;
+      }
+      return [label];
+    },
+    check: async () => {
+      if (label === failSelectionFor) throw new Error('provider check failed');
+      checked.add(label);
+    },
+    click: async () => {
+      if (label === failSelectionFor) return;
+      if (checked.has(label)) checked.delete(label);
+      else checked.add(label);
+    },
+    uncheck: async () => { checked.delete(label); },
+    isChecked: async () => checked.has(label),
+  }));
+  const controls: any = {
+    count: async () => choices.length,
+    first: () => choices[0] ?? absentWorkableLocator(),
+    nth: (index: number) => choices[index] ?? absentWorkableLocator(),
+  };
+  const selector = `input[type="checkbox"][name="${groupName}"]`;
+  const page = {
+    locator: (queried: string) => queried === selector ? controls : absentWorkableLocator(),
+    getByText: () => absentWorkableLocator(),
+  } as unknown as Page;
+  return { page, checked, unconfirmed };
+}
+
+test('direct Greenhouse replay commits and verifies every exact option in one checkbox group', async () => {
+  const question = 'Which office locations are you interested in?';
+  const groupName = 'question_67595579[]';
+  const offered = ['Chicago', 'New York', 'Austin, Texas'];
+  const fixture = directGreenhouseChoiceFixture(groupName, offered, ['Austin, Texas']);
+  const result = await fillPortal(fixture.page, 'greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    fieldOptions: { [groupName]: offered },
+    questions: [{
+      question,
+      answer: 'Chicago, New York',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_67595579\\[\\]_728374231',
+      portalInputType: 'checkbox',
+    }],
+  });
+
+  assert.deepEqual([...fixture.checked], ['Chicago', 'New York']);
+  assert.deepEqual([...fixture.unconfirmed], []);
+  assert.ok(result.filledFields.includes(`question_checkbox:${question}`));
+  assert.equal(result.blockers.some((blocker) => blocker.includes(question)), false);
+});
+
+test('direct Greenhouse replay fails closed on an ambiguous comma decomposition', async () => {
+  const question = 'Which office locations are you interested in?';
+  const groupName = 'question_67595579[]';
+  const offered = ['Chicago', 'New York', 'Chicago, New York'];
+  const fixture = directGreenhouseChoiceFixture(groupName, offered, ['Chicago']);
+  const result = await fillPortal(fixture.page, 'greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    fieldOptions: { [groupName]: offered },
+    questions: [{
+      question,
+      answer: 'Chicago, New York',
+      answerSource: 'applicant_review',
+      required: false,
+      portalSelector: 'input[id="question_67595579[]_728374231"]',
+      portalInputType: 'checkbox',
+    }],
+  });
+
+  assert.deepEqual([...fixture.checked], ['Chicago'], 'an ambiguous answer must not mutate the group');
+  assert.equal(result.filledFields.includes(`question_checkbox:${question}`), false);
+  const blocker = result.blockers.find((item) => item.includes(question));
+  assert.equal(
+    blocker,
+    `Litos could not safely apply or verify the reviewed selection for "${question}"`,
+  );
+  assert.doesNotMatch(blocker!, /required|still empty/i);
+});
+
+test('direct Greenhouse replay blocks an optional Jump answer when exact options are missing', async () => {
+  const question = 'Which office locations are you interested in?';
+  const groupName = 'question_67595579[]';
+  const fixture = directGreenhouseChoiceFixture(
+    groupName,
+    ['Chicago', 'New York', 'Austin, Texas'],
+    ['Austin, Texas'],
+  );
+  const result = await fillPortal(fixture.page, 'greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question,
+      answer: 'Chicago',
+      answerSource: 'applicant_review',
+      required: false,
+      portalSelector: '#question_67595579\\[\\]_728374231',
+      portalInputType: 'checkbox',
+    }],
+  });
+
+  assert.deepEqual([...fixture.checked], ['Austin, Texas'], 'missing inventory must not mutate the group');
+  assert.equal(result.filledFields.includes(`question_checkbox:${question}`), false);
+  const blocker = result.blockers.find((item) => item.includes(question));
+  assert.equal(
+    blocker,
+    `Litos could not safely apply or verify the reviewed selection for "${question}"`,
+  );
+  assert.doesNotMatch(blocker!, /required|still empty/i);
+});
+
+test('direct Greenhouse replay clears markers after rolling back a mid-mutation failure', async () => {
+  const question = 'Which office locations are you interested in?';
+  const groupName = 'question_67595579[]';
+  const offered = ['Chicago', 'New York', 'Austin, Texas'];
+  const fixture = directGreenhouseChoiceFixture(
+    groupName,
+    offered,
+    ['Austin, Texas'],
+    'New York',
+  );
+  const result = await fillPortal(fixture.page, 'greenhouse', {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    fieldOptions: { [groupName]: offered },
+    questions: [{
+      question,
+      answer: 'Chicago, New York',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_67595579\\[\\]_728374231',
+      portalInputType: 'checkbox',
+    }],
+  });
+
+  assert.deepEqual(
+    [...fixture.checked],
+    ['Austin, Texas'],
+    'a partial selection must restore every prior checked value',
+  );
+  assert.deepEqual(
+    [...fixture.unconfirmed],
+    [],
+    'cleanup must remove every unconfirmed marker before returning',
+  );
+  assert.equal(result.filledFields.includes(`question_checkbox:${question}`), false);
+  assert.ok(result.blockers.some((blocker) => blocker.includes(question)));
+});
 
 /**
  * ONE UNDISCOVERED REQUIRED FIELD, present as `input[required]` and named only by aria-label - the
@@ -3504,6 +3676,7 @@ test('the measured Akuna question shape keeps every education control and attest
     applicationProfile: { gpa: '3.89' },
     fieldOptions: Object.fromEntries(questions.flatMap((item) => {
       const selector = item.portalSelector;
+      if (selector === '#question_19\\[\\]_1') return [['question_19[]', [item.answer]]];
       return item.portalInputType === 'combobox' && selector?.startsWith('#question_')
         ? [[selector.slice(1), [item.answer]]]
         : [];
@@ -3787,47 +3960,51 @@ test('Greenhouse Databricks academic and reviewed question packet stays inside t
 });
 
 test('Greenhouse replays Databricks export-control checkbox answers by exact option', () => {
+  const exportQuestion = 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.';
+  const followupQuestion = 'If you selected a response to the prior question other than none of the above, please confirm whether any of the following also applies to you. Select all that apply.';
+  const exportAnswer = 'None of the above';
+  const followupAnswer = 'Not applicable (i.e., I selected none of the above for the prior question)';
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
+    fieldOptions: {
+      'question_35110536002[]': [exportAnswer],
+      'question_35114221002[]': [followupAnswer],
+    },
     questions: [
       {
-        question: 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
-        answer: 'None of the above',
+        question: exportQuestion,
+        answer: exportAnswer,
         portalSelector: 'input[id="question_35110536002[]_221056618002"]',
         portalInputType: 'checkbox',
       },
       {
-        question: 'If you selected a response to the prior question other than none of the above, please confirm whether any of the following also applies to you. Select all that apply.',
-        answer: 'Not applicable (i.e., I selected none of the above for the prior question)',
+        question: followupQuestion,
+        answer: followupAnswer,
         portalSelector: 'input[id="question_35114221002[]_221073825002"]',
         portalInputType: 'checkbox',
       },
     ],
   });
 
-  const checkboxClicks = actions.filter((action) => action.label?.startsWith('question_checkbox:'));
-  assert.equal(actions.some((action) => action.label?.startsWith('question_choice:')), false);
-  // ONE CLICK PER BOX. A click is a toggle, so the alternatives ride in a single comma-joined
-  // selector and the runner takes the first that resolves - the same shape managedFill has always
-  // used. Two questions here, so two clicks and no more: four clicks on one export-control box
-  // would tick it, untick it, tick it and untick it.
-  assert.equal(checkboxClicks.length, 2, `expected one click per checkbox, got ${checkboxClicks.length}`);
-  const exportControl = checkboxClicks.find((action) => action.selector?.includes('Please confirm whether any of the below'));
-  const priorQuestion = checkboxClicks.find((action) => action.selector?.includes('If you selected a response to the prior question'));
-  assert.ok(exportControl?.type === 'click' && exportControl.selector?.includes('None of the above'));
-  assert.ok(priorQuestion?.type === 'click' && priorQuestion.selector?.includes('Not applicable'));
-  // The discovered id leads each one, and the label-scoped alternatives follow it inside the same
-  // selector rather than as extra toggles.
-  assert.ok(exportControl?.selector?.startsWith('input[id="question_35110536002[]_221056618002"], '));
-  assert.ok(priorQuestion?.selector?.startsWith('input[id="question_35114221002[]_221073825002"], '));
-  assert.ok(checkboxClicks.every((action) => action.optional === true));
-  assert.ok(checkboxClicks.every((action) => (action.timeout ?? Infinity) < 30_000));
-  // browserbase.ts drops an optional action whose selector is over 500 characters, which would
-  // take the tick with it. The ladder is truncated to fit rather than allowed to overflow.
-  assert.ok(checkboxClicks.every((action) => (action.selector?.length ?? 0) <= 500));
+  assert.deepEqual(
+    actions.filter((action) => action.type === 'fillByLabelText' && action.text === exportQuestion)
+      .map((action) => action.value),
+    [exportAnswer],
+  );
+  assert.deepEqual(
+    actions.filter((action) => action.type === 'fillByLabelText' && action.text === followupQuestion)
+      .map((action) => action.value),
+    [followupAnswer],
+  );
+  assert.equal(
+    actions.some((action) => action.type === 'click'
+      && /question_(?:35110536002|35114221002)\[\]_/.test(action.selector ?? '')),
+    false,
+    'an inventory-backed group uses exact scoped checks, never a concrete option click',
+  );
 });
 
 test('Greenhouse keeps the exact option hook when there is no discovered checkbox selector', () => {
@@ -3852,16 +4029,18 @@ test('Greenhouse keeps the exact option hook when there is no discovered checkbo
   assert.ok(checkboxClicks[0]!.selector?.includes('label:has-text("None of the above") input[type="checkbox"]'));
 });
 
-test('Greenhouse ticks a reviewed checkbox once, with the durable selector leading', () => {
+test('Greenhouse uses exact group inventory instead of clicking the durable checkbox selector', () => {
   const selector = 'input[id="question_35110536002[]_221056618002"]';
+  const question = 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.';
   const actions = buildManagedPortalActions('greenhouse', {
     fullName: 'Mehek Mandal',
     email: 'mehekmandal05@gmail.com',
     resume: Buffer.from('pdf'),
     resumeName: 'resume.pdf',
+    fieldOptions: { 'question_35110536002[]': ['None of the above'] },
     questions: [
       {
-        question: 'Please confirm whether any of the below applies to you. Select all that apply. Note: This information will only be used to ensure compliance with U.S. sanctions and export controls.',
+        question,
         answer: 'None of the above',
         portalSelector: selector,
         portalInputType: 'checkbox',
@@ -3870,13 +4049,12 @@ test('Greenhouse ticks a reviewed checkbox once, with the durable selector leadi
   });
 
   const clicks = actions.filter((action) => action.type === 'click' && action.selector?.includes(selector));
-  assert.equal(clicks.length, 1, `a checkbox may be clicked once, got ${clicks.length}`);
-  // The id read off this very form leads, because it beats every shape-based guess after it, and
-  // the guesses are still there behind it as alternatives rather than as extra toggles.
-  assert.ok(clicks[0]!.selector?.startsWith(selector));
-  assert.ok(clicks[0]!.selector?.includes('label:has-text("None of the above") input[type="checkbox"]'));
-  assert.ok(clicks[0]!.label?.startsWith('question_checkbox:'));
-  assert.equal(actions.some((action) => action.label?.startsWith('question_choice_selector:')), false);
+  assert.equal(clicks.length, 0);
+  assert.deepEqual(
+    actions.filter((action) => action.type === 'fillByLabelText' && action.text === question)
+      .map((action) => action.value),
+    ['None of the above'],
+  );
 });
 
 test('Greenhouse school aliases do not strip comma-separated campus names generically', () => {
@@ -7059,6 +7237,126 @@ test('managed Greenhouse discovery replays every exact reviewed checkbox option'
     false,
     'a group selector click would choose only its first checkbox and ignore the reviewed values',
   );
+});
+
+test('managed Greenhouse replay joins per-option selectors to the public group inventory', () => {
+  const question = 'Which office locations are you interested in?';
+  const groupName = 'question_67595579[]';
+  const offered = ['Chicago', 'New York', 'Austin, Texas'];
+  const cases = [
+    {
+      selector: '#question_67595579\\[\\]_728374231',
+      answer: 'Chicago',
+      expected: ['Chicago'],
+    },
+    {
+      selector: 'input[id="question_67595579[]_728374231"]',
+      answer: 'Chicago, New York',
+      expected: ['Chicago', 'New York'],
+    },
+  ];
+
+  for (const item of cases) {
+    const actions = buildManagedPortalActions('greenhouse', {
+      fullName: 'Taylor Example',
+      email: 'taylor@example.com',
+      resume: Buffer.from('resume-pdf'),
+      resumeName: 'resume.pdf',
+      fieldOptions: { [groupName]: offered },
+      questions: [{
+        question,
+        answer: item.answer,
+        answerSource: 'applicant_review',
+        portalSelector: item.selector,
+        portalInputType: 'checkbox',
+      }],
+    });
+    assert.deepEqual(
+      actions.filter((action) => action.type === 'fillByLabelText' && action.text === question)
+        .map((action) => action.value),
+      item.expected,
+      item.selector,
+    );
+    assert.equal(
+      actions.some((action) => action.type === 'click' && action.selector?.includes(item.selector)),
+      false,
+      item.selector,
+    );
+  }
+});
+
+test('managed Greenhouse group replay refuses an ambiguous comma decomposition', () => {
+  const question = 'Which office locations are you interested in?';
+  const packet = {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    fieldOptions: {
+      'question_67595579[]': ['Chicago', 'New York', 'Chicago, New York'],
+    },
+    questions: [{
+      question,
+      answer: 'Chicago, New York',
+      answerSource: 'applicant_review',
+      portalSelector: '#question_67595579\\[\\]_728374231',
+      portalInputType: 'checkbox',
+    }],
+  };
+  const actions = buildManagedPortalActions('greenhouse', packet);
+  assert.deepEqual(
+    actions.filter((action) => action.type === 'fillByLabelText' && action.text === question),
+    [],
+  );
+  assert.equal(actions.some((action) => action.type === 'confirmAndSubmit'), false);
+
+  let submittedActions: ReturnType<typeof buildManagedPortalActions> | undefined;
+  assert.throws(
+    () => { submittedActions = buildManagedPortalActions('greenhouse', packet, true); },
+    (error: unknown) => error instanceof ManagedRequiredFieldConfirmationError
+      && error.fields.includes(question)
+      && /did not press submit/i.test(error.message),
+  );
+  assert.equal(submittedActions, undefined, 'the typed stop must fire before a submit list is returned');
+});
+
+test('managed Greenhouse replay never blind-clicks Jump when exact group options are missing', () => {
+  const question = 'Which office locations are you interested in?';
+  const selector = '#question_67595579\\[\\]_728374231';
+  const packet = {
+    fullName: 'Taylor Example',
+    email: 'taylor@example.com',
+    resume: Buffer.from('resume-pdf'),
+    resumeName: 'resume.pdf',
+    questions: [{
+      question,
+      answer: 'Chicago',
+      answerSource: 'applicant_review',
+      required: false,
+      portalSelector: selector,
+      portalInputType: 'checkbox',
+    }],
+  };
+
+  const preview = buildManagedPortalActions('greenhouse', packet);
+  assert.equal(
+    preview.some((action) => action.type === 'click' && action.selector?.includes(selector)),
+    false,
+    'a concrete per-option selector is not proof that Chicago is the represented option',
+  );
+  assert.equal(
+    preview.some((action) => action.type === 'fillByLabelText' && action.text === question),
+    false,
+  );
+
+  let submittedActions: ReturnType<typeof buildManagedPortalActions> | undefined;
+  assert.throws(
+    () => { submittedActions = buildManagedPortalActions('greenhouse', packet, true); },
+    (error: unknown) => error instanceof ManagedRequiredFieldConfirmationError
+      && error.fields.includes(question)
+      && /did not press submit/i.test(error.message),
+  );
+  assert.equal(submittedActions, undefined, 'no confirmAndSubmit action may survive the typed stop');
 });
 
 test('managed Workable name-only choice inventory reaches exact multi-select replay', () => {
