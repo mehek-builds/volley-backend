@@ -4627,3 +4627,73 @@ test('a reviewed GPA band against a classification-worded label still detects a 
   assert.notEqual(refreshed[0].answer, '3.5 - 3.8',
     'a stale reviewed band that her real GPA (3.89) sits outside must be recomputed, not kept');
 });
+
+/* THE REFERRAL QUESTION THAT NAMES THE EMPLOYER INSTEAD OF "US".
+ *
+ * MEASURED live on the owner's queue, 2026-08-27, on a Five Rings Greenhouse packet that could not
+ * be completed at all. classifyField was the ONLY one of parseReferralQuestion's four call sites
+ * that omitted jdText, and that branch recognises an employer-NAMED target only by validating it
+ * against the employer frozen into the packet context. With nothing to validate against it refused
+ * every one:
+ *
+ *   "how did you hear about us?"               -> referral_source_default -> ladder -> "Other"
+ *   "how did you first hear about five rings?" -> null                    -> no ladder, no guard
+ *
+ * A null key skips BOTH referral rules in profileFieldResolution: the ladder that answers "Other",
+ * and the guard that returns null rather than put an unmatched value into a closed list. So the raw
+ * stored default "Job board" was emitted with matchedOption false into a control whose options are
+ * [Coffee Chat, Conference, GitHub, ..., Other]. The dashboard refused it on every pass - correctly,
+ * it is not one of the options - and the application looped forever, unfinishable.
+ *
+ * Reproduced identically for Databricks and Akuna: the trigger is an employer NAME in the label. */
+const FROZEN_FIVE_RINGS = '[LITOS FROZEN JOB EMPLOYER] Five Rings\nFive Rings is a proprietary trading firm.';
+
+test('an employer-named referral question classifies as the referral question', () => {
+  assert.equal(classifyField('how did you first hear about five rings?', undefined, FROZEN_FIVE_RINGS), 'referral_source_default');
+  assert.equal(classifyField('how did you hear about five rings?', undefined, FROZEN_FIVE_RINGS), 'referral_source_default');
+  // The generic phrasing never depended on the context and still does not.
+  assert.equal(classifyField('how did you hear about us?', undefined, FROZEN_FIVE_RINGS), 'referral_source_default');
+  assert.equal(classifyField('how did you hear about us?'), 'referral_source_default');
+});
+
+test('a caller with no packet context keeps exactly its old answer', () => {
+  // portalSubmission's questionMayBeClosedList and questionFillShouldPressEnter pass no context, so
+  // the employer target stays unvalidated and stays refused. This widens what can be RECOGNISED on
+  // evidence, never what is assumed without it.
+  assert.equal(classifyField('how did you first hear about five rings?'), null);
+});
+
+test('the context has to name THIS employer, not just any', () => {
+  // Otherwise the fix would amount to "accept any trailing words", which is the exact thing the
+  // target validation exists to prevent.
+  const other = '[LITOS FROZEN JOB EMPLOYER] Jane Street\nJane Street is a trading firm.';
+  assert.equal(classifyField('how did you first hear about five rings?', undefined, other), null);
+});
+
+test('an open-source question is still refused, context or no context', () => {
+  // The hazard referralSourceDetailAnswer documents: "source" present is not "source" qualified.
+  assert.notEqual(classifyField('please describe your open source contributions', undefined, FROZEN_FIVE_RINGS), 'referral_source_default');
+});
+
+test('the employer-named question now resolves to an option on the employer list', () => {
+  // End to end through the real resolver: the whole point is that "Other" reaches the control and
+  // "Job board" - which is on no employer list - never does.
+  const options = ['Coffee Chat', 'Conference', 'GitHub', 'Handshake', 'LinkedIn', 'Word of Mouth', 'Information Session', 'Other'];
+  const withDefault = { full_name: 'M', email: 'm@e.com', referral_source_default: 'Job board' } as unknown as ApplicationProfileLike;
+  const resolved = resolveProfileField(
+    { label: 'how did you first hear about five rings?', inputType: 'select', options },
+    withDefault, FROZEN_FIVE_RINGS, undefined, undefined,
+  );
+  assert.equal(resolved?.key, 'referral_source_default');
+  assert.equal(resolved?.value, 'Other');
+  assert.equal(resolved?.matchedOption, true);
+  assert.ok(options.includes(String(resolved?.value)), 'the answer must be one of the employer\'s own options');
+
+  // And with no standing declaration on the profile it stays blank rather than guessing - the
+  // account this was measured on has no referral_source_default at all.
+  const noDefault = { full_name: 'M', email: 'm@e.com' } as unknown as ApplicationProfileLike;
+  assert.equal(
+    resolveProfileField({ label: 'how did you first hear about five rings?', inputType: 'select', options }, noDefault, FROZEN_FIVE_RINGS, undefined, undefined),
+    null,
+  );
+});

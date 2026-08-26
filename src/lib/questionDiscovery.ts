@@ -5225,8 +5225,25 @@ function gpaClassificationVocabularyMatches(label: string): boolean {
 // Ported verbatim from generic.ts's classifyField (see that file for the full rationale on
 // ordering - refusals first, citizenship before residence, term before start date, state before
 // city). `label` must already be lowercased by the caller.
-export function classifyField(label: string, type?: string): ProfileKey | null {
-  const key = classifyFieldIntent(label, type);
+/* jdText is threaded in for ONE rule: parseReferralQuestion below. Its "how did you hear about
+ * <X>" branch can only accept an employer-NAMED target by checking it against the employer frozen
+ * into this packet's context, and with no context to check against it refuses every one of them.
+ *
+ * MEASURED on the owner's queue, 2026-08-27. classifyField was the only one of parseReferralQuestion's
+ * four call sites that omitted the argument, so a Greenhouse form asking "how did you first hear about
+ * five rings?" classified as null while "how did you hear about us?" classified as referral_source_default.
+ * Null there skips BOTH referral rules in profileFieldResolution - the ladder that answers "Other", and
+ * the guard that leaves a closed list alone when nothing matched - so the raw stored default "Job board"
+ * was emitted with matchedOption false, into a control whose option list has no such entry. The
+ * dashboard then refused it on every pass and the application could not be completed at all.
+ * Reproduced identically for Databricks and Akuna: it is the employer's NAME in the label, not any one
+ * employer.
+ *
+ * Callers with no context in scope pass nothing and keep exactly today's answer, because an
+ * unvalidated employer target is still refused. This widens what can be RECOGNISED; it does not widen
+ * what may be ANSWERED - the ladder still picks the option, and still never picks a referral. */
+export function classifyField(label: string, type?: string, jdText?: string): ProfileKey | null {
+  const key = classifyFieldIntent(label, type, jdText);
   /* THE CURRENT PROGRAMME CANNOT ANSWER A QUESTION ABOUT THE HIGH SCHOOL.
    *
    * Gated on the KEY, not on where the rule sits in the chain below. The first draft was an early
@@ -5241,7 +5258,7 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   return key;
 }
 
-function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
+function classifyFieldIntent(label: string, type?: string, jdText?: string): ProfileKey | null {
   const l = label ?? '';
   if (isRefusedQuestion(l)) return null;
   /* Belt and braces on the "Dubai" defect. resolveKnownAnswer already short-circuits these labels,
@@ -5291,7 +5308,7 @@ function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
   if (CITIZENSHIP_QUESTION.test(l)) return 'citizenship';
   if (!locationCommitment && !locationChoice && RESIDENCE_QUESTION.test(l)) return 'address_country';
 
-  const referral = parseReferralQuestion(l);
+  const referral = parseReferralQuestion(l, jdText);
   if (referral?.valid) return 'referral_source_default';
   if (referral) return null;
   if (parseRelocationQuestion(l)) return null;
@@ -7566,7 +7583,7 @@ export function resolveKnownAnswer(
     return WORK_ELIGIBILITY_QUESTION.test(label) ? { skipReason: workEligibilitySkipReason(label) } : null;
   }
 
-  const key = classifyField(label, inputType === 'tel' ? 'tel' : undefined);
+  const key = classifyField(label, inputType === 'tel' ? 'tel' : undefined, jdText);
   // Last gate before the profile answers it: the stored education facts are about the current
   // programme, so a question scoped to a later or different one gets nothing from them.
   if (key && CURRENT_PROGRAMME_KEYS.has(key) && FUTURE_OR_OTHER_PROGRAMME_QUESTION.test(label)) {
