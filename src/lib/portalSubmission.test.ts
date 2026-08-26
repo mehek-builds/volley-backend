@@ -4597,14 +4597,14 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
     selector: 'input[name="phone"][type="tel"]:visible',
     label: 'workable_phone_value_visible',
     optional: true,
-    timeout: 20_000,
+    timeout: 4_000,
   });
   assert.deepEqual(actions[countryWaitIndex], {
     type: 'waitForSelector',
     selector: '.iti__selected-dial-code:visible',
     label: 'workable_phone_country_visible',
     optional: true,
-    timeout: 20_000,
+    timeout: 4_000,
   });
   assert.equal(actions[countryProofIndex]?.attribute, undefined);
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
@@ -4660,8 +4660,11 @@ test('managed Workable waits through phone remounts before its final value proof
   assert.equal(countryProof?.requireNonEmpty, true);
   assert.equal(countryProof?.requireUnique, true);
   assert.equal(countryProof?.expectedValueDigits, '1');
-  assert.equal(actions[phoneWaitIndex]?.timeout, 20_000);
-  assert.equal(actions[countryWaitIndex]?.timeout, 20_000);
+  /* Four, not twenty. These barriers bridge a React remount - hundreds of milliseconds - and they
+   * are best-effort now, so an unreachable node costs the full timeout twice for nothing. That
+   * mattered once the Pony.ai submit measured ~276s against the runner's 240s budget. */
+  assert.equal(actions[phoneWaitIndex]?.timeout, 4_000);
+  assert.equal(actions[countryWaitIndex]?.timeout, 4_000);
 });
 
 test('managed Workable US phone selects exact United States and proves national digits', () => {

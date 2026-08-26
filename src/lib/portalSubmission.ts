@@ -1189,10 +1189,26 @@ const RECEIPT_PROOF_RE = /thank you|thanks for your application|application (?:h
 // to the reviewed-question fills, so no one action can ever spend 30s.
 const MANAGED_FILL_TIMEOUT_MS = 10_000;
 // Workable can briefly remove the complete phone subtree while React reconciles an international
-// value. The normal 10 second miss budget is right for unknown selectors, but too short for a
-// selector that was just proven and is expected to remount. Twenty seconds is the managed-provider
-// ceiling. Keep it scoped to these post-write barriers, with exact value reads still required.
-const WORKABLE_PHONE_REMOUNT_TIMEOUT_MS = 20_000;
+/* value. The normal 10 second miss budget is right for unknown selectors, but too short for a
+ * selector that was just proven and is expected to remount. Keep it scoped to these post-write
+ * barriers, with exact value reads still required.
+ *
+ * FOUR SECONDS, NOT TWENTY, AND THE CHANGE OF UNITS FOLLOWS THE CHANGE OF STAKES. Twenty was the
+ * managed-provider ceiling, chosen while a miss here was FATAL: the wait was optional:false, so
+ * spending the whole ceiling was the price of not killing a filled application. It is best-effort
+ * now, and an optional wait still burns its full timeout before it gives up - so on a form where
+ * the replacement never becomes `:visible`, twenty seconds bought nothing and cost twenty seconds,
+ * twice.
+ *
+ * That is not free. MANAGED_RUN_TIMEOUT_MS in the managed runner is 240s for the whole run, and the
+ * Pony.ai submit measured ~276s against it on 2026-08-26 and was cut off before it could press
+ * Send. Forty seconds of waiting for a node that is not coming is a real share of that overrun.
+ *
+ * Four still covers what the barrier is FOR. It bridges a React remount - the subtree is torn down
+ * and re-mounted in one frame budget, measured in hundreds of milliseconds - not a page load. And
+ * nothing is proved by this wait in any case: the extract after it keeps requireNonEmpty and
+ * expectedValueDigits, so a phone that genuinely did not land still fails, four seconds sooner. */
+const WORKABLE_PHONE_REMOUNT_TIMEOUT_MS = 4_000;
 
 function managedFill(
   actions: ManagedBrowserAction[],
