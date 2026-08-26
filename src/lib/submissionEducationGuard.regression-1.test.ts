@@ -194,7 +194,10 @@ test('extension-start refuses a drifted packet before it reserves the submission
     handler.indexOf('packetEducationDrift') < handler.indexOf('withinDailyCap'),
     'the drift check must run before the daily cap, so a drifted packet reports drift rather than the cap',
   );
-  assert.match(handler, /result\.kind === 'education_drift'\) return reply\.status\(422\)\.send\(educationDriftResponse/);
+  assert.match(
+    handler,
+    /result\.kind === 'education_drift'\) return reply\.status\(422\)\.send\(\{[\s\S]{0,100}\.\.\.educationDriftResponse\(result\.issues\),[\s\S]{0,100}retry_safety:/,
+  );
 });
 
 test('extension-start refuses sensitive questions before it reserves the submission', () => {
@@ -216,7 +219,7 @@ test('submit-request carries the same guard and does not merely warn', () => {
   assert.match(handler, /packetEducationDrift\(stored/);
   assert.match(
     handler,
-    /submitEducationIssues\.length > 0\) \{\s*return reply\.status\(422\)\.send\(educationDriftResponse\(submitEducationIssues\)\);/,
+    /submitEducationIssues\.length > 0\) \{\s*return reply\.status\(422\)\.send\(\{[\s\S]{0,100}\.\.\.educationDriftResponse\(submitEducationIssues\),[\s\S]{0,100}retry_safety:/,
   );
   assert.ok(
     handler.indexOf('packetEducationDrift') < handler.indexOf('processSubmissionApplication'),

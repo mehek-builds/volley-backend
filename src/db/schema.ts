@@ -12,6 +12,7 @@ import {
   index,
   uniqueIndex,
   check,
+  foreignKey,
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
@@ -576,6 +577,235 @@ export const application_submission_events = pgTable('application_submission_eve
   userEventUnique: uniqueIndex('application_submission_events_user_event_unique').on(t.user_id, t.event_id),
   applicationTimeIdx: index('application_submission_events_application_time_idx')
     .on(t.application_id, t.observed_at),
+}));
+
+/* One immutable global marker closes the legacy snapshot-import window. Runtime event inserts are
+ * rejected by the database until this row exists, while migration reruns use it to repair schema
+ * without reinterpreting mutable packet or canonical application state as historical evidence.
+ */
+export const application_submission_attempt_ledger_cutovers = pgTable(
+  'application_submission_attempt_ledger_cutovers',
+  {
+    cutover_key: text('cutover_key').primaryKey(),
+    completed_at: timestamp('completed_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => ({
+    keyCheck: check('application_submission_attempt_ledger_cutovers_key_check', sql`
+      ${t.cutover_key} = 'legacy_backfill_v1'
+    `),
+  }),
+);
+
+/* One immutable binding for each employer-boundary attempt. The event insert trigger registers this
+ * row through its composite primary key before accepting any fact, so concurrent event IDs cannot
+ * attach one attempt to two packets or postings. Values may never change after registration.
+ */
+export const application_submission_attempt_bindings = pgTable('application_submission_attempt_bindings', {
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  attempt_id: uuid('attempt_id').notNull(),
+  application_id: uuid('application_id'),
+  packet_id: uuid('packet_id').notNull(),
+  parent_attempt_id: uuid('parent_attempt_id'),
+  source: text('source').notNull(),
+  operation: text('operation').notNull(),
+  submission_run_id: text('submission_run_id'),
+  submission_claim_id: text('submission_claim_id'),
+  packet_version: text('packet_version'),
+  posting_key: text('posting_key'),
+  job_id: text('job_id'),
+  company_role: text('company_role'),
+  company_name: text('company_name').notNull(),
+  role: text('role').notNull(),
+  portal_url: text('portal_url'),
+  portal_identity: text('portal_identity'),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  pk: primaryKey({
+    name: 'application_submission_attempt_bindings_pkey',
+    columns: [t.user_id, t.attempt_id],
+  }),
+  sourceCheck: check('application_submission_attempt_bindings_source_check', sql`
+    ${t.source} in (
+      'managed_browser', 'direct_browser', 'chrome_extension', 'unsupported_email',
+      'ats_api', 'attended_handoff', 'legacy_backfill'
+    )
+  `),
+  operationCheck: check('application_submission_attempt_bindings_operation_check', sql`
+    ${t.operation} in ('initial_submission', 'security_code_continuation', 'manual_submission')
+  `),
+  parentCheck: check('application_submission_attempt_bindings_parent_check', sql`
+    ${t.parent_attempt_id} is null or ${t.parent_attempt_id} <> ${t.attempt_id}
+  `),
+}));
+
+/* Immutable evidence about each employer-boundary attempt.
+ *
+ * `generated_resumes.spec._review` is a current UI projection. A retry intentionally replaces
+ * fields in that object, so it cannot also be the history that decides whether another application
+ * is safe. Every row here is one fact about one attempt. Facts are appended, never promoted or
+ * replaced, and the posting identity is copied onto each fact so later packet edits cannot rewrite
+ * what posting the attempt targeted.
+ *
+ * The migration rejects UPDATE and direct row DELETE. It permits deletion only when the owning
+ * user row is already being removed, so the foreign-key cascade can honor account/privacy erasure.
+ *
+ * application_id is optional because five legacy packets predate their canonical application row.
+ * packet_id is therefore the mandatory ownership and same-packet key. It deliberately has no
+ * generated_resumes foreign key: retention or repair of a packet must not delete send evidence.
+ */
+export const application_submission_attempt_events = pgTable('application_submission_attempt_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  // Frozen attribution, not a foreign key: canonical rows can merge without rewriting evidence.
+  application_id: uuid('application_id'),
+  packet_id: uuid('packet_id').notNull(),
+  event_id: uuid('event_id').notNull(),
+  attempt_id: uuid('attempt_id').notNull(),
+  parent_attempt_id: uuid('parent_attempt_id'),
+  event_kind: text('event_kind').notNull(),
+  source: text('source').notNull(),
+  operation: text('operation').notNull(),
+  submission_run_id: text('submission_run_id'),
+  submission_claim_id: text('submission_claim_id'),
+  packet_version: text('packet_version'),
+  posting_key: text('posting_key'),
+  job_id: text('job_id'),
+  company_role: text('company_role'),
+  company_name: text('company_name').notNull(),
+  role: text('role').notNull(),
+  portal_url: text('portal_url'),
+  portal_identity: text('portal_identity'),
+  proof_kind: text('proof_kind'),
+  evidence_code: text('evidence_code'),
+  boundary_activation_id: uuid('boundary_activation_id'),
+  boundary_expires_at: timestamp('boundary_expires_at', { withTimezone: true }),
+  observed_at: timestamp('observed_at', { withTimezone: true }).defaultNow().notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  userEventUnique: uniqueIndex('application_submission_attempt_events_user_event_unique')
+    .on(t.user_id, t.event_id),
+  userAttemptTimeIdx: index('application_submission_attempt_events_user_attempt_time_idx')
+    .on(t.user_id, t.attempt_id, t.created_at),
+  userAttemptBoundaryUnique: uniqueIndex('submission_attempt_events_user_attempt_boundary_uq')
+    .on(t.user_id, t.attempt_id)
+    .where(sql`${t.event_kind} = 'boundary_authorized'`),
+  packetTimeIdx: index('application_submission_attempt_events_packet_time_idx')
+    .on(t.packet_id, t.created_at),
+  userPostingIdx: index('application_submission_attempt_events_user_posting_idx')
+    .on(t.user_id, t.posting_key),
+  userJobIdx: index('application_submission_attempt_events_user_job_idx')
+    .on(t.user_id, t.job_id),
+  userCompanyRoleIdx: index('application_submission_attempt_events_user_company_role_idx')
+    .on(t.user_id, t.company_role),
+  eventKindCheck: check('application_submission_attempt_events_kind_check', sql`
+    ${t.event_kind} in (
+      'attempt_opened', 'boundary_authorized', 'press_observed',
+      'submission_confirmed', 'not_sent_proven'
+    )
+  `),
+  sourceCheck: check('application_submission_attempt_events_source_check', sql`
+    ${t.source} in (
+      'managed_browser', 'direct_browser', 'chrome_extension', 'unsupported_email',
+      'ats_api', 'attended_handoff', 'legacy_backfill'
+    )
+  `),
+  operationCheck: check('application_submission_attempt_events_operation_check', sql`
+    ${t.operation} in ('initial_submission', 'security_code_continuation', 'manual_submission')
+  `),
+  proofCheck: check('application_submission_attempt_events_proof_check', sql`
+    (${t.event_kind} = 'not_sent_proven' and ${t.proof_kind} is not null and ${t.proof_kind} in (
+      'typed_pre_click_stop', 'applicant_checked_not_sent',
+      'applicant_checked_all_possible_destinations_not_sent', 'employer_rejected_not_filed',
+      'employer_verification_pending_not_filed', 'provider_definitive_rejection',
+      'extension_cancelled_before_press'
+    ))
+    or (${t.event_kind} <> 'not_sent_proven' and ${t.proof_kind} is null)
+  `),
+  boundaryAuthorizationCheck: check('submission_attempt_events_boundary_auth_check', sql`
+    (${t.event_kind} = 'boundary_authorized'
+      and ${t.boundary_activation_id} is not null
+      and ${t.boundary_expires_at} is not null
+      and ${t.boundary_expires_at} > ${t.observed_at}
+      and ${t.boundary_expires_at} <= ${t.observed_at} + interval '5 minutes')
+    or (${t.event_kind} <> 'boundary_authorized'
+      and ${t.boundary_activation_id} is null
+      and ${t.boundary_expires_at} is null)
+  `),
+  parentCheck: check('application_submission_attempt_events_parent_check', sql`
+    ${t.parent_attempt_id} is null or ${t.parent_attempt_id} <> ${t.attempt_id}
+  `),
+}));
+
+/* One explicit, pair-specific repair for a legacy risk whose posting cannot otherwise be compared
+ * with the current application. This is intentionally not an attempt event: folding it into the
+ * submission ledger would make a comparison look like another employer-boundary attempt and could
+ * hide the risk it is meant to narrow.
+ *
+ * The prior side is the immutable attempt binding. The candidate side is both immutable record
+ * keys plus a versioned digest of the server's current posting identity. A later edit changes the
+ * digest, so this relation stops applying rather than silently following a repurposed packet. The
+ * migration rejects UPDATE and direct DELETE, with the same account-erasure exception as the
+ * evidence ledger.
+ */
+export const application_posting_distinctions = pgTable('application_posting_distinctions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  relation_id: uuid('relation_id').notNull(),
+  prior_attempt_id: uuid('prior_attempt_id').notNull(),
+  candidate_application_id: uuid('candidate_application_id').notNull(),
+  candidate_packet_id: uuid('candidate_packet_id').notNull(),
+  candidate_identity_version: text('candidate_identity_version').notNull(),
+  candidate_identity_digest: text('candidate_identity_digest').notNull(),
+  candidate_identity_snapshot: jsonb('candidate_identity_snapshot').notNull(),
+  candidate_posting_key: text('candidate_posting_key'),
+  candidate_job_id: text('candidate_job_id'),
+  candidate_company_role: text('candidate_company_role'),
+  candidate_portal_url: text('candidate_portal_url').notNull(),
+  proof_kind: text('proof_kind').notNull(),
+  observed_at: timestamp('observed_at', { withTimezone: true }).defaultNow().notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  priorAttemptFk: foreignKey({
+    name: 'application_posting_distinctions_prior_attempt_fk',
+    columns: [t.user_id, t.prior_attempt_id],
+    foreignColumns: [
+      application_submission_attempt_bindings.user_id,
+      application_submission_attempt_bindings.attempt_id,
+    ],
+  }).onDelete('cascade'),
+  userRelationUnique: uniqueIndex('application_posting_distinctions_user_relation_unique')
+    .on(t.user_id, t.relation_id),
+  pairIdentityUnique: uniqueIndex('application_posting_distinctions_pair_identity_unique')
+    .on(
+      t.user_id,
+      t.prior_attempt_id,
+      t.candidate_application_id,
+      t.candidate_packet_id,
+      t.candidate_identity_version,
+      t.candidate_identity_digest,
+    ),
+  candidateLookupIdx: index('application_posting_distinctions_candidate_lookup_idx')
+    .on(
+      t.user_id,
+      t.candidate_application_id,
+      t.candidate_packet_id,
+      t.candidate_identity_version,
+      t.candidate_identity_digest,
+    ),
+  priorAttemptIdx: index('application_posting_distinctions_prior_attempt_idx')
+    .on(t.user_id, t.prior_attempt_id),
+  identityVersionCheck: check('application_posting_distinctions_identity_version_check', sql`
+    ${t.candidate_identity_version} = 'posting-distinction-candidate-v1'
+  `),
+  identityDigestCheck: check('application_posting_distinctions_identity_digest_check', sql`
+    ${t.candidate_identity_digest} ~ '^[0-9a-f]{64}$'
+  `),
+  portalUrlCheck: check('application_posting_distinctions_portal_url_check', sql`
+    ${t.candidate_portal_url} like 'https://%'
+  `),
+  proofKindCheck: check('application_posting_distinctions_proof_kind_check', sql`
+    ${t.proof_kind} = 'applicant_confirmed_distinct_posting_pair'
+  `),
 }));
 
 // ---- checkout action restoration and monetization ledger ----

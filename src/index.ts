@@ -37,6 +37,8 @@ import { assertEncryptionKeyConfigured } from './lib/fieldCrypto';
 import { metaRoutes } from './routes/meta';
 import { applicationRoutes } from './routes/applications';
 import { canonicalApplicationRoutes } from './routes/canonicalApplications';
+import { submissionOrphanRiskRoutes } from './routes/submissionOrphanRisks';
+import { postingIdentityDistinctionRoutes } from './routes/postingIdentityDistinctions';
 import { submissionRunnerRoutes } from './routes/submissionRunner';
 import { autopilotMatcherRoutes } from './routes/autopilotMatcher';
 import { captchaStallRoutes } from './routes/captchaStalls';
@@ -47,7 +49,7 @@ import { coverLetterRoutes } from './routes/coverLetter';
 import { documentRoutes } from './routes/documents';
 import { emailConnectionRoutes } from './routes/emailConnections';
 import { applicationEmailRoutes } from './routes/applicationEmail';
-import { API_VERSION, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
+import { API_VERSION, CLIENT_COMPATIBILITY, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
 import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } from './middleware/rateLimit';
 import { sharedRankingConfigured } from './lib/rankingCache';
 import { resolveBuild, resolveRevision } from './lib/buildInfo';
@@ -60,6 +62,10 @@ import { applicationEmailRouteSelection } from './lib/applicationEmailRoute';
 import { warmApplicationAliasDeliverability } from './lib/applicationEmailDeliverability';
 import { aggregateServiceHealthStatus } from './lib/serviceHealth';
 import { createSubmissionCutoverHook, resolveSubmissionCutover } from './lib/submissionCutover';
+import {
+  extensionClientNeedsSafetyUpdate,
+  extensionSafetyUpdatePathIsEvidenceOnly,
+} from './lib/clientCompatibility';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -194,6 +200,29 @@ export async function buildApp(options: BuildAppOptions = {}) {
       fileSize: 10 * 1024 * 1024, // 10 MB max
       files: 1,
     },
+  });
+
+  /* Extension 0.6.2 is the first build that reserves and rechecks a canonical manual attempt
+   * before an employer boundary. Older installed builds can still have application tabs open,
+   * so this gate lives on the server rather than relying on Chrome Web Store propagation. Keep
+   * evidence-only endpoints reachable: a stale client that already crossed a boundary must be
+   * allowed to report what happened even though it cannot receive any new fill or submission
+   * capability. */
+  fastify.addHook('onRequest', async (request, reply) => {
+    const origin = typeof request.headers.origin === 'string' ? request.headers.origin : undefined;
+    if (
+      extensionClientNeedsSafetyUpdate(request.headers, origin)
+      && !extensionSafetyUpdatePathIsEvidenceOnly(request.method, request.url)
+    ) {
+      return reply
+        .status(426)
+        .header('Cache-Control', 'no-store')
+        .send({
+          error: `Update the Litos extension to version ${CLIENT_COMPATIBILITY.extension.minimum} or newer, then close old application tabs and reopen them before continuing.`,
+          code: 'extension_safety_update_required',
+          minimum_version: CLIENT_COMPATIBILITY.extension.minimum,
+        });
+    }
   });
 
   // Front-door protection runs before route handlers and database work. Expensive product
@@ -434,6 +463,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(sponsorshipRoutes);
   await fastify.register(applicationAnswerRoutes);
   await fastify.register(canonicalApplicationRoutes);
+  await fastify.register(submissionOrphanRiskRoutes);
+  await fastify.register(postingIdentityDistinctionRoutes);
   await fastify.register(applicationRoutes);
   await fastify.register(submissionRunnerRoutes);
   await fastify.register(autopilotMatcherRoutes);

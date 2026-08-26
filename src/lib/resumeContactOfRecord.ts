@@ -46,6 +46,16 @@ function text(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function comparablePlace(value: string): string {
+  return value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+}
+
+function resumeCountryLabel(country: string | undefined): string | undefined {
+  if (!country) return undefined;
+  const comparable = comparablePlace(country).replace(/\./g, '');
+  return comparable === 'united arab emirates' || comparable === 'uae' ? 'U.A.E.' : country;
+}
+
 /**
  * The header's location line, assembled from the address she gave rather than inferred.
  *
@@ -64,7 +74,9 @@ function text(value: unknown): string | undefined {
 export function resumeHeaderLocation(profile: Record<string, unknown> | undefined): string | undefined {
   const city = text(profile?.['address_city']);
   if (!city) return undefined;
-  const region = text(profile?.['address_state']) ?? text(profile?.['address_country']);
+  const state = text(profile?.['address_state']);
+  const nonDuplicateState = state && comparablePlace(state) !== comparablePlace(city) ? state : undefined;
+  const region = nonDuplicateState ?? resumeCountryLabel(text(profile?.['address_country']));
   return region ? `${city}, ${region}` : city;
 }
 

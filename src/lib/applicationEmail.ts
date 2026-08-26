@@ -19,6 +19,15 @@ import {
 import { emailSender, sendEmail, type OutboundEmail } from './email';
 import { applicationEmailRouteSelection, type ApplicationEmailRouteMode } from './applicationEmailRoute';
 import { resendReceivingApiKey } from './resendReceiving';
+import {
+  appendSubmissionAttemptEvent,
+  freezePostingIdentity,
+  lockSubmissionAttemptUser,
+  submissionAttemptBindingFromEvent,
+  submissionAttemptEventId,
+  submissionAttemptEventsForPacket,
+  type SubmissionAttemptBinding,
+} from './submissionAttemptLedger';
 
 export type ApplicationEmailIdentity = {
   alias: string;
@@ -751,7 +760,10 @@ export function reviewFromSubmissionConfirmation(
  * there and carries no review yet. The two are different answers and the caller reports them as
  * different reasons, because one of them is an ownership failure.
  */
-export type PacketReviewLookup = { review: ApplicationReviewState | null } | null;
+export type PacketReviewLookup = {
+  review: ApplicationReviewState | null;
+  jobContext?: unknown;
+} | null;
 
 export type SubmissionConfirmationOutcome =
   | { resolved: true; review: ApplicationReviewState }
@@ -797,10 +809,22 @@ export type SubmissionConfirmationDeps = {
     userId: string;
     review: ApplicationReviewState;
     receivedAt: Date;
-  }) => Promise<void>;
+    expectedSubmissionRunId?: string;
+    expectedSubmissionClaimId?: string;
+  }) => Promise<boolean | void>;
   syncCanonicalApplication?: (input: {
     packetId: string;
     userId: string;
+  }) => Promise<void>;
+  recordConfirmationFact?: (input: {
+    applicationId: string;
+    userId: string;
+    alias: string;
+    subject?: string;
+    current: ApplicationReviewState;
+    jobContext?: unknown;
+    receivedAt: Date;
+    correlation: 'current_attempt' | 'uncorrelated_delayed';
   }) => Promise<void>;
 };
 
@@ -812,7 +836,7 @@ export type SubmissionConfirmationDeps = {
  * belonging to the mailbox it arrived at, whatever hands the id to this function later. */
 async function loadPacketReview(input: { applicationId: string; userId: string }): Promise<PacketReviewLookup> {
   const rows = await db
-    .select({ spec: generated_resumes.spec })
+    .select({ spec: generated_resumes.spec, jobContext: generated_resumes.job_context })
     .from(generated_resumes)
     .where(and(
       eq(generated_resumes.id, input.applicationId),
@@ -820,7 +844,107 @@ async function loadPacketReview(input: { applicationId: string; userId: string }
     ))
     .limit(1);
   if (rows.length === 0) return null;
-  return { review: readApplicationReview(rows[0].spec) };
+  return { review: readApplicationReview(rows[0].spec), jobContext: rows[0].jobContext };
+}
+
+async function recordSubmissionConfirmationFact(input: {
+  applicationId: string;
+  userId: string;
+  alias: string;
+  subject?: string;
+  current: ApplicationReviewState;
+  jobContext?: unknown;
+  receivedAt: Date;
+  correlation: 'current_attempt' | 'uncorrelated_delayed';
+}): Promise<void> {
+  await db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, input.userId);
+    const events = await submissionAttemptEventsForPacket(input.userId, input.applicationId, { executor: tx });
+    let binding: SubmissionAttemptBinding;
+    if (input.correlation === 'uncorrelated_delayed') {
+      // The receipt predates the active run. It proves this packet reached the employer, but it
+      // cannot honestly be attached to the newer run or claim merely because those fields are now
+      // on the mutable review. Give the delayed receipt its own packet/posting-level attempt.
+      const attemptId = submissionAttemptEventId(
+        input.applicationId,
+        'attempt_opened',
+        `delayed-email:${input.alias.trim().toLowerCase()}:${input.receivedAt.toISOString()}:${input.subject?.trim() ?? ''}`,
+      );
+      binding = {
+        attemptId,
+        userId: input.userId,
+        packetId: input.applicationId,
+        source: 'legacy_backfill',
+        operation: 'initial_submission',
+        postingIdentity: freezePostingIdentity(input.jobContext, input.current.portal_url),
+        submissionRunId: null,
+        submissionClaimId: null,
+        packetVersion: null,
+      };
+      await appendSubmissionAttemptEvent({
+        ...binding,
+        eventId: submissionAttemptEventId(binding.attemptId, 'attempt_opened', 'delayed-email-confirmation'),
+        eventKind: 'attempt_opened',
+        observedAt: input.receivedAt,
+        evidenceCode: 'delayed_employer_confirmation_uncorrelated',
+      }, { executor: tx });
+    } else {
+      const openings = events.filter((event) => event.event_kind === 'attempt_opened');
+      const opening = [...openings].reverse().find((event) =>
+        (input.current.submission_claim_id && event.submission_claim_id === input.current.submission_claim_id)
+        || (input.current.submission_run_id && event.submission_run_id === input.current.submission_run_id));
+      if (opening) {
+        binding = submissionAttemptBindingFromEvent(opening);
+      } else {
+        const attemptId = input.current.submission_claim_id
+          && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(input.current.submission_claim_id)
+          ? input.current.submission_claim_id
+          : submissionAttemptEventId(input.applicationId, 'attempt_opened', 'legacy-email-confirmation-attempt');
+        binding = {
+          attemptId,
+          userId: input.userId,
+          packetId: input.applicationId,
+          source: 'legacy_backfill',
+          operation: 'initial_submission',
+          postingIdentity: freezePostingIdentity(input.jobContext, input.current.portal_url),
+          submissionRunId: input.current.submission_run_id ?? null,
+          submissionClaimId: input.current.submission_claim_id ?? null,
+          packetVersion: input.current.packet_audit?.packet_version
+            ?? input.current.submission_packet_version
+            ?? null,
+        };
+        await appendSubmissionAttemptEvent({
+          ...binding,
+          eventId: submissionAttemptEventId(binding.attemptId, 'attempt_opened', 'email-confirmation-bridge'),
+          eventKind: 'attempt_opened',
+          ...(input.current.submission_claimed_at
+            ? { observedAt: new Date(input.current.submission_claimed_at) }
+            : {}),
+          evidenceCode: 'legacy_email_confirmation_bridge',
+        }, { executor: tx });
+      }
+    }
+    await appendSubmissionAttemptEvent({
+      ...binding,
+      eventId: submissionConfirmationEmailEventId(binding.attemptId, input),
+      eventKind: 'submission_confirmed',
+      observedAt: input.receivedAt,
+      evidenceCode: 'employer_confirmation_email_received',
+    }, { executor: tx });
+  });
+}
+
+export function submissionConfirmationEmailEventId(
+  attemptId: string,
+  input: { alias: string; subject?: string; receivedAt: Date },
+): string {
+  const alias = input.alias.trim().toLowerCase();
+  const subject = input.subject?.trim().replace(/\s+/g, ' ') ?? '';
+  return submissionAttemptEventId(
+    attemptId,
+    'submission_confirmed',
+    `employer-email:${alias}:${input.receivedAt.toISOString()}:${subject}`,
+  );
 }
 
 async function savePacketReview(input: {
@@ -828,8 +952,10 @@ async function savePacketReview(input: {
   userId: string;
   review: ApplicationReviewState;
   receivedAt: Date;
-}): Promise<void> {
-  await db.update(generated_resumes).set({
+  expectedSubmissionRunId?: string;
+  expectedSubmissionClaimId?: string;
+}): Promise<boolean> {
+  const updated = await db.update(generated_resumes).set({
     spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(input.review)}::jsonb, true)`,
     pipeline_stage: 'applied',
     pipeline_stage_at: input.receivedAt,
@@ -840,7 +966,14 @@ async function savePacketReview(input: {
     // than trusted from the read. A second confirmation arriving in that gap must not restamp a
     // receipt over the one already recorded.
     sql`${generated_resumes.spec}->'_review'->>'status' <> 'submitted'`,
-  ));
+    ...(input.expectedSubmissionRunId
+      ? [sql`${generated_resumes.spec}->'_review'->>'submission_run_id' = ${input.expectedSubmissionRunId}`]
+      : []),
+    ...(input.expectedSubmissionClaimId
+      ? [sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${input.expectedSubmissionClaimId}`]
+      : []),
+  )).returning({ id: generated_resumes.id });
+  return updated.length > 0;
 }
 
 /**
@@ -861,6 +994,8 @@ export async function resolvePacketFromConfirmation(input: {
   if (!lookup) return { resolved: false, reason: 'packet_not_found' };
   const current = lookup.review;
   if (!current) return { resolved: false, reason: 'review_missing' };
+  const recordConfirmation = deps.recordConfirmationFact
+    ?? (!deps.loadReview && !deps.saveReview ? recordSubmissionConfirmationFact : undefined);
   /* Best-effort on both paths, through the shared never-throwing wrapper: a degraded applications
    * table must not fail a webhook delivery or turn every duplicate receipt into a Resend retry
    * storm. A swallowed failure here is not lost: the packet is the source of truth and the
@@ -869,22 +1004,61 @@ export async function resolvePacketFromConfirmation(input: {
     { packetId: input.applicationId, userId: input.userId },
     { sync: deps.syncCanonicalApplication },
   );
+  const replaysHeldReceipt = current.status === 'submitted'
+    && current.receipt?.captured_at === input.receivedAt.toISOString();
+  if (!replaysHeldReceipt && confirmationIsStale(current, input.receivedAt)) {
+    await recordConfirmation?.({
+      applicationId: input.applicationId,
+      userId: input.userId,
+      alias: input.alias,
+      subject: input.subject,
+      current,
+      jobContext: lookup.jobContext,
+      receivedAt: input.receivedAt,
+      correlation: 'uncorrelated_delayed',
+    });
+    return { resolved: false, reason: 'stale_confirmation' };
+  }
   if (current.status === 'submitted') {
     /* The packet already knows. The canonical row may not: every confirmation resolved before the
      * sync below existed left a submitted packet beside a still-sendable applications row, and the
      * reconciler replays exactly this branch. Healing it here makes one reconcile pass fix them
      * all, and the guarded UPDATE makes the heal a no-op when nothing is wrong. */
+    await recordConfirmation?.({
+      applicationId: input.applicationId,
+      userId: input.userId,
+      alias: input.alias,
+      subject: input.subject,
+      current,
+      jobContext: lookup.jobContext,
+      receivedAt: input.receivedAt,
+      correlation: 'current_attempt',
+    });
     await syncCanonical();
     return { resolved: false, reason: 'already_submitted' };
   }
-  if (confirmationIsStale(current, input.receivedAt)) return { resolved: false, reason: 'stale_confirmation' };
   const review = reviewFromSubmissionConfirmation(current, input);
-  await (deps.saveReview ?? savePacketReview)({
+  await recordConfirmation?.({
+    applicationId: input.applicationId,
+    userId: input.userId,
+    alias: input.alias,
+    subject: input.subject,
+    current,
+    jobContext: lookup.jobContext,
+    receivedAt: input.receivedAt,
+    correlation: 'current_attempt',
+  });
+  const applied = await (deps.saveReview ?? savePacketReview)({
     applicationId: input.applicationId,
     userId: input.userId,
     review,
     receivedAt: input.receivedAt,
+    expectedSubmissionRunId: current.submission_run_id,
+    expectedSubmissionClaimId: current.submission_claim_id,
   });
+  // The receipt fact remains durable because it is external evidence, but a stale mutable snapshot
+  // must not be reported as resolved or advance the canonical row it did not update.
+  if (applied === false) return { resolved: false, reason: 'stale_confirmation' };
   await syncCanonical();
   return { resolved: true, review };
 }

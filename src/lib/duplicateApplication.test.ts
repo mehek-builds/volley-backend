@@ -8,8 +8,10 @@ import {
   duplicateApplicationReason,
   duplicateApplicationResponse,
   isLegacyUnverifiedAttemptReason,
+  freezePostingIdentity,
   postingIdentity,
   type SubmittedTwinRow,
+  unidentifiableDuplicateApplicationResponse,
 } from './duplicateApplication';
 import { attentionCategoriesForReasons } from './submissionTerminalCause';
 
@@ -90,6 +92,18 @@ describe('what counts as the same posting', () => {
     assert.deepEqual(comparePostings(a, b), { same: true, basis: 'job_id' });
   });
 
+  test('different internal job ids do not prove different employer postings', () => {
+    const a = postingIdentity(
+      { company: 'Acme', role: 'Engineer', job_id: 'monitor-row-a' },
+      'https://careers.example.com/openings/engineer',
+    );
+    const b = postingIdentity(
+      { company: 'Acme', role: 'Engineer', job_id: 'monitor-row-b' },
+      'https://jobs.another-example.com/openings/engineer',
+    );
+    assert.deepEqual(comparePostings(a, b), { same: false, basis: null });
+  });
+
   test('company plus role carries the packets that have no job_id at all', () => {
     // Fluency Engineering Intern: three packets, job_id null on every one of them.
     const context = { company: 'Fluency', role: 'Engineering Intern' };
@@ -140,6 +154,23 @@ describe('what counts as the same posting', () => {
     assert.deepEqual(comparePostings(a, b), { same: false, basis: 'ats_posting' });
   });
 
+  test('different provider or tenant namespaces do not prove two postings are different', () => {
+    const linkedIn = postingIdentity(
+      { company: 'Acme', role: 'Software Engineer' },
+      'https://www.linkedin.com/jobs/view/123456789',
+    );
+    const workable = postingIdentity(
+      { company: 'Acme', role: 'Software Engineer' },
+      'https://apply.workable.com/acme/j/ACMEPOST1/apply/',
+    );
+    const otherTenant = postingIdentity(
+      { company: 'Acme', role: 'Software Engineer' },
+      'https://apply.workable.com/acme-careers/j/ACMEPOST2/apply/',
+    );
+    assert.deepEqual(comparePostings(linkedIn, workable), { same: false, basis: null });
+    assert.deepEqual(comparePostings(workable, otherTenant), { same: false, basis: null });
+  });
+
   test('no shared tier is reported, never silently treated as a clear', () => {
     const a = postingIdentity({}, undefined);
     const b = postingIdentity({ company: 'Akuna', role: AKUNA_ROLE }, AKUNA_DIRECT_URL);
@@ -162,6 +193,159 @@ describe('the verdict over a set of already-submitted applications', () => {
       [submitted()],
     );
     assert.equal(verdict.kind, 'clear');
+  });
+
+  test('an attributed unknown-provider orphan uses its exact public URL instead of mutable names', () => {
+    const orphan = submitted({
+      id: '7a1a4c68-bf4c-42c5-bc88-a59db891de50',
+      job_context: { company: 'Original Company', role: 'Original Role' },
+      portal_url: 'https://example.com/careers/openings/123/',
+      submitted_at: '2026-08-24T12:00:00.000Z',
+      exact_url_scope: true,
+      tracker_available: false,
+    });
+    const renamed = duplicateAmong(
+      { company: 'Renamed Company', role: 'Renamed Role' },
+      'http://www.example.com/careers/openings/123/application-form?utm_source=tracker',
+      [orphan],
+    );
+    assert.equal(renamed.kind, 'duplicate');
+    if (renamed.kind !== 'duplicate') return;
+    assert.equal(renamed.match.basis, 'portal_url');
+    assert.equal(renamed.match.tracker_available, false);
+    assert.doesNotMatch(renamed.reason, /Open the earlier application in your Tracker/);
+    assert.match(renamed.reason, /confirmed duplicate-risk record in Litos/);
+
+    const adjacent = duplicateAmong(
+      { company: 'Original Company', role: 'Original Role' },
+      'https://example.com/careers/openings/456',
+      [orphan],
+    );
+    assert.equal(adjacent.kind, 'unidentifiable');
+
+    const unprovedAlias = duplicateAmong(
+      { company: 'Original Company', role: 'Original Role' },
+      'https://example.com/careers/roles/123',
+      [orphan],
+    );
+    assert.equal(unprovedAlias.kind, 'unidentifiable');
+
+    const paddedNumericAlias = duplicateAmong(
+      { company: 'Original Company', role: 'Original Role' },
+      'https://example.com/careers/openings/000123',
+      [orphan],
+    );
+    assert.equal(paddedNumericAlias.kind, 'unidentifiable');
+  });
+
+  test('unknown-provider mutable slugs never prove that a risky posting is different', () => {
+    const orphan = submitted({
+      job_context: { company: 'Original Company', role: 'Original Role' },
+      portal_url: 'https://careers.example.com/openings/123-engineer',
+      exact_url_scope: true,
+      tracker_available: false,
+    });
+    const verdict = duplicateAmong(
+      { company: 'Original Company', role: 'Original Role' },
+      'https://careers.example.com/openings/123-senior-engineer',
+      [orphan],
+    );
+    assert.equal(verdict.kind, 'unidentifiable');
+  });
+
+  test('unknown-provider UUID keys compare case-insensitively', () => {
+    const postingId = 'dc8693b5-72ce-4ca3-ab15-9c8434d35da1';
+    const orphan = submitted({
+      job_context: { company: 'Original Company', role: 'Original Role' },
+      portal_url: `https://careers.example.com/openings/${postingId}`,
+      exact_url_scope: true,
+      tracker_available: false,
+    });
+    const verdict = duplicateAmong(
+      { company: 'Renamed Company', role: 'Renamed Role' },
+      `https://careers.example.com/openings/${postingId.toUpperCase()}`,
+      [orphan],
+    );
+    assert.equal(verdict.kind, 'duplicate');
+    assert.equal(verdict.kind === 'duplicate' && verdict.match.basis, 'portal_url');
+  });
+
+  test('a regular submitted unknown-provider row blocks the same exact URL after name drift', () => {
+    const prior = submitted({
+      job_context: { company: 'Original Co', role: 'Original Engineer' },
+      portal_url: 'https://careers.example.com/openings/123',
+    });
+    const verdict = duplicateAmong(
+      { company: 'Renamed Co', role: 'Senior Engineer' },
+      'https://careers.example.com/openings/123',
+      [prior],
+    );
+    assert.equal(verdict.kind, 'duplicate');
+    assert.equal(verdict.kind === 'duplicate' && verdict.match.basis, 'portal_url');
+  });
+
+  test('exact public URL equality outranks differing internal job ids', () => {
+    const prior = submitted({
+      job_context: { company: 'Original Co', role: 'Original Engineer', job_id: 'monitor-row-a' },
+      portal_url: 'https://careers.example.com/openings/123',
+    });
+    const verdict = duplicateAmong(
+      { company: 'Renamed Co', role: 'Senior Engineer', job_id: 'monitor-row-b' },
+      'https://careers.example.com/openings/123',
+      [prior],
+    );
+    assert.equal(verdict.kind, 'duplicate');
+    assert.equal(verdict.kind === 'duplicate' && verdict.match.basis, 'portal_url');
+  });
+
+  test('different internal job ids stay unidentifiable without a trusted provider namespace', () => {
+    const prior = submitted({
+      job_context: { company: 'Acme', role: 'Engineer', job_id: 'monitor-row-a' },
+      portal_url: 'https://careers.example.com/openings/123',
+    });
+    const verdict = duplicateAmong(
+      { company: 'Acme', role: 'Engineer', job_id: 'monitor-row-b' },
+      'https://jobs.another-example.com/openings/456',
+      [prior],
+    );
+    assert.equal(verdict.kind, 'unidentifiable');
+  });
+
+  test('one-sided known-provider parsing cannot fall through to mutable names', () => {
+    const prior = submitted({
+      job_context: { company: 'Original Co', role: 'Original Engineer' },
+      portal_url: 'https://www.linkedin.com/jobs/view/123456789',
+      posting_identity: freezePostingIdentity(
+        { company: 'Original Co', role: 'Original Engineer' },
+        'https://www.linkedin.com/jobs/view/123456789',
+      ),
+      tracker_available: false,
+    });
+    const verdict = duplicateAmong(
+      { company: 'Renamed Co', role: 'Senior Engineer' },
+      'https://linkedin.com/jobs/view/123456789',
+      [prior],
+    );
+    assert.equal(verdict.kind, 'duplicate');
+    assert.equal(verdict.kind === 'duplicate' && verdict.match.basis, 'portal_url');
+  });
+
+  test('cross-provider posting keys remain unidentifiable instead of proving a clear', () => {
+    const prior = submitted({
+      job_context: { company: 'Acme', role: 'Software Engineer' },
+      portal_url: 'https://www.linkedin.com/jobs/view/123456789',
+      posting_identity: freezePostingIdentity(
+        { company: 'Acme', role: 'Software Engineer' },
+        'https://www.linkedin.com/jobs/view/123456789',
+      ),
+      tracker_available: false,
+    });
+    const verdict = duplicateAmong(
+      { company: 'Acme', role: 'Software Engineer' },
+      'https://apply.workable.com/acme/j/ACMEPOST1/apply/',
+      [prior],
+    );
+    assert.equal(verdict.kind, 'unidentifiable');
   });
 
   test('nothing submitted yet is clear, not unidentifiable', () => {
@@ -194,7 +378,71 @@ describe('the verdict over a set of already-submitted applications', () => {
 
   test('a packet that shares no key with anything submitted says so', () => {
     const verdict = duplicateAmong({}, undefined, [submitted()]);
-    assert.deepEqual(verdict, { kind: 'unidentifiable' });
+    assert.equal(verdict.kind, 'unidentifiable');
+    if (verdict.kind !== 'unidentifiable') return;
+    assert.equal(verdict.application_id, 'd26aca4c-db65-4f07-a69e-811d85c52cf9');
+    assert.match(verdict.reason, /Not sent/);
+    assert.match(verdict.reason, /cannot be safely compared/);
+  });
+
+  test('same-packet immutable risk blocks even when the packet has no comparable posting key', () => {
+    const packetId = 'd26aca4c-db65-4f07-a69e-811d85c52cf9';
+    const verdict = duplicateAmong({}, undefined, [submitted({
+      id: packetId,
+      job_context: {},
+      portal_url: null,
+      submitted_at: null,
+      unverified_at: '2026-08-24T12:00:02.000Z',
+    })], packetId);
+    assert.equal(verdict.kind, 'duplicate');
+    if (verdict.kind !== 'duplicate') return;
+    assert.equal(verdict.match.application_id, packetId);
+    assert.equal(verdict.match.basis, 'same_packet');
+    assert.equal(verdict.match.certainty, 'unverified');
+  });
+
+  test('an incomparable risky row fails closed even when another risky row compares as different', () => {
+    const incomparable = submitted({
+      id: 'd26aca4c-db65-4f07-a69e-811d85c52cf8',
+      job_context: {},
+      portal_url: null,
+    });
+    const different = submitted({
+      id: 'd26aca4c-db65-4f07-a69e-811d85c52cf7',
+      job_context: { company: 'Palantir', role: 'FDSE Intern', job_id: 'different-job' },
+      portal_url: 'https://job-boards.greenhouse.io/palantir/jobs/7000002',
+    });
+    const verdict = duplicateAmong(akunaContext(), AKUNA_DIRECT_URL, [incomparable, different]);
+    assert.equal(verdict.kind, 'unidentifiable');
+    assert.equal(verdict.kind === 'unidentifiable' && verdict.application_id, incomparable.id);
+  });
+
+  test('the unidentifiable refusal body is explicit and names the risky packet', () => {
+    const verdict = duplicateAmong({}, undefined, [submitted()]);
+    assert.equal(verdict.kind, 'unidentifiable');
+    if (verdict.kind !== 'unidentifiable') return;
+    assert.deepEqual(unidentifiableDuplicateApplicationResponse(verdict), {
+      error: verdict.reason,
+      code: 'DUPLICATE_RISK_UNIDENTIFIABLE',
+      duplicate_of: 'd26aca4c-db65-4f07-a69e-811d85c52cf9',
+      matched_on: null,
+      resolution: {
+        prior_attempt_id: null,
+        prior_application_id: null,
+        prior_packet_id: 'd26aca4c-db65-4f07-a69e-811d85c52cf9',
+        prior_company: 'Akuna',
+        prior_role: AKUNA_ROLE,
+        prior_portal_url: 'https://boards.greenhouse.io/akunacapital/jobs/8018893',
+        prior_identity_exact: true,
+        candidate_application_id: null,
+        candidate_packet_id: null,
+        candidate_company: '',
+        candidate_role: '',
+        candidate_portal_url: null,
+        candidate_identity_version: null,
+        candidate_identity_digest: null,
+      },
+    });
   });
 
   test('the refusal names the employer, the role and the day', () => {
@@ -335,11 +583,17 @@ describe('every path that can write status submitted is behind the guard', () =>
   test('the extension outcome path is downstream of extension-start and must stay so', async () => {
     const source = await readFile('src/routes/applications.ts', 'utf8');
     const outcomeAt = source.indexOf("'/applications/:id/submission/extension-outcome'");
-    const body = source.slice(outcomeAt, outcomeAt + 3000);
+    const body = source.slice(outcomeAt, source.indexOf("'/applications/:id/resume'", outcomeAt));
+    const helperAt = source.indexOf('export async function commitExtensionSubmissionOutcome');
+    const helper = source.slice(helperAt, source.indexOf('export async function', helperAt + 1));
     // extension-outcome RECORDS a submission the extension already performed. Guarding it would be
     // refusing to write down something that already happened, which loses the receipt rather than
-    // preventing the send. The gate for this path is extension-start, above.
-    assert.match(body, /current\.submission_claim_id !== parsed\.data\.claim_id \|\| current\.status !== 'submitting'/);
+    // preventing the send. The gate for this path is extension-start, above. The route delegates
+    // the exact-attempt check and outcome write to one locked transaction so a competing resolution
+    // cannot slip between the check and the persisted fact.
+    assert.match(body, /await commitExtensionSubmissionOutcome\(\{/);
+    assert.match(helper, /extensionOutcomeClaimDisposition\(current, input\.claimId, outcome\)/);
+    assert.match(helper, /disposition === 'stale'/);
   });
 
   test('the refusal is written through the shared merge, so it carries its cause', async () => {
@@ -353,12 +607,13 @@ describe('every path that can write status submitted is behind the guard', () =>
        submitRequestDisposition as re-runnable. So the refusal stands and the status it lands in
        depends on the packet. What this test exists to protect is unchanged and still checked: the
        write goes through the shared merge, and it carries duplicate.reason. */
-    const gateAt = runner.indexOf("if (duplicate.kind === 'duplicate')");
+    const submitAt = runner.indexOf('async function submit(row: ResumeRow');
+    const gateAt = runner.indexOf("if (duplicate.kind !== 'clear')", submitAt);
     assert.ok(gateAt > 0, 'the duplicate gate must still be in the runner');
     const gate = runner.slice(gateAt, runner.indexOf('const claimedRow = await claimSubmission(row);', gateAt));
     assert.match(gate, /nextReview\(current, \{/);
     assert.match(gate, /duplicate\.reason/);
-    assert.match(gate, /attention_categories:[\s\S]{0,120}'duplicate_application'/);
+    assert.match(gate, /attention_categories:[\s\S]{0,320}'duplicate_application'/);
     assert.match(gate, /'needs_attention'/);
   });
 });

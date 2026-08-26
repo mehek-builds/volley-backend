@@ -58,10 +58,13 @@ test('the email confirmation writer advances the canonical row through the share
  * what keeps a claim, a hold or a failure write from ever touching the canonical row. */
 test('every runner submit stamp advances the canonical row through writeReview', () => {
   const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  const writeReview = runner.slice(runner.indexOf('async function writeReview'));
-  assert.match(writeReview.slice(0, 900), /review\.status === 'submitted'/);
+  const start = runner.indexOf('async function writeReview');
+  const end = runner.indexOf('\nasync function standingAuthorization', start);
+  assert.ok(start >= 0 && end > start, 'could not bound writeReview');
+  const writeReview = runner.slice(start, end);
+  assert.match(writeReview, /updated\.length > 0 && review\.status === 'submitted'/);
   assert.match(
-    writeReview.slice(0, 900),
+    writeReview,
     /advanceCanonicalApplicationFromPacketSubmission\(\{ packetId: row\.id, userId: row\.user_id \}\)/,
   );
 });
@@ -108,18 +111,27 @@ test('each dashboard writer that stamps a packet submitted advances the canonica
   // same predicate the runner's writeReview uses, never a re-derivation from request inputs.
   // Their idempotent retry arms heal an already-submitted packet, which is what makes a retry
   // the recovery path for a canonical advance that failed the first time.
-  for (const path of [
-    '/applications/:id/submission/extension-outcome',
-    '/applications/:id/submission/unverified',
-  ]) {
+  for (const [path, persistedStatus, idempotentAdvancePrecedesGuard] of [
+    ['/applications/:id/submission/extension-outcome', "result.review.status === 'submitted'", false],
+    ['/applications/:id/submission/unverified', "next.status === 'submitted'", true],
+  ] as const) {
     const route = routeSlice(path);
+    const advanceAt = route.indexOf('advanceCanonicalApplicationFromPacketSubmission(');
+    const persistedStatusAt = route.indexOf(persistedStatus);
     assert.ok(
-      route.includes("next.status === 'submitted'"),
+      persistedStatusAt >= 0,
       `${path} does not gate the advance on the persisted status`,
     );
-    assert.ok(
-      route.indexOf('advanceCanonicalApplicationFromPacketSubmission(') < route.indexOf("next.status === 'submitted'"),
-      `${path} does not heal the canonical row on its idempotent retry arm`,
-    );
+    if (idempotentAdvancePrecedesGuard) {
+      assert.ok(
+        advanceAt < persistedStatusAt,
+        `${path} does not heal the canonical row on its idempotent retry arm`,
+      );
+    } else {
+      assert.ok(
+        persistedStatusAt < advanceAt,
+        `${path} advances the canonical row before checking the persisted result`,
+      );
+    }
   }
 });

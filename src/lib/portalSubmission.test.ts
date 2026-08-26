@@ -4518,10 +4518,8 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   const countryOptionIndex = actions.findIndex((action) => action.label === 'phone_country_option');
   const countryCloseIndex = actions.findIndex((action) => action.label === 'phone_country_close');
   const phoneIndex = actions.findIndex((action) => action.type === 'fill' && action.label === 'phone');
-  const phoneWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_value_visible');
   const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
   const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
-  const countryWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_country_visible');
 
   assert.ok(capabilityIndex > Math.max(...uploadIndexes, ...addressIndexes));
   assert.equal(lateCookieDeclineIndex, capabilityIndex + 1);
@@ -4530,10 +4528,8 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(countryOptionIndex, countryOpenIndex + 1);
   assert.equal(countryCloseIndex, countryOptionIndex + 1);
   assert.equal(phoneIndex, countryCloseIndex + 1);
-  assert.equal(phoneWaitIndex, phoneIndex + 1);
-  assert.equal(phoneProofIndex, phoneWaitIndex + 1);
-  assert.equal(countryWaitIndex, phoneProofIndex + 1);
-  assert.equal(countryProofIndex, countryWaitIndex + 1);
+  assert.equal(phoneProofIndex, phoneIndex + 1);
+  assert.equal(countryProofIndex, phoneProofIndex + 1);
   assert.deepEqual(actions[countryOpenIndex], {
     type: 'click',
     selector: 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
@@ -4586,20 +4582,8 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[phoneIndex]?.value, '0567417451');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
   assert.equal(actions[phoneIndex]?.optional, false);
-  assert.deepEqual(actions[phoneWaitIndex], {
-    type: 'waitForSelector',
-    selector: 'input[name="phone"][type="tel"]:visible',
-    label: 'workable_phone_value_visible',
-    optional: false,
-    timeout: 20_000,
-  });
-  assert.deepEqual(actions[countryWaitIndex], {
-    type: 'waitForSelector',
-    selector: '.iti__selected-dial-code:visible',
-    label: 'workable_phone_country_visible',
-    optional: false,
-    timeout: 20_000,
-  });
+  assert.equal(actions.some((action) => action.label === 'workable_phone_value_visible'), false);
+  assert.equal(actions.some((action) => action.label === 'workable_phone_country_visible'), false);
   assert.equal(actions[countryProofIndex]?.attribute, undefined);
   assert.equal(actions[countryProofIndex]?.expectedValueDigits, '971');
   assert.equal(
@@ -4609,14 +4593,16 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[countryProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
+  assert.equal(actions[countryProofIndex]?.timeout, 20_000);
   assert.equal(actions[phoneProofIndex]?.attribute, 'value');
   assert.equal(actions[phoneProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[phoneProofIndex]?.expectedValueDigits, '0567417451');
   assert.equal(actions[phoneProofIndex]?.requireUnique, true);
   assert.equal(actions[phoneProofIndex]?.stabilityWindowMs, 1_200);
+  assert.equal(actions[phoneProofIndex]?.timeout, 20_000);
 });
 
-test('managed Workable waits through phone remounts before its final value proofs', () => {
+test('managed Workable asserted extracts poll through phone remounts without separate waits', () => {
   const actions = buildManagedPortalActions('workable', {
     ...capturePacket,
     phone: '+1 213 574 6270',
@@ -4624,9 +4610,7 @@ test('managed Workable waits through phone remounts before its final value proof
   const countryOpen = actions.find((action) => action.label === 'phone_country_open');
   const countryOption = actions.find((action) => action.label === 'phone_country_option');
   const phoneIndex = actions.findIndex((action) => action.type === 'fill' && action.label === 'phone');
-  const phoneWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_value_visible');
   const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
-  const countryWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_country_visible');
   const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
   const countryProof = actions.find((action) => action.label === 'filled_field:phone_country');
 
@@ -4641,10 +4625,10 @@ test('managed Workable waits through phone remounts before its final value proof
     countryOption?.selector,
     '[role="option"][data-country-code="us"][data-dial-code="1"][id$="__item-us"]:visible',
   );
-  assert.equal(phoneWaitIndex, phoneIndex + 1);
-  assert.equal(phoneProofIndex, phoneWaitIndex + 1);
-  assert.equal(countryWaitIndex, phoneProofIndex + 1);
-  assert.equal(countryProofIndex, countryWaitIndex + 1);
+  assert.equal(phoneProofIndex, phoneIndex + 1);
+  assert.equal(countryProofIndex, phoneProofIndex + 1);
+  assert.equal(actions.some((action) => action.label === 'workable_phone_value_visible'), false);
+  assert.equal(actions.some((action) => action.label === 'workable_phone_country_visible'), false);
   assert.equal(
     countryProof?.selector,
     '.iti__selected-dial-code:visible',
@@ -4654,8 +4638,8 @@ test('managed Workable waits through phone remounts before its final value proof
   assert.equal(countryProof?.requireNonEmpty, true);
   assert.equal(countryProof?.requireUnique, true);
   assert.equal(countryProof?.expectedValueDigits, '1');
-  assert.equal(actions[phoneWaitIndex]?.timeout, 20_000);
-  assert.equal(actions[countryWaitIndex]?.timeout, 20_000);
+  assert.equal(actions[phoneProofIndex]?.timeout, 20_000);
+  assert.equal(actions[countryProofIndex]?.timeout, 20_000);
 });
 
 test('managed Workable US phone selects exact United States and proves national digits', () => {
@@ -4673,10 +4657,8 @@ test('managed Workable US phone selects exact United States and proves national 
   const countryOptionIndex = actions.findIndex((action) => action.label === 'phone_country_option');
   const countryCloseIndex = actions.findIndex((action) => action.label === 'phone_country_close');
   const phoneIndex = actions.findIndex((action) => action.type === 'fill' && action.label === 'phone');
-  const phoneWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_value_visible');
   const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
   const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
-  const countryWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_country_visible');
 
   assert.equal(lateCookieClearedIndex, lateCookieDeclineIndex + 1);
   assert.equal(countryOpenIndex, lateCookieClearedIndex + 1);
@@ -4691,10 +4673,10 @@ test('managed Workable US phone selects exact United States and proves national 
     requireUnique: true,
   });
   assert.equal(phoneIndex, countryCloseIndex + 1);
-  assert.equal(phoneWaitIndex, phoneIndex + 1);
-  assert.equal(phoneProofIndex, phoneWaitIndex + 1);
-  assert.equal(countryWaitIndex, phoneProofIndex + 1);
-  assert.equal(countryProofIndex, countryWaitIndex + 1);
+  assert.equal(phoneProofIndex, phoneIndex + 1);
+  assert.equal(countryProofIndex, phoneProofIndex + 1);
+  assert.equal(actions.some((action) => action.label === 'workable_phone_value_visible'), false);
+  assert.equal(actions.some((action) => action.label === 'workable_phone_country_visible'), false);
   assert.equal(actions[phoneIndex]?.value, '2135746270');
   assert.equal(actions[phoneIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.attribute, undefined);

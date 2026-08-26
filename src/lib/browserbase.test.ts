@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  acquireManagedStratusOidcAuthorization,
   browserSessionBody,
   browserDeliveryRuntimeIdentity,
   continueManagedBrowser,
@@ -14,8 +15,10 @@ import {
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
   ManagedBrowserPreSubmitCrashError,
+  ManagedBrowserProviderProgressError,
   runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
+  startManagedBrowserRequestBudget,
 } from './browserbase';
 import { observeManagedReceiptOnce } from './managedSubmitOutcome';
 import {
@@ -23,6 +26,14 @@ import {
   buildManagedPortalActions,
   MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
 } from './portalSubmission';
+
+const MANAGED_SUBMISSION_ATTEMPT = Object.freeze({
+  runId: '11111111-1111-4111-8111-111111111111',
+  claimId: '22222222-2222-4222-8222-222222222222',
+  executionId: '33333333-3333-4333-8333-333333333333',
+});
+
+const managedProviderDeadlineAt = (offsetMs = 240_000) => new Date(Date.now() + offsetMs).toISOString();
 
 function assertStratusSafeActions(actions: Array<Record<string, unknown>>) {
   for (const action of actions) {
@@ -150,6 +161,47 @@ test('an uncertain provider failure is never retried', async () => {
       },
     ),
     /sandbox stream was closed/,
+  );
+  assert.equal(runs, 1);
+  assert.equal(authorizationReads, 0);
+});
+
+test('the retry helper revalidates typed progress instead of trusting its error class', async () => {
+  let runs = 0;
+  let authorizationReads = 0;
+  const error = new ManagedBrowserPreSubmitCrashError('sandbox closed', {
+    version: 1,
+    phase: 0,
+    stage: 'submit_blocked',
+    submitPressed: false,
+    applicationSubmitPressed: false,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+    employerOutcome: {
+      kind: 'confirmed',
+      state: 'confirmed',
+      source: 'ats_state',
+      evidence: '.application-success',
+      message: 'Application received',
+      formStillPresent: false,
+    },
+    requiredFieldConfirmationStatus: 'confirmed',
+  });
+
+  await assert.rejects(
+    runWithManagedPreSubmitCrashRetry(
+      async () => {
+        runs += 1;
+        throw error;
+      },
+      async () => {
+        authorizationReads += 1;
+        return true;
+      },
+    ),
+    (thrown: unknown) => thrown instanceof Error
+      && !(thrown instanceof ManagedBrowserPreSubmitCrashError),
   );
   assert.equal(runs, 1);
   assert.equal(authorizationReads, 0);
@@ -310,6 +362,182 @@ test('managed Stratus posts bounded actions to the private production run endpoi
   else process.env.STRATUS_BASE_URL = previousUrl;
 });
 
+test('an initial managed Stratus run has one validated local HTTP timeout', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let fetches = 0;
+  let pendingFetchGuard: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      fetches += 1;
+      const signal = init?.signal;
+      assert.ok(signal, 'the initial provider request must carry its duration fence');
+      return new Promise<Response>((_resolve, reject) => {
+        // AbortSignal.timeout uses an unreferenced timer. This guard models a live socket and keeps
+        // the event loop alive long enough to observe that the provider request is actually cut off.
+        pendingFetchGuard = setTimeout(() => reject(new Error('provider request was not bounded')), 1_000);
+        const rejectForAbort = () => {
+          if (pendingFetchGuard) clearTimeout(pendingFetchGuard);
+          pendingFetchGuard = undefined;
+          reject(signal.reason);
+        };
+        if (signal.aborted) rejectForAbort();
+        else signal.addEventListener('abort', rejectForAbort, { once: true });
+      });
+    }) as typeof fetch;
+
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [], {
+        allowSubmit: true,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        providerDeadlineAt: managedProviderDeadlineAt(),
+        timeoutMs: 10,
+      }),
+      (error: unknown) => error instanceof DOMException && error.name === 'TimeoutError',
+    );
+    assert.equal(fetches, 1);
+
+    for (const timeoutMs of [0, 300_001, 1.5]) {
+      await assert.rejects(
+        runManagedBrowser('https://portal.example/apply', [], {
+          allowSubmit: true,
+          submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+          timeoutMs,
+        }),
+        /timeout must be between 1 ms and 5 minutes/i,
+      );
+    }
+    assert.equal(fetches, 1, 'invalid timeout values must fail before provider dispatch');
+  } finally {
+    if (pendingFetchGuard) clearTimeout(pendingFetchGuard);
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('the managed request timeout includes delayed OIDC credential acquisition', async () => {
+  let credentialResolved = false;
+  const signal = AbortSignal.timeout(10);
+  const delayedCredential = () => new Promise<string>((resolve) => {
+    setTimeout(() => {
+      credentialResolved = true;
+      resolve('late-oidc-token');
+    }, 50);
+  });
+
+  await assert.rejects(
+    acquireManagedStratusOidcAuthorization(signal, delayedCredential),
+    (error: unknown) => error instanceof DOMException && error.name === 'TimeoutError',
+  );
+  assert.equal(credentialResolved, false, 'an expired callback must return before the credential does');
+});
+
+test('a retained continuation reuses its pre-gate budget and refuses a late provider dispatch', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let fetches = 0;
+  let expectedSignal: AbortSignal | undefined;
+
+  try {
+    globalThis.fetch = (async (_input, init) => {
+      fetches += 1;
+      assert.equal(init?.signal, expectedSignal, 'the provider fetch must reuse the signal started before the gate');
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        run: {
+          title: 'Complete',
+          url: 'https://portal.example/complete',
+          text: 'Thank you',
+          submissionAttempt: body.submissionAttempt,
+        },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    const acceptedBudget = startManagedBrowserRequestBudget(1_000);
+    expectedSignal = acceptedBudget.signal;
+    await continueManagedBrowser('a'.repeat(43), [{ type: 'click', selector: '#verify' }], {
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      requestBudget: acceptedBudget,
+      providerDeadlineAt: new Date(Date.now() + 2_000).toISOString(),
+      minimumDispatchBudgetMs: 20,
+    });
+    assert.equal(fetches, 1);
+
+    const delayedBudget = startManagedBrowserRequestBudget(30);
+    await new Promise<void>((resolve) => setTimeout(resolve, 15));
+    await assert.rejects(
+      continueManagedBrowser('b'.repeat(43), [{ type: 'click', selector: '#verify' }], {
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        requestBudget: delayedBudget,
+        providerDeadlineAt: new Date(Date.now() + 1_000).toISOString(),
+        minimumDispatchBudgetMs: 20,
+      }),
+      (error: unknown) => error instanceof DOMException && error.name === 'TimeoutError',
+    );
+    assert.equal(fetches, 1, 'a worker that spent its dispatch margin must not call the provider');
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed Stratus refuses unbound sends and mismatched result correlation', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example/';
+  let fetches = 0;
+  globalThis.fetch = (async () => {
+    fetches += 1;
+    return new Response(JSON.stringify({
+      run: {
+        title: 'Complete',
+        url: 'https://portal.example/complete',
+        text: 'Thank you',
+        submissionAttempt: { ...MANAGED_SUBMISSION_ATTEMPT, executionId: '44444444-4444-4444-8444-444444444444' },
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', [], {
+      allowSubmit: true,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
+    /submission attempt correlation is required/i,
+  );
+  assert.equal(fetches, 0);
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', [], {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
+    /did not match its durable submission attempt/i,
+  );
+  assert.equal(fetches, 1);
+
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
 test('managed Stratus continuation sends an opaque token and actions without reopening a URL', async () => {
   const previousKey = process.env.STRATUS_API_KEY;
   const previousUrl = process.env.STRATUS_BASE_URL;
@@ -318,8 +546,14 @@ test('managed Stratus continuation sends an opaque token and actions without reo
   process.env.STRATUS_BASE_URL = 'https://stratus.example/';
   const requests: Array<Record<string, unknown>> = [];
   globalThis.fetch = (async (_input, init) => {
-    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-    return new Response(JSON.stringify({ run: { title: 'Complete', url: 'https://portal.example/complete', text: 'Thank you' } }), {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    requests.push(body);
+    return new Response(JSON.stringify({ run: {
+      title: 'Complete',
+      url: 'https://portal.example/complete',
+      text: 'Thank you',
+      submissionAttempt: body.submissionAttempt,
+    } }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -328,11 +562,16 @@ test('managed Stratus continuation sends an opaque token and actions without reo
   await runManagedBrowser('https://portal.example/apply', [], {
     requestContinuation: true,
     continuationTtlSeconds: 500,
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+    providerDeadlineAt: managedProviderDeadlineAt(),
   });
-  await continueManagedBrowser('a'.repeat(43), [{ type: 'click', selector: '#verify' }]);
+  await continueManagedBrowser('a'.repeat(43), [{ type: 'click', selector: '#verify' }], {
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+    timeoutMs: 60_000,
+  });
 
   assert.equal(requests[0].requestContinuation, true);
-  assert.equal(requests[0].continuationTtlSeconds, 120);
+  assert.equal(requests[0].continuationTtlSeconds, 180);
   assert.equal(requests[1].continuationToken, 'a'.repeat(43));
   assert.equal('url' in requests[1], false);
   assert.equal('requestContinuation' in requests[1], false);
@@ -403,6 +642,7 @@ test('a pressed-unknown receipt reaches its one read-only observer with no check
               : {}),
             humanVerification: null,
             submitOutcome,
+            submissionAttempt: body.submissionAttempt,
           },
         }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
@@ -421,12 +661,20 @@ test('a pressed-unknown receipt reaches its one read-only observer with no check
             message: 'Thank you for submitting your application.',
             formStillPresent: false,
           },
+          submissionAttempt: body.submissionAttempt,
         },
       }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     }) as typeof fetch;
 
     // The exact options a real managed application submit sends, not a hand-written approximation.
-    const initial = await runManagedBrowser(applicationUrl, [], managedApplicationSubmitOptions(120));
+    const initial = await runManagedBrowser(
+      applicationUrl,
+      [],
+      {
+        ...managedApplicationSubmitOptions(120, MANAGED_SUBMISSION_ATTEMPT),
+        providerDeadlineAt: managedProviderDeadlineAt(),
+      },
+    );
     assert.equal(initial.humanVerification, null);
     assert.equal(initial.continuationOffered, true,
       'pressedUnknown alone offers the continuation, which is what the checkpoint flag was added for');
@@ -437,7 +685,11 @@ test('a pressed-unknown receipt reaches its one read-only observer with no check
       initial,
       expectedApplicationUrl: applicationUrl,
       nowMs: Date.parse('2026-08-11T12:00:05.000Z'),
-      observe: (continuationToken) => continueManagedBrowser(continuationToken, [], { screenshot: true }),
+      observe: (continuationToken) => continueManagedBrowser(continuationToken, [], {
+        screenshot: true,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        timeoutMs: 60_000,
+      }),
     });
 
     assert.equal(observation.attempted, true);
@@ -465,9 +717,14 @@ test('a pressed-unknown receipt reaches its one read-only observer with no check
  * that was never going to be spent. Nothing about those outcomes needs a second look.
  */
 test('a terminal managed submit outcome offers no continuation once the checkpoint flag is gone', () => {
-  const sent = managedApplicationSubmitOptions(120) as Record<string, unknown>;
+  const sent = managedApplicationSubmitOptions(120, MANAGED_SUBMISSION_ATTEMPT) as Record<string, unknown>;
   assert.equal('continuationCheckpoint' in sent, false, 'the flag rested on a false premise');
-  assert.deepEqual(sent, { allowSubmit: true, requestContinuation: true, continuationTtlSeconds: 120 });
+  assert.deepEqual(sent, {
+    allowSubmit: true,
+    requestContinuation: true,
+    continuationTtlSeconds: 120,
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+  });
   for (const state of ['confirmed', 'rejected', 'not_attempted'] as const) {
     const pressed = state !== 'not_attempted';
     const withoutFlag = stratusContinuation(sent, { pressed, state });
@@ -595,6 +852,8 @@ test('managed Stratus types only durable chooser-v4 pre-submit crash progress as
     verificationSubmitPressed: false,
     submitKind: 'application',
     policyVersion: 4,
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+    applicantAnswer: 'must not cross the provider boundary',
   };
   globalThis.fetch = (async () => new Response(JSON.stringify({
     error: { code: 'SANDBOX_RUN_FAILED', message: 'Sandbox browser run failed', runProgress: progress },
@@ -604,9 +863,40 @@ test('managed Stratus types only durable chooser-v4 pre-submit crash progress as
   })) as typeof fetch;
 
   await assert.rejects(
-    runManagedBrowser('https://portal.example/apply', []),
+    runManagedBrowser('https://portal.example/apply', [], {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
     (error: unknown) => error instanceof ManagedBrowserPreSubmitCrashError
-      && error.runProgress.stage === 'phase_started',
+      && error.runProgress.stage === 'phase_started'
+      && !('applicantAnswer' in error.runProgress),
+  );
+
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: {
+      code: 'SANDBOX_RUN_FAILED',
+      message: 'Sandbox browser run failed',
+      runProgress: {
+        ...progress,
+        submissionAttempt: {
+          ...MANAGED_SUBMISSION_ATTEMPT,
+          executionId: '44444444-4444-4444-8444-444444444444',
+        },
+      },
+    },
+  }), {
+    status: 502,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', [], {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
+    (error: unknown) => error instanceof Error
+      && !(error instanceof ManagedBrowserPreSubmitCrashError),
   );
 
   globalThis.fetch = (async () => new Response(JSON.stringify({
@@ -620,7 +910,11 @@ test('managed Stratus types only durable chooser-v4 pre-submit crash progress as
     headers: { 'Content-Type': 'application/json' },
   })) as typeof fetch;
   await assert.rejects(
-    runManagedBrowser('https://portal.example/apply', []),
+    runManagedBrowser('https://portal.example/apply', [], {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    }),
     (error: unknown) => error instanceof Error
       && !(error instanceof ManagedBrowserPreSubmitCrashError),
   );
@@ -630,6 +924,348 @@ test('managed Stratus types only durable chooser-v4 pre-submit crash progress as
   else process.env.STRATUS_API_KEY = previousKey;
   if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
   else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('managed Stratus retries only an absent or exact not-attempted employer outcome', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  let fetches = 0;
+  let authorizationReads = 0;
+  globalThis.fetch = (async () => {
+    fetches += 1;
+    if (fetches === 1) {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'SANDBOX_RUN_FAILED',
+          message: 'Sandbox browser run failed',
+          runProgress: {
+            version: 1,
+            phase: 0,
+            stage: 'submit_blocked',
+            submitPressed: false,
+            applicationSubmitPressed: false,
+            verificationSubmitPressed: false,
+            submitKind: 'application',
+            policyVersion: 4,
+            employerOutcome: {
+              kind: 'not_attempted',
+              state: 'not_attempted',
+              source: null,
+              evidence: null,
+              message: null,
+              formStillPresent: null,
+            },
+            submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+          },
+        },
+      }), { status: 502, headers: { 'Content-Type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({
+      run: {
+        title: 'Application',
+        url: 'https://portal.example/apply',
+        text: 'Ready',
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+
+  try {
+    const outcome = await runWithManagedPreSubmitCrashRetry(
+      () => runManagedBrowser('https://portal.example/apply', [], {
+        allowSubmit: true,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        providerDeadlineAt: managedProviderDeadlineAt(),
+      }),
+      async () => {
+        authorizationReads += 1;
+        return true;
+      },
+    );
+    assert.equal(outcome.kind, 'completed');
+    assert.equal(outcome.retried, true);
+    assert.equal(fetches, 2);
+    assert.equal(authorizationReads, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed Stratus rejects contradictory provider progress without retrying', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  let currentProgress: Record<string, unknown>;
+  let fetches = 0;
+  let authorizationReads = 0;
+  globalThis.fetch = (async () => {
+    fetches += 1;
+    return new Response(JSON.stringify({
+      error: {
+        code: 'SANDBOX_RUN_FAILED',
+        message: 'Sandbox browser run failed',
+        runProgress: currentProgress,
+      },
+    }), { status: 502, headers: { 'Content-Type': 'application/json' } });
+  }) as typeof fetch;
+
+  const exactNotAttempted = {
+    kind: 'not_attempted',
+    state: 'not_attempted',
+    source: null,
+    evidence: null,
+    message: null,
+    formStillPresent: null,
+  };
+  const confirmed = {
+    kind: 'confirmed',
+    state: 'confirmed',
+    source: 'ats_state',
+    evidence: '.application-success',
+    message: 'Application received',
+    formStillPresent: false,
+  };
+  const pressedUnknown = {
+    kind: 'pressed',
+    state: 'unknown',
+    source: null,
+    evidence: null,
+    message: null,
+    formStillPresent: true,
+  };
+  const base = {
+    version: 1,
+    phase: 0,
+    stage: 'submit_blocked',
+    submitPressed: false,
+    applicationSubmitPressed: false,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+  };
+  const cases: Array<{ name: string; progress: Record<string, unknown> }> = [
+    {
+      name: 'confirmation paired with a blocked no-press checkpoint',
+      progress: { ...base, employerOutcome: confirmed, requiredFieldConfirmationStatus: 'confirmed' },
+    },
+    {
+      name: 'pressed outcome paired with no aggregate or per-kind press',
+      progress: { ...base, employerOutcome: pressedUnknown },
+    },
+    {
+      name: 'aggregate no-press paired with an application press',
+      progress: {
+        ...base,
+        stage: 'submit_released',
+        applicationSubmitPressed: true,
+        employerOutcome: pressedUnknown,
+      },
+    },
+    {
+      name: 'released stage paired with no current-kind press',
+      progress: { ...base, stage: 'submit_released', employerOutcome: exactNotAttempted },
+    },
+    {
+      name: 'phase zero paired with a verification submit',
+      progress: { ...base, submitKind: 'verification', employerOutcome: exactNotAttempted },
+    },
+    {
+      name: 'accepted security code paired with no verification press',
+      progress: {
+        ...base,
+        phase: 1,
+        stage: 'result_ready',
+        submitPressed: true,
+        applicationSubmitPressed: true,
+        submitKind: 'verification',
+        employerOutcome: pressedUnknown,
+        securityCodeOutcome: 'accepted',
+      },
+    },
+    {
+      name: 'no-control security code paired with a verification press',
+      progress: {
+        ...base,
+        phase: 1,
+        stage: 'result_ready',
+        submitPressed: true,
+        verificationSubmitPressed: true,
+        submitKind: 'verification',
+        employerOutcome: pressedUnknown,
+        securityCodeOutcome: 'no_control',
+      },
+    },
+    {
+      name: 'not-attempted outcome carrying employer evidence',
+      progress: {
+        ...base,
+        employerOutcome: { ...exactNotAttempted, source: 'page_text', evidence: 'Not sent' },
+      },
+    },
+  ];
+
+  try {
+    for (const entry of cases) {
+      currentProgress = entry.progress;
+      fetches = 0;
+      authorizationReads = 0;
+      await assert.rejects(
+        runWithManagedPreSubmitCrashRetry(
+          () => runManagedBrowser('https://portal.example/apply', [], {
+            allowSubmit: true,
+            submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+            providerDeadlineAt: managedProviderDeadlineAt(),
+          }),
+          async () => {
+            authorizationReads += 1;
+            return true;
+          },
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof Error, entry.name);
+          assert.equal(error instanceof ManagedBrowserPreSubmitCrashError, false, entry.name);
+          assert.equal(error instanceof ManagedBrowserProviderProgressError, false, entry.name);
+          return true;
+        },
+      );
+      assert.equal(fetches, 1, entry.name);
+      assert.equal(authorizationReads, 0, entry.name);
+    }
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed Stratus preserves correlated press and confirmation progress on response loss', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  const progress = {
+    version: 1,
+    phase: 0,
+    stage: 'result_ready',
+    submitPressed: true,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+    employerOutcome: {
+      kind: 'confirmed',
+      state: 'confirmed',
+      source: 'ats_state',
+      evidence: '.application-success',
+      message: 'Application received',
+      formStillPresent: false,
+    },
+    requiredFieldConfirmationStatus: 'confirmed',
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+  } as const;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: {
+      code: 'SANDBOX_RESULT_MISSING',
+      message: 'Provider response stream reset',
+      runProgress: progress,
+    },
+  }), {
+    status: 502,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [], {
+        allowSubmit: true,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        providerDeadlineAt: managedProviderDeadlineAt(),
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof ManagedBrowserProviderProgressError);
+        assert.equal(error.code, 'SANDBOX_RESULT_MISSING');
+        assert.deepEqual(error.runProgress, progress);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
+});
+
+test('managed Stratus preserves one consistent verification confirmation checkpoint', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  const progress = {
+    version: 1,
+    phase: 1,
+    stage: 'result_ready',
+    submitPressed: true,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: true,
+    submitKind: 'verification',
+    policyVersion: 4,
+    employerOutcome: {
+      kind: 'confirmed',
+      state: 'confirmed',
+      source: 'ats_route',
+      evidence: '/complete',
+      message: 'Application received',
+      formStillPresent: false,
+    },
+    requiredFieldConfirmationStatus: 'confirmed',
+    securityCodeOutcome: 'accepted',
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+  } as const;
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: {
+      code: 'SANDBOX_RESULT_MISSING',
+      message: 'Provider response stream reset',
+      runProgress: progress,
+    },
+  }), {
+    status: 502,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      runManagedBrowser('https://portal.example/apply', [], {
+        allowSubmit: true,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        providerDeadlineAt: managedProviderDeadlineAt(),
+      }),
+      (error: unknown) => error instanceof ManagedBrowserProviderProgressError
+        && error.runProgress.securityCodeOutcome === 'accepted'
+        && error.runProgress.verificationSubmitPressed === true,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+    else process.env.STRATUS_API_KEY = previousKey;
+    if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+    else process.env.STRATUS_BASE_URL = previousUrl;
+  }
 });
 
 test('managed Stratus selector errors include a sanitized outbound action audit', async () => {
@@ -692,7 +1328,11 @@ test('managed Stratus selector audits include the v4 form boundary without appli
       questions: [],
     }, true, applicationUrl);
     await assert.rejects(
-      runManagedBrowser(applicationUrl, actions, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, actions, {
+        allowSubmit: true,
+        submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+        providerDeadlineAt: managedProviderDeadlineAt(),
+      }),
       (error: unknown) => {
         assert.ok(error instanceof Error);
         assert.match(error.message, /"applicationScopes":\[\{/);
@@ -840,7 +1480,10 @@ test('managed Stratus proves the exact employer URL before actions and before a 
   let chooserReported = true;
   let advertiseAtomicCapability = true;
   globalThis.fetch = (async (_input, init) => {
-    const body = JSON.parse(String(init?.body)) as { actions: Array<Record<string, unknown>> };
+    const body = JSON.parse(String(init?.body)) as {
+      actions: Array<Record<string, unknown>>;
+      submissionAttempt?: unknown;
+    };
     assert.deepEqual(body.actions.slice(0, 2), [
       {
         type: 'requireCapability',
@@ -888,6 +1531,7 @@ test('managed Stratus proves the exact employer URL before actions and before a 
           bareSendCandidateCount: 0,
         } } : {}),
         submitOutcome: { pressed: true, state: 'confirmed' },
+        submissionAttempt: body.submissionAttempt,
       },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } });
   }) as typeof fetch;
@@ -900,22 +1544,27 @@ test('managed Stratus proves the exact employer URL before actions and before a 
     questions: [],
   };
   const actions = buildManagedPortalActions('workable', packet, true, expectedPageUrl);
-  await runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true });
+  const submitOptions = {
+    allowSubmit: true,
+    submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+    providerDeadlineAt: managedProviderDeadlineAt(),
+  };
+  await runManagedBrowser(expectedPageUrl, actions, submitOptions);
   proofMatches = false;
   await assert.rejects(
-    runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true }),
+    runManagedBrowser(expectedPageUrl, actions, submitOptions),
     /did not prove the exact employer page URL boundaries/,
   );
   proofMatches = true;
   chooserReported = false;
   await assert.rejects(
-    runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true }),
+    runManagedBrowser(expectedPageUrl, actions, submitOptions),
     /did not prove the final-submit chooser outcome/,
   );
   chooserReported = true;
   advertiseAtomicCapability = false;
   await assert.rejects(
-    runManagedBrowser(expectedPageUrl, actions, { allowSubmit: true }),
+    runManagedBrowser(expectedPageUrl, actions, submitOptions),
     /did not advertise required runner capability: atomic-submit-v4/,
   );
 
@@ -952,9 +1601,13 @@ test('managed chooser v4 refuses to leave the process without both exact boundar
       && action.value === MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY);
     assert.ok(exactIndex >= 0);
     assert.ok(atomicIndex >= 0);
+    const invalidSubmitOptions = {
+      allowSubmit: true,
+      providerDeadlineAt: managedProviderDeadlineAt(),
+    };
     const missingExact = actions.filter((_action, index) => index !== exactIndex);
     await assert.rejects(
-      runManagedBrowser(applicationUrl, missingExact, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, missingExact, invalidSubmitOptions),
       /policy v4 requires an exact employer page URL boundary/,
     );
     const mismatchedBoundary = actions.map((action, index) => index === exactIndex ? {
@@ -962,45 +1615,45 @@ test('managed chooser v4 refuses to leave the process without both exact boundar
       expectedPageUrl: 'https://apply.workable.com/example/j/OTHER/',
     } : { ...action });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, mismatchedBoundary, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, mismatchedBoundary, invalidSubmitOptions),
       /policy v4 requires an exact employer page URL boundary/,
     );
     const optionalBoundary = actions.map((action, index) => index === exactIndex
       ? { ...action, optional: true }
       : { ...action });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, optionalBoundary, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, optionalBoundary, invalidSubmitOptions),
       /policy v4 requires an exact employer page URL boundary/,
     );
     const duplicateBoundary = actions.map((action) => ({ ...action }));
     duplicateBoundary.splice(exactIndex + 1, 0, { ...actions[exactIndex]! });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, duplicateBoundary, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, duplicateBoundary, invalidSubmitOptions),
       /policy v4 requires an exact employer page URL boundary/,
     );
     const missingAtomic = actions.filter((_action, index) => index !== atomicIndex);
     await assert.rejects(
-      runManagedBrowser(applicationUrl, missingAtomic, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, missingAtomic, invalidSubmitOptions),
       /policy v4 requires one exact application form boundary/,
     );
     const optionalAtomic = actions.map((action, index) => index === atomicIndex
       ? { ...action, optional: true }
       : { ...action });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, optionalAtomic, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, optionalAtomic, invalidSubmitOptions),
       /policy v4 requires one exact application form boundary/,
     );
     const missingScope = actions.map((action, index) => index === atomicIndex
       ? { type: action.type, value: action.value, optional: action.optional }
       : { ...action });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, missingScope, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, missingScope, invalidSubmitOptions),
       /policy v4 requires one exact application form boundary/,
     );
     const duplicateAtomic = actions.map((action) => ({ ...action }));
     duplicateAtomic.splice(atomicIndex + 1, 0, { ...actions[atomicIndex]! });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, duplicateAtomic, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, duplicateAtomic, invalidSubmitOptions),
       /policy v4 requires one exact application form boundary/,
     );
     const wrongCapability = actions.map((action, index) => index === atomicIndex
@@ -1011,7 +1664,7 @@ test('managed chooser v4 refuses to leave the process without both exact boundar
       }
       : { ...action });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, wrongCapability, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, wrongCapability, invalidSubmitOptions),
       /application scope selector requires the atomic submit v4 capability/,
     );
     const scopeOnFill = actions.map((action) => ({ ...action }));
@@ -1021,7 +1674,7 @@ test('managed chooser v4 refuses to leave the process without both exact boundar
       applicationScopeSelector: MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
     };
     await assert.rejects(
-      runManagedBrowser(applicationUrl, scopeOnFill, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, scopeOnFill, invalidSubmitOptions),
       /application scope selector requires the atomic submit v4 capability/,
     );
     const v3WithAtomicOnly = actions
@@ -1031,7 +1684,7 @@ test('managed chooser v4 refuses to leave the process without both exact boundar
         chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
       });
     await assert.rejects(
-      runManagedBrowser(applicationUrl, v3WithAtomicOnly, { allowSubmit: true }),
+      runManagedBrowser(applicationUrl, v3WithAtomicOnly, invalidSubmitOptions),
       /atomic submit v4 capability requires a chooser v4 submit/,
     );
     assert.equal(calls, 0);

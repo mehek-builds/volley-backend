@@ -9,6 +9,7 @@ import {
   reconcileSubmissionConfirmations,
   resolvePacketFromConfirmation,
   reviewFromSubmissionConfirmation,
+  submissionConfirmationEmailEventId,
   type ApplicationEmailClassification,
   type PacketReviewLookup,
   type StoredEmployerMessageDeps,
@@ -196,6 +197,75 @@ test('a receipt resolves its packet and writes it back under the same owner', as
   assert.equal(harness.saves[0].review.attention_reason, undefined);
 });
 
+test('a receipt fact is durable before the mutable packet is marked submitted', async () => {
+  const order: string[] = [];
+  const outcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    subject: 'Thanks for applying',
+    receivedAt: RECEIVED_AT,
+  }, {
+    loadReview: async () => ({ review: AWAITING_A_CODE }),
+    recordConfirmationFact: async () => {
+      order.push('fact');
+    },
+    saveReview: async () => {
+      order.push('packet');
+    },
+    syncCanonicalApplication: async () => {
+      order.push('canonical');
+    },
+  });
+  assert.equal(outcome.resolved, true);
+  assert.deepEqual(order, ['fact', 'packet', 'canonical']);
+});
+
+test('a receipt fact failure closes the path before a submitted snapshot can be written', async () => {
+  let saved = false;
+  await assert.rejects(() => resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    subject: 'Thanks for applying',
+    receivedAt: RECEIVED_AT,
+  }, {
+    loadReview: async () => ({ review: AWAITING_A_CODE }),
+    recordConfirmationFact: async () => {
+      throw new Error('ledger unavailable');
+    },
+    saveReview: async () => {
+      saved = true;
+    },
+  }), /ledger unavailable/);
+  assert.equal(saved, false);
+});
+
+test('a stale packet CAS never reports resolution or advances the canonical row', async () => {
+  const order: string[] = [];
+  const outcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    subject: 'Thanks for applying',
+    receivedAt: RECEIVED_AT,
+  }, {
+    loadReview: async () => ({ review: AWAITING_A_CODE }),
+    recordConfirmationFact: async () => {
+      order.push('fact');
+    },
+    saveReview: async () => {
+      order.push('stale-cas');
+      return false;
+    },
+    syncCanonicalApplication: async () => {
+      order.push('canonical');
+    },
+  });
+  assert.deepEqual(outcome, { resolved: false, reason: 'stale_confirmation' });
+  assert.deepEqual(order, ['fact', 'stale-cas']);
+});
+
 /* A packet belongs to the owner of the alias the mail arrived at, and to nobody else. The lookup is
  * scoped by user AND id, so a confirmation carrying another user's application id finds nothing
  * rather than resolving a stranger's application. */
@@ -313,6 +383,78 @@ test('a stale or unresolvable receipt does not touch the canonical row', async (
     receivedAt: RECEIVED_AT,
   }, unowned.deps);
   assert.equal(unowned.syncs.length, 0);
+});
+
+test('a delayed attempt A receipt records conservative evidence without binding active attempt B', async () => {
+  const activeClaim = '95ab4556-0031-45aa-b827-d558a643bd70';
+  const activeRun = 'e32f385f-2724-4e53-8417-aa5607f62d90';
+  const currentB = review({
+    status: 'awaiting_security_code',
+    submission_run_id: activeRun,
+    submission_claim_id: activeClaim,
+    submission_claimed_at: '2026-08-11T09:00:00.000Z',
+  });
+  const recorded: Array<Parameters<NonNullable<import('./applicationEmail').SubmissionConfirmationDeps['recordConfirmationFact']>>[0]> = [];
+  let saved = false;
+  let synced = false;
+  const outcome = await resolvePacketFromConfirmation({
+    applicationId: APPLICATION_ID,
+    userId: USER_ID,
+    alias: ALIAS,
+    subject: 'Thank you for applying to the earlier attempt',
+    receivedAt: RECEIVED_AT,
+  }, {
+    loadReview: async () => ({ review: currentB, jobContext: { company: 'Cresta', role: 'Engineer' } }),
+    recordConfirmationFact: async (input) => {
+      recorded.push(input);
+    },
+    saveReview: async () => {
+      saved = true;
+    },
+    syncCanonicalApplication: async () => {
+      synced = true;
+    },
+  });
+  assert.deepEqual(outcome, { resolved: false, reason: 'stale_confirmation' });
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0]?.correlation, 'uncorrelated_delayed');
+  assert.equal(recorded[0]?.current.submission_claim_id, activeClaim);
+  assert.equal(recorded[0]?.current.submission_run_id, activeRun);
+  assert.equal(saved, false);
+  assert.equal(synced, false);
+});
+
+test('email receipt event ids replay one delivery and separate multiple receipts', () => {
+  const attemptId = '13a3e546-b780-4538-97d3-a0f064f0c182';
+  const first = { alias: ALIAS, subject: 'Thanks for applying', receivedAt: RECEIVED_AT };
+  assert.equal(
+    submissionConfirmationEmailEventId(attemptId, first),
+    submissionConfirmationEmailEventId(attemptId, { ...first }),
+  );
+  assert.notEqual(
+    submissionConfirmationEmailEventId(attemptId, first),
+    submissionConfirmationEmailEventId(attemptId, {
+      ...first,
+      receivedAt: new Date(RECEIVED_AT.getTime() + 1_000),
+    }),
+  );
+  assert.notEqual(
+    submissionConfirmationEmailEventId(attemptId, first),
+    submissionConfirmationEmailEventId(attemptId, { ...first, subject: 'Application received' }),
+  );
+});
+
+test('delayed confirmation facts use a separate packet-level binding', () => {
+  const source = readFileSync('src/lib/applicationEmail.ts', 'utf8');
+  const branch = source.slice(
+    source.indexOf("input.correlation === 'uncorrelated_delayed'"),
+    source.indexOf("} else {", source.indexOf("input.correlation === 'uncorrelated_delayed'")),
+  );
+  assert.match(branch, /source: 'legacy_backfill'/);
+  assert.match(branch, /submissionRunId: null/);
+  assert.match(branch, /submissionClaimId: null/);
+  assert.match(branch, /packetVersion: null/);
+  assert.match(branch, /delayed_employer_confirmation_uncorrelated/);
 });
 
 /* THE REPLAY WINDOW the reordering opens, closed before anything can wire the reconciler.
@@ -723,9 +865,9 @@ test('the live packet read and write are both scoped by owner', () => {
   const load = service.slice(service.indexOf('async function loadPacketReview'));
   assert.match(load.slice(0, 600), /eq\(generated_resumes\.user_id, input\.userId\)/);
   const save = service.slice(service.indexOf('async function savePacketReview'));
-  assert.match(save.slice(0, 900), /eq\(generated_resumes\.user_id, input\.userId\)/);
+  assert.match(save.slice(0, 1400), /eq\(generated_resumes\.user_id, input\.userId\)/);
   // The optimistic guard that stops a second receipt restamping the first one's evidence.
-  assert.match(save.slice(0, 900), /'_review'->>'status' <> 'submitted'/);
+  assert.match(save.slice(0, 1400), /'_review'->>'status' <> 'submitted'/);
 });
 
 test('resolution is ordered ahead of the forwarding claim, not after the send', () => {

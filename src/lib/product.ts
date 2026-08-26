@@ -20,7 +20,7 @@ export const PRODUCT_LINKS = {
 } as const;
 
 export const CLIENT_COMPATIBILITY = {
-  extension: { minimum: '0.4.4' },
+  extension: { minimum: '0.6.2' },
   web: { minimum: '0.1.0' },
 } as const;
 

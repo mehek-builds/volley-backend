@@ -30,7 +30,18 @@ describe('resumeHeaderLocation', () => {
   test('country stands in for a missing state', () => {
     assert.equal(
       resumeHeaderLocation({ address_city: 'Dubai', address_country: 'United Arab Emirates' }),
-      'Dubai, United Arab Emirates',
+      'Dubai, U.A.E.',
+    );
+  });
+
+  test('a duplicated city in the state field falls back to the country', () => {
+    assert.equal(
+      resumeHeaderLocation({
+        address_city: 'Dubai',
+        address_state: ' dubai ',
+        address_country: 'United Arab Emirates',
+      }),
+      'Dubai, U.A.E.',
     );
   });
 

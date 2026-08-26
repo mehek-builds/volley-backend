@@ -136,7 +136,7 @@ test('a stated cause is never overwritten by the fallback', () => {
 
 test('the extension failure outcome cannot land reasonless either', () => {
   const patch = extensionOutcomePatch('failed', '2026-08-06T00:00:00.000Z', { finalUrl: 'https://example.com' });
-  assert.equal(patch.attention_reason, undefined, 'the patch itself still states no reason');
+  assert.match(patch.attention_reason ?? '', /cannot prove whether the employer received it/i);
   const written = applyReviewPatch(baseReview, patch);
   assert.ok(written.attention_reason?.trim(), 'the merge is what guarantees it');
   assert.ok((written.attention_categories?.length ?? 0) > 0);

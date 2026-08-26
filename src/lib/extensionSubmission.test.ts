@@ -4,6 +4,7 @@ import type { ApplicationReviewState } from './applicationReview';
 import {
   canStartExtensionSubmission,
   extensionEmployerReceiptIsSufficient,
+  extensionOutcomeClaimDisposition,
   extensionOutcomePatch,
   isSafeExtensionReceiptUrl,
 } from './extensionSubmission';
@@ -33,12 +34,38 @@ test('only confirmed outcomes become submitted with a Chrome extension receipt',
   });
   assert.equal(confirmed.status, 'submitted');
   assert.equal(confirmed.receipt?.source, 'chrome_extension');
-  assert.equal(extensionOutcomePatch('unknown', '2026-07-30T01:00:00.000Z', { finalUrl: 'https://jobs.example' }).status, 'needs_attention');
-  assert.equal(extensionOutcomePatch('failed', '2026-07-30T01:00:00.000Z', { finalUrl: 'https://jobs.example' }).status, 'failed');
-  const cancelled = extensionOutcomePatch('cancelled', '2026-07-30T01:00:00.000Z', { finalUrl: 'https://jobs.example' });
-  assert.equal(cancelled.status, 'ready_to_submit');
-  assert.equal(cancelled.submission_claim_id, undefined);
-  assert.equal(cancelled.submission_claimed_at, undefined);
+  for (const outcome of ['unknown', 'failed', 'cancelled'] as const) {
+    const unresolved = extensionOutcomePatch(outcome, '2026-07-30T01:00:00.000Z', {
+      finalUrl: 'https://jobs.example',
+      submissionRunId: '8b56a408-a8d0-41c0-8335-c3f2b6f12246',
+    });
+    assert.equal(unresolved.status, 'needs_attention');
+    assert.equal(unresolved.submission_attempted_at, '2026-07-30T01:00:00.000Z');
+    assert.deepEqual(unresolved.unverified_submission, {
+      at: '2026-07-30T01:00:00.000Z',
+      cause: 'no_confirmation_state',
+      portal_url: 'https://jobs.example',
+      submission_run_id: '8b56a408-a8d0-41c0-8335-c3f2b6f12246',
+    });
+    assert.equal(Object.hasOwn(unresolved, 'submission_claim_id'), false);
+    assert.equal(Object.hasOwn(unresolved, 'submission_claimed_at'), false);
+  }
+});
+
+test('an unknown extension response replays and can later promote on a verified receipt', () => {
+  const claimId = '45be435b-63de-4451-90bd-a59b901f1e0a';
+  const unresolved: ApplicationReviewState = {
+    ...review('needs_attention'),
+    submission_claim_id: claimId,
+    unverified_submission: {
+      at: '2026-07-30T01:00:00.000Z',
+      cause: 'no_confirmation_state',
+    },
+  };
+  assert.equal(extensionOutcomeClaimDisposition(unresolved, claimId, 'unknown'), 'replay_unverified');
+  assert.equal(extensionOutcomeClaimDisposition(unresolved, claimId, 'confirmed'), 'promote_confirmed');
+  assert.equal(extensionOutcomeClaimDisposition(unresolved, '84d53e99-f24a-423b-b4fb-34841c53f20c', 'confirmed'), 'stale');
+  assert.equal(extensionOutcomeClaimDisposition(review('submitted'), claimId, 'confirmed'), 'stale');
 });
 
 test('extension receipt links cannot execute or open local files', () => {

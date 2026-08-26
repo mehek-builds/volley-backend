@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   delayedSecurityCodeHandoffReview,
+  managedSecurityCodeContinuationRefusalReview,
   preClickNoSubmitReview,
   preClickSecurityRecipientMismatchReview,
   preClickVerificationContinuationBlockedReview,
@@ -65,68 +66,81 @@ test('the pre-click route transition is retryable and stores no attempted or sub
   assert.doesNotMatch(persisted.attention_reason!, /could not verify the employer confirmation/);
 });
 
-test('a standing code wall for another alias stays non-restartable and preserves the challenge', () => {
+test('a post-authorization recipient mismatch retains the parent and opens only the exact unverified exit', () => {
+  const authorization = {
+    source: 'standing_consent' as const,
+    authorized_at: '2026-08-11T11:59:59.000Z',
+  };
   const current = {
     status: 'submission_claimed',
     submission_claimed_at: '2026-08-11T12:00:00.000Z',
     submission_claim_id: 'claim-id',
-    submission_authorization: { source: 'standing_consent' },
+    submission_authorization: authorization,
+    submission_run_id: 'run-id',
+    portal_url: 'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
     submission_attempted_at: '2026-08-11T12:00:01.000Z',
     unverified_submission: {
       attempted_at: '2026-08-11T12:00:01.000Z',
       cause: 'no_confirmation_state',
       portal_url: 'https://job-boards.greenhouse.io/embed/job_app?for=haizelabs&token=4685944008',
     },
-    submitted_at: '2026-08-11T12:00:02.000Z',
-    receipt: { confirmation_text: 'stale', final_url: 'stale', captured_at: 'stale' },
     security_code: { digits: 8, sent_to: 'packet@example.com', requested_at: 'stale', submit_was_authorized: true },
-    verification: { status: 'searching' },
+    verification: {
+      status: 'searching',
+      provider: 'litos',
+      requested_at: '2026-08-11T12:00:01.000Z',
+      retry_count: 0,
+      runner: 'stratus-managed',
+      continuation_fingerprint: 'continuation-fingerprint',
+      continuation_execution_fingerprint: 'execution-fingerprint',
+      continuation_resumed: false,
+    },
     updated_at: '2026-08-11T12:00:00.000Z',
   } as unknown as Parameters<typeof preClickSecurityRecipientMismatchReview>[0];
   const persisted = preClickSecurityRecipientMismatchReview(current, {
     digits: 8,
     sentTo: 'other@example.com',
   }, '2026-08-11T12:00:03.000Z');
-  assert.equal(persisted.status, 'awaiting_security_code');
-  assert.equal(persisted.submission_claimed_at, undefined);
-  assert.equal(persisted.submission_claim_id, undefined);
-  assert.equal(persisted.submission_authorization, undefined);
-  assert.equal(persisted.submission_attempted_at, '2026-08-11T12:00:01.000Z',
-    'the standing wall must not invent a current-run attempt or erase known prior evidence');
+  assert.equal(persisted.status, 'needs_attention');
+  assert.equal(persisted.submission_claimed_at, '2026-08-11T12:00:00.000Z');
+  assert.equal(persisted.submission_claim_id, 'claim-id');
+  assert.deepEqual(persisted.submission_authorization, authorization);
+  assert.equal(persisted.submission_attempted_at, '2026-08-11T12:00:03.000Z');
+  assert.deepEqual(persisted.unverified_submission, {
+    at: '2026-08-11T12:00:03.000Z',
+    cause: 'no_confirmation_state',
+    portal_url: current.portal_url,
+    submission_run_id: 'run-id',
+  });
   assert.equal(persisted.security_code?.sent_to, 'other@example.com');
   assert.equal(persisted.security_code?.submit_was_authorized, false,
     'a wall for another recipient cannot inherit authorization from the packet recipient');
   assert.equal(persisted.security_code?.attempts, undefined);
-  assert.equal(persisted.unverified_submission, undefined);
   assert.equal(persisted.submitted_at, undefined);
   assert.equal(persisted.receipt, undefined);
   assert.equal(persisted.verification?.status, 'verification_pending');
+  assert.equal(persisted.verification?.runner, 'stratus-managed');
+  assert.equal(persisted.verification?.continuation_fingerprint, 'continuation-fingerprint');
+  assert.equal(persisted.verification?.continuation_execution_fingerprint, 'execution-fingerprint');
+  assert.equal(persisted.verification?.continuation_resumed, false);
   assert.match(persisted.attention_reason!, /different application email/i);
-  assert.match(persisted.attention_reason!, /already waiting/i);
-  assert.equal(submitRequestDisposition(persisted.status), 'reject');
+  assert.match(persisted.attention_reason!, /exact application was received/i);
+  assert.equal(submitRequestDisposition(persisted.status, true), 'reject');
+  assert.equal(resumeEditDisposition(persisted.status, true), 'reject');
 });
 
-/* THE LOCK HAS TO HAVE A KEY, AND THIS TEST USED TO ASSERT THE TRAP INTO PLACE.
- *
- * It checked that the claim was retained and that submitRequestDisposition said 'reject', and never
- * asked the next question: what, then, can ever move this packet? The answer was nothing. Three
- * exits exist in this system and the shape it wrote closed all three at once - the ordinary submit
- * and resume-edit routes both go through submitRequestDisposition, the security-code endpoint needs
- * status 'awaiting_security_code' AND a null claim, and the unverified-resolution endpoint needs an
- * unverified_submission record that this branch deliberately clears.
- *
- * So the assertions below are the pair, not the half: still non-restartable through the ordinary
- * path, and provably finishable through the one route that is safe from a standing code wall.
- */
-test('a delayed post-click code wall stays non-restartable and keeps the code route open', () => {
+test('a delayed post-click code wall retains its authorized parent and exact mutable projection', () => {
+  const authorization = {
+    source: 'standing_consent' as const,
+    authorized_at: '2026-08-11T11:59:59.000Z',
+  };
   const current = {
     status: 'submitting',
     submission_claimed_at: '2026-08-11T12:00:00.000Z',
     submission_claim_id: 'claim-id',
-    submission_authorization: {
-      source: 'standing_consent',
-      authorized_at: '2026-08-11T11:59:59.000Z',
-    },
+    submission_authorization: authorization,
+    submission_run_id: 'run-id',
+    portal_url: 'https://job-boards.greenhouse.io/example/jobs/123',
     unverified_submission: {
       at: '2026-08-11T12:00:01.000Z',
       cause: 'no_confirmation_state',
@@ -142,8 +156,13 @@ test('a delayed post-click code wall stays non-restartable and keeps the code ro
     },
     verification: {
       status: 'verification_pending',
+      provider: 'litos',
       requested_at: '2026-08-11T12:00:03.000Z',
       retry_count: 0,
+      runner: 'stratus-managed',
+      continuation_fingerprint: 'continuation-fingerprint',
+      continuation_execution_fingerprint: 'execution-fingerprint',
+      continuation_resumed: false,
     },
     attemptedAt: '2026-08-11T12:00:03.000Z',
     screenshotUrl: 'https://proof.example/receipt.png',
@@ -152,47 +171,56 @@ test('a delayed post-click code wall stays non-restartable and keeps the code ro
   assert.equal(persisted.preview_screenshot_url, 'https://proof.example/receipt.png');
   assert.equal(persisted.security_code?.sent_to, 'app-exact@apply.trylitos.com');
   assert.equal(persisted.verification?.status, 'verification_pending');
-  assert.equal(persisted.unverified_submission, undefined);
+  assert.equal(persisted.verification?.runner, 'stratus-managed');
+  assert.equal(persisted.verification?.continuation_fingerprint, 'continuation-fingerprint');
+  assert.equal(persisted.verification?.continuation_execution_fingerprint, 'execution-fingerprint');
+  assert.equal(persisted.verification?.continuation_resumed, false);
+  assert.deepEqual(persisted.unverified_submission, {
+    at: '2026-08-11T12:00:03.000Z',
+    cause: 'no_confirmation_state',
+    portal_url: current.portal_url,
+    submission_run_id: 'run-id',
+  });
   assert.equal(persisted.submission_error, undefined);
-  assert.deepEqual(persisted.attention_categories, ['security_code', 'evidence_gap']);
-  assert.match(persisted.attention_reason!, /will not open a fresh form or send this application again on its own/);
-
-  // THE LOCK. Neither another submit run nor a resume edit can move this packet, and the reason is
-  // the status itself rather than the claim, so releasing the claim below does not weaken it.
-  assert.equal(submitRequestDisposition(persisted.status, Boolean(persisted.submission_claimed_at)), 'reject');
-  assert.equal(submitRequestDisposition(persisted.status, false), 'reject',
-    'the status alone must refuse a re-run, with or without a claim on the row');
-  assert.equal(resumeEditDisposition(persisted.status, Boolean(persisted.submission_claimed_at)), 'reject');
-
-  /* THE KEY. POST /applications/:id/security-code is the one route that is safe from a standing
-   * code wall, and it has two preconditions, both of which this state has to satisfy:
-   * finishSecurityCodeSubmission requires status 'awaiting_security_code' with a security_code on
-   * the row, and claimSecurityCodeSubmission then updates only WHERE submission_claimed_at is null.
-   * Assert both, because satisfying either one alone still leaves the packet with no way out. */
-  assert.equal(persisted.status, 'awaiting_security_code',
-    'finishSecurityCodeSubmission answers not_awaiting on any other status');
-  assert.ok(persisted.security_code, 'finishSecurityCodeSubmission needs the challenge it is finishing');
-  assert.equal(persisted.submission_claimed_at, undefined,
-    'claimSecurityCodeSubmission only claims a row whose submission_claimed_at is null');
-  assert.equal(persisted.submission_claim_id, undefined);
-  assert.equal(persisted.submission_authorization, undefined,
-    'the code the applicant supplies is its own per-application approval, taken at claim time');
+  assert.deepEqual(persisted.attention_categories, ['security_code', 'unverified_submission']);
+  assert.match(persisted.attention_reason!, /authorized parent remains unresolved/i);
+  assert.equal(persisted.status, 'needs_attention');
+  assert.equal(persisted.submission_claimed_at, '2026-08-11T12:00:00.000Z');
+  assert.equal(persisted.submission_claim_id, 'claim-id');
+  assert.deepEqual(persisted.submission_authorization, authorization);
+  assert.equal(submitRequestDisposition(persisted.status, true), 'reject');
+  assert.equal(resumeEditDisposition(persisted.status, true), 'reject');
 });
 
 for (const cause of ['authorization_revoked', 'email_route_changed', 'email_permission_revoked'] as const) {
   for (const pressed of [true, false]) {
-    test(`a ${cause} race after pressed=${pressed} preserves the challenge and cannot restart`, () => {
+    test(`an ${cause} race after pressed=${pressed} retains the authorized parent and cannot restart`, () => {
       const knownAttempt = undefined;
       const currentAttempt = pressed ? '2026-08-11T12:00:02.000Z' : undefined;
+      const unresolvedAt = currentAttempt ?? '2026-08-11T11:59:00.000Z';
+      const authorization = {
+        source: 'standing_consent' as const,
+        authorized_at: '2026-08-11T11:58:59.000Z',
+      };
       const current = {
         status: 'submission_claimed',
         submission_claimed_at: '2026-08-11T12:00:00.000Z',
         submission_claim_id: 'claim-id',
-        submission_authorization: { source: 'standing_consent' },
+        submission_authorization: authorization,
+        submission_run_id: 'run-id',
+        portal_url: 'https://job-boards.greenhouse.io/example/jobs/123',
         submission_attempted_at: knownAttempt,
         unverified_submission: { attempted_at: 'stale', cause: 'no_confirmation_state', portal_url: 'stale' },
-        submitted_at: 'stale',
-        receipt: { confirmation_text: 'stale', final_url: 'stale', captured_at: 'stale' },
+        verification: {
+          status: 'searching',
+          provider: 'litos',
+          requested_at: '2026-08-11T11:59:00.000Z',
+          retry_count: 0,
+          runner: 'stratus-managed',
+          continuation_fingerprint: 'continuation-fingerprint',
+          continuation_execution_fingerprint: 'execution-fingerprint',
+          continuation_resumed: false,
+        },
         updated_at: '2026-08-11T12:00:00.000Z',
       } as unknown as Parameters<typeof preClickVerificationContinuationBlockedReview>[0];
       const challenge = {
@@ -203,37 +231,98 @@ for (const cause of ['authorization_revoked', 'email_route_changed', 'email_perm
         attempts: undefined,
       };
       const persisted = preClickVerificationContinuationBlockedReview(current, challenge, cause, currentAttempt);
-      assert.equal(persisted.status, 'awaiting_security_code');
+      assert.equal(persisted.status, 'needs_attention');
       assert.equal(persisted.security_code, challenge);
       assert.equal(persisted.security_code?.attempts, undefined, 'the matched code is not fingerprinted before authorization');
-      assert.equal(persisted.submission_claimed_at, undefined);
-      assert.equal(persisted.submission_claim_id, undefined);
-      assert.equal(persisted.submission_authorization, undefined);
-      assert.equal(persisted.submission_attempted_at, currentAttempt,
-        'pressed=false must not invent a current-run attempt marker');
-      assert.equal(persisted.unverified_submission, undefined);
+      assert.equal(persisted.submission_claimed_at, '2026-08-11T12:00:00.000Z');
+      assert.equal(persisted.submission_claim_id, 'claim-id');
+      assert.deepEqual(persisted.submission_authorization, authorization);
+      assert.equal(persisted.submission_attempted_at, unresolvedAt);
+      assert.deepEqual(persisted.unverified_submission, {
+        at: unresolvedAt,
+        cause: 'no_confirmation_state',
+        portal_url: current.portal_url,
+        submission_run_id: 'run-id',
+      });
       assert.equal(persisted.submitted_at, undefined);
       assert.equal(persisted.receipt, undefined);
-      assert.match(persisted.attention_reason!, /already waiting/i);
-      assert.match(persisted.attention_reason!, /without clicking the verification button/i);
-      assert.equal(submitRequestDisposition(persisted.status), 'reject');
+      assert.equal(persisted.verification?.status, 'verification_pending');
+      assert.equal(persisted.verification?.runner, 'stratus-managed');
+      assert.equal(persisted.verification?.continuation_fingerprint, 'continuation-fingerprint');
+      assert.equal(persisted.verification?.continuation_execution_fingerprint, 'execution-fingerprint');
+      assert.equal(persisted.verification?.continuation_resumed, false);
+      assert.match(persisted.attention_reason!, /already authorized parent remains unresolved/i);
+      assert.match(persisted.attention_reason!, /exact application was received/i);
+      assert.equal(submitRequestDisposition(persisted.status, true), 'reject');
+      assert.equal(resumeEditDisposition(persisted.status, true), 'reject');
     });
   }
 }
 
-test('action-time blocking preserves a genuine prior attempted marker on a retained wall', () => {
-  const current = {
-    status: 'submission_claimed',
-    submission_attempted_at: '2026-08-11T11:58:00.000Z',
-    updated_at: '2026-08-11T12:00:00.000Z',
-  } as unknown as Parameters<typeof preClickVerificationContinuationBlockedReview>[0];
-  const challenge = {
+test('a continuation lease refusal keeps immutable parent risk and clears only live-call markers', () => {
+  const authorization = {
+    source: 'standing_consent' as const,
+    authorized_at: '2026-08-11T11:58:59.000Z',
+  };
+  const securityCode = {
     digits: 8,
+    sent_to: 'app-exact@apply.trylitos.com',
     requested_at: '2026-08-11T11:59:00.000Z',
     submit_was_authorized: true,
+    attempts: [{
+      at: '2026-08-11T11:59:30.000Z',
+      fingerprint: 'spent-code-fingerprint',
+      outcome: 'error' as const,
+    }],
   };
-  const persisted = preClickVerificationContinuationBlockedReview(current, challenge, 'authorization_revoked');
-  assert.equal(persisted.submission_attempted_at, '2026-08-11T11:58:00.000Z');
+  const current = {
+    status: 'submission_claimed',
+    submission_claimed_at: '2026-08-11T12:00:00.000Z',
+    submission_claim_id: 'claim-id',
+    submission_authorization: authorization,
+    submission_run_id: 'run-id',
+    portal_url: 'https://job-boards.greenhouse.io/example/jobs/123',
+    security_code: securityCode,
+    verification: {
+      status: 'searching',
+      provider: 'litos',
+      requested_at: '2026-08-11T11:59:00.000Z',
+      retry_count: 0,
+      runner: 'stratus-managed',
+      continuation_fingerprint: 'continuation-fingerprint',
+      continuation_execution_fingerprint: 'execution-fingerprint',
+      continuation_resumed: false,
+      continuation_call_started_at: '2026-08-11T11:59:40.000Z',
+      continuation_call_deadline_at: '2026-08-11T12:00:40.000Z',
+    },
+    updated_at: '2026-08-11T12:00:00.000Z',
+  } as unknown as Parameters<typeof managedSecurityCodeContinuationRefusalReview>[0];
+  const persisted = managedSecurityCodeContinuationRefusalReview(
+    current,
+    'lease_window_too_short',
+    '2026-08-11T12:00:03.000Z',
+    securityCode,
+  );
+  assert.equal(persisted.status, 'needs_attention');
+  assert.equal(persisted.submission_claimed_at, '2026-08-11T12:00:00.000Z');
+  assert.equal(persisted.submission_claim_id, 'claim-id');
+  assert.deepEqual(persisted.submission_authorization, authorization);
+  assert.deepEqual(persisted.unverified_submission, {
+    at: '2026-08-11T12:00:03.000Z',
+    cause: 'no_confirmation_state',
+    portal_url: current.portal_url,
+    submission_run_id: 'run-id',
+  });
+  assert.equal(persisted.security_code, securityCode);
+  assert.equal(persisted.verification?.status, 'verification_pending');
+  assert.equal(persisted.verification?.runner, 'stratus-managed');
+  assert.equal(persisted.verification?.continuation_fingerprint, 'continuation-fingerprint');
+  assert.equal(persisted.verification?.continuation_execution_fingerprint, 'execution-fingerprint');
+  assert.equal(persisted.verification?.continuation_resumed, false);
+  assert.equal(persisted.verification?.continuation_call_started_at, undefined);
+  assert.equal(persisted.verification?.continuation_call_deadline_at, undefined);
+  assert.equal(submitRequestDisposition(persisted.status, true), 'reject');
+  assert.equal(resumeEditDisposition(persisted.status, true), 'reject');
 });
 
 test('no-submit-control outranks uncertainty, and captcha outranks both', () => {

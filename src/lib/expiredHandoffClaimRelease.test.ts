@@ -189,11 +189,26 @@ test('submit-request repairs the expired handoff claim before submitRequestDispo
   assert.ok(gate > repair, 'the release must run before the disposition reads the row');
 });
 
-test('the repair persists with an exact-spec CAS and asks the shared evidence rule, not a local copy', () => {
+test('the repair locks the user, proves the exact attempt never pressed, and releases with one atomic ledger fact', () => {
   const helper = routeSlice('async function repairExpiredAttendedHandoffClaim', 'function editableResumeSpec');
-  assert.match(helper, /releasedExpiredAttendedHandoffReview\(row\.id, userId, current\)/);
-  assert.match(helper, /JSON\.stringify\(row\.spec\)/);
-  // Null on a CAS miss: a concurrent writer wins and the stored gates keep refusing, which is the
-  // failure direction that cannot cost a duplicate application.
-  assert.match(helper, /if \(updated\.length === 0\) return null;/);
+  const lock = helper.indexOf('lockSubmissionAttemptUser(tx, userId)');
+  const latest = helper.indexOf('tx.select().from(generated_resumes)', lock);
+  const proof = helper.indexOf('expiredAttendedHandoffClaimIsReleasable(current)', latest);
+  const events = helper.indexOf('submissionAttemptEventsForPacket(userId, latest.id', proof);
+  const extensionOutcome = helper.indexOf('application_submission_events', events);
+  const update = helper.indexOf('tx.update(generated_resumes)', extensionOutcome);
+  const ledger = helper.indexOf("appendApplicationAttemptFact(\n      submissionAttemptBindingFromEvent(opening),\n      'not_sent_proven'", update);
+  assert.ok(lock >= 0 && latest > lock && proof > latest && events > proof
+    && extensionOutcome > events && update > extensionOutcome && ledger > update,
+  'the evidence check, row release, and immutable fact must share the user-locked transaction');
+  assert.match(
+    helper,
+    /event\.event_kind === 'boundary_authorized'[\s\S]*event\.event_kind === 'press_observed'[\s\S]*event\.event_kind === 'submission_confirmed'/,
+  );
+  assert.match(helper, /proofKind: 'typed_pre_click_stop'/);
+  assert.match(helper, /evidenceCode: 'expired_attended_handoff_proven_before_press'/);
+  assert.match(helper, /JSON\.stringify\(latest\.spec\)/);
+  assert.match(helper, /submission_claim_id' = \$\{current\.submission_claim_id\}/);
+  assert.match(helper, /return healed\.row/,
+    'callers must continue with the persisted row whose retry safety is now safe_not_sent');
 });

@@ -253,14 +253,20 @@ describe('the restore is wired at the packet-audit gate, not at buildPacket', ()
        does not happen. Both GET audit call sites must stay on the default. */
     const applications = readFileSync('src/routes/applications.ts', 'utf8');
     const getRoutes = [
-      "'/applications/:id/submission/extension-packet'",
-      "'/applications/:id/submission'",
+      {
+        route: "'/applications/:id/submission/extension-packet'",
+        auditCall: 'currentAcknowledgedPacketAudit(',
+      },
+      {
+        route: "'/applications/:id/submission'",
+        auditCall: 'attendedPacketAudit(',
+      },
     ];
-    for (const route of getRoutes) {
+    for (const { route, auditCall } of getRoutes) {
       const start = applications.indexOf(route);
       assert.ok(start > 0, `${route} should still exist`);
       const body = applications.slice(start, start + 4000);
-      const audit = body.indexOf('currentAcknowledgedPacketAudit(');
+      const audit = body.indexOf(auditCall);
       assert.ok(audit > 0, `${route} should still audit`);
       const call = body.slice(audit, audit + 200);
       assert.doesNotMatch(call, /restoreExpiredResume/,

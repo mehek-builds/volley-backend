@@ -93,6 +93,13 @@ import {
   reserveEntitledUsage,
   usesLegacyMonthlyProductQuota,
 } from '../lib/entitlements';
+import {
+  appendSubmissionAttemptEvent,
+  freezePostingIdentity,
+  lockSubmissionAttemptUser,
+  submissionAttemptEventId,
+  type SubmissionAttemptLedgerExecutor,
+} from '../lib/submissionAttemptLedger';
 
 async function refreshedResumeReplay(
   request: FastifyRequest,
@@ -429,6 +436,7 @@ export function missingRenderedEducation(spec: Pick<ResumeSpec, 'school' | 'degr
 // Bounds are telemetry-sized: 50 labels of 200 chars covers any real form and caps what a
 // misbehaving client can store per event. Optional: older extensions and label-less fills omit it.
 export const autofillEventSchema = z.object({
+  client_event_id: z.string().uuid().optional(),
   ats_name: z.string().min(1),
   job_context: z.object({ company: z.string(), role: z.string() }),
   fields_filled: z.number().int().min(0),
@@ -436,6 +444,137 @@ export const autofillEventSchema = z.object({
   auto_submitted: z.boolean().optional(),
   r030_candidate_labels: z.array(z.string().max(200)).max(50).optional(),
 });
+
+type AutofillEventBody = z.infer<typeof autofillEventSchema>;
+type AutofillEventExecutor = Pick<SubmissionAttemptLedgerExecutor, 'insert' | 'select'>;
+
+export class AutofillEventIdConflictError extends Error {
+  readonly code = 'AUTOFILL_EVENT_ID_CONFLICT';
+
+  constructor() {
+    super('The autofill event ID was already bound to different event data');
+    this.name = 'AutofillEventIdConflictError';
+  }
+}
+
+function autofillEventValues(userId: string, body: AutofillEventBody) {
+  return {
+    user_id: userId,
+    ats_name: body.ats_name,
+    job_context: body.job_context,
+    fields_filled: body.fields_filled,
+    fields_skipped: body.fields_skipped,
+    auto_submitted: body.auto_submitted ?? false,
+    r030_candidate_labels: body.r030_candidate_labels ?? null,
+  };
+}
+
+function sameAutofillEvent(
+  stored: typeof autofill_events.$inferSelect,
+  userId: string,
+  body: AutofillEventBody,
+): boolean {
+  const expected = autofillEventValues(userId, body);
+  const context = stored.job_context && typeof stored.job_context === 'object' && !Array.isArray(stored.job_context)
+    ? stored.job_context as Record<string, unknown>
+    : {};
+  return stored.user_id === expected.user_id
+    && stored.ats_name === expected.ats_name
+    && context.company === expected.job_context.company
+    && context.role === expected.job_context.role
+    && stored.fields_filled === expected.fields_filled
+    && stored.fields_skipped === expected.fields_skipped
+    && stored.auto_submitted === expected.auto_submitted
+    && JSON.stringify(stored.r030_candidate_labels ?? null)
+      === JSON.stringify(expected.r030_candidate_labels);
+}
+
+async function insertOrReplayAutofillEvent(
+  executor: AutofillEventExecutor,
+  userId: string,
+  body: AutofillEventBody,
+): Promise<{ event: typeof autofill_events.$inferSelect; replay: boolean }> {
+  const values = autofillEventValues(userId, body);
+  if (!body.client_event_id) {
+    const [event] = await executor.insert(autofill_events).values(values).returning();
+    if (!event) throw new Error('Autofill event was not stored');
+    return { event, replay: false };
+  }
+
+  const [inserted] = await executor.insert(autofill_events)
+    .values({ id: body.client_event_id, ...values })
+    .onConflictDoNothing({ target: autofill_events.id })
+    .returning();
+  if (inserted) return { event: inserted, replay: false };
+
+  const [existing] = await executor.select().from(autofill_events)
+    .where(eq(autofill_events.id, body.client_event_id))
+    .limit(1);
+  if (existing && sameAutofillEvent(existing, userId, body)) {
+    return { event: existing, replay: true };
+  }
+  throw new AutofillEventIdConflictError();
+}
+
+/** Persist extension telemetry and its employer-click evidence in one transaction. */
+export async function persistAutofillEventWithSubmissionEvidence(
+  userId: string,
+  body: AutofillEventBody,
+): Promise<void> {
+  if (body.auto_submitted !== true) {
+    await insertOrReplayAutofillEvent(db, userId, body);
+    return;
+  }
+
+  await db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, userId);
+    const stored = await insertOrReplayAutofillEvent(tx, userId, body);
+    if (stored.replay) return;
+
+    /* Extension reports carry no packet, application, or posting URL, so bind the exact company and
+       role to a namespaced orphan packet. Old clients omit client_event_id and remain distinct. */
+    const packetId = submissionAttemptEventId(
+      stored.event.id,
+      'attempt_opened',
+      `autofill-synthetic-packet:${userId}`,
+    );
+    const attemptId = submissionAttemptEventId(
+      stored.event.id,
+      'attempt_opened',
+      `autofill-auto-submit-attempt:${userId}`,
+    );
+    const observedAt = stored.event.created_at ?? new Date();
+    const binding = {
+      attemptId,
+      userId,
+      packetId,
+      applicationId: null,
+      parentAttemptId: null,
+      source: 'chrome_extension' as const,
+      operation: 'initial_submission' as const,
+      postingIdentity: freezePostingIdentity(body.job_context, null),
+      submissionRunId: null,
+      submissionClaimId: null,
+      packetVersion: null,
+    };
+    await appendSubmissionAttemptEvent({
+      ...binding,
+      eventId: submissionAttemptEventId(attemptId, 'attempt_opened', 'autofill-auto-submit-report'),
+      eventKind: 'attempt_opened',
+      evidenceCode: 'autofill_auto_submit_report',
+      observedAt,
+      createdAt: observedAt,
+    }, { executor: tx });
+    await appendSubmissionAttemptEvent({
+      ...binding,
+      eventId: submissionAttemptEventId(attemptId, 'press_observed', 'autofill-auto-submit-click'),
+      eventKind: 'press_observed',
+      evidenceCode: 'autofill_auto_submit_click',
+      observedAt,
+      createdAt: new Date(observedAt.getTime() + 1),
+    }, { executor: tx });
+  });
+}
 
 export async function resumeRoutes(fastify: FastifyInstance) {
   // POST /resume/generate - tailor a resume to a specific JD from the student's experience bank
@@ -1657,8 +1796,14 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     }
 
     try {
-      await db.insert(autofill_events).values({ user_id: userId, ...body });
+      await persistAutofillEventWithSubmissionEvidence(userId, body);
     } catch (err) {
+      if (err instanceof AutofillEventIdConflictError) {
+        return reply.status(409).send({
+          error: 'This autofill event ID was already used for different event data',
+          code: err.code,
+        });
+      }
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to log autofill event' });
     }

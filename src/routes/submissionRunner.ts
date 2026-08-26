@@ -50,9 +50,13 @@ import {
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
+  type ManagedSubmissionAttempt,
+  type ManagedBrowserRunProgress,
   ManagedBrowserPreSubmitCrashError,
+  ManagedBrowserProviderProgressError,
   runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
+  startManagedBrowserRequestBudget,
 } from '../lib/browserbase';
 import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from '../lib/workableApplicationUrl';
 import {
@@ -263,7 +267,22 @@ import {
   storedDocuments,
   MAX_USER_DOCUMENT_BYTES,
 } from '../lib/documentStore';
-import { duplicateApplicationVerdict } from '../lib/duplicateApplication';
+import { duplicateApplicationVerdict, type DuplicateApplicationVerdict } from '../lib/duplicateApplication';
+import {
+  authorizeFinalSubmissionBoundary,
+  appendSubmissionAttemptEvent,
+  freezePostingIdentity,
+  lockSubmissionAttemptUser,
+  submissionAttemptBindingFromEvent,
+  submissionBoundaryAuthorization,
+  submissionAttemptEventId,
+  submissionAttemptEventsForPacket,
+  submissionAttemptsOpenedToday,
+  type SubmissionBoundaryAuthorization,
+  type SubmissionAttemptBinding,
+  type SubmissionAttemptEventKind,
+  type SubmissionNotSentProofKind,
+} from '../lib/submissionAttemptLedger';
 import {
   ApplicantEmailRegenerationRequiredError,
   readPinnedApplicantEmail,
@@ -346,14 +365,33 @@ export function atsApiSubmissionEnabled(env: NodeJS.ProcessEnv = process.env): b
 }
 
 async function writeReview(row: ResumeRow, review: ApplicationReviewState) {
-  await db.update(generated_resumes).set({
+  const expected = readApplicationReview(row.spec);
+  const conditions = [
+    eq(generated_resumes.id, row.id),
+    eq(generated_resumes.user_id, row.user_id),
+  ];
+  /* A runner result belongs to one exact run and, after the external-send reservation, one exact
+   * claim. A late result is still valuable as a ledger fact, but it must never overwrite the newer
+   * run currently rendered by the packet. Read the expected values from the row the caller acted on,
+   * not from `review`, because terminal patches intentionally clear claims. */
+  if (expected?.submission_run_id) {
+    conditions.push(sql`${generated_resumes.spec}->'_review'->>'submission_run_id' = ${expected.submission_run_id}`);
+  } else {
+    conditions.push(sql`${generated_resumes.spec}->'_review'->>'submission_run_id' is null`);
+  }
+  if (expected?.submission_claim_id) {
+    conditions.push(sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${expected.submission_claim_id}`);
+  } else {
+    conditions.push(sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' is null`);
+  }
+  const updated = await db.update(generated_resumes).set({
     spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(review)}::jsonb, true)`,
-  }).where(eq(generated_resumes.id, row.id));
+  }).where(and(...conditions)).returning({ id: generated_resumes.id });
   /* Every submit path in this file - ATS API, managed, retained-session, controlled - stamps its
    * packet submitted through this one statement, so this is where the canonical applications row
    * learns the same fact. Best-effort by construction: the receipt the run just captured must not
    * be lost to the tracker table having a bad day. */
-  if (review.status === 'submitted') {
+  if (updated.length > 0 && review.status === 'submitted') {
     await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: row.user_id });
   }
 }
@@ -416,23 +454,781 @@ async function countSubmissionsClaimedToday(userId: string): Promise<number> {
   return counted?.total ?? 0;
 }
 
+function runnerAttemptSource(): SubmissionAttemptBinding['source'] {
+  return isManagedStratusProvider() ? 'managed_browser' : 'direct_browser';
+}
+
+function runnerAttemptBinding(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  operation: SubmissionAttemptBinding['operation'],
+): SubmissionAttemptBinding {
+  const claimId = review.submission_claim_id;
+  if (!claimId || !review.submission_run_id) {
+    throw new Error('Submission attempt reservation is missing its exact run or claim id');
+  }
+  return {
+    // One claim releases one employer-boundary capability. Reusing the UUID here makes every
+    // later route able to recover the immutable attempt without adding another mutable review key.
+    attemptId: claimId,
+    userId: row.user_id,
+    packetId: row.id,
+    source: runnerAttemptSource(),
+    operation,
+    postingIdentity: freezePostingIdentity(row.job_context, review.portal_url),
+    submissionRunId: review.submission_run_id,
+    submissionClaimId: claimId,
+    packetVersion: review.packet_audit?.packet_version ?? review.submission_packet_version ?? null,
+  };
+}
+
+async function persistedRunnerAttemptBinding(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+): Promise<SubmissionAttemptBinding> {
+  const claimId = review.submission_claim_id;
+  if (!claimId) throw new Error('Submission attempt claim is missing');
+  const events = await submissionAttemptEventsForPacket(row.user_id, row.id);
+  const opened = events.find((event) => event.attempt_id === claimId && event.event_kind === 'attempt_opened');
+  if (!opened) throw new Error('Submission attempt reservation was not durably recorded');
+  return submissionAttemptBindingFromEvent(opened);
+}
+
+async function appendRunnerAttemptFact(
+  binding: SubmissionAttemptBinding,
+  eventKind: SubmissionAttemptEventKind,
+  factKey: string,
+  options: {
+    proofKind?: SubmissionNotSentProofKind;
+    evidenceCode?: string;
+    observedAt?: Date;
+  } = {},
+): Promise<void> {
+  await appendSubmissionAttemptEvent({
+    ...binding,
+    eventId: submissionAttemptEventId(binding.attemptId, eventKind, factKey),
+    eventKind,
+    ...options,
+  });
+}
+
+class FinalSubmissionBoundaryBlockedError extends Error {
+  constructor(readonly verdict: Exclude<DuplicateApplicationVerdict, { kind: 'clear' }>) {
+    super(verdict.reason);
+    this.name = 'FinalSubmissionBoundaryBlockedError';
+  }
+}
+
+class FinalSubmissionBoundaryChangedError extends Error {
+  constructor() {
+    super('The reserved submission changed before the final employer boundary');
+    this.name = 'FinalSubmissionBoundaryChangedError';
+  }
+}
+
+class FinalSubmissionAuthorizationChangedError extends Error {
+  constructor() {
+    super('Submission authorization changed before the final employer boundary');
+    this.name = 'FinalSubmissionAuthorizationChangedError';
+  }
+}
+
+class FinalSubmissionBoundaryAlreadyAuthorizedError extends Error {
+  constructor() {
+    super('The reserved submission capability was already authorized');
+    this.name = 'FinalSubmissionBoundaryAlreadyAuthorizedError';
+  }
+}
+
+/**
+ * Stratus bounds one retained-session continuation at 60 seconds. The parent boundary lease must
+ * outlive that entire remote window plus enough time for the HTTP result to return and be recorded.
+ * This fence is checked against the database clock under the same user lock as the continuation
+ * CAS, so a lock wait or mailbox delay cannot spend a lease that only looks live to the app host.
+ */
+export const MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS = 60_000;
+export const MANAGED_SECURITY_CODE_CONTINUATION_RESPONSE_MARGIN_MS = 10_000;
+export const MANAGED_SECURITY_CODE_CONTINUATION_CALL_TIMEOUT_MS =
+  MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS
+  + MANAGED_SECURITY_CODE_CONTINUATION_RESPONSE_MARGIN_MS;
+export const MANAGED_SECURITY_CODE_CONTINUATION_DISPATCH_MARGIN_MS = 10_000;
+
+export function managedProviderProgressDisposition(
+  progress: ManagedBrowserRunProgress,
+  expectedSubmitKind: 'application' | 'verification',
+): 'none' | 'pressed' | 'confirmed' {
+  const pressed = expectedSubmitKind === 'application'
+    ? progress.phase === 0 && progress.submitKind === 'application' && progress.applicationSubmitPressed
+    : progress.phase === 1 && progress.submitKind === 'verification' && progress.verificationSubmitPressed;
+  if (!pressed) return 'none';
+  const confirmed = progress.employerOutcome?.kind === 'confirmed'
+    && progress.employerOutcome.state === 'confirmed'
+    && Boolean(progress.employerOutcome.message?.trim())
+    && progress.requiredFieldConfirmationStatus === 'confirmed'
+    && (expectedSubmitKind !== 'verification' || progress.securityCodeOutcome === 'accepted');
+  return confirmed ? 'confirmed' : 'pressed';
+}
+
+export class ManagedSecurityCodeContinuationRefusedError extends Error {
+  constructor(readonly reason: 'lease_window_too_short' | 'duplicate_risk') {
+    super(reason === 'lease_window_too_short'
+      ? 'The retained employer verification session no longer has a safe execution window'
+      : 'A duplicate-safety fact appeared before employer verification could continue');
+    this.name = 'ManagedSecurityCodeContinuationRefusedError';
+  }
+}
+
+export function finalBoundaryAuthorizationMatches(
+  review: ApplicationReviewState,
+  user: {
+    enabled: boolean | null;
+    consentedAt: Date | null;
+    consentVersion: string | null;
+  } | undefined,
+  automaticSubmissionEntitled: boolean,
+): boolean {
+  const authorization = review.submission_authorization;
+  if (authorization?.source === 'per_application_approval') return true;
+  if (authorization?.source !== 'standing_consent'
+    || user?.enabled !== true
+    || !automaticSubmissionEntitled) return false;
+  return Boolean(authorization.consented_at)
+    && authorization.consented_at === user.consentedAt?.toISOString()
+    && Boolean(authorization.consent_version)
+    && authorization.consent_version === user.consentVersion;
+}
+
+export function finalRunnerReservationMatches(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  attemptBinding: SubmissionAttemptBinding,
+  latest: ResumeRow | null | undefined,
+): boolean {
+  if (!latest) return false;
+  const latestReview = readApplicationReview(latest.spec);
+  if (!latestReview) return false;
+  const expectedSpec = JSON.parse(JSON.stringify({
+    ...(row.spec as StoredSpec),
+    _review: review,
+  })) as StoredSpec;
+  const latestPacketVersion = latestReview.packet_audit?.packet_version
+    ?? latestReview.submission_packet_version
+    ?? null;
+  return isDeepStrictEqual(latest.spec, expectedSpec)
+    && latest.resume_object_key === row.resume_object_key
+    && isDeepStrictEqual(latest.job_context, row.job_context)
+    && attemptBinding.packetId === latest.id
+    && latestReview.submission_claim_id === attemptBinding.attemptId
+    && (latestReview.submission_run_id ?? null) === attemptBinding.submissionRunId
+    && latestPacketVersion === attemptBinding.packetVersion
+    && isDeepStrictEqual(
+      freezePostingIdentity(latest.job_context, latestReview.portal_url),
+      attemptBinding.postingIdentity,
+    );
+}
+
+export async function executeAfterFinalSubmissionBoundary<T, V = void>(
+  verify: () => Promise<V>,
+  externalBoundary: (verified: V) => Promise<T>,
+): Promise<T> {
+  const verified = await verify();
+  return externalBoundary(verified);
+}
+
+/** Recheck under the user lock after reservation and immediately before an employer boundary. */
+export async function assertFinalRunnerBoundaryClear(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  attemptBinding: SubmissionAttemptBinding,
+  options: { reuseAuthorization?: SubmissionBoundaryAuthorization } = {},
+): Promise<SubmissionBoundaryAuthorization> {
+  const result = await db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, row.user_id);
+    const [latest] = await tx.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, row.user_id),
+    )).limit(1);
+    if (!finalRunnerReservationMatches(row, review, attemptBinding, latest)) {
+      throw new FinalSubmissionBoundaryChangedError();
+    }
+    const latestReview = readApplicationReview(latest!.spec)!;
+    let authorizationUser: {
+      enabled: boolean | null;
+      consentedAt: Date | null;
+      consentVersion: string | null;
+    } | undefined;
+    let automaticSubmissionEntitled = false;
+    if (latestReview.submission_authorization?.source === 'standing_consent') {
+      [authorizationUser] = await tx.select({
+        enabled: users.automatic_submission_enabled,
+        consentedAt: users.automatic_submission_consented_at,
+        consentVersion: users.automatic_submission_consent_version,
+      }).from(users).where(eq(users.id, row.user_id)).limit(1);
+      automaticSubmissionEntitled = (await getEntitlementSnapshot(
+        row.user_id,
+        new Date(),
+        tx,
+      )).features.automatic_submission;
+    }
+    if (!finalBoundaryAuthorizationMatches(
+      latestReview,
+      authorizationUser,
+      automaticSubmissionEntitled,
+    )) throw new FinalSubmissionAuthorizationChangedError();
+    const verdict = await duplicateApplicationVerdict({
+      userId: latest.user_id,
+      applicationId: latest.id,
+      jobContext: latest.job_context,
+      portalUrl: latestReview.portal_url,
+      excludeAttemptId: attemptBinding.attemptId,
+    }, tx);
+    if (verdict.kind !== 'clear') return { kind: 'blocked' as const, verdict };
+    const authorization = await authorizeFinalSubmissionBoundary(attemptBinding, {
+      executor: tx,
+      factKey: 'runner-final-boundary',
+      evidenceCode: `${attemptBinding.source}_employer_boundary_authorized`,
+      ...(options.reuseAuthorization
+        ? { activationId: options.reuseAuthorization.activationId }
+        : {}),
+    });
+    if (authorization.kind === 'fresh') {
+      return { kind: 'clear' as const, authorization: authorization.authorization };
+    }
+    if (authorization.kind === 'existing'
+      && options.reuseAuthorization
+      && authorization.authorization.active
+      && authorization.authorization.activationId === options.reuseAuthorization.activationId
+      && authorization.authorization.leaseId === options.reuseAuthorization.leaseId) {
+      return { kind: 'clear' as const, authorization: authorization.authorization };
+    }
+    return { kind: 'already_authorized' as const, retrySafety: authorization.retrySafety };
+  });
+  if (result.kind === 'blocked') throw new FinalSubmissionBoundaryBlockedError(result.verdict);
+  if (result.kind === 'already_authorized') throw new FinalSubmissionBoundaryAlreadyAuthorizedError();
+  return result.authorization;
+}
+
+/** Keep an initial provider callback behind its immutable database-clock authorization expiry. */
+export function managedInitialCallTimeoutMs(authorization: SubmissionBoundaryAuthorization): number {
+  const deadlineMs = Date.parse(managedInitialProviderDeadlineAt(authorization));
+  const timeoutMs = Math.floor(deadlineMs - Date.parse(authorization.serverNow));
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 5 * 60 * 1000) {
+    throw new FinalSubmissionBoundaryChangedError();
+  }
+  return timeoutMs;
+}
+
+/** Absolute database-clock cutoff sent through every layer of the initial managed provider call. */
+export function managedInitialProviderDeadlineAt(
+  authorization: SubmissionBoundaryAuthorization,
+): string {
+  const expiresAtMs = Date.parse(authorization.expiresAt);
+  const serverNowMs = Date.parse(authorization.serverNow);
+  const deadlineMs = expiresAtMs - MANAGED_SECURITY_CODE_CONTINUATION_RESPONSE_MARGIN_MS;
+  if (!Number.isFinite(expiresAtMs)
+    || !Number.isFinite(serverNowMs)
+    || deadlineMs <= serverNowMs
+    || deadlineMs - serverNowMs > 5 * 60 * 1000) {
+    throw new FinalSubmissionBoundaryChangedError();
+  }
+  return new Date(deadlineMs).toISOString();
+}
+
+export function managedContinuationExecutionFingerprint(
+  submissionAttempt: ManagedSubmissionAttempt,
+): string {
+  return createHash('sha256')
+    .update(`${submissionAttempt.runId}:${submissionAttempt.claimId}:${submissionAttempt.executionId}`)
+    .digest('hex');
+}
+
+/**
+ * Consume the one retained-session verification submit already covered by the parent application
+ * attempt. The first press has permanently made that parent a duplicate risk, so the continuation
+ * does not mint a second attempt. Instead, this gate atomically changes the exact continuation from
+ * unconsumed to pending under the user lock. Every receipt and uncertainty fact remains on the
+ * parent, allowing confirmation to close the whole flow while a lost result stays blocked.
+ */
+export async function assertManagedSecurityCodeContinuationBoundaryClear(
+  row: ResumeRow,
+  review: ApplicationReviewState,
+  attemptBinding: SubmissionAttemptBinding,
+  continuationFingerprint: string,
+  submissionAttempt: ManagedSubmissionAttempt,
+  providerExpiresAt: string,
+  continuationSecurityCode: NonNullable<ApplicationReviewState['security_code']>,
+): Promise<{ providerDeadlineAt: string }> {
+  if (
+    attemptBinding.source !== 'managed_browser'
+    || attemptBinding.parentAttemptId
+    || attemptBinding.packetId !== row.id
+    || attemptBinding.userId !== row.user_id
+    || attemptBinding.attemptId !== review.submission_claim_id
+    || attemptBinding.submissionClaimId !== review.submission_claim_id
+    || attemptBinding.submissionRunId !== review.submission_run_id
+    || submissionAttempt.runId !== attemptBinding.submissionRunId
+    || submissionAttempt.claimId !== attemptBinding.submissionClaimId
+    || !continuationFingerprint.trim()
+    || !providerExpiresAt.trim()
+    || !continuationSecurityCode.submit_was_authorized
+  ) throw new FinalSubmissionBoundaryChangedError();
+  const executionFingerprint = managedContinuationExecutionFingerprint(submissionAttempt);
+
+  const result = await db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, row.user_id);
+    const [latest] = await tx.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, row.user_id),
+    )).limit(1);
+    if (!finalRunnerReservationMatches(row, review, attemptBinding, latest)) {
+      return { kind: 'changed' as const };
+    }
+    const latestReview = readApplicationReview(latest!.spec)!;
+    const verification = latestReview.verification;
+    if (
+      !latestReview.security_code
+      || verification?.status !== 'searching'
+      || verification.runner !== 'stratus-managed'
+      || verification.continuation_fingerprint !== continuationFingerprint
+      || verification.continuation_execution_fingerprint !== executionFingerprint
+      || verification.continuation_resumed !== false
+    ) return { kind: 'changed' as const };
+
+    const persistRefusal = async (
+      reason: ManagedSecurityCodeContinuationRefusedError['reason'],
+      observedAt: string,
+    ) => {
+      const refusedReview = managedSecurityCodeContinuationRefusalReview(
+        latestReview,
+        reason,
+        observedAt,
+        continuationSecurityCode,
+      );
+      const updated = await tx.update(generated_resumes).set({
+        spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(refusedReview)}::jsonb, true)`,
+      }).where(and(
+        eq(generated_resumes.id, latest!.id),
+        eq(generated_resumes.user_id, latest!.user_id),
+        sql`${generated_resumes.spec} = ${JSON.stringify(latest!.spec)}::jsonb`,
+        sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${attemptBinding.attemptId}`,
+        sql`${generated_resumes.spec}->'_review'->'verification'->>'continuation_resumed' = 'false'`,
+      )).returning({ id: generated_resumes.id });
+      return updated.length > 0
+        ? { kind: 'refused' as const, reason }
+        : { kind: 'changed' as const };
+    };
+
+    const initialAuthorization = await submissionBoundaryAuthorization(
+      row.user_id,
+      attemptBinding.attemptId,
+      { executor: tx },
+    );
+    const exactEvents = (await submissionAttemptEventsForPacket(row.user_id, row.id, { executor: tx }))
+      .filter((event) => event.attempt_id === attemptBinding.attemptId);
+    const parentHasOneAuthorizedUnresolvedPress = Boolean(initialAuthorization)
+      && exactEvents.filter((event) => event.event_kind === 'boundary_authorized').length === 1
+      && exactEvents.some((event) => event.event_kind === 'press_observed')
+      && !exactEvents.some((event) => event.event_kind === 'submission_confirmed'
+        || event.event_kind === 'not_sent_proven');
+    if (!parentHasOneAuthorizedUnresolvedPress || !initialAuthorization) {
+      return { kind: 'changed' as const };
+    }
+
+    const duplicate = await duplicateApplicationVerdict({
+      userId: latest!.user_id,
+      applicationId: latest!.id,
+      jobContext: latest!.job_context,
+      portalUrl: latestReview.portal_url,
+      excludeAttemptId: attemptBinding.attemptId,
+    }, tx);
+    if (duplicate.kind !== 'clear') {
+      return persistRefusal('duplicate_risk', initialAuthorization.serverNow);
+    }
+
+    // Refresh the database clock after every potentially slow duplicate query. The first read only
+    // established immutable parent lineage; this one decides whether a new remote call may start.
+    const authorization = await submissionBoundaryAuthorization(
+      row.user_id,
+      attemptBinding.attemptId,
+      { executor: tx },
+    );
+    if (!authorization) return { kind: 'changed' as const };
+    const serverNowMs = Date.parse(authorization.serverNow);
+    const boundaryExpiresAtMs = Date.parse(authorization.expiresAt);
+    const providerExpiresAtMs = Date.parse(providerExpiresAt);
+    const providerDeadlineAtMs = serverNowMs + MANAGED_SECURITY_CODE_CONTINUATION_CALL_TIMEOUT_MS;
+    const minimumSafeExpiryMs = providerDeadlineAtMs
+      + MANAGED_SECURITY_CODE_CONTINUATION_DISPATCH_MARGIN_MS;
+    if (!Number.isFinite(serverNowMs)
+      || !Number.isFinite(boundaryExpiresAtMs)
+      || !Number.isFinite(providerExpiresAtMs)
+      || boundaryExpiresAtMs <= minimumSafeExpiryMs
+      || providerExpiresAtMs <= minimumSafeExpiryMs) {
+      return persistRefusal('lease_window_too_short', authorization.serverNow);
+    }
+    const providerDeadlineAt = new Date(providerDeadlineAtMs).toISOString();
+
+    const pendingReview = nextReview(latestReview, {
+      security_code: continuationSecurityCode,
+      verification: {
+        ...verification,
+        status: 'verification_pending',
+        continuation_resumed: true,
+        continuation_call_started_at: authorization.serverNow,
+        // This is the provider budget approved under the database lock, not the broader parent
+        // lease. The caller starts the matching timer before entering this gate and never restarts
+        // it after commit, so an accepted callback cannot cross this applicant-resolution fence.
+        continuation_call_deadline_at: providerDeadlineAt,
+      },
+    });
+    const updated = await tx.update(generated_resumes).set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(pendingReview)}::jsonb, true)`,
+    }).where(and(
+      eq(generated_resumes.id, latest!.id),
+      eq(generated_resumes.user_id, latest!.user_id),
+      sql`${generated_resumes.spec} = ${JSON.stringify(latest!.spec)}::jsonb`,
+      sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${attemptBinding.attemptId}`,
+      sql`${generated_resumes.spec}->'_review'->'verification'->>'continuation_resumed' = 'false'`,
+    )).returning({ id: generated_resumes.id });
+    return updated.length > 0
+      ? { kind: 'clear' as const, providerDeadlineAt }
+      : { kind: 'changed' as const };
+  });
+  if (result.kind === 'refused') throw new ManagedSecurityCodeContinuationRefusedError(result.reason);
+  if (result.kind !== 'clear') throw new FinalSubmissionBoundaryAlreadyAuthorizedError();
+  return { providerDeadlineAt: result.providerDeadlineAt };
+}
+
+function mergeManagedSecurityCodeEvidence(
+  latest: ApplicationReviewState['security_code'],
+  incoming: ApplicationReviewState['security_code'],
+): ApplicationReviewState['security_code'] {
+  if (!incoming) return latest;
+  if (!latest) return incoming;
+  const latestRequestedAt = Date.parse(latest.requested_at);
+  const incomingRequestedAt = Date.parse(incoming.requested_at);
+  const incomingIsNewer = Number.isFinite(incomingRequestedAt)
+    && (!Number.isFinite(latestRequestedAt) || incomingRequestedAt >= latestRequestedAt);
+  const mergedBase = {
+    ...(incomingIsNewer ? latest : incoming),
+    ...(incomingIsNewer ? incoming : latest),
+    attempts: latest.attempts,
+  };
+  return withSecurityCodeAttempts(mergedBase, incoming.attempts ?? []);
+}
+
+function mergeManagedVerificationEvidence(
+  latest: ApplicationReviewState['verification'],
+  incoming: ApplicationReviewState['verification'],
+): ApplicationReviewState['verification'] {
+  if (!incoming) return latest;
+  const merged = { ...latest, ...incoming };
+  if (!latest) return merged;
+  // Continuation identity and consumption are monotonic. A stale outcome may change the visible
+  // status, but it cannot turn a consumed exact capability back into an unconsumed one or shorten
+  // the callback-live fence that a resolver trusts.
+  return {
+    ...merged,
+    ...(latest.runner ? { runner: latest.runner } : {}),
+    ...(latest.continuation_fingerprint
+      ? { continuation_fingerprint: latest.continuation_fingerprint }
+      : {}),
+    ...(latest.continuation_execution_fingerprint
+      ? { continuation_execution_fingerprint: latest.continuation_execution_fingerprint }
+      : {}),
+    ...(latest.continuation_resumed !== undefined
+      ? { continuation_resumed: latest.continuation_resumed }
+      : {}),
+    ...(latest.continuation_call_started_at
+      ? { continuation_call_started_at: latest.continuation_call_started_at }
+      : {}),
+    ...(latest.continuation_call_deadline_at
+      ? { continuation_call_deadline_at: latest.continuation_call_deadline_at }
+      : {}),
+  };
+}
+
+type ManagedAuthorizedUnverifiedInput = {
+  message: string;
+  attentionReason: string;
+  attentionCategories: ApplicationAttentionCategory[];
+  securityCode?: ApplicationReviewState['security_code'];
+  verification?: ApplicationReviewState['verification'];
+  previewUrl?: string;
+  network?: NonNullable<ApplicationReviewState['unverified_submission']>['network'];
+  challengeOnScreen?: boolean;
+  requireContinuationResumed?: boolean;
+};
+
+/** Every managed stop after boundary authorization remains an unresolved parent, never not-sent. */
+export async function recordManagedAuthorizedAttemptUnverified(
+  row: ResumeRow,
+  attemptBinding: SubmissionAttemptBinding,
+  input: ManagedAuthorizedUnverifiedInput,
+): Promise<boolean> {
+  return db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, row.user_id);
+    const [latest] = await tx.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, row.user_id),
+    )).limit(1);
+    const latestReview = latest ? readApplicationReview(latest.spec) : null;
+    if (!latest || !latestReview
+      || latestReview.submission_claim_id !== attemptBinding.attemptId
+      || latestReview.submission_run_id !== attemptBinding.submissionRunId) return false;
+    if (input.requireContinuationResumed && (
+      latestReview.verification?.runner !== 'stratus-managed'
+      || latestReview.verification.continuation_resumed !== true
+      || !latestReview.verification.continuation_call_deadline_at
+    )) return false;
+    const authorization = await submissionBoundaryAuthorization(
+      row.user_id,
+      attemptBinding.attemptId,
+      { executor: tx },
+    );
+    if (!authorization) return false;
+    const exactEvents = (await submissionAttemptEventsForPacket(row.user_id, row.id, { executor: tx }))
+      .filter((event) => event.attempt_id === attemptBinding.attemptId);
+    if (exactEvents.some((event) => event.event_kind === 'submission_confirmed'
+        || event.event_kind === 'not_sent_proven')) return false;
+    const mergedSecurityCode = mergeManagedSecurityCodeEvidence(
+      latestReview.security_code,
+      input.securityCode,
+    );
+    const mergedVerification = mergeManagedVerificationEvidence(
+      latestReview.verification,
+      input.verification,
+    );
+    const unresolved = nextReview(latestReview, {
+      ...unverifiedSubmissionPatch(latestReview, {
+        at: authorization.serverNow,
+        cause: 'no_confirmation_state',
+        ...(input.previewUrl ? { previewUrl: input.previewUrl } : {}),
+        ...(input.network ? { network: input.network } : {}),
+        ...(input.challengeOnScreen ? { challengeOnScreen: true } : {}),
+      }),
+      ...(mergedSecurityCode ? { security_code: mergedSecurityCode } : {}),
+      ...(mergedVerification ? { verification: mergedVerification } : {}),
+      submission_error: input.message.slice(0, 500),
+      attention_reason: input.attentionReason,
+      attention_categories: input.attentionCategories,
+    });
+    const conditions = [
+      eq(generated_resumes.id, latest.id),
+      eq(generated_resumes.user_id, latest.user_id),
+      sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
+      sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${attemptBinding.attemptId}`,
+    ];
+    if (input.requireContinuationResumed) {
+      conditions.push(sql`${generated_resumes.spec}->'_review'->'verification'->>'continuation_resumed' = 'true'`);
+    }
+    const updated = await tx.update(generated_resumes).set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(unresolved)}::jsonb, true)`,
+    }).where(and(...conditions)).returning({ id: generated_resumes.id });
+    return updated.length > 0;
+  });
+}
+
+/** Persist exact post-call uncertainty after the provider capability was consumed. */
+export async function recordManagedSecurityCodeContinuationUnverified(
+  row: ResumeRow,
+  attemptBinding: SubmissionAttemptBinding,
+  message: string,
+  options: { previewUrl?: string } = {},
+): Promise<boolean> {
+  return recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+    message,
+    attentionReason: 'Litos used the employer verification control, but could not prove the final result. Check the employer portal and record whether this exact application was received.',
+    attentionCategories: ['security_code', 'unverified_submission'],
+    ...(options.previewUrl ? { previewUrl: options.previewUrl } : {}),
+    requireContinuationResumed: true,
+  });
+}
+
+/** Durably bind the retained provider capability to the exact challenged parent before polling. */
+export async function recordManagedSecurityCodeContinuationSearch(
+  row: ResumeRow,
+  attemptBinding: SubmissionAttemptBinding,
+  input: {
+    securityCode: NonNullable<ApplicationReviewState['security_code']>;
+    verification: NonNullable<ApplicationReviewState['verification']>;
+  },
+): Promise<{ row: ResumeRow; review: ApplicationReviewState } | null> {
+  return db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, row.user_id);
+    const [latest] = await tx.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, row.user_id),
+    )).limit(1);
+    const latestReview = latest ? readApplicationReview(latest.spec) : null;
+    if (!latest || !latestReview
+      || latestReview.submission_claim_id !== attemptBinding.attemptId
+      || latestReview.submission_run_id !== attemptBinding.submissionRunId) return null;
+    if (latestReview.verification?.runner === 'stratus-managed'
+      && latestReview.verification.continuation_resumed !== undefined) return null;
+    const authorization = await submissionBoundaryAuthorization(
+      row.user_id,
+      attemptBinding.attemptId,
+      { executor: tx },
+    );
+    if (!authorization) return null;
+    const exactEvents = (await submissionAttemptEventsForPacket(row.user_id, row.id, { executor: tx }))
+      .filter((event) => event.attempt_id === attemptBinding.attemptId);
+    if (exactEvents.some((event) => event.event_kind === 'submission_confirmed'
+        || event.event_kind === 'not_sent_proven')) return null;
+    const searchingReview = nextReview(latestReview, {
+      ...unverifiedSubmissionPatch(latestReview, {
+        at: authorization.serverNow,
+        cause: 'no_confirmation_state',
+      }),
+      security_code: mergeManagedSecurityCodeEvidence(latestReview.security_code, input.securityCode),
+      verification: mergeManagedVerificationEvidence(latestReview.verification, input.verification),
+      submission_error: 'Employer verification is pending in the retained managed session',
+      attention_categories: ['security_code', 'unverified_submission'],
+    });
+    const [updated] = await tx.update(generated_resumes).set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(searchingReview)}::jsonb, true)`,
+    }).where(and(
+      eq(generated_resumes.id, latest.id),
+      eq(generated_resumes.user_id, latest.user_id),
+      sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
+      sql`${generated_resumes.spec}->'_review'->>'submission_claim_id' = ${attemptBinding.attemptId}`,
+    )).returning();
+    return updated ? { row: updated, review: searchingReview } : null;
+  });
+}
+
+type ManagedSubmissionConfirmedInput = {
+  capturedAt: string;
+  verification: ApplicationReviewState['verification'];
+  securityCode?: ApplicationReviewState['security_code'];
+  receipt: NonNullable<ApplicationReviewState['receipt']>;
+};
+
+/**
+ * Confirmation is the strongest exact-attempt fact. Append it and heal the packet projection under
+ * one user lock, even if a safe-expiry applicant answer cleared the claim just before the receipt.
+ */
+export async function recordManagedSubmissionConfirmed(
+  row: ResumeRow,
+  attemptBinding: SubmissionAttemptBinding,
+  input: ManagedSubmissionConfirmedInput,
+): Promise<boolean> {
+  const confirmed = await db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, row.user_id);
+    const [latest] = await tx.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, row.user_id),
+    )).limit(1);
+    const latestReview = latest ? readApplicationReview(latest.spec) : null;
+    if (!latest || !latestReview
+      || latestReview.submission_run_id !== attemptBinding.submissionRunId) return false;
+    const events = await submissionAttemptEventsForPacket(row.user_id, row.id, { executor: tx });
+    const opening = events.find((event) => event.attempt_id === attemptBinding.attemptId
+      && event.event_kind === 'attempt_opened');
+    if (!opening
+      || !isDeepStrictEqual(submissionAttemptBindingFromEvent(opening), attemptBinding)) return false;
+    const exactEvents = events.filter((event) => event.attempt_id === attemptBinding.attemptId);
+    if (!exactEvents.some((event) => event.event_kind === 'submission_confirmed')) {
+      await appendSubmissionAttemptEvent({
+        ...attemptBinding,
+        eventId: submissionAttemptEventId(
+          attemptBinding.attemptId,
+          'submission_confirmed',
+          'managed-receipt',
+        ),
+        eventKind: 'submission_confirmed',
+        evidenceCode: input.securityCode
+          ? 'managed_security_code_receipt'
+          : 'managed_application_receipt',
+        observedAt: new Date(input.capturedAt),
+      }, { executor: tx });
+    }
+    const securityCode = mergeManagedSecurityCodeEvidence(
+      latestReview.security_code,
+      input.securityCode,
+    );
+    const verification = mergeManagedVerificationEvidence(
+      latestReview.verification,
+      input.verification,
+    );
+    const submitted = nextReview(latestReview, {
+      status: 'submitted',
+      submitted_at: input.capturedAt,
+      submission_error: undefined,
+      attention_reason: undefined,
+      attention_categories: undefined,
+      ...(verification ? { verification } : {}),
+      ...(securityCode ? { security_code: securityCode } : {}),
+      ...(latestReview.unverified_submission ? {
+        unverified_submission: {
+          ...latestReview.unverified_submission,
+          resolution: 'sent',
+          resolved_at: input.capturedAt,
+        },
+      } : {}),
+      receipt: input.receipt,
+    });
+    const updated = await tx.update(generated_resumes).set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(submitted)}::jsonb, true)`,
+    }).where(and(
+      eq(generated_resumes.id, latest.id),
+      eq(generated_resumes.user_id, latest.user_id),
+      sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
+      sql`${generated_resumes.spec}->'_review'->>'submission_run_id' = ${attemptBinding.submissionRunId}`,
+    )).returning({ id: generated_resumes.id });
+    if (updated.length === 0) throw new FinalSubmissionBoundaryChangedError();
+    return true;
+  });
+  if (confirmed) {
+    await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: row.user_id });
+  }
+  return confirmed;
+}
+
 async function claimSubmission(row: ResumeRow, alreadyHeld = false): Promise<ResumeRow | null> {
   const current = readApplicationReview(row.spec);
-  if (alreadyHeld) return submissionClaimIsHeld(current) ? row : null;
+  if (alreadyHeld) {
+    if (!submissionClaimIsHeld(current)) return null;
+    // A held claim without its immutable opening fact is legacy or partially written state. It can
+    // never be allowed to cross an employer boundary after the ledger gate is active.
+    await persistedRunnerAttemptBinding(row, current!);
+    return row;
+  }
   if (!current || current.status !== 'submitting' || current.submission_claimed_at) return null;
   const claimed = nextReview(current, submissionClaimPatch(new Date().toISOString(), randomUUID()));
-  const rows = await db.update(generated_resumes)
-    .set({
-      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(claimed)}::jsonb, true)`,
-    })
-    .where(and(
-      eq(generated_resumes.id, row.id),
-      sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-      sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
-      sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
-    ))
-    .returning();
-  return rows[0] ?? null;
+  return db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, row.user_id);
+    const duplicate = await duplicateApplicationVerdict({
+      userId: row.user_id,
+      applicationId: row.id,
+      jobContext: row.job_context,
+      portalUrl: current.portal_url,
+    }, tx);
+    if (duplicate.kind !== 'clear') return null;
+    const openedToday = await submissionAttemptsOpenedToday(row.user_id, { executor: tx });
+    if (!withinDailyCap(openedToday, dailySubmissionCap())) return null;
+    const rows = await tx.update(generated_resumes)
+      .set({
+        spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(claimed)}::jsonb, true)`,
+      })
+      .where(and(
+        eq(generated_resumes.id, row.id),
+        sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+        sql`${generated_resumes.spec}->'_review'->>'status' = 'submitting'`,
+        sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
+      ))
+      .returning();
+    if (!rows[0]) return null;
+    const binding = runnerAttemptBinding(rows[0], claimed, 'initial_submission');
+    await appendSubmissionAttemptEvent({
+      ...binding,
+      eventId: submissionAttemptEventId(binding.attemptId, 'attempt_opened', 'reservation'),
+      eventKind: 'attempt_opened',
+      evidenceCode: 'atomic_claim_reserved',
+    }, { executor: tx });
+    return rows[0];
+  });
 }
 
 export function submissionClaimIsHeld(review: ApplicationReviewState | null | undefined): boolean {
@@ -457,18 +1253,38 @@ async function claimSecurityCodeSubmission(
     ...submissionClaimPatch(new Date().toISOString(), randomUUID()),
     submission_error: undefined,
   });
-  const rows = await db.update(generated_resumes)
-    .set({
-      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(requested)}::jsonb, true)`,
-    })
-    .where(and(
-      eq(generated_resumes.id, row.id),
-      sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-      sql`${generated_resumes.spec}->'_review'->>'status' = 'awaiting_security_code'`,
-      sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
-    ))
-    .returning();
-  return rows[0] ?? null;
+  return db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, row.user_id);
+    const duplicate = await duplicateApplicationVerdict({
+      userId: row.user_id,
+      applicationId: row.id,
+      jobContext: row.job_context,
+      portalUrl: current.portal_url,
+    }, tx);
+    if (duplicate.kind !== 'clear') return null;
+    const openedToday = await submissionAttemptsOpenedToday(row.user_id, { executor: tx });
+    if (!withinDailyCap(openedToday, dailySubmissionCap())) return null;
+    const rows = await tx.update(generated_resumes)
+      .set({
+        spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(requested)}::jsonb, true)`,
+      })
+      .where(and(
+        eq(generated_resumes.id, row.id),
+        sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
+        sql`${generated_resumes.spec}->'_review'->>'status' = 'awaiting_security_code'`,
+        sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
+      ))
+      .returning();
+    if (!rows[0]) return null;
+    const binding = runnerAttemptBinding(rows[0], requested, 'security_code_continuation');
+    await appendSubmissionAttemptEvent({
+      ...binding,
+      eventId: submissionAttemptEventId(binding.attemptId, 'attempt_opened', 'reservation'),
+      eventKind: 'attempt_opened',
+      evidenceCode: 'atomic_security_code_claim_reserved',
+    }, { executor: tx });
+    return rows[0];
+  });
 }
 
 async function claimPreparation(row: ResumeRow): Promise<ResumeRow | null> {
@@ -5628,6 +6444,7 @@ async function submitControlled(
   fastify: FastifyInstance,
   audit: PacketAudit,
   verifiedQuestions: readonly ApplicationReviewQuestion[],
+  attemptBinding: SubmissionAttemptBinding,
 ) {
   if (process.env.LITOS_ENABLE_TEST_PORTAL !== 'true') throw new Error('Controlled portal is disabled');
   const packet = await buildPacket(row, true, verifiedQuestions);
@@ -5648,11 +6465,21 @@ async function submitControlled(
     await transportVerifiedBuiltPacket(packet, audit, verifiedQuestions, async (exactPacket) => {
       await fillPortal(page, 'controlled_test', exactPacket);
       assertEmployerPageUrl(review.portal_url!, page.url());
-      await clickFinalSubmit(page);
+      await executeAfterFinalSubmissionBoundary(
+        () => assertFinalRunnerBoundaryClear(row, review, attemptBinding),
+        () => clickFinalSubmit(page),
+      );
+      await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'controlled-submit', {
+        evidenceCode: 'controlled_submit_returned',
+      });
     }, 'full', envelope);
     const receipt = await readReceipt(page);
     const capturedAt = new Date().toISOString();
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
+    await appendRunnerAttemptFact(attemptBinding, 'submission_confirmed', 'controlled-receipt', {
+      evidenceCode: 'controlled_receipt_verified',
+      observedAt: new Date(capturedAt),
+    });
     await writeReview(row, nextReview(review, {
       status: 'submitted',
       submitted_at: capturedAt,
@@ -5702,6 +6529,16 @@ const SECURITY_CODE_CONTINUATION_TTL_SECONDS = 180;
 const SECURITY_CODE_MAILBOX_ATTEMPTS = 15;
 const SECURITY_CODE_MAILBOX_DELAY_MS = 3_000;
 
+class SubmissionExecutionError extends Error {
+  constructor(
+    readonly actedOnRow: ResumeRow,
+    readonly submissionCause: unknown,
+  ) {
+    super(submissionCause instanceof Error ? submissionCause.message : 'Submission runner failed');
+    this.name = 'SubmissionExecutionError';
+  }
+}
+
 // `securityCode` is the code the applicant pasted in, and it is a PARAMETER rather than a stored
 // field on purpose: it is a live credential to a real employer's form, and the review object it
 // would have to live in is unvalidated JSON that is serialized to the dashboard and the extension.
@@ -5722,6 +6559,14 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
 } = {}) {
   const current = readApplicationReview(row.spec);
   if (!current?.submission_run_id || !current.portal_url) throw new Error('The prepared run is missing');
+  const resolveHeldPreSendStop = async (factKey: string, evidenceCode: string) => {
+    if (!options.claimAlreadyHeld || !current.submission_claim_id) return;
+    const binding = await persistedRunnerAttemptBinding(row, current);
+    await appendRunnerAttemptFact(binding, 'not_sent_proven', factKey, {
+      proofKind: 'typed_pre_click_stop',
+      evidenceCode,
+    });
+  };
   const packetAudit = await verifiedPacketForRun(row, current, currentAcknowledgedPacketAudit);
   if (!packetAudit.valid) {
     const finishingSecurityCode = Boolean(options.securityCode) && Boolean(current.security_code);
@@ -5729,6 +6574,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       { applicationId: row.id, code: packetAudit.code, bindingMismatchKeys: packetAudit.bindingMismatchKeys ?? [] },
       'Submission withheld because the exact packet audit is missing or stale',
     );
+    await resolveHeldPreSendStop('held-packet-audit-stop', 'packet_audit_invalid_before_send');
     await writeReview(row, nextReview(current, {
       status: finishingSecurityCode ? 'awaiting_security_code' : 'needs_attention',
       /* The authored sentence, never the raw verdict token. Same rule and same measured leak as
@@ -5751,6 +6597,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       { applicationId: row.id, issues: leadIssues },
       'Submission withheld at the click: resume lead evidence is stale or unsupported',
     );
+    await resolveHeldPreSendStop('held-lead-alignment-stop', 'lead_alignment_invalid_before_send');
     await withholdInvalidLeadAlignment(
       row,
       current,
@@ -5765,6 +6612,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     standingConsentEnabled: authorization.enabled,
   })) {
     if (current.submission_authorization?.source === 'standing_consent') {
+      await resolveHeldPreSendStop('held-authorization-stop', 'standing_authorization_revoked_before_send');
       await writeReview(row, nextReview(current, {
         status: 'ready_for_final_approval',
         submission_authorization: undefined,
@@ -5788,22 +6636,22 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
    *
    * A read failure does NOT open the gate. The whole point is that a duplicate cannot be
    * withdrawn, so an unreadable database is a reason to stop rather than a reason to proceed. */
-  const duplicate = await duplicateApplicationVerdict({
-    userId: row.user_id,
-    applicationId: row.id,
-    jobContext: row.job_context,
-    portalUrl: current.portal_url,
-  });
-  if (duplicate.kind === 'unidentifiable') {
-    fastify.log.warn(
-      { applicationId: row.id },
-      'duplicate guard abstained: no shared posting key with any submitted application',
-    );
-  }
-  if (duplicate.kind === 'duplicate') {
+  const duplicate = options.claimAlreadyHeld
+    ? { kind: 'clear' as const }
+    : await duplicateApplicationVerdict({
+      userId: row.user_id,
+      applicationId: row.id,
+      jobContext: row.job_context,
+      portalUrl: current.portal_url,
+    });
+  if (duplicate.kind !== 'clear') {
     fastify.log.info(
-      { applicationId: row.id, duplicateOf: duplicate.match.application_id, basis: duplicate.match.basis },
-      'Submission refused: this user already applied to this posting',
+      {
+        applicationId: row.id,
+        duplicateOf: duplicate.kind === 'duplicate' ? duplicate.match.application_id : duplicate.application_id,
+        basis: duplicate.kind === 'duplicate' ? duplicate.match.basis : 'unidentifiable',
+      },
+      'Submission refused: an earlier application attempt is not safe to repeat',
     );
     /* Refuse, but do not DEMOTE a packet the employer already holds.
      *
@@ -5821,8 +6669,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         ? `${securityCodeAttentionReason(current.security_code!)}\n${duplicate.reason}`
         : duplicate.reason,
       attention_categories: finishingSecurityCode
-        ? ['security_code', 'duplicate_application']
-        : ['duplicate_application'],
+        ? ['security_code', duplicate.kind === 'duplicate' && duplicate.match.certainty === 'submitted'
+          ? 'duplicate_application' : 'unverified_submission']
+        : [duplicate.kind === 'duplicate' && duplicate.match.certainty === 'submitted'
+          ? 'duplicate_application' : 'unverified_submission'],
       submission_authorization: undefined,
       submission_claimed_at: undefined,
       submission_claim_id: undefined,
@@ -5835,8 +6685,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
   const claimedRow = await claimSubmission(row, options.claimAlreadyHeld);
   if (!claimedRow) return;
   row = claimedRow;
-  let claimedReview = readApplicationReview(row.spec);
-  if (!claimedReview) return;
+  try {
+    let claimedReview = readApplicationReview(row.spec);
+    if (!claimedReview) return;
+    const attemptBinding = await persistedRunnerAttemptBinding(row, claimedReview);
   /* THE LAST PLACE THIS CAN BE ASKED, and the only one that covers every path to 'submitted'.
    *
    * blankRequiredQuestionLabels already gates the two PREPARE decisions and the approve route, and
@@ -5885,6 +6737,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     const requiredSentence = `${unansweredRequired.length} required `
       + `${unansweredRequired.length === 1 ? 'question is' : 'questions are'} still unanswered, so this was not sent: `
       + `${unansweredRequired.map((label) => `"${label.slice(0, 60)}"`).join(', ').slice(0, 400)}`;
+    await appendRunnerAttemptFact(attemptBinding, 'not_sent_proven', 'required-questions-withheld', {
+      proofKind: 'typed_pre_click_stop',
+      evidenceCode: 'required_questions_unanswered',
+    });
     await writeReview(row, nextReview(claimedReview, {
       status: finishingSecurityCode ? 'awaiting_security_code' : 'needs_attention',
       attention_reason: finishingSecurityCode
@@ -5902,7 +6758,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
   const claimedPortal = detectPortal(claimedReview.portal_url!);
   assertControlledPortalEnabled(claimedPortal);
   if (shouldUseLocalControlledBrowser(claimedPortal)) {
-    await submitControlled(row, claimedReview, fastify, packetAudit.audit, packetAudit.questions);
+    await submitControlled(row, claimedReview, fastify, packetAudit.audit, packetAudit.questions, attemptBinding);
     return;
   }
   if (await submitViaAtsSubmissionChannel(
@@ -5935,9 +6791,15 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       ? await loadUnattendedConsentGrant(row.user_id)
       : null;
     if (!portalCanAutoSubmitWithConsentGrant(portal, submitConsentGrant)) {
+      await appendRunnerAttemptFact(attemptBinding, 'not_sent_proven', 'portal-handoff', {
+        proofKind: 'typed_pre_click_stop',
+        evidenceCode: 'portal_requires_attended_handoff',
+      });
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
         attention_reason: portalHandoffReason(portal) ?? undefined,
+        submission_claimed_at: undefined,
+        submission_claim_id: undefined,
         // Same family test as the unattended branch above, different stage: this path DID fill the
         // form, so the applicant is finishing a filled application rather than starting a blank one.
         ...(isCaptchaGatedFamily(portal)
@@ -5955,6 +6817,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
   if (isManagedStratusProvider()) {
     const portal = claimedPortal;
     if (!await authorizationValidAtClick(row, claimedReview)) {
+      await appendRunnerAttemptFact(attemptBinding, 'not_sent_proven', 'authorization-revoked-before-managed', {
+        proofKind: 'typed_pre_click_stop',
+        evidenceCode: 'authorization_revoked_before_managed_submit',
+      });
       await holdRevokedSubmission(row, claimedReview);
       return;
     }
@@ -6025,9 +6891,15 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * needs_attention state the family reached before this feature, with the same sentence. */
     if (!portalCanAutoSubmit(portal) && !managedConsentTickPlan(portal, packet)
       && !managedImpliedConsentSubmitLicence(portal, packet)) {
+      await appendRunnerAttemptFact(attemptBinding, 'not_sent_proven', 'consent-plan-withheld', {
+        proofKind: 'typed_pre_click_stop',
+        evidenceCode: 'managed_consent_plan_unavailable',
+      });
       await writeReview(row, nextReview(claimedReview, {
         status: 'needs_attention',
         attention_reason: portalHandoffReason(portal) ?? undefined,
+        submission_claimed_at: undefined,
+        submission_claim_id: undefined,
       }));
       return;
     }
@@ -6062,18 +6934,82 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * keepAlive stayed true and sandbox.stop() was skipped in the finally of every successful
      * submission, leaking one sandbox per application while the runner waited on a continuation
      * nothing was going to send. */
-    const submitRun = await runWithManagedPreSubmitCrashRetry(
-      () => runManagedBrowser(
-        applicationUrl,
-        initialActions,
-        managedApplicationSubmitOptions(SECURITY_CODE_CONTINUATION_TTL_SECONDS),
-      ),
+    let managedSubmissionAttempt: ManagedSubmissionAttempt | null = null;
+    let managedBoundaryAuthorization: SubmissionBoundaryAuthorization | null = null;
+    const executeManagedSubmit = () => runWithManagedPreSubmitCrashRetry(
+      async () => {
+        managedSubmissionAttempt = {
+          runId: attemptBinding.submissionRunId!,
+          claimId: attemptBinding.submissionClaimId!,
+          // A containment-proven sandbox retry is a distinct execution. The successful execution's
+          // value is retained below because every continuation is bound to that held session.
+          executionId: randomUUID(),
+        };
+        return executeAfterFinalSubmissionBoundary(
+          () => assertFinalRunnerBoundaryClear(row, claimedReview, attemptBinding, {
+            ...(managedBoundaryAuthorization
+              ? { reuseAuthorization: managedBoundaryAuthorization }
+              : {}),
+          }),
+          (authorization) => {
+            managedBoundaryAuthorization = authorization;
+            return runManagedBrowser(
+              applicationUrl,
+              initialActions,
+              {
+                ...managedApplicationSubmitOptions(
+                  SECURITY_CODE_CONTINUATION_TTL_SECONDS,
+                  managedSubmissionAttempt!,
+                ),
+                timeoutMs: managedInitialCallTimeoutMs(authorization),
+                providerDeadlineAt: managedInitialProviderDeadlineAt(authorization),
+              },
+            );
+          },
+        );
+      },
       () => authorizationValidAtClick(row, claimedReview),
     );
-    if (submitRun.kind === 'authorization_revoked') {
-      await holdRevokedSubmission(row, claimedReview);
+    let submitRun: Awaited<ReturnType<typeof executeManagedSubmit>>;
+    try {
+      submitRun = await executeManagedSubmit();
+    } catch (error) {
+      if (!(error instanceof ManagedBrowserProviderProgressError)) throw error;
+      const disposition = managedProviderProgressDisposition(error.runProgress, 'application');
+      if (disposition === 'pressed' || disposition === 'confirmed') {
+        await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-initial-submit', {
+          evidenceCode: 'stratus_application_press_progress',
+        });
+      }
+      if (disposition !== 'confirmed') throw error;
+      const capturedAt = new Date().toISOString();
+      const confirmationText = error.runProgress.employerOutcome!.message!.trim();
+      await recordManagedSubmissionConfirmed(row, attemptBinding, {
+        capturedAt,
+        verification: { status: 'not_needed' },
+        receipt: {
+          confirmation_text: confirmationText,
+          final_url: applicationUrl,
+          captured_at: capturedAt,
+          source: 'managed_browser',
+        },
+      });
+      fastify.log.warn(
+        { applicationId: row.id, attemptId: attemptBinding.attemptId },
+        'Managed confirmation was recovered from correlated provider progress without a screenshot',
+      );
       return;
     }
+    if (submitRun.kind === 'authorization_revoked') {
+      await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+        message: 'Submission authorization changed after the employer boundary was authorized',
+        attentionReason: 'Litos authorized this employer attempt, but permission changed while the secure browser was recovering. Check the employer portal and record whether this exact application was received.',
+        attentionCategories: ['unverified_submission'],
+      });
+      return;
+    }
+    const successfulSubmissionAttempt = managedSubmissionAttempt as ManagedSubmissionAttempt | null;
+    if (!successfulSubmissionAttempt) throw new Error('Managed submission execution identity was not created');
     if (submitRun.retried) {
       fastify.log.warn(
         { applicationId: row.id },
@@ -6083,15 +7019,27 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     const result = submitRun.result;
     const initialChallengeCandidate = readManagedSecurityCodeChallenge(result);
     const initialSubmitOutcome = readManagedSubmitOutcome(result);
+    if (initialSubmitOutcome?.pressed === true) {
+      await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-initial-submit', {
+        evidenceCode: 'stratus_application_press_echoed',
+      });
+    }
     const initialChallenge = securityCodeChallengeMatchesRecipient(initialChallengeCandidate, packet.email)
       ? initialChallengeCandidate
       : null;
     if (initialChallengeCandidate && initialSubmitOutcome?.pressed === false && !initialChallenge) {
-      await writeReview(row, preClickSecurityRecipientMismatchReview(
+      const mismatch = preClickSecurityRecipientMismatchReview(
         claimedReview,
         initialChallengeCandidate,
         verificationRequestedAt.toISOString(),
-      ));
+      );
+      await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+        message: mismatch.submission_error ?? 'Employer verification recipient did not match this packet',
+        attentionReason: `${mismatch.attention_reason ?? 'The employer verification recipient did not match this packet.'} Check the employer portal and record whether this exact application was received.`,
+        attentionCategories: ['security_code', 'unverified_submission'],
+        securityCode: mismatch.security_code,
+        verification: mismatch.verification,
+      });
       return;
     }
     // Required-field confirmation is a barrier inside the same remote action list, immediately
@@ -6185,26 +7133,38 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       const continuationIsLive = typeof continuationToken === 'string'
         && typeof continuationExpiresAt === 'string'
         && Date.parse(continuationExpiresAt) > Date.now();
-      const continuationEvidence = continuationIsLive
+      const continuationFingerprint = continuationIsLive
+        ? managedContinuationFingerprint(continuationToken)
+        : null;
+      const continuationEvidence = continuationFingerprint
         ? {
           runner: 'stratus-managed' as const,
-          continuation_fingerprint: managedContinuationFingerprint(continuationToken),
+          continuation_fingerprint: continuationFingerprint,
+          continuation_execution_fingerprint: managedContinuationExecutionFingerprint(successfulSubmissionAttempt),
           continuation_resumed: false,
         }
         : {};
       if (continuationIsLive && verificationAllowed) {
         // The continuation capability stays call-local. Persisting it would turn the review JSON,
         // which is returned to dashboard and extension clients, into a browser-session credential.
-        await writeReview(row, nextReview(claimedReview, {
-          verification: {
+        if (!initialSecurityCodeState) throw new Error('Managed security-code state was not initialized');
+        const searchingProjection = await recordManagedSecurityCodeContinuationSearch(
+          row,
+          attemptBinding,
+          {
+            securityCode: initialSecurityCodeState,
+            verification: {
             status: 'searching',
             requested_at: requestedAt,
             retry_count: 0,
             ...continuationEvidence,
+            },
           },
-          attention_reason: undefined,
-          submission_error: undefined,
-        }));
+        );
+        // A confirmation or competing exact-state winner may have moved the parent while the
+        // initial provider response was being processed. Such a loser never polls or writes.
+        if (!searchingProjection) return;
+        const searchingReview = searchingProjection.review;
         const prepared = await prepareManagedEmailVerification({
           result,
           userId: row.user_id,
@@ -6222,7 +7182,7 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
             initialSecurityCodeState,
             securityCodeFingerprint(row.id, prepared.code),
           ));
-        if (prepared.status === 'ready' && !codeWasAlreadyAttempted && Date.parse(continuationExpiresAt) > Date.now()) {
+        if (prepared.status === 'ready' && !codeWasAlreadyAttempted) {
           const actionAuthorizationValid = await authorizationValidAtClick(row, claimedReview);
           const actionVerificationRoute = await resolveVerificationEmailRoute({
             userId: row.user_id,
@@ -6247,12 +7207,19 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
                   && !actionPersonalVerificationEnabled
                 ? 'email_permission_revoked' as const
                 : 'email_route_changed' as const;
-            await writeReview(row, preClickVerificationContinuationBlockedReview(
-              claimedReview,
+            const blocked = preClickVerificationContinuationBlockedReview(
+              searchingReview,
               initialSecurityCodeState,
               actionBlockCause,
               initialSubmitOutcome?.pressed === true ? verificationRequestedAt.toISOString() : undefined,
-            ));
+            );
+            await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+              message: blocked.submission_error ?? 'Managed verification continuation was withheld',
+              attentionReason: blocked.attention_reason ?? 'Litos could not safely continue employer verification. Check the employer portal before retrying.',
+              attentionCategories: ['security_code', 'unverified_submission'],
+              securityCode: blocked.security_code,
+              verification: blocked.verification,
+            });
             return;
           }
           /* THE PACKET'S OWN SUBMIT ACTION, CARRYING THE CODE, and it is one action rather than ten.
@@ -6276,16 +7243,91 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           ]);
           // Spend the exact code before the one-shot remote call. If the worker stops after this
           // write, the same retained code cannot be selected and submitted on another run.
-          await writeReview(row, nextReview(claimedReview, { security_code: enteredSecurityCodeState }));
           const codeActions = securityCodeContinuationActions(initialActions, prepared.code, result.url) ?? prepared.actions;
+          // Start the only request timer before the locked continuation gate. Commit delay, OIDC
+          // acquisition, and fetch all spend this same budget; none can mint a fresh 70 seconds.
+          const continuationRequestBudget = startManagedBrowserRequestBudget(
+            MANAGED_SECURITY_CODE_CONTINUATION_CALL_TIMEOUT_MS,
+          );
+          let continuationAuthorization: { providerDeadlineAt: string };
           try {
-            // Exactly one continuation call. An uncertain click is never retried.
-            receiptResult = await continueManagedBrowser(continuationToken, codeActions);
+            if (!continuationFingerprint) throw new FinalSubmissionBoundaryChangedError();
+            // The retained runner token is one-shot. Atomically consume the exact mutable
+            // continuation before calling it, while the parent's immutable press keeps retries
+            // blocked if the worker dies before a receipt is recorded.
+            continuationAuthorization = await assertManagedSecurityCodeContinuationBoundaryClear(
+              searchingProjection.row,
+              searchingReview,
+              attemptBinding,
+              continuationFingerprint,
+              successfulSubmissionAttempt,
+              continuationExpiresAt,
+              enteredSecurityCodeState,
+            );
+          } catch (error) {
+            // A gate loser or a policy refusal never enters the stale initial-run failure handler.
+            // Near-expiry and duplicate refusals already wrote the exact mutable resolution exit
+            // under the user lock. A changed/replayed loser writes nothing over the winner.
+            if (error instanceof ManagedSecurityCodeContinuationRefusedError
+              || error instanceof FinalSubmissionBoundaryBlockedError
+              || error instanceof FinalSubmissionBoundaryChangedError
+              || error instanceof FinalSubmissionAuthorizationChangedError
+              || error instanceof FinalSubmissionBoundaryAlreadyAuthorizedError) return;
+            throw error;
+          }
+          try {
+            // Exactly one bounded continuation call. An uncertain click is never retried.
+            receiptResult = await continueManagedBrowser(continuationToken, codeActions, {
+              submissionAttempt: successfulSubmissionAttempt,
+              requestBudget: continuationRequestBudget,
+              providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
+              minimumDispatchBudgetMs: MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS,
+            });
+            if (readManagedSubmitOutcome(receiptResult)?.pressed === true) {
+              await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-security-code-submit', {
+                evidenceCode: 'stratus_verification_press_echoed',
+              });
+            }
             // A continuation has its own physical submit. Its v2 action must confirm the active
             // verification form and own that click atomically, just like the initial application
             // send. The first receipt cannot authorize a later DOM or a replaced submit node.
             assertManagedRequiredFieldsConfirmed(receiptResult, 'verification');
           } catch (error) {
+            if (error instanceof ManagedBrowserProviderProgressError) {
+              const disposition = managedProviderProgressDisposition(error.runProgress, 'verification');
+              if (disposition === 'pressed' || disposition === 'confirmed') {
+                await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-security-code-submit', {
+                  evidenceCode: 'stratus_verification_press_progress',
+                });
+              }
+              if (disposition === 'confirmed') {
+                const capturedAt = new Date().toISOString();
+                const confirmedSecurityCode = recordEnteredCodeOutcome('accepted', capturedAt);
+                await recordManagedSubmissionConfirmed(row, attemptBinding, {
+                  capturedAt,
+                  verification: {
+                    status: 'completed',
+                    provider: prepared.provider,
+                    requested_at: requestedAt,
+                    retry_count: 1,
+                    ...continuationEvidence,
+                    continuation_resumed: true,
+                  },
+                  ...(confirmedSecurityCode ? { securityCode: confirmedSecurityCode } : {}),
+                  receipt: {
+                    confirmation_text: error.runProgress.employerOutcome!.message!.trim(),
+                    final_url: applicationUrl,
+                    captured_at: capturedAt,
+                    source: 'managed_browser',
+                  },
+                });
+                fastify.log.warn(
+                  { applicationId: row.id, attemptId: attemptBinding.attemptId },
+                  'Managed verification confirmation was recovered from correlated provider progress without a screenshot',
+                );
+                return;
+              }
+            }
             /* AN UNCERTAIN CLICK IS NEVER RETRIED, and that outranks landing somewhere friendlier.
              *
              * A throw here can come from either side of the physical submit: the call itself can
@@ -6301,13 +7343,12 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
              * needs_attention is not a dead end: it carries the portal and the receipt screenshot,
              * which is exactly what someone finishing this by hand needs. */
             const failedAt = new Date().toISOString();
-            await writeReview(row, nextReview(claimedReview, {
-              status: 'needs_attention',
-              security_code: recordEnteredCodeOutcome('error', failedAt),
-              verification: { status: 'verification_pending', requested_at: requestedAt, retry_count: 1 },
-              attention_reason: 'Litos entered the employer verification step, but could not prove the final result. Check the employer portal before trying anything again.',
-              submission_error: error instanceof Error ? error.message.slice(0, 500) : 'Managed verification continuation failed',
-            }));
+            recordEnteredCodeOutcome('error', failedAt);
+            await recordManagedSecurityCodeContinuationUnverified(
+              row,
+              attemptBinding,
+              error instanceof Error ? error.message : 'Managed verification continuation failed',
+            );
             return;
           }
           if (!readManagedSecurityCodeChallenge(receiptResult)) {
@@ -6355,7 +7396,13 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       const observation = await observeManagedReceiptOnce({
         initial: receiptResult,
         expectedApplicationUrl: applicationUrl,
-        observe: (continuationToken) => continueManagedBrowser(continuationToken, [], { screenshot: true }),
+        observe: (continuationToken) => continueManagedBrowser(continuationToken, [], {
+          screenshot: true,
+          submissionAttempt: successfulSubmissionAttempt,
+          // This continuation is read-only, but it still must not hold the runner or a provider
+          // socket forever while the parent attempt is waiting for an exact receipt verdict.
+          timeoutMs: MANAGED_SECURITY_CODE_CONTINUATION_CALL_TIMEOUT_MS,
+        }),
       });
       receiptResult = observation.receiptResult;
       receiptEvidenceResult = observation.evidenceResult;
@@ -6383,12 +7430,82 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         fastify.log.warn({ applicationId: row.id, detail }, 'Managed receipt observation failed closed');
       }
     }
-    if (!receiptEvidenceResult.screenshot) throw new Error('Stratus managed browser did not return a receipt screenshot');
     const capturedAt = new Date().toISOString();
-    const blob = await storeReceiptScreenshot(
-      `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
-      Buffer.from(receiptEvidenceResult.screenshot, 'base64'),
-    );
+    /* LINEARIZE TYPED CONFIRMATION BEFORE RECEIPT STORAGE.
+     *
+     * Blob storage is enrichment and may block after the bounded provider callback has returned.
+     * Once the correlated runner result, required-field barrier, absent code wall, and accepted
+     * entered code all agree that the employer confirmed this exact attempt, its immutable fact
+     * must win before that unbounded work starts. The later locked writer adds the screenshot and
+     * packet projection idempotently using the same deterministic fact id. */
+    const typedConfirmationVerdict = managedSubmitVerdict(receiptResult);
+    const typedConfirmationChallengeCandidate = readManagedSecurityCodeChallenge(receiptResult);
+    const typedConfirmationChallenge = securityCodeChallengeMatchesRecipient(
+      typedConfirmationChallengeCandidate,
+      packet.email,
+    ) ? typedConfirmationChallengeCandidate : null;
+    const typedConfirmationHasAcceptedCode = !enteredCode
+      || receiptResult.securityCodeAttempt?.outcome === 'accepted';
+    let confirmedSecurityCode: ApplicationReviewState['security_code'];
+    let typedConfirmationReceipt: NonNullable<ApplicationReviewState['receipt']> | undefined;
+    if (!delayedObservedChallenge
+      && !typedConfirmationChallenge
+      && typedConfirmationVerdict.kind === 'confirmed'
+      && typedConfirmationHasAcceptedCode) {
+      confirmedSecurityCode = enteredCode
+        ? recordEnteredCodeOutcome('accepted', capturedAt)
+        : enteredSecurityCodeState && codeAttempts.length > 0
+          ? withSecurityCodeAttempts(enteredSecurityCodeState, codeAttempts)
+          : undefined;
+      const typedConfirmationScrape = (() => {
+        try { return readManagedReceipt(receiptResult); } catch { return null; }
+      })();
+      typedConfirmationReceipt = {
+        confirmation_text: typedConfirmationVerdict.confirmationText,
+        final_url: receiptResult.url,
+        captured_at: capturedAt,
+        reference_id: typedConfirmationScrape?.referenceId,
+        source: 'managed_browser',
+      };
+      const confirmedBeforeReceiptStorage = await recordManagedSubmissionConfirmed(row, attemptBinding, {
+        capturedAt,
+        verification,
+        ...(confirmedSecurityCode ? { securityCode: confirmedSecurityCode } : {}),
+        receipt: typedConfirmationReceipt,
+      });
+      if (!confirmedBeforeReceiptStorage) {
+        fastify.log.warn(
+          { applicationId: row.id, attemptId: attemptBinding.attemptId },
+          'Managed confirmation did not match its immutable submission opening',
+        );
+        return;
+      }
+    }
+    if (!receiptEvidenceResult.screenshot) {
+      if (typedConfirmationReceipt) {
+        fastify.log.warn(
+          { applicationId: row.id, attemptId: attemptBinding.attemptId },
+          'Managed confirmation was persisted without an available receipt screenshot',
+        );
+        return;
+      }
+      throw new Error('Stratus managed browser did not return a receipt screenshot');
+    }
+    let blob: Awaited<ReturnType<typeof storeReceiptScreenshot>>;
+    try {
+      blob = await storeReceiptScreenshot(
+        `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
+        Buffer.from(receiptEvidenceResult.screenshot, 'base64'),
+      );
+    } catch (error) {
+      if (!typedConfirmationReceipt) throw error;
+      fastify.log.warn({
+        applicationId: row.id,
+        attemptId: attemptBinding.attemptId,
+        detail: error instanceof Error ? error.message.slice(0, 200) : 'Receipt screenshot storage failed',
+      }, 'Managed confirmation was persisted before receipt screenshot storage failed');
+      return;
+    }
     if (delayedObservedChallenge) {
       const delayedChallenge = readManagedSecurityCodeChallenge(receiptResult);
       if (!delayedChallenge) throw new Error('Delayed security-code challenge disappeared before handoff');
@@ -6398,12 +7515,20 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         authorized: true,
         existing: claimedReview.security_code,
       });
-      await writeReview(row, delayedSecurityCodeHandoffReview(claimedReview, {
+      const delayed = delayedSecurityCodeHandoffReview(claimedReview, {
         verification,
         securityCode,
         attemptedAt: capturedAt,
         screenshotUrl: blob.url,
-      }));
+      });
+      await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+        message: 'Employer security-code challenge appeared after the receipt observation capability was consumed',
+        attentionReason: `${delayed.attention_reason ?? securityCodeAttentionReason(securityCode)} Check the employer portal and record whether this exact application was received.`,
+        attentionCategories: ['security_code', 'unverified_submission'],
+        securityCode,
+        verification,
+        previewUrl: blob.url,
+      });
       fastify.log.warn({
         applicationId: row.id,
         sentTo: securityCode.sent_to,
@@ -6447,26 +7572,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
               : 'not_entered') as SecurityCodeAttempt['outcome'],
         }] : []),
       ]);
-      await writeReview(row, nextReview(claimedReview, {
-        status: 'awaiting_security_code',
-        // Preserve the polling result computed above. Rebuilding from claimedReview here used to
-        // erase verification_pending back to not_needed after a code email arrived but could not
-        // be matched, hiding the exact reason the continuation stopped.
+      await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+        message: 'Employer is holding this application behind an emailed security code',
+        attentionReason: `${securityCodeAttentionReason(attempted)} Check the employer portal and record whether this exact application was received.`,
+        attentionCategories: ['security_code', 'unverified_submission'],
+        securityCode: attempted,
         verification: verification.status === 'not_needed'
           ? claimedReview.verification ?? verification
           : verification,
-        security_code: attempted,
-        submission_attempted_at: capturedAt,
-        preview_screenshot_url: blob.url,
-        submission_error: undefined,
-        attention_reason: securityCodeAttentionReason(attempted),
-        attention_categories: ['security_code'],
-        // Cleared so the packet is not left looking mid-flight. The claim is what blocks a re-run
-        // through the ordinary path, and it is not needed for that here: submitRequestDisposition
-        // rejects this status outright, claim or no claim.
-        submission_claimed_at: undefined,
-        submission_claim_id: undefined,
-      }));
+        previewUrl: blob.url,
+      });
       fastify.log.warn({
         applicationId: row.id,
         sentTo: attempted.sent_to,
@@ -6505,46 +7620,41 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       const refusedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'rejected'
         ? 'rejected' as const
         : 'error' as const;
-      await writeReview(row, nextReview(claimedReview, {
-        status: 'needs_attention',
-        ...(enteredCode ? { security_code: recordEnteredCodeOutcome(refusedCodeOutcome, capturedAt) } : {}),
-        submission_attempted_at: capturedAt,
-        preview_screenshot_url: blob.url,
-        submission_error: undefined,
-        attention_reason: 'The employer refused this application at the last step and said: '
-          + `“${verdict.message.slice(0, 300)}”. Nothing was filed, so there is no confirmation to look for. `
-          + 'Litos will not send it again until this is sorted out.',
-        attention_categories: ['unknown'],
-        submission_claimed_at: undefined,
-        submission_claim_id: undefined,
-      }));
+      const refusedSecurityCode = enteredCode
+        ? recordEnteredCodeOutcome(refusedCodeOutcome, capturedAt)
+        : undefined;
+      /* Provider prose is not typed phase-1 no-press evidence. After authorization it cannot
+       * machine-close the parent, even when the page says "refused". */
+      await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+        message: `Employer verification was refused: ${verdict.message.slice(0, 300)}`,
+        attentionReason: `The employer refused this application at the last step and said: “${verdict.message.slice(0, 300)}”. Litos cannot prove from that page alone that no employer action occurred. Check the employer portal and record whether this exact application was received.`,
+        attentionCategories: ['unverified_submission'],
+        ...(refusedSecurityCode ? { securityCode: refusedSecurityCode } : {}),
+        previewUrl: blob.url,
+      });
       return;
     }
-    /* NOTHING WAS SENT, AND THAT IS KNOWN, so this must not become an unverified submission. The
-     * runner reached the end of its action list without pressing Send, which is what the pre-submit
-     * gate does when a required field is still empty. Writing 'unverified' here would tell her Litos
-     * pressed Send, send her hunting for a receipt that cannot exist, and leave an unresolved record
-     * that blocks every later application to this posting. The claim is released because the packet
-     * is safe to run again the moment the missing answer exists. */
+    /* A PROVIDER LABEL IS NOT PHASE-1 PROOF. This result arrived only after the immutable employer
+     * capability was authorized. Until Stratus returns a correlated pre-activation stop record, a
+     * not_attempted label cannot close the parent or release its duplicate lock. */
     if (verdict.kind === 'not_attempted') {
       const notAttemptedCodeOutcome = receiptResult.securityCodeAttempt?.outcome === 'no_control'
         ? 'no_control' as const
         : receiptResult.securityCodeAttempt?.outcome === 'not_entered'
           ? 'not_entered' as const
           : 'error' as const;
-      await writeReview(row, nextReview(claimedReview, {
-        status: 'needs_attention',
-        ...(enteredCode ? { security_code: recordEnteredCodeOutcome(notAttemptedCodeOutcome, capturedAt) } : {}),
-        submission_attempted_at: capturedAt,
-        preview_screenshot_url: blob.url,
-        submission_error: undefined,
-        attention_reason: 'Litos filled this application but stopped before sending it, because the '
-          + 'form was not complete. Nothing reached the employer, so there is no confirmation to look '
-          + 'for. Fill in what is missing below and send it again.',
-        attention_categories: ['required_field'],
-        submission_claimed_at: undefined,
-        submission_claim_id: undefined,
-      }));
+      const notAttemptedSecurityCode = enteredCode
+        ? recordEnteredCodeOutcome(notAttemptedCodeOutcome, capturedAt)
+        : undefined;
+      /* The managed result does not yet expose correlated phase-1 pre-activation proof. Its
+       * not_attempted label therefore stays unresolved after an immutable authorization. */
+      await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+        message: 'Managed provider reported not_attempted after employer-boundary authorization',
+        attentionReason: 'The secure browser reported that it did not complete the final action, but it did not provide typed phase-1 no-press proof. Check the employer portal and record whether this exact application was received.',
+        attentionCategories: ['required_field', 'unverified_submission'],
+        ...(notAttemptedSecurityCode ? { securityCode: notAttemptedSecurityCode } : {}),
+        previewUrl: blob.url,
+      });
       return;
     }
     if (verdict.kind === 'unverified') {
@@ -6570,16 +7680,24 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           pageText: rawOutcome.message,
         }, 'Unrecognised post-submit page: no confirmation arm exists for this ATS shape yet');
       }
-      await writeReview(row, nextReview(claimedReview, {
-        ...unverifiedSubmissionPatch(claimedReview, {
-          at: capturedAt,
+      const unverifiedSecurityCode = enteredCode
+        ? recordEnteredCodeOutcome(unverifiedCodeOutcome, capturedAt)
+        : undefined;
+      await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+        message: 'Managed submission result did not contain a confirmation state',
+        attentionReason: unverifiedSubmissionReason({
+          atsName: claimedReview.ats_name,
+          portalUrl: claimedReview.portal_url,
           cause: 'no_confirmation_state',
-          previewUrl: blob.url,
-          network: pressNetwork,
+          network: pressNetwork ?? null,
           challengeOnScreen: pressChallengeOnScreen,
         }),
-        ...(enteredCode ? { security_code: recordEnteredCodeOutcome(unverifiedCodeOutcome, capturedAt) } : {}),
-      }));
+        attentionCategories: ['unverified_submission'],
+        ...(unverifiedSecurityCode ? { securityCode: unverifiedSecurityCode } : {}),
+        previewUrl: blob.url,
+        network: pressNetwork,
+        challengeOnScreen: pressChallengeOnScreen,
+      });
       return;
     }
     /* A CODE RUN OWES TWO PROOFS, AND "NO ERROR VISIBLE" IS NEITHER OF THEM.
@@ -6601,22 +7719,28 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           { applicationId: row.id, codeOutcome, verdict: verdict.kind },
           'Security-code submission could not be proved, recording it as unverified',
         );
-        await writeReview(row, nextReview(claimedReview, {
-          ...unverifiedSubmissionPatch(claimedReview, {
-            at: capturedAt,
+        const uncertainSecurityCode = recordEnteredCodeOutcome(
+          codeOutcome === 'rejected' ? 'rejected'
+            : codeOutcome === 'no_control' ? 'no_control'
+              : codeOutcome === 'not_entered' ? 'not_entered'
+                : 'error',
+          capturedAt,
+        );
+        await recordManagedAuthorizedAttemptUnverified(row, attemptBinding, {
+          message: 'Security-code submission could not be proved',
+          attentionReason: unverifiedSubmissionReason({
+            atsName: claimedReview.ats_name,
+            portalUrl: claimedReview.portal_url,
             cause: 'no_confirmation_state',
-            previewUrl: blob.url,
-            network: pressNetwork,
+            network: pressNetwork ?? null,
             challengeOnScreen: pressChallengeOnScreen,
           }),
-          security_code: recordEnteredCodeOutcome(
-            codeOutcome === 'rejected' ? 'rejected'
-              : codeOutcome === 'no_control' ? 'no_control'
-                : codeOutcome === 'not_entered' ? 'not_entered'
-                  : 'error',
-            capturedAt,
-          ),
-        }));
+          attentionCategories: ['security_code', 'unverified_submission'],
+          ...(uncertainSecurityCode ? { securityCode: uncertainSecurityCode } : {}),
+          previewUrl: blob.url,
+          network: pressNetwork,
+          challengeOnScreen: pressChallengeOnScreen,
+        });
         return;
       }
     }
@@ -6631,20 +7755,22 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       // the body when there is one. The scrape is now enrichment; it is no longer the proof.
       ? { confirmationText: verdict.confirmationText, finalUrl: receiptResult.url, referenceId: scraped?.referenceId }
       : readManagedReceipt(receiptResult);
-    await writeReview(row, nextReview(claimedReview, {
-      status: 'submitted',
-      submitted_at: capturedAt,
-      submission_error: undefined,
+    // Present only when a code finished this one, and it is the fact that makes the receipt
+    // legible: this application was sent, refused, and completed with the code the same run read
+    // out of the mailbox while holding the challenged page open.
+    confirmedSecurityCode ??= enteredCode
+      ? recordEnteredCodeOutcome('accepted', capturedAt)
+      : enteredSecurityCodeState && codeAttempts.length > 0
+        ? withSecurityCodeAttempts(enteredSecurityCodeState, codeAttempts)
+        : undefined;
+    const confirmed = await recordManagedSubmissionConfirmed(row, attemptBinding, {
+      capturedAt,
       verification,
-      // Present only when a code finished this one, and it is the fact that makes the receipt
-      // legible: this application was sent, refused, and completed with the code the same run read
-      // out of the mailbox while holding the challenged page open.
-      ...(enteredCode
-        ? { security_code: recordEnteredCodeOutcome('accepted', capturedAt) }
-        : enteredSecurityCodeState && codeAttempts.length > 0
-          ? { security_code: withSecurityCodeAttempts(enteredSecurityCodeState, codeAttempts) }
-          : {}),
-      receipt: {
+      ...(confirmedSecurityCode ? { securityCode: confirmedSecurityCode } : {}),
+      receipt: typedConfirmationReceipt ? {
+        ...typedConfirmationReceipt,
+        screenshot_url: blob.url,
+      } : {
         confirmation_text: receipt.confirmationText,
         final_url: receipt.finalUrl,
         screenshot_url: blob.url,
@@ -6652,7 +7778,14 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         reference_id: receipt.referenceId,
         source: 'managed_browser',
       },
-    }));
+    });
+    if (!confirmed) {
+      fastify.log.warn(
+        { applicationId: row.id, attemptId: attemptBinding.attemptId },
+        'Managed receipt belonged to a replaced submission run and did not change its packet',
+      );
+      return;
+    }
     fastify.log.info({ applicationId: row.id }, 'Application submission receipt verified with Stratus Sandbox');
     return;
   }
@@ -6683,12 +7816,22 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     const page = connected.page;
     assertEmployerPageUrl(directEnvelope.destinationUrl, page.url());
     if (!await authorizationValidAtClick(row, claimedReview)) {
+      await appendRunnerAttemptFact(attemptBinding, 'not_sent_proven', 'authorization-revoked-before-direct', {
+        proofKind: 'typed_pre_click_stop',
+        evidenceCode: 'authorization_revoked_before_direct_submit',
+      });
       await holdRevokedSubmission(row, claimedReview);
       return;
     }
     await fillPortal(page, directPortal, directPacket);
     assertEmployerPageUrl(directEnvelope.destinationUrl, page.url());
-    await clickFinalSubmit(page);
+    await executeAfterFinalSubmissionBoundary(
+      () => assertFinalRunnerBoundaryClear(row, claimedReview, attemptBinding),
+      () => clickFinalSubmit(page),
+    );
+    await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'direct-submit', {
+      evidenceCode: 'direct_submit_returned',
+    });
     const receipt = await readReceipt(page);
     const capturedAt = new Date().toISOString();
     const screenshot = await page.screenshot({ fullPage: true, type: 'png' });
@@ -6696,6 +7839,10 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
       `users/${row.user_id}/submission-runs/${claimedReview.submission_run_id}/receipt.png`,
       screenshot,
     );
+    await appendRunnerAttemptFact(attemptBinding, 'submission_confirmed', 'direct-receipt', {
+      evidenceCode: 'direct_receipt_verified',
+      observedAt: new Date(capturedAt),
+    });
     await writeReview(row, nextReview(claimedReview, {
       status: 'submitted',
       submitted_at: capturedAt,
@@ -6711,6 +7858,9 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     fastify.log.info({ applicationId: row.id }, 'Application submission receipt verified');
   } finally {
     await browser?.close().catch(() => undefined);
+  }
+  } catch (error) {
+    throw new SubmissionExecutionError(row, error);
   }
 }
 
@@ -6892,7 +8042,7 @@ export function preClickNoSubmitReview(
   });
 }
 
-/** A standing code wall for another recipient is pre-click and must never enter mailbox handling. */
+/** A mismatched recipient after managed authorization remains an unresolved exact parent. */
 export function preClickSecurityRecipientMismatchReview(
   current: ApplicationReviewState,
   challenge: NonNullable<ReturnType<typeof readManagedSecurityCodeChallenge>>,
@@ -6908,24 +8058,26 @@ export function preClickSecurityRecipientMismatchReview(
     authorized: matchingExistingState?.submit_was_authorized ?? false,
     existing: matchingExistingState,
   });
-  const attentionReason = 'This application is already waiting at the employer security-code step, but that step names a different application email than this packet. Litos did not click the verification button. Open the employer portal and resolve the email mismatch before regenerating or retrying this application.';
+  const attentionReason = 'The employer security-code step named a different application email than this packet after the managed employer capability was authorized. Check the employer portal and record whether this exact application was received before taking another action.';
   return nextReview(current, {
-    status: 'awaiting_security_code',
-    submission_claimed_at: undefined,
-    submission_claim_id: undefined,
-    submission_authorization: undefined,
-    unverified_submission: undefined,
-    submitted_at: undefined,
-    receipt: undefined,
+    ...unverifiedSubmissionPatch(current, {
+      at: observedAt,
+      cause: 'no_confirmation_state',
+    }),
     security_code: securityCode,
-    verification: { status: 'verification_pending', requested_at: observedAt, retry_count: 0 },
+    verification: {
+      ...current.verification,
+      status: 'verification_pending',
+      requested_at: observedAt,
+      retry_count: current.verification?.retry_count ?? 0,
+    },
     submission_error: 'Managed security-code recipient did not match the packet email',
     attention_reason: attentionReason,
-    attention_categories: ['security_code', 'evidence_gap'],
+    attention_categories: ['security_code', 'unverified_submission'],
   });
 }
 
-/** A code match grants no click if consent or the exact email route changed during mailbox polling. */
+/** A withheld continuation cannot release a parent whose initial managed capability was authorized. */
 export function preClickVerificationContinuationBlockedReview(
   current: ApplicationReviewState,
   securityCode: NonNullable<ApplicationReviewState['security_code']>,
@@ -6933,24 +8085,22 @@ export function preClickVerificationContinuationBlockedReview(
   attemptedAt?: string,
 ): ApplicationReviewState {
   const attentionReason = cause === 'authorization_revoked'
-    ? 'This application is already waiting at the employer security-code step. Automatic submission permission was revoked before Litos could finish verification, so Litos stopped without clicking the verification button. Review this application before authorizing another attempt.'
+    ? 'Automatic submission permission was revoked before Litos could finish employer verification. The already authorized parent remains unresolved. Check the employer portal and record whether this exact application was received.'
     : cause === 'email_permission_revoked'
-      ? 'This application is already waiting at the employer security-code step. Automatic inbox verification was turned off before Litos could finish, so Litos stopped without clicking the verification button. Review this application before authorizing another attempt.'
-    : 'This application is already waiting at the employer security-code step. Its email route changed before Litos could finish verification, so Litos stopped without clicking the verification button. Regenerate this application before trying again.';
+      ? 'Automatic inbox verification was turned off before Litos could finish employer verification. The already authorized parent remains unresolved. Check the employer portal and record whether this exact application was received.'
+      : 'The application email route changed before Litos could finish employer verification. The already authorized parent remains unresolved. Check the employer portal and record whether this exact application was received.';
   return nextReview(current, {
-    status: 'awaiting_security_code',
-    submission_claimed_at: undefined,
-    submission_claim_id: undefined,
-    submission_authorization: undefined,
-    submission_attempted_at: current.submission_attempted_at ?? attemptedAt,
-    unverified_submission: undefined,
-    submitted_at: undefined,
-    receipt: undefined,
+    ...unverifiedSubmissionPatch(current, {
+      at: attemptedAt ?? securityCode.requested_at,
+      cause: 'no_confirmation_state',
+    }),
+    submission_attempted_at: current.submission_attempted_at ?? attemptedAt ?? securityCode.requested_at,
     security_code: securityCode,
     verification: {
+      ...current.verification,
       status: 'verification_pending',
       requested_at: securityCode.requested_at,
-      retry_count: 0,
+      retry_count: current.verification?.retry_count ?? 0,
     },
     submission_error: cause === 'authorization_revoked'
       ? 'Submission authorization was revoked before security-code continuation'
@@ -6958,36 +8108,46 @@ export function preClickVerificationContinuationBlockedReview(
         ? 'Automatic inbox verification was disabled before security-code continuation'
         : 'Application email route changed before security-code continuation',
     attention_reason: attentionReason,
-    attention_categories: ['security_code', 'evidence_gap'],
+    attention_categories: ['security_code', 'unverified_submission'],
   });
 }
 
-/* A DELAYED POST-CLICK CODE WALL IS STILL A CODE WALL, AND IT NEEDS THE SAME DOOR AS ITS SIBLINGS.
- *
- * This wrote status 'needs_attention' while keeping the claim, and that combination closed every
- * exit the packet had:
- *
- *   submitRequestDisposition('needs_attention', claimed) is 'reject', and resumeEditDisposition
- *   delegates to it, so neither another run nor a resume edit could move it.
- *
- *   POST /applications/:id/security-code answered 'not_awaiting', because finishSecurityCodeSubmission
- *   requires status 'awaiting_security_code' - and claimSecurityCodeSubmission additionally requires
- *   submission_claimed_at to be null, so the status alone would not have been enough.
- *
- *   POST /applications/:id/submission/unverified answered 409, because unverified_submission was
- *   explicitly cleared and that route resolves nothing else.
- *
- * A packet in that state could not be finished, retried, edited or resolved by anybody. That is the
- * exact trap submitRequestDisposition names in its own parameter docs, and the one the Skydio packet
- * 13bccb2d work existed to remove.
- *
- * SO IT NOW WRITES WHAT ITS SIBLINGS WRITE. preClickSecurityRecipientMismatchReview and the ordinary
- * post-click challenge branch both land on 'awaiting_security_code' with the claim released, and
- * that pair is not a relaxation: submitRequestDisposition rejects 'awaiting_security_code' outright,
- * claim or no claim, so the ordinary path still cannot re-run and re-send. What it opens is the ONE
- * route that is safe from here, the applicant's own code, which re-enters on the standing wall the
- * employer is already holding rather than on a fresh form.
+/**
+ * A retained verification capability can be refused after the parent application was already
+ * pressed. This is not an initial pre-click stop: the parent claim and immutable risk must remain.
+ * Persist the applicant's exact resolution door without writing machine not-sent evidence.
  */
+export function managedSecurityCodeContinuationRefusalReview(
+  current: ApplicationReviewState,
+  reason: ManagedSecurityCodeContinuationRefusedError['reason'],
+  observedAt: string,
+  securityCode: NonNullable<ApplicationReviewState['security_code']>,
+): ApplicationReviewState {
+  const detail = reason === 'lease_window_too_short'
+    ? 'The retained employer verification session did not have enough time left for one bounded, safely recorded continuation.'
+    : 'A duplicate-safety fact appeared before the retained employer verification session could continue.';
+  return nextReview(current, {
+    ...unverifiedSubmissionPatch(current, {
+      at: observedAt,
+      cause: 'no_confirmation_state',
+    }),
+    verification: current.verification
+      ? {
+        ...current.verification,
+        status: 'verification_pending',
+        continuation_resumed: false,
+        continuation_call_started_at: undefined,
+        continuation_call_deadline_at: undefined,
+      }
+      : { status: 'verification_pending' },
+    security_code: securityCode,
+    submission_error: detail,
+    attention_reason: `${detail} Check the employer portal and record whether this exact application was received.`,
+    attention_categories: ['security_code', 'unverified_submission'],
+  });
+}
+
+/** A delayed post-authorization code wall retains the parent and opens only human resolution. */
 export function delayedSecurityCodeHandoffReview(
   current: ApplicationReviewState,
   input: {
@@ -6998,21 +8158,17 @@ export function delayedSecurityCodeHandoffReview(
   },
 ): ApplicationReviewState {
   return nextReview(current, {
-    status: 'awaiting_security_code',
-    verification: input.verification,
-    security_code: input.securityCode,
+    ...unverifiedSubmissionPatch(current, {
+      at: input.attemptedAt,
+      cause: 'no_confirmation_state',
+    }),
+    verification: mergeManagedVerificationEvidence(current.verification, input.verification),
+    security_code: mergeManagedSecurityCodeEvidence(current.security_code, input.securityCode),
     submission_attempted_at: input.attemptedAt,
     preview_screenshot_url: input.screenshotUrl,
     submission_error: undefined,
-    attention_reason: 'The employer showed a verification-code step after Litos used its one safe receipt check. Litos will not open a fresh form or send this application again on its own. Enter the code the employer emailed you, or open the employer portal and finish the verification there.',
-    attention_categories: ['security_code', 'evidence_gap'],
-    unverified_submission: undefined,
-    // Released together with the status, because both are required for the code route to open:
-    // finishSecurityCodeSubmission checks the status and claimSecurityCodeSubmission checks that the
-    // claim is null. The lock that matters is kept by the status itself.
-    submission_claimed_at: undefined,
-    submission_claim_id: undefined,
-    submission_authorization: undefined,
+    attention_reason: 'The employer showed a verification-code step after Litos used its receipt check. The authorized parent remains unresolved. Check the employer portal and record whether this exact application was received.',
+    attention_categories: ['security_code', 'unverified_submission'],
   });
 }
 
@@ -7078,11 +8234,103 @@ export function isProviderSessionFailureMessage(message: string): boolean {
   return /sandbox stream was closed|not accepting commands/i.test(message);
 }
 
-async function fail(row: ResumeRow, error: unknown) {
-  const latestRows = await db.select().from(generated_resumes).where(eq(generated_resumes.id, row.id)).limit(1);
-  const current = latestRows[0] ? readApplicationReview(latestRows[0].spec) : null;
-  if (!current) return;
-  await writeReview(latestRows[0], submissionFailureReview(current, error));
+/**
+ * Linearize a runner failure against authorization, terminal evidence, and the packet projection.
+ * A stale caller either updates the exact still-current attempt or writes nothing.
+ */
+export async function recordSubmissionRunnerFailure(
+  row: ResumeRow,
+  cause: unknown,
+  securityCodeAttemptFingerprint?: string,
+): Promise<boolean> {
+  const actedOnReview = readApplicationReview(row.spec);
+  if (!actedOnReview) return false;
+  return db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, row.user_id);
+    const [latest] = await tx.select().from(generated_resumes).where(and(
+      eq(generated_resumes.id, row.id),
+      eq(generated_resumes.user_id, row.user_id),
+    )).limit(1);
+    const latestReview = latest ? readApplicationReview(latest.spec) : null;
+    if (!latest || !latestReview
+      || (latestReview.submission_run_id ?? null) !== (actedOnReview.submission_run_id ?? null)) {
+      return false;
+    }
+    const attemptId = actedOnReview.submission_claim_id;
+    if (attemptId && latestReview.submission_claim_id !== attemptId) return false;
+    const exactEvents = attemptId
+      ? (await submissionAttemptEventsForPacket(row.user_id, row.id, { executor: tx }))
+        .filter((event) => event.attempt_id === attemptId)
+      : [];
+    if (exactEvents.some((event) => event.event_kind === 'submission_confirmed'
+        || event.event_kind === 'not_sent_proven')) return false;
+
+    let failed = submissionFailureReview(latestReview, cause);
+    if (securityCodeAttemptFingerprint && failed.security_code) {
+      failed = nextReview(failed, {
+        security_code: withSecurityCodeAttempt(failed.security_code, {
+          at: new Date().toISOString(),
+          fingerprint: securityCodeAttemptFingerprint,
+          outcome: 'error',
+        }),
+      });
+    }
+    const boundary = attemptId
+      ? await submissionBoundaryAuthorization(row.user_id, attemptId, { executor: tx })
+      : null;
+    if (boundary) {
+      const securityCode = mergeManagedSecurityCodeEvidence(
+        latestReview.security_code,
+        failed.security_code,
+      );
+      const verification = mergeManagedVerificationEvidence(
+        latestReview.verification,
+        failed.verification,
+      );
+      failed = nextReview(latestReview, {
+        ...unverifiedSubmissionPatch(latestReview, {
+          at: boundary.serverNow,
+          cause: 'provider_error',
+        }),
+        ...(securityCode ? { security_code: securityCode } : {}),
+        ...(verification ? { verification } : {}),
+        submission_error: failed.submission_error
+          ?? (cause instanceof Error ? cause.message : 'Submission runner failed'),
+        attention_reason: failed.attention_reason
+          ?? 'Litos could not prove the final employer result. Check the employer portal and record whether this exact application was received.',
+        attention_categories: failed.attention_categories?.length
+          ? [...new Set([...failed.attention_categories, 'unverified_submission' as const])]
+          : ['unverified_submission'],
+      });
+    } else if (attemptId && !failed.submission_claim_id) {
+      const opening = exactEvents.find((event) => event.event_kind === 'attempt_opened');
+      if (!opening) throw new Error('Submission attempt reservation was not durably recorded');
+      const binding = submissionAttemptBindingFromEvent(opening);
+      await appendSubmissionAttemptEvent({
+        ...binding,
+        eventId: submissionAttemptEventId(attemptId, 'not_sent_proven', 'typed-runner-stop'),
+        eventKind: 'not_sent_proven',
+        proofKind: 'typed_pre_click_stop',
+        evidenceCode: failed.submission_stop?.reason ?? 'typed_pre_click_stop',
+      }, { executor: tx });
+    }
+
+    const updated = await tx.update(generated_resumes).set({
+      spec: sql`jsonb_set(coalesce(${generated_resumes.spec}, '{}'::jsonb), '{_review}', ${JSON.stringify(failed)}::jsonb, true)`,
+    }).where(and(
+      eq(generated_resumes.id, latest.id),
+      eq(generated_resumes.user_id, latest.user_id),
+      sql`${generated_resumes.spec} = ${JSON.stringify(latest.spec)}::jsonb`,
+    )).returning({ id: generated_resumes.id });
+    if (updated.length === 0) throw new FinalSubmissionBoundaryChangedError();
+    return true;
+  });
+}
+
+async function fail(row: ResumeRow, error: unknown, securityCodeAttemptFingerprint?: string) {
+  const actedOnRow = error instanceof SubmissionExecutionError ? error.actedOnRow : row;
+  const cause = error instanceof SubmissionExecutionError ? error.submissionCause : error;
+  await recordSubmissionRunnerFailure(actedOnRow, cause, securityCodeAttemptFingerprint);
 }
 
 /* WHAT A STOPPED RUN LEAVES ON THE ROW, AND WHETHER THE ROW CAN STILL BE MOVED AFTERWARDS.
@@ -7123,6 +8371,36 @@ export function submissionFailureReview(
   error: unknown,
   now: () => string = () => new Date().toISOString(),
 ): ApplicationReviewState {
+  if (error instanceof FinalSubmissionBoundaryChangedError) {
+    return nextReview(current, {
+      status: 'needs_attention',
+      ...preClickNoSubmitReleasePatch(),
+      submission_error: error.message,
+      attention_reason: 'This submission changed after its employer attempt was reserved, so Litos stopped before sending anything. Reload the application before trying again.',
+      attention_categories: ['evidence_gap'],
+    });
+  }
+  if (error instanceof FinalSubmissionAuthorizationChangedError) {
+    return nextReview(current, {
+      status: 'ready_for_final_approval',
+      ...preClickNoSubmitReleasePatch(),
+      submission_error: error.message,
+      attention_reason: 'Submission permission changed before the employer send. Review this application and approve it again before retrying.',
+      attention_categories: ['evidence_gap'],
+    });
+  }
+  if (error instanceof FinalSubmissionBoundaryBlockedError) {
+    return nextReview(current, {
+      status: 'needs_attention',
+      ...preClickNoSubmitReleasePatch(),
+      submission_error: 'Submission withheld by the final duplicate-safety recheck',
+      attention_reason: error.verdict.reason,
+      attention_categories: [error.verdict.kind === 'duplicate'
+        && error.verdict.match.certainty === 'submitted'
+        ? 'duplicate_application'
+        : 'unverified_submission'],
+    });
+  }
   const message = error instanceof Error ? error.message : 'Submission runner failed';
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const providerSessionFailureBeforeSubmit = error instanceof ManagedBrowserPreSubmitCrashError;
@@ -7345,8 +8623,9 @@ export async function finishSecurityCodeSubmission(
   try {
     await submit(activeRow, fastify, { securityCode: code, claimAlreadyHeld: true });
   } catch (error) {
-    fastify.log.error({ err: error, applicationId }, 'Security-code submission failed');
-    await fail(activeRow, error);
+    const cause = error instanceof SubmissionExecutionError ? error.submissionCause : error;
+    fastify.log.error({ err: cause, applicationId }, 'Security-code submission failed');
+    await fail(activeRow, error, fingerprint);
   }
   const refreshed = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
   const review = refreshed[0] ? readApplicationReview(refreshed[0].spec) : null;
@@ -7355,6 +8634,10 @@ export async function finishSecurityCodeSubmission(
   // the same code could be replayed against the employer a moment later. fail() has already written
   // the cause; this only makes sure the fingerprint is remembered.
   if (review.status !== 'submitted' && review.status !== 'awaiting_security_code' && review.security_code) {
+    const activeReview = readApplicationReview(activeRow.spec);
+    if (review.submission_run_id !== activeReview?.submission_run_id) {
+      return { kind: 'done', review };
+    }
     const recorded = nextReview(review, {
       security_code: withSecurityCodeAttempt(review.security_code, {
         at: new Date().toISOString(),
@@ -7404,13 +8687,13 @@ export async function processSubmissionApplication(
     }
     if (review?.status === 'submitting') await submit(activeRow, fastify);
   } catch (error) {
+    const cause = error instanceof SubmissionExecutionError ? error.submissionCause : error;
     fastify.log.error({
-      err: error,
+      err: cause,
       applicationId: row.id,
-      ...privateRunnerStepDiagnostic(error),
+      ...privateRunnerStepDiagnostic(cause),
     }, 'Application runner step failed');
-    const latest = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
-    await fail(latest[0] ?? activeRow, error);
+    await fail(activeRow, error);
   }
   const refreshed = await db.select().from(generated_resumes).where(eq(generated_resumes.id, applicationId)).limit(1);
   return refreshed[0] ? readApplicationReview(refreshed[0].spec) : null;
