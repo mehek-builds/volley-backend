@@ -3846,9 +3846,40 @@ function resumeSatisfies(resumeText: string, term: JdTerm, now?: Date): string |
   return (SAME_CAPABILITY_TERMS.get(normalizeTerm(term.term)) ?? []).find((t) => resumeCovers(resumeText, t));
 }
 
-export function resumeCovers(resumeText: string, term: string): boolean {
-  const hay = resumeHaystack(resumeText);
-  const needle = normalizeTerm(term);
+/**
+ * ONE NAME WRITTEN TWO WAYS, where the second way is the initialism of the first.
+ *
+ * NOT A SYNONYM TABLE, and that distinction is the whole of the admission test. SAME_CAPABILITY_TERMS
+ * relates two DIFFERENT names for one capability and is deliberately tiny for that reason. This table
+ * relates a name to its own abbreviation: `OOP` does not resemble "object-oriented programming", it IS
+ * "object-oriented programming", contracted. Nothing here is inferred or broadened, so it cannot do
+ * what a synonym table does wrong.
+ *
+ * WHY IT HAD TO EXIST. Databricks writes "You have good knowledge of algorithms, data structures, and
+ * OOP principles". A resume whose Education block reads "Relevant coursework: Data Structures &
+ * Algorithms, Object-Oriented Programming" answers that sentence in the employer's own words, and on
+ * 2026-08-26 the packet reported it to the applicant as a GAP. `data structures` matched off the
+ * coursework line and `oop` did not, because this function is literal plus morphology and no amount of
+ * morphology turns three letters into three words. Term coverage requires EVERY named term where the
+ * clause states no choice, so one unmatched initialism carried the whole clause to `unmet`, and
+ * packetAuditService renders `unmet` as `missing`. She was shown a hole in a requirement her
+ * transcript states outright.
+ *
+ * BOTH DIRECTIONS, because either document may be the one that abbreviates.
+ *
+ * THE BAR FOR A NEW ENTRY, so this cannot drift into the synonym table it is not: the short form must
+ * be the letters of the long form, in order, with exactly ONE expansion a student resume or a job
+ * posting could mean. `cv` fails it (curriculum vitae), `ml` and `ai` are hypernyms of half the lexicon
+ * once expanded, and `ood` fails it because design is not programming - a different activity that
+ * happens to share three quarters of a name.
+ */
+const INITIALISM_SPELLINGS = new Map<string, string[]>([
+  ['oop', ['object oriented programming']],
+  ['object oriented programming', ['oop']],
+]);
+
+/** The literal test, unchanged: exact, folded, singularised, and the resume's own plural. */
+function haystackHas(hay: string, needle: string): boolean {
   if (hay.includes(` ${needle} `)) return true;
   const foldedNeedle = foldKey(needle);
   if (foldedNeedle !== needle && hay.includes(` ${foldedNeedle} `)) return true;
@@ -3857,6 +3888,15 @@ export function resumeCovers(resumeText: string, term: string): boolean {
   // The resume may pluralise where the JD did not.
   const words = ` ${hay} `;
   return words.includes(` ${needle}s `) || words.includes(` ${needle}es `);
+}
+
+export function resumeCovers(resumeText: string, term: string): boolean {
+  const hay = resumeHaystack(resumeText);
+  const needle = normalizeTerm(term);
+  if (haystackHas(hay, needle)) return true;
+  /* AFTER the literal test and never instead of it, so the spelling table can only ever add a
+   * reading the literal one missed. */
+  return (INITIALISM_SPELLINGS.get(needle) ?? []).some((spelling) => haystackHas(hay, spelling));
 }
 
 export interface JdMatchResult {

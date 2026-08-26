@@ -569,6 +569,32 @@ describe('normalizeTerm and resumeCovers', () => {
       'a broad discipline must not satisfy a specific tool requirement',
     );
   });
+
+  /* THE DATABRICKS OOP GAP, 2026-08-26. The posting asked for "knowledge of algorithms, data
+     structures, and OOP principles" and the applicant's Education block listed the courses by name.
+     `data structures` matched off that line and `oop` did not, so the clause - which names no choice
+     and therefore requires every term - came back unmet, and the packet showed her a hole in a
+     requirement her transcript states outright. */
+  test('an initialism is met by the words it stands for, in either document', () => {
+    const coursework = 'Relevant coursework: Data Structures & Algorithms, Object-Oriented Programming';
+    assert.ok(resumeCovers(coursework, 'OOP'), 'the resume spells out what the posting abbreviated');
+    assert.ok(
+      resumeCovers('Relevant coursework: OOP, Data Structures', 'object-oriented programming'),
+      'and the other way round, because either document may be the one that abbreviates',
+    );
+  });
+
+  test('the spelling table is not a synonym table', () => {
+    // The bar is stated on INITIALISM_SPELLINGS: the short form must be the letters of the long form
+    // with exactly one expansion. Design is not programming, so OOD is not OOP...
+    assert.ok(
+      !resumeCovers('Relevant coursework: Object-Oriented Design', 'OOP'),
+      'a name that merely resembles the expansion is not the expansion',
+    );
+    // ...and none of this reopens the R-015 trap directly above.
+    assert.ok(!resumeCovers('Relevant coursework: Object-Oriented Programming', 'python'));
+    assert.ok(!resumeCovers('Experience with machine learning', 'ml'));
+  });
 });
 
 describe('scoreJdMatch', () => {
