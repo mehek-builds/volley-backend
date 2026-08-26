@@ -4,6 +4,7 @@ import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { db } from '../db/index';
 import { users, generated_resumes } from '../db/schema';
 import { mintInternalAutomationToken } from '../lib/internalAutomationAuth';
+import { getEntitlementSnapshot } from '../lib/entitlements';
 import {
   nextPreferredReadyPacket,
   type MatchableJob,
@@ -51,7 +52,31 @@ async function defaultEligibleUserIds(): Promise<string[]> {
     .select({ id: users.id })
     .from(users)
     .where(and(eq(users.automatic_submission_enabled, true), eq(users.is_guest, false)));
-  return rows.map((row) => row.id);
+
+  /* THE TOGGLE IS NOT THE ENTITLEMENT, and queueing without checking the second one is what made
+   * this matcher spend money on accounts it could never send for.
+   *
+   * `automatic_submission_enabled` is a preference the account keeps forever once set. The right to
+   * act on it is `features.automatic_submission`, which only trial_plus, plus_paid, legacy_paid and
+   * an explicitly granted free_grandfathered carry. The SEND side has always enforced both - see
+   * standingAuthorization in submissionRunner.ts, which reads the entitlement before it will let a
+   * run reach `submitting`. This side read only the toggle.
+   *
+   * So an account that switched autopilot on during a trial and then lapsed to Free kept getting a
+   * packet queued every fifteen minutes, forever. Each one boots a managed browser, spends LLM
+   * credits building answers, moves updated_at, and clears the row's attention acknowledgements -
+   * and then correctly stops at ready_for_final_approval, because the send side does check. The
+   * work was never wasted at the end; it was wasted at the start, and it is the likeliest reason a
+   * Free account's API credits drain and its applications appear to move on their own.
+   *
+   * Sequential rather than Promise.all: this runs on a cron with no deadline pressure, and the
+   * eligible population is small enough that a burst of snapshot reads is the wrong trade. */
+  const eligible: string[] = [];
+  for (const row of rows) {
+    const entitlement = await getEntitlementSnapshot(row.id);
+    if (entitlement.features.automatic_submission) eligible.push(row.id);
+  }
+  return eligible;
 }
 
 /* Never queue a second one on top of a pass this account already has in flight. The submission
