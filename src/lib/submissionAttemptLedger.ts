@@ -13,6 +13,7 @@ import {
   leverPostingFromUrl,
 } from './atsSubmissionChannels';
 import { companyIdentity } from './companyIdentity';
+import { DATABASE_PROBE_TIMEOUT_MS } from './healthProbe';
 
 export const SUBMISSION_ATTEMPT_EVENT_KINDS = [
   'attempt_opened',
@@ -1064,23 +1065,41 @@ export async function submissionAttemptRetrySafetyForPacket(
  * ahead of its migration is caught by the same revision-and-state check every other release step
  * already makes, instead of first showing up as 500s on somebody's board.
  *
- * This never throws. A health probe that can take the endpoint down with it is not a health probe.
+ * This never throws, and it ALWAYS TIMES OUT, for the reason healthProbe.ts gives and for one more
+ * specific to this runtime: on Vercel the pool is a single client with no connectionTimeoutMillis,
+ * so this read queues on pool.connect() behind any open transaction. Unbounded, it would put the
+ * very pool-exhaustion hang this release removed from the submission path onto /health, which is
+ * the one page an incident needs working. It borrows the database probe's own tuned budget rather
+ * than inventing a second number, because it is waiting on the same pool for the same reasons.
  */
 export async function submissionLedgerReadiness(
   executor: Pick<typeof db, 'select'> = db,
+  timeoutMs: number = DATABASE_PROBE_TIMEOUT_MS,
 ): Promise<{ ready: boolean; reason: 'cutover_recorded' | 'not_migrated' | 'unreadable' }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const rows = await executor
-      .select({ cutover_key: application_submission_attempt_ledger_cutovers.cutover_key })
-      .from(application_submission_attempt_ledger_cutovers)
-      .limit(1);
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('probe timeout')), timeoutMs);
+    });
+    const rows = await Promise.race([
+      executor
+        .select({ cutover_key: application_submission_attempt_ledger_cutovers.cutover_key })
+        .from(application_submission_attempt_ledger_cutovers)
+        .limit(1),
+      timeout,
+    ]);
     return rows.length > 0
       ? { ready: true, reason: 'cutover_recorded' as const }
       : { ready: false, reason: 'not_migrated' as const };
   } catch {
-    // A missing relation and an unreachable database are both "cannot say it is ready". The
-    // distinction that matters to a release is ready versus not, and the driver's message can name
-    // hosts and roles, so it stays out of an unauthenticated response.
+    /* A missing relation, an unreachable database and a saturated pool all collapse to "cannot say
+     * it is ready", which is the only distinction a release needs. The same response already
+     * carries `database`, which separates a dead database from a merely unmigrated one, and the
+     * driver's message can name hosts and roles so it stays out of an unauthenticated body. */
     return { ready: false, reason: 'unreadable' as const };
+  } finally {
+    // Serverless will not freeze the invocation while a stray timer is pending, so an uncleared one
+    // keeps the function billable after the response has been sent. Same reason as probeDatabase.
+    if (timer !== undefined) clearTimeout(timer);
   }
 }

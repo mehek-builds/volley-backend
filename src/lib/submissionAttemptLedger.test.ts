@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test, { describe } from 'node:test';
 import {
   blockingSubmissionAttemptsFromEvents,
+  submissionLedgerReadiness,
   confirmedOrphanAttributionForParent,
   confirmedWeakPostingIdentityOpening,
   freezePostingIdentity,
@@ -423,5 +424,50 @@ describe('confirmed weak posting attribution eligibility', () => {
       },
     ];
     assert.equal(confirmedWeakPostingIdentityOpening(conflictingBinding), null);
+  });
+});
+
+
+/* A HEALTH PROBE THAT CAN HANG IS THE OUTAGE IT EXISTS TO REPORT.
+ *
+ * This probe reads a ledger table through the same pool every request uses, and on Vercel that pool
+ * is a single client with no connectionTimeoutMillis, so it queues behind any open transaction.
+ * Unbounded, it would reproduce on /health the exact pool-exhaustion hang that was just removed
+ * from the submission path, on the one page an incident needs working. It must always answer, and
+ * a stray timer must not keep a serverless invocation billable after the response is sent. */
+describe('submission ledger readiness probe', () => {
+  test('a hanging pool still answers, and answers unready', async () => {
+    const started = Date.now();
+    const hangs = { select: () => ({ from: () => ({ limit: () => new Promise(() => {}) }) }) };
+    const readiness = await submissionLedgerReadiness(hangs as never, 40);
+    assert.deepEqual(readiness, { ready: false, reason: 'unreadable' });
+    assert.ok(Date.now() - started < 2_000, 'the probe must time out rather than wait on the pool');
+  });
+
+  test('a missing relation reads as unready, never as a thrown health endpoint', async () => {
+    const missing = {
+      select: () => ({
+        from: () => ({
+          limit: () => Promise.reject(Object.assign(new Error('relation does not exist'), { code: '42P01' })),
+        }),
+      }),
+    };
+    assert.deepEqual(await submissionLedgerReadiness(missing as never, 5_000), {
+      ready: false,
+      reason: 'unreadable',
+    });
+  });
+
+  test('the migration marker is what makes it ready', async () => {
+    const migrated = { select: () => ({ from: () => ({ limit: () => Promise.resolve([{ cutover_key: 'legacy_backfill_v1' }]) }) }) };
+    assert.deepEqual(await submissionLedgerReadiness(migrated as never, 5_000), {
+      ready: true,
+      reason: 'cutover_recorded',
+    });
+    const empty = { select: () => ({ from: () => ({ limit: () => Promise.resolve([]) }) }) };
+    assert.deepEqual(await submissionLedgerReadiness(empty as never, 5_000), {
+      ready: false,
+      reason: 'not_migrated',
+    });
   });
 });
