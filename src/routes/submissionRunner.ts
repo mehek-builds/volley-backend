@@ -895,6 +895,53 @@ const APPLICANT_PACKET_DRIFT_PHRASES: Record<string, string> = {
   'application questions changed after packet approval': 'the application questions',
 };
 
+/* WHICH QUESTIONS MOVED, AND HOW - employer labels and field names only, never answer values.
+ * The pair of issues measured on fee9f00c/c4413bff/6de82956 (2026-08-26) recurred identically on
+ * every round across two portals, and the issue strings alone cannot say whether the sets differ,
+ * one projected field differs, or only the ORDER differs (the gate's isDeepStrictEqual is
+ * order-sensitive). This diff is what turns "the questions changed" into a fixable statement. */
+export function packetQuestionsDriftDiagnostic(
+  packetQuestions: SubmissionPacket['questions'],
+  verifiedQuestions: SubmissionPacket['questions'],
+): {
+  added: string[];
+  removed: string[];
+  changed: Array<{ question: string; fields: string[] }>;
+  orderChanged: boolean;
+} {
+  const label = (q: SubmissionPacket['questions'][number]) => q.question;
+  const byLabel = (list: SubmissionPacket['questions']) => {
+    const map = new Map<string, SubmissionPacket['questions'][number]>();
+    for (const q of list) if (!map.has(label(q))) map.set(label(q), q);
+    return map;
+  };
+  const packetMap = byLabel(packetQuestions);
+  const verifiedMap = byLabel(verifiedQuestions);
+  const added = [...packetMap.keys()].filter((k) => !verifiedMap.has(k));
+  const removed = [...verifiedMap.keys()].filter((k) => !packetMap.has(k));
+  const COMPARED_FIELDS = [
+    'answer', 'portalSelector', 'portalInputType', 'atsApiField',
+    'answerOptionSource', 'answerSource', 'required',
+  ] as const;
+  const changed: Array<{ question: string; fields: string[] }> = [];
+  for (const [key, packetQ] of packetMap) {
+    const verifiedQ = verifiedMap.get(key);
+    if (!verifiedQ) continue;
+    const fields = COMPARED_FIELDS.filter((f) => !isDeepStrictEqual(packetQ[f], verifiedQ[f]))
+      // 'answer' may hold the applicant's own text; name the field, never the values.
+      .map((f) => String(f));
+    if (fields.length > 0) changed.push({ question: key, fields });
+  }
+  const sharedPacketOrder = packetQuestions.map(label).filter((k) => verifiedMap.has(k));
+  const sharedVerifiedOrder = verifiedQuestions.map(label).filter((k) => packetMap.has(k));
+  return {
+    added,
+    removed,
+    changed,
+    orderChanged: !isDeepStrictEqual(sharedPacketOrder, sharedVerifiedOrder),
+  };
+}
+
 export function packetDriftAttentionReason(issues: readonly string[]): string {
   const phrases = [...new Set(issues.map((issue) =>
     APPLICANT_PACKET_DRIFT_PHRASES[issue] ?? 'how Litos reaches this employer'))];
@@ -927,7 +974,19 @@ async function holdPreparationForPacketDrift(input: {
    * safe for hosted logs - and without this line the drift class is invisible: the run parks, the
    * applicant re-approves, and no record anywhere says which binding kept moving. */
   input.log.warn(
-    { applicationId: input.row.id, runId: input.patch.submission_run_id, packetDriftIssues: issues },
+    {
+      applicationId: input.row.id,
+      runId: input.patch.submission_run_id,
+      packetDriftIssues: issues,
+      ...(issues.includes('application questions changed after packet approval')
+        ? {
+          questionsDrift: packetQuestionsDriftDiagnostic(
+            input.packet.questions,
+            submissionPacketQuestions(input.verifiedQuestions),
+          ),
+        }
+        : {}),
+    },
     'Application preparation withheld because the built packet drifted from the acknowledged audit',
   );
   await writeReview(input.row, nextReview(input.current, {
