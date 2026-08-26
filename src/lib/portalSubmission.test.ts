@@ -4599,7 +4599,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
    * commit. The proof is unweakened: requireUnique, requireNonEmpty and expectedValueDigits below. */
   assert.deepEqual(actions[phoneWaitIndex], {
     type: 'waitForSelector',
-    selector: 'input[name="phone"][type="tel"]',
+    selector: 'input[name="phone"]',
     label: 'workable_phone_value_visible',
     optional: true,
     timeout: 4_000,

@@ -5263,8 +5263,22 @@ const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
  * A readback does not need visibility. It needs the value, and it still proves it: both consumers
  * keep requireUnique, requireNonEmpty and expectedValueDigits, so a phone that did not land, landed
  * twice, or landed wrong still refuses. The FILL keeps `:visible`, because typing has to reach a
- * control the applicant could have typed into. */
-const WORKABLE_PHONE_READBACK_SELECTOR = 'input[name="phone"][type="tel"]';
+ * control the applicant could have typed into.
+ *
+ * AND `[type="tel"]` IS GONE TOO, BECAUSE DROPPING `:visible` ALONE WAS MEASURED AND WAS NOT ENOUGH.
+ * Shipped as 2d108f4 and re-run the same day: identical refusal, new fingerprint f87c52076c3a3557,
+ * `expected exactly one match for input[name="phone"][type="tel"], found 0`. So the control is not
+ * merely hidden after the commit - in that shape it does not exist at all. Two readings of this
+ * failure have now been refuted by measurement (a timing one, then a visibility one), which is the
+ * reason this selector is now the WEAKEST claim that still identifies the field: the name the form
+ * gave it, and nothing else.
+ *
+ * The name is the right thing to keep. It is what the employer's own form submits under, so a
+ * control carrying it IS the phone this application will send - whatever `type` intl-tel-input has
+ * re-rendered it into. And the count still has to be one: requireUnique means a second `name="phone"`
+ * node (a hidden E.164 twin, say) refuses rather than guessing which one to believe, and says so in
+ * a message that names the count. */
+const WORKABLE_PHONE_READBACK_SELECTOR = 'input[name="phone"]';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
   + 'button[aria-label="Telephone country code"][aria-controls]:visible';
