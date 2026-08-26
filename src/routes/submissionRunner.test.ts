@@ -41,7 +41,9 @@ import {
   truthfulOtherChoice,
   employerPageUrlIssue,
   packetDriftAttentionReason,
+  packetQuestionsDriftDiagnostic,
   packetQuestionsMatchAcknowledged,
+  optionSnapClaim,
   packetQuestionAcknowledgement,
   PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE,
   transportVerifiedBuiltPacket,
@@ -60,10 +62,12 @@ import {
 } from '../lib/packetAudit';
 import { savedAnswerKey } from '../lib/answerReuse';
 import {
+  normalizeReviewQuestionLabel,
   refreshKnownQuestionAnswers,
   resolveKnownAnswer,
   type ApplicationProfileLike,
 } from '../lib/questionDiscovery';
+import { resolveProfileField } from '../lib/profileFieldResolution';
 import { workEligibilityFromSponsorshipAnswer } from '../lib/applicationProfileLike';
 import type { ApplicationReviewQuestion, ApplicationReviewState } from '../lib/applicationReview';
 import type { SubmissionPacket } from '../lib/portalSubmission';
@@ -5580,6 +5584,271 @@ test('a documented option snap of the acknowledged answer passes the drift gate;
   assert.equal(packetQuestionsMatchAcknowledged([...projected, projected[0]], projected), false);
 });
 
+/* THE BUILD-TIME RESOLUTION SHAPE OF discoverAndResolveQuestions, for the closed-choice path.
+ *
+ * Three calls in the order the runner makes them: the profile reading, the snap onto the control's
+ * LIVE option list, and the claim that records what was snapped from. It is deliberately not a
+ * private model of that loop - every call here is the real exported function, so the two tests
+ * below measure the resolvers rather than restating what they are believed to do. The audit-side
+ * reading needs no helper: it is refreshKnownQuestionAnswers, called verbatim. */
+function resolveClosedChoiceAsBuildDoes(
+  rawLabel: string,
+  options: string[],
+  ap: ApplicationProfileLike,
+): { reviewLabel: string; answer: string; claim: string | undefined } {
+  // Resolution reads the RAW label and the row stores the clipped one, exactly as
+  // discoverAndResolveQuestions does. The two are the same string below the 500-character clip,
+  // which is every label these tests use; keeping them distinct here means the helper still
+  // mirrors the loop rather than a convenient simplification of it.
+  const reviewLabel = normalizeReviewQuestionLabel(rawLabel);
+  const profileKnown = resolveKnownAnswer(rawLabel, 'select', ap, undefined, undefined, undefined, options);
+  const resolvedField = profileKnown && 'value' in profileKnown
+    ? resolveProfileField({ label: rawLabel, inputType: 'select', options }, ap, undefined, undefined, undefined)
+    : null;
+  return {
+    reviewLabel,
+    answer: resolvedField?.value ?? (profileKnown && 'value' in profileKnown ? profileKnown.value : ''),
+    claim: optionSnapClaim(resolvedField, profileKnown),
+  };
+}
+
+function eeoStoredQuestion(
+  built: { reviewLabel: string; answer: string; claim: string | undefined },
+): ApplicationReviewQuestion {
+  return {
+    id: 'eeo-row',
+    question: built.reviewLabel,
+    answer: built.answer,
+    kind: 'required',
+    required: true,
+    portal_selector: '#eeo',
+    portal_input_type: 'select',
+    ...(built.claim === undefined ? {} : { answer_option_source: built.claim }),
+  };
+}
+
+/* THE ROW THAT PARKED 6de82956, DRIVEN THROUGH THE REAL RESOLVERS ON BOTH SIDES.
+ *
+ * Application 6de82956, run 097ddf87, Lever, 2026-08-26 11:31:38 UTC, on every consecutive attempt:
+ * three EEO self-identification questions listed as `changed`, and the dashboard bouncing the
+ * applicant back to re-save an already-correct answer forever. Two of the three carried
+ * answerOptionSource and were already being accepted by e0aaa88; only the LGBTQIA row moved
+ * `answer` alone, with no claim, and one refused row fails the whole multiset.
+ *
+ * The cause was not the gate and not the question. resolveProfileField snaps onto the control's
+ * own bytes through comparableOption, which folds case; the guard that decided whether to RECORD
+ * that snap compared trim + toLowerCase, so a control spelling the decline "Decline To
+ * Self-Identify" rewrote the answer and wrote down nothing. The audit-side reading has no option
+ * list, recomputes the canonical "Decline to self-identify", and refreshKnownQuestionAnswers'
+ * deliberately strict equality replaces the stored answer - so the two sides differed with no
+ * evidence between them.
+ *
+ * Every row below is the live control list; the expected bytes are measured, not chosen. */
+test('a case-only option snap records its claim, so the 6de82956 EEO rows stop parking', () => {
+  const ap = {
+    full_name: 'Mehek Mandal',
+    email: 'mehek@example.com',
+    eeo_prefs: {},
+  } as unknown as ApplicationProfileLike;
+  const lgbtqia = 'Do you identify as a member of the LGBTQIA (Lesbian, Gay, Bisexual, '
+    + 'Transgender, Queer/Questioning, Intersex, and Asexual) community?';
+
+  const rows: Array<{ name: string; label: string; options: string[]; answer: string; claim?: string }> = [
+    {
+      // THE ROW THAT PARKED. Differs from the resolver's wording by capitalization and nothing else.
+      name: 'case-only snap',
+      label: lgbtqia,
+      options: ['Yes', 'No', 'Decline To Self-Identify'],
+      answer: 'Decline To Self-Identify',
+      claim: 'Decline to self-identify',
+    },
+    {
+      // Control: punctuation as well as case, so the old guard already fired here and this row
+      // already passed. It must keep passing, unchanged.
+      name: 'case and punctuation',
+      label: lgbtqia,
+      options: ['Yes', 'No', 'Decline To Self Identify'],
+      answer: 'Decline To Self Identify',
+      claim: 'Decline to self-identify',
+    },
+    {
+      name: 'veteran status, live list',
+      label: 'Veteran Status',
+      options: [
+        'I identify as one or more of the classifications of a protected veteran',
+        'I am not a protected veteran',
+        "I don't wish to answer",
+      ],
+      answer: "I don't wish to answer",
+      claim: 'Decline to self-identify',
+    },
+    {
+      name: 'disability status, live list',
+      label: 'Disability Status',
+      options: [
+        'Yes, I have a disability, or have had one in the past',
+        'No, I do not have a disability and have not had one in the past',
+        'I do not want to answer',
+      ],
+      answer: 'I do not want to answer',
+      claim: 'Decline to self-identify',
+    },
+    {
+      // Control: the control spells it exactly as the resolver does, so nothing moved and there is
+      // nothing to document. A claim here would be a record of a snap that never happened.
+      name: 'no drift at all',
+      label: lgbtqia,
+      options: ['Yes', 'No', 'Decline to self-identify'],
+      answer: 'Decline to self-identify',
+      claim: undefined,
+    },
+  ];
+
+  for (const row of rows) {
+    const built = resolveClosedChoiceAsBuildDoes(row.label, row.options, ap);
+    assert.equal(built.answer, row.answer, `${row.name}: built answer`);
+    assert.equal(built.claim, row.claim, `${row.name}: recorded claim`);
+
+    const stored = eeoStoredQuestion(built);
+    const acknowledged = refreshKnownQuestionAnswers([stored], ap, undefined);
+    // The audit reading is the canonical wording on every row: this is the divergence itself.
+    assert.equal(acknowledged[0].answer, 'Decline to self-identify', `${row.name}: audit answer`);
+
+    const packetSide = packetQuestionsForFill([stored]);
+    const auditSide = packetQuestionsForFill(acknowledged);
+    assert.equal(
+      packetQuestionsMatchAcknowledged(packetSide, auditSide),
+      true,
+      `${row.name}: the built packet must no longer park`,
+    );
+
+    // THE OTHER HALF OF THE RULE, pinned so neither can be relaxed by accident: strip the claim and
+    // the identical pair refuses. The gate accepts a DOCUMENTED snap, never a bare rewrite.
+    if (built.claim !== undefined) {
+      const undocumented = packetQuestionsForFill([{ ...stored, answer_option_source: undefined }]);
+      assert.deepEqual(
+        packetQuestionsDriftDiagnostic(undocumented, auditSide).changed,
+        [{ question: built.reviewLabel, fields: ['answer'] }],
+        `${row.name}: the pre-fix signature is answer-only`,
+      );
+      assert.equal(
+        packetQuestionsMatchAcknowledged(undocumented, auditSide),
+        false,
+        `${row.name}: an undocumented rewrite must still refuse`,
+      );
+    }
+  }
+});
+
+/* THE SAFETY PROPERTY: A REAL ANSWER CHANGE STILL PARKS THE RUN.
+ *
+ * The point of the drift gate is that Litos never mails an employer an answer the applicant did not
+ * review, and recording more snaps must not buy the fix at that price. The first case is the one
+ * that matters most and it runs through the SAME resolvers as the fix: she approved a packet that
+ * declined to self-identify, then filled the preference in on her profile. The rebuild answers
+ * "Yes" - which is a real option on the real list, so it is a snap by every structural test - and
+ * the claim is correctly absent, because the profile value IS "Yes" and nothing was snapped from
+ * anything. Answer moved, no evidence, run parks. That is the whole design. */
+test('a genuinely changed answer still parks the run, snap or no snap', () => {
+  const lgbtqia = 'Do you identify as a member of the LGBTQIA (Lesbian, Gay, Bisexual, '
+    + 'Transgender, Queer/Questioning, Intersex, and Asexual) community?';
+  const options = ['Yes', 'No', 'Decline To Self-Identify'];
+  const declining = {
+    full_name: 'Mehek Mandal', email: 'mehek@example.com', eeo_prefs: {},
+  } as unknown as ApplicationProfileLike;
+  const corrected = {
+    full_name: 'Mehek Mandal', email: 'mehek@example.com', eeo_prefs: { transgender_status: 'Yes' },
+  } as unknown as ApplicationProfileLike;
+
+  const approvedBuild = resolveClosedChoiceAsBuildDoes(lgbtqia, options, declining);
+  const approvedRow = eeoStoredQuestion(approvedBuild);
+  const acknowledged = packetQuestionsForFill(
+    refreshKnownQuestionAnswers([approvedRow], declining, undefined),
+  );
+  assert.equal(acknowledged[0].answer, 'Decline to self-identify');
+
+  const rebuilt = resolveClosedChoiceAsBuildDoes(lgbtqia, options, corrected);
+  assert.equal(rebuilt.answer, 'Yes', 'the profile now answers the question');
+  assert.equal(rebuilt.claim, undefined, 'nothing was snapped from anything, so nothing is claimed');
+  const rebuiltPacket = packetQuestionsForFill([eeoStoredQuestion(rebuilt)]);
+  assert.equal(
+    packetQuestionsMatchAcknowledged(rebuiltPacket, acknowledged),
+    false,
+    'an answer she never approved must never reach the employer',
+  );
+
+  const approvedProjection = packetQuestionsForFill([approvedRow]);
+  const [approvedQ] = approvedProjection;
+  const refuses = (moved: (typeof approvedProjection)[number], why: string) =>
+    assert.equal(packetQuestionsMatchAcknowledged([moved], acknowledged), false, why);
+
+  // A snap claim naming a value the acknowledged reading never held is a rewrite wearing evidence.
+  refuses(
+    { ...approvedQ, answerOptionSource: 'Yes' },
+    'a claim naming some other value must refuse',
+  );
+  /* NOT ASSERTED HERE, because it is not true and writing it down as if it were would hide the
+   * actual trade: a claim that names the acknowledged answer is accepted whatever the answer beside
+   * it says, because the gate cannot re-verify option-list membership (field options do not survive
+   * into the packet). The trust anchor is matchedOption at WRITE time - the value really came off
+   * the control's own list - and that is e0aaa88's trade, widened by this change from
+   * punctuation-differing snaps to byte-differing ones, not created by it. */
+  /* atsApiField is still compared byte for byte: on the ATS API channel it is the DESTINATION KEY,
+   * not aiming, so a moved one sends her approved answer to a different field.
+   *
+   * portalSelector, portalInputType and required are NOT, since eb8cf2d. That commit is deliberate
+   * and measured - six applications (Old Mission, Jump Trading, Tower Research, IMC, Cloudflare)
+   * parked on a [data-litos-discovered-N] marker that is renumbered every page load, telling her an
+   * application had changed when she had changed nothing. This file follows that contract instead of
+   * re-pinning the stricter rule it replaced; the boundary it protects is the ANSWER, asserted just
+   * above and just below, and no selector change can put an answer she never approved into a packet. */
+  refuses({ ...approvedQ, atsApiField: 'eeo_lgbtqia' }, 'a moved ats field must refuse');
+  const passes = (moved: (typeof approvedProjection)[number], why: string) =>
+    assert.equal(packetQuestionsMatchAcknowledged([moved], acknowledged), true, why);
+  passes({ ...approvedQ, portalSelector: '#moved' }, 'a re-aimed selector is the form moving, not her');
+  passes({ ...approvedQ, portalInputType: 'text' }, 'a re-read input type is the form moving, not her');
+  passes({ ...approvedQ, required: false }, 'a re-advertised required flag is the form moving, not her');
+  // answerSource may be DROPPED by a snap and never MINTED: a packet that claims she reviewed a
+  // value the acknowledged reading never carried is asserting a review that did not happen.
+  refuses(
+    { ...approvedQ, answerSource: 'applicant_review' },
+    'a minted answerSource must refuse',
+  );
+  // Membership, in both directions.
+  assert.equal(packetQuestionsMatchAcknowledged([], acknowledged), false, 'a dropped question refuses');
+  assert.equal(
+    packetQuestionsMatchAcknowledged([approvedQ, { ...approvedQ, question: 'Veteran status' }], acknowledged),
+    false,
+    'an added question refuses',
+  );
+
+  // And the write side itself never mints a claim it has no evidence for.
+  assert.equal(
+    optionSnapClaim({ value: 'Decline To Self-Identify', matchedOption: false }, { value: 'Decline to self-identify' }),
+    undefined,
+    'a value that did not come off the control list is not a snap',
+  );
+  assert.equal(
+    optionSnapClaim({ value: 'Decline to self-identify', matchedOption: true }, { value: 'Decline to self-identify' }),
+    undefined,
+    'a value that did not move records nothing',
+  );
+  assert.equal(
+    optionSnapClaim({ value: 'Decline To Self-Identify', matchedOption: true }, { skipReason: 'left for you' }),
+    undefined,
+    'a refused question has no profile value to have snapped from',
+  );
+  assert.equal(
+    optionSnapClaim({ value: 'Decline To Self-Identify', matchedOption: true }, { value: '   ' }),
+    undefined,
+    'an empty profile value claims nothing',
+  );
+  assert.equal(
+    optionSnapClaim({ value: 'Decline To Self-Identify', matchedOption: true }, { value: 'Decline to self-identify' }),
+    'Decline to self-identify',
+    'the case-only snap is the one that was being silenced',
+  );
+});
 /* THE CHECK THAT STOPPED EVERY MULTI-QUESTION APPLICATION FROM COMPLETING.
  *
  * Measured live 2026-08-26: six parked applications retried through the dashboard. Pony.ai, with 2

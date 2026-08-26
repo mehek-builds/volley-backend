@@ -767,6 +767,65 @@ export function managedFormSnapshotWithStableCapabilities(input: {
   });
 }
 
+/* THE WRITE SIDE OF THE SNAP CONTRACT: the record must say what the build actually did.
+ *
+ * This decides whether a resolved closed-choice answer carries a snap claim; the gate immediately
+ * below decides what to do with one. They are two halves of one rule and are kept together for
+ * that reason - the value written into `answer` is the employer's option text byte for byte, so
+ * the test for "did anything move" has to be byte identity too. It was not.
+ *
+ * THE DEFECT, and it is a gap between two equivalence classes rather than a missing rule.
+ * chooseClosestOption matches on comparableOption (lib/selfIdentification.ts): it folds case,
+ * deletes apostrophes, collapses every other punctuation run to a space - and then returns the
+ * CONTROL's own bytes. The guard here asked only whether the resolved value differed from the
+ * profile value after trim + toLowerCase, an equivalence class strictly NARROWER than the
+ * matcher's. Everything in the gap is a snap that changes bytes without changing meaning, and the
+ * single largest class in that gap is the one that differs by capitalization alone: the answer was
+ * rewritten to the employer's spelling and nothing on the record said so.
+ *
+ * CONFIRMED BY MEASUREMENT, not inferred. Application 6de82956, run 097ddf87, Lever, 2026-08-26
+ * 11:31:38 UTC, reproduced on every consecutive attempt (deterministic, not flaky). Driving the
+ * real resolvers with the three EEO controls that run's diagnostic listed reproduces its `changed`
+ * array exactly, and exactly one row parks:
+ *
+ *   LGBTQIA label, decline listed "Decline To Self-Identify"  -> moved ["answer"]              PARK
+ *   "veteran status",    decline "I don't wish to answer"     -> moved ["answer","answerOS"]   pass
+ *   "disability status", decline "I do not want to answer"    -> moved ["answer","answerOS"]   pass
+ *
+ * The last two differ from the resolver's "Decline to self-identify" case-INSENSITIVELY as well, so
+ * the old guard fired, recorded the claim, and e0aaa88's exemption accepted them - which is why the
+ * warn line kept listing all three and why that commit looked inert. Only the case-only row was
+ * silenced, and one refused row fails the whole multiset, so the run parked,
+ * holdPreparationForPacketDrift cleared the acknowledgement, and the applicant was bounced back to
+ * re-approve a packet nobody had changed, for as many rounds as she was willing to do it. Both
+ * logged issue strings came from that one row: the delivery check's `questionsMatch &&`
+ * short-circuits, so the payload line is a shadow of the questions line, not a second fault.
+ *
+ * A STRICT INCREASE IN WHAT IS WRITTEN DOWN, and nothing else. This suppresses no comparison,
+ * widens no exemption and touches no part of the gate. packetQuestionEqualsAcknowledged still
+ * demands snapClaim.length > 0 AND snapClaim === the acknowledged answer byte for byte, so an
+ * answer that moved with no claim beside it still refuses, a claim naming any other value still
+ * refuses, a minted answerSource still refuses, and a question added, removed or moved in any
+ * non-snap field still refuses. It completes e0aaa88 by feeding that rule the evidence it asks for.
+ *
+ * THE TRUST ANCHOR IS matchedOption, here at write time: the value really did come off the
+ * control's own list. The gate does not re-verify list membership, which is the same trade e0aaa88
+ * already made for punctuation-differing snaps - widened, not created, by byte identity.
+ *
+ * INFERRED, not measured: that no other family reaches this line with a case-only snap today.
+ * Nothing here is keyed on a label, a portal or the EEO family and nothing here should be - any
+ * closed-choice control whose option differs from the profile value by capitalization alone sat in
+ * the same gap and now records the same claim.
+ */
+export function optionSnapClaim(
+  resolvedField: { value: string; matchedOption: boolean } | null | undefined,
+  profileKnown: { value: string } | { skipReason: string } | null | undefined,
+): string | undefined {
+  if (!resolvedField?.matchedOption) return undefined;
+  if (!profileKnown || !('value' in profileKnown) || !profileKnown.value.trim()) return undefined;
+  return resolvedField.value !== profileKnown.value ? profileKnown.value : undefined;
+}
+
 /* A DOCUMENTED OPTION SNAP IS THE ACKNOWLEDGED ANSWER, not a change to it.
  *
  * The prepare pass resolves closed-choice answers against the LIVE option lists and types the
@@ -1057,7 +1116,17 @@ const APPLICANT_PACKET_DRIFT_PHRASES: Record<string, string> = {
  * The pair of issues measured on fee9f00c/c4413bff/6de82956 (2026-08-26) recurred identically on
  * every round across two portals, and the issue strings alone cannot say whether the sets differ,
  * one projected field differs, or only the ORDER differs (the gate's isDeepStrictEqual is
- * order-sensitive). This diff is what turns "the questions changed" into a fixable statement. */
+ * order-sensitive). This diff is what turns "the questions changed" into a fixable statement.
+ *
+ * READ IT AS A DIFF, NEVER AS THE GATE'S VERDICT. It is computed independently of
+ * packetQuestionsMatchAcknowledged and does not consult a single one of its exemptions, so a
+ * documented option snap and a live form reorder both show up here on runs that PROCEED. On
+ * 6de82956/097ddf87 (2026-08-26) that cost real time: three EEO rows were listed `changed` and
+ * orderChanged was true, but two of the three carried their snap claim and were already being
+ * accepted, and the order has not been able to park a run since e0aaa88 made the comparison a
+ * multiset. Only one row - `fields: ["answer"]`, no claim - was the fault. The success signal for
+ * any fix in this area is therefore the ABSENCE of the enclosing warn line, not a cleaner diff
+ * inside it, and a row that carries answerOptionSource is the least interesting row in the list. */
 export function packetQuestionsDriftDiagnostic(
   packetQuestions: SubmissionPacket['questions'],
   verifiedQuestions: SubmissionPacket['questions'],
@@ -2692,12 +2761,8 @@ export async function discoverAndResolveQuestions(
      * REVOCABLE permission owes: once she turns the permission off, resolveKnownAnswer stops
      * answering "Yes" for that label, the profile no longer says what it said, and the tick is
      * recomputed out of any packet that has not been sent. */
-    const answerOptionSource = resolvedField?.matchedOption
-      && profileKnown && 'value' in profileKnown
-      && profileKnown.value.trim()
-      && resolvedField.value.trim().toLowerCase() !== profileKnown.value.trim().toLowerCase()
-      ? profileKnown.value
-      : undefined;
+    // The rule itself is optionSnapClaim, up beside the gate that reads what it writes.
+    const answerOptionSource = optionSnapClaim(resolvedField, profileKnown);
     /* THE ACCEPTANCE, WRITTEN DOWN ON THE QUESTION IT WAS MADE ON.
      *
      * Litos may tick an employer's privacy statement, applicant terms or code of conduct only under
