@@ -734,7 +734,7 @@ const APPLICATION_PROCESS_LINE =
  * CPT/OPT and we sponsor work visas for full-time positions" and contributed `international` and
  * `cpt`. Neither sentence is a thing a resume can be scored against, and neither was reachable by
  * the existing vocabulary. `sponsorship` was here; "we sponsor work visas" is the verb form. */
-const ELIGIBILITY_LINE =
+export const ELIGIBILITY_LINE =
   /\b((minimum|cumulative|overall|major|current|combined)? ?gpa|grade[- ]point average|authoriz(ed|ation) to work|work authoriz(ed|ation)|legally (authorized|entitled|permitted)|right to work|(visa|employment|work) sponsorship|require sponsorship|employment eligibility|(lawful )?permanent residen(cy|t)|refugee|asylee|sponsors? work visas?)\b/i;
 
 /**
@@ -2720,11 +2720,21 @@ export interface JdTermOptions {
   groupChoices?: boolean;
 }
 
-export function extractJdTerms(
+/**
+ * THE TERMS, AND THE TEXT THEY WERE READ OUT OF, from ONE pass.
+ *
+ * The route needs to say how many requirement lines the extractor could not turn into a term, and
+ * the only honest denominator for that is the text the extractor actually looked at. Re-deriving
+ * "which sections count" outside this function would be exactly the hand-copied expression the
+ * comment at the statedThings gate below warns about: the moment isPrimaryFitSection changes, the
+ * caption would be describing a different posting than the score. So the scored sections leave here
+ * with the terms, by the same four exits, and nothing re-extracts.
+ */
+export function extractJdTermsWithSections(
   jdText: string,
   context?: JdContext,
   options?: JdTermOptions,
-): JdTerm[] {
+): { terms: JdTerm[]; scored: JdSection[] } {
   const self = selfReferenceTokens(context);
   const roleSelf = roleReferenceTokens(context?.role);
   const places = new Set(locationTokens(context?.location));
@@ -2751,14 +2761,15 @@ export function extractJdTerms(
     sections.some((s) => PRIMARY_STATED_KINDS.has(s.kind)) || hasPrimaryFitHeading(jdText);
   const rawTerms = strip(extractFrom(sections, casing, context?.company, groupChoices));
   if (hasPrimaryFitSection) {
-    return capToEmphasis(strip(extractFrom(sections.filter(isPrimaryFitSection), casing, context?.company, groupChoices)));
+    const primary = sections.filter(isPrimaryFitSection);
+    return { terms: capToEmphasis(strip(extractFrom(primary, casing, context?.company, groupChoices))), scored: primary };
   }
   const terms = preferStatedRequirements(rawTerms);
   /* statedThings, NOT terms.length. The comment on isScorable ties this gate to that function
      exactly, and a hand-copied expression cannot keep that property: once a stated choice became
      one term, this half counted the choice and that half counted its branches, so a posting this
      gate declared too thin was one the scorer was perfectly willing to score. */
-  if (statedThings(terms) >= MIN_SCORABLE_TERMS) return capToEmphasis(terms);
+  if (statedThings(terms) >= MIN_SCORABLE_TERMS) return { terms: capToEmphasis(terms), scored: sections.filter((s) => s.weight > 0) };
 
   // A noise heading runs until the next recognised heading, so a posting that OPENS with
   // "Compensation" or "Pay range" (mandatory first in pay-transparency states, and increasingly
@@ -2793,21 +2804,30 @@ export function extractJdTerms(
   // re-reading, so a long EEO block cannot be what tips a posting into salvaging.
   const salvageable = sections.filter((s) => s.kind === 'noise' && !s.footer);
   const chars = (list: JdSection[]) => list.reduce((n, s) => n + s.text.length, 0);
-  if (chars(salvageable) <= chars(sections.filter((s) => s.weight > 0))) return capToEmphasis(terms);
+  if (chars(salvageable) <= chars(sections.filter((s) => s.weight > 0))) {
+    return { terms: capToEmphasis(terms), scored: sections.filter((s) => s.weight > 0) };
+  }
 
-  const salvaged = strip(
-    extractFrom(
-      sections.map((section) =>
-        section.kind === 'noise' && !section.footer
-          ? { ...section, kind: 'body' as SectionKind, weight: SECTION_WEIGHT.body }
-          : section,
-      ),
-      casing,
-      context?.company,
-      groupChoices,
-    ),
+  const remapped = sections.map((section) =>
+    section.kind === 'noise' && !section.footer
+      ? { ...section, kind: 'body' as SectionKind, weight: SECTION_WEIGHT.body }
+      : section,
   );
-  return capToEmphasis(salvaged.length > terms.length ? salvaged : terms);
+  const salvaged = strip(extractFrom(remapped, casing, context?.company, groupChoices));
+  const won = salvaged.length > terms.length;
+  return {
+    terms: capToEmphasis(won ? salvaged : terms),
+    scored: (won ? remapped : sections).filter((s) => s.weight > 0),
+  };
+}
+
+/** The terms alone, which is what every existing caller wants. */
+export function extractJdTerms(
+  jdText: string,
+  context?: JdContext,
+  options?: JdTermOptions,
+): JdTerm[] {
+  return extractJdTermsWithSections(jdText, context, options).terms;
 }
 
 /** The sections where an employer states candidate fit directly, as opposed to work prose around it. */
