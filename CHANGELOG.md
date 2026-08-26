@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Changed
+
+- Eligible postings remain discoverable for 90 days rather than 14, so the board keeps a role for
+  as long as its employer is still listing it. Closed postings still leave the board immediately;
+  the window governs only how long an untouched posting date is treated as believable. Rows are
+  correspondingly purged at 180 days rather than 28.
+
 ### Fixed
 
 - Managed application email receiving proofs now renew through append-only signed delivery events

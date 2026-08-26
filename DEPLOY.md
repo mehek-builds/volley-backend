@@ -268,7 +268,7 @@ variable when the API is not hosted at `https://student-outreach-backend.vercel.
 
 Vercel starts the monitor daily at 06:00 UTC. The GitHub Actions workflow starts ten minutes later
 and makes up to five bounded follow-up passes to drain a large source queue. It fails visibly when
-sources fail, polling remains incomplete, or the 14-day surfaced board drops below an inventory
+sources fail, polling remains incomplete, or the 90-day surfaced board drops below an inventory
 floor. Each pass writes raw postings, distinct grouped roles, sponsor-only postings, and variety
 metrics to the workflow summary. Each invocation selects at most 400 oldest sources, so source 401
 starts a follow-up segment rather than extending one serverless run. Follow-up passes carry the
