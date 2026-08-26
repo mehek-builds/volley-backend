@@ -612,6 +612,43 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           mismatches,
         });
       }
+
+      /* THE POSTING THE CANONICAL RECORD ALREADY NAMES, when the request itself did not name one.
+       *
+       * `canonicalApplicationBindingMismatches` tolerates `incoming.jobId === undefined` on purpose
+       * (lib/canonicalApplicationBinding.ts: the job_id check is skipped entirely when the body omits
+       * it), so "generate against my saved application" is a SUPPORTED request shape that carries an
+       * application_id and no job_id. The block above resolved the posting row from `body.job_id`
+       * only, so every packet built that way was written with a job_context of exactly
+       * `{ company, role, jd_hash }` - no location, no portal_country, no country evidence of any
+       * kind - even though the server was holding the posting id the whole time on the applications
+       * row it had just read.
+       *
+       * WHY THAT IS NOT A COSMETIC GAP. job_context is the ONLY country evidence any later resolver
+       * has: routes/submissionRunner.ts and routes/applications.ts both compute their
+       * postingCountryCode with `postingCountryCodeFromJobContext(row.job_context)`, and
+       * selectedEligibilityCountry in lib/questionDiscovery.ts falls back to that code for every
+       * sponsorship question that does not name a country in its own text. Cloudflare's asks "do you
+       * now or will you in the future require immigration sponsorship to work at cloudflare?" - the
+       * EMPLOYER where the country would be - so the fallback is the only thing that can answer it,
+       * and a countryless packet leaves a required field blank with `needs_sponsorship` sitting in
+       * the profile. Refusing is correct when no country can be established; being unable to
+       * establish one from a posting the server can see is not.
+       *
+       * Read only AFTER the binding gate above has passed, so the row is provably the same posting
+       * this request is about, and through the same scoped `postingRow` helper for the same
+       * disclosure reason recorded there.
+       *
+       * DELIBERATELY NOT `jdText`, and not `job_context.job_id`. The JD the resume is tailored
+       * against and the id the duplicate/autopilot matchers key on are both decisions this change
+       * has no evidence about; widening it to them would alter what gets written into the resume and
+       * which packets count as duplicates, neither of which is the defect being closed here.
+       */
+      if (!body.job_id && ownedCanonicalApplication.job_id) {
+        const canonicalPosting = await postingRow(ownedCanonicalApplication.job_id);
+        postingLocation = canonicalPosting?.location ?? null;
+        postingPortalCountry = canonicalPosting?.portal_country ?? null;
+      }
     }
 
     // The v2 trial uses durable lifetime counters below. Existing grandfathered accounts retain
