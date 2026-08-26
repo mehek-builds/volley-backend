@@ -100,24 +100,59 @@ Set these for Production (and Preview if you want):
 
 ### Submission ledger cutover fence
 
-This fence must be deployed before the submission-attempt ledger migration. Deploy PR0 first with
-`SUBMISSION_CUTOVER_MODE=off`, then verify that the exact PR0 revision is live and reports
-`{"mode":"off","config_valid":true}`. Do not combine the first fence deployment with a production
-drain. A Vercel environment change reaches the running service only after a deployment.
+The fence must be live before the submission-attempt ledger migration. First deploy the isolated
+fence release with `SUBMISSION_CUTOVER_MODE=off`. Then merge the runtime-neutral migration-only
+release and verify its exact revision still reports `{"mode":"off","config_valid":true}`. Do not
+combine the first fence deployment with a production drain. A Vercel environment change reaches
+the running service only after a deployment.
 
-Promote the same PR0 revision with `SUBMISSION_CUTOVER_MODE=drain`. Capture and verify the health
-response only after that deployment is live:
+Deploy the correlation-aware Stratus build with
+`STRATUS_SUBMISSION_CORRELATION_MODE=compat` and leave `STRATUS_SUBMISSION_QUIESCED` unset. This
+lets the old backend finish accepted work without requiring identities it does not yet send.
+`STRATUS_SUBMISSION_CORRELATION_MODE` must be `compat` or `required`; if it is missing, Stratus
+defaults to required correlation. Only `STRATUS_SUBMISSION_QUIESCED=1` is quiesced. An unset or
+non-`1` value is live, so a mistyped quiesce value does not stop submissions. Every environment
+change requires a Stratus redeploy.
+
+After every Stratus release-control redeploy, require the exact source commit and the expected
+health flags from this table:
+
+| Redeployed Stratus state | Correlation value | Quiesce value | `submissionQuiesced` | `submissionCorrelationRequired` |
+|---|---|---|---:|---:|
+| Compatibility, live | `compat` | unset or non-`1` | `false` | `false` |
+| Compatibility, quiesced | `compat` | `1` | `true` | `false` |
+| Required, quiesced | `required` | `1` | `true` | `true` |
+| Required, live | `required` or missing | unset or non-`1` | `false` | `true` |
+
+Use the intended row for `EXPECTED_QUIESCED` and `EXPECTED_CORRELATION_REQUIRED`:
 
 ```bash
-EXPECTED_REVISION="<PR0 merge commit SHA>"
+EXPECTED_STRATUS_COMMIT="<Stratus commit SHA>"
+EXPECTED_QUIESCED=false
+EXPECTED_CORRELATION_REQUIRED=false
+STRATUS_JSON="$(curl -fsS https://stratus-browser-cloud.vercel.app/api/health)"
+STRATUS_COMMIT="$(jq -er '.commit | select(type == "string" and length > 0)' <<<"$STRATUS_JSON")"
+test "$STRATUS_COMMIT" = "$EXPECTED_STRATUS_COMMIT"
+jq -e \
+  --argjson quiesced "$EXPECTED_QUIESCED" \
+  --argjson correlation "$EXPECTED_CORRELATION_REQUIRED" \
+  '.submissionQuiesced == $quiesced and .submissionCorrelationRequired == $correlation' \
+  <<<"$STRATUS_JSON"
+```
+
+Stop if `commit` is null, empty, or different from `EXPECTED_STRATUS_COMMIT`, even when both flags
+look correct. Then promote the exact migration-only backend revision with
+`SUBMISSION_CUTOVER_MODE=drain` and verify:
+
+```bash
+EXPECTED_REVISION="<migration-only merge commit SHA>"
 CUTOVER_JSON="$(curl -sS https://student-outreach-backend.vercel.app/health)"
 CUTOVER_REVISION="$(jq -er '.revision' <<<"$CUTOVER_JSON")"
 test "$CUTOVER_REVISION" = "$EXPECTED_REVISION"
 jq -e '.submission_cutover == {"mode":"drain","config_valid":true}' <<<"$CUTOVER_JSON"
 ```
 
-Keep `drain` active for at least 310 seconds, then require the same revision and cutover state
-again:
+Keep drain active for at least 310 seconds, then require the same revision and cutover state again:
 
 ```bash
 sleep 310
@@ -127,32 +162,64 @@ curl -sS https://student-outreach-backend.vercel.app/health \
 ```
 
 Drain refuses every application mutation, application detail read, resume route, dashboard
-bootstrap, and internal worker while leaving only the exact existing-attempt evidence sinks,
-application list reads, inbound application mail, and legacy autofill evidence available. The
-310-second wait clears old backend requests, but it does not prove that external capabilities are
-gone.
+bootstrap, and internal worker. It leaves open only exact existing-attempt evidence sinks,
+application list reads, inbound application mail, and legacy autofill evidence. The 310-second wait
+clears old backend requests, but it does not prove external capabilities are gone.
 
-Quiesce Stratus separately. Terminate every accepted Stratus run, or wait at least eight minutes
-after its last accepted work. Then enumerate and terminate every retained Browserbase session. If
-session enumeration or termination cannot be proven, wait the full 60-minute Browserbase maximum
-from the last session creation. Eight minutes is not a substitute for the Browserbase step. Confirm
-there are no future handoff expiries or recently active claims. Never clear a claim to make a check
-pass. Employer pages already open in a person's own browser have no revocable lease, so the legacy
-backfill must preserve each persistent sign that one may have been exposed as an unresolved hold.
+Set `STRATUS_SUBMISSION_QUIESCED=1` while correlation remains `compat`, redeploy, and require
+`submissionQuiesced:true` plus `submissionCorrelationRequired:false` on the exact Stratus commit.
+Terminate every accepted Stratus run, or wait at least eight minutes after its last accepted work.
+Then enumerate and terminate every retained Browserbase session. If session enumeration or
+termination cannot be proven, wait the full
+60-minute Browserbase maximum from the last session creation. Eight minutes does not replace the
+Browserbase step. Confirm there are no future handoff expiries or recently active claims. Never
+clear a claim to make a check pass. Employer pages already open in a person's own browser have no
+revocable lease, so the backfill must preserve every nonterminal generated capability as an
+unresolved hold.
 
-Next, promote the same PR0 revision with `SUBMISSION_CUTOVER_MODE=freeze`. Verify the exact revision
-and `{"mode":"freeze","config_valid":true}`, wait another 310 seconds, then verify that same frozen
-revision again. Freeze also refuses application and resume mutations, including evidence sinks and
-the inbound application-email webhook. The webhook must be replayed after the ledger-aware backend
-is live.
+Next, promote the same migration-only backend revision with `SUBMISSION_CUTOVER_MODE=freeze`.
+Verify the exact revision and `{"mode":"freeze","config_valid":true}`, then start the migration
+workflow. The workflow owns the final 310-second old-instance drain and verifies that same frozen
+revision both before and after it. Freeze also refuses evidence sinks, legacy autofill, and the
+inbound application-email webhook. Queue those webhook deliveries for idempotent replay after the
+ledger-aware backend is live and unfrozen.
 
 Run the stable-state preflight and ledger migration only while that exact frozen revision remains
-live. Keep freeze active while deploying Stratus correlation, the ledger-aware backend, and both
-clients. Unfreeze Stratus first and run its correlated canary. Then switch the backend to `off`,
-verify the exact ledger-aware revision and off mode, replay inbound application confirmations
-idempotently, and run the controlled application canary. Never replay into a frozen webhook. Never
-continue when health reports `config_valid:false`; that means an invalid nonempty value took effect
-as freeze.
+live. The release owns an exclusive backend change window from the migration workflow's first frozen
+health check through verified frozen health on the exact PR2 revision. During that window, make no
+unrelated backend merge, redeploy, rollback, or Vercel environment edit. The only permitted backend
+change after the workflow's final frozen check is the planned promotion of the exact verified PR2
+revision with freeze still set. A transient unfreeze can admit a legacy write even if a later health
+check looks frozen again. Keep freeze active while deploying the ledger-aware backend and both
+clients. Set `STRATUS_SUBMISSION_CORRELATION_MODE=required` while
+`STRATUS_SUBMISSION_QUIESCED=1`, redeploy, and require both Stratus health flags to be `true` on the
+exact commit. Then unset `STRATUS_SUBMISSION_QUIESCED`, redeploy, and require
+`submissionQuiesced:false` plus `submissionCorrelationRequired:true` on that same exact commit
+before running a non-employer correlated canary. Then switch the backend to `off`, verify the exact
+ledger-aware revision and off mode, recover inbound application confirmations, and run the
+controlled application canary. Keep the Resend `email.received` endpoint configured throughout the
+freeze and record the exact freeze start and end timestamps. After the exact PR2 revision reports
+valid `off` health, inspect Resend deliveries for that interval. Manually replay every failed
+`email.received` delivery so Resend creates a fresh signed request, and require HTTP 202 from each
+replay. Do not resend captured webhook headers or a saved raw request: signed inbound requests older
+than five minutes fail the freshness check. For every replay, verify that the inbound message is
+stored once after deduplication and that the matching application has its durable ledger
+confirmation. Do not run the application canary while any delivery in the interval is failed or
+unaccounted for. Never replay into a frozen webhook. Never continue when health reports
+`config_valid:false`; any invalid nonempty mode takes effect as freeze.
+
+If rollback is needed after the ledger-aware backend is live, set
+`STRATUS_SUBMISSION_QUIESCED=1`, redeploy the exact correlation-aware Stratus revision, and require
+`submissionQuiesced:true` plus the correlation flag for its current mode. Then freeze the exact PR2
+backend and verify its
+revision and valid freeze mode. Keep that pair live for at least 310 seconds so every accepted
+backend invocation exits. Drain or terminate all retained Stratus runs and Browserbase sessions
+before rolling code. While Stratus remains quiesced, set correlation to `compat`, redeploy, and
+require `submissionQuiesced:true` plus `submissionCorrelationRequired:false` on the exact commit.
+Then roll the backend back only to the migration-only fence revision with freeze still set. Do not
+roll Stratus back to a build without the quiesce and correlation controls. Keep that containment
+build and fix forward. Do not reopen the old submission runtime after the append-only marker exists.
+The additive ledger tables and immutable evidence remain in place while the fix moves forward.
 
 ### The ranking cache's shared tier is OPTIONAL and ships OFF
 
@@ -352,6 +419,77 @@ cannot reach it. That is deliberate: before 2026-08-04 this endpoint touched not
 200 through a 75-minute outage in which every other route returned 500. `database_reason` narrows it
 immediately: `quota` means the Neon transfer allowance is spent, `refused` a dead or unreachable
 compute, `timeout` a saturated one. See docs/incidents/2026-08-04-neon-transfer-quota.md.
+
+### Submission attempt ledger cutover
+
+The backend reads `application_submission_attempt_events` on normal submission and duplicate-risk
+paths. The additive schema and deterministic positive-evidence backfill must therefore complete
+before any backend build containing those reads reaches production.
+
+First land and deploy the isolated submission fence as PR0 with mode `off`. Then land the migration
+script, package command, workflow, and this runbook as PR1, without runtime ledger readers or
+`src/db/schema.ts`. That runtime-neutral deploy is safe because the old backend ignores the
+additive table. Deploy the correlation-aware Stratus build in compatibility mode, then complete the
+drain, provider quiesce, Browserbase termination, and backend freeze described above.
+
+Run the `Submission attempt ledger migration` workflow from `main` only while that exact PR1 merge
+revision is serving in valid freeze mode. It uses the protected `production` environment, reads the
+connection only from `SCHEMA_CHECK_DATABASE_URL`, proves the full schema and backfill contract
+against an isolated PostgreSQL-compatible database with a standalone test that imports no runtime
+ledger readers:
+
+```bash
+npm run test:submission-attempt-ledger-migration
+```
+
+Only after that proof passes does the workflow run:
+
+```bash
+npm run db:submission-attempt-ledger
+```
+
+The production step exits nonzero unless every required column, unique/index key, vocabulary
+constraint, and append-only trigger is present after the idempotent backfill. Its final successful
+line is `Ready: immutable submission attempt ledger schema is present.` Preserve that workflow run
+as the migration evidence for the release.
+
+Old backend behavior remains byte-equivalent throughout this first release because its file set is
+limited to the additive migration script, standalone proof, package command, protected workflow,
+and this runbook. In particular, PR1 omits `src/db/schema.ts`. Runtime schema readers and writers
+belong to the later backend cutover release.
+
+Prepare PR2 before applying the migration, then rebase it onto the deployed PR1 revision before its
+final test run. After the workflow creates the additive tables, the old main schema model will
+temporarily report them as EXTRA until PR2 lands. Do not run `db:push` or any schema reconciliation
+command during that window. Run PR2's schema-drift check against the migrated database, then merge
+PR2 promptly while the backend stays frozen and Stratus stays quiesced.
+
+The required release order is:
+
+1. Deploy PR0 fence with backend mode `off`.
+2. Deploy PR1 migration-only revision with backend mode `off`.
+3. Deploy correlation-aware Stratus in compatibility mode, unquiesced.
+4. Set the PR1 backend to `drain`; after 310 seconds, quiesce Stratus and drain or terminate every provider capability.
+5. Set the same PR1 backend revision to `freeze`; run the migration workflow, which verifies the frozen revision and owns the final 310-second drain.
+6. Rebase, verify, and deploy PR2 ledger writers and duplicate-risk gate while backend freeze remains active.
+7. Deploy the website and extension retry-safety clients while backend freeze remains active.
+8. Change Stratus to required correlation while it remains quiesced.
+9. Unquiesce Stratus and pass a non-employer correlated canary.
+10. Set the exact PR2 backend revision to `off`, recover every failed inbound delivery from the recorded freeze interval with fresh signed replays, and pass one controlled real application canary.
+
+Do not merge PR2 before the migration workflow succeeds, because the GitHub integration deploys
+every main merge automatically. An old backend safely ignores the additive table, but reopening old
+submission behavior would recreate the duplicate-risk gap. On rollback, keep the fence frozen and
+fix forward. Never remove or rewrite ledger evidence.
+
+The backfill preserves current evidence plus conservative openings for every nonterminal generated
+packet, every nonterminal canonical portal capability, and every legacy extension record whose
+`auto_submitted` value is exactly true. Each source gets a distinct deterministic attempt so a safe
+resolution for one cannot release another. A blank legacy extension identity remains a user-wide
+fail-closed hold because it cannot be compared safely. The Max Borges Agency Workable packet
+`c43b9eeb-c1f3-4fd9-b9ba-d74e4dd0ad30` has a deterministic operational hold for the vault-recorded
+pressed and unverified attempt on 2026-08-20. That hold remains blocked until a person records an
+exact resolution.
 
 ## Shipping a change
 
