@@ -1,7 +1,10 @@
 import { and, asc, countDistinct, eq, gte, inArray, sql } from 'drizzle-orm';
 import { v5 as uuidv5 } from 'uuid';
 import { db } from '../db';
-import { application_submission_attempt_events } from '../db/schema';
+import {
+  application_submission_attempt_events,
+  application_submission_attempt_ledger_cutovers,
+} from '../db/schema';
 import {
   ashbyPostingFromUrl,
   canonicalPublicPostingUrl,
@@ -1046,4 +1049,38 @@ export async function submissionAttemptRetrySafetyForPacket(
   return submissionAttemptRetrySafetyForPacketEvents(
     await submissionAttemptEventsForPacket(userId, packetId, options),
   );
+}
+
+/* THE LEDGER CAN ARRIVE BEFORE THE TABLES IT READS.
+ *
+ * These four tables are created by a separately dispatched migration, not by anything that runs on
+ * deploy: there is no postinstall or vercel-build hook, and src/db/migrate.ts points at a drizzle
+ * directory this repo does not have. Merging ships the code; the migration does not follow it. The
+ * cutover fence does not cover that gap either, because its default is off and the dashboard list
+ * is deliberately readable even while submissions are paused.
+ *
+ * So the gap has to be VISIBLE. The migration's own completion marker is the honest signal, and an
+ * absent one means "not migrated yet", not "broken". Reported at /health so a runtime that landed
+ * ahead of its migration is caught by the same revision-and-state check every other release step
+ * already makes, instead of first showing up as 500s on somebody's board.
+ *
+ * This never throws. A health probe that can take the endpoint down with it is not a health probe.
+ */
+export async function submissionLedgerReadiness(
+  executor: Pick<typeof db, 'select'> = db,
+): Promise<{ ready: boolean; reason: 'cutover_recorded' | 'not_migrated' | 'unreadable' }> {
+  try {
+    const rows = await executor
+      .select({ cutover_key: application_submission_attempt_ledger_cutovers.cutover_key })
+      .from(application_submission_attempt_ledger_cutovers)
+      .limit(1);
+    return rows.length > 0
+      ? { ready: true, reason: 'cutover_recorded' as const }
+      : { ready: false, reason: 'not_migrated' as const };
+  } catch {
+    // A missing relation and an unreachable database are both "cannot say it is ready". The
+    // distinction that matters to a release is ready versus not, and the driver's message can name
+    // hosts and roles, so it stays out of an unauthenticated response.
+    return { ready: false, reason: 'unreadable' as const };
+  }
 }

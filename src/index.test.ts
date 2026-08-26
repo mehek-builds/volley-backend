@@ -206,6 +206,20 @@ test('submission cutover runs before auth and publishes only its effective confi
     const drainHealth = await drain.inject({ method: 'GET', url: '/health' });
     assert.deepEqual(drainHealth.json().submission_cutover, { mode: 'drain', config_valid: true });
 
+    /* THE LEDGER'S READINESS IS PART OF THE RELEASE'S STATE. This runtime reads four tables a
+     * hand-dispatched migration creates, and nothing runs that migration on deploy. Without this
+     * field a runtime that landed ahead of its migration answers a healthy 200 while the dashboard
+     * list 500s, which is the shape of the 2026-08-04 incident this endpoint was hardened against.
+     * Under test no migration has run, so the honest answer is "not ready", and it must never
+     * throw: a readiness probe that can take /health down with it is not a readiness probe. */
+    const ledger = drainHealth.json().submission_ledger;
+    assert.equal(ledger.ready, false, 'an unmigrated ledger must report itself unready');
+    assert.ok(['not_migrated', 'unreadable'].includes(ledger.reason), `unexpected reason ${ledger.reason}`);
+    // 200, or the 503 a degraded dependency already produces. The probe must not add a new way to
+    // fail: the migration workflow's own preflight accepts exactly these two.
+    assert.ok([200, 503].includes(drainHealth.statusCode),
+      `the readiness probe must not take the endpoint down (got ${drainHealth.statusCode})`);
+
     const invalidValue = 'invalid-value-must-not-be-echoed';
     const invalid = await appFor(invalidValue);
     const invalidHealth = await invalid.inject({ method: 'GET', url: '/health' });

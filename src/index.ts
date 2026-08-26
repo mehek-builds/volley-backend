@@ -61,6 +61,7 @@ import { applicationEmailHealth } from './lib/applicationEmail';
 import { applicationEmailRouteSelection } from './lib/applicationEmailRoute';
 import { warmApplicationAliasDeliverability } from './lib/applicationEmailDeliverability';
 import { aggregateServiceHealthStatus } from './lib/serviceHealth';
+import { submissionLedgerReadiness } from './lib/submissionAttemptLedger';
 import { createSubmissionCutoverHook, resolveSubmissionCutover } from './lib/submissionCutover';
 import {
   extensionClientNeedsSafetyUpdate,
@@ -291,6 +292,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
      * that moved real bytes would spend the resource it exists to watch. It never throws and always
      * times out, so a degraded database cannot take this endpoint down with it. */
     const database = await probeDatabase(() => db.execute(sql`select 1`));
+    const submissionLedger = await submissionLedgerReadiness();
     if (database.status !== 'ok') {
       // The category is what the response carries; the driver's message can name hosts and roles,
       // so the detail goes to the log and the endpoint stays safe to expose.
@@ -429,6 +431,10 @@ export async function buildApp(options: BuildAppOptions = {}) {
       // Effective state only. An invalid nonempty environment value fails closed to freeze, while
       // the value itself stays out of this unauthenticated response.
       submission_cutover: submissionCutover,
+      /* Whether the ledger this runtime reads actually exists yet. The migration that creates it is
+       * dispatched by hand and does not follow a deploy, so a release that arrives first is caught
+       * here rather than in 500s on somebody's board. */
+      submission_ledger: submissionLedger,
       ts: new Date().toISOString(),
     });
   });
