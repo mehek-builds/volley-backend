@@ -42,6 +42,8 @@ import {
   employerPageUrlIssue,
   packetDriftAttentionReason,
   packetQuestionsMatchAcknowledged,
+  packetQuestionAcknowledgement,
+  PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE,
   transportVerifiedBuiltPacket,
   verifiedBuiltPacketIssues,
   managedActionDiagnosticsForLog,
@@ -5568,8 +5570,117 @@ test('a documented option snap of the acknowledged answer passes the drift gate;
     'full employer-delivery payload changed after packet approval',
   ]);
 
-  // The multiset rule alone: same content reordered matches; a dropped or added question never does.
+  /* The multiset rule alone: same content reordered matches, and a DROPPED question never does.
+   * An added one is judged by whose claim it carries rather than by arithmetic - the duplicate
+   * below wears projected[0]'s applicant_review flag, so it is refused as a forgery rather than as
+   * arithmetic. See packetQuestionAcknowledgement, and the tests at the end of this file for the
+   * unclaimed case - which is refused too, but as a question to ASK rather than as drift. */
   assert.equal(packetQuestionsMatchAcknowledged([projected[1], projected[0]], projected), true);
   assert.equal(packetQuestionsMatchAcknowledged([projected[0]], projected), false);
   assert.equal(packetQuestionsMatchAcknowledged([...projected, projected[0]], projected), false);
 });
+
+/* THE CHECK THAT STOPPED EVERY MULTI-QUESTION APPLICATION FROM COMPLETING.
+ *
+ * Measured live 2026-08-26: six parked applications retried through the dashboard. Pony.ai, with 2
+ * questions, reached ready_for_final_approval. Old Mission (9), Jump Trading (11), Tower Research
+ * (14), IMC Trading (22) and Cloudflare (22) every one parked here, and every one told the applicant
+ * the application had "changed after you approved" when she had changed nothing. The inputs are not
+ * the same population: packet.questions is the LIVE form at fill time, verifiedProjected is the
+ * audit's set, and a form carrying more fields than the audit met is ordinary.
+ *
+ * These four cases pin the property that replaced equal length. The last two are the ones that must
+ * never regress: they are the reason the gate exists.
+ */
+const q = (over: Partial<SubmissionPacket['questions'][number]> = {}): SubmissionPacket['questions'][number] => ({
+  question: 'Will you require sponsorship?',
+  answer: 'Yes',
+  portalSelector: undefined,
+  portalInputType: undefined,
+  atsApiField: undefined,
+  answerOptionSource: undefined,
+  answerSource: undefined,
+  required: true,
+  ...over,
+});
+const acknowledged = [q({ question: 'Degree?', answer: 'BS in Computer Science', answerSource: 'applicant_review' })];
+
+/* A FORM WHOSE DOM MOVED IS NOT AN APPLICANT WHO CHANGED HER MIND.
+ *
+ * portalSelector, portalInputType and required are read off the live page every run, and for a
+ * control with no durable id the selector is the [data-litos-discovered-N] marker stamped by THAT
+ * page load. The acknowledged copy of all three is the previous run's reading of the same form, not
+ * anything she reviewed. Comparing them byte-for-byte is why the retry never converged: the marker
+ * is renumbered every load, so the packet could never equal the audit however many times she
+ * re-approved. Her answer is untouched here, and that is the only byte the employer receives. */
+test('the live form re-aimed, her answer untouched, passes the drift gate', () => {
+  const acknowledgedQ = q({ portalSelector: '[data-litos-discovered-3]', portalInputType: 'text' });
+  const reAimed = q({ portalSelector: '[data-litos-discovered-7]', portalInputType: 'combobox', required: false });
+  assert.equal(packetQuestionsMatchAcknowledged([reAimed], [acknowledgedQ]), true);
+});
+
+/* THE ANSWER STILL HAS TO BE HERS, however the form moved. Same control, same aiming, one value
+ * swapped for another with no snap claim: that is the rewrite the gate exists to refuse, and the
+ * exemption above must not have bought it passage. */
+test('an aiming exemption does not license a changed answer', () => {
+  const acknowledgedQ = q({ portalSelector: '#sponsorship' });
+  const rewritten = q({ portalSelector: '[data-litos-discovered-2]', answer: 'No' });
+  assert.equal(packetQuestionsMatchAcknowledged([rewritten], [acknowledgedQ]), false);
+});
+
+/* A QUESTION THE AUDIT NEVER MET IS ASKED, NOT SENT, AND NOT CALLED DRIFT.
+ *
+ * An absent answer_source proves only that no human claim was minted - the essay drafter and
+ * answerReuse both produce answers wearing no flag, and one of those is a sentence she typed on a
+ * DIFFERENT employer's form. So an extra never passes. It gets its own issue string, so the send
+ * paths keep throwing exactly as before while the prepare hold writes the true sentence and puts the
+ * question in front of her. */
+test('an extra question the audit never met is refused, and named as an ask rather than as drift', () => {
+  const drafted = q({ question: 'Why this team?', answer: 'A freshly drafted paragraph.' });
+  assert.equal(packetQuestionsMatchAcknowledged([...acknowledged, drafted], acknowledged), false);
+  assert.deepEqual(packetQuestionAcknowledgement([...acknowledged, drafted], acknowledged), {
+    missing: [], unacknowledged: ['Why this team?'], forged: [],
+  });
+  assert.equal(
+    packetDriftAttentionReason([PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE]),
+    'This company form asks questions your approved packet did not cover, so nothing was sent.'
+      + ' Open it, answer them, and approve it again.',
+  );
+  assert.doesNotMatch(packetDriftAttentionReason([PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE]), /changed after you approved/);
+});
+
+/* AN EMPTY EXTRA IS NOT A HARMLESS EXTRA, which is the measurement that decided this design.
+ * greenhouseReviewedQuestionAnswer synthesises a value from the packet for a row whose own answer is
+ * blank - graduationMonth, the graduation-year control, the referral source - and the managed action
+ * loops gate on THAT result rather than on item.answer. A blank question the audit never met can
+ * still type her profile into a field she was never shown, so it is asked like any other extra. */
+test('a blank question the audit never met is still asked, never waved through', () => {
+  const blankExtra = q({ question: 'What is your graduation month?', answer: '' });
+  assert.equal(packetQuestionsMatchAcknowledged([...acknowledged, blankExtra], acknowledged), false);
+});
+
+test('everything she DID approve must still be there', () => {
+  // An extra may be added; an acknowledged one may never go missing behind it.
+  assert.equal(packetQuestionsMatchAcknowledged([q()], acknowledged), false);
+});
+
+test('an extra wearing her review flag is refused', () => {
+  // This is the forgery the gate is for: an answer asserting she reviewed it, on a question the
+  // audit never showed her.
+  const forged = q({ answerSource: 'applicant_review' });
+  assert.equal(packetQuestionsMatchAcknowledged([...acknowledged, forged], acknowledged), false);
+});
+
+test('a granted permission is not transferable to another question', () => {
+  const borrowed = q({ answerSource: 'consent_permission' });
+  assert.equal(packetQuestionsMatchAcknowledged([...acknowledged, borrowed], acknowledged), false);
+});
+
+test('a REWRITTEN acknowledged answer is not laundered as an extra', () => {
+  /* The subtle one. A modified question finds no twin, so it lands in the unacknowledged pile -
+   * but its acknowledged original is then left unmatched, and that half fails first. Without it,
+   * stripping answer_source off a rewritten answer would buy passage. */
+  const rewritten = { ...acknowledged[0], answer: 'PhD in Computer Science', answerSource: undefined };
+  assert.equal(packetQuestionsMatchAcknowledged([rewritten], acknowledged), false);
+});
+
