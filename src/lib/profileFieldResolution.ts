@@ -71,6 +71,7 @@ import {
   isCompanySiteReferralClaim,
   isJobBoardReferralClaim,
   genericJobBoardOption,
+  namedJobBoardOption,
   otherReferralOption,
 } from './referralSource';
 import {
@@ -1375,7 +1376,15 @@ export function resolveProfileField(
      * and held a complete application; now it is answered the way she asked for it to be. */
     if (matched === null && isJobBoardReferralClaim(evidenced)) {
       const options = usableOptions(shape.options);
-      matched = genericJobBoardOption(options) ?? otherReferralOption(options) ?? null;
+      /* namedJobBoardOption is last because it says the MOST: it names one particular board, where
+       * her standing answer is the generic fact. It is only correct once the two entries that state
+       * that fact more exactly - the generic wording, then "Other" - are both absent from the list,
+       * which is the Databricks shape. See namedJobBoardOption for the exclusions that keep a
+       * referral, a recruiter or a career fair from ever landing here. */
+      matched = genericJobBoardOption(options)
+        ?? otherReferralOption(options)
+        ?? namedJobBoardOption(options)
+        ?? null;
     }
   }
   if (key === 'referral_source_default' && usableOptions(shape.options).length > 0 && matched === null) {

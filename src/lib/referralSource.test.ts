@@ -6,6 +6,7 @@ import {
   referralSourceForApplication,
   referralSourceOptionCandidates,
   genericJobBoardOption,
+  namedJobBoardOption,
   otherReferralOption,
   REFERRAL_OTHER_DETAIL,
   type ReferralSourceEvidence,
@@ -102,4 +103,71 @@ test('specific non-site sources remain available when no packet evidence exists'
   assert.equal(referralSourceForApplication('University event'), 'University event');
   assert.deepEqual(referralSourceOptionCandidates('LinkedIn'), ['LinkedIn']);
   assert.deepEqual(referralSourceOptionCandidates('Careers'), []);
+});
+
+/* THE DATABRICKS SHAPE: a list with no generic board entry and no "Other".
+ *
+ * Read live off Databricks' Greenhouse form on 2026-08-26, where a fully filled, audited packet
+ * parked on this one required radio button. genericJobBoardOption abstains here on purpose
+ * ("LinkedIn Job Posting" is a qualified board) and otherReferralOption has nothing to find, so
+ * before namedJobBoardOption the ladder ran out and the question came back "left for you".
+ */
+const DATABRICKS_OPTIONS = [
+  'LinkedIn Job Posting',
+  'Recruiter Reach Out',
+  'BrickFest',
+  'School Career Fair and/or Event',
+  'Referral from Employee',
+  'Referral from Intern',
+  'I am a previous Databricks intern',
+];
+
+test('the named board is taken when the list offers neither a generic board nor Other', () => {
+  assert.equal(namedJobBoardOption(DATABRICKS_OPTIONS), 'LinkedIn Job Posting');
+  // The two entries that would say it better are genuinely absent; that is what makes this reachable.
+  assert.equal(genericJobBoardOption(DATABRICKS_OPTIONS), undefined);
+  assert.equal(otherReferralOption(DATABRICKS_OPTIONS), undefined);
+});
+
+test('no claim she cannot make is ever reachable by name', () => {
+  /* Each of these is a relationship that did not happen. A referral additionally routes the
+   * application to a named employee and can pay that employee a bonus. */
+  for (const option of [
+    'Referral from Employee',
+    'Referral from Intern',
+    'Recruiter Reach Out',
+    'I am a previous Databricks intern',
+    'School Career Fair and/or Event',
+    'BrickFest',
+  ]) {
+    assert.equal(namedJobBoardOption([option]), undefined, option);
+  }
+});
+
+test('a board name attached to a person-channel is still refused', () => {
+  // The board's own name in the string is not enough; the channel is what the entry claims.
+  assert.equal(namedJobBoardOption(['LinkedIn Recruiter reached out']), undefined);
+  assert.equal(namedJobBoardOption(['Referred by a LinkedIn connection']), undefined);
+  assert.equal(namedJobBoardOption(['Indeed - employee referral']), undefined);
+});
+
+test('university-affiliated boards are not public boards', () => {
+  // Handshake and a university board both assert she came through USC's careers channel.
+  assert.equal(namedJobBoardOption(['Handshake']), undefined);
+  assert.equal(namedJobBoardOption(['University job board']), undefined);
+  assert.equal(namedJobBoardOption(['College Career Website']), undefined);
+});
+
+test('ambiguity abstains rather than guessing a board', () => {
+  // Two boards named, or none: the question goes back to her, which is the honest outcome.
+  assert.equal(namedJobBoardOption(['LinkedIn', 'Indeed']), undefined);
+  assert.equal(namedJobBoardOption(['Recruiter Reach Out', 'Career Fair']), undefined);
+  assert.equal(namedJobBoardOption([]), undefined);
+});
+
+test('the generic entry still wins when the list has one', () => {
+  /* namedJobBoardOption must never PREEMPT the generic wording - it says more than her standing
+   * answer does, so it is only correct when nothing states the fact more plainly. */
+  const withGeneric = ['Job board', 'LinkedIn Job Posting', 'Referral from Employee'];
+  assert.equal(genericJobBoardOption(withGeneric), 'Job board');
 });
