@@ -560,4 +560,38 @@ describe('exact-country resolver', () => {
     const resume = readFileSync('src/routes/resume.ts', 'utf8');
     assert.match(resume, /postingPortalCountry[\s\S]*portal_country: postingPortalCountry/);
   });
+
+  test('a packet generated against a saved application still freezes that posting\'s country', () => {
+    /* THE ONE WRITER, and the one input every later resolver has.
+     *
+     * routes/resume.ts:1375 is the only insert into generated_resumes anywhere in the codebase, so
+     * the job_context it composes is the ONLY country evidence routes/submissionRunner.ts and
+     * routes/applications.ts can ever compute a postingCountryCode from. It read the posting row
+     * from `body.job_id` and nothing else, while canonicalApplicationBindingMismatches deliberately
+     * tolerates a body that omits job_id and identifies the posting through application_id instead
+     * (the job_id comparison is skipped outright when `incoming.jobId === undefined`). Every packet
+     * built through that supported shape was therefore written with `{ company, role, jd_hash }` and
+     * no geography at all, and selectedEligibilityCountry then had nothing to fall back on for any
+     * sponsorship question that does not name a country in its own words - which is exactly the
+     * shape that puts the employer's name there instead ("...to work at Cloudflare?").
+     *
+     * Pinned as source, like the three assertions above it, because the branch is a DB read inside a
+     * 1,200-line handler and what has to stay true about it is structural: the lookup happens, it
+     * happens only when the request named no posting of its own, and it feeds the same two variables
+     * the job_id branch feeds. The resolver behaviour on either side of it is pinned for real in
+     * questionDiscovery.test.ts. */
+    const resume = readFileSync('src/routes/resume.ts', 'utf8');
+    assert.match(
+      resume,
+      /if \(!body\.job_id && ownedCanonicalApplication\.job_id\) \{[\s\S]{0,400}?postingRow\(ownedCanonicalApplication\.job_id\)/,
+      'the canonical application\'s own posting is the fallback when the body names none',
+    );
+    assert.match(resume, /postingLocation = canonicalPosting\?\.location \?\? null/);
+    assert.match(resume, /postingPortalCountry = canonicalPosting\?\.portal_country \?\? null/);
+    // AFTER the binding gate, so the row read is provably the same posting this request is about.
+    assert.ok(
+      resume.indexOf("code: 'application_context_mismatch'") < resume.indexOf('postingRow(ownedCanonicalApplication.job_id)'),
+      'the mismatch refusal must come first',
+    );
+  });
 });

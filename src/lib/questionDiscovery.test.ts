@@ -35,6 +35,10 @@ import {
 // graduation year came from the ladder, not from resolveKnownAnswer, and only this call sees it.
 import { resolveProfileField } from './profileFieldResolution';
 import { packetAuditSha256, packetVisibleQuestions } from './packetAudit';
+// The employer-named sponsorship tests below resolve the posting country through the real parser
+// rather than passing a code by hand: the parser is the half that decides whether the packet's own
+// structured fields name one country exactly enough to answer on.
+import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from './jobLocation';
 
 // R-004 originally refused every work-eligibility question after one false legal declaration
 // shipped. These are now answerable only from explicit stored booleans, never by inference.
@@ -3689,6 +3693,98 @@ test('stored country eligibility answers only labels that select that country', 
     const empty = resolveKnownAnswer(label, 'text', {}, undefined);
     assert.ok(empty && 'skipReason' in empty, label.slice(0, 70));
     assert.ok(empty.skipReason.trim().length > 20, label.slice(0, 70));
+  }
+});
+
+/* THE COMPANY NAME WHERE THE COUNTRY GOES, WITH THE POSTING SUPPLIED.
+ *
+ * The test above passes `undefined` for the posting country at every call, so what it pins is the
+ * FLOOR: with no posting in hand, an employer's name where a country belongs leaves
+ * selectedEligibilityCountry nothing to select and the question goes back to her. It was read as
+ * "Cloudflare's wording is unanswerable", and that reading is wrong. The LABEL was never the
+ * defect. The resolver answers it the moment an exact country arrives, and the country was being
+ * lost upstream, in the one place a packet's geography is ever written: `POST /resume/generate`
+ * read the posting row from `body.job_id` alone, so a request that named its posting through the
+ * canonical application instead stored a job_context of `{ company, role, jd_hash }` and nothing
+ * else. `postingCountryCodeFromJobContext(row.job_context)` is then correctly `undefined` at every
+ * one of its call sites, and each of them correctly refuses - which is why nothing looked broken
+ * anywhere in between, and why the label kept taking the blame.
+ *
+ * The three contexts below are the three shapes generated_resumes.job_context actually holds: a
+ * location string, the ATS's own country field, and a "Remote" posting whose country the employer
+ * published separately. Nothing here asserts a hardcoded 'US' - the parser decides, and the
+ * assertion is that it decided exactly once.
+ */
+test('an employer-named sponsorship label is answered from the posting country the packet carries', () => {
+  for (const jobContext of [
+    { company: 'Cloudflare', role: 'Software Engineering Intern', jd_hash: 'e515deb8', location: 'Austin, TX' },
+    { company: 'Cloudflare', role: 'Software Engineering Intern', jd_hash: 'e515deb8', portal_country: 'US' },
+    {
+      company: 'Cloudflare',
+      role: 'Software Engineering Intern',
+      jd_hash: 'e515deb8',
+      location: 'Remote',
+      portal_country: 'United States',
+    },
+  ]) {
+    const country = postingCountryFromJobContext(jobContext);
+    const code = postingCountryCodeFromJobContext(jobContext);
+    assert.equal(code, 'US', JSON.stringify(jobContext));
+    // The employer's own name, and the two-hundred-word tail of visa categories beside it, are the
+    // same question with the same stored answer behind them.
+    for (const label of [CLOUDFLARE_SPONSORSHIP_LABEL, REDWOOD_SPONSORSHIP_LABEL]) {
+      assert.deepEqual(
+        resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, undefined, country, code),
+        { value: 'Yes' },
+        `${label.slice(0, 50)} / ${JSON.stringify(jobContext)}`,
+      );
+    }
+  }
+
+  /* It is READING needs_sponsorship, not agreeing with it. An account that needs nothing gets the
+   * opposite answer on the identical label and posting, which is the only thing separating a relay
+   * from a constant - and a constant "Yes" here is R-004's false legal declaration again. */
+  const noSponsorshipNeeded: ApplicationProfileLike = {
+    work_authorized: true,
+    needs_sponsorship: false,
+    work_eligibility_by_country: [{
+      country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false,
+    }],
+  };
+  assert.deepEqual(
+    resolveKnownAnswer(CLOUDFLARE_SPONSORSHIP_LABEL, 'text', noSponsorshipNeeded, undefined, 'us', 'US'),
+    { value: 'No' },
+  );
+});
+
+test('an employer-named sponsorship label still refuses when the posting names no one country', () => {
+  /* THE FAIL-CLOSED HALF, and it is the half that must survive every future repair of the half
+   * above. "Yes, I need sponsorship" is wrong and costly for a role in the one country where she
+   * does not, so a posting that cannot say which country it is in must leave the field for her -
+   * exactly as it does today. Four ways a posting says nothing usable, all of them live shapes:
+   * a packet with no structured location at all (what every countryless packet on disk looks like),
+   * a bare "Remote", two offices in two countries, and a portal country field naming two.
+   *
+   * The fifth case is different in kind and belongs here anyway: London resolves to exactly ONE
+   * country, GB, and is still refused, because no GB declaration is on file. An exact country is
+   * what lets the resolver look; it is not permission to answer. */
+  for (const jobContext of [
+    { company: 'Cloudflare', role: 'Software Engineering Intern', jd_hash: 'e515deb8' },
+    { company: 'Cloudflare', role: 'Software Engineering Intern', jd_hash: 'e515deb8', location: 'Remote' },
+    { locations: ['San Francisco, CA', 'London'] },
+    { portal_country: 'United States | Canada' },
+    { location: 'London, United Kingdom' },
+  ]) {
+    const country = postingCountryFromJobContext(jobContext);
+    const code = postingCountryCodeFromJobContext(jobContext);
+    for (const label of [CLOUDFLARE_SPONSORSHIP_LABEL, REDWOOD_SPONSORSHIP_LABEL]) {
+      const resolved = resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, undefined, country, code);
+      assert.ok(
+        resolved && 'skipReason' in resolved,
+        `${label.slice(0, 50)} / ${JSON.stringify(jobContext)}`,
+      );
+      assert.ok(resolved.skipReason.trim().length > 20, JSON.stringify(jobContext));
+    }
   }
 });
 
