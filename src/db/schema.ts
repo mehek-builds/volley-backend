@@ -215,8 +215,11 @@ export const users = pgTable('users', {
   /* The specific posting a job-first account is entitled to spend its one free build on. Set at
      guest creation, read by the match step in place of the ranked-board algorithm, and cleared
      (best-effort) once /onboarding/flow/steps acknowledges 'match' so a later reload never
-     re-offers a job the student has already moved past. Null for every ordinary account. */
-  pinned_onboarding_job_id: text('pinned_onboarding_job_id'),
+     re-offers a job the student has already moved past. Null for every ordinary account.
+     uuid, not text: this always holds a monitored_jobs.id, and matching that column's own type
+     is what keeps a future join against it (e.g. the match step's own lookup) a plain indexed
+     equality instead of a cast that can silently defeat monitored_jobs' primary-key index. */
+  pinned_onboarding_job_id: uuid('pinned_onboarding_job_id'),
   // The exact answer given, kept for the record and for the settings screen to explain itself.
   sponsorship_answer: text('sponsorship_answer'),
   // The settings toggle. Independent of the declaration and strictly additive: someone who did not

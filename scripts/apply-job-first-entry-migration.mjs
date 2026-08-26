@@ -16,7 +16,7 @@ import pg from 'pg';
 
 const COLUMNS = [
   { name: 'job_first_entry', definition: 'boolean not null default false' },
-  { name: 'pinned_onboarding_job_id', definition: 'text' },
+  { name: 'pinned_onboarding_job_id', definition: 'uuid' },
 ];
 
 function quoteIdentifier(value) {

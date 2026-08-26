@@ -3,8 +3,9 @@ import { z } from 'zod';
 import { createRemoteJWKSet, jwtVerify, SignJWT, type JWTPayload as JoseJWTPayload } from 'jose';
 import { createHash, randomInt } from 'node:crypto';
 import { db, withDedicatedDatabase } from '../db/index';
-import { users, email_verification_codes, monitored_jobs } from '../db/schema';
-import { and, eq, gte, lt, sql } from 'drizzle-orm';
+import { users, email_verification_codes, monitored_jobs, career_page_sources } from '../db/schema';
+import { and, eq, gte, inArray, lt, sql } from 'drizzle-orm';
+import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { v4 as uuidv4 } from 'uuid';
 import { allowHourly, rateLimitedReply, LIMITS, TRIAL_DAYS } from '../middleware/quota';
 import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
@@ -368,9 +369,44 @@ export async function authRoutes(fastify: FastifyInstance) {
 
     const keyHash = hashCode(parsed.data.idempotency_key);
     try {
+      /* Validated once, up front, so every path below - a brand new guest, one returning with
+         an active session, one returning after theirs expired - can offer the same pin from the
+         same click. checked against the identical, NEVER RELAXED predicate GET /jobs/:id and the
+         board itself enforce (jobMonitor.ts): is_active, the source being enabled, and ATS family
+         membership in AUTONOMOUS_PORTAL_FAMILIES. A weaker check here would pin an account to a
+         posting the rest of the product refuses to show or build against - the exact dead end
+         this comment used to only half-prevent. A miss degrades to the ordinary guest flow rather
+         than failing the whole sign-up - the click still deserves an account even if the board
+         moved under it. */
+      const targetJobId = parsed.data.target_job_id;
+      const pinnedJob = targetJobId
+        ? await db.select({ id: monitored_jobs.id })
+            .from(monitored_jobs)
+            .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+            .where(and(
+              eq(monitored_jobs.id, targetJobId),
+              eq(monitored_jobs.is_active, true),
+              eq(career_page_sources.enabled, true),
+              inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+            ))
+            .limit(1)
+        : [];
+      const jobFirstEntry = pinnedJob.length === 1;
+
       const existing = await db.select().from(users).where(eq(users.guest_key_hash, keyHash)).limit(1);
       const active = existing[0];
       if (active?.is_guest && active.guest_expires_at && active.guest_expires_at > new Date()) {
+        /* A RETURNING guest who clicks a job-first posting deserves the pin too - the click is
+           what carries the intent, not the account's age. Scoped tightly: only while the account
+           is still in setup (never re-pin or reopen a finished one), and only when it does not
+           already carry a pin of its own (never silently swap one posting's claim for another's
+           mid-flow). Anything outside that leaves the account exactly as it already was, which is
+           the same "degrade to the ordinary flow" rule the validation above follows. */
+        if (jobFirstEntry && !active.onboarding_completed_at && !active.job_first_entry) {
+          await db.update(users)
+            .set({ job_first_entry: true, pinned_onboarding_job_id: targetJobId })
+            .where(eq(users.id, active.id));
+        }
         const token = await signSessionToken(active.id, {
           isGuest: true,
           expiresAt: Math.floor(active.guest_expires_at.getTime() / 1000),
@@ -393,43 +429,42 @@ export async function authRoutes(fastify: FastifyInstance) {
       const ipAllowed = await allowHourly(`ip:${request.ip}`, 'guest-create-ip', 3);
       if (!ipAllowed) return rateLimitedReply(reply);
 
-      /* Checked before the write, not trusted from the request: a client-chosen id that does not
-         name a real, active posting must not pin an account to something /jobs/:id will 404 on
-         the moment the match step tries to build it. A miss degrades to the ordinary guest flow
-         rather than failing the whole sign-up - the click still deserves an account even if the
-         board moved under it. */
-      const targetJobId = parsed.data.target_job_id;
-      const pinnedJob = targetJobId
-        ? await db.select({ id: monitored_jobs.id })
-            .from(monitored_jobs)
-            .where(and(eq(monitored_jobs.id, targetJobId), eq(monitored_jobs.is_active, true)))
-            .limit(1)
-        : [];
-      const jobFirstEntry = pinnedJob.length === 1;
-
       const now = new Date();
       /* A guest has no email and no card, so a guest cannot start a trial at
          all any more. The guest session itself is unchanged -- it still lasts
          guestExpiry() and still fills applications, which is the whole free
          tier -- it simply starts on Free instead of on Litos+. */
       const guest_expires_at = guestExpiry(now);
-      const created = await db
-        .insert(users)
-        .values({
-          id: uuidv4(),
-          email: null,
-          email_verified: false,
-          is_guest: true,
-          guest_key_hash: keyHash,
-          entitlement_policy_version: ENTITLEMENT_POLICY_VERSION,
-          ...signupTrialGrant(),
-          guest_expires_at,
-          created_at: now,
-          job_first_entry: jobFirstEntry,
-          pinned_onboarding_job_id: jobFirstEntry ? targetJobId : null,
-        })
-        .onConflictDoNothing({ target: users.guest_key_hash })
-        .returning();
+      const insertValues = {
+        id: uuidv4(),
+        email: null,
+        email_verified: false,
+        is_guest: true,
+        guest_key_hash: keyHash,
+        entitlement_policy_version: ENTITLEMENT_POLICY_VERSION,
+        ...signupTrialGrant(),
+        guest_expires_at,
+        created_at: now,
+        job_first_entry: jobFirstEntry,
+        pinned_onboarding_job_id: jobFirstEntry ? targetJobId : null,
+      };
+      /* A conflict here means the idempotency key already names a row - an EXPIRED guest whose
+         session lapsed, since an active one was already handled above. Ordinarily that is a pure
+         no-op: the row keeps whatever it already had. But when THIS request carries a validated
+         pin, doing nothing would silently drop it exactly like the returning-active-guest case
+         above did before this fix - so the same job-first fields get upserted onto the existing
+         row instead. Branched rather than always upserting, because an upsert with no pin to
+         offer must never overwrite a pin (or job_first_entry) that row already carries. */
+      const created = jobFirstEntry
+        ? await db.insert(users).values(insertValues)
+            .onConflictDoUpdate({
+              target: users.guest_key_hash,
+              set: { job_first_entry: true, pinned_onboarding_job_id: targetJobId },
+            })
+            .returning()
+        : await db.insert(users).values(insertValues)
+            .onConflictDoNothing({ target: users.guest_key_hash })
+            .returning();
       const guest = created[0]
         ?? (await db.select().from(users).where(eq(users.guest_key_hash, keyHash)).limit(1))[0];
       if (!guest) throw new Error('Guest creation did not return a user');

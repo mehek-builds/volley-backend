@@ -438,20 +438,21 @@ export function onboardingStepFrom(input: {
      showing them that resume would re-ask a question their click already answered. 'focus' is not
      skipped forever, only moved: the route handler serves it once more, after the application
      sequence (which is what actually spends the pinned job) has itself resolved to 'done', so it
-     stays a required step and simply lands where it stops being in the way. */
-  if (input.jobFirstEntry) {
-    if (!input.hasResume) return 'resume';
-    return 'done';
-  }
-  /* FOCUS LEADS. A resume upload is the heaviest act in the flow and it used to be the front door;
-     roles is three taps and it is now what a student meets first.
+     stays a required step and simply lands where it stops being in the way.
+     The resume check below is shared with the ordinary path rather than repeated in a branch of
+     its own - a job-first account and an ordinary one agree on exactly one thing, "no resume yet
+     means the resume screen", and writing that once keeps the two paths unable to quietly
+     disagree about it. */
+  if (!input.jobFirstEntry && !input.hasFocus) return 'focus';
+  /* FOCUS LEADS for an ordinary account. A resume upload is the heaviest act in the flow and it
+     used to be the front door; roles is three taps and it is now what a student meets first.
      The ordering is only safe because the focus screen no longer needs a resume to draw itself.
      It used to seed its title list from inferResumeTargeting, which is why it sat third; the
      field-then-stage-then-titles picker derives its candidates from the chosen field instead
      (lib/onboarding-role-inference.ts, FIELDS), so there is nothing left here to wait on.
      The resume inference still seeds a RETURNING student's screen - it just no longer gates it. */
-  if (!input.hasFocus) return 'focus';
   if (!input.hasResume) return 'resume';
+  if (input.jobFirstEntry) return 'done';
   /* BASE, GAPS AND SPONSORSHIP ARE NO LONGER DERIVED HERE, each for its own measured reason.
    *
    * base: the one-page review was never a question, it was an artifact review. The packet is built
@@ -950,9 +951,20 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
      * deploy first, verify, then flip it, and set it to the deploy instant to gate
      * only new signups or to a past date to gate everyone. */
     const requiresPaymentMethod = requiresPaymentMethodFor(user);
+    /* THE THIRD TERM IS THE JOB-FIRST FOCUS GATE, and it has to be OR'd in here too, not only
+       into the step served below. onboardingStepFrom skipped this account's own focus check
+       entirely so derivedStep reads 'done' the moment a job-first account has a resume - that is
+       correct for THAT function's job, but it means derivedStep !== 'done' alone can no longer
+       stand in for "onboarding is finished" the way it always has for every other account. A
+       job-first account can satisfy every term above (derivedStep 'done', flow completed, no
+       card owed) while still owing the deferred focus screen. Without this term, a caller that
+       reads requires_onboarding instead of step (the field's own documented purpose - see the
+       CARD GATE comment above) would wave the account into the dashboard having never set a
+       target role, the same class of gap the card gate exists to close for payment. */
     const requiresOnboarding = requiresPaymentMethod || (flow.available
       ? !flowCompleted || derivedStep !== 'done'
-      : derivedStep !== 'done');
+      : derivedStep !== 'done')
+      || (jobFirstEntry && !has_focus && step === 'done');
     /* AND THE STEP HAS TO BE THE ONE THAT TAKES A CARD, or the gate is a loop.
        Saying "onboarding is not finished" while serving 'done' sends the student to
        /start, which draws the finished screen, which offers no way to pay, while the
@@ -986,8 +998,11 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
          wherever it clicked in on /browse-jobs. Only meaningful while the match step is still
          ahead: the client uses it to skip the ranked-board algorithm and build against exactly
          the job the student chose, and it stops mattering (and gets cleared) the moment 'match'
-         is acknowledged. Never surfaced for an ordinary account. */
-      pinned_target_job_id: jobFirstEntry ? (user.pinned_onboarding_job_id ?? null) : null,
+         is acknowledged. Never set for an ordinary account in the first place - see auth.ts,
+         which only ever writes this column alongside job_first_entry - so reading the column
+         directly here already means "never surfaced for an ordinary account" without a redundant
+         jobFirstEntry guard restating the same fact. */
+      pinned_target_job_id: user.pinned_onboarding_job_id ?? null,
       flow_version: CURRENT_ONBOARDING_FLOW_VERSION,
       flow_completed: flowCompleted,
       requires_onboarding: requiresOnboarding,
