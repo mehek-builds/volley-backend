@@ -230,6 +230,36 @@ describe('a form-only page is refused rather than frozen into a packet', () => {
     assert.deepEqual(leadRequirementCandidates(clipJdText(page)), []);
   });
 
+  /* THE REFUSAL MUST NOT ASSERT MORE THAN THE PREDICATE PROVES. leadRequirementCandidates returns
+     nothing when it finds no stated requirement; a form is the usual cause but not the only one.
+     splitClauses works on LINES and drops any over 300 chars, so a genuine posting written as
+     flowing paragraphs lands here too - correctly refused, and previously told it was a form. */
+  test('the refusal states what was found, and offers the form only as a possibility', () => {
+    const route = readFileSync(path.join(__dirname, 'jobExtract.ts'), 'utf8');
+    assert.match(route, /could not find a stated requirement on that page/);
+    assert.match(route, /It may be the application form/);
+    // The old sentence asserted it outright. It must not come back.
+    assert.doesNotMatch(route, /looks like an application form rather than a job description/);
+  });
+
+  test('a cut-off description is explained as length, not as a form', () => {
+    const route = readFileSync(path.join(__dirname, 'jobExtract.ts'), 'utf8');
+    assert.match(route, /requirements sit past the amount of text Litos captures/);
+  });
+
+  /* The prose-paragraph shape this wording exists for, pinned so the claim in the comment stays
+     true: a single long line states no ask, and a section heading above it does not rescue it. */
+  test('a genuine posting written as one long line states no ask, heading or not', () => {
+    const oneLongLine = 'At Databricks we build the best data and AI infrastructure platform. As a '
+      + 'Product Management Intern you will learn how to be a successful PM. We are hiring across '
+      + 'all of our teams, including AI Platform, Machine Learning, Databricks SQL, ETL and EDA. '
+      + 'This is a 12 week paid summer internship. You will prototype and test early ideas with '
+      + 'customers using Python.';
+    assert.ok(oneLongLine.length > 300, 'fixture must exceed the clause cap to exercise this');
+    assert.deepEqual(leadRequirementCandidates(oneLongLine), []);
+    assert.deepEqual(leadRequirementCandidates(`What we look for:\n${oneLongLine}`), []);
+  });
+
   test('the route separates a cut-off description from a page that never had one', () => {
     const route = readFileSync(path.join(__dirname, 'jobExtract.ts'), 'utf8');
     assert.match(route, /descriptionPushedPastCap/);

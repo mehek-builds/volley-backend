@@ -214,8 +214,24 @@ export async function jobExtractRoutes(fastify: FastifyInstance) {
         },
         'job description extraction returned no stated requirement',
       );
+      /* SAY WHAT WAS DETERMINED, NOT WHAT IT PROBABLY MEANS. This read "That page looks like an
+         application form rather than a job description", which the predicate does not establish:
+         leadRequirementCandidates returns nothing when it finds no stated requirement, and a form
+         is only the most common reason. It is not the only one. splitClauses works on LINES and
+         drops any over 300 characters, so a genuine posting written as flowing paragraphs rather
+         than bullets also lands here, correctly refused and wrongly explained. Measured on this
+         repo's own fixtures: the abridged Databricks posting behind ISSUE-014 is a single 458
+         character line and states no ask by this test, and adding a section heading above it does
+         not change that.
+
+         A refusal with a false reason is worse than a blunt one. It sends the operator hunting for
+         a form that is not there and reads as a product defect rather than as what it is, which is
+         that the captured text did not contain a requirement. The form remains a hint because it is
+         genuinely the usual cause, but it is offered as a possibility rather than asserted. */
       return reply.status(502).send({
-        error: 'That page looks like an application form rather than a job description. Paste the job description manually instead.',
+        error: descriptionPushedPastCap
+          ? 'Litos read that page, but its requirements sit past the amount of text Litos captures. Paste the job description manually instead.'
+          : 'Litos could not find a stated requirement on that page. It may be the application form rather than the posting itself. Paste the job description manually instead.',
         code: descriptionPushedPastCap ? 'job_extract_truncated_past_description' : 'job_extract_no_requirements',
       });
     }
