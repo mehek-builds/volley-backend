@@ -190,7 +190,11 @@ test('extension outcomes only mark confirmed claims applied', () => {
     source.indexOf('export async function commitExtensionSubmissionOutcome('),
     source.indexOf('function finalApplicationAuthorizationMatches('),
   );
-  assert.match(outcomeCommit, /input\.reportedOutcome === 'confirmed'[\s\S]*?pipeline_stage: 'applied'/);
+  /* The stage write is gated on the DERIVED outcome, not the reported one: a claimed confirmation
+   * without a sufficient employer receipt is downgraded first, and only what survives that may mark
+   * the packet applied. */
+  assert.match(outcomeCommit, /outcome === 'confirmed'[\s\S]{0,120}pipeline_stage: 'applied'/);
+  assert.match(outcomeCommit, /input\.reportedOutcome === 'confirmed' && !extensionEmployerReceiptIsSufficient/);
   assert.match(outcomeCommit, /const exactClaim = current\.submission_claim_id === input\.claimId/);
   assert.match(outcomeCommit, /const confirmedRecovery = outcome === 'confirmed'/);
   assert.match(source, /extensionReceiptUrlSchema/);
@@ -200,9 +204,33 @@ test('extension outcomes only mark confirmed claims applied', () => {
     'non-confirmed outcome transitions must still use the stored packet snapshot');
   assert.doesNotMatch(outcomeContract, /resolvedPacketAuditQuestions\(/,
     'post-send profile or clock drift must not prevent receipt recording');
-  assert.match(outcomeCommit, /if \(outcome !== 'confirmed'\)[\s\S]*?verifyPacket\(latest, current\)/);
+  assert.match(outcomeCommit, /if \(outcome !== 'confirmed'\)[\s\S]*?audited\.verification\.valid/,
+    'only a non-confirmed outcome is decided by the packet audit');
   assert.doesNotMatch(outcomeCommit, /if \(outcome === 'confirmed'\)[\s\S]{0,160}verifyPacket/,
     'a sufficient exact employer receipt must not be vetoed by packet drift after the press');
+  assert.match(outcomeCommit, /extensionOutcomeForReceipt\(input, review\) === 'confirmed'\) return null/,
+    'the confirmed path must not pay for an audit it is forbidden to act on');
+
+  /* THE DEADLOCK THIS REPLACED. currentAcknowledgedPacketAudit reads the pooled handle and can
+   * fetch the resume; on Vercel the pool is one client, so awaiting it inside the locked
+   * transaction waited on the client that transaction was holding, forever. The press_observed
+   * fact rolled back with it, so a run that pressed Submit at the employer recorded nothing. The
+   * audit must therefore be computed before the transaction opens, and the locked body may only
+   * consume a verdict whose spec still matches byte for byte. */
+  const lockedBody = source.slice(
+    source.indexOf('async function commitAuditedExtensionOutcome('),
+    source.indexOf('function extensionOutcomeForReceipt('),
+  );
+  assert.doesNotMatch(lockedBody, /await verifyPacket\(/,
+    'the packet audit must never run inside the locked transaction');
+  assert.doesNotMatch(lockedBody, /currentAcknowledgedPacketAudit\(/,
+    'no pooled packet-audit read may run inside the locked transaction');
+  assert.match(lockedBody, /audited\.specJson !== JSON\.stringify\(latest\.spec\)[\s\S]*?audit_stale/,
+    'a verdict whose row moved must be re-audited, never applied to different bytes');
+  const pressIndex = lockedBody.indexOf("'press_observed'");
+  const verdictIndex = lockedBody.indexOf('audited.verification.valid');
+  assert.ok(pressIndex >= 0 && verdictIndex > pressIndex,
+    'the pressed-submit fact must be appended before the audit can return, so a failed audit still commits it');
 });
 
 test('extension claim reservation and outcome evidence fail closed across retries', () => {

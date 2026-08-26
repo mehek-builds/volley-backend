@@ -499,8 +499,11 @@ test('extension non-confirmed transitions verify the captured snapshot without v
   assert.match(extensionOutcome, /questions:\s*review\.questions/);
   assert.doesNotMatch(extensionOutcome, /resolvedPacketAuditQuestions\(/);
   assert.match(extensionOutcome, /review\.submission_packet_version !== verdict\.audit\.packet_version/);
-  assert.match(extensionOutcome, /if \(outcome !== 'confirmed'\)[\s\S]*?verifyPacket\(latest, current\)/);
+  assert.match(extensionOutcome, /if \(outcome !== 'confirmed'\)[\s\S]*?audited\.verification\.valid/);
   assert.doesNotMatch(extensionOutcome, /if \(outcome === 'confirmed'\)[\s\S]{0,160}verifyPacket/);
+  // The audit is the pooled, resume-fetching read. It runs before the lock, never inside it.
+  assert.match(extensionOutcome, /await verifyPacket\(candidate, review\)/,
+    'the audit must be computed against an unlocked read');
 
   const handoffComplete = routeSlice("'/applications/:id/submission/handoff-complete'", "'/applications/:id/submission/approve'");
   assert.match(handoffComplete, /questions:\s*current\.questions/);

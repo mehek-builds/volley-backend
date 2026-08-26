@@ -545,6 +545,34 @@ export async function commitExtensionSubmissionOutcome(input: {
   ) => Promise<ExtensionOutcomePacketVerification>;
 } = {}): Promise<ExtensionOutcomeCommitResult> {
   const verifyPacket = dependencies.verifyPacket ?? verifyExtensionOutcomePacket;
+  /* THE LOCK IS TAKEN FIRST, AND NOTHING IS READ BEFORE IT.
+   *
+   * A confirmed receipt needs no audit, so it must not pay a read to discover that: an extra query
+   * before the lock delays when this attempt queues for it, and a late receipt racing a queued
+   * negative resolution linearizes on that queue order. So round zero carries no verdict, takes the
+   * lock immediately, and only a non-confirmed outcome asks for one. That round returns without
+   * writing, which releases the lock, the audit runs unlocked, and the retry re-takes it. The audit
+   * costs an extra round only on the path that was going to be refused or projected anyway. */
+  let audited: { specJson: string; verification: ExtensionOutcomePacketVerification } | null = null;
+  for (let round = 0; ; round += 1) {
+    const result = await commitAuditedExtensionOutcome(input, audited);
+    if (result.kind !== 'audit_stale') return result;
+    if (round >= 2) return { kind: 'changed' as const, row: result.row };
+    audited = await auditExtensionOutcomeBeforeLock(input, verifyPacket);
+  }
+}
+
+async function commitAuditedExtensionOutcome(
+  input: {
+    packetId: string;
+    userId: string;
+    claimId: string;
+    reportedOutcome: ExtensionOutcome;
+    confirmationText?: string;
+    finalUrl: string;
+  },
+  audited: { specJson: string; verification: ExtensionOutcomePacketVerification } | null,
+): Promise<ExtensionOutcomeCommitResult | { kind: 'audit_stale'; row: StoredResumeRow }> {
   try {
     return await db.transaction(async (tx) => {
       await lockSubmissionAttemptUser(tx, input.userId);
@@ -566,14 +594,7 @@ export async function commitExtensionSubmissionOutcome(input: {
         return { kind: 'binding_mismatch' as const, row: latest };
       }
 
-      const outcome = input.reportedOutcome === 'confirmed' && !extensionEmployerReceiptIsSufficient({
-        portalUrl: current.portal_url,
-        atsName: current.ats_name,
-        confirmationText: input.confirmationText,
-        finalUrl: input.finalUrl,
-      })
-        ? 'unknown' as const
-        : input.reportedOutcome;
+      const outcome = extensionOutcomeForReceipt(input, current);
       const exactClaim = current.submission_claim_id === input.claimId;
       const exactNegativeResolution = current.status === 'needs_attention'
         && !current.submission_claim_id
@@ -623,9 +644,14 @@ export async function commitExtensionSubmissionOutcome(input: {
         return { kind: 'replayed' as const, row: latest, review: current };
       }
       if (outcome !== 'confirmed') {
-        const packet = await verifyPacket(latest, current);
-        if (!packet.valid) {
-          return { kind: 'audit_failure' as const, row: latest, response: packet.response };
+        /* The verdict has to belong to the row being written. Byte-equal spec is the same identity
+         * the write CAS below insists on, so a verdict that survives this check judged exactly the
+         * bytes that are about to change. Anything else re-audits rather than guesses. */
+        if (!audited || audited.specJson !== JSON.stringify(latest.spec)) {
+          return { kind: 'audit_stale' as const, row: latest };
+        }
+        if (!audited.verification.valid) {
+          return { kind: 'audit_failure' as const, row: latest, response: audited.verification.response };
         }
       }
 
@@ -676,6 +702,65 @@ export async function commitExtensionSubmissionOutcome(input: {
     }
     throw error;
   }
+}
+
+/* One derivation of the outcome, read twice: once before the lock to decide whether an audit is
+ * even needed, and once inside it to act. A second copy of this rule would be free to drift, and a
+ * drift here decides whether a real employer receipt gets audited at all. */
+function extensionOutcomeForReceipt(
+  input: { reportedOutcome: ExtensionOutcome; confirmationText?: string; finalUrl: string },
+  review: ApplicationReviewState,
+): ExtensionOutcome {
+  return input.reportedOutcome === 'confirmed' && !extensionEmployerReceiptIsSufficient({
+    portalUrl: review.portal_url,
+    atsName: review.ats_name,
+    confirmationText: input.confirmationText,
+    finalUrl: input.finalUrl,
+  })
+    ? 'unknown'
+    : input.reportedOutcome;
+}
+
+/* THE AUDIT RUNS BEFORE THE LOCK, NEVER INSIDE IT.
+ *
+ * currentAcknowledgedPacketAudit reads through the POOLED handle and can fetch the stored resume.
+ * On Vercel the pool is one client (src/db/index.ts), so running it inside the locked transaction
+ * made the nested read wait for the very client the transaction holds: a circular wait with no
+ * connectionTimeoutMillis to break it. The transaction then never returned, so the press_observed
+ * fact appended just above it rolled back and a run that really did press Submit at the employer
+ * left no evidence at all, which is the exact hole this ledger exists to close. It also stranded
+ * the user-wide advisory lock, blocking every other submission path for that applicant.
+ *
+ * So the audit is computed here, against an unlocked read, and carries the exact spec it judged.
+ * The locked body re-reads the row and refuses to use a verdict whose spec has moved, which is the
+ * same byte-for-byte spec equality the write CAS already demands. */
+async function auditExtensionOutcomeBeforeLock(
+  input: {
+    packetId: string;
+    userId: string;
+    reportedOutcome: ExtensionOutcome;
+    confirmationText?: string;
+    finalUrl: string;
+  },
+  verifyPacket: (
+    row: StoredResumeRow,
+    review: ApplicationReviewState,
+  ) => Promise<ExtensionOutcomePacketVerification>,
+): Promise<{ specJson: string; verification: ExtensionOutcomePacketVerification } | null> {
+  const [candidate] = await db.select().from(generated_resumes).where(and(
+    eq(generated_resumes.id, input.packetId),
+    eq(generated_resumes.user_id, input.userId),
+  )).limit(1);
+  if (!candidate) return null;
+  const review = readApplicationReview(candidate.spec);
+  if (!review) return null;
+  // A sufficient exact employer receipt is external reality and no audit may veto it, so the
+  // confirmed path never pays for one, here or anywhere.
+  if (extensionOutcomeForReceipt(input, review) === 'confirmed') return null;
+  return {
+    specJson: JSON.stringify(candidate.spec),
+    verification: await verifyPacket(candidate, review),
+  };
 }
 
 function finalApplicationAuthorizationMatches(
