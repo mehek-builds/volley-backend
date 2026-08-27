@@ -32,6 +32,7 @@ import { jobDescriptionSourceUrl } from '../routes/jobExtract';
 import {
   boardPostingFromPortalUrl,
   packetJdIsRepairable,
+  REPAIRABLE_STATUSES,
   packetJdStatesNoRequirement,
   planPacketJdRepair,
   recordsAnUnverifiedPress,
@@ -292,7 +293,12 @@ describe('a row an employer may already hold is never rewritten', () => {
   const refusals: Array<[string, Partial<GateReview>, string | null | undefined]> = [
     ['a submitted status', { status: 'submitted' }, null],
     ['an awaiting_security_code status', { status: 'awaiting_security_code' }, null],
-    ['a needs_attention status', { status: 'needs_attention' }, null],
+    /* `needs_attention` was here, and it refused the only row this module exists for: Belvedere
+       c4413bff sits in that status having provably never been sent. It moved to the suite below,
+       where BOTH real needs_attention rows are asserted - the one that was never sent is
+       repairable, and Jane Street, in the same status with two employer holds, is not. That is a
+       stronger assertion than this row was making, not a weaker one: it pins that the refusal
+       comes from the evidence rather than from the status label. */
     ['a ready_for_final_approval status', { status: 'ready_for_final_approval' }, null],
     ['a held submission claim', { submission_claimed_at: '2026-08-20T00:00:00.000Z' }, null],
     ['a recorded submitted_at', { submitted_at: '2026-08-20T00:00:00.000Z' }, null],
@@ -874,5 +880,62 @@ describe('the price of a repair is real and is stated in the header', () => {
       issues.some((issue) => /jd_hash does not match the frozen job description/.test(issue)),
       `expected a jd_hash mismatch, got ${JSON.stringify(issues)}`,
     );
+  });
+});
+
+/* NEEDS_ATTENTION IS A REASON, NOT A DESTINATION.
+ *
+ * Excluding it by name refused the only row this module was written for. Measured 2026-08-27
+ * against the deployed plan-only route: both candidates answered `planned: false`, and Belvedere
+ * c4413bff was refused on status alone despite provably never having been sent.
+ *
+ * These two fixtures are the real shapes of the two rows, and they are the whole argument for the
+ * change: the same status, opposite answers, decided by evidence rather than by the status. */
+describe('needs_attention is decided by evidence, not by the status', () => {
+  type GateReview = Parameters<typeof packetJdIsRepairable>[0];
+
+  /* Belvedere c4413bff, verbatim: attention_reason says it was not sent, and every one of
+     employerMayHoldApplication's four facts is absent. */
+  const belvedere: GateReview = {
+    status: 'needs_attention',
+    attention_reason:
+      'This application changed after you approved the exact packet Litos prepared, so it was not sent.'
+      + ' What changed: the application questions, how Litos read them.',
+  };
+
+  /* Jane Street 496cff97, verbatim: the SAME status, and two independent holds. Its
+     attention_reason is NOT either unverified-press producer's prose, which is exactly why the
+     evidence fields have to carry this and the reason string cannot. */
+  const janeStreet: GateReview = {
+    status: 'needs_attention',
+    submission_attempted_at: '2026-08-17T16:14:01.000Z',
+    security_code: { requested_at: '2026-08-17T16:15:00.000Z' } as never,
+    attention_reason:
+      'Litos entered the employer verification step, but could not prove the final result.'
+      + ' Check the employer portal before trying anything again.',
+  };
+
+  test('a needs_attention row that was never sent is repairable', () => {
+    assert.equal(packetJdIsRepairable(belvedere), true);
+  });
+
+  test('the same status with an employer hold is still refused', () => {
+    assert.equal(packetJdIsRepairable(janeStreet), false);
+  });
+
+  /* The load-bearing half. If this ever passes for the wrong reason - because someone re-narrowed
+     the status set rather than because the evidence refused it - the next person to widen the set
+     re-opens the hole. Assert the refusal survives with the status explicitly allowed. */
+  test('the Jane Street refusal comes from its evidence, not from its status', () => {
+    assert.ok(REPAIRABLE_STATUSES.has('needs_attention'), 'this test is vacuous unless the status is allowed');
+    assert.equal(packetJdIsRepairable({ ...janeStreet, status: 'ready_to_submit' }), false);
+    assert.equal(packetJdIsRepairable({ ...janeStreet, status: 'resume_ready' }), false);
+  });
+
+  test('each of its two holds refuses on its own', () => {
+    const { security_code, submission_attempted_at, ...noHolds } = janeStreet;
+    assert.equal(packetJdIsRepairable(noHolds), true, 'the fixture must be repairable once both holds are removed');
+    assert.equal(packetJdIsRepairable({ ...noHolds, security_code }), false);
+    assert.equal(packetJdIsRepairable({ ...noHolds, submission_attempted_at }), false);
   });
 });

@@ -255,11 +255,31 @@ export function packetJdStatesNoRequirement(row: Pick<ResumeRow, 'spec'>): boole
    submitRequestDisposition itself calls 'start' - the SEND-grade question, which is the right
    altitude: a repaired packet has to be regenerated and re-approved before it can go anywhere, so
    this is a reopening-a-send decision and not a save. */
-const REPAIRABLE_STATUSES = new Set<ApplicationReviewState['status']>([
+export const REPAIRABLE_STATUSES = new Set<ApplicationReviewState['status']>([
   'resume_ready',
   'questions_ready',
   'ready_to_submit',
   'failed',
+  /* NEEDS_ATTENTION IS A REASON, NOT A DESTINATION, and excluding it by name refused the only row
+     this module was written for. Measured 2026-08-27 against the deployed plan-only route: both
+     candidates on this account answered `planned: false`, and Belvedere c4413bff - 20,000 characters
+     of Lever application form, a `Name of School` select across 748 lines, nothing else - was
+     refused on status alone. That row has `submitted_at` null, `submission_attempted_at` null, no
+     security_code and no receipt, and its attention_reason says in as many words that it was NOT
+     sent: "This application changed after you approved the exact packet Litos prepared, so it was
+     not sent."
+
+     THE SAFETY WAS NEVER IN THE STATUS, AND ADDING THIS DEMONSTRATES THAT RATHER THAN WEAKENING IT.
+     Jane Street 496cff97 is ALSO needs_attention and must never be repaired: it carries a
+     security_code AND a submission_attempted_at, so employerMayHoldApplication answers true on two
+     of its four facts independently of any status. The three checks below - submitted_at,
+     pipeline_stage 'applied', recordsAnUnverifiedPress - together with that function are the actual
+     send-grade question. The status set was a coarse proxy for it, and where the two disagreed the
+     proxy was wrong in both directions at once: it admits `failed`, which can carry an unverified
+     press, and it refused a row that provably never left the building.
+
+     The allow-list property is unchanged: a status added to this union later still fails closed. */
+  'needs_attention',
 ]);
 
 /* The prose an extension run writes when it pressed submit and could not confirm the result. A
