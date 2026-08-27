@@ -741,8 +741,15 @@ test('resolution is ordered ahead of the forwarding claim, not after the send', 
   assert.match(service, /return applyReviewPatch\(current, \{\s*\n\s*status: 'submitted'/);
 });
 
-test('the reconciliation path is a function and not a scheduled job', () => {
+// Reversed 2026-08-20: leaving a managed send's own outcome to a person watching an inbox is the
+// exact failure this reconciler exists to remove (breezy.hr and workable.com both left real sends
+// "unverified" while the DOM reader had no confirmation arm for them). The function itself was
+// already read-only about mail - it resolves packets from receipts already in the ledger, sends
+// nothing - so wiring it to a schedule was a decision to make, not a risk to defer. It is now made:
+// the route lives at src/routes/submissionConfirmationReconciler.ts and cronSchedule.test.ts pins
+// its entry to the Hobby daily-only shape every other cron follows.
+test('the reconciliation path is a function, wired to a daily schedule', () => {
   assert.match(service, /export async function reconcileSubmissionConfirmations/);
-  const vercel = readFileSync('vercel.json', 'utf8');
-  assert.doesNotMatch(vercel, /reconcile/i);
+  const vercel = readFileSync('vercel.json', 'utf8') as string;
+  assert.match(vercel, /"path": "\/internal\/submission-confirmation-reconciler"/);
 });
