@@ -1,4 +1,8 @@
 import type { Page } from 'playwright-core';
+import {
+  referralAnswer as referrerDeclarationAnswer,
+  graduationWindowAnswer as graduationWindowDeclarationAnswer,
+} from './heldAnswerQuestions';
 import { isSameCompany } from './companyIdentity';
 import { isOpaqueIdentifier, tidyLabel } from './fieldLabel';
 import { jobCountry, type JobCountry } from './jobLocation';
@@ -1082,6 +1086,22 @@ function standardizedTestAnswer(
     if (ap.standardized_test_type === 'None') {
       const none = noScoreOptionFor(options);
       if (none) return { value: none };
+      /* NO WAY TO SAY IT ON THIS LIST, so say that, rather than returning a word the list cannot
+       * take. The two branches directly above already do exactly this; this one fell through to
+       * `{ value: 'None' }` instead, and on a CLOSED control that is not an answer at all - the
+       * downstream matcher finds no option spelled "None", leaves the control blank, and the run
+       * parks with nothing on the row explaining why.
+       *
+       * MEASURED, IMC Trading's Greenhouse form, 2026-08-26: "Select your standardized test score
+       * type" offers ACT, SAT and Other. The applicant has declared she has no scores, so all three
+       * are false - "Other" claims a different exam she also did not sit - and a silent blank was
+       * the only outcome available. declaredNone turns that into the refusal the Apply screen can
+       * read back through isDeclaredAbsenceRefusal and show her as a decision, not a failure.
+       *
+       * An OPEN control is untouched: with no option list, `noScoreOptionFor` returns null but
+       * typing the word "None" into a text box is a true and accepted answer, so the fall-through
+       * below still applies there. */
+      if (options && options.length > 0) return declaredNone('standardized test type');
     }
     return { value: ap.standardized_test_type };
   }
@@ -5205,8 +5225,25 @@ function gpaClassificationVocabularyMatches(label: string): boolean {
 // Ported verbatim from generic.ts's classifyField (see that file for the full rationale on
 // ordering - refusals first, citizenship before residence, term before start date, state before
 // city). `label` must already be lowercased by the caller.
-export function classifyField(label: string, type?: string): ProfileKey | null {
-  const key = classifyFieldIntent(label, type);
+/* jdText is threaded in for ONE rule: parseReferralQuestion below. Its "how did you hear about
+ * <X>" branch can only accept an employer-NAMED target by checking it against the employer frozen
+ * into this packet's context, and with no context to check against it refuses every one of them.
+ *
+ * MEASURED on the owner's queue, 2026-08-27. classifyField was the only one of parseReferralQuestion's
+ * four call sites that omitted the argument, so a Greenhouse form asking "how did you first hear about
+ * five rings?" classified as null while "how did you hear about us?" classified as referral_source_default.
+ * Null there skips BOTH referral rules in profileFieldResolution - the ladder that answers "Other", and
+ * the guard that leaves a closed list alone when nothing matched - so the raw stored default "Job board"
+ * was emitted with matchedOption false, into a control whose option list has no such entry. The
+ * dashboard then refused it on every pass and the application could not be completed at all.
+ * Reproduced identically for Databricks and Akuna: it is the employer's NAME in the label, not any one
+ * employer.
+ *
+ * Callers with no context in scope pass nothing and keep exactly today's answer, because an
+ * unvalidated employer target is still refused. This widens what can be RECOGNISED; it does not widen
+ * what may be ANSWERED - the ladder still picks the option, and still never picks a referral. */
+export function classifyField(label: string, type?: string, jdText?: string): ProfileKey | null {
+  const key = classifyFieldIntent(label, type, jdText);
   /* THE CURRENT PROGRAMME CANNOT ANSWER A QUESTION ABOUT THE HIGH SCHOOL.
    *
    * Gated on the KEY, not on where the rule sits in the chain below. The first draft was an early
@@ -5221,7 +5258,7 @@ export function classifyField(label: string, type?: string): ProfileKey | null {
   return key;
 }
 
-function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
+function classifyFieldIntent(label: string, type?: string, jdText?: string): ProfileKey | null {
   const l = label ?? '';
   if (isRefusedQuestion(l)) return null;
   /* Belt and braces on the "Dubai" defect. resolveKnownAnswer already short-circuits these labels,
@@ -5271,7 +5308,7 @@ function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
   if (CITIZENSHIP_QUESTION.test(l)) return 'citizenship';
   if (!locationCommitment && !locationChoice && RESIDENCE_QUESTION.test(l)) return 'address_country';
 
-  const referral = parseReferralQuestion(l);
+  const referral = parseReferralQuestion(l, jdText);
   if (referral?.valid) return 'referral_source_default';
   if (referral) return null;
   if (parseRelocationQuestion(l)) return null;
@@ -5329,6 +5366,18 @@ function classifyFieldIntent(label: string, type?: string): ProfileKey | null {
     && !KEYWORD_SUBJECT_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))
     && !SCHOOL_ATTRIBUTE_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))) return 'school';
   if (/\bwhich\s+(?:school|university|college|institution)\b|\b(?:school|university|college|institution)\s+(?:name|(?:you\s+|are\s+you\s+)?(?:currently\s+)?(?:attend(?:ing|ed)?|enrolled(?:\s+in)?))\b|\bname\s+of\s+(?:your\s+)?(?:school|university|college|institution)\b|^university\s*\/\s*institution\b/i.test(l)) return 'school';
+  /* THE SAME REQUEST WITH A PARTICIPLE IN THE WAY.
+   *
+   * "Please inform the name of your attending or graduated school or university" - Mercari's
+   * Workable form, read live 2026-08-26. The branch above needs the school noun to follow "name of
+   * your" directly, and two participles sit in between, so a school Litos has on file came back to
+   * the applicant as a question. The words allowed in that gap say WHICH school rather than some
+   * attribute OF one, which is what keeps this from reaching "name of your university email
+   * address" - and both guards the branch above relies on are applied here for the same reason it
+   * applies them: an explicit pattern that returns early never reaches labelNamesProfileField. */
+  if (/\bname\s+of\s+(?:the\s+|your\s+)?(?:(?:current(?:ly)?|most\s+recent|latest|last|previous|prior|attending|attended|graduated?|graduating|enrolled)\s+(?:or\s+)?){1,3}(?:school|university|college|institution)\b/i.test(l)
+    && !KEYWORD_SUBJECT_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))
+    && !SCHOOL_ATTRIBUTE_QUALIFIER.test(l.replace(SCHOOL_NOUN, ' '))) return 'school';
   if (MAJOR_QUESTION.test(l)) return 'major';
   if (CURRENT_ENROLLMENT_QUESTION.test(l) && !GRADUATION_DATE_QUESTION.test(l)) return 'current_enrollment';
   if (EDUCATION_ATTENDANCE_DATE_QUESTION.test(l)) {
@@ -5878,21 +5927,56 @@ function priorEmployerAnswer(label: string, ap: ApplicationProfileLike): { value
    * Cost Infrastructure" while the form says "Traeco", and an exact match answers "No" to an
    * employer she is currently at. employerMatchesTarget is anchored at the first token precisely
    * so that "Tone" still cannot match "Tonee". */
-  /* STILL "Yes" OR SILENCE, NEVER "No", and this was re-tested on 2026-08-09 rather than assumed.
-   *
-   * Redwood Materials' "Have you ever worked for Redwood Materials?" is refused while the profile
-   * holds an employment record that plainly does not contain Redwood, and returning "No" from that
-   * record was tried here and reverted. The record is NOT EXHAUSTIVE and was measured not to be:
-   * `employer_history` is scraped out of parsed_json.experience and held 4 of the owner's 9
-   * organisations, so the same reasoning that produces "No" about Redwood produces "No" about a
-   * company she works at today. governmentEmployment.test.ts pins all three cases.
-   *
-   * `prior_application_employers` does not rescue it either. That column is a list of employers she
-   * has APPLIED to, which she maintains and where `[]` does mean none. This question is about
-   * having been EMPLOYED, and answering one from the other would be a statement about her work
-   * history built out of her application history. */
   const knownMatch = history.some((employer) => employerMatchesTarget(employer, target));
-  return knownMatch ? { value: 'Yes' } : null;
+  if (knownMatch) return { value: 'Yes' };
+
+  /* "No" FROM THE FULL RECORD, AND ONLY ONCE EVERY GUARD ABOVE HAS PASSED.
+   *
+   * THE HISTORY OF THIS LINE MATTERS, because it returned silence for a year and the reason was
+   * sound. Returning "No" was tried on 2026-08-09 and reverted: `employer_history` is scraped out
+   * of parsed_json.experience and was measured holding 4 of the owner's 9 organisations, so a "No"
+   * built on it could deny a job she actually had - the worst answer this file can produce, since
+   * it is a false statement to an employer rather than a missing one.
+   *
+   * WHAT CHANGED IS THE RECORD, NOT THE APPETITE FOR RISK. declaredEmployers no longer reads that
+   * 4-of-9 scrape alone; it unions it with the experience bank, which is the record she authored
+   * herself and which held all 9. Asked on 2026-08-26 which she wanted, the owner chose exactly
+   * this: answer from the full record, keep the guards.
+   *
+   * AND THE GUARDS ARE WHAT MAKE IT SAFE. Everything ambiguous has already returned above -
+   * a composite target ("Databricks or any subsidiary", "Goldman Sachs or its affiliates") via
+   * isSinglePlainEmployerTarget, a generic one ("any employer in this industry") via the article
+   * test, and anything under five characters. What is left below is the near miss, which is the one
+   * ambiguity a token-anchored match cannot see: the form's "Tone" is not her "Tonee" by token, and
+   * answering "No" to it would deny the company she founded over one letter. An overlapping spelling
+   * is not a different employer, it is an unresolved one, so it goes back to her.
+   *
+   * `prior_application_employers` still does not participate. That column lists employers she has
+   * APPLIED to; answering an employment question from it would build a claim about her work history
+   * out of her application history. */
+  /* WHAT "ABSENT" HAS TO MEAN BEFORE IT CAN MEAN "NO".
+   *
+   * `history` above is JOB entries only, which is right for proving a Yes and far too narrow for
+   * proving a No. The bank also holds projects and leadership roles, and an organisation she names
+   * there is one she HAS a relationship with - "have you ever worked for Spark SC" is not a question
+   * her own record answers in the negative just because the entry is typed `leadership`. Every
+   * organisation she has mentioned, whatever its type, therefore blocks the negative.
+   *
+   * The near miss blocks it too, in both shapes the corpus produced: a prefix relation ("SoFia"
+   * against "SoFi") and a shared first token ("Traeco Labs" against "Traeco - AI Agent Cost
+   * Infrastructure"). employerMatchesTarget is anchored precisely so those do not count as a match,
+   * and the same anchoring means they must not count as a MISS either - an overlapping name is an
+   * unresolved employer, not a different one. */
+  const mentioned = [
+    ...history,
+    ...(ap.experience_bank ?? []).map((entry) => normalizeEmployerName(entry.org)),
+  ].filter(Boolean);
+  const firstToken = (value: string): string => value.split(' ')[0] ?? '';
+  const unresolved = mentioned.some((org) => org.startsWith(target)
+    || target.startsWith(org)
+    || firstToken(org) === firstToken(target));
+  if (unresolved) return null;
+  return { value: 'No' };
 }
 
 /* Where she LIVES, which is a stored fact, kept strictly apart from where she will WORK, which is
@@ -7131,6 +7215,7 @@ export async function discoverPageQuestions(page: Page): Promise<DiscoveredQuest
 // Resolves a discovered question's answer from the stored profile, without touching the LLM.
 // Returns null for anything that isn't a confidently-known field (including every refused
 // question), so the caller can fall through to the essay drafter or leave it for the human.
+
 export function resolveKnownAnswer(
   label: string,
   inputType: string,
@@ -7192,8 +7277,31 @@ export function resolveKnownAnswer(
   const politicallyExposed = politicallyExposedAnswer(label, ap);
   if (politicallyExposed) return politicallyExposed;
 
+
+  /* QUESTIONS LITOS ALREADY HOLDS THE ANSWER TO, up here with the other self-declarations and for
+   * the same reason: a broad rule further down answers them wrongly or holds them.
+   *
+   * MEASURED on Mercari's Workable form, 2026-08-26, where four of fifteen questions parked.
+   *
+   * ABOVE siblingQuestionRefusal DELIBERATELY. That guard holds a compound question because one
+   * control carrying two statements cannot be answered by one value, and it read the referral label
+   * "if this is a referral, enter the employee's name; if it is not, please enter na" as exactly
+   * that. But a compound of the form "if A do X, if not A do Y" is determinate the moment A is
+   * known, and her standing answer is that she is not referred - so the label states its own answer
+   * and the guard was holding a question Litos could complete. The rules below only ever return
+   * that determinate branch; anything they cannot settle returns null and falls through to the
+   * guard exactly as before.
+   *
+   * See lib/heldAnswerQuestions.ts for what each rule refuses. */
+  const referrerDeclaration = referrerDeclarationAnswer(label, options);
+  if (referrerDeclaration) return referrerDeclaration;
+
+  const graduationWindow = graduationWindowDeclarationAnswer(label, ap.grad_date, options);
+  if (graduationWindow) return graduationWindow;
+
   const siblingRefusal = siblingQuestionRefusal(label, jdText);
   if (siblingRefusal) return siblingRefusal;
+
 
   /* Up here for the same reason as the two above it, and AFTER them on purpose: the PEP question
    * and Astranis's export-control paragraph both contain the word "government", and both are
@@ -7475,7 +7583,7 @@ export function resolveKnownAnswer(
     return WORK_ELIGIBILITY_QUESTION.test(label) ? { skipReason: workEligibilitySkipReason(label) } : null;
   }
 
-  const key = classifyField(label, inputType === 'tel' ? 'tel' : undefined);
+  const key = classifyField(label, inputType === 'tel' ? 'tel' : undefined, jdText);
   // Last gate before the profile answers it: the stored education facts are about the current
   // programme, so a question scoped to a later or different one gets nothing from them.
   if (key && CURRENT_PROGRAMME_KEYS.has(key) && FUTURE_OR_OTHER_PROGRAMME_QUESTION.test(label)) {

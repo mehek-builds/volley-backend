@@ -41,6 +41,9 @@ const smartRecruitersExactSelectors = {
   email: 'spl-input#email-input input',
   confirm_email: 'spl-input#confirm-email-input input',
   phone: 'spl-phone-field input[aria-label="Phone number"]',
+  /* Required on the live form, measured 2026-08-27 on a Western Digital posting. Anchored on
+     data-test because the element's own id is generated per render (spl-form-element_5). */
+  location: 'spl-autocomplete[data-test="location-autocomplete"] input',
   linkedin: 'spl-input#linkedin-input input',
   portfolio: 'spl-input#website-input input',
   resume: 'spl-dropzone[data-test="resume-upload"] input[type="file"]',
@@ -53,6 +56,10 @@ test('detects the exact live SmartRecruiters, iCIMS, Jobvite, and Oracle attende
     ['https://jobs.smartrecruiters.com/oneclick-ui/company/Lumina1/publication/f137edd9-1f3b-448a-9a5f-2c2ca63fddeb?dcr_ci=Lumina1', 'smartrecruiters'],
     ['https://externalhourly-omnihotels.icims.com/jobs/133505/commis-%c3%a0-la-r%c3%a9ception/job', 'icims'],
     ['https://jobs-express.icims.com/jobs/48173/sales-associate/login', 'icims'],
+    // A real SIG posting. iCIMS copies the title into the slug verbatim, so the colon arrives
+    // unencoded from the tenant's own search results; the %3a form is the same posting.
+    ['https://careers-sig.icims.com/jobs/10837/trading-system-engineering-internship:-summer-2027/job', 'icims'],
+    ['https://careers-sig.icims.com/jobs/10837/trading-system-engineering-internship%3a-summer-2027/job', 'icims'],
     ['https://jobs.jobvite.com/worldfirst/job/oknrAfws/apply', 'jobvite'],
     ['https://jobs.jobvite.com/genpactexperience/job/oZCwAfwr', 'jobvite'],
     ['https://iawmqy.fa.ocs.oraclecloud.com/hcmUI/CandidateExperience/en/sites/careers/job/295586', 'oraclecloud'],

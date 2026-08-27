@@ -1189,10 +1189,26 @@ const RECEIPT_PROOF_RE = /thank you|thanks for your application|application (?:h
 // to the reviewed-question fills, so no one action can ever spend 30s.
 const MANAGED_FILL_TIMEOUT_MS = 10_000;
 // Workable can briefly remove the complete phone subtree while React reconciles an international
-// value. The normal 10 second miss budget is right for unknown selectors, but too short for a
-// selector that was just proven and is expected to remount. Twenty seconds is the managed-provider
-// ceiling. Keep it scoped to these post-write readbacks, with exact value reads still required.
-const WORKABLE_PHONE_READBACK_TIMEOUT_MS = 20_000;
+/* value. The normal 10 second miss budget is right for unknown selectors, but too short for a
+ * selector that was just proven and is expected to remount. Keep it scoped to these post-write
+ * barriers, with exact value reads still required.
+ *
+ * FOUR SECONDS, NOT TWENTY, AND THE CHANGE OF UNITS FOLLOWS THE CHANGE OF STAKES. Twenty was the
+ * managed-provider ceiling, chosen while a miss here was FATAL: the wait was optional:false, so
+ * spending the whole ceiling was the price of not killing a filled application. It is best-effort
+ * now, and an optional wait still burns its full timeout before it gives up - so on a form where
+ * the replacement never becomes `:visible`, twenty seconds bought nothing and cost twenty seconds,
+ * twice.
+ *
+ * That is not free. MANAGED_RUN_TIMEOUT_MS in the managed runner is 240s for the whole run, and the
+ * Pony.ai submit measured ~276s against it on 2026-08-26 and was cut off before it could press
+ * Send. Forty seconds of waiting for a node that is not coming is a real share of that overrun.
+ *
+ * Four still covers what the barrier is FOR. It bridges a React remount - the subtree is torn down
+ * and re-mounted in one frame budget, measured in hundreds of milliseconds - not a page load. And
+ * nothing is proved by this wait in any case: the extract after it keeps requireNonEmpty and
+ * expectedValueDigits, so a phone that genuinely did not land still fails, four seconds sooner. */
+const WORKABLE_PHONE_REMOUNT_TIMEOUT_MS = 4_000;
 
 function managedFill(
   actions: ManagedBrowserAction[],
@@ -2978,6 +2994,19 @@ const SMARTRECRUITERS_FIRST_NAME_SELECTOR = 'spl-input#first-name-input input';
 const SMARTRECRUITERS_LAST_NAME_SELECTOR = 'spl-input#last-name-input input';
 const SMARTRECRUITERS_EMAIL_SELECTOR = 'spl-input#email-input input';
 const SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = 'spl-input#confirm-email-input input';
+/* CITY, and it is REQUIRED - measured live 2026-08-27 on a Western Digital posting
+   (jobs.smartrecruiters.com/oneclick-ui/company/WesternDigital/publication/...): the field carries
+   `required` and the step-one footer will not validate without it. Nothing filled it until now, so
+   a SmartRecruiters run could never complete even the first page, quite apart from the multi-step
+   bar that stops it later.
+
+   ANCHORED ON data-test, not on the id. The element's own id is `spl-form-element_5`, generated per
+   render, so an id selector would be a coin flip on the next load. The input lives in the
+   autocomplete's SHADOW ROOT (confirmed: zero light-DOM child inputs), which is why the compound
+   selector spans the boundary the same way the resume dropzone's does - Playwright pierces open
+   shadow roots for plain CSS. It is role="combobox" with aria-autocomplete="list", so it is a
+   suggestion field and not a text box: see the Enter press beside its fill. */
+const SMARTRECRUITERS_CITY_SELECTOR = 'spl-autocomplete[data-test="location-autocomplete"] input';
 const SMARTRECRUITERS_LINKEDIN_SELECTOR = 'spl-input#linkedin-input input';
 const SMARTRECRUITERS_WEBSITE_SELECTOR = 'spl-input#website-input input';
 const CONTROLLED_SMARTRECRUITERS_FIRST_NAME_SELECTOR = '[id="first-name-input"]';
@@ -2987,6 +3016,7 @@ const CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = '[id="confirm-email-in
 // The controlled QA fixture is ordinary light DOM. Keep its compatibility selector isolated from
 // the live adapter so it can never broaden a real SmartRecruiters page-wide phone match.
 const CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
+const CONTROLLED_SMARTRECRUITERS_CITY_SELECTOR = '[data-test="location-autocomplete"]';
 const CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR = '[id="linkedin-input"]';
 const CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR = '[id="website-input"]';
 /* THE ASHBY LOCATION CONTROL, and why the obvious selector matches nothing.
@@ -5229,6 +5259,56 @@ export const MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR =
 const WORKABLE_ADDRESS_SELECTOR = 'input[name="address"]:visible';
 const WORKABLE_LEGACY_CITY_SELECTOR = 'input[name="city"]:visible';
 const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
+/* THE SAME CONTROL, READ RATHER THAN TYPED INTO, AND VISIBILITY IS NOT PART OF THE FACT.
+ *
+ * MEASURED on Pony.ai's Workable form, 2026-08-26, stratus fingerprint 94dbba09171c165b:
+ *
+ *     filled_field:phone: expected exactly one match for
+ *     input[name="phone"][type="tel"]:visible, found 0
+ *
+ * The FILL with the identical selector had already succeeded - `phone` is in the run's filled_fields
+ * beside first_name, last_name, email, location and resume - so exactly one visible match existed
+ * when the value was typed, and none existed a moment later. `:visible` is the only clause that can
+ * flip from one to zero while the field still holds the value, and Workable's phone widget is
+ * intl-tel-input (its country readback is `.iti__selected-dial-code`), which re-renders its input
+ * subtree on commit. The 20s barrier could never outwait that either: this was never timing, the
+ * node simply stops being VISIBLE.
+ *
+ * A readback does not need visibility. It needs the value, and it still proves it: both consumers
+ * keep requireUnique, requireNonEmpty and expectedValueDigits, so a phone that did not land, landed
+ * twice, or landed wrong still refuses. The FILL keeps `:visible`, because typing has to reach a
+ * control the applicant could have typed into.
+ *
+ * AND `[type="tel"]` IS GONE TOO, BECAUSE DROPPING `:visible` ALONE WAS MEASURED AND WAS NOT ENOUGH.
+ * Shipped as 2d108f4 and re-run the same day: identical refusal, new fingerprint f87c52076c3a3557,
+ * `expected exactly one match for input[name="phone"][type="tel"], found 0`. So the control is not
+ * merely hidden after the commit - in that shape it does not exist at all. Two readings of this
+ * failure have now been refuted by measurement (a timing one, then a visibility one), which is the
+ * reason this selector is now the WEAKEST claim that still identifies the field: the name the form
+ * gave it, and nothing else.
+ *
+ * AND THE NAME IS GONE TOO. Shipped as 81ef0bd and re-run 2026-08-27, submission run
+ * 8c81e9ad-c993-4c7e-a3e3-4f3f77ed9284: `filled_field:phone: expected exactly one match for
+ * input[name="phone"], found 0` - with `phone` again in that run's filled_fields, and the run's own
+ * captured form image showing the field on screen holding 2135746270 behind a +1 flag. The control
+ * is present, visible and correct at the moment the readback runs; it simply no longer carries
+ * `name="phone"`. intl-tel-input has taken the name off the control it re-rendered. That is the
+ * fourth reading of this failure refuted by measurement: timing, then visibility, then type, now
+ * the name itself. And the runner already re-counts a zero-match asserted extract until its own
+ * timeout, so a node that was coming back under this name would have been found.
+ *
+ * What survives the re-render is the widget's container. Workable's phone control IS intl-tel-input,
+ * which is not an assumption added here: the country readback on the very next extract binds to
+ * `.iti__selected-dial-code` with optional false, so this file already rests a required proof on the
+ * same `.iti` contract. Reading the tel input inside that container adds nothing that was not
+ * already load-bearing one line down, and it names the control the applicant can actually see.
+ *
+ * NOTHING IS WEAKENED. Both consumers keep requireUnique, requireNonEmpty and expectedValueDigits
+ * pinned to the planned number, so a phone that did not land, landed twice, or landed wrong still
+ * refuses - and a form with no intl-tel-input matches zero and refuses too, rather than passing by
+ * default. `[type="tel"]` is what excludes any hidden E.164 twin the widget parks in the same
+ * container, so the count stays one. */
+const WORKABLE_PHONE_READBACK_SELECTOR = '.iti input[type="tel"]';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
   + 'button[aria-label="Telephone country code"][aria-controls]:visible';
@@ -5428,29 +5508,60 @@ function pushWorkableManagedPhoneActions(
     timeout: MANAGED_FILL_TIMEOUT_MS,
     requireUnique: true,
   });
-  // Workable remounts its React phone subtree after a value commit. The asserted extract primitive
-  // polls a zero-match interval until its timeout, then binds the unique replacement control and
-  // proves the stable exact value. A separate visibility wait can race a second remount and adds no
-  // evidence, so keep readiness and proof atomic in this action.
+  /* Workable remounts its React phone subtree after a value commit. A fill can therefore verify the
+   * old node and then leave a short interval with no visible input before the replacement mounts.
+   * Wait on the stable selector before the separate evidence read instead of treating that remount
+   * interval as a provider-session failure.
+   *
+   * OPTIONAL, because non-optional made this wait CAUSE the failure it was written to prevent.
+   * MEASURED on Pony.ai's Workable form 2026-08-26, four consecutive send attempts, stratus
+   * fingerprint 0913d5abde9ba637: `page.waitForSelector: Timeout 20000ms exceeded` with
+   * submitPressed false, so the whole application died here and the applicant was told Litos had hit
+   * "a temporary secure-browser error" - the exact provider-session sentence this comment says the
+   * wait exists to avoid. The selector demands `:visible`, and a replacement that mounts
+   * present-but-not-visible can never satisfy it, so no timeout value would have helped.
+   *
+   * NOTHING IS WEAKENED BY THIS, and that is the whole reason it is safe: this action settles the
+   * page, it does not prove anything. The extract on the very next line is the evidence gate and is
+   * untouched - optional false, requireUnique, requireNonEmpty, and expectedValueDigits pinned to
+   * the planned number. A phone that genuinely did not land still fails there, and fails with a
+   * sentence about the phone rather than about the browser. */
+  actions.push({
+    type: 'waitForSelector',
+    selector: WORKABLE_PHONE_READBACK_SELECTOR,
+    label: 'workable_phone_value_visible',
+    optional: true,
+    timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
+  });
   actions.push({
     type: 'extract',
-    selector: WORKABLE_PHONE_SELECTOR,
+    selector: WORKABLE_PHONE_READBACK_SELECTOR,
     attribute: 'value',
     label: 'filled_field:phone',
     optional: false,
-    timeout: WORKABLE_PHONE_READBACK_TIMEOUT_MS,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
     requireUnique: true,
     requireNonEmpty: true,
     expectedValueDigits: plan.expectedDigits,
     stabilityWindowMs: 1_200,
   });
   if (plan.country) {
+    /* Same shape, same reason, same protection: the country readback extract below keeps
+     * optional false with requireNonEmpty and expectedValueDigits on the dial code, so the fact is
+     * still proved. Only the settling wait stands down. */
+    actions.push({
+      type: 'waitForSelector',
+      selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
+      label: 'workable_phone_country_visible',
+      optional: true,
+      timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
+    });
     actions.push({
       type: 'extract',
       selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
       label: 'filled_field:phone_country',
       optional: false,
-      timeout: WORKABLE_PHONE_READBACK_TIMEOUT_MS,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
       requireUnique: true,
       requireNonEmpty: true,
       expectedValueDigits: plan.country.dialCode,
@@ -6947,6 +7058,21 @@ function pushFixedFieldActions(
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR, packet.email, 'email');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR, packet.email, 'confirm_email');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
+    managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_CITY_SELECTOR : SMARTRECRUITERS_CITY_SELECTOR, packet.city, 'location');
+    if (packet.city) {
+      /* Take the suggestion, exactly as the Workable location field does. A combobox with
+         aria-autocomplete="list" holds typed text that the form has not accepted as a choice, so
+         filling without this leaves a required field that LOOKS answered and validates as empty.
+         Optional and bounded: a tenant that accepts free text simply keeps what was typed. */
+      actions.push({
+        type: 'press',
+        selector: controlled ? CONTROLLED_SMARTRECRUITERS_CITY_SELECTOR : SMARTRECRUITERS_CITY_SELECTOR,
+        value: 'Enter',
+        label: 'location_select',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+    }
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
     managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
@@ -8015,7 +8141,13 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   // careers page) and the /careers/{department}-team marketing routes, without an ad-hoc host rule.
   bamboohr: /^\/careers\/\d+\/?$/i,
   jobvite: /^\/[a-z0-9._-]+\/job\/[a-z0-9]+(?:\/apply)?\/?$/i,
-  icims: /^\/jobs\/\d+\/[a-z0-9%._~-]+\/(?:job|login)\/?$/i,
+  // The colon is not decoration: iCIMS builds the slug from the posting title verbatim, so every
+  // "Internship: Summer 2027" tenant emits `.../trading-system-engineering-internship:-summer-2027/job`
+  // unencoded in its own search results. Without it the SAME posting reads as supported through the
+  // `%3a` form and unsupported through the literal one, which is a routing decision flipping on a
+  // detail no job seeker can see. A colon is a legal pchar (RFC 3986) and the path SHAPE below is
+  // what does the excluding, so this widens nothing structural.
+  icims: /^\/jobs\/\d+\/[a-z0-9%._~:-]+\/(?:job|login)\/?$/i,
   // The one that matters most. Without it this family would claim every Oracle Cloud application
   // under the sun, including ones that are somebody's payroll or ERP login.
   oraclecloud: /^\/hcmUI\/CandidateExperience\/(?:[a-z]{2}\/)?sites\/[a-z0-9_-]+\/(?:job|opportunity)\/\d+(?:\/apply\/email)?\/?$/i,
@@ -9398,6 +9530,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR], packet.email, 'email', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR], packet.email, 'confirm_email', filledFields);
     await fillPhoneField(page, [controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR], portal, packet.phone, 'phone', filledFields);
+    await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_CITY_SELECTOR : SMARTRECRUITERS_CITY_SELECTOR], packet.city, 'location', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);

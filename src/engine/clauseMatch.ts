@@ -118,7 +118,7 @@ export function splitClauses(sectionText: string): string[] {
  * it as a miss invents a gap, and counting it as met would credit everyone equally, which is the
  * same as not counting it. So it leaves.
  */
-const UNSCOREABLE = [
+export const UNSCOREABLE = [
   /\b(curious|curiosity|passion(ate)?|enthusias|excited|motivated|self[- ]starter|growth mindset)\b/i,
   /\b(thrive|comfortable with ambiguity|fast[- ]paced|bias for action|scrappy|humble|low ego)\b/i,
   /\b(team player|culture|values|fun|energy)\b/i,

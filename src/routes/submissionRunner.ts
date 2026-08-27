@@ -1583,6 +1583,65 @@ export function managedFormSnapshotWithStableCapabilities(input: {
   });
 }
 
+/* THE WRITE SIDE OF THE SNAP CONTRACT: the record must say what the build actually did.
+ *
+ * This decides whether a resolved closed-choice answer carries a snap claim; the gate immediately
+ * below decides what to do with one. They are two halves of one rule and are kept together for
+ * that reason - the value written into `answer` is the employer's option text byte for byte, so
+ * the test for "did anything move" has to be byte identity too. It was not.
+ *
+ * THE DEFECT, and it is a gap between two equivalence classes rather than a missing rule.
+ * chooseClosestOption matches on comparableOption (lib/selfIdentification.ts): it folds case,
+ * deletes apostrophes, collapses every other punctuation run to a space - and then returns the
+ * CONTROL's own bytes. The guard here asked only whether the resolved value differed from the
+ * profile value after trim + toLowerCase, an equivalence class strictly NARROWER than the
+ * matcher's. Everything in the gap is a snap that changes bytes without changing meaning, and the
+ * single largest class in that gap is the one that differs by capitalization alone: the answer was
+ * rewritten to the employer's spelling and nothing on the record said so.
+ *
+ * CONFIRMED BY MEASUREMENT, not inferred. Application 6de82956, run 097ddf87, Lever, 2026-08-26
+ * 11:31:38 UTC, reproduced on every consecutive attempt (deterministic, not flaky). Driving the
+ * real resolvers with the three EEO controls that run's diagnostic listed reproduces its `changed`
+ * array exactly, and exactly one row parks:
+ *
+ *   LGBTQIA label, decline listed "Decline To Self-Identify"  -> moved ["answer"]              PARK
+ *   "veteran status",    decline "I don't wish to answer"     -> moved ["answer","answerOS"]   pass
+ *   "disability status", decline "I do not want to answer"    -> moved ["answer","answerOS"]   pass
+ *
+ * The last two differ from the resolver's "Decline to self-identify" case-INSENSITIVELY as well, so
+ * the old guard fired, recorded the claim, and e0aaa88's exemption accepted them - which is why the
+ * warn line kept listing all three and why that commit looked inert. Only the case-only row was
+ * silenced, and one refused row fails the whole multiset, so the run parked,
+ * holdPreparationForPacketDrift cleared the acknowledgement, and the applicant was bounced back to
+ * re-approve a packet nobody had changed, for as many rounds as she was willing to do it. Both
+ * logged issue strings came from that one row: the delivery check's `questionsMatch &&`
+ * short-circuits, so the payload line is a shadow of the questions line, not a second fault.
+ *
+ * A STRICT INCREASE IN WHAT IS WRITTEN DOWN, and nothing else. This suppresses no comparison,
+ * widens no exemption and touches no part of the gate. packetQuestionEqualsAcknowledged still
+ * demands snapClaim.length > 0 AND snapClaim === the acknowledged answer byte for byte, so an
+ * answer that moved with no claim beside it still refuses, a claim naming any other value still
+ * refuses, a minted answerSource still refuses, and a question added, removed or moved in any
+ * non-snap field still refuses. It completes e0aaa88 by feeding that rule the evidence it asks for.
+ *
+ * THE TRUST ANCHOR IS matchedOption, here at write time: the value really did come off the
+ * control's own list. The gate does not re-verify list membership, which is the same trade e0aaa88
+ * already made for punctuation-differing snaps - widened, not created, by byte identity.
+ *
+ * INFERRED, not measured: that no other family reaches this line with a case-only snap today.
+ * Nothing here is keyed on a label, a portal or the EEO family and nothing here should be - any
+ * closed-choice control whose option differs from the profile value by capitalization alone sat in
+ * the same gap and now records the same claim.
+ */
+export function optionSnapClaim(
+  resolvedField: { value: string; matchedOption: boolean } | null | undefined,
+  profileKnown: { value: string } | { skipReason: string } | null | undefined,
+): string | undefined {
+  if (!resolvedField?.matchedOption) return undefined;
+  if (!profileKnown || !('value' in profileKnown) || !profileKnown.value.trim()) return undefined;
+  return resolvedField.value !== profileKnown.value ? profileKnown.value : undefined;
+}
+
 /* A DOCUMENTED OPTION SNAP IS THE ACKNOWLEDGED ANSWER, not a change to it.
  *
  * The prepare pass resolves closed-choice answers against the LIVE option lists and types the
@@ -1608,6 +1667,25 @@ export function managedFormSnapshotWithStableCapabilities(input: {
  * she did not, and refuses. */
 const SNAP_EXEMPT_FIELDS = new Set(['answer', 'answerOptionSource', 'answerSource']);
 
+/* WHERE THE ANSWER IS TYPED IS THE LIVE FORM'S BUSINESS, NOT HER APPROVAL'S, and comparing it is the
+ * second half of the same deadlock the snap rule closed - the half that made a RETRY pointless.
+ *
+ * This is the argument applicationReview.ts already makes for `options`: the employer receives the
+ * VALUE she chose, never the control it was chosen on, so hashing the control spends a stored
+ * acknowledgement the first time a board's DOM moves. These three are read fresh off the page every
+ * run. portalSelectorForField hands back the per-page-load `[data-litos-discovered-N]` marker for
+ * any control with no durable id, portal_input_type flaps text/combobox on a react-select that
+ * mounts late, and `required` is whatever the form advertised this minute. The acknowledged copy is
+ * not her reading of them; it is the PREVIOUS run's reading of the same page, and it is the older
+ * and likelier-wrong of the two. Because the marker is renumbered on every load, the packet could
+ * never equal the audit however many times she re-approved.
+ *
+ * Refusing on them cannot protect the boundary: no selector change can put an answer she never
+ * approved INTO the packet. It can only put an approved answer in the wrong control, and the
+ * managed runner's own post-fill value verification is what catches that. atsApiField stays
+ * compared - on the ATS API channel it is the DESTINATION KEY, not aiming. */
+const LIVE_FORM_READING_FIELDS = new Set(['portalSelector', 'portalInputType', 'required']);
+
 function packetQuestionEqualsAcknowledged(
   packetQ: SubmissionPacket['questions'][number],
   verifiedQ: SubmissionPacket['questions'][number],
@@ -1615,12 +1693,17 @@ function packetQuestionEqualsAcknowledged(
   if (isDeepStrictEqual(packetQ, verifiedQ)) return true;
   const fields = new Set([...Object.keys(packetQ), ...Object.keys(verifiedQ)]) as Set<keyof typeof packetQ>;
   for (const field of fields) {
-    if (SNAP_EXEMPT_FIELDS.has(field)) continue;
+    if (SNAP_EXEMPT_FIELDS.has(field) || LIVE_FORM_READING_FIELDS.has(field)) continue;
     if (!isDeepStrictEqual(packetQ[field], verifiedQ[field])) return false;
   }
   if (packetQ.answerSource !== undefined && !isDeepStrictEqual(packetQ.answerSource, verifiedQ.answerSource)) {
     return false;
   }
+  /* The acknowledged answer, unchanged, with only the live form's aiming moved beneath it. There is
+   * no snap to document because nothing about the ANSWER moved, so the claim rule below - which
+   * exists to license a REPHRASING - must not be asked to license this. */
+  if (isDeepStrictEqual(packetQ.answer, verifiedQ.answer)
+    && isDeepStrictEqual(packetQ.answerOptionSource, verifiedQ.answerOptionSource)) return true;
   const snapClaim = typeof packetQ.answerOptionSource === 'string' ? packetQ.answerOptionSource.trim() : '';
   const acknowledged = typeof verifiedQ.answer === 'string' ? verifiedQ.answer.trim() : '';
   return snapClaim.length > 0
@@ -1629,22 +1712,59 @@ function packetQuestionEqualsAcknowledged(
     && packetQ.answer.trim().length > 0;
 }
 
-export function packetQuestionsMatchAcknowledged(
+/* ABSENT answer_source IS NOT EVIDENCE OF ANYTHING, and treating it as a licence to send is how a
+ * fix for the old equal-length rule widens the boundary it was meant to protect.
+ *
+ * MEASURED live on trylitos.com, 2026-08-26. Six parked applications were retried. Pony.ai carried 2
+ * questions and reached ready_for_final_approval; Old Mission (9), Jump Trading (11), Tower Research
+ * (14), IMC Trading (22) and Cloudflare (22) all parked here, every one telling the applicant "this
+ * application changed after you approved" about a change she had not made. The two sides are not the
+ * same population: packet.questions is the LIVE form at fill time, verifiedProjected is the audit's
+ * set, and a form carrying more fields than the audit met is ordinary rather than tampered.
+ *
+ * The flag is 'applicant_review' | 'consent_permission' and NOTHING ELSE (applicationReview.ts), so
+ * it is absent on every MACHINE answer, not merely on profile relays: the essay drafter pushes its
+ * paragraph with no flag, and answerReuse hands back a sentence she typed on a DIFFERENT employer's
+ * form with no flag either. "Carries no claim of hers" and "safe to send unreviewed" are not the
+ * same set, and the second one is empty.
+ *
+ * So an extra question is SORTED, not judged. It is not DRIFT - nothing she approved moved, and
+ * telling her the application changed sends her back to re-approve a packet with nothing wrong in
+ * it, which is the loop that never converged. It is also not SENDABLE, because the audit never
+ * showed it to her. It is a question, and the answer to a question is to ask it: the prepare hold
+ * writes the merged set onto the review and drops the acknowledgement, so her next approval covers
+ * it and the round after completes. One extra round, once, instead of forever. */
+export function packetQuestionAcknowledgement(
   packetQuestions: SubmissionPacket['questions'],
   verifiedProjected: SubmissionPacket['questions'],
-): boolean {
-  if (packetQuestions.length !== verifiedProjected.length) return false;
+): { missing: string[]; unacknowledged: string[]; forged: string[] } {
   const unmatched = [...verifiedProjected];
+  const extras: SubmissionPacket['questions'] = [];
   for (const packetQ of packetQuestions) {
     // Exact matches claim their twin first so a snap cannot steal a duplicate label's exact pair.
     let index = unmatched.findIndex((verifiedQ) => isDeepStrictEqual(packetQ, verifiedQ));
     if (index === -1) {
       index = unmatched.findIndex((verifiedQ) => packetQuestionEqualsAcknowledged(packetQ, verifiedQ));
     }
-    if (index === -1) return false;
+    if (index === -1) {
+      extras.push(packetQ);
+      continue;
+    }
     unmatched.splice(index, 1);
   }
-  return unmatched.length === 0;
+  return {
+    missing: unmatched.map((verifiedQ) => verifiedQ.question),
+    unacknowledged: extras.filter((q) => q.answerSource === undefined).map((q) => q.question),
+    forged: extras.filter((q) => q.answerSource !== undefined).map((q) => q.question),
+  };
+}
+
+export function packetQuestionsMatchAcknowledged(
+  packetQuestions: SubmissionPacket['questions'],
+  verifiedProjected: SubmissionPacket['questions'],
+): boolean {
+  const { missing, unacknowledged, forged } = packetQuestionAcknowledgement(packetQuestions, verifiedProjected);
+  return missing.length === 0 && unacknowledged.length === 0 && forged.length === 0;
 }
 
 /**
@@ -1673,10 +1793,20 @@ export function verifiedBuiltPacketIssues(
     issues.push('resume file changed after packet approval');
   }
   const verifiedProjected = submissionPacketQuestions(verifiedQuestions);
-  const questionsMatch = packetQuestionsMatchAcknowledged(packet.questions, verifiedProjected);
-  if (!questionsMatch) {
+  const acknowledgement = packetQuestionAcknowledgement(packet.questions, verifiedProjected);
+  /* Drift is the stronger statement and refuses on its own, so the ask never rides beside it: a
+   * packet that moved something she approved is not a packet with a new question on it. */
+  if (acknowledgement.missing.length > 0 || acknowledgement.forged.length > 0) {
     issues.push('application questions changed after packet approval');
+  } else if (acknowledgement.unacknowledged.length > 0) {
+    issues.push(PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE);
   }
+  /* The delivery re-hash below may only stand down for a packet whose questions ALL matched. An
+   * unacknowledged extra is still a question the audit never bound, so it must not buy the snap-only
+   * exemption any more than a drift would. */
+  const questionsMatch = acknowledgement.missing.length === 0
+    && acknowledgement.unacknowledged.length === 0
+    && acknowledgement.forged.length === 0;
   const deliveryIssue = employerDeliveryBindingIssue(packet, audit.bindings.employerDelivery, mode, envelope);
   if (deliveryIssue) {
     /* The delivery sha hashes the whole projection, questions included, so documented snaps fail
@@ -1783,19 +1913,36 @@ export function privateRunnerStepDiagnostic(error: unknown): {
  * changed" reopens the packet, sees nothing different, approves, and lands here again - the same
  * shape as the four-round Easy Dynamics loop of 2026-08-20, except this time nothing anywhere said
  * WHICH binding moved. Naming the moved part is what lets her (or us) break the cycle. */
+/* Its own issue string, and it must stay one: assertVerifiedBuiltPacket throws on ANY issue, so the
+ * send paths stay exactly as fail-closed as they were, while the prepare hold can read this one and
+ * say the true sentence instead of the drift one. */
+export const PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE = 'this form asks questions the packet approval never covered';
+
 const APPLICANT_PACKET_DRIFT_PHRASES: Record<string, string> = {
   'applicant snapshot changed after packet approval': 'your saved profile details',
   'job description changed after packet approval': 'the job description',
   'applicant email changed after packet approval': 'the application email',
   'resume file changed after packet approval': 'the resume file',
   'application questions changed after packet approval': 'the application questions',
+  // Only reached when a real drift rides alongside the ask; on its own it gets its own sentence.
+  [PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE]: 'the questions this form asks',
 };
 
 /* WHICH QUESTIONS MOVED, AND HOW - employer labels and field names only, never answer values.
  * The pair of issues measured on fee9f00c/c4413bff/6de82956 (2026-08-26) recurred identically on
  * every round across two portals, and the issue strings alone cannot say whether the sets differ,
  * one projected field differs, or only the ORDER differs (the gate's isDeepStrictEqual is
- * order-sensitive). This diff is what turns "the questions changed" into a fixable statement. */
+ * order-sensitive). This diff is what turns "the questions changed" into a fixable statement.
+ *
+ * READ IT AS A DIFF, NEVER AS THE GATE'S VERDICT. It is computed independently of
+ * packetQuestionsMatchAcknowledged and does not consult a single one of its exemptions, so a
+ * documented option snap and a live form reorder both show up here on runs that PROCEED. On
+ * 6de82956/097ddf87 (2026-08-26) that cost real time: three EEO rows were listed `changed` and
+ * orderChanged was true, but two of the three carried their snap claim and were already being
+ * accepted, and the order has not been able to park a run since e0aaa88 made the comparison a
+ * multiset. Only one row - `fields: ["answer"]`, no claim - was the fault. The success signal for
+ * any fix in this area is therefore the ABSENCE of the enclosing warn line, not a cleaner diff
+ * inside it, and a row that carries answerOptionSource is the least interesting row in the list. */
 export function packetQuestionsDriftDiagnostic(
   packetQuestions: SubmissionPacket['questions'],
   verifiedQuestions: SubmissionPacket['questions'],
@@ -1839,6 +1986,12 @@ export function packetQuestionsDriftDiagnostic(
 }
 
 export function packetDriftAttentionReason(issues: readonly string[]): string {
+  /* Not drift, so not the drift sentence. She changed nothing; the form asks more than the packet she
+   * approved covered, and the only honest next step is the one that actually clears it. */
+  if (issues.length > 0 && issues.every((issue) => issue === PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE)) {
+    return 'This company form asks questions your approved packet did not cover, so nothing was sent.'
+      + ' Open it, answer them, and approve it again.';
+  }
   const phrases = [...new Set(issues.map((issue) =>
     APPLICANT_PACKET_DRIFT_PHRASES[issue] ?? 'how Litos reaches this employer'))];
   const what = phrases.length > 0 ? ` What changed: ${phrases.join(', ')}.` : '';
@@ -1889,7 +2042,10 @@ async function holdPreparationForPacketDrift(input: {
     ...input.patch,
     status: 'needs_attention',
     attention_reason: packetDriftAttentionReason(issues),
-    attention_categories: ['evidence_gap'],
+    /* A question waiting to be asked is something she can finish, not a gap in her evidence. */
+    attention_categories: issues.every((issue) => issue === PACKET_QUESTIONS_UNACKNOWLEDGED_ISSUE)
+      ? ['required_field']
+      : ['evidence_gap'],
     packet_audit_acknowledgement: undefined,
     submission_authorization: undefined,
     submission_claimed_at: undefined,
@@ -3421,12 +3577,8 @@ export async function discoverAndResolveQuestions(
      * REVOCABLE permission owes: once she turns the permission off, resolveKnownAnswer stops
      * answering "Yes" for that label, the profile no longer says what it said, and the tick is
      * recomputed out of any packet that has not been sent. */
-    const answerOptionSource = resolvedField?.matchedOption
-      && profileKnown && 'value' in profileKnown
-      && profileKnown.value.trim()
-      && resolvedField.value.trim().toLowerCase() !== profileKnown.value.trim().toLowerCase()
-      ? profileKnown.value
-      : undefined;
+    // The rule itself is optionSnapClaim, up beside the gate that reads what it writes.
+    const answerOptionSource = optionSnapClaim(resolvedField, profileKnown);
     /* THE ACCEPTANCE, WRITTEN DOWN ON THE QUESTION IT WAS MADE ON.
      *
      * Litos may tick an employer's privacy statement, applicant terms or code of conduct only under

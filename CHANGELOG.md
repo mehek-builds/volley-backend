@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Changed
+
+- Eligible postings remain discoverable for 90 days rather than 14, so the board keeps a role for
+  as long as its employer is still listing it. Closed postings still leave the board immediately;
+  the window governs only how long an untouched posting date is treated as believable. Rows are
+  correspondingly purged at 180 days rather than 28.
+- Internships remain discoverable for 180 days rather than 90, keeping their window at twice the
+  board's so a req posted in the August burst is still listed through the following spring. Their
+  rows are correspondingly purged at 360 days rather than 180.
+
 ### Fixed
 
 - Managed application email receiving proofs now renew through append-only signed delivery events

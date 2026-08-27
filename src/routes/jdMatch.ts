@@ -5,8 +5,8 @@ import { db } from '../db/index';
 import { profiles } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { resumeSpecText } from '../engine/resumeValidate';
-import { scoreJdMatch, scoreBand, MIN_SCORABLE_TERMS, segmentJd } from '../engine/jdMatch';
-import { scorePosting, type CandidateFacts } from '../engine/clauseMatch';
+import { scoreJdMatch, scoreBand, MIN_SCORABLE_TERMS, segmentJd, extractJdTermsWithSections, normalizeTerm, ELIGIBILITY_LINE, type JdTerm } from '../engine/jdMatch';
+import { scorePosting, splitClauses, statesTiming, UNSCOREABLE, type CandidateFacts } from '../engine/clauseMatch';
 import { judgeCompetenciesCached } from '../llm/competencyCache';
 import { findGapEvidence } from '../engine/gapEvidence';
 import { checkResumeHealth } from '../engine/resumeHealth';
@@ -188,12 +188,75 @@ const requirementsSchema = z.object({
  * 600-character preview. Closure is a fact about the job, not a permission boundary; the source
  * and portal-family checks are the permission boundary and both are enforced.
  */
+/**
+ * HOW MUCH OF THE POSTING THE SCORE IS ACTUALLY DRAWN OVER.
+ *
+ * `term_count` is a count of what the extractor RECOGNISED, and it was being read as a count of what
+ * the posting ASKED FOR. Those are the same number only when the extractor read everything, and on a
+ * prose-heavy posting they are far apart: a Databricks PM internship states roughly eight things and
+ * yields three or four terms, so the screen printed "3 of 3 requirements we counted" beside a score
+ * of 100 and a student read it as a perfect match. The denominator was self-fulfilling - a
+ * requirement the extractor could not tokenize left the numerator and the denominator together, so
+ * failing to read a requirement could only ever raise the score.
+ *
+ * This changes no term, no weight and no score. It only lets the caller say what was not read.
+ *
+ * WHY THE FILTERS. A raw count of term-less lines would be noise: the sections the engine scores
+ * still contain dispositions ("curious", "thrives in ambiguity"), eligibility boilerplate (GPA,
+ * work authorization) and timing lines, none of which a resume can be scored against and all of
+ * which the codebase ALREADY has vocabularies for. Counting those as "requirements we could not
+ * read" would make the caption lie in the opposite direction, and it would break the one posting
+ * this repo pins as genuinely stating nothing. So an unread line is only counted when it is not
+ * something the engine deliberately declines to score.
+ *
+ * KNOWN AND DELIBERATE UNDER-COUNT. splitClauses drops any line under four words, a floor it holds
+ * for the clause judge's own reasons, so a terse bullet ("Proficiency in Excel") is counted neither
+ * read nor unread and a terse posting reports 0/0. That is the safe direction and it is why this
+ * reuses splitClauses instead of splitting lines itself: under-counting means the caption stays
+ * quiet about a requirement it cannot see, whereas a private splitter with a lower floor would
+ * start counting headings and fragments as requirements the extractor "could not read", which is a
+ * claim about the student's resume that would not be true. `unread` is therefore a floor on what
+ * was missed, never an estimate of it, and the caption must be worded to match.
+ */
+export function requirementLineCoverage(
+  jdText: string,
+  context: Parameters<typeof extractJdTermsWithSections>[1],
+): { read: number; unread: number } {
+  const { terms, scored } = extractJdTermsWithSections(jdText, context);
+  const keys = new Set<string>();
+  for (const term of terms as JdTerm[]) {
+    keys.add(term.term);
+    for (const alternative of term.alternatives ?? []) keys.add(alternative);
+  }
+  let read = 0;
+  let unread = 0;
+  for (const section of scored) {
+    for (const clause of splitClauses(section.text)) {
+      const hay = ` ${normalizeTerm(clause)} `;
+      /* Whole-word, never substring: `ai` must not mark a line because it says "available". */
+      if ([...keys].some((key) => key && hay.includes(` ${key} `))) {
+        read += 1;
+        continue;
+      }
+      if (ELIGIBILITY_LINE.test(clause)) continue;
+      if (statesTiming(clause)) continue;
+      if (UNSCOREABLE.some((pattern) => pattern.test(clause))) continue;
+      unread += 1;
+    }
+  }
+  return { read, unread };
+}
+
 export async function postingRow(
   jobId: string | null | undefined,
-): Promise<{ location: string | null; portal_country: string | null; description: string | null } | null> {
+): Promise<{ company_name: string | null; location: string | null; portal_country: string | null; description: string | null } | null> {
   if (!jobId) return null;
   const [row] = await db
     .select({
+      /* The employer's own name, so selfReferenceTokens can delete it. It lives on the source row
+         this query already joins, so it costs no extra join. See the backfill at the scoreJdMatch
+         call below for why a caller that omits it gets the company scored as a requirement. */
+      company_name: career_page_sources.company_name,
       location: monitored_jobs.location,
       // Bounded ATS metadata persisted in monitored_jobs.raw_json. Null on rows created before the
       // preservation path shipped, and filled by the next ordinary poll without a migration.
@@ -213,6 +276,7 @@ export async function postingRow(
     )
     .limit(1);
   return row ? {
+    company_name: row.company_name ?? null,
     location: row.location ?? null,
     portal_country: row.portal_country ?? null,
     description: row.description ?? null,
@@ -413,8 +477,24 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     }
 
     const resumeText = body.resume_text ?? storedResumeText ?? '';
+    /* THE COMPANY IS BACKFILLED FROM THE POSTING FOR THE SAME REASON THE LOCATION IS.
+       selfReferenceTokens (engine/jdMatch.ts:2657) deletes the employer's own name from every
+       section, on the ground that a posting cannot require experience with itself. It can only do
+       that when a company reaches it, and this route was backfilling `location` from the job row
+       while leaving `company` to whatever the caller happened to send. A caller that omits it gets
+       the employer's name scored as an unmet requirement: measured on a Databricks posting, the
+       term set is 4 terms with the company supplied and 5 without, the fifth being `databricks`.
+       The dashboard does send it, so this is a latent hole rather than a live defect, but the route
+       already knows the answer and there is no reason for it to depend on the caller. */
     const result = scoreJdMatch(resumeText, jdText, {
       ...body.job_context,
+      company: body.job_context?.company ?? posting?.company_name ?? undefined,
+      location: body.job_context?.location ?? posting?.location ?? null,
+    });
+
+    const coverage = requirementLineCoverage(jdText, {
+      ...body.job_context,
+      company: body.job_context?.company ?? posting?.company_name ?? undefined,
       location: body.job_context?.location ?? posting?.location ?? null,
     });
 
@@ -426,6 +506,10 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
       required_coverage: result.required_coverage,
       term_count: result.term_count,
       min_scorable_terms: MIN_SCORABLE_TERMS,
+      /* What the score is drawn over. A client that ignores these two fields sees exactly today's
+         behaviour; a client that reads them can stop presenting term_count as the whole posting. */
+      clauses_read: coverage.read,
+      clauses_unread: coverage.unread,
       // Display strings, not match keys: the student should see "CI/CD", not "ci cd".
       /* `satisfied_by` rides with the matched terms so the review screen can put the blue mark on
          the words the resume actually uses. See resumeSatisfies in engine/jdMatch.ts. */

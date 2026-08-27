@@ -145,6 +145,51 @@ export function genericJobBoardOption(options: readonly string[]): string | unde
   return named.length === 1 ? named[0] : undefined;
 }
 
+/* THE BOARD BY NAME, WHEN THE LIST OFFERS NEITHER A GENERIC BOARD NOR "OTHER".
+ *
+ * Reached only after genericJobBoardOption and otherReferralOption have BOTH missed, which is a
+ * narrower place than it sounds. genericJobBoardOption refuses a qualified board on purpose - a
+ * "University job board" is a different claim - and "Other" is the escape hatch that refusal
+ * assumes exists. On lists that offer no escape hatch the refusal had nowhere to fall, so the
+ * question came back "left for you" and held an otherwise complete application.
+ *
+ * MEASURED, Databricks Greenhouse, 2026-08-26. The seven options are "LinkedIn Job Posting",
+ * "Recruiter Reach Out", "BrickFest", "School Career Fair and/or Event", "Referral from Employee",
+ * "Referral from Intern", "I am a previous Databricks intern". There is no generic board entry and
+ * no "Other", so the ladder returned null and a filled, audited packet parked on one radio button.
+ * Six of those seven are claims she cannot make; the seventh states the fact.
+ *
+ * Her rule, stated 2026-08-26: when the list has no "Other", the fallback is always the job board.
+ * This RELAYS that declaration rather than generating one, which is the same footing the stored
+ * "Job board" default already stands on.
+ *
+ * THE EXCLUSIONS ARE THE SAFETY. A referral routes the application to a named employee and can pay
+ * that employee a bonus; a recruiter reach-out says someone contacted her; a career fair, a school
+ * and a prior internship each assert a relationship that did not happen. None of those is a board
+ * she read a posting on, so none is reachable here whatever else the entry says - including when
+ * the board's own name sits in the same string ("LinkedIn Recruiter reached out").
+ *
+ * Handshake and university boards are deliberately absent from the board list: both assert she came
+ * through USC's careers channel. Ambiguity abstains - two boards named, or none, returns undefined
+ * and the question goes back to her, which is the honest outcome.
+ */
+const NAMES_A_PUBLIC_BOARD =
+  /\b(?:linkedin|indeed|glassdoor|ziprecruiter|monster|dice|built\s*in|wellfound|angellist|simplify|otta|jobright|hiring\s*cafe)\b/i;
+const NOT_A_BOARD_CHANNEL =
+  /\b(?:referr\w*|employee|intern\b|interned|recruit\w*|reach(?:ed)?\s*out|contacted|sourced|fair|conference|event|meetup|hackathon|school|college|universit\w*|campus|alumni|student|professor|faculty|advisor|friend|family|colleague|word\s+of\s+mouth|previous|former|current)\b/i;
+
+/**
+ * The one option naming a public job board, or undefined.
+ *
+ * Only consulted once the generic wording and "Other" are both absent from the employer's list.
+ */
+export function namedJobBoardOption(options: readonly string[]): string | undefined {
+  const named = options
+    .map((option) => option.trim())
+    .filter((option) => option && NAMES_A_PUBLIC_BOARD.test(option) && !NOT_A_BOARD_CHANNEL.test(option));
+  return named.length === 1 ? named[0] : undefined;
+}
+
 /* "OTHER", AND WHY IT IS A TRUTHFUL LAST RESORT RATHER THAN A SHRUG.
  *
  * Reached only once the list has been searched for her actual answer and does not offer it. On a

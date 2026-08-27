@@ -2158,9 +2158,14 @@ describe('the sibling family: prior employment with the hiring company', () => {
     assert.equal(answer('have you ever worked for spark sc?', ap), 'SKIP');
   });
 
-  test('an employer in neither record is held because the records are not exhaustive', () => {
+  /* Was 'SKIP', flipped 2026-08-26 at the owner's request. The reason it held was that
+     declaredEmployers read only the 4-of-9 parsed scrape; it unions the bank she authored now, and
+     she asked for the negative to be answered from that fuller record. Redwood appears nowhere in
+     either record and resembles nothing in them, which is the only shape that reaches a No - every
+     mention and every near miss above still holds. */
+  test('an employer in neither record answers No from the full record', () => {
     const ap: ApplicationProfileLike = { employer_history: PARSED_ONLY, experience_bank: REAL_BANK };
-    assert.equal(answer('have you ever worked for redwood materials?', ap), 'SKIP');
+    assert.equal(answer('have you ever worked for redwood materials?', ap), 'VALUE No');
   });
 
   test('the widened match is a prefix, not a substring', () => {

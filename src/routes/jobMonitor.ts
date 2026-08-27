@@ -7,7 +7,6 @@ import { decide, isBlocked } from '../engine/eligibility';
 import {
   normalizeEmployerName,
   readPostingSponsorship,
-  SPONSORSHIP_BLOCKING_STATUS_PATTERN,
   sponsorOnlyBoardRequired,
   sponsorshipVerdict,
   type PostingSponsorship,
@@ -222,63 +221,95 @@ export const MONITOR_METRICS_STATEMENT_TIMEOUT_MS = 30_000;
 export const TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS = 5_000;
 
 /**
- * ONLY POSTINGS FROM THE LAST FOURTEEN DAYS ARE SHOWN.
+ * ONLY POSTINGS FROM THE LAST THREE MONTHS ARE SHOWN.
  *
- * FOURTEEN IS STRUCTURAL, NOT A ROUND NUMBER. Hiring is weekday work: measured on this board on
- * 2026-07-28, weekdays carry 700-3,500 postings a day while **Saturday carries 143 and Sunday 22**.
- * A window shorter than a week therefore changes size depending on which days it happens to cover -
- * a rolling 3-day window measured 3,917 on a Tuesday and would hold roughly 2,000 on a Monday, when
- * it spans Sat+Sun+Mon. A 14-day window contains exactly two Saturdays and two Sundays, so the
- * weekend dip is fully absorbed while roles remain discoverable long enough to meet the grouped
- * inventory floor.
+ * NINETY DAYS, Mehek's call on 2026-08-26, and the third value this constant has held: seven days,
+ * then fourteen, now a season.
+ *
+ * WHAT THE EARLIER NUMBERS WERE SOLVING, kept because it is the reason none of them can be restored
+ * casually. Hiring is weekday work: measured on this board on 2026-07-28, weekdays carry 700-3,500
+ * postings a day while **Saturday carries 143 and Sunday 22**. A window shorter than a week
+ * therefore changes size depending on which days it happens to cover - a rolling 3-day window
+ * measured 3,917 on a Tuesday and would hold roughly 2,000 on a Monday, when it spans Sat+Sun+Mon.
+ * Fourteen days fixed that by containing exactly two Saturdays and two Sundays. Ninety contains
+ * twelve or thirteen of each, so the weekend shape has stopped being what governs the number.
  *
  * Measured windows before the 10,000-job commitment: 3d = 3,917, 4d = 6,927, 5d = 7,815,
- * 7d = 9,664, and 14d = 12,516. The longer window is the immediate supply stabilizer while
- * Workable and additional reviewed sources build durable headroom.
+ * 7d = 9,664, and 14d = 12,516. NINETY WAS NOT MEASURED BEFORE IT SHIPPED - state that plainly
+ * rather than implying a number that was never taken. What it will hold is whatever the sources
+ * carry, which is why the daily cron reports surfaced postings and grouped roles on every run.
  *
- * WHAT WOULD MAKE THIS UNSUSTAINABLE, and what the cron watches for: weekly posting volume falling
- * (a hiring slowdown, or the December lull), or sources decaying as board tokens rotate. Either
- * shows up as surfaced postings and grouped roles trending toward their warning thresholds in the
- * daily cron response, which is why both numbers are reported on every run.
+ * WHAT NOW GOVERNS THE NUMBER is how long an untouched DATE stays believable, which is the same
+ * argument INTERNSHIP_FRESHNESS_DAYS rests on. Internships keep the longer window - 180 against
+ * this 90 - because their dates go untouched for longer still.
+ *
+ * THIS DOES NOT SURFACE CLOSED POSTINGS. `is_active` is a separate predicate and the poll's sweep
+ * flips it the moment a posting leaves its board, so a 90-day window can still only show reqs the
+ * employer is listing today. The window governs how long an untouched date stays believable, not
+ * how long a dead posting survives.
+ *
+ * WHAT TO WATCH, and it is no longer supply: a longer window cannot thin the board, so the headroom
+ * warnings should now sit far above their lines. The cost moved to STORAGE, and both purges are
+ * derived, so widening a window silently doubles a retention: ordinary rows are kept 180 days
+ * against the old 28, and internships 360 against the old 180. That is close to a year of rows on a
+ * 512 MB database. purged_postings and the table's own size are the numbers that matter on the
+ * daily run, and if they turn bad the honest fix is a tighter purge multiple - breaking the exact
+ * doubling - not a quietly narrowed window.
  *
  * Greenhouse note: `posted_at` is Greenhouse's `updated_at` (it publishes no create date), so for
- * 77% of the board this is "changed in the last 14 days" rather than "posted". That is a deliberate
+ * 77% of the board this is "changed in the last 90 days" rather than "posted". That is a deliberate
  * call, and it is why the board card says UPDATED for Greenhouse rows and POSTED for Lever/Ashby.
  * Do not collapse those two words - claiming a publish date we do not have is the one thing the
  * board's copy tests exist to prevent.
  */
-export const JOB_FRESHNESS_DAYS = 14;
+export const JOB_FRESHNESS_DAYS = 90;
 
 /**
- * HOW LONG AN INTERNSHIP STAYS ON THE BOARD. Ninety days, not fourteen.
+ * HOW LONG AN INTERNSHIP STAYS ON THE BOARD. A hundred and eighty days.
  *
- * An internship req is posted once and stays open for months, and NOBODY EVER RE-SAVES IT. That is
- * the whole difference. Greenhouse publishes no create date so `posted_at` is its `updated_at`, and
- * a full-time req is edited often enough to keep re-entering a 14-day window; an internship posted
- * in the August burst is untouched from then until it closes. So it aged out of the board in
- * mid-September while still open, and still the most valuable posting on the board for the student
- * it was written for.
+ * TWICE THE BOARD WINDOW, restored to that ratio on 2026-08-26 (Mehek's call) in the same breath as
+ * the board moved 14 -> 90. For a few minutes the two were equal at 90 and this branch admitted
+ * nothing the general one did not; 180 makes it load-bearing again, which is the state the code was
+ * written for and the state its test asserts.
+ *
+ * WHY THE RULE IS ITS OWN: an internship req is posted once and stays open for months, and NOBODY
+ * EVER RE-SAVES IT. Greenhouse publishes no create date so `posted_at` is its `updated_at`, and a
+ * full-time req is edited often enough to keep re-entering a short window; an internship posted in
+ * the August burst is untouched from then until it closes. Under the old 14-day board window it aged
+ * out in mid-September while still open, and still the most valuable posting on the board for the
+ * student it was written for.
  *
  * Measured 2026-08-03, which is what set the number: 367 internships were open across our sources
  * and only 170 were inside 14 days. The window alone was costing 54% of internship supply.
  *
- * THIS DOES NOT SURFACE CLOSED INTERNSHIPS. `is_active` is a separate predicate and the poll's
- * sweep flips it the moment a posting leaves its board, so a 90-day window can still only show reqs
- * the employer is listing today. The window governs how long an untouched DATE stays believable,
- * not how long a dead posting survives.
+ * THIS DOES NOT SURFACE CLOSED INTERNSHIPS, and at this length that sentence is carrying more
+ * weight than it used to. `is_active` is a separate predicate and the poll's sweep flips it the
+ * moment a posting leaves its board, so even a 180-day window can only show reqs the employer is
+ * listing TODAY. The window governs how long an untouched DATE stays believable, not how long a
+ * dead posting survives. Without that sweep this number would be indefensible; with it, the worst
+ * case is a live req whose date is old, which is exactly the internship case.
  *
- * Ninety is a season, chosen against the shape of the thing: summer hiring opens Aug-Oct and runs
- * interviews into the winter, so a shorter window still drops live autumn reqs, while a longer one
- * starts surfacing reqs whose date can no longer be told apart from abandoned.
+ * A HUNDRED AND EIGHTY IS THE CYCLE, not a season. Ninety was chosen to span the Aug-Oct opening
+ * and the interviews that run into winter. 180 spans the whole of it: a summer-2027 req posted in
+ * August is still shown in February, by which time the employer has either closed it - and the
+ * sweep has already removed it - or is still hiring against it. What it gives up is the ability to
+ * read anything into the date at all, which is why the board card says FOUND or UPDATED rather than
+ * POSTED wherever the employer did not publish a real publish date.
  */
-export const INTERNSHIP_FRESHNESS_DAYS = 90;
+export const INTERNSHIP_FRESHNESS_DAYS = 180;
 
 /**
  * The window, which is now two windows.
  *
  * Still ONE helper, for the reason the single-window version was: `/jobs`, `/jobs/grouped`,
  * `/jobs/facets` and `surfacedJobCount()` all call it, and a second copy of this rule is precisely
- * how the floor check ends up watching a number no visitor ever sees.
+ * how the floor check ends up watching a number no visitor ever sees. One helper is also why
+ * widening the board window widens the dashboard's job feed by the same amount: that is the design,
+ * not a side effect.
+ *
+ * Two windows, two lengths: 90 for the board and 180 for internships, so the second branch decides
+ * a real set of rows rather than restating the first. See INTERNSHIP_FRESHNESS_DAYS for why an
+ * internship's date ages differently from everything else's.
  */
 function freshnessPredicate() {
   return sql`(
@@ -1188,9 +1219,9 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
      * different facts and only the first one is a fault. */
     /* Two cutoffs, matching freshnessPredicate. The ingest gate is the THIRD place the window is
        enforced (read, purge, here) and the one that decides what exists at all: an internship the
-       poll refuses to store can never be shown by a longer read window, so leaving this at 14 days
-       would make the other two changes inert. The employment type is resolved by the normalizers
-       before this point, which is what lets the gate ask. */
+       poll refuses to store can never be shown by a longer read window, so leaving this behind the
+       constants would make the other two changes inert. The employment type is resolved by the
+       normalizers before this point, which is what lets the gate ask. */
     const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 86_400_000);
     const internshipCutoff = new Date(Date.now() - INTERNSHIP_FRESHNESS_DAYS * 86_400_000);
     const fresh = jobs
@@ -1355,9 +1386,20 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
  */
 export function sponsorOnlyPredicate() {
   return and(
-    /* The posting itself always wins over company-level filing history. This also protects rows
-       saved before the parser learned the restriction, so the correction is immediate. */
-    sql<boolean>`${monitored_jobs.description} !~* ${SPONSORSHIP_BLOCKING_STATUS_PATTERN}`,
+    /* The posting itself always wins over company-level filing history: a row whose own text
+       reads as refusing sponsorship is excluded regardless of which branch below would otherwise
+       admit it.
+       THIS USED TO BE `description !~* SPONSORSHIP_BLOCKING_STATUS_PATTERN`, re-run on every
+       request. A regex predicate cannot use an index, so it forced a full sequential scan of
+       monitored_jobs on every sponsor-only board load - measured on prod 2026-08-27 at ~2s warm
+       and ~27s cold, next to ~90ms for the same query without it, and it ran TWICE per
+       /jobs/grouped request (once for the rows, once for the count). That is what a visitor
+       checking the sponsorship box actually felt: the board "not loading" was this scan timing
+       out, not an empty result. `sponsorship_status` is written by the same classifier the regex
+       exists to double-check, and a prod audit the same day found zero rows where the two
+       disagreed (785 postings match the pattern, all 785 already carry 'refuses'), so this reads
+       the already-indexed column the regex was re-deriving instead of re-running it. */
+    ne(monitored_jobs.sponsorship_status, 'refuses'),
     or(
       /* The posting's own words, wherever the role is. An employer writing "visa sponsorship
          available" on a Berlin role is talking about Germany, and it is their statement to make. */
@@ -1368,7 +1410,6 @@ export function sponsorOnlyPredicate() {
            ours is one we cannot identify, so nothing on it may be called a confirmed sponsor - even
            if a link survived from before the mismatch was noticed. */
         eq(career_page_sources.portal_name_mismatch, false),
-        ne(monitored_jobs.sponsorship_status, 'refuses'),
         /* AND THE ROLE HAS TO BE ONE AN H-1B COULD COVER. The employer-level evidence is a US
            petition record; applying it to a Bengaluru or Tokyo posting claims something about a
            visa regime this product knows nothing about. 'unknown' (a bare "Remote") stays in: at a
@@ -2346,7 +2387,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       minimum_sponsor_surfaced_jobs: MINIMUM_SPONSOR_SURFACED_JOBS,
       /* THE SUSTAINABILITY CHECK, run every day rather than once.
        *
-       * Whether the 14-day window keeps both postings and grouped roles above their warning lines
+       * Whether the 90-day window keeps both postings and grouped roles above their warning lines
        * depends on hiring volume and sources still resolving. Reporting both makes the answer
        * observable instead of relying on a one-time measurement.
        *

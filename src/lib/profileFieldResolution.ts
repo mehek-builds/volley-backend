@@ -71,6 +71,7 @@ import {
   isCompanySiteReferralClaim,
   isJobBoardReferralClaim,
   genericJobBoardOption,
+  namedJobBoardOption,
   otherReferralOption,
 } from './referralSource';
 import {
@@ -1130,10 +1131,11 @@ export function chooseEeoOption(
 // ---- intent and resolution ----
 
 /** The question intent for a raw discovered label, after handle stripping. */
-export function profileFieldIntent(label: string): ProfileKey | null {
+export function profileFieldIntent(label: string, jdText?: string): ProfileKey | null {
   const normalized = normalizeDiscoveredLabel(label) || label.trim();
   if (!normalized) return null;
-  return classifyField(normalized);
+  // Passed straight through for the referral rule; see classifyField's note in questionDiscovery.ts.
+  return classifyField(normalized, undefined, jdText);
 }
 
 /**
@@ -1309,7 +1311,7 @@ export function resolveProfileField(
   if (!known || !('value' in known)) return null;
   const base = known.value.trim();
   if (!base) return null;
-  const key = profileFieldIntent(label);
+  const key = profileFieldIntent(label, jdText);
   // Self-identification has its own ladder and its own matcher: classifyField declines every EEO
   // label on purpose, so `key` is null here and the generic path would offer the stored wording and
   // nothing else. See the EEO section above for why the opt-out is a legitimate second choice on
@@ -1375,7 +1377,15 @@ export function resolveProfileField(
      * and held a complete application; now it is answered the way she asked for it to be. */
     if (matched === null && isJobBoardReferralClaim(evidenced)) {
       const options = usableOptions(shape.options);
-      matched = genericJobBoardOption(options) ?? otherReferralOption(options) ?? null;
+      /* namedJobBoardOption is last because it says the MOST: it names one particular board, where
+       * her standing answer is the generic fact. It is only correct once the two entries that state
+       * that fact more exactly - the generic wording, then "Other" - are both absent from the list,
+       * which is the Databricks shape. See namedJobBoardOption for the exclusions that keep a
+       * referral, a recruiter or a career fair from ever landing here. */
+      matched = genericJobBoardOption(options)
+        ?? otherReferralOption(options)
+        ?? namedJobBoardOption(options)
+        ?? null;
     }
   }
   if (key === 'referral_source_default' && usableOptions(shape.options).length > 0 && matched === null) {

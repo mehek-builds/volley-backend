@@ -35,6 +35,10 @@ import {
 // graduation year came from the ladder, not from resolveKnownAnswer, and only this call sees it.
 import { resolveProfileField } from './profileFieldResolution';
 import { packetAuditSha256, packetVisibleQuestions } from './packetAudit';
+// The employer-named sponsorship tests below resolve the posting country through the real parser
+// rather than passing a code by hand: the parser is the half that decides whether the packet's own
+// structured fields name one country exactly enough to answer on.
+import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from './jobLocation';
 
 // R-004 originally refused every work-eligibility question after one false legal declaration
 // shipped. These are now answerable only from explicit stored booleans, never by inference.
@@ -1296,7 +1300,8 @@ test('live-audit profile labels beat generic wording and stay out of drafts', ()
     value: 'Yes',
   });
   const samsara = resolveKnownAnswer('Have you previously worked at Samsara?', 'select', profile, undefined);
-  assert.ok(samsara && 'skipReason' in samsara);
+  // Absent from the full record and nothing like it: answered No. The near miss below still holds.
+  assert.deepEqual(samsara, { value: 'No' });
   const nearMissPriorEmployer = resolveKnownAnswer('Have you previously worked at Tone?', 'select', profile, undefined);
   assert.ok(nearMissPriorEmployer && 'skipReason' in nearMissPriorEmployer && nearMissPriorEmployer.skipReason.startsWith('prior employer'));
   const genericPriorEmployer = resolveKnownAnswer('Have you previously worked at any employer in this industry?', 'select', profile, undefined);
@@ -1768,14 +1773,20 @@ test('Databricks export-control checkbox questions are not inferred from profile
   );
 });
 
-test('Databricks prior employer questions answer only a proven positive', () => {
+/* Rewritten 2026-08-26. This pinned "Yes or silence, never No", which was right while
+   declaredEmployers read only the 4-of-9 parsed scrape. It now unions the experience bank she
+   authored, and the owner asked for the negative to be answered from that fuller record. What the
+   test still pins - and what matters more than the flip - is that every AMBIGUOUS shape below is
+   unchanged: a composite target, a subsidiary, a generic one and a near miss all still go to her. */
+test('Databricks prior employer questions answer No from the full record and hold every ambiguity', () => {
   const absent = resolveKnownAnswer(
       'Do you currently or have you previously worked for Databricks in the past?',
       'combobox',
       { employer_history: ['SoFi', 'Traeco', 'Tonee'] },
       undefined,
   );
-  assert.ok(absent && 'skipReason' in absent);
+  // Unambiguous and absent from the full record: answered rather than handed back.
+  assert.deepEqual(absent, { value: 'No' });
   assert.deepEqual(
     resolveKnownAnswer(
       'Do you currently or have you previously worked for Databricks in the past?',
@@ -3685,6 +3696,98 @@ test('stored country eligibility answers only labels that select that country', 
   }
 });
 
+/* THE COMPANY NAME WHERE THE COUNTRY GOES, WITH THE POSTING SUPPLIED.
+ *
+ * The test above passes `undefined` for the posting country at every call, so what it pins is the
+ * FLOOR: with no posting in hand, an employer's name where a country belongs leaves
+ * selectedEligibilityCountry nothing to select and the question goes back to her. It was read as
+ * "Cloudflare's wording is unanswerable", and that reading is wrong. The LABEL was never the
+ * defect. The resolver answers it the moment an exact country arrives, and the country was being
+ * lost upstream, in the one place a packet's geography is ever written: `POST /resume/generate`
+ * read the posting row from `body.job_id` alone, so a request that named its posting through the
+ * canonical application instead stored a job_context of `{ company, role, jd_hash }` and nothing
+ * else. `postingCountryCodeFromJobContext(row.job_context)` is then correctly `undefined` at every
+ * one of its call sites, and each of them correctly refuses - which is why nothing looked broken
+ * anywhere in between, and why the label kept taking the blame.
+ *
+ * The three contexts below are the three shapes generated_resumes.job_context actually holds: a
+ * location string, the ATS's own country field, and a "Remote" posting whose country the employer
+ * published separately. Nothing here asserts a hardcoded 'US' - the parser decides, and the
+ * assertion is that it decided exactly once.
+ */
+test('an employer-named sponsorship label is answered from the posting country the packet carries', () => {
+  for (const jobContext of [
+    { company: 'Cloudflare', role: 'Software Engineering Intern', jd_hash: 'e515deb8', location: 'Austin, TX' },
+    { company: 'Cloudflare', role: 'Software Engineering Intern', jd_hash: 'e515deb8', portal_country: 'US' },
+    {
+      company: 'Cloudflare',
+      role: 'Software Engineering Intern',
+      jd_hash: 'e515deb8',
+      location: 'Remote',
+      portal_country: 'United States',
+    },
+  ]) {
+    const country = postingCountryFromJobContext(jobContext);
+    const code = postingCountryCodeFromJobContext(jobContext);
+    assert.equal(code, 'US', JSON.stringify(jobContext));
+    // The employer's own name, and the two-hundred-word tail of visa categories beside it, are the
+    // same question with the same stored answer behind them.
+    for (const label of [CLOUDFLARE_SPONSORSHIP_LABEL, REDWOOD_SPONSORSHIP_LABEL]) {
+      assert.deepEqual(
+        resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, undefined, country, code),
+        { value: 'Yes' },
+        `${label.slice(0, 50)} / ${JSON.stringify(jobContext)}`,
+      );
+    }
+  }
+
+  /* It is READING needs_sponsorship, not agreeing with it. An account that needs nothing gets the
+   * opposite answer on the identical label and posting, which is the only thing separating a relay
+   * from a constant - and a constant "Yes" here is R-004's false legal declaration again. */
+  const noSponsorshipNeeded: ApplicationProfileLike = {
+    work_authorized: true,
+    needs_sponsorship: false,
+    work_eligibility_by_country: [{
+      country_code: 'US', authorized_now: true, needs_sponsorship_now: false, needs_sponsorship_future: false,
+    }],
+  };
+  assert.deepEqual(
+    resolveKnownAnswer(CLOUDFLARE_SPONSORSHIP_LABEL, 'text', noSponsorshipNeeded, undefined, 'us', 'US'),
+    { value: 'No' },
+  );
+});
+
+test('an employer-named sponsorship label still refuses when the posting names no one country', () => {
+  /* THE FAIL-CLOSED HALF, and it is the half that must survive every future repair of the half
+   * above. "Yes, I need sponsorship" is wrong and costly for a role in the one country where she
+   * does not, so a posting that cannot say which country it is in must leave the field for her -
+   * exactly as it does today. Four ways a posting says nothing usable, all of them live shapes:
+   * a packet with no structured location at all (what every countryless packet on disk looks like),
+   * a bare "Remote", two offices in two countries, and a portal country field naming two.
+   *
+   * The fifth case is different in kind and belongs here anyway: London resolves to exactly ONE
+   * country, GB, and is still refused, because no GB declaration is on file. An exact country is
+   * what lets the resolver look; it is not permission to answer. */
+  for (const jobContext of [
+    { company: 'Cloudflare', role: 'Software Engineering Intern', jd_hash: 'e515deb8' },
+    { company: 'Cloudflare', role: 'Software Engineering Intern', jd_hash: 'e515deb8', location: 'Remote' },
+    { locations: ['San Francisco, CA', 'London'] },
+    { portal_country: 'United States | Canada' },
+    { location: 'London, United Kingdom' },
+  ]) {
+    const country = postingCountryFromJobContext(jobContext);
+    const code = postingCountryCodeFromJobContext(jobContext);
+    for (const label of [CLOUDFLARE_SPONSORSHIP_LABEL, REDWOOD_SPONSORSHIP_LABEL]) {
+      const resolved = resolveKnownAnswer(label, 'text', PROD_OWNER_PROFILE, undefined, country, code);
+      assert.ok(
+        resolved && 'skipReason' in resolved,
+        `${label.slice(0, 50)} / ${JSON.stringify(jobContext)}`,
+      );
+      assert.ok(resolved.skipReason.trim().length > 20, JSON.stringify(jobContext));
+    }
+  }
+});
+
 test('Scale AI\'s restrictive-agreement declaration stays refused, R-105', () => {
   /* NOT a lost answer, and it must not be repaired alongside them. This asks about her contractual
    * obligations to a PAST employer, no column records them, and the hardcoded "No" it used to get
@@ -4523,4 +4626,74 @@ test('a reviewed GPA band against a classification-worded label still detects a 
   ], { gpa: '3.89', gpa_scale: '4.0' }, undefined, reviewedAt);
   assert.notEqual(refreshed[0].answer, '3.5 - 3.8',
     'a stale reviewed band that her real GPA (3.89) sits outside must be recomputed, not kept');
+});
+
+/* THE REFERRAL QUESTION THAT NAMES THE EMPLOYER INSTEAD OF "US".
+ *
+ * MEASURED live on the owner's queue, 2026-08-27, on a Five Rings Greenhouse packet that could not
+ * be completed at all. classifyField was the ONLY one of parseReferralQuestion's four call sites
+ * that omitted jdText, and that branch recognises an employer-NAMED target only by validating it
+ * against the employer frozen into the packet context. With nothing to validate against it refused
+ * every one:
+ *
+ *   "how did you hear about us?"               -> referral_source_default -> ladder -> "Other"
+ *   "how did you first hear about five rings?" -> null                    -> no ladder, no guard
+ *
+ * A null key skips BOTH referral rules in profileFieldResolution: the ladder that answers "Other",
+ * and the guard that returns null rather than put an unmatched value into a closed list. So the raw
+ * stored default "Job board" was emitted with matchedOption false into a control whose options are
+ * [Coffee Chat, Conference, GitHub, ..., Other]. The dashboard refused it on every pass - correctly,
+ * it is not one of the options - and the application looped forever, unfinishable.
+ *
+ * Reproduced identically for Databricks and Akuna: the trigger is an employer NAME in the label. */
+const FROZEN_FIVE_RINGS = '[LITOS FROZEN JOB EMPLOYER] Five Rings\nFive Rings is a proprietary trading firm.';
+
+test('an employer-named referral question classifies as the referral question', () => {
+  assert.equal(classifyField('how did you first hear about five rings?', undefined, FROZEN_FIVE_RINGS), 'referral_source_default');
+  assert.equal(classifyField('how did you hear about five rings?', undefined, FROZEN_FIVE_RINGS), 'referral_source_default');
+  // The generic phrasing never depended on the context and still does not.
+  assert.equal(classifyField('how did you hear about us?', undefined, FROZEN_FIVE_RINGS), 'referral_source_default');
+  assert.equal(classifyField('how did you hear about us?'), 'referral_source_default');
+});
+
+test('a caller with no packet context keeps exactly its old answer', () => {
+  // portalSubmission's questionMayBeClosedList and questionFillShouldPressEnter pass no context, so
+  // the employer target stays unvalidated and stays refused. This widens what can be RECOGNISED on
+  // evidence, never what is assumed without it.
+  assert.equal(classifyField('how did you first hear about five rings?'), null);
+});
+
+test('the context has to name THIS employer, not just any', () => {
+  // Otherwise the fix would amount to "accept any trailing words", which is the exact thing the
+  // target validation exists to prevent.
+  const other = '[LITOS FROZEN JOB EMPLOYER] Jane Street\nJane Street is a trading firm.';
+  assert.equal(classifyField('how did you first hear about five rings?', undefined, other), null);
+});
+
+test('an open-source question is still refused, context or no context', () => {
+  // The hazard referralSourceDetailAnswer documents: "source" present is not "source" qualified.
+  assert.notEqual(classifyField('please describe your open source contributions', undefined, FROZEN_FIVE_RINGS), 'referral_source_default');
+});
+
+test('the employer-named question now resolves to an option on the employer list', () => {
+  // End to end through the real resolver: the whole point is that "Other" reaches the control and
+  // "Job board" - which is on no employer list - never does.
+  const options = ['Coffee Chat', 'Conference', 'GitHub', 'Handshake', 'LinkedIn', 'Word of Mouth', 'Information Session', 'Other'];
+  const withDefault = { full_name: 'M', email: 'm@e.com', referral_source_default: 'Job board' } as unknown as ApplicationProfileLike;
+  const resolved = resolveProfileField(
+    { label: 'how did you first hear about five rings?', inputType: 'select', options },
+    withDefault, FROZEN_FIVE_RINGS, undefined, undefined,
+  );
+  assert.equal(resolved?.key, 'referral_source_default');
+  assert.equal(resolved?.value, 'Other');
+  assert.equal(resolved?.matchedOption, true);
+  assert.ok(options.includes(String(resolved?.value)), 'the answer must be one of the employer\'s own options');
+
+  // And with no standing declaration on the profile it stays blank rather than guessing - the
+  // account this was measured on has no referral_source_default at all.
+  const noDefault = { full_name: 'M', email: 'm@e.com' } as unknown as ApplicationProfileLike;
+  assert.equal(
+    resolveProfileField({ label: 'how did you first hear about five rings?', inputType: 'select', options }, noDefault, FROZEN_FIVE_RINGS, undefined, undefined),
+    null,
+  );
 });
