@@ -7,7 +7,6 @@ import { decide, isBlocked } from '../engine/eligibility';
 import {
   normalizeEmployerName,
   readPostingSponsorship,
-  SPONSORSHIP_BLOCKING_STATUS_PATTERN,
   sponsorOnlyBoardRequired,
   sponsorshipVerdict,
   type PostingSponsorship,
@@ -1387,9 +1386,20 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
  */
 export function sponsorOnlyPredicate() {
   return and(
-    /* The posting itself always wins over company-level filing history. This also protects rows
-       saved before the parser learned the restriction, so the correction is immediate. */
-    sql<boolean>`${monitored_jobs.description} !~* ${SPONSORSHIP_BLOCKING_STATUS_PATTERN}`,
+    /* The posting itself always wins over company-level filing history: a row whose own text
+       reads as refusing sponsorship is excluded regardless of which branch below would otherwise
+       admit it.
+       THIS USED TO BE `description !~* SPONSORSHIP_BLOCKING_STATUS_PATTERN`, re-run on every
+       request. A regex predicate cannot use an index, so it forced a full sequential scan of
+       monitored_jobs on every sponsor-only board load - measured on prod 2026-08-27 at ~2s warm
+       and ~27s cold, next to ~90ms for the same query without it, and it ran TWICE per
+       /jobs/grouped request (once for the rows, once for the count). That is what a visitor
+       checking the sponsorship box actually felt: the board "not loading" was this scan timing
+       out, not an empty result. `sponsorship_status` is written by the same classifier the regex
+       exists to double-check, and a prod audit the same day found zero rows where the two
+       disagreed (785 postings match the pattern, all 785 already carry 'refuses'), so this reads
+       the already-indexed column the regex was re-deriving instead of re-running it. */
+    ne(monitored_jobs.sponsorship_status, 'refuses'),
     or(
       /* The posting's own words, wherever the role is. An employer writing "visa sponsorship
          available" on a Berlin role is talking about Germany, and it is their statement to make. */
@@ -1400,7 +1410,6 @@ export function sponsorOnlyPredicate() {
            ours is one we cannot identify, so nothing on it may be called a confirmed sponsor - even
            if a link survived from before the mismatch was noticed. */
         eq(career_page_sources.portal_name_mismatch, false),
-        ne(monitored_jobs.sponsorship_status, 'refuses'),
         /* AND THE ROLE HAS TO BE ONE AN H-1B COULD COVER. The employer-level evidence is a US
            petition record; applying it to a Bengaluru or Tokyo posting claims something about a
            visa regime this product knows nothing about. 'unknown' (a bare "Remote") stays in: at a
