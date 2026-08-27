@@ -111,6 +111,7 @@ import { resumeEmailOfRecord, resumePacketEmailIsCurrent } from '../lib/resumeEm
 import { refreshResumeContactFromProfile } from '../lib/resumeContactOfRecord';
 import { allowHourly, LIMITS, rateLimitedReply } from '../middleware/quota';
 import { reconcileCanonicalCoverLetterForPacket } from '../lib/canonicalCoverLetterService';
+import { planPacketJdRepair, repairPacketJd } from '../lib/packetJdRepair';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const extensionPacketQuerySchema = z.object({ current_url: z.string().url().max(4000) });
@@ -627,6 +628,71 @@ async function refuseDuplicateApplication(
 }
 
 export async function applicationRoutes(fastify: FastifyInstance) {
+  /**
+   * POST /applications/:id/jd-repair - replace a frozen job description that is an application form.
+   *
+   * WHY A ROUTE AND NOT A CRON OR A READ PATH. packetJdRepair moves `jd_text`, which is hashed into
+   * packetBindings.jdSha256, so a repair moves `packet_version` and takes any stored acknowledgement
+   * to packet_stale. That is a consequence the operator has to choose, per row, having seen what the
+   * replacement would be. A read path that repaired on sight would do it to rows nobody asked about,
+   * and a cron would do it to all of them at once.
+   *
+   * PLAN-ONLY BY DEFAULT. Without `confirm: true` this performs no write at all: it returns the plan
+   * planPacketJdRepair produced, including the refusals, so a row can be inspected before anything
+   * touches it. The write-back is the one step in this feature nobody has yet observed on real data,
+   * and defaulting to it would be the wrong way round.
+   *
+   * THE REFUSALS ARE THE POINT, not an edge case. Measured on Jane Street packet 496cff97 while
+   * wiring this: `submitted_at` is null but `submission_attempted_at` is set, a `security_code` is
+   * on the row, and attention_reason reads "Litos entered the employer verification step, but could
+   * not prove the final result." An employer may hold that application. Its description is wrong and
+   * it must still not be rewritten, because the frozen description is the record of what was sent.
+   * planPacketJdRepair already refuses it through employerMayHoldApplication; this route must never
+   * grow an override for that.
+   */
+  fastify.post(
+    '/applications/:id/jd-repair',
+    { preHandler: requireAuth },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const row = await ownedResume(request, reply);
+      if (!row) return;
+
+      const confirm = (request.body as { confirm?: unknown } | undefined)?.confirm === true;
+
+      if (!(await allowHourly(request.jwtPayload!.userId, 'jdRepair', LIMITS.perHour.jobExtract))) {
+        return rateLimitedReply(reply);
+      }
+
+      const planned = await planPacketJdRepair(row);
+      if (!planned) {
+        /* One shape for every refusal, deliberately. The reasons are not equally safe to publish -
+         * "an employer may hold this" and "this description is fine" are different facts about the
+         * row - and the caller's next action is identical either way: leave it alone. */
+        return reply.status(200).send({ repaired: false, planned: false });
+      }
+
+      const preview = {
+        source: planned.replacement.source,
+        chars: planned.replacement.text.length,
+        head: planned.replacement.text.slice(0, 300),
+      };
+      if (!confirm) return reply.status(200).send({ repaired: false, planned: true, preview });
+
+      const written = await repairPacketJd(row);
+      if (!written) {
+        /* A lost CAS, or a row that stopped qualifying between the plan and the write. Never retried
+         * here: repairPacketJd returns null precisely so the caller re-reads rather than replaying a
+         * plan built against a spec that is no longer on the row. */
+        return reply.status(409).send({ repaired: false, planned: true, code: 'jd_repair_row_moved' });
+      }
+      request.log.warn(
+        { applicationId: row.id, userId: row.user_id, source: preview.source, chars: preview.chars },
+        'packet job description repaired',
+      );
+      return reply.status(200).send({ repaired: true, planned: true, preview });
+    },
+  );
+
   fastify.post(
     '/applications/:id/packet-audit',
     { preHandler: requireAuth },
