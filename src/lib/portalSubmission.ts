@@ -8112,7 +8112,13 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   // careers page) and the /careers/{department}-team marketing routes, without an ad-hoc host rule.
   bamboohr: /^\/careers\/\d+\/?$/i,
   jobvite: /^\/[a-z0-9._-]+\/job\/[a-z0-9]+(?:\/apply)?\/?$/i,
-  icims: /^\/jobs\/\d+\/[a-z0-9%._~-]+\/(?:job|login)\/?$/i,
+  // The colon is not decoration: iCIMS builds the slug from the posting title verbatim, so every
+  // "Internship: Summer 2027" tenant emits `.../trading-system-engineering-internship:-summer-2027/job`
+  // unencoded in its own search results. Without it the SAME posting reads as supported through the
+  // `%3a` form and unsupported through the literal one, which is a routing decision flipping on a
+  // detail no job seeker can see. A colon is a legal pchar (RFC 3986) and the path SHAPE below is
+  // what does the excluding, so this widens nothing structural.
+  icims: /^\/jobs\/\d+\/[a-z0-9%._~:-]+\/(?:job|login)\/?$/i,
   // The one that matters most. Without it this family would claim every Oracle Cloud application
   // under the sun, including ones that are somebody's payroll or ERP login.
   oraclecloud: /^\/hcmUI\/CandidateExperience\/(?:[a-z]{2}\/)?sites\/[a-z0-9_-]+\/(?:job|opportunity)\/\d+(?:\/apply\/email)?\/?$/i,
