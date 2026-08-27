@@ -2994,6 +2994,19 @@ const SMARTRECRUITERS_FIRST_NAME_SELECTOR = 'spl-input#first-name-input input';
 const SMARTRECRUITERS_LAST_NAME_SELECTOR = 'spl-input#last-name-input input';
 const SMARTRECRUITERS_EMAIL_SELECTOR = 'spl-input#email-input input';
 const SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = 'spl-input#confirm-email-input input';
+/* CITY, and it is REQUIRED - measured live 2026-08-27 on a Western Digital posting
+   (jobs.smartrecruiters.com/oneclick-ui/company/WesternDigital/publication/...): the field carries
+   `required` and the step-one footer will not validate without it. Nothing filled it until now, so
+   a SmartRecruiters run could never complete even the first page, quite apart from the multi-step
+   bar that stops it later.
+
+   ANCHORED ON data-test, not on the id. The element's own id is `spl-form-element_5`, generated per
+   render, so an id selector would be a coin flip on the next load. The input lives in the
+   autocomplete's SHADOW ROOT (confirmed: zero light-DOM child inputs), which is why the compound
+   selector spans the boundary the same way the resume dropzone's does - Playwright pierces open
+   shadow roots for plain CSS. It is role="combobox" with aria-autocomplete="list", so it is a
+   suggestion field and not a text box: see the Enter press beside its fill. */
+const SMARTRECRUITERS_CITY_SELECTOR = 'spl-autocomplete[data-test="location-autocomplete"] input';
 const SMARTRECRUITERS_LINKEDIN_SELECTOR = 'spl-input#linkedin-input input';
 const SMARTRECRUITERS_WEBSITE_SELECTOR = 'spl-input#website-input input';
 const CONTROLLED_SMARTRECRUITERS_FIRST_NAME_SELECTOR = '[id="first-name-input"]';
@@ -3003,6 +3016,7 @@ const CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR = '[id="confirm-email-in
 // The controlled QA fixture is ordinary light DOM. Keep its compatibility selector isolated from
 // the live adapter so it can never broaden a real SmartRecruiters page-wide phone match.
 const CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR = '[aria-label="Phone number"]';
+const CONTROLLED_SMARTRECRUITERS_CITY_SELECTOR = '[data-test="location-autocomplete"]';
 const CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR = '[id="linkedin-input"]';
 const CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR = '[id="website-input"]';
 /* THE ASHBY LOCATION CONTROL, and why the obvious selector matches nothing.
@@ -7044,6 +7058,21 @@ function pushFixedFieldActions(
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR, packet.email, 'email');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR, packet.email, 'confirm_email');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR, phoneForPortalField(portal, packet.phone), 'phone');
+    managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_CITY_SELECTOR : SMARTRECRUITERS_CITY_SELECTOR, packet.city, 'location');
+    if (packet.city) {
+      /* Take the suggestion, exactly as the Workable location field does. A combobox with
+         aria-autocomplete="list" holds typed text that the form has not accepted as a choice, so
+         filling without this leaves a required field that LOOKS answered and validates as empty.
+         Optional and bounded: a tenant that accepts free text simply keeps what was typed. */
+      actions.push({
+        type: 'press',
+        selector: controlled ? CONTROLLED_SMARTRECRUITERS_CITY_SELECTOR : SMARTRECRUITERS_CITY_SELECTOR,
+        value: 'Enter',
+        label: 'location_select',
+        optional: true,
+        timeout: MANAGED_FILL_TIMEOUT_MS,
+      });
+    }
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR, packet.linkedinUrl, 'linkedin');
     managedFill(actions, controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR, packet.portfolioUrl ?? packet.githubUrl, 'portfolio');
     managedUpload(actions, SMARTRECRUITERS_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
@@ -9501,6 +9530,7 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_EMAIL_SELECTOR : SMARTRECRUITERS_EMAIL_SELECTOR], packet.email, 'email', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR : SMARTRECRUITERS_CONFIRM_EMAIL_SELECTOR], packet.email, 'confirm_email', filledFields);
     await fillPhoneField(page, [controlled ? CONTROLLED_SMARTRECRUITERS_PHONE_SELECTOR : SMARTRECRUITERS_PHONE_SELECTOR], portal, packet.phone, 'phone', filledFields);
+    await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_CITY_SELECTOR : SMARTRECRUITERS_CITY_SELECTOR], packet.city, 'location', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_LINKEDIN_SELECTOR : SMARTRECRUITERS_LINKEDIN_SELECTOR], packet.linkedinUrl, 'linkedin', filledFields);
     await fillFirst(page, [controlled ? CONTROLLED_SMARTRECRUITERS_WEBSITE_SELECTOR : SMARTRECRUITERS_WEBSITE_SELECTOR], packet.portfolioUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [SMARTRECRUITERS_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);

@@ -41,6 +41,9 @@ const smartRecruitersExactSelectors = {
   email: 'spl-input#email-input input',
   confirm_email: 'spl-input#confirm-email-input input',
   phone: 'spl-phone-field input[aria-label="Phone number"]',
+  /* Required on the live form, measured 2026-08-27 on a Western Digital posting. Anchored on
+     data-test because the element's own id is generated per render (spl-form-element_5). */
+  location: 'spl-autocomplete[data-test="location-autocomplete"] input',
   linkedin: 'spl-input#linkedin-input input',
   portfolio: 'spl-input#website-input input',
   resume: 'spl-dropzone[data-test="resume-upload"] input[type="file"]',
