@@ -7,7 +7,7 @@
 #
 # Safe to run against an empty queue: the endpoint selects only rows in submit_requested or
 # submitting, so a run with nothing queued returns {"processed":0} and touches no employer.
-name: submission-runner
+name: generated-receipt-tuple-audit
 
 on:
   schedule:
@@ -21,7 +21,7 @@ on:
 # the per-user daily cap honest: that count is a snapshot, so parallel callers are the one way to
 # overshoot it.
 concurrency:
-  group: submission-runner
+  group: generated-receipt-tuple-audit
   cancel-in-progress: false
 
 jobs:
@@ -29,47 +29,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Call the submission runner
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: Require the frozen production revision
         env:
-          INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
           API_BASE: ${{ vars.LITOS_API_BASE || 'https://student-outreach-backend.vercel.app' }}
         run: |
           set -euo pipefail
-
-          if [ -z "${INTERNAL_CRON_SECRET}" ]; then
-            echo "::error::INTERNAL_CRON_SECRET is not set on this repository."
-            echo "Add it with: gh secret set INTERNAL_CRON_SECRET"
-            echo "It must match INTERNAL_CRON_SECRET in the Vercel project's production env."
-            exit 1
-          fi
-
-          # --fail-with-body is deliberate: a 401 or 503 must fail the run loudly. A scheduler that
-          # reports success while the endpoint refuses every call is indistinguishable from a
-          # working one, and that is how the daily job silently never ran once before.
-          HTTP_STATUS=$(curl -sS --fail-with-body \
-            --max-time 300 \
-            --retry 2 --retry-delay 10 --retry-connrefused \
-            -o response.json \
-            -w '%{http_code}' \
-            -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
-            "${API_BASE}/internal/application-submission-runner") || {
-              echo "::error::Runner call failed with status ${HTTP_STATUS:-unknown}"
-              cat response.json 2>/dev/null || true
-              exit 1
-            }
-
-          echo "status=${HTTP_STATUS}"
-          cat response.json
-          echo
-
-          # Surface the counts in the run summary so a queue that has stopped moving is visible
-          # without opening logs. An empty queue and a stalled one both return processed=0; the
-          # deferred fields are what tell them apart.
-          {
-            echo "### Submission runner"
-            echo ""
-            echo '```json'
-            cat response.json
-            echo ""
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          health_file=$(mktemp)
+          curl --silent --show-error --fail --max-time 30 \
+            --output "$health_file" "${API_BASE%/}/health"
+          jq --exit-status '
+            .revision == "90234cd25d0c33b2bc28b4947816a5eac6c53891"
+            and .build == "dpl_GsHMMeGz8EHQpWMinXgJpHNURdH2"
+            and .submission_cutover.mode == "freeze"
+            and .submission_cutover.config_valid == true
+          ' "$health_file" >/dev/null
+      - name: Audit generated receipt tuples read only
+        env:
+          DATABASE_URL: ${{ secrets.SCHEMA_CHECK_DATABASE_URL }}
+        run: node scripts/audit-generated-receipt-tuples.mjs
