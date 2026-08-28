@@ -4876,6 +4876,10 @@ function isProtectedManagedAction(
   // whether the transcript upload took the resume's control. A trim that dropped it would leave the
   // run unable to tell a resume that is still attached from one that was replaced, which is the
   // exact silence this read was added to break.
+  // The Workable terminal re-reads (workable_phone_terminal:*) are deliberately NOT protected:
+  // they are tolerant corroboration behind the strict pre-upload proofs, and under budget pressure
+  // giving one of them up is strictly better than blocking a submit or giving up a reviewed
+  // answer. managedResultFilledFields treats their absence as the ordinary remounted-widget case.
   return /^(?:filled_field:|captcha_|options:|option_probe_|cover_letter_capability$|transcript_capability$|resume_upload_verify$|controlled_portal_hydrated$|greenhouse_open_application_form$|greenhouse_application_form_ready$|greenhouse_cookie_preflight|workable_cookie_(?:preflight|final_decline|final_cleared)$|workable_application_form_ready$|workable_phone_(?:assertion_capability|value_visible|country_visible)$|teamtailor_resume_upload_complete$)/
     .test(label);
 }
@@ -5507,6 +5511,37 @@ function workablePhoneBlockerLabel(phone: string | undefined): string {
   return country ? `Phone ${country.displayedDialCode}` : 'Phone';
 }
 
+/**
+ * Whether the saved phone can reach Workable's atomic submit at all: either there is no phone on
+ * file (the employer form's own required-field confirmation stays the authority), or the number
+ * maps to an exact country and national value the widget can hold. A nonempty phone that maps to
+ * neither must stop the submit before the click, exactly as before the phone block moved into the
+ * fixed-field sequence.
+ */
+function workableManagedPhoneSubmitReady(phone: string | undefined): boolean {
+  if (!phone?.trim()) return true;
+  return workablePhonePlan(phone) !== null;
+}
+
+/* SEQUENCING, and it is the sixth reading of the found-0 refusal - the first that is not a selector.
+ *
+ * This block used to be appended at the very END of the managed plan, after the resume upload and
+ * every reviewed-question action, on the theory that resume parsing can rewrite contact fields and
+ * the last write should win. Five readback selectors then failed live in that terminal position,
+ * each with `found 0` and the value visibly on screen, while the #762 evidence probe measured the
+ * fresh page matching every arm (tel_inputs:1, iti_containers:1, named_phone_inputs:1,
+ * readback_matches:1, no iframes). So the chain is right and the MOMENT is wrong: the readback ran
+ * inside the window where the asynchronous resume-parse remount (the PR #737-#742 mechanism that
+ * renumbers and strips the widget) lands, and at that moment no tel input exists to read.
+ *
+ * The fix is to run the fill and its proofs BEFORE the remount trigger: this block is now pushed
+ * from pushFixedFieldActions, after the address commit and before the resume upload, so the strict
+ * extracts read the same steady-state widget the fill just wrote. What the terminal position used
+ * to guard - a parse that rewrites the committed value - is guarded instead by
+ * pushWorkableManagedPhoneTerminalActions below: tolerant post-upload re-reads whose digits, when
+ * the widget is still readable, must agree with the proven value (managedResultFilledFields fails
+ * closed on a mismatch). NOTHING IS WEAKENED: the strict proofs keep optional false, requireUnique,
+ * requireNonEmpty and expectedValueDigits unchanged - only WHEN they run has moved. */
 function pushWorkableManagedPhoneActions(
   actions: ManagedBrowserAction[],
   phone: string | undefined,
@@ -5525,24 +5560,6 @@ function pushWorkableManagedPhoneActions(
     optional: false,
   });
   if (plan.country) {
-    // Workable can mount a fresh cookie dialog after resume parsing and the other form mutations.
-    // Decline optional cookies again at the final phone boundary, then require both the dialog and
-    // its pointer-intercepting backdrop to leave the DOM before touching the country combobox.
-    actions.push({
-      type: 'click',
-      selector: WORKABLE_FINAL_COOKIE_DECLINE_SELECTOR,
-      label: 'workable_cookie_final_decline',
-      optional: true,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-      requireUnique: true,
-    });
-    actions.push({
-      type: 'waitForSelector',
-      selector: WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR,
-      label: 'workable_cookie_final_cleared',
-      optional: false,
-      timeout: MANAGED_FILL_TIMEOUT_MS,
-    });
     actions.push({
       type: 'click',
       selector: WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR,
@@ -5644,6 +5661,81 @@ function pushWorkableManagedPhoneActions(
     });
   }
   return true;
+}
+
+/** Terminal re-read labels. Deliberately OUTSIDE the `filled_field:` namespace: a second entry
+ * under `filled_field:phone` would break managedResultFilledFields' exactly-one-proof contract.
+ * They are also deliberately unprotected from the budget trims (see isProtectedManagedAction). */
+const WORKABLE_PHONE_TERMINAL_READBACK_LABEL = 'workable_phone_terminal:phone';
+const WORKABLE_PHONE_COUNTRY_TERMINAL_READBACK_LABEL = 'workable_phone_terminal:phone_country';
+
+/* THE TERMINAL BOUNDARY the phone block left behind when it moved ahead of the resume upload.
+ *
+ * Two jobs, both at the very end of the plan where the old proofs used to sit:
+ *
+ * 1. The COOKIE boundary. Workable can mount a fresh consent dialog after resume parsing and the
+ *    other form mutations, and its backdrop intercepts the pointer - which now matters for the
+ *    atomic submit click rather than for the country combobox. Decline again, then require both
+ *    the dialog and the backdrop gone before anything after this is allowed to click.
+ *
+ * 2. The TOLERANT re-reads. The strict proofs ran before the parse remount could land, so they can
+ *    no longer see a parse that rewrites the committed value afterwards. These re-reads can - and
+ *    they are OPTIONAL with no assertions, because five live refutations (see
+ *    WORKABLE_PHONE_READBACK_SELECTOR) proved a required read in this position dies with `found 0`
+ *    whenever the remount has the widget mid-rebuild. A widget that is absent here lands in
+ *    `skipped`, the proven early extract stands as the record with that provenance visible in
+ *    skipped_reasons, and managedResultFilledFields falls back to it. A widget that IS readable
+ *    here must agree with the proven digits or the phone is dropped from filled_fields - so a
+ *    rewrite still fails closed, it just fails as a phone fact instead of a dead browser run. */
+function pushWorkableManagedPhoneTerminalActions(
+  actions: ManagedBrowserAction[],
+  phone: string | undefined,
+) {
+  const raw = phone?.trim();
+  if (!raw) return;
+  const plan = workablePhonePlan(phone);
+  if (!plan) return;
+  actions.push({
+    type: 'click',
+    selector: WORKABLE_FINAL_COOKIE_DECLINE_SELECTOR,
+    label: 'workable_cookie_final_decline',
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+    requireUnique: true,
+  });
+  actions.push({
+    type: 'waitForSelector',
+    selector: WORKABLE_COOKIE_OVERLAY_CLEARED_SELECTOR,
+    label: 'workable_cookie_final_cleared',
+    optional: false,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  // Bridge the remount before reading, exactly as the early block does, and just as optionally: a
+  // widget that never comes back costs one bounded wait, never the run.
+  actions.push({
+    type: 'waitForSelector',
+    selector: WORKABLE_PHONE_READBACK_SELECTOR,
+    label: 'workable_phone_terminal_visible',
+    optional: true,
+    timeout: WORKABLE_PHONE_REMOUNT_TIMEOUT_MS,
+  });
+  actions.push({
+    type: 'extract',
+    selector: WORKABLE_PHONE_READBACK_SELECTOR,
+    attribute: 'value',
+    label: WORKABLE_PHONE_TERMINAL_READBACK_LABEL,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+  });
+  if (plan.country) {
+    actions.push({
+      type: 'extract',
+      selector: WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR,
+      label: WORKABLE_PHONE_COUNTRY_TERMINAL_READBACK_LABEL,
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    });
+  }
 }
 
 /* ─── Workable phone readback EVIDENCE, so failure six is a diagnosis and not a seventh guess ─────
@@ -6908,7 +7000,26 @@ export function managedResultFilledFields(result: ManagedBrowserResult): string[
       || (Boolean(expectedCountryDigits)
         && digitsOnly(countryEvidence?.value) === expectedCountryDigits
         && countryEvidence?.value?.includes(`+${expectedCountryDigits}`));
-    if (phonePersisted && countryPersisted) fields.add('phone');
+    /* The strict proofs run BEFORE the resume upload now, so a parse that rewrites the committed
+     * value afterwards is caught here instead: the tolerant terminal re-reads at the end of the
+     * plan are optional and carry no assertions, but WHEN they came home with a value, that value
+     * must still hold the proven digits. Absent or null terminal reads mean the parse remount had
+     * the widget unreadable, which five live refutations showed is the ordinary end-of-run state;
+     * the proven early extract stands as the record, with the skip visible in skipped_reasons as
+     * its provenance. A terminal read that returns a DIFFERENT number, or an emptied one, drops
+     * phone from filled_fields - fail closed, as a phone fact rather than a dead run. */
+    const terminalPhone = (result.extracted ?? [])
+      .filter((item) => item.label === WORKABLE_PHONE_TERMINAL_READBACK_LABEL);
+    const terminalPhoneConsistent = terminalPhone.every((item) =>
+      item.value === null || digitsOnly(item.value) === expectedPhoneDigits);
+    const terminalCountry = (result.extracted ?? [])
+      .filter((item) => item.label === WORKABLE_PHONE_COUNTRY_TERMINAL_READBACK_LABEL);
+    const terminalCountryConsistent = terminalCountry.every((item) =>
+      item.value === null
+      || (Boolean(expectedCountryDigits) && digitsOnly(item.value) === expectedCountryDigits));
+    if (phonePersisted && countryPersisted && terminalPhoneConsistent && terminalCountryConsistent) {
+      fields.add('phone');
+    }
   }
   for (const item of result.extracted ?? []) {
     if (!item.value?.trim()) continue;
@@ -7296,6 +7407,14 @@ function pushFixedFieldActions(
     // path, not here. `headline` is the one free identity field, and it is left alone deliberately:
     // it is candidate-authored positioning, not a fact from the profile, so guessing it would put
     // words in the student's mouth on a real application.
+    //
+    // THE PHONE RUNS HERE, BEFORE THE RESUME UPLOAD, and the ordering is the whole point: the
+    // upload is what triggers the asynchronous resume-parse remount that destroys the intl-tel-input
+    // widget mid-run (PRs #737-#742), and five readback selectors were refuted live with `found 0`
+    // while the proofs sat AFTER it. Fill and prove against the steady-state widget the #762
+    // evidence probe measured; the parse's ability to rewrite the value afterwards is guarded by
+    // the tolerant terminal re-reads in pushWorkableManagedPhoneTerminalActions instead.
+    pushWorkableManagedPhoneActions(actions, packet.phone);
     managedUpload(actions, WORKABLE_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
     managedUpload(actions, WORKABLE_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
     // NOT filled: input[name="gdpr"]. It is a consent checkbox, and the standing rule below about
@@ -7579,8 +7698,9 @@ export function buildManagedDiscoveryActions(portal: SupportedPortal, packet: Su
   // whatever the search text left standing instead of the employer's actual list, which is the one
   // thing this read exists to get. Discovery only: the fill run consumes the result, it does not
   // need to take the reads again.
+  // Workable's phone fill and strict readback proofs ride inside pushFixedFieldActions now, ahead
+  // of the resume upload whose parse remount refuted five terminal-position readbacks in a row.
   pushFixedFieldActions(actions, portal, packet, { probeOptions: true });
-  if (portalFamily(portal) === 'workable') pushWorkableManagedPhoneActions(actions, packet.phone);
   pushManagedCoreFieldExtractActions(actions, portal);
   actions.push({ type: 'discover', optional: true, timeout: MANAGED_FILL_TIMEOUT_MS });
   // Round two, after `discover` has walked the whole DOM: the controls whose option lists load over
@@ -7989,10 +8109,17 @@ export function buildManagedPortalActions(
     pushGreenhouseReferralSourceAliases(actions, packet);
     pushGreenhouseDemographicAliases(actions, packet);
   }
-  // Workable resume parsing can rewrite contact fields. Phone therefore runs after every upload,
-  // address commit, and reviewed-question action, then proves the selected dial code and live value.
+  /* The phone fill and its strict proofs now run INSIDE pushFixedFieldActions, after the address
+   * commit and BEFORE the resume upload - the sequencing fix for five live `found 0` refutations
+   * measured with the proofs in this terminal position (see pushWorkableManagedPhoneActions).
+   * What remains here at the end of the plan is the tolerant terminal boundary: the post-parse
+   * cookie decline that clears the way for the submit click, and the optional re-reads whose
+   * digits, when the widget survived the parse remount readable, must still agree with the proven
+   * value (managedResultFilledFields fails closed on a mismatch and falls back to the early proof
+   * when the widget is absent). */
   if (family === 'workable') {
-    workablePhoneReadyForSubmit = pushWorkableManagedPhoneActions(actions, packet.phone);
+    workablePhoneReadyForSubmit = workableManagedPhoneSubmitReady(packet.phone);
+    pushWorkableManagedPhoneTerminalActions(actions, packet.phone);
   }
   /* Atomic v4 is a promise that this same list ends in its one chooser-v4 submit action. Do not
    * advertise it until every builder-side submit gate has passed. In particular, a nonempty phone
