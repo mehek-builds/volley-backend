@@ -3,6 +3,7 @@ import { jwtVerify } from 'jose';
 import { db } from '../db/index';
 import { users } from '../db/schema';
 import { eq } from 'drizzle-orm';
+import { accountIsCardGateLocked, isCardGateAllowedPath } from '../lib/cardGate';
 
 export interface JWTPayload {
   userId: string;
@@ -37,7 +38,11 @@ export function sessionVersionIsStale(tokenVersion: unknown, storedVersion: numb
 
 /** Why a session either verifies or does not, with no third answer. */
 type SessionOutcome =
-  | { ok: true; payload: JWTPayload }
+  /* cardGateLocked travels separately from JWTPayload on purpose: it is a fact read off the
+     user row at resolution time (see resolveToken), not a claim the token itself carries, and
+     JWTPayload is the shape handed to callers as request.jwtPayload -- routes destructuring it
+     should not have to know the card gate exists. Only requireAuth reads cardGateLocked. */
+  | { ok: true; payload: JWTPayload; cardGateLocked: boolean }
   /** No credential was presented at all. Distinct from a bad one: optionalAuth continues here. */
   | { ok: false; reason: 'anonymous' }
   /** A credential was presented and did not hold up. Never treated as anonymous. */
@@ -108,6 +113,13 @@ async function resolveToken(token: string, secret: string): Promise<SessionOutco
         email: users.email,
         is_guest: users.is_guest,
         guest_expires_at: users.guest_expires_at,
+        // The three columns THE CARD GATE (lib/cardGate.ts) needs. Added to this same indexed
+        // PK read rather than a second query -- resolveToken already runs on every authed
+        // request via the inFlightSessions cache, so a separate lookup would double it.
+        billing_provider: users.billing_provider,
+        billing_customer_id: users.billing_customer_id,
+        created_at: users.created_at,
+        onboarding_completed_at: users.onboarding_completed_at,
       })
       .from(users)
       .where(eq(users.id, userId))
@@ -133,16 +145,47 @@ async function resolveToken(token: string, secret: string): Promise<SessionOutco
         sessionVersion: row[0].session_version,
         authenticatedAt: payload.iat ?? 0,
       },
+      cardGateLocked: accountIsCardGateLocked(row[0]),
     };
   } catch {
     return { ok: false, reason: 'invalid' };
   }
 }
 
+/**
+ * The path this request actually matched, for the card gate's route allowlist.
+ *
+ * By the time a preHandler runs, Fastify has already resolved routing, so
+ * routeOptions.url is the registered template ('/onboarding/state', not
+ * '/onboarding/state?x=1', and not a dynamic segment's literal value). request.url is
+ * the fallback for the rare case routing has not attached it (matches the pattern
+ * lib/submissionCutover.ts's onRequest hook already uses for the same reason).
+ */
+function requestPathForCardGate(request: FastifyRequest): string {
+  return request.routeOptions?.url ?? request.url ?? '/';
+}
+
+/**
+ * THE CARD GATE's enforcement point. See lib/cardGate.ts for what "locked" means and why the
+ * allowlist is short rather than the routes gated wide.
+ *
+ * Lives inside requireAuth, not as a separate hook chained after it, so every one of the ~40
+ * route files that already do `preHandler: requireAuth` gets the enforcement for free: no route
+ * file needs to import a second preHandler, and a future route that adds `preHandler: requireAuth`
+ * is gated by default rather than by remembering to opt in.
+ */
 export async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
   const outcome = await resolveSession(request);
   if (outcome.ok) {
     request.jwtPayload = outcome.payload;
+    if (outcome.cardGateLocked && !isCardGateAllowedPath(requestPathForCardGate(request))) {
+      return reply.status(402).send({
+        error: 'A payment method is required to continue using Litos.',
+        code: 'payment_method_required',
+        onboarding_state_url: '/onboarding/state',
+        billing_checkout_url: '/billing/checkout',
+      });
+    }
     return;
   }
   if (outcome.reason === 'misconfigured') {

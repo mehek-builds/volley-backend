@@ -13,6 +13,7 @@ import {
   onboarding_flow_step_acknowledgements,
 } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
+import { cardGateInstant, requiresPaymentMethodFor } from '../lib/cardGate';
 import { decryptField } from '../lib/fieldCrypto';
 import { decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
 import {
@@ -164,52 +165,13 @@ export const MIGRATION_PENDING_COLUMNS: ReadonlySet<string> = new Set([
  * state every account is in anyway until it does.
  */
 /**
- * The instant the card gate starts applying to newly created accounts, or null.
- *
- * Null -- the unset default, and also what an unparseable value gives -- means no
- * account is gated. See THE CARD GATE in the state handler for why this reads its
- * own env var instead of borrowing the entitlement cutover.
+ * cardGateInstant and requiresPaymentMethodFor now live in lib/cardGate.ts (imported
+ * above), so middleware/auth.ts can enforce the gate server-side (see
+ * accountIsCardGateLocked there) without importing a route file. Re-exported here so
+ * every existing import of them from './onboarding' -- including onboarding.test.ts --
+ * keeps working unchanged.
  */
-export function cardGateInstant(env: NodeJS.ProcessEnv = process.env): number | null {
-  const raw = env.CARD_GATE_FROM?.trim();
-  if (!raw) return null;
-  const value = Date.parse(raw);
-  return Number.isFinite(value) ? value : null;
-}
-
-/**
- * Whether this account still owes us a card before the dashboard opens.
- *
- * Pure, exported, and separate from the route handler because it is the single
- * sentence that decides whether a student can use the product at all, and a rule
- * that important should be readable and testable without standing up a request.
- */
-export function requiresPaymentMethodFor(
-  user: {
-    billing_provider?: string | null;
-    billing_customer_id?: string | null;
-    created_at?: Date | null;
-  },
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  const from = cardGateInstant(env);
-  if (from === null) return false;
-  /* GUESTS ARE NOT EXEMPT. Mehek's call 2026-08-19, and it reverses the exemption
-     that shipped a few hours earlier in this same file.
-     The exemption was added for a real reason: /billing/checkout refuses a guest
-     outright ("Verify an email before starting checkout"), so a gated guest was
-     redirected to /start, handed the plan screen, and 409ed by the only control on
-     it. But exempting them fixed the brick wall by opening a door instead -- Guest
-     mode is a button on the front of /login, so anyone could walk around the payment
-     gate by using it, which is the opposite of what the gate is for.
-     So the gate applies to everyone and the WAY OUT is what changed: a guest who
-     hits checkout now gets sent to claim an email (components/start/PlanStep.tsx
-     reads the claim_required code), and a claimed account can pay like any other.
-     Guests are gated; they are simply gated one step earlier. */
-  if (!user.created_at || user.created_at.getTime() < from) return false;
-  const paymentMethodOnFile = user.billing_provider === 'stripe' && Boolean(user.billing_customer_id);
-  return !paymentMethodOnFile;
-}
+export { cardGateInstant, requiresPaymentMethodFor };
 
 async function selectOnboardingUserRow(userId: string) {
   try {

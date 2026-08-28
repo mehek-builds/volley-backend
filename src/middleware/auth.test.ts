@@ -151,3 +151,152 @@ test('session lookups share only while the same token is in flight', async () =>
     else process.env.JWT_SIGNING_SECRET = previousSecret;
   }
 });
+
+test('THE CARD GATE, enforced through requireAuth', async (t) => {
+  const previousSecret = process.env.JWT_SIGNING_SECRET;
+  const previousGate = process.env.CARD_GATE_FROM;
+  const secret = 'test-signing-secret-32-chars-minimum!!';
+  process.env.JWT_SIGNING_SECRET = secret;
+  process.env.CARD_GATE_FROM = '2026-08-19T00:00:00.000Z';
+
+  const signToken = (userId: string) => new SignJWT({
+    userId,
+    isGuest: false,
+    authMethod: 'password',
+    sessionVersion: 0,
+  })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setIssuedAt()
+    .sign(new TextEncoder().encode(secret));
+
+  /** A user row shaped like resolveToken's SELECT, with card-gate columns overridable per test. */
+  const userRow = (overrides: Record<string, unknown> = {}) => ({
+    session_valid_from: null,
+    session_version: 0,
+    email: 'student@example.com',
+    is_guest: false,
+    guest_expires_at: null,
+    billing_provider: null,
+    billing_customer_id: null,
+    created_at: new Date('2026-08-20T00:00:00.000Z'),
+    onboarding_completed_at: new Date('2026-08-21T00:00:00.000Z'),
+    ...overrides,
+  });
+
+  const requestFor = (token: string, url: string): FastifyRequest => ({
+    headers: { authorization: `Bearer ${token}` },
+    url,
+    routeOptions: { url },
+  }) as unknown as FastifyRequest;
+
+  const outcome = () => {
+    const calls: Array<{ status: number; body: unknown }> = [];
+    const reply = {
+      status(status: number) {
+        return {
+          send(body: unknown) {
+            calls.push({ status, body });
+          },
+        };
+      },
+    } as unknown as FastifyReply;
+    return { reply, calls };
+  };
+
+  const withMockedUser = async (row: Record<string, unknown>, fn: () => Promise<void>) => {
+    const select = mock.method(db, 'select', (() => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => [row],
+        }),
+      }),
+    })) as unknown as typeof db.select);
+    try {
+      await fn();
+    } finally {
+      select.mock.restore();
+    }
+  };
+
+  try {
+    await t.test('a gated, onboarding-complete account is turned away from a dashboard data route', async () => {
+      const token = await signToken('user-gated');
+      await withMockedUser(userRow(), async () => {
+        const request = requestFor(token, '/applications');
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        // The session itself is genuine -- jwtPayload is still set, exactly like a route
+        // handler would see it for any other authenticated request. This is a business-rule
+        // rejection on top of a valid session, not an authentication failure, and the 402
+        // reply is what actually stops the handler from ever running.
+        assert.equal(request.jwtPayload?.userId, 'user-gated');
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].status, 402);
+        assert.equal((calls[0].body as { code: string }).code, 'payment_method_required');
+      });
+    });
+
+    await t.test('the same account still reaches its onboarding and billing routes', async () => {
+      const token = await signToken('user-gated-2');
+      await withMockedUser(userRow(), async () => {
+        for (const url of ['/onboarding/state', '/billing/checkout', '/billing/state', '/me', '/auth/session']) {
+          const request = requestFor(token, url);
+          const { reply, calls } = outcome();
+          await requireAuth(request, reply);
+          assert.equal(calls.length, 0, `expected ${url} to be reachable while gated`);
+          assert.equal(request.jwtPayload?.userId, 'user-gated-2');
+        }
+      });
+    });
+
+    await t.test('mid-setup (onboarding_completed_at still null) the same data route is not blocked', async () => {
+      const token = await signToken('user-mid-setup');
+      await withMockedUser(userRow({ onboarding_completed_at: null }), async () => {
+        const request = requestFor(token, '/applications');
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        assert.equal(calls.length, 0);
+        assert.equal(request.jwtPayload?.userId, 'user-mid-setup');
+      });
+    });
+
+    await t.test('an account created before CARD_GATE_FROM is unaffected', async () => {
+      const token = await signToken('user-grandfathered');
+      await withMockedUser(userRow({ created_at: new Date('2026-08-01T00:00:00.000Z') }), async () => {
+        const request = requestFor(token, '/applications');
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        assert.equal(calls.length, 0);
+        assert.equal(request.jwtPayload?.userId, 'user-grandfathered');
+      });
+    });
+
+    await t.test('a paid account (billing_customer_id on file) is unaffected even when gated and complete', async () => {
+      const token = await signToken('user-paid');
+      await withMockedUser(userRow({ billing_provider: 'stripe', billing_customer_id: 'cus_123' }), async () => {
+        const request = requestFor(token, '/applications');
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        assert.equal(calls.length, 0);
+        assert.equal(request.jwtPayload?.userId, 'user-paid');
+      });
+    });
+
+    await t.test('CARD_GATE_FROM unset is a complete no-op regardless of onboarding/billing state', async () => {
+      delete process.env.CARD_GATE_FROM;
+      const token = await signToken('user-no-gate');
+      await withMockedUser(userRow(), async () => {
+        const request = requestFor(token, '/applications');
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        assert.equal(calls.length, 0);
+        assert.equal(request.jwtPayload?.userId, 'user-no-gate');
+      });
+    });
+  } finally {
+    if (previousSecret === undefined) delete process.env.JWT_SIGNING_SECRET;
+    else process.env.JWT_SIGNING_SECRET = previousSecret;
+    if (previousGate === undefined) delete process.env.CARD_GATE_FROM;
+    else process.env.CARD_GATE_FROM = previousGate;
+  }
+});
