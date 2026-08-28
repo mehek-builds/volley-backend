@@ -36,7 +36,7 @@ import {
   NoSubmitControlError,
 } from '../lib/portalSubmission';
 import { isManagedNoSubmitControl, submissionProvablyNotSent, unwrapThrownErrorMessage } from '../lib/managedSubmitOutcome';
-import { ManagedBrowserPreSubmitCrashError } from '../lib/browserbase';
+import { ManagedBrowserAssertionFailureError, ManagedBrowserPreSubmitCrashError } from '../lib/browserbase';
 import { submitRequestDisposition } from '../lib/submissionSafety';
 
 const CLAIMED_AT = '2026-08-11T12:00:00.000Z';
@@ -143,6 +143,43 @@ describe('every post-claim stop leaves the row with a way out', () => {
     assert.ok(exitIsAnOrdinaryRerun(persisted), 'exit: POST /applications/:id/submit-request');
     assert.equal(persisted.unverified_submission, undefined);
     assert.match(persisted.attention_reason || '', /Nothing was sent/);
+  });
+
+  test('a deterministic proof refusal releases like a pre-submit stop but never claims to be temporary', () => {
+    /* The runner refused its own required readback proof, under the same durable containment
+       progress the crash release leans on. Five consecutive live Workable phone attempts proved
+       this reproduces identically, so the one sentence it must never wear is the provider-session
+       one: "a temporary secure-browser error ... try this one again in a few minutes". */
+    const persisted = submissionFailureReview(
+      claimedRunning(),
+      new ManagedBrowserAssertionFailureError(
+        'filled_field:phone: expected exactly one match for .iti input[type="tel"], found 0; '
+          + 'workable_phone_readback_evidence={"observed":"fresh_page_load"}',
+        {
+          version: 1,
+          phase: 0,
+          stage: 'phase_started',
+          submitPressed: false,
+          applicationSubmitPressed: false,
+          verificationSubmitPressed: false,
+          submitKind: 'application',
+          policyVersion: 4,
+        },
+        'filled_field:phone',
+      ),
+    );
+    assert.equal(persisted.status, 'needs_attention');
+    assert.equal(persisted.submission_stop?.reason, 'field_proof_failed_before_submit');
+    assert.equal(persisted.submission_stop?.before_click, true);
+    assert.ok(exitIsAnOrdinaryRerun(persisted), 'exit: POST /applications/:id/submit-request');
+    assert.equal(persisted.unverified_submission, undefined);
+    assert.doesNotMatch(persisted.attention_reason || '', /temporary secure-browser/);
+    assert.doesNotMatch(persisted.attention_reason || '', /again in a few minutes/);
+    assert.match(persisted.attention_reason || '', /Nothing has been sent/);
+    assert.match(persisted.attention_reason || '', /could not prove one of the answers/);
+    // The exact failed proof, evidence included, is what the row records for whoever debugs it.
+    assert.match(persisted.submission_error || '', /expected exactly one match/);
+    assert.match(persisted.submission_error || '', /workable_phone_readback_evidence=/);
   });
 
   test('a generic throw exits by the unverified-resolution route, keeping its lock', () => {

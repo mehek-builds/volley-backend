@@ -53,6 +53,10 @@ import {
   ManagedActionBudgetError,
   ManagedRequiredFieldConfirmationError,
   budgetDroppedReviewedQuestions,
+  buildWorkablePhoneEvidenceActions,
+  isWorkablePhoneReadbackAssertionLabel,
+  redactStructuralEvidenceHtml,
+  workablePhoneEvidenceSummary,
   reviewedQuestionsWithoutActions,
   PORTAL_FAMILIES,
   MANAGED_OPTION_EXTRACT_PREFIX,
@@ -4494,6 +4498,158 @@ test('Workable uploads the resume by data-ui, never by id or a bare file selecto
   assert.notEqual(upload!.selector, 'input[type="file"]');
 });
 
+/* The widened readback chain, spelled out once: current widget scope first, then Workable's own
+ * data-ui container, then the document-wide unique name, each later arm active only when every
+ * earlier arm matches nothing. */
+const WIDENED_WORKABLE_PHONE_READBACK =
+  '.iti input[type="tel"], '
+  + 'body:not(:has(.iti input[type="tel"])) div[data-ui="phone"] input[type="tel"], '
+  + 'body:not(:has(.iti input[type="tel"])):not(:has(div[data-ui="phone"] input[type="tel"])) input[name="phone"]';
+
+/* Captured off the LIVE Pony.ai Workable form (apply.workable.com/pony-dot-ai/j/BA5FFDBC71/apply)
+ * on 2026-08-28, rendered in a real browser after country selection and a committed value, with the
+ * value attribute added the way a serializer that includes properties would emit it. This is the
+ * steady-state markup every historical readback selector matches; the evidence machinery exists
+ * for the remounted state no external reproduction has reached. */
+const PONY_AI_PHONE_CONTAINER_HTML =
+  '<div class="styles--1EuHm" data-ui="phone" data-ignore-focus="true">'
+  + '<div data-role="illustrated-input" class="styles--1tBNa"><div class="styles--3qHIU">'
+  + '<div class="iti iti--allow-dropdown iti--separate-dial-code iti--show-flags">'
+  + '<div class="iti__flag-container"><div class="iti__selected-flag" role="combobox" aria-haspopup="listbox" '
+  + 'aria-controls="iti-0__country-listbox" aria-expanded="false" aria-label="Telephone country code" '
+  + 'tabindex="0" title="United States"><div class="iti__flag iti__us"></div>'
+  + '<div class="iti__selected-dial-code">+1</div><div class="iti__arrow"></div></div></div>'
+  + '<input aria-required="true" maxlength="255" name="phone" required="" type="tel" '
+  + 'class="styles--2e9Cp iti__tel-input" dir="auto" autocomplete="off" data-intl-tel-input-id="0" '
+  + 'value="2135746270" style="padding-left: 117px;"></div></div></div></div>';
+
+test('Workable phone readback is a mutually exclusive fallback chain the runner can hold', () => {
+  const actions = buildManagedPortalActions('workable', {
+    ...capturePacket,
+    phone: '+1 213 574 6270',
+  });
+  const proof = actions.find((action) => action.label === 'filled_field:phone');
+  assert.equal(proof?.selector, WIDENED_WORKABLE_PHONE_READBACK);
+  // The runner refuses any selector past 500 characters during normalization, before the browser
+  // opens, so the chain being holdable is a fact worth pinning rather than assuming.
+  assert.ok((proof?.selector?.length ?? 0) <= 500, String(proof?.selector?.length));
+  // Each fallback arm is guarded by body:not(:has(<every earlier arm>)), so two arms can never
+  // both match and requireUnique keeps meaning exactly one control on the page.
+  const arms = proof!.selector!.split(', ');
+  assert.equal(arms.length, 3);
+  assert.equal(arms[0], '.iti input[type="tel"]');
+  assert.ok(arms[1]!.startsWith('body:not(:has(.iti input[type="tel"]))'));
+  assert.ok(arms[2]!.startsWith('body:not(:has(.iti input[type="tel"])):not(:has(div[data-ui="phone"] input[type="tel"]))'));
+  assert.ok(arms[2]!.endsWith('input[name="phone"]'));
+  // The proof discipline survives the widening untouched.
+  assert.equal(proof?.optional, false);
+  assert.equal(proof?.requireUnique, true);
+  assert.equal(proof?.requireNonEmpty, true);
+  assert.equal(proof?.expectedValueDigits, '2135746270');
+});
+
+test('every arm of the widened readback matches the live Pony.ai steady-state markup', () => {
+  /* No DOM engine runs in this suite, so this pins the structural facts each arm rests on against
+   * the captured markup itself: the widget arm's `.iti` wrapper and tel input, the container arm's
+   * Workable-owned data-ui hook, and the name arm's name="phone". If Workable ships markup where
+   * these stop holding, this test is the first thing that should be updated with a fresh capture. */
+  assert.match(PONY_AI_PHONE_CONTAINER_HTML, /class="iti /);
+  assert.match(PONY_AI_PHONE_CONTAINER_HTML, /<input [^>]*name="phone"[^>]*type="tel"/);
+  assert.match(PONY_AI_PHONE_CONTAINER_HTML, /data-ui="phone"/);
+  assert.match(PONY_AI_PHONE_CONTAINER_HTML, /iti__tel-input/);
+  assert.match(PONY_AI_PHONE_CONTAINER_HTML, /class="iti__selected-dial-code"/);
+});
+
+test('Workable phone evidence actions are all optional, value-free, and bounded', () => {
+  const actions = buildWorkablePhoneEvidenceActions();
+  // An evidence run must always come home: a probe that matches nothing is a finding, never a stop.
+  for (const action of actions) {
+    assert.equal(action.optional, true, action.label);
+    assert.ok((action.selector?.length ?? 0) > 0 && (action.selector?.length ?? 0) <= 500, action.label);
+  }
+  // No probe may read the applicant's number back over the evidence channel.
+  for (const action of actions.filter((item) => item.type === 'extract')) {
+    assert.notEqual(action.attribute, 'value', action.label);
+    assert.ok(action.label?.startsWith('phone_evidence:'), action.label);
+  }
+  const labels = actions.filter((item) => item.type === 'extract').map((item) => item.label);
+  assert.deepEqual(labels, [
+    'phone_evidence:tel_inputs',
+    'phone_evidence:iti_containers',
+    'phone_evidence:named_phone_inputs',
+    'phone_evidence:readback_matches',
+    'phone_evidence:iframes',
+    'phone_evidence:phone_container_html',
+  ]);
+  const readback = actions.find((item) => item.label === 'phone_evidence:readback_matches');
+  assert.equal(readback?.selector, WIDENED_WORKABLE_PHONE_READBACK);
+  const container = actions.find((item) => item.label === 'phone_evidence:phone_container_html');
+  assert.equal(container?.selector, 'div[data-ui="phone"]');
+  assert.equal(container?.attribute, 'outerHTML');
+  // The structural counts lean on requireVisible; the container read does not need it.
+  const telProbe = actions.find((item) => item.label === 'phone_evidence:tel_inputs');
+  assert.equal(telProbe?.requireVisible, true);
+  assert.equal(container?.requireVisible, undefined);
+  // The cookie boundary rides ahead of the probes, or a fresh consent dialog hides the whole form.
+  assert.equal(actions[0]?.label, 'workable_cookie_preflight');
+  assert.equal(actions[1]?.label, 'workable_application_form_ready');
+});
+
+test('structural evidence redaction strips values and text while keeping the diagnosis', () => {
+  const redacted = redactStructuralEvidenceHtml(PONY_AI_PHONE_CONTAINER_HTML);
+  // The applicant's number is gone from both the attribute and the dial-code text node.
+  assert.equal(redacted.includes('2135746270'), false);
+  assert.equal(redacted.includes('>+1<'), false);
+  assert.match(redacted, /value="\[redacted\]"/);
+  // The structure a diagnosis needs survives.
+  assert.match(redacted, /data-ui="phone"/);
+  assert.match(redacted, /class="iti /);
+  assert.match(redacted, /name="phone"/);
+  assert.match(redacted, /iti__selected-dial-code/);
+  // Bounded, because this string ends up inside submission_error.
+  const oversized = `<div data-ui="phone">${'<span class="filler"></span>'.repeat(200)}</div>`;
+  const bounded = redactStructuralEvidenceHtml(oversized);
+  assert.ok(bounded.length <= 2_048 + '[truncated]'.length, String(bounded.length));
+  assert.ok(bounded.endsWith('[truncated]'));
+});
+
+test('Workable phone evidence summary counts probes, names the misses, and redacts the container', () => {
+  const summary = workablePhoneEvidenceSummary({
+    title: 'Apply',
+    url: 'https://apply.workable.com/pony-dot-ai/j/BA5FFDBC71/apply/',
+    text: 'Apply for this job',
+    capabilities: ['extract-assertions-v1', 'extract-require-visible-v1'],
+    extracted: [
+      { selector: 'input[type="tel"]', label: 'phone_evidence:tel_inputs', value: 'phone' },
+      { selector: '.iti', label: 'phone_evidence:iti_containers', value: 'iti iti--allow-dropdown iti--separate-dial-code iti--show-flags' },
+      { selector: 'input[name="phone"]', label: 'phone_evidence:named_phone_inputs', value: 'tel' },
+      { selector: 'div[data-ui="phone"]', label: 'phone_evidence:phone_container_html', value: PONY_AI_PHONE_CONTAINER_HTML },
+    ],
+    skipped: ['phone_evidence:readback_matches', 'phone_evidence:iframes', 'workable_cookie_preflight'],
+  });
+  assert.ok(summary.startsWith('workable_phone_readback_evidence='));
+  const parsed = JSON.parse(summary.slice('workable_phone_readback_evidence='.length));
+  assert.equal(parsed.observed, 'fresh_page_load');
+  assert.equal(parsed.visibility_counted, true);
+  assert.equal(parsed.probes.tel_inputs.found, 1);
+  assert.deepEqual(parsed.probes.tel_inputs.values, ['phone']);
+  assert.equal(parsed.probes.iti_containers.found, 1);
+  // "Matched nothing" is the finding that matters most on a found-0 refusal, so it is named,
+  // and only for the evidence probes: the cookie boundary being skipped is routine.
+  assert.deepEqual(parsed.matched_nothing, ['readback_matches', 'iframes']);
+  assert.equal(String(parsed.phone_container).includes('2135746270'), false);
+  assert.match(String(parsed.phone_container), /data-ui="phone"/);
+  // The whole line stays a bounded single-record string for submission_error.
+  assert.ok(summary.length < 4_000, String(summary.length));
+});
+
+test('only the Workable phone proofs summon the evidence run', () => {
+  assert.equal(isWorkablePhoneReadbackAssertionLabel('filled_field:phone'), true);
+  assert.equal(isWorkablePhoneReadbackAssertionLabel('filled_field:phone_country'), true);
+  assert.equal(isWorkablePhoneReadbackAssertionLabel('filled_field:email'), false);
+  assert.equal(isWorkablePhoneReadbackAssertionLabel(null), false);
+});
+
 test('managed Workable phone selects exact UAE and verifies the final post-upload value', () => {
   const actions = buildManagedPortalActions('workable', {
     ...capturePacket,
@@ -4592,18 +4748,19 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
    * node that is present-but-not-visible can never satisfy `:visible`. The proof of the phone is the
    * EXTRACT below, not this wait - the assertions on requireNonEmpty and expectedValueDigits a few
    * lines down are what must never move. */
-  /* THE READBACK BINDS TO THE WIDGET CONTAINER, NOT TO THE FORM'S NAME. The FILL above keeps
-   * `input[name="phone"][type="tel"]:visible` - typing must reach a control she could have typed
-   * into - but by the time the value is read back, intl-tel-input has re-rendered the control and
-   * taken `name="phone"` off it. Measured on Pony.ai across four send attempts: `:visible` found
-   * zero, then `[type="tel"]` found zero, then on 2026-08-27 the bare name found zero too (run
-   * 8c81e9ad), while that run's own captured form image showed the field on screen holding the
-   * right digits. `.iti` is what survives, and the country proof below already stakes a required
-   * extract on the same contract. The proof is unweakened: requireUnique, requireNonEmpty and
-   * expectedValueDigits below, so a form with no intl-tel-input matches zero and still refuses. */
+  /* THE READBACK IS A FALLBACK CHAIN NOW, because binding it to any single scope has been refuted
+   * five times: `:visible`, `[type="tel"]`, `name="phone"`, and on 2026-08-28 the `.iti` container
+   * scope itself (Pony.ai run fdcf4ccb: `found 0` with the value visible in the run screenshot).
+   * Measured against the live Pony.ai form on 2026-08-28: the steady-state control is
+   * `input[name="phone"][type="tel"].iti__tel-input` inside `.iti` inside Workable's own
+   * `div[data-ui="phone"]` container, so the chain tries the widget contract first, then the
+   * data-ui container, then the document-wide unique name - each later arm active only when every
+   * earlier arm matches NOTHING, via the same body:not(:has(...)) technique as the location
+   * selector, so the comma list can never double-match. The proof is unweakened: requireUnique,
+   * requireNonEmpty and expectedValueDigits below still refuse zero, two, or a wrong value. */
   assert.deepEqual(actions[phoneWaitIndex], {
     type: 'waitForSelector',
-    selector: '.iti input[type="tel"]',
+    selector: WIDENED_WORKABLE_PHONE_READBACK,
     label: 'workable_phone_value_visible',
     optional: true,
     timeout: 4_000,
@@ -4625,6 +4782,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(actions[countryProofIndex]?.requireUnique, true);
   assert.equal(actions[countryProofIndex]?.stabilityWindowMs, 1_200);
   assert.equal(actions[phoneProofIndex]?.attribute, 'value');
+  assert.equal(actions[phoneProofIndex]?.selector, WIDENED_WORKABLE_PHONE_READBACK);
   assert.equal(actions[phoneProofIndex]?.requireNonEmpty, true);
   assert.equal(actions[phoneProofIndex]?.expectedValueDigits, '0567417451');
   assert.equal(actions[phoneProofIndex]?.requireUnique, true);

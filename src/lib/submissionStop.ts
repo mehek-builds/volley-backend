@@ -49,6 +49,11 @@ export type SubmissionStopReason =
   | 'provider_session_failure'
   /** Chooser v4 durably reported that transport containment still held when the sandbox crashed. */
   | 'provider_session_failure_before_submit'
+  /** A required filled-field proof failed its deterministic runner assertion, under the same
+   * durable chooser-v4 containment progress as the crash reason above. The runner stopped the
+   * action list at the failed proof, so confirmAndSubmit was never reached. Its own error type
+   * (ManagedBrowserAssertionFailureError) is constructed only under that proof. */
+  | 'field_proof_failed_before_submit'
   /** The managed run was cut off before it reported anything. Where in the run is unknown. */
   | 'run_timed_out'
   /** Anything else. Deliberately not guessed at, and never treated as pre-click. */
@@ -97,6 +102,7 @@ const PRECEDES_CLICK: ReadonlySet<SubmissionStopReason> = new Set<SubmissionStop
   'packet_document_expired',
   'applicant_email_regeneration',
   'provider_session_failure_before_submit',
+  'field_proof_failed_before_submit',
 ]);
 
 export function stopReasonPrecedesClick(reason: SubmissionStopReason): boolean {
@@ -116,6 +122,7 @@ export function classifySubmissionStop(input: {
   regenerationRequired: boolean;
   packetDocumentExpired: boolean;
   actionBudget: boolean;
+  fieldProofFailedBeforeSubmit: boolean;
   confirmationUnproven: boolean;
   providerSessionFailureBeforeSubmit: boolean;
   providerSessionFailure: boolean;
@@ -128,6 +135,7 @@ export function classifySubmissionStop(input: {
   if (input.regenerationRequired) return 'applicant_email_regeneration';
   if (input.packetDocumentExpired) return 'packet_document_expired';
   if (input.actionBudget) return 'action_budget';
+  if (input.fieldProofFailedBeforeSubmit) return 'field_proof_failed_before_submit';
   if (input.noSubmitControl) return 'no_submit_control';
   if (input.confirmationUnproven) return 'confirmation_unproven';
   if (input.providerSessionFailureBeforeSubmit) return 'provider_session_failure_before_submit';

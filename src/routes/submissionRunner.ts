@@ -50,6 +50,7 @@ import {
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
+  ManagedBrowserAssertionFailureError,
   ManagedBrowserPreSubmitCrashError,
   runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
@@ -67,6 +68,9 @@ import {
   captchaProviderForFamily,
   buildManagedAttendedAccountProbeActions,
   buildManagedPortalActions,
+  buildWorkablePhoneEvidenceActions,
+  isWorkablePhoneReadbackAssertionLabel,
+  workablePhoneEvidenceSummary,
   budgetDroppedReviewedQuestions,
   attachManagedFieldOptions,
   buildManagedDiscoveredOptionProbeBatches,
@@ -6214,6 +6218,16 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
      * keepAlive stayed true and sandbox.stop() was skipped in the finally of every successful
      * submission, leaking one sandbox per application while the runner waited on a continuation
      * nothing was going to send. */
+    /* EVIDENCE ON THE TYPED PHONE-READBACK REFUSAL, BEFORE THE ERROR LEAVES THIS SCOPE.
+     *
+     * Five Workable phone readback selectors have been refuted live with nothing in the error but
+     * `found 0` (see WORKABLE_PHONE_READBACK_SELECTOR in portalSubmission.ts). The failing run's
+     * own extracts never come back on the error channel, so the diagnosis has to be bought with a
+     * second bounded, submit-free run: all-optional structural probes against the same posting URL,
+     * folded into one redacted line and appended to the refusal's message, which fail() then
+     * persists as submission_error. Best-effort by design - an evidence run that itself fails is
+     * logged and the original refusal is thrown unchanged, because the evidence must never be the
+     * reason a failure gets harder to read. */
     const submitRun = await runWithManagedPreSubmitCrashRetry(
       () => runManagedBrowser(
         applicationUrl,
@@ -6221,7 +6235,28 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         managedApplicationSubmitOptions(SECURITY_CODE_CONTINUATION_TTL_SECONDS),
       ),
       () => authorizationValidAtClick(row, claimedReview),
-    );
+    ).catch(async (error: unknown) => {
+      if (error instanceof ManagedBrowserAssertionFailureError
+        && isWorkablePhoneReadbackAssertionLabel(error.assertionLabel)
+        && managedApplicationUsesAtomicSubmitV4(portal, applicationUrl)) {
+        try {
+          const evidenceRun = await runManagedBrowser(
+            applicationUrl,
+            buildWorkablePhoneEvidenceActions(),
+            { screenshot: false },
+          );
+          error.attachEvidence(workablePhoneEvidenceSummary(evidenceRun));
+        } catch (evidenceError) {
+          // Bounded: the runner's error string is remote-controlled and can embed page markup.
+          const detail = String(evidenceError instanceof Error ? evidenceError.message : evidenceError).slice(0, 200);
+          fastify.log.warn(
+            { applicationId: row.id, detail },
+            'Workable phone readback evidence run failed; the refusal is recorded without evidence',
+          );
+        }
+      }
+      throw error;
+    });
     if (submitRun.kind === 'authorization_revoked') {
       await holdRevokedSubmission(row, claimedReview);
       return;
@@ -6902,13 +6937,18 @@ export function submissionFailureOutcome(input: {
   /* A ManagedRequiredFieldConfirmationError, which is a NoSubmitControlError by inheritance and is
      NOT one in fact. See the arm below for what that inheritance was costing the applicant. */
   requiredFieldConfirmation?: boolean;
+  /* A ManagedBrowserAssertionFailureError: the runner's own deterministic proof refusal, under
+     durable containment progress. Its arm below exists so it stops borrowing the provider-session
+     sentence, whose "temporary ... try this one again in a few minutes" is false twice over for a
+     refusal that reproduces on every attempt. */
+  fieldProofFailedBeforeSubmit?: boolean;
   uncertainAfterClaim: boolean;
   externalGate: boolean;
   providerSessionFailure: boolean;
   currentAttentionReason: string | undefined;
 }): SubmissionFailureOutcome {
-  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
-  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || uncertainAfterClaim || providerSessionFailure
+  const { captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, requiredFieldConfirmation, fieldProofFailedBeforeSubmit, uncertainAfterClaim, externalGate, providerSessionFailure } = input;
+  const status: TerminalRunStatus | 'submit_requested' = captchaStop || noSubmitControl || regenerationRequired || packetDocumentExpired || actionBudgetStop || requiredFieldConfirmation || fieldProofFailedBeforeSubmit || uncertainAfterClaim || providerSessionFailure
     ? 'needs_attention'
     : externalGate ? 'submit_requested' : 'failed';
   const attentionReason = captchaStop === 'at_submit'
@@ -6958,6 +6998,17 @@ export function submissionFailureOutcome(input: {
            noSubmitControl is cause-neutral - the error carries its own field list into
            submission_error, and the blockers the run produced are surfaced on their own. */
         ? 'Litos filled this application in and found the button that sends it, but could not confirm one of the required answers had been accepted, so it did not press it. Nothing has been sent and there is no confirmation to look for. Open it when you have a minute and finish it off.'
+      : fieldProofFailedBeforeSubmit
+        /* THE HONEST SENTENCE FOR A DETERMINISTIC PROOF REFUSAL, which until now wore the
+           provider-session one. That sentence promises "a temporary secure-browser error" and asks
+           for a retry "in a few minutes"; this stop is neither temporary nor cured by minutes - the
+           runner refused its own required readback proof, the same way, on five consecutive live
+           Workable phone attempts. What is always true, and all that is claimed: the run stopped at
+           a proof that precedes the send click (its typed error is only constructed under durable
+           containment progress), so nothing was sent, and pressing retry without a fix changes
+           nothing. The exact failed proof is in submission_error, now with structural evidence
+           attached where the evidence run could reach the page. */
+        ? 'Litos filled this application in, but could not prove one of the answers it typed was still on the form, so it stopped before pressing the button that sends it. Nothing has been sent and there is no confirmation to look for. Retrying will very likely stop at the same place, so open it when you have a minute and finish it off.'
       : noSubmitControl
         /* CAUSE-NEUTRAL. NoSubmitControlError is thrown for a multi-step first page, a page that
            renders nothing in a headless browser, a control relabelled mid-run, and a click that
@@ -7278,6 +7329,12 @@ export function submissionFailureReview(
   const message = error instanceof Error ? error.message : 'Submission runner failed';
   const externalGate = /browserbase|stratus managed browser is not configured|secure browser provider is not configured/i.test(message);
   const providerSessionFailureBeforeSubmit = error instanceof ManagedBrowserPreSubmitCrashError;
+  /* The runner's own deterministic assertion refusal under durable containment progress. Typed at
+     the wrap site in browserbase.ts, so it can never be conflated with a crash again: it is not a
+     provider session failure, it is not retried, and its sentence below stops calling it temporary.
+     The stop still precedes the click by the same proof the crash reason relies on, so the claim
+     release rule treats it the same way. */
+  const fieldProofFailedBeforeSubmit = error instanceof ManagedBrowserAssertionFailureError;
   const providerSessionFailure = providerSessionFailureBeforeSubmit || isProviderSessionFailureMessage(message);
   const uncertainAfterClaim = Boolean(current.submission_claimed_at);
   const stoppedAt = now();
@@ -7331,6 +7388,7 @@ export function submissionFailureReview(
       regenerationRequired,
       packetDocumentExpired,
       actionBudget: actionBudgetStop !== null,
+      fieldProofFailedBeforeSubmit,
       confirmationUnproven,
       providerSessionFailureBeforeSubmit,
       providerSessionFailure,
@@ -7358,7 +7416,7 @@ export function submissionFailureReview(
   const needsExit = uncertainAfterClaim && !releasesClaim && !current.unverified_submission;
 
   const outcome = submissionFailureOutcome({
-    captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, uncertainAfterClaim, externalGate, providerSessionFailure,
+    captchaStop, noSubmitControl, regenerationRequired, packetDocumentExpired, actionBudgetStop, fieldProofFailedBeforeSubmit, uncertainAfterClaim, externalGate, providerSessionFailure,
     currentAttentionReason: current.attention_reason,
   });
 

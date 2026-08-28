@@ -13,6 +13,8 @@ import {
   managedActionsWithExactPageUrl,
   managedApplicationSubmitOptions,
   managedContinuationFingerprint,
+  managedDeterministicAssertionRefusal,
+  ManagedBrowserAssertionFailureError,
   ManagedBrowserPreSubmitCrashError,
   runWithManagedPreSubmitCrashRetry,
   runManagedBrowser,
@@ -630,6 +632,130 @@ test('managed Stratus types only durable chooser-v4 pre-submit crash progress as
   else process.env.STRATUS_API_KEY = previousKey;
   if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
   else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('a deterministic assertion refusal under containment progress is typed, not called a crash', async () => {
+  const previousKey = process.env.STRATUS_API_KEY;
+  const previousUrl = process.env.STRATUS_BASE_URL;
+  const previousFetch = globalThis.fetch;
+  process.env.STRATUS_API_KEY = 'private-key';
+  process.env.STRATUS_BASE_URL = 'https://stratus.example';
+  const progress = {
+    version: 1,
+    phase: 0,
+    stage: 'phase_started',
+    submitPressed: false,
+    applicationSubmitPressed: false,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+  };
+  /* The exact live refusal, verbatim: Pony.ai application fdcf4ccb, 2026-08-28. Until this typing
+   * existed it became ManagedBrowserPreSubmitCrashError, was retried once as a crash, and told the
+   * applicant it was "a temporary secure-browser error". It is deterministic and none of that. */
+  const refusal = 'filled_field:phone: expected exactly one match for .iti input[type="tel"], found 0';
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: { code: 'SANDBOX_RUN_FAILED', message: refusal, runProgress: progress },
+  }), {
+    status: 502,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', []),
+    (error: unknown) => error instanceof ManagedBrowserAssertionFailureError
+      && !(error instanceof ManagedBrowserPreSubmitCrashError)
+      && error.assertionLabel === 'filled_field:phone'
+      && error.runProgress.stage === 'phase_started',
+  );
+
+  /* The same refusal WITHOUT containment progress stays a plain error: the release rule downstream
+   * leans on the durable proof, so the typing must never outrun it. */
+  globalThis.fetch = (async () => new Response(JSON.stringify({
+    error: { code: 'SANDBOX_RUN_FAILED', message: refusal },
+  }), {
+    status: 502,
+    headers: { 'Content-Type': 'application/json' },
+  })) as typeof fetch;
+  await assert.rejects(
+    runManagedBrowser('https://portal.example/apply', []),
+    (error: unknown) => error instanceof Error
+      && !(error instanceof ManagedBrowserAssertionFailureError)
+      && !(error instanceof ManagedBrowserPreSubmitCrashError),
+  );
+
+  globalThis.fetch = previousFetch;
+  if (previousKey === undefined) delete process.env.STRATUS_API_KEY;
+  else process.env.STRATUS_API_KEY = previousKey;
+  if (previousUrl === undefined) delete process.env.STRATUS_BASE_URL;
+  else process.env.STRATUS_BASE_URL = previousUrl;
+});
+
+test('the crash retry helper never spends a second sandbox run on a deterministic refusal', async () => {
+  const progress = {
+    version: 1,
+    phase: 0,
+    stage: 'phase_started',
+    submitPressed: false,
+    applicationSubmitPressed: false,
+    verificationSubmitPressed: false,
+    submitKind: 'application',
+    policyVersion: 4,
+  } as const;
+  let runs = 0;
+  const refusal = new ManagedBrowserAssertionFailureError(
+    'filled_field:phone: expected exactly one match for .iti input[type="tel"], found 0',
+    { ...progress, submitKind: 'application', policyVersion: 4 },
+    'filled_field:phone',
+  );
+  await assert.rejects(
+    runWithManagedPreSubmitCrashRetry(
+      async () => {
+        runs += 1;
+        throw refusal;
+      },
+      async () => true,
+    ),
+    (error: unknown) => error === refusal,
+  );
+  assert.equal(runs, 1, 'a deterministic refusal reproduces; retrying it only doubles the cost');
+});
+
+test('the assertion refusal detector holds the measured shapes and refuses the rest', () => {
+  assert.deepEqual(
+    managedDeterministicAssertionRefusal('filled_field:phone: expected exactly one match for .iti input[type="tel"], found 0'),
+    { label: 'filled_field:phone' },
+  );
+  assert.deepEqual(
+    managedDeterministicAssertionRefusal('expected exactly one match for input[name="phone"], found 0'),
+    { label: null },
+  );
+  assert.deepEqual(
+    managedDeterministicAssertionRefusal('filled_field:phone_country: expected exactly one match for .iti__selected-dial-code:visible, found 2'),
+    { label: 'filled_field:phone_country' },
+  );
+  assert.equal(managedDeterministicAssertionRefusal('Sandbox browser run failed'), null);
+  assert.equal(managedDeterministicAssertionRefusal('The sandbox stream was closed'), null);
+  assert.equal(managedDeterministicAssertionRefusal('page.waitForSelector: Timeout 20000ms exceeded'), null);
+});
+
+test('attached evidence rides the refusal message into submission_error', () => {
+  const refusal = new ManagedBrowserAssertionFailureError(
+    'filled_field:phone: expected exactly one match for .iti input[type="tel"], found 0',
+    {
+      version: 1,
+      phase: 0,
+      stage: 'phase_started',
+      submitPressed: false,
+      applicationSubmitPressed: false,
+      verificationSubmitPressed: false,
+      submitKind: 'application',
+      policyVersion: 4,
+    },
+    'filled_field:phone',
+  );
+  refusal.attachEvidence('workable_phone_readback_evidence={"observed":"fresh_page_load"}');
+  assert.match(refusal.message, /found 0; workable_phone_readback_evidence=/);
 });
 
 test('managed Stratus selector errors include a sanitized outbound action audit', async () => {
