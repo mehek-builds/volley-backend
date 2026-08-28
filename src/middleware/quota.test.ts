@@ -176,9 +176,13 @@ test('paid product usage is unlimited while rolling hourly safety limits remain'
     readFile(`src/routes/${name}`, 'utf8')));
   for (const source of routes) {
     assert.match(source, /usesLegacyMonthlyProductQuota/);
-    assert.match(source, /allowHourly/);
     assert.doesNotMatch(source, /paidSafetyLimitedReply/);
   }
+  // resume.ts still meters through allowHourly. resolve.ts and draft.ts had their rolling
+  // hourly abuse limits removed on request (2026-08-29); monthly product quotas still apply.
+  assert.match(routes[0], /allowHourly/);
+  assert.doesNotMatch(routes[1], /allowHourly/);
+  assert.doesNotMatch(routes[2], /allowHourly/);
 });
 
 test('resume generation atomically reserves the final monthly slot and refunds storage failures', async () => {

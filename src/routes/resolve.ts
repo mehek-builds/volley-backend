@@ -4,7 +4,7 @@ import { db } from '../db/index';
 import { applications, companies, contacts, email_resolutions, monetization_events, resolve_cache, user_contact_unlocks } from '../db/schema';
 import { and, eq, inArray } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
-import { allowHourly, getEntitlements, getCount, bumpCounter, monthPeriod, quotaExceededPayload, rateLimitedReply, LIMITS } from '../middleware/quota';
+import { getEntitlements, getCount, bumpCounter, monthPeriod, quotaExceededPayload } from '../middleware/quota';
 import { resolveEmail, resolveKnownEmail } from '../engine/email';
 import { fetchApolloContacts, type SourcedContact } from '../engine/apollo';
 import { fetchHunterContacts } from '../engine/hunter';
@@ -336,7 +336,6 @@ export async function resolveRoutes(fastify: FastifyInstance) {
     if (!featureVerdict.allowed) return reply.status(402).send(featureVerdict.denial);
     const trialAccess = usesV2TrialMetering(featureVerdict.snapshot);
     const usesMonthlyProductQuota = usesLegacyMonthlyProductQuota(featureVerdict.snapshot);
-    if (!(await allowHourly(userId, 'resolve', LIMITS.perHour.resolve))) return rateLimitedReply(reply);
     const ent = await getEntitlements(userId);
     const usedContacts = usesMonthlyProductQuota ? await getCount(userId, monthPeriod(), 'verified_contacts') : 0;
     const monthlyRemaining = usesMonthlyProductQuota

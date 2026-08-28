@@ -360,11 +360,12 @@ export async function accountRoutes(fastify: FastifyInstance) {
     try {
       // Neither of these has an FK to users, so the cascade does not reach them.
       //
-      // BOTH keys, not just the user id. usage_counters.key is a plain string precisely so the
-      // pre-auth endpoints can rate-limit before a user id exists, and auth.ts does exactly that:
-      // `allowHourly(email, ...)` for session/request-code/verify-code. Deleting only the userId
-      // rows left every one of those keyed by her email address, tying her address to a deleted
-      // account forever, with nothing else in the codebase that would ever purge them.
+      // BOTH keys, not just the user id. usage_counters.key is a plain string precisely so
+      // pre-auth endpoints could rate-limit before a user id exists (auth.ts no longer does this
+      // as of 2026-08-29, but older email-keyed rows can still exist from before that change).
+      // Deleting only the userId rows left every one of those keyed by her email address, tying
+      // her address to a deleted account forever, with nothing else in the codebase that would
+      // ever purge them.
       const counterKeys = email ? [userId, email] : [userId];
       await db.transaction(async (tx) => {
         const manualContactRows = await tx.select({ contact_id: user_contact_unlocks.contact_id })
