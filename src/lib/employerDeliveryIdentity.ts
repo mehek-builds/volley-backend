@@ -134,7 +134,21 @@ export function employerDeliveryProjection(packet: SubmissionPacket): Record<str
       && typeof value === 'object'
       && !Array.isArray(value)
       && Object.keys(value as Record<string, unknown>).length === 0) continue;
-    if (key === 'failedFields' && Array.isArray(value) && value.length === 0) continue;
+    // failedFields entries carry live-page composition detail alongside the durable control id:
+    // selector is a per-page-load [data-litos-discovered-N] marker that renumbers on every load,
+    // inputType flaps between text and combobox while a react-select mounts, and label is composed
+    // from the live DOM. Binding those bytes makes every prepare of a packet with a nonempty
+    // failed-fields set read as "how Litos reaches this employer changed", forever. Only the SET of
+    // failed controls is employer-delivery behavior, so the hash binds the sorted, deduplicated
+    // controlId list (empty stays omitted, matching the absent case above). The snapshot itself
+    // keeps the full entries; only the hash projection narrows.
+    if (key === 'failedFields' && Array.isArray(value)) {
+      if (value.length === 0) continue;
+      projection[key] = [...new Set(
+        (value as NonNullable<SubmissionPacket['failedFields']>).map((field) => field.controlId),
+      )].sort();
+      continue;
+    }
     projection[key] = EMPLOYER_DELIVERY_PACKET_FIELDS[key] === 'file'
       ? fileProjection(value as Buffer)
       : value;

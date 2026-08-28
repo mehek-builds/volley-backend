@@ -100,6 +100,53 @@ test('nonempty managed form inventories remain bound to exact options and failur
   assert.notEqual(employerDeliverySha256(base, envelope), employerDeliverySha256(changedFailure, envelope));
 });
 
+test('failed fields bind by durable control identity, not per-load selector, inputType, or label', () => {
+  const envelope = employerDeliveryEnvelope({
+    channel: 'browser:stratus-managed',
+    destinationUrl: 'https://example.com/careers/apply',
+    portalFamily: 'greenhouse',
+  });
+  const firstLoad = {
+    ...packet(),
+    failedFields: [
+      { controlId: 'question_67727949', label: 'Preferred office', selector: '[data-litos-discovered-3]', inputType: 'text' },
+      { controlId: 'question_67727969', label: 'Visa status', selector: '[data-litos-discovered-7]', inputType: 'text' },
+    ],
+  };
+  const secondLoad = {
+    ...packet(),
+    failedFields: [
+      { controlId: 'question_67727969', label: 'Visa status *', selector: '[data-litos-discovered-12]', inputType: 'combobox' },
+      { controlId: 'question_67727949', label: 'Preferred office (required)', selector: '[data-litos-discovered-9]', inputType: 'combobox' },
+      { controlId: 'question_67727949', label: 'Preferred office', selector: '[data-litos-discovered-9]', inputType: 'combobox' },
+    ],
+  };
+  // (a) selector renumbering, inputType flapping, label recomposition, ordering, and duplicate
+  // rediscovery of the same control are all one delivery identity across page loads.
+  assert.deepEqual(
+    employerDeliveryProjection(firstLoad).failedFields,
+    ['question_67727949', 'question_67727969'],
+  );
+  assert.equal(employerDeliverySha256(firstLoad, envelope), employerDeliverySha256(secondLoad, envelope));
+
+  // (b) a changed SET of failed controls still changes the hash.
+  const extraFailure = {
+    ...packet(),
+    failedFields: [...firstLoad.failedFields, { controlId: 'question_99', label: 'New question' }],
+  };
+  const differentFailure = {
+    ...packet(),
+    failedFields: [firstLoad.failedFields[0]],
+  };
+  assert.notEqual(employerDeliverySha256(firstLoad, envelope), employerDeliverySha256(extraFailure, envelope));
+  assert.notEqual(employerDeliverySha256(firstLoad, envelope), employerDeliverySha256(differentFailure, envelope));
+
+  // (c) an empty failed-fields set is still omitted: hash equals the absent case.
+  const measuredEmpty = { ...packet(), failedFields: [] };
+  assert.equal(employerDeliveryProjection(measuredEmpty).failedFields, undefined);
+  assert.equal(employerDeliverySha256(measuredEmpty, envelope), employerDeliverySha256(packet(), envelope));
+});
+
 test('managed form snapshots do not alter the separate attended extension payload', () => {
   const base = {
     target_role: 'Engineer',
