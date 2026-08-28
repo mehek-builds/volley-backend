@@ -42,6 +42,21 @@ export type ApplicationReviewQuestion = {
    * provenance list, because it is not a claim about how the answer got there.
    */
   options?: string[] | null;
+  /**
+   * THE TEXT A RE-OPENED QUESTION USED TO CARRY, offered back as a prefilled draft.
+   *
+   * Written only by reopenUnfitClosedChoiceQuestions (lib/questionMetadata.ts) when a stored
+   * answer on a strict closed-choice control matches none of the control's measured exact options:
+   * the unfillable answer is blanked so the question re-enters the dashboard flow as a required
+   * blocker with its options, and the removed text lands here so a client that supports drafts can
+   * show her what was there. Cleared by the same pass the moment the question carries a real
+   * answer again.
+   *
+   * DISPLAY ONLY, like `options`, and for the same reason: the employer receives the value she
+   * chooses, never the draft, so hashing it would spend acknowledgements over text nobody sends.
+   * It is not provenance either - it makes no claim about how any answer got anywhere.
+   */
+  answer_draft?: string;
   /* WHO PUT THIS ANSWER HERE, when it was not simply resolved from the profile.
    *
    * 'applicant_review' is her, typing on the review screen. 'consent_permission' is Litos accepting
@@ -197,7 +212,7 @@ type PacketVisibleQuestionField = (typeof PACKET_VISIBLE_QUESTION_FIELDS)[number
  * chose, never the list, so hashing it would spend every stored acknowledgement the first time a
  * board reordered its own options. That is precisely the deadlock the allow-list was narrowed to
  * prevent, and a test in packetAudit.test.ts pins it. */
-type QuestionDisplayField = 'options';
+type QuestionDisplayField = 'options' | 'answer_draft';
 type QuestionFieldClassification =
   PacketVisibleQuestionField | AnswerProvenanceField | QuestionDisplayField;
 type UnclassifiedQuestionField =

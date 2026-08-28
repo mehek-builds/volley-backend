@@ -1067,13 +1067,14 @@ const everyQuestionField = {
   consent_permission_granted_at: '2026-08-01T00:00:00.000Z',
   consent_permission_version: 'v1',
   options: ['Female', 'Male', 'Decline To Self Identify'],
+  answer_draft: 'Woman',
 } satisfies Required<ApplicationReviewQuestion>;
 
 /* DISPLAY-ONLY FIELDS ARE THE THIRD KIND, named here so the runtime check agrees with the
    compile-time partition in applicationReview.ts. `options` is what the employer's control OFFERS;
    the employer receives the value she chose and never the menu, so it is neither packet identity
    nor a claim about how the answer got there. */
-const DISPLAY_ONLY_QUESTION_FIELDS = ['options'] as const;
+const DISPLAY_ONLY_QUESTION_FIELDS = ['options', 'answer_draft'] as const;
 
 test('every question field is classified as packet-visible, provenance or display, exactly once', () => {
   const provenance = new Set<string>([...APPLICANT_CLAIM_FIELDS, ...ANSWER_CLAIM_FIELDS]);

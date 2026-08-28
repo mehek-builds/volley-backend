@@ -53,6 +53,7 @@ import {
   managedFormSnapshotWithStableCapabilities,
 } from './submissionRunner';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
+import { blankRequiredQuestionLabels } from '../lib/submissionSafety';
 import { PacketDocumentExpiredError } from '../lib/resumeAccess';
 import {
   createPacketAudit,
@@ -5953,3 +5954,167 @@ test('a REWRITTEN acknowledged answer is not laundered as an extra', () => {
   assert.equal(packetQuestionsMatchAcknowledged([rewritten], acknowledged), false);
 });
 
+
+/* THE MYTOS DEADLOCK: a reviewed answer that fits none of a closed control's exact options.
+ *
+ * Measured live on application 55de7c9e-13c0-44fd-8f78-0dee280dbd33 (Mytos on Lever, 2026-08-28).
+ * The required "What was your degree classification? ✱" select offers nine exact discovered
+ * options; the stored reviewed answer is the resolver's own composite "3.89/4.00 (US 4.0 scale)"
+ * (answer_source applicant_review), which matches none of them. The runner correctly refused to
+ * guess and withheld the final press ("1 required field confirmation failed"), but the
+ * pending-question flow only surfaces unanswered questions, so nothing ever re-asked it: the row
+ * was permanently stuck between an unfillable answer and an unaskable question.
+ *
+ * PR 711 added "a reviewed answer that still fits is kept". This is the converse: one that does
+ * NOT fit must re-open the question as an answerable blocker carrying the exact options. */
+test('an unfit reviewed answer on a closed control re-opens the question and holds the send until re-answered', () => {
+  const asOf = new Date('2026-08-28T08:00:00.000Z');
+  const reviewedAt = '2026-08-27T18:30:00.000Z';
+  const mytosOptions = [
+    'First-Class Honours',
+    'Upper Second-Class Honours (2:1)',
+    'Lower Second-Class Honours (2:2)',
+    'Third-Class Honours',
+    'GPA <3.0',
+    'GPA 3.0-3.4',
+    'GPA 3.5-3.8',
+    'GPA 3.9+',
+    'Other',
+  ];
+  const row = {
+    user_id: 'user-1',
+    job_context: { company: 'Mytos', role: 'Software Engineer' },
+  } as ResumeRow;
+  const profile = { gpa: '3.89', gpa_scale: '4.0' } as ApplicationProfileLike;
+  const review: ApplicationReviewState = {
+    jd_text: 'Automate biology.',
+    role: 'Software Engineer',
+    portal_url: 'https://jobs.lever.co/mytos/1c9deacd',
+    ats_name: 'lever',
+    status: 'needs_attention',
+    edited_terms: [],
+    questions_reviewed_at: reviewedAt,
+    questions: [
+      {
+        id: 'degree-classification',
+        question: 'what was your degree classification? ✱',
+        answer: '3.89/4.00 (US 4.0 scale)',
+        kind: 'required',
+        required: true,
+        portal_input_type: 'select-one',
+        options: [...mytosOptions],
+        answer_source: 'applicant_review',
+        answer_reviewed_at: reviewedAt,
+      },
+      /* The open prose question on the same form must ride through untouched. */
+      {
+        id: 'why-mytos',
+        question: 'why do you want to work at mytos? ✱',
+        answer: 'Because automating biology needs software people.',
+        kind: 'essay',
+        required: true,
+        portal_input_type: 'textarea',
+      },
+    ],
+    skipped_reasons: [],
+    updated_at: reviewedAt,
+  };
+  const context = applicationContextForQuestionResolution(row, review);
+  const canonical = (current: ApplicationReviewState) => resolvePacketAuditQuestionFixpoint(
+    current,
+    profile,
+    context,
+    undefined,
+    undefined,
+    asOf,
+  );
+
+  /* Before the fix the stored shape passed the required-answer gate while being unfillable. */
+  assert.deepEqual(blankRequiredQuestionLabels(review.questions), [],
+    'the stuck shape: an answered-looking question no fill can place and no screen re-asks');
+
+  const reopened = canonical(review);
+  const degree = reopened.find((question) => question.id === 'degree-classification');
+  const essay = reopened.find((question) => question.id === 'why-mytos');
+
+  assert.ok(degree, 'the question record survives the re-open');
+  assert.equal(degree.answer, '', 'the unfillable answer is cleared so the dashboard asks again');
+  assert.deepEqual(degree.options, mytosOptions, 'the exact employer options are carried to her');
+  assert.equal(degree.answer_draft, '3.89/4.00 (US 4.0 scale)', 'her removed words survive as the draft');
+  assert.equal(degree.required, true);
+  assert.equal(essay?.answer, 'Because automating biology needs software people.',
+    'an open free-text question is untouched');
+  assert.deepEqual(
+    blankRequiredQuestionLabels(reopened),
+    ['what was your degree classification? ✱'],
+    'the run and send gates now hold this packet until the question is re-answered',
+  );
+
+  /* The persisted re-opened set is a fixpoint: audit, acknowledgement and send converge on one
+   * packet identity instead of oscillating between the unfit answer and the blank. */
+  const persisted = { ...review, questions: reopened };
+  assert.deepEqual(canonical(persisted), reopened, 'the re-opened reading is stable across requests');
+
+  /* She answers with the one honest option for a 3.89 GPA on this list. The save sticks, the
+   * draft clears, and the gate opens. */
+  const saved = resolveSubmittedApplicationAnswers({
+    current: { ...persisted, jd_text: context },
+    submitted: [{ ...degree, answer: 'Other' }],
+    profile,
+    asOf,
+    now: () => reviewedAt,
+  });
+  const savedDegree = saved.questions.find((question) => question.id === 'degree-classification');
+  assert.equal(savedDegree?.answer, 'Other', 'an exact option she chose stays chosen');
+  assert.equal(savedDegree && 'answer_draft' in savedDegree && savedDegree.answer_draft !== undefined, false,
+    'the draft never lingers beside an accepted answer');
+  assert.deepEqual(blankRequiredQuestionLabels(saved.questions), [], 'the send gate is open again');
+});
+
+test('a reviewed band that is an exact offered option stays closed through the same fixpoint', () => {
+  const asOf = new Date('2026-08-28T08:00:00.000Z');
+  const reviewedAt = '2026-08-27T18:30:00.000Z';
+  const review: ApplicationReviewState = {
+    jd_text: 'Automate biology.',
+    role: 'Software Engineer',
+    portal_url: 'https://jobs.lever.co/mytos/1c9deacd',
+    ats_name: 'lever',
+    status: 'needs_attention',
+    edited_terms: [],
+    questions_reviewed_at: reviewedAt,
+    questions: [
+      {
+        id: 'degree-classification',
+        question: 'what was your degree classification? ✱',
+        answer: 'GPA 3.0-3.4',
+        kind: 'required',
+        required: true,
+        portal_input_type: 'select-one',
+        options: ['GPA <3.0', 'GPA 3.0-3.4', 'GPA 3.5-3.8', 'GPA 3.9+', 'Other'],
+        answer_source: 'applicant_review',
+        answer_reviewed_at: reviewedAt,
+      },
+    ],
+    skipped_reasons: [],
+    updated_at: reviewedAt,
+  };
+  const row = {
+    user_id: 'user-1',
+    job_context: { company: 'Mytos', role: 'Software Engineer' },
+  } as ResumeRow;
+  const profile = { gpa: '3.2', gpa_scale: '4.0' } as ApplicationProfileLike;
+  const settled = resolvePacketAuditQuestionFixpoint(
+    review,
+    profile,
+    applicationContextForQuestionResolution(row, review),
+    undefined,
+    undefined,
+    asOf,
+  );
+
+  assert.equal(settled[0]?.answer, 'GPA 3.0-3.4', 'a reviewed answer that fits an exact option is kept');
+  assert.equal(settled[0]?.answer_source, 'applicant_review', 'and keeps its applicant claim');
+  assert.equal(settled[0] && 'answer_draft' in settled[0] && settled[0].answer_draft !== undefined, false,
+    'no draft is minted for a fit answer');
+  assert.deepEqual(blankRequiredQuestionLabels(settled), []);
+});
