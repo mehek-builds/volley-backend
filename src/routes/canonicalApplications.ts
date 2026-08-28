@@ -17,6 +17,7 @@ import {
   users,
 } from '../db/schema';
 import { canonicalCompanyScope, getEntitlementSnapshot } from '../lib/entitlements';
+import { INVENTORY_LIMIT } from '../engine/pipeline';
 import { requireAuth } from '../middleware/auth';
 import { apiBaseFor } from '../lib/apiBase';
 import { mintDownloadToken } from '../lib/resumeAccess';
@@ -56,7 +57,16 @@ export const fillApplicationSchema = z.object({
 });
 
 const paramsSchema = z.object({ id: z.string().uuid() });
-const listSchema = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50) });
+/* THE MAXIMUM IS THE BOARD'S MAXIMUM, and it has to be, because the dashboard renders this list and
+   GET /applications/board on one screen. At 100 here against the board's 200 the Tracker showed
+   "Your applications 100" directly above "187 of 200 have not been sent yet" (trylitos.com,
+   2026-08-29), and an application could sit in the board's Applied column while falling outside
+   this window entirely - which is how "Applied 13" and "12 Sent" were both true.
+
+   It is a REFUSAL, not a clamp: anything above the maximum answers 400, and the web app's fallbacks
+   turn that into a silently empty canonical list. So the ceiling has to rise here, and this has to
+   deploy, before any client may ask for more. See INVENTORY_LIMIT. */
+const listSchema = z.object({ limit: z.coerce.number().int().min(1).max(INVENTORY_LIMIT).default(50) });
 
 export const manualSubmissionOutcomeSchema = z.object({
   event_id: z.string().uuid(),

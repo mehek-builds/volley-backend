@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { STAGES, deriveStage, isStage, canMove, STAGE_LABEL } from './pipeline';
+import { readFileSync } from 'node:fs';
+import { STAGES, deriveStage, isStage, canMove, STAGE_LABEL, BOARD_LIMIT, INVENTORY_LIMIT } from './pipeline';
 
 describe('deriveStage', () => {
   test('a stored stage always wins over the derivation', () => {
@@ -92,5 +93,46 @@ describe('deriveStage over the full submission status union', () => {
   test('only a confirmed submission derives to applied', () => {
     const applied = Object.entries(EXPECTED).filter(([, stage]) => stage === 'applied');
     assert.deepEqual(applied.map(([status]) => status), ['submitted']);
+  });
+});
+
+/*
+ * ONE INVENTORY, ONE CEILING.
+ *
+ * The dashboard's Tracker draws GET /applications/board directly under a ledger counted from
+ * GET /applications. While the two routes carried different maximums they were honest counts of two
+ * different universes six pixels apart: measured on trylitos.com 2026-08-29, "Your applications
+ * 100" sat above "187 of 200 have not been sent yet", and a card could sit in the board's Applied
+ * column while falling outside the ledger's window - which is how "Applied 13" and "12 Sent" were
+ * both correct at once.
+ *
+ * The list route's maximum is a REFUSAL, not a clamp: above it the request answers 400, and the web
+ * app's fallbacks turn that into a silently empty canonical list, dropping every canonical-only
+ * application off the Tracker. So this pin guards a failure that is invisible from the client.
+ */
+describe('the inventory ceiling', () => {
+  test('the board and the canonical list bound the same inventory by the same number', () => {
+    assert.equal(BOARD_LIMIT, INVENTORY_LIMIT);
+  });
+
+  test('the canonical list route validates its limit against that ceiling, not a literal', () => {
+    const route = readFileSync('src/routes/canonicalApplications.ts', 'utf8');
+    assert.match(
+      route,
+      /limit: z\.coerce\.number\(\)\.int\(\)\.min\(1\)\.max\(INVENTORY_LIMIT\)/,
+      'a second literal here is how the two windows drifted apart in the first place',
+    );
+  });
+
+  test('the board route bounds its query by the same constant', () => {
+    const route = readFileSync('src/routes/jdMatch.ts', 'utf8');
+    assert.match(route, /\.limit\(BOARD_LIMIT\)/);
+  });
+
+  test('the ceiling is high enough for the window the dashboard actually asks for', () => {
+    /* The web app fetches /applications?limit=200 on Home and on the Tracker, in lockstep
+       (tests/home-tracker-canonical-limit.test.mjs over there). Lowering this below that number
+       turns both fetches into 400s. */
+    assert.ok(INVENTORY_LIMIT >= 200, 'the dashboard asks for 200 rows and a smaller ceiling refuses it');
   });
 });
