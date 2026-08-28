@@ -32,11 +32,14 @@ import {
 import { extractPdfText } from '../lib/pdfText';
 import {
   BULLET_MAX_CHARS,
+  BULLET_MIN_WORDS,
+  BULLET_MAX_WORDS,
   validateResumeSpec,
   validatePdfLayout,
   pruneUngroundedContent,
   weakVerbBullets,
   overlongBullets,
+  misWordedBullets,
 } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
@@ -427,11 +430,63 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        * hint fires only on a bullet that genuinely survived a previous rewrite attempt. Keying it
        * on the pass counter asserted a false history whenever pass 1 was the regeneration branch. */
       const previouslyTargeted = new Set<string>();
+
+      /* One builder for every place that asks for bullet rewrites, so the loop and the post-floor
+       * backstop below can never drift on what a defect is called or when the do-not-reuse hint
+       * fires. A bullet can break several rules at once; reasons merge by (org, bullet) so the
+       * model sees one target with all of its problems rather than conflicting rewrites. */
+      const repairTargetsFor = (
+        weak: ReturnType<typeof weakVerbBullets>,
+        overlong: ReturnType<typeof overlongBullets>,
+        misWorded: ReturnType<typeof misWordedBullets>,
+      ): Map<string, BulletRepairTarget> => {
+        const targets = new Map<string, BulletRepairTarget>();
+        const addReason = (org: string, bullet: string, reason: string) => {
+          const key = `${org}\u0000${bullet}`;
+          const existing = targets.get(key);
+          if (existing) existing.reasons.push(reason);
+          else targets.set(key, { org, bullet, reasons: [reason] });
+        };
+        for (const w of weak) {
+          /* The concrete candidate menu lives in the repair system prompt (VERB_REPAIR_MENU), so
+           * the reason names only this bullet's defect. The do-not-reuse hint fires only when THIS
+           * bullet already survived a rewrite attempt, never merely because an earlier pass ran. */
+          const retried = previouslyTargeted.has(`${w.org}\u0000${w.bullet}`);
+          addReason(
+            w.org,
+            w.bullet,
+            `opens with "${w.verb}", which is not an approved strong verb${retried ? '. A previous rewrite of this bullet also failed; choose a different approved opener' : ''}`,
+          );
+        }
+        for (const b of misWorded) {
+          /* The word band is a hard gate ("bullet has N words (min 8)") and until 2026-08-29 it
+           * was the one bullet rule with no repair path: a 7-word bullet died at the fail-closed
+           * ATS gate with nothing saved, measured live on an onboarding trial. */
+          addReason(
+            b.org,
+            b.bullet,
+            b.words < BULLET_MIN_WORDS
+              ? `only ${b.words} words; the rule is ${BULLET_MIN_WORDS}-${BULLET_MAX_WORDS}. Expand it using only the facts it already states`
+              : `${b.words} words; the rule is ${BULLET_MIN_WORDS}-${BULLET_MAX_WORDS}. Condense without dropping a metric`,
+          );
+        }
+        for (const b of overlong) {
+          /* Naming the overage, not just the rule: the count it got wrong is the feedback that
+           * changes the outcome. The grounding pass below independently rejects anything invented,
+           * but a dropped number is not invention and would survive it, so the keep-every-metric
+           * constraint lives in the repair prompt itself. */
+          addReason(b.org, b.bullet, `${b.length} characters, ${b.length - BULLET_MAX_CHARS} over the ${BULLET_MAX_CHARS} limit`);
+        }
+        for (const key of targets.keys()) previouslyTargeted.add(key);
+        return targets;
+      };
+
       for (let pass = 1; pass <= MAX_REPAIR_PASSES; pass += 1) {
         const weak = weakVerbBullets(rawSpec);
         const overlong = overlongBullets(rawSpec);
+        const misWorded = misWordedBullets(rawSpec);
         const missingPriorities = baseResumeSelectionIssues(rawSpec, priorityEntries);
-        if (weak.length === 0 && overlong.length === 0 && missingPriorities.length === 0) break;
+        if (weak.length === 0 && overlong.length === 0 && misWorded.length === 0 && missingPriorities.length === 0) break;
         /* REQUEST_DEADLINE_MS bounds one model call, not the request. A repair pass is seconds
          * now, but the regeneration branch can still spend a full call, and blowing vercel.json's
          * 300s maxDuration kills the function mid-stream: the client gets a truncated SSE with
@@ -465,39 +520,17 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
                 .map((b) => `${b.org} at ${b.length} characters (${b.length - BULLET_MAX_CHARS} over the ${BULLET_MAX_CHARS} limit): "${b.bullet}"`)
                 .join('; ')}. Rewrite each to under ${BULLET_MAX_CHARS} characters without dropping a metric.`
               : '',
+            misWorded.length > 0
+              ? `These bullets are outside the ${BULLET_MIN_WORDS}-${BULLET_MAX_WORDS} word rule: ${misWorded
+                .map((b) => `${b.org} at ${b.words} words: "${b.bullet}"`)
+                .join('; ')}. Rewrite each to ${BULLET_MIN_WORDS}-${BULLET_MAX_WORDS} words. Expand a short one using only the facts it already states; condense a long one without dropping a metric.`
+              : '',
           ].filter(Boolean));
           continue;
         }
 
-        /* Bullet-level defects only: rewrite them in place. A bullet can be both weak and overlong,
-         * so the reasons merge by (org, bullet) and the model sees one target with both problems
-         * rather than two conflicting rewrites of the same line. */
-        const targets = new Map<string, BulletRepairTarget>();
-        const addReason = (org: string, bullet: string, reason: string) => {
-          const key = `${org}\u0000${bullet}`;
-          const existing = targets.get(key);
-          if (existing) existing.reasons.push(reason);
-          else targets.set(key, { org, bullet, reasons: [reason] });
-        };
-        for (const w of weak) {
-          /* The concrete candidate menu lives in the repair system prompt (VERB_REPAIR_MENU), so
-           * the reason names only this bullet's defect. The do-not-reuse hint fires only when THIS
-           * bullet already survived a rewrite attempt, never merely because an earlier pass ran. */
-          const retried = previouslyTargeted.has(`${w.org}\u0000${w.bullet}`);
-          addReason(
-            w.org,
-            w.bullet,
-            `opens with "${w.verb}", which is not an approved strong verb${retried ? '. A previous rewrite of this bullet also failed; choose a different approved opener' : ''}`,
-          );
-        }
-        for (const b of overlong) {
-          /* Naming the overage, not just the rule: the count it got wrong is the feedback that
-           * changes the outcome. The grounding pass below independently rejects anything invented,
-           * but a dropped number is not invention and would survive it, so the keep-every-metric
-           * constraint lives in the repair prompt itself. */
-          addReason(b.org, b.bullet, `${b.length} characters, ${b.length - BULLET_MAX_CHARS} over the ${BULLET_MAX_CHARS} limit`);
-        }
-        for (const key of targets.keys()) previouslyTargeted.add(key);
+        // Bullet-level defects only: rewrite them in place.
+        const targets = repairTargetsFor(weak, overlong, misWorded);
         const repaired = await repairBaseResumeBullets(rawSpec, [...targets.values()], { timeoutMs: REQUEST_DEADLINE_MS });
         /* Same-reference return means nothing merged - a malformed reply, a transient model error,
          * or rewrites that failed the deterministic checks. Repainting identical content would
@@ -546,6 +579,37 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
           ),
       });
       const removed = [...droppedForLength, ...pruned.removed];
+
+      /* THE FLOOR CAN BREAK WHAT THE LOOP JUST FIXED. enforceExperienceBulletFloor tops short
+       * entries up with RAW bank variants - the student's own parsed wording, any length, any
+       * opener - after every repair above has run, and the ATS gate below fails closed on exactly
+       * those rules. Measured live 2026-08-29: a 7-word variant injected here killed an onboarding
+       * build with nothing saved. One targeted pass over the final spec closes the gap; the merge
+       * guard in applyBulletRepairs means it can never make the spec worse, and a rewrite that
+       * still fails simply ships the same gate outcome the build had without this pass. Bank
+       * variants are grounded by definition (they ARE the bank), and the repair prompt keeps a
+       * rewrite on the facts the bullet already states. */
+      let finalSpec = spec;
+      const lateWeak = weakVerbBullets(finalSpec);
+      const lateOverlong = overlongBullets(finalSpec);
+      const lateMisWorded = misWordedBullets(finalSpec);
+      if (
+        (lateWeak.length > 0 || lateOverlong.length > 0 || lateMisWorded.length > 0)
+        && Date.now() - buildStartedAt <= REPAIR_PASS_BUDGET_MS
+      ) {
+        const lateTargets = repairTargetsFor(lateWeak, lateOverlong, lateMisWorded);
+        const lateRepaired = await repairBaseResumeBullets(finalSpec, [...lateTargets.values()], { timeoutMs: REQUEST_DEADLINE_MS });
+        if (lateRepaired !== finalSpec) {
+          /* Every rewrite the LOOP produced flowed through pruneUngroundedContent above; this one
+           * runs after it, so without a re-prune an invented number in a backstop rewrite would be
+           * the one model output nothing checks. Re-pruning can drop a rewritten bullet back out,
+           * which is the correct failure direction: a bullet nobody can ground helps no one, and
+           * the entry keeps its other bullets. */
+          const latePruned = pruneUngroundedContent(lateRepaired, bank, declaredSkills);
+          finalSpec = latePruned.spec;
+          removed.push(...latePruned.removed);
+        }
+      }
       /* The base resume has no posting, so its keyword coverage is scored against the roles the
        * student says they are chasing (targeting titles and categories, plus the target_roles the
        * parse inferred). That number is ADVISORY and never gates: a synthetic JD is a guess at what
@@ -598,11 +662,11 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        * trimmer just removed, so any student whose content overflowed a page failed the gate and was
        * stranded at this step - deterministically, so a rebuild would not clear it. resume.ts has
        * always reassigned `spec = rendered.spec` here; this route was the one that did not. */
-      let printed = spec;
+      let printed = finalSpec;
       try {
         /* Same as the tailored path: the base resume gets the same page-filling rule, from the
            same bank, because it is the same document made for a different audience. */
-        const rendered = await renderResumePdf(spec, contact, targetText, bank);
+        const rendered = await renderResumePdf(finalSpec, contact, targetText, bank);
         printed = rendered.spec;
         const parsedPdf = await extractPdfText(rendered.buffer);
         const layout = validatePdfLayout(parsedPdf.text, parsedPdf.numpages);

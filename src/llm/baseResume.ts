@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { ExperienceBankEntry } from '../db/schema';
 import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { relevanceScore } from '../engine/resumePolicy';
-import { BULLET_MAX_CHARS, STRONG_VERBS, startsWithStrongVerb } from '../engine/resumeValidate';
+import { BULLET_MAX_CHARS, BULLET_MIN_WORDS, BULLET_MAX_WORDS, STRONG_VERBS, startsWithStrongVerb } from '../engine/resumeValidate';
 import { normalizeSpec, type ResumeSpec } from './resumeSpec';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -458,7 +458,9 @@ Rules for every rewritten bullet:
 - For an operational or service bullet, these approved verbs fit most actions: ${VERB_REPAIR_MENU.join(', ')}.
 - Keep every fact, number, tool and outcome exactly as the original has them. Rewording is allowed; invention is not,
   and dropping a metric to save space is not.
-- One sentence, 8-30 words, under ${BULLET_MAX_CHARS} characters. Cut filler, not facts.
+- One sentence, ${BULLET_MIN_WORDS}-${BULLET_MAX_WORDS} words, under ${BULLET_MAX_CHARS} characters. Cut filler, not facts. When a
+  bullet is too SHORT, expand it using only the facts already in it: name the tool, the scope or the outcome it
+  states, never a new one.
 - NEVER use an em dash anywhere. Use a comma, colon, hyphen or period instead.
 - Keep the applicant's own spelling. Never convert between British and American spelling in either direction.`;
 
@@ -560,7 +562,13 @@ export function applyBulletRepairs(spec: ResumeSpec, replyText: string): ResumeS
      * the original: same gate outcome, one more mutation. Refusing it here can never make the
      * spec worse than what the reply offered. */
     const candidate = rewritten.trim();
-    if (candidate.length > BULLET_MAX_CHARS || !startsWithStrongVerb(candidate)) continue;
+    const candidateWords = candidate.split(/\s+/).filter(Boolean).length;
+    if (
+      candidate.length > BULLET_MAX_CHARS
+      || candidateWords < BULLET_MIN_WORDS
+      || candidateWords > BULLET_MAX_WORDS
+      || !startsWithStrongVerb(candidate)
+    ) continue;
     rewrittenFor.set(repairKey(org, bullet), candidate);
   }
   if (rewrittenFor.size === 0) return spec;
