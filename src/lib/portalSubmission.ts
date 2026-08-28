@@ -7656,6 +7656,34 @@ export function buildManagedPortalActions(
               { includeSelectFallbacks: false },
             );
           }
+        } else if (portalFamily(portal) === 'lever') {
+          /* THE DURABLE-NAME FILL, WHICH IS THE ONLY SHAPE THE RUNNER'S VERIFIED RADIO CHOOSER
+           * CAN RECEIVE FOR A LEVER GROUP. Measured on the live DGA form, 2026-08-28 (application
+           * c3093dee, run at 11:31 UTC): all five required radio questions sat in the packet with
+           * applicant-reviewed answers and exact discovered options, this arm emitted only the
+           * optional label-scoped fillByLabelText below, that action stepped over Lever's
+           * label-wrapped cards[uuid][fieldN] markup without ticking anything, and the required
+           * gate reported every one of them "required and is still empty". Meanwhile the runner
+           * side (stratus-browser-cloud PR #116) routes a fill whose SELECTOR resolves to exactly
+           * one radio or checkbox group through pickRadioOption with a verified read-back - an arm
+           * this planner never reached, because no such fill was ever in the plan.
+           *
+           * So on Lever the discovered group name leads: one fill per proven option value, aimed at
+           * the [name="cards[<uuid>][fieldN]"] selector discovery captured. The runner reads every
+           * option's label and value first, ticks only an exact match, verifies the committed
+           * state, and refuses a selector spanning more than one group - so a value that does not
+           * match exactly is left for the applicant rather than guessed. Values are decomposed
+           * against the discovered option inventory the same way the Workable arm does it; when
+           * the inventory cannot prove one decomposition, or a radio answer resolves to anything
+           * but one value, the label-scoped path below stays the fallback. */
+          const values = currentOptions ? exactChoiceOptionValues(answer, currentOptions) : [answer];
+          if (values && !(/^radio$/i.test(portalInputType ?? '') && values.length !== 1)) {
+            for (const value of values) {
+              managedFill(actions, portalSelector, value, `question:${questionText.slice(0, 80)}`);
+            }
+          } else {
+            pushScopedQuestionChoiceActions(actions, questionText, answer, 'question', { includeSelectFallbacks: false });
+          }
         } else {
           /* A choice question on a non-Greenhouse board used to fall out of this branch having
            * pushed NOTHING, and that was invisible for as long as no choice question could get here:
@@ -7669,7 +7697,9 @@ export function buildManagedPortalActions(
            * says which of Yes and No was meant; the runner's scoped choice handling reads the
            * question's own container and presses the matching option pill, which is the only thing
            * that works there. One action, and the same one the no-selector path below would spend.
-           */
+           * Lever is the measured exception above: its durable name IS the group, and the runner
+           * verifies the tick, so the selector leads there and this label path stays the rule for
+           * every other family. */
           pushScopedQuestionChoiceActions(actions, questionText, answer, 'question', { includeSelectFallbacks: false });
         }
         continue;
