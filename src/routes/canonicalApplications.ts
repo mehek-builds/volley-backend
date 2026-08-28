@@ -17,6 +17,7 @@ import {
   users,
 } from '../db/schema';
 import { canonicalCompanyScope, getEntitlementSnapshot } from '../lib/entitlements';
+import { companyDomainFor } from '../lib/companyDomains';
 import { INVENTORY_LIMIT } from '../engine/pipeline';
 import { requireAuth } from '../middleware/auth';
 import { apiBaseFor } from '../lib/apiBase';
@@ -363,6 +364,15 @@ function applicationResponse(row: typeof applications.$inferSelect) {
     legacy_generated_resume_id: row.legacy_generated_resume_id,
     job_id: row.job_id,
     company: row.company_name,
+    /* The employer's own domain, resolved from the same verified map the job board and the
+       notification emails already use (companyDomainFor). It is here so the Tracker can draw the
+       company's logo beside its name the way Jobs and Home already do.
+       WHY THE SERVER RESOLVES IT. The dashboard has the company NAME and nothing else, and a domain
+       guessed from a name is how a row ends up wearing another company's logo - which tells a
+       student this application is to a different employer than it is. The map is in-memory and
+       keyed by normalized name, so this costs a lookup per row and no query. Null whenever the map
+       does not know the company, which the client renders as a monogram rather than a wrong icon. */
+    company_domain: companyDomainFor(row.company_name),
     company_scope_key: row.company_scope_key,
     role: row.role,
     portal_url: safeStoredPortalUrl(row.portal_url),
