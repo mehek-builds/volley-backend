@@ -25,6 +25,7 @@ import {
   PROVIDER_HANDLE_ONLY_SCRIPT,
   questionRequiresHumanAttention,
   refreshKnownQuestionAnswers,
+  reviewedAnswerIsAnOfferedOption,
   REVIEW_QUESTION_TEXT_MAX_LENGTH,
   resolveKnownAnswer,
   sensitiveQuestionRequiresAttention,
@@ -4626,6 +4627,76 @@ test('a reviewed GPA band against a classification-worded label still detects a 
   ], { gpa: '3.89', gpa_scale: '4.0' }, undefined, reviewedAt);
   assert.notEqual(refreshed[0].answer, '3.5 - 3.8',
     'a stale reviewed band that her real GPA (3.89) sits outside must be recomputed, not kept');
+});
+
+/* THE SAME CONTRADICTION, BUT SHE PICKED IT FROM THE CONTROL'S OWN LIST.
+ *
+ * The band-contradiction rule above is right for a range TYPED into an open control, where the
+ * recomputed value is itself fillable. It is wrong for a value PICKED from a closed list: on the live
+ * Mytos degree-classification select (nine options, application 55de7c9e, row 16f1c744, 2026-08-28)
+ * the same band verdict 'contradicts' replaced her chosen option "GPA 3.5-3.8" with the resolver's
+ * composite "3.89/4.00 (US 4.0 scale)", which reopenUnfitClosedChoiceQuestions then blanked because
+ * it is on no option - so GET /submission served the required question unanswered forever. A reviewed
+ * answer that exactly matches one of the control's current options is her fillable pick and is kept
+ * verbatim, ahead of the band rule. The distinguishing input is portal_input_type + options; nothing
+ * else about the two cases differs. */
+test('a reviewed answer that is an exact option of a closed control is kept over a contradicting resolver value', () => {
+  const reviewedAt = '2026-08-19T22:29:38.833Z';
+  const options = [
+    'First-Class Honours (First or 1st) (70% and above)',
+    'GPA <3.0', 'GPA 3.0-3.4', 'GPA 3.5-3.8', 'GPA 3.9+', 'Other',
+  ];
+  const refreshed = refreshKnownQuestionAnswers([
+    {
+      question: 'what was your degree classification? ✱',
+      answer: 'GPA 3.5-3.8',
+      portal_input_type: 'select',
+      options,
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+      answer_override_of: '3.89/4.00 (US 4.0 scale)',
+    },
+  ], { gpa: '3.89', gpa_scale: '4.0' }, undefined, reviewedAt);
+  assert.equal(refreshed[0].answer, 'GPA 3.5-3.8',
+    'her exact-option pick survives the refresh even though her raw GPA sits above the band');
+  assert.equal(refreshed[0].answer_source, 'applicant_review', 'and it stays her claim');
+});
+
+test('the exact-option keep does not rescue an unfit answer, so a genuine re-open still fires', () => {
+  const reviewedAt = '2026-08-19T22:29:38.833Z';
+  const options = ['GPA <3.0', 'GPA 3.0-3.4', 'GPA 3.5-3.8', 'GPA 3.9+', 'Other'];
+  const refreshed = refreshKnownQuestionAnswers([
+    {
+      // On no option: matches nothing, so the keep must decline and the resolver value replaces it.
+      question: 'what was your degree classification? ✱',
+      answer: 'Postgraduate Certificate',
+      portal_input_type: 'select',
+      options,
+      answer_source: 'applicant_review',
+      answer_reviewed_at: reviewedAt,
+    },
+  ], { gpa: '3.89', gpa_scale: '4.0' }, undefined, reviewedAt);
+  assert.notEqual(refreshed[0].answer, 'Postgraduate Certificate',
+    'an answer on no option is not protected by the exact-option keep');
+});
+
+test('reviewedAnswerIsAnOfferedOption uses the fill path trim/case equivalence and the strict control gate', () => {
+  const options = ['GPA 3.5-3.8', 'GPA 3.9+', 'Other'];
+  // Exact, and trim + case-insensitive, on a strict single-choice control.
+  assert.equal(reviewedAnswerIsAnOfferedOption(
+    { answer: 'GPA 3.5-3.8', portal_input_type: 'select', options }), true);
+  assert.equal(reviewedAnswerIsAnOfferedOption(
+    { answer: '  gpa 3.5-3.8 ', portal_input_type: 'radio', options }), true);
+  // On no option.
+  assert.equal(reviewedAnswerIsAnOfferedOption(
+    { answer: 'GPA 3.4', portal_input_type: 'select', options }), false);
+  // A searchable combobox can find options never enumerated, so it is not a strict gate - not judged.
+  assert.equal(reviewedAnswerIsAnOfferedOption(
+    { answer: 'GPA 3.5-3.8', portal_input_type: 'combobox', options }), false);
+  // No control type and no options: an open text control is never judged.
+  assert.equal(reviewedAnswerIsAnOfferedOption({ answer: 'GPA 3.5-3.8' }), false);
+  assert.equal(reviewedAnswerIsAnOfferedOption(
+    { answer: '', portal_input_type: 'select', options }), false);
 });
 
 /* THE REFERRAL QUESTION THAT NAMES THE EMPLOYER INSTEAD OF "US".

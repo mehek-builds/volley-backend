@@ -2224,6 +2224,42 @@ export function knownAnswerLookup(
   };
 }
 
+/**
+ * Closed single-choice control shapes whose value can only reach the employer as one of the
+ * control's own exact options. The single source of truth for that gate: questionMetadata.ts's
+ * reopenUnfitClosedChoiceQuestions imports this same constant, so the set of controls on which an
+ * unfit answer is re-opened is exactly the set on which a fit reviewed answer is protected below.
+ * Deliberately NARROWER than a generic closed-control test - combobox, checkbox and select-multiple
+ * are excluded for the reasons documented at the import site.
+ */
+export const SINGLE_CHOICE_EXACT_OPTION_TYPE = /^(?:select(?:-one)?|radio|listbox)$/i;
+
+/**
+ * True when this strict single-choice control offers the stored answer verbatim, under the fill
+ * path's own equivalence (trimmed, case-insensitive; the same test reopenUnfitClosedChoiceQuestions
+ * and reviewedAnswerStillFits use). This is the exact CONVERSE of storedAnswerMatchesNoExactOption:
+ * an answer this says yes to is one that path leaves un-reopened, and one it says no to is either an
+ * open control it never judges or an unfit answer that path re-opens.
+ *
+ * Raw options rather than usableOptions here, on purpose: the placeholder filter only ever removes
+ * rows like "Select..." that no real reviewed answer can equal, so it cannot change a positive
+ * match, and reading options directly keeps this leaf-usable without importing profileFieldResolution
+ * (which imports this module).
+ */
+export function reviewedAnswerIsAnOfferedOption(question: {
+  answer: string;
+  portal_input_type?: string;
+  options?: readonly string[] | null;
+}): boolean {
+  const controlType = question.portal_input_type?.trim().toLowerCase() ?? '';
+  if (!SINGLE_CHOICE_EXACT_OPTION_TYPE.test(controlType)) return false;
+  const answer = question.answer.trim();
+  if (!answer) return false;
+  return (question.options ?? []).some(
+    (option) => typeof option === 'string' && option.trim().toLowerCase() === answer.toLowerCase(),
+  );
+}
+
 export function refreshKnownQuestionAnswers<T extends { question: string; answer: string }>(
   questions: readonly T[],
   ap: ApplicationProfileLike,
@@ -2287,6 +2323,30 @@ export function refreshKnownQuestionAnswers<T extends { question: string; answer
     const derivedFrom = typeof withProvenance.answer_option_source === 'string'
       ? withProvenance.answer_option_source
       : undefined;
+    /* SHE REVIEWED AND PICKED ONE OF THE CONTROL'S OWN OPTIONS, SO THAT IS THE ANSWER, FULL STOP.
+     *
+     * Measured live on the Mytos Lever packet (application 55de7c9e, generated_resumes row
+     * 16f1c744, 2026-08-28). The required degree-classification select offers nine exact options; she
+     * reviewed the machine's "3.89/4.00 (US 4.0 scale)" and chose the option "GPA 3.5-3.8" through PUT
+     * /review/answers, which returned 200 and genuinely stored her pick. But the resolver's value for
+     * that label is still the composite "3.89/4.00 (US 4.0 scale)", and its leading number 3.89 sits
+     * just above the band [3.5, 3.8], so reviewedOptionBandVerdict below returns 'contradicts', no
+     * keep-branch fired, and the line at the bottom of this block replaced her option with the
+     * composite. reopenUnfitClosedChoiceQuestions then blanked that composite - it is on no option -
+     * so GET /applications/:id/submission served the required question as unanswered forever and the
+     * launch was never reachable. That divergence hit the fill path too: the runner refused every
+     * press with "no option matched", for a choice she had already made.
+     *
+     * The band rule exists to let the profile CONTRADICT a range she TYPED into an open control, where
+     * the recomputed value is itself a fillable answer. It must not fire against a value she PICKED
+     * from a closed list: the option she selected is fillable and the composite is not, so replacing
+     * one with the other can only strand the packet. A reviewed answer that exactly matches a current
+     * option is therefore kept verbatim, ahead of every recompute rule below. This is the exact
+     * converse of reopenUnfitClosedChoiceQuestions and shares its option test and its control-type
+     * gate, so the two never disagree: a fit reviewed answer is kept here and never re-opened; an
+     * unfit one is not kept here and is re-opened there. It touches nothing else - an answer that
+     * matches no option (the genuine re-open case) is not protected and still recomputes. */
+    if (applicantReviewedCurrentAnswer && reviewedAnswerIsAnOfferedOption(withProvenance)) return question;
     /* A LIVE CLOSED LIST OMITTED THE APPLICANT'S JOB-BOARD WORDING AND OFFERED "OTHER".
      *
      * This proof does not depend on the employer-specific referral parser succeeding again during

@@ -917,6 +917,114 @@ test('CBS legacy Recruitee phone produces one normalized audit and acknowledgeme
   );
 });
 
+/* GET /applications/:id/submission MUST REFLECT A CLOSED-CHOICE ANSWER PUT /review/answers PERSISTED.
+ *
+ * Measured live on the Mytos Lever packet (application 55de7c9e, generated_resumes row 16f1c744,
+ * 2026-08-28). The required degree-classification select offers nine exact options; PUT
+ * /review/answers stored her pick "GPA 3.5-3.8" (a valid option) and the row genuinely held it, yet
+ * GET /submission served the question blank. The read path is resolvePacketAuditQuestionFixpoint,
+ * whose refresh replaced her option with the resolver's composite "3.89/4.00 (US 4.0 scale)" (its
+ * leading 3.89 sits just above the [3.5, 3.8] band, so the band verdict was 'contradicts') and whose
+ * re-open then blanked that composite because it is on no option. The dashboard showed the required
+ * question unanswered forever and the launch was never reachable. */
+const mytosClassificationOptions = [
+  'First-Class Honours (First or 1st) (70% and above)',
+  'Upper Second-Class Honours (2:1, 2.i) (60-70%)',
+  'Lower Second-Class Honours (2:2, 2.ii) (50-60%)',
+  'Third-Class Honours (Third or 3rd) (40-50%)',
+  'GPA <3.0',
+  'GPA 3.0-3.4',
+  'GPA 3.5-3.8',
+  'GPA 3.9+',
+  'Other',
+];
+
+function mytosClassificationReview(
+  question: Partial<ApplicationReviewQuestion> & Pick<ApplicationReviewQuestion, 'answer'>,
+): ApplicationReviewState {
+  const reviewedAt = '2026-08-19T22:29:38.833Z';
+  return {
+    jd_text: 'Build systems at Mytos.',
+    role: 'Software Engineer Intern',
+    portal_url: 'https://jobs.lever.co/mytos/00000000-0000-0000-0000-000000000000/apply',
+    ats_name: 'lever',
+    status: 'needs_attention',
+    edited_terms: [],
+    questions: [
+      {
+        id: '94905a8f-baf7-42ca-824a-7bfb6f15bc26',
+        question: 'what was your degree classification? ✱',
+        kind: 'required',
+        required: true,
+        portal_input_type: 'select',
+        options: mytosClassificationOptions,
+        answer_source: 'applicant_review',
+        answer_reviewed_at: reviewedAt,
+        ...question,
+      },
+    ],
+    skipped_reasons: [],
+    questions_reviewed_at: reviewedAt,
+    updated_at: reviewedAt,
+  };
+}
+
+const mytosResolverProfile = { gpa: '3.89', gpa_scale: '4.0' } as ApplicationProfileLike;
+const mytosRow = {
+  user_id: 'user-1',
+  job_context: { company: 'Mytos', role: 'Software Engineer Intern' },
+} as ResumeRow;
+const readMytosSubmission = (review: ApplicationReviewState) => resolvePacketAuditQuestionFixpoint(
+  review,
+  mytosResolverProfile,
+  applicationContextForQuestionResolution(mytosRow, review),
+  undefined,
+  undefined,
+  new Date('2026-08-28T12:00:00.000Z'),
+);
+const mytosClassification = (questions: readonly ApplicationReviewQuestion[]) =>
+  questions.find((question) => /classification/i.test(question.question));
+
+test('GET /submission reflects a valid closed-choice answer PUT /review/answers persisted', () => {
+  const review = mytosClassificationReview({ answer: 'GPA 3.5-3.8' });
+  const served = readMytosSubmission(review);
+  const classification = mytosClassification(served);
+  assert.ok(classification, 'the degree-classification question must survive the read');
+  assert.equal(classification!.answer, 'GPA 3.5-3.8',
+    'her saved option must read back exactly, not the resolver composite or a blank');
+  assert.deepEqual(blankRequiredQuestionLabels(served), [],
+    'the required question is answered, so it is not a launch-blocking blank');
+});
+
+test('GET /submission still re-opens a saved answer that matches no option', () => {
+  // A reviewed answer that is on NO option is the genuine re-open case; the keep must not protect it.
+  const review = mytosClassificationReview({ answer: 'Postgraduate Certificate' });
+  const served = readMytosSubmission(review);
+  const classification = mytosClassification(served);
+  assert.ok(classification, 'the degree-classification question must survive the read');
+  assert.equal(classification!.answer, '',
+    'an unfit closed-choice answer must still be re-opened, not kept');
+  assert.deepEqual(blankRequiredQuestionLabels(served), [classification!.question],
+    'a re-opened required question is a blocker again, exactly as before');
+});
+
+test('GET /submission reads back the Mytos row answered after a re-open then a re-answer', () => {
+  // The production row shape: nine options, her pick "GPA 3.5-3.8", answer_override_of carrying the
+  // resolver composite she overrode, and answer_draft left by an earlier re-open. It must read back
+  // answered with the stale draft cleared.
+  const review = mytosClassificationReview({
+    answer: 'GPA 3.5-3.8',
+    answer_override_of: '3.89/4.00 (US 4.0 scale)',
+    answer_draft: '3.89/4.00 (US 4.0 scale)',
+  });
+  const served = readMytosSubmission(review);
+  const classification = mytosClassification(served);
+  assert.ok(classification, 'the degree-classification question must survive the read');
+  assert.equal(classification!.answer, 'GPA 3.5-3.8', 'her re-answer reads back, stable across the fixpoint');
+  assert.equal(classification!.answer_draft, undefined, 'the stale re-open draft is dropped beside a real answer');
+  assert.deepEqual(blankRequiredQuestionLabels(served), [], 'answered, so not a blocker');
+});
+
 test('audit, acknowledgement, submit-request, and prepare share one production-shaped packet snapshot', () => {
   const asOf = new Date('2026-08-21T10:00:00.000Z');
   const reviewedAt = asOf.toISOString();
