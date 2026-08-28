@@ -598,7 +598,17 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         && Date.now() - buildStartedAt <= REPAIR_PASS_BUDGET_MS
       ) {
         const lateTargets = repairTargetsFor(lateWeak, lateOverlong, lateMisWorded);
-        finalSpec = await repairBaseResumeBullets(finalSpec, [...lateTargets.values()], { timeoutMs: REQUEST_DEADLINE_MS });
+        const lateRepaired = await repairBaseResumeBullets(finalSpec, [...lateTargets.values()], { timeoutMs: REQUEST_DEADLINE_MS });
+        if (lateRepaired !== finalSpec) {
+          /* Every rewrite the LOOP produced flowed through pruneUngroundedContent above; this one
+           * runs after it, so without a re-prune an invented number in a backstop rewrite would be
+           * the one model output nothing checks. Re-pruning can drop a rewritten bullet back out,
+           * which is the correct failure direction: a bullet nobody can ground helps no one, and
+           * the entry keeps its other bullets. */
+          const latePruned = pruneUngroundedContent(lateRepaired, bank, declaredSkills);
+          finalSpec = latePruned.spec;
+          removed.push(...latePruned.removed);
+        }
       }
       /* The base resume has no posting, so its keyword coverage is scored against the roles the
        * student says they are chasing (targeting titles and categories, plus the target_roles the
