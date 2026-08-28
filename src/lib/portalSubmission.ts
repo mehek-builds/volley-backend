@@ -1,6 +1,7 @@
 import type { Page } from 'playwright-core';
 import {
   MANAGED_ATOMIC_SUBMIT_V4_CAPABILITY,
+  MANAGED_CAPTCHA_VISIBILITY_CAPABILITY,
   MANAGED_DISCOVERY_ROLE_CAPABILITY,
   MANAGED_EXACT_PAGE_URL_CAPABILITY,
   MANAGED_EXTRACT_ASSERTIONS_CAPABILITY,
@@ -5307,8 +5308,43 @@ const WORKABLE_PHONE_SELECTOR = 'input[name="phone"][type="tel"]:visible';
  * pinned to the planned number, so a phone that did not land, landed twice, or landed wrong still
  * refuses - and a form with no intl-tel-input matches zero and refuses too, rather than passing by
  * default. `[type="tel"]` is what excludes any hidden E.164 twin the widget parks in the same
- * container, so the count stays one. */
-const WORKABLE_PHONE_READBACK_SELECTOR = '.iti input[type="tel"]';
+ * container, so the count stays one.
+ *
+ * AND THE `.iti` SCOPE ALONE WAS REFUTED TOO - the fifth reading. Measured 2026-08-28, Pony.ai
+ * application fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb: `filled_field:phone: expected exactly one match
+ * for .iti input[type="tel"], found 0`, with the value again visible in the run screenshot. Five
+ * selector refinements have now each been refuted live, so this stops being a guessing game on two
+ * fronts at once:
+ *
+ * 1. EVIDENCE ON THE NEXT FAILURE. When this exact proof fails again, the runner error is typed
+ *    (ManagedBrowserAssertionFailureError) and the submit path launches a bounded, submit-free
+ *    evidence run (buildWorkablePhoneEvidenceActions below) whose redacted structural findings ride
+ *    into submission_error, so failure six arrives with a diagnosis attached instead of a theory.
+ *
+ * 2. A FALLBACK CHAIN INSTEAD OF ONE CLAIM. Measured against the live Pony.ai form on 2026-08-28
+ *    (rendered in a real browser; initial mount, after country selection, after a committed value,
+ *    desktop and mobile): the control is `input[name="phone"][type="tel"].iti__tel-input` inside
+ *    `.iti`, inside a Workable-owned `div[data-ui="phone"]` container - the same data-ui contract
+ *    the resume selector already rests on. Every historical selector matches that steady state, so
+ *    the arms below are ordered current-scope-first and each later arm exists only when every
+ *    earlier arm matches NOTHING (the same `body:not(:has(...))` conditional-arm technique as
+ *    WORKABLE_LOCATION_SELECTOR, so the comma list can never double-match):
+ *
+ *      1. `.iti input[type="tel"]`                     the widget contract, unchanged
+ *      2. `div[data-ui="phone"] input[type="tel"]`     Workable's own question container, for a
+ *                                                      re-render that drops or re-parents `.iti`
+ *      3. `input[name="phone"]`                        the document-wide unique name, last
+ *
+ * NOTHING IS WEAKENED BY THE WIDENING EITHER: requireUnique, requireNonEmpty and
+ * expectedValueDigits still guard whichever arm is active, so zero matches, two matches, or a
+ * wrong value all still refuse - now with the evidence run behind them. */
+const WORKABLE_PHONE_READBACK_WIDGET_SELECTOR = '.iti input[type="tel"]';
+const WORKABLE_PHONE_READBACK_CONTAINER_SELECTOR = 'div[data-ui="phone"] input[type="tel"]';
+const WORKABLE_PHONE_READBACK_NAMED_SELECTOR = 'input[name="phone"]';
+const WORKABLE_PHONE_READBACK_SELECTOR =
+  `${WORKABLE_PHONE_READBACK_WIDGET_SELECTOR}, `
+  + `body:not(:has(${WORKABLE_PHONE_READBACK_WIDGET_SELECTOR})) ${WORKABLE_PHONE_READBACK_CONTAINER_SELECTOR}, `
+  + `body:not(:has(${WORKABLE_PHONE_READBACK_WIDGET_SELECTOR})):not(:has(${WORKABLE_PHONE_READBACK_CONTAINER_SELECTOR})) ${WORKABLE_PHONE_READBACK_NAMED_SELECTOR}`;
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
   'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
   + 'button[aria-label="Telephone country code"][aria-controls]:visible';
@@ -5569,6 +5605,129 @@ function pushWorkableManagedPhoneActions(
     });
   }
   return true;
+}
+
+/* ─── Workable phone readback EVIDENCE, so failure six is a diagnosis and not a seventh guess ─────
+ *
+ * Five live refutations of five different readback selectors (see WORKABLE_PHONE_READBACK_SELECTOR
+ * above) all failed the same way: `found 0`, value visibly on screen, and nothing in the error to
+ * say what the page actually held. The runner reports assertions through /api/run's error channel,
+ * so the failing run's own extracts never come back - which means the evidence has to come from a
+ * separate bounded, submit-free run made only after the typed failure, against the same posting URL.
+ *
+ * WHAT IT CAN AND CANNOT SEE, said plainly so nobody over-reads it: this run loads the form fresh,
+ * so it observes the INITIAL widget markup, not the post-fill remount the failing run died on. That
+ * still answers the structural questions five guesses could not: has Workable shipped a form whose
+ * phone control no longer mounts as `.iti` + `input[name="phone"][type="tel"]` at all (web
+ * component, renamed classes, portal-rendered node), how many tel inputs the page carries, whether
+ * iframes are present that could be hosting the control, and what the phone question's container
+ * actually renders. Same-origin iframe INTERIORS are beyond the managed selector contract, which is
+ * why iframe presence and sources are recorded rather than pierced.
+ *
+ * EVERY ACTION IS OPTIONAL, deliberately: an evidence run must always come home. A probe that
+ * matches nothing lands in `skipped`, and "matched nothing" is itself the finding. requireVisible
+ * asks a capable runner for one entry per visible match, which is what turns an extract into a
+ * count; an older runner degrades to a first-match read and the summary says so via the echoed
+ * capabilities list.
+ *
+ * NO PROBE READS `value`. The applicant's number must never ride an evidence channel, so the
+ * probes read structural attributes only, and the container HTML is additionally passed through
+ * redactStructuralEvidenceHtml before it can reach an error message or a log line. */
+const WORKABLE_PHONE_EVIDENCE_HTML_LIMIT = 2_048;
+const WORKABLE_PHONE_CONTAINER_SELECTOR = 'div[data-ui="phone"]';
+
+export function buildWorkablePhoneEvidenceActions(): ManagedBrowserAction[] {
+  const probe = (
+    label: string,
+    selector: string,
+    attribute: string,
+    requireVisible?: true,
+  ): ManagedBrowserAction => ({
+    type: 'extract',
+    selector,
+    attribute,
+    label: `phone_evidence:${label}`,
+    optional: true,
+    timeout: MANAGED_FILL_TIMEOUT_MS,
+    ...(requireVisible ? { requireVisible } : {}),
+  });
+  return [
+    {
+      type: 'click',
+      selector: WORKABLE_DECLINE_OPTIONAL_COOKIES_SELECTOR,
+      label: 'workable_cookie_preflight',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    },
+    {
+      type: 'waitForSelector',
+      selector: WORKABLE_APPLICATION_FORM_READY_SELECTOR,
+      label: 'workable_application_form_ready',
+      optional: true,
+      timeout: MANAGED_FILL_TIMEOUT_MS,
+    },
+    probe('tel_inputs', 'input[type="tel"]', 'name', true),
+    probe('iti_containers', '.iti', 'className', true),
+    probe('named_phone_inputs', WORKABLE_PHONE_READBACK_NAMED_SELECTOR, 'type', true),
+    probe('readback_matches', WORKABLE_PHONE_READBACK_SELECTOR, 'name', true),
+    probe('iframes', 'iframe', 'src', true),
+    probe('phone_container_html', WORKABLE_PHONE_CONTAINER_SELECTOR, 'outerHTML'),
+  ];
+}
+
+/**
+ * Strips every applicant-shaped byte out of captured markup: value attributes lose their content
+ * and text nodes are removed outright, leaving only the element structure, classes, names and ids
+ * a diagnosis needs. Bounded, because this string ends up inside submission_error.
+ */
+export function redactStructuralEvidenceHtml(html: string): string {
+  const structural = html
+    .replace(/\svalue\s*=\s*"[^"]*"/gi, ' value="[redacted]"')
+    .replace(/\svalue\s*=\s*'[^']*'/gi, " value='[redacted]'")
+    .replace(/>[^<>]+</g, '><');
+  return structural.length > WORKABLE_PHONE_EVIDENCE_HTML_LIMIT
+    ? `${structural.slice(0, WORKABLE_PHONE_EVIDENCE_HTML_LIMIT)}[truncated]`
+    : structural;
+}
+
+/**
+ * Folds an evidence run's result into one bounded, redacted line for the failing error's message.
+ * Counts come from requireVisible multi-entry extracts on a capable runner; each probe that matched
+ * nothing is named under `matched_nothing`, because "found none" is the finding that matters most
+ * on a `found 0` refusal.
+ */
+export function workablePhoneEvidenceSummary(result: ManagedBrowserResult): string {
+  const extracted = result.extracted ?? [];
+  const byLabel = new Map<string, string[]>();
+  for (const item of extracted) {
+    const label = item.label?.startsWith('phone_evidence:') ? item.label.slice('phone_evidence:'.length) : null;
+    if (!label) continue;
+    const values = byLabel.get(label) ?? [];
+    values.push(String(item.value ?? ''));
+    byLabel.set(label, values);
+  }
+  const bounded = (values: string[]) => values.slice(0, 8).map((value) => value.slice(0, 120));
+  const probes: Record<string, { found: number; values: string[] }> = {};
+  for (const [label, values] of byLabel) {
+    if (label === 'phone_container_html') continue;
+    probes[label] = { found: values.length, values: bounded(values) };
+  }
+  const containerHtml = byLabel.get('phone_container_html')?.[0];
+  const matchedNothing = (result.skipped ?? [])
+    .filter((label) => label.startsWith('phone_evidence:'))
+    .map((label) => label.slice('phone_evidence:'.length));
+  return `workable_phone_readback_evidence=${JSON.stringify({
+    observed: 'fresh_page_load',
+    visibility_counted: result.capabilities?.includes(MANAGED_CAPTCHA_VISIBILITY_CAPABILITY) === true,
+    probes,
+    matched_nothing: matchedNothing,
+    phone_container: containerHtml ? redactStructuralEvidenceHtml(containerHtml) : null,
+  })}`;
+}
+
+/** The typed Workable phone (or phone country) readback refusal this evidence run explains. */
+export function isWorkablePhoneReadbackAssertionLabel(label: string | null): boolean {
+  return label === 'filled_field:phone' || label === 'filled_field:phone_country';
 }
 
 // ─── JazzHR (*.applytojob.com) ────────────────────────────────────────────────

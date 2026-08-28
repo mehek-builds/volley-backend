@@ -326,6 +326,58 @@ export class ManagedBrowserPreSubmitCrashError extends Error {
   }
 }
 
+/* A DETERMINISTIC RUNNER ASSERTION REFUSAL, told apart from a sandbox crash BY ITS OWN SENTENCE.
+ *
+ * The runner reports a failed required extract assertion through the same SANDBOX_RUN_FAILED code a
+ * genuine crash uses, so until now a `filled_field:phone: expected exactly one match for ..., found
+ * 0` with durable chooser-v4 containment progress was typed ManagedBrowserPreSubmitCrashError,
+ * retried once by runWithManagedPreSubmitCrashRetry, and finally told the applicant Litos had hit
+ * "a temporary secure-browser error ... try this one again in a few minutes". Measured five times
+ * on Workable's phone readback (fdcf4ccb, 8c81e9ad and the three before them): the refusal is the
+ * assertion doing its fail-closed job on a page whose DOM no longer matches the proof selector, it
+ * reproduces on every attempt, and nothing about it is temporary. The retry costs a full sandbox
+ * run and the sentence costs the trust to believe the next real transient.
+ *
+ * Matched on the runner's exact uniqueness-refusal shape and nothing looser. requireNonEmpty and
+ * digit refusals keep today's typing until their live wording has been measured, because a wrong
+ * match here converts a crash into a non-retryable stop, and that is the direction that must not
+ * be guessed in.
+ */
+const MANAGED_ASSERTION_REFUSAL_RE =
+  /(?:^|[\s;])(?:([A-Za-z0-9_.:-]+): )?expected exactly one match for .{1,600}, found \d+/;
+
+/** The deterministic assertion refusal inside a runner error message, or null when it is not one. */
+export function managedDeterministicAssertionRefusal(message: string): { label: string | null } | null {
+  const match = message.match(MANAGED_ASSERTION_REFUSAL_RE);
+  if (!match) return null;
+  return { label: match[1] ?? null };
+}
+
+/**
+ * A required extract assertion the runner refused, on a run whose durable chooser-v4 progress
+ * proves the employer transport was still contained. Deliberately NOT a subclass of
+ * ManagedBrowserPreSubmitCrashError: the crash retry helper must not spend a second sandbox run
+ * reproducing a deterministic refusal, and the applicant sentence must stop calling it temporary.
+ */
+export class ManagedBrowserAssertionFailureError extends Error {
+  readonly code = 'SANDBOX_RUN_FAILED';
+  readonly runProgress: ManagedBrowserRunProgress;
+  /** The failing action's label as the runner spelled it, e.g. `filled_field:phone`. */
+  readonly assertionLabel: string | null;
+
+  constructor(message: string, runProgress: ManagedBrowserRunProgress, assertionLabel: string | null) {
+    super(message);
+    this.name = 'ManagedBrowserAssertionFailureError';
+    this.runProgress = runProgress;
+    this.assertionLabel = assertionLabel;
+  }
+
+  /** Appends bounded, redacted structural evidence so submission_error carries the diagnosis. */
+  attachEvidence(evidence: string) {
+    this.message = `${this.message}; ${evidence}`;
+  }
+}
+
 export type ManagedPreSubmitCrashRetryResult<T> =
   | { kind: 'completed'; result: T; retried: boolean }
   | { kind: 'authorization_revoked'; error: ManagedBrowserPreSubmitCrashError };
@@ -384,6 +436,13 @@ function managedBrowserRequestError(
       && progress.applicationSubmitPressed === false
       && progress.verificationSubmitPressed === false;
     if (progress && transportStillContained) {
+      /* Same containment proof, different fact. A deterministic assertion refusal under this exact
+       * progress is the runner refusing to proceed past a failed required proof, not the sandbox
+       * dying, so it must neither be retried as a crash nor described as temporary. */
+      const assertion = managedDeterministicAssertionRefusal(message);
+      if (assertion) {
+        return new ManagedBrowserAssertionFailureError(message, progress, assertion.label);
+      }
       return new ManagedBrowserPreSubmitCrashError(message, progress);
     }
   }
