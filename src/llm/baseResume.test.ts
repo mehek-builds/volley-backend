@@ -1,6 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  applyBulletRepairs,
   baseResumeSelectionIssues,
   BaseResumeStreamReader,
   parseSpecText,
@@ -238,5 +239,50 @@ describe('base resume priority selection', () => {
     const priorities = priorityEntriesForBaseResume([admin, nursing, convent], 'Registered Nurse. Nursing Research');
     assert.equal(priorities[0]?.id, 'admin');
     assert.ok(priorities.some((entry) => entry.id === 'nursing'));
+  });
+});
+
+describe('applyBulletRepairs', () => {
+  const spec = parseSpecText(JSON.stringify(SPEC));
+
+  test('replaces exactly the matched (org, bullet) pair and nothing else', () => {
+    const reply = JSON.stringify([
+      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: 'Engineered a data pipeline processing 2M rows daily' },
+    ]);
+    const repaired = applyBulletRepairs(spec, reply);
+    assert.equal(repaired.experience[0].bullets[0], 'Engineered a data pipeline processing 2M rows daily');
+    assert.equal(repaired.experience[0].bullets[1], 'Shipped it');
+    assert.equal(repaired.experience[1].bullets[0], 'Designed a system');
+  });
+
+  test('the same bullet text under a different org is not touched', () => {
+    const reply = JSON.stringify([
+      { org: 'Litos', bullet: 'Built a thing', rewritten: 'Should not land anywhere' },
+    ]);
+    const repaired = applyBulletRepairs(spec, reply);
+    assert.deepEqual(repaired.experience[0].bullets, ['Built a thing', 'Shipped it']);
+    assert.deepEqual(repaired.experience[1].bullets, ['Designed a system']);
+  });
+
+  test('a fenced reply is unwrapped before parsing', () => {
+    const reply = '```json\n' + JSON.stringify([
+      { org: 'Litos', bullet: 'Designed a system', rewritten: 'Architected a streaming build system' },
+    ]) + '\n```';
+    const repaired = applyBulletRepairs(spec, reply);
+    assert.equal(repaired.experience[1].bullets[0], 'Architected a streaming build system');
+  });
+
+  test('malformed replies leave the spec untouched', () => {
+    for (const reply of ['not json', '{"org":"x"}', '[]', JSON.stringify([{ org: 'Acme Labs' }]), JSON.stringify([{ org: 'Acme Labs', bullet: 'Built a thing', rewritten: '   ' }])]) {
+      assert.deepEqual(applyBulletRepairs(spec, reply), spec);
+    }
+  });
+
+  test('the original spec object is never mutated', () => {
+    const before = JSON.stringify(spec);
+    applyBulletRepairs(spec, JSON.stringify([
+      { org: 'Acme Labs', bullet: 'Shipped it', rewritten: 'Delivered the feature to 300 users' },
+    ]));
+    assert.equal(JSON.stringify(spec), before);
   });
 });

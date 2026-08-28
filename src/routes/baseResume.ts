@@ -9,7 +9,9 @@ import {
   baseResumeSelectionIssues,
   generateBaseResumeSpec,
   priorityEntriesForBaseResume,
+  repairBaseResumeBullets,
   type BaseResumeEvent,
+  type BulletRepairTarget,
 } from '../llm/baseResume';
 import {
   applyResumePolicy,
@@ -404,6 +406,15 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        * their stored base resume with a note underneath it. Measured across 30 real resumes on
        * 2026-07-27: the single retry failed to converge on 4 of them.
        *
+       * A REPAIR IS A REWRITE OF THE OFFENDING BULLETS, NOT A NEW RESUME. This loop used to re-run
+       * the full generation with feedback appended, which re-decided the whole selection to fix one
+       * opener and, worse, could break on a new bullet each pass: measured 2026-08-29 against
+       * production, three such passes turned a 16-second build into 94 seconds while the student
+       * watched. repairBaseResumeBullets rewrites only the bullets that failed and leaves the
+       * selection alone. The one defect that still regenerates is a MISSING REQUIRED PRIORITY
+       * ENTRY, because that is a selection defect: no bullet rewrite can change which entries are
+       * on the page.
+       *
        * PARAPHRASE IS THE POINT. The model is explicitly allowed to reword a bullet to reach a
        * strong opener, because the alternative is not a weaker verb, it is a resume that breaks the
        * house rule. What it may never do is invent a fact, which is what the grounding pass below
@@ -414,11 +425,10 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
        * let them fix it in the editor rather than loop burning model calls forever.
        *
        * LENGTH IS REPAIRED HERE TOO, for the same reason the verb is. The generation prompt asks for
-       * "under 235 characters" in prose and this loop used to ignore the answer, so a bullet four
-       * characters over walked through all three passes and died at the ATS gate below, which fails
-       * closed: nothing was stored, and the student's only remaining move was to re-roll the model
-       * and hope. Trimming is the one repair the model is reliably good at, and it is strictly
-       * cheaper to ask for it here than to throw the whole build away.
+       * "under 235 characters" in prose, and a bullet four characters over used to walk through
+       * every pass untouched and then die at the ATS gate below, which fails closed. Trimming is
+       * the one repair the model is reliably good at, and it is strictly cheaper to ask for it here
+       * than to throw the whole build away.
        */
       const MAX_REPAIR_PASSES = 3;
       for (let pass = 1; pass <= MAX_REPAIR_PASSES; pass += 1) {
@@ -436,49 +446,66 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
           break;
         }
         send({ event: 'stage', stage: 'polishing' });
-        // The client paints entries positionally, so it has to clear before the re-stream or a
-        // shorter later pass would leave stale entries from the first behind.
-        send({ event: 'restart' });
-        rawSpec = await generate([
-          weak.length > 0
-            ? `These bullets do not open with a strong action verb: ${weak
-              .map((w) => `"${w.verb}" in ${w.org}`)
-              .join('; ')}.`
-            : '',
-          missingPriorities.length > 0
-            ? `The previous selection displaced required current or role-defining work: ${missingPriorities.join('; ')}. Include every REQUIRED PRIORITY ENTRY, even when its source has only one grounded bullet.`
-            : '',
-          weak.length > 0
-            ? 'Rewrite each weak opener with an approved strong verb. You may paraphrase freely to get there, but keep every fact and number exactly as it is.'
-            : '',
+
+        if (missingPriorities.length > 0) {
+          // The client paints entries positionally, so it has to clear before the re-stream or a
+          // shorter later pass would leave stale entries from the first behind.
+          send({ event: 'restart' });
+          rawSpec = await generate([
+            `The previous selection displaced required current or role-defining work: ${missingPriorities.join('; ')}. Include every REQUIRED PRIORITY ENTRY, even when its source has only one grounded bullet.`,
+            weak.length > 0
+              ? `These bullets also do not open with a strong action verb: ${weak
+                .map((w) => `"${w.verb}" in ${w.org}`)
+                .join('; ')}. Rewrite each weak opener with an approved strong verb, keeping every fact and number exactly as it is.`
+              : '',
+            overlong.length > 0
+              ? `These bullets are too long and will not fit the page: ${overlong
+                .map((b) => `${b.org} at ${b.length} characters (${b.length - BULLET_MAX_CHARS} over the ${BULLET_MAX_CHARS} limit): "${b.bullet}"`)
+                .join('; ')}. Rewrite each to under ${BULLET_MAX_CHARS} characters without dropping a metric.`
+              : '',
+          ].filter(Boolean));
+          continue;
+        }
+
+        /* Bullet-level defects only: rewrite them in place. A bullet can be both weak and overlong,
+         * so the reasons merge by (org, bullet) and the model sees one target with both problems
+         * rather than two conflicting rewrites of the same line. */
+        const targets = new Map<string, BulletRepairTarget>();
+        const addReason = (org: string, bullet: string, reason: string) => {
+          const key = `${org}\u0000${bullet}`;
+          const existing = targets.get(key);
+          if (existing) existing.reasons.push(reason);
+          else targets.set(key, { org, bullet, reasons: [reason] });
+        };
+        for (const w of weak) {
           /* Naming candidates, not just the rule. The whole approved list is already in the system
            * prompt and the model still returned "Stocked" three passes running on a food-service
            * bullet (measured 2026-07-27), so repeating "use an approved verb" a fourth time was not
            * the missing ingredient. A short concrete menu beside the offending word is. */
-          weak.length > 0
-            ? `For each weak opener, pick whichever of these fits the action best: ${VERB_SUGGESTIONS.join(', ')}.`
-            : '',
-          weak.length > 0 && pass > 1
-            ? 'A previous attempt at this failed. Do not reuse the opener you used last time for these bullets.'
-            : '',
-          /* Naming the bullet AND the overage. "Shorten your bullets" is the instruction the prompt
-           * already gives and the model already believes it followed, so the feedback that changes
-           * the outcome is the count it got wrong and the exact text to cut. The WHOLE bullet goes
-           * back, not an excerpt: the model is being asked to rewrite it, and it cannot trim what it
-           * cannot see. */
-          overlong.length > 0
-            ? `These bullets are too long and will not fit the page: ${overlong
-              .map((b) => `${b.org} at ${b.length} characters (${b.length - BULLET_MAX_CHARS} over the ${BULLET_MAX_CHARS} limit): "${b.bullet}"`)
-              .join('; ')}.`
-            : '',
-          /* Cut words, not facts. The grounding pass below independently rejects anything invented,
-           * but a dropped number is not invention and would survive it, so the constraint has to be
-           * stated here: trimming a bullet must never be a route to losing the metric that earns it
-           * its place. */
-          overlong.length > 0
-            ? `Rewrite each one to under ${BULLET_MAX_CHARS} characters. Cut filler words and redundant phrasing, and keep every number, tool and outcome exactly as it is. Do not drop a metric to make room.`
-            : '',
-        ].filter(Boolean));
+          addReason(
+            w.org,
+            w.bullet,
+            `opens with "${w.verb}", which is not an approved strong verb. Candidates that fit most actions: ${VERB_SUGGESTIONS.join(', ')}.${pass > 1 ? ' A previous rewrite of this bullet also failed; do not reuse its opener.' : ''}`,
+          );
+        }
+        for (const b of overlong) {
+          /* Naming the overage, not just the rule: the count it got wrong is the feedback that
+           * changes the outcome. The grounding pass below independently rejects anything invented,
+           * but a dropped number is not invention and would survive it, so the keep-every-metric
+           * constraint lives in the repair prompt itself. */
+          addReason(b.org, b.bullet, `${b.length} characters, ${b.length - BULLET_MAX_CHARS} over the ${BULLET_MAX_CHARS} limit`);
+        }
+        rawSpec = await repairBaseResumeBullets(rawSpec, [...targets.values()], { timeoutMs: REQUEST_DEADLINE_MS });
+
+        // Repaint from the merged spec locally: same restart-then-pieces contract as a full
+        // regeneration, with no model in the path, so the client cannot tell the two apart.
+        send({ event: 'restart' });
+        // Mirrors the stream reader: the education piece is emitted only when the spec carries it.
+        if (rawSpec.education_position) {
+          send({ event: 'piece', type: 'education', education_position: rawSpec.education_position });
+        }
+        rawSpec.experience.forEach((entry, index) => send({ event: 'piece', type: 'entry', index, entry }));
+        send({ event: 'piece', type: 'skills', skills: rawSpec.skills });
       }
 
       send({ event: 'stage', stage: 'fitting' });
