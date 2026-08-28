@@ -1,4 +1,5 @@
 import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { requireAuth } from '../middleware/auth';
 
 const OPTIONAL_DEFAULTS = {
   targeting: {
@@ -100,10 +101,22 @@ function forwardedHeaders(request: FastifyRequest): Record<string, string> {
 export async function dashboardBootstrapRoutes(fastify: FastifyInstance) {
   fastify.get(
     '/dashboard/bootstrap',
+    /* preHandler: requireAuth, ADDED by the same review that found THE CARD GATE's core bug
+     * (2026-08-29). This route used to have none: authentication was enforced by every private
+     * resource fetched below, with /me acting as the critical gate for the aggregate response.
+     * That stopped being enough once card-gate enforcement moved into requireAuth itself, because
+     * '/dashboard/bootstrap' is not on THE CARD GATE's allowlist under any tier (see
+     * lib/cardGate.ts) and never should be -- it is the dashboard's own entry point, never called
+     * by /start's onboarding flow, and is exactly the route a locked account would poll to browse
+     * the dashboard without paying. Without an outer requireAuth, none of that mattered: 'me'
+     * (allowlisted, TIER A) always 200s, and 'jobs' -- fetched through the unenforced optionalAuth
+     * a sibling finding in the same review caught -- would too whenever the account was still
+     * inside its onboarding build window, so the aggregate answered 200 with real data regardless
+     * of how THE CARD GATE classified the two sub-fetches individually. An outer requireAuth settles
+     * it in one place: this path matches no allowlist tier, so a locked account's session 402s
+     * here before a single sub-fetch runs, exactly like every other requireAuth route. */
+    { preHandler: requireAuth },
     async (request: FastifyRequest, reply: FastifyReply) => {
-      // Authentication is enforced by every private resource below, with /me acting as the
-      // critical gate for the aggregate response. Avoiding a second outer requireAuth check keeps
-      // one bootstrap equivalent to the eight authenticated reads it replaces, not nine.
       const headers = forwardedHeaders(request);
       const fetchResource: DashboardBootstrapFetcher = async (resource) => {
         const response = await fastify.inject({

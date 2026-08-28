@@ -14,6 +14,7 @@ import {
 } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
 import { cardGateInstant, requiresPaymentMethodFor } from '../lib/cardGate';
+import { CURRENT_ONBOARDING_FLOW_VERSION, onboardingFlowLedger } from '../lib/onboardingFlowLedger';
 import { decryptField } from '../lib/fieldCrypto';
 import { decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
 import {
@@ -172,6 +173,13 @@ export const MIGRATION_PENDING_COLUMNS: ReadonlySet<string> = new Set([
  * keeps working unchanged.
  */
 export { cardGateInstant, requiresPaymentMethodFor };
+/**
+ * CURRENT_ONBOARDING_FLOW_VERSION and onboardingFlowLedger now live in
+ * lib/onboardingFlowLedger.ts (imported above), so lib/cardGate.ts can read the application-sequence
+ * acknowledgement ledger without importing this route file. Re-exported here so every existing
+ * import of them from './onboarding' keeps working unchanged.
+ */
+export { CURRENT_ONBOARDING_FLOW_VERSION, onboardingFlowLedger };
 
 async function selectOnboardingUserRow(userId: string) {
   try {
@@ -206,13 +214,9 @@ type Step =
    this deploys can still acknowledge 'build'. Removing them would turn a harmless late
    acknowledgement into a 400 in the one window where a student is mid-flow. */
 
-/* Bumped to 3 by the roles-first reorder. The bump is what keeps the change off accounts that are
-   already through setup: onboardingFlowLedger only reads runs and acknowledgements AT THIS
-   VERSION, so an account carrying a completed version-2 run starts version 3 with an empty ledger
-   and `replayRequired` false (the column is only ever written false in code and defaults false).
-   Nothing replays unless a migration deliberately sets replay_required, and `onboardingStepFrom`
-   short-circuits on `completed` before it reads a single order-dependent branch. */
-export const CURRENT_ONBOARDING_FLOW_VERSION = 3;
+/* CURRENT_ONBOARDING_FLOW_VERSION now lives in lib/onboardingFlowLedger.ts (imported above) so
+   lib/cardGate.ts can read the same ledger without importing this route file. Re-exported below so
+   every existing import of it from here keeps working unchanged. */
 /* ORDER IS THE RENDER ORDER, and 'focus' leads it now. See onboardingStepFrom for why. */
 const REPLAY_STEPS_WITHOUT_GAPS = ['focus', 'resume', 'impact', 'sponsorship', 'base'] as const;
 
@@ -313,38 +317,6 @@ export function flowAcknowledgementDecision(
     return { accepted: true, alreadyRecorded: true, expected };
   }
   return { accepted: expected === submitted, alreadyRecorded: false, expected };
-}
-
-function isUndefinedTableError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === '42P01';
-}
-
-async function onboardingFlowLedger(userId: string) {
-  try {
-    const [[run], acknowledgements] = await Promise.all([
-      db.select().from(onboarding_flow_runs).where(sql`${onboarding_flow_runs.user_id} = ${userId}
-        and ${onboarding_flow_runs.flow_version} = ${CURRENT_ONBOARDING_FLOW_VERSION}`).limit(1),
-      db.select({ step: onboarding_flow_step_acknowledgements.step })
-        .from(onboarding_flow_step_acknowledgements)
-        .where(sql`${onboarding_flow_step_acknowledgements.user_id} = ${userId}
-          and ${onboarding_flow_step_acknowledgements.flow_version} = ${CURRENT_ONBOARDING_FLOW_VERSION}`),
-    ]);
-    return {
-      available: true as const,
-      /* DELIBERATELY UNREAD, and not a substitute for replayRequired. A version bump leaves every
-         pre-existing account with an empty ledger AT THE NEW VERSION, so this is false for exactly
-         the accounts a bump means to leave alone. Gating on it once served those accounts `done`
-         and then refused to record it, which locked all of them out of the dashboard. Enrolment is
-         replay_required and nothing else. */
-      exists: !!run,
-      completed: run?.completed_at != null,
-      replayRequired: run?.replay_required === true,
-      acknowledged: acknowledgements.map((row) => row.step),
-    };
-  } catch (error) {
-    if (!isUndefinedTableError(error)) throw error;
-    return { available: false as const, exists: false, completed: false, replayRequired: false, acknowledged: [] as string[] };
-  }
 }
 
 /* 'gaps' IS BACK IN THIS UNION, and the reason #116 took it out is the reason this is safe now.

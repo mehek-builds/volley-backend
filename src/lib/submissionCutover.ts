@@ -1,4 +1,5 @@
 import type { FastifyReply, FastifyRequest } from 'fastify';
+import { isAtOrBelowPath as isAtOrBelow, normalizedRequestPath as normalizedPath } from './httpPath';
 
 export type SubmissionCutoverMode = 'off' | 'drain' | 'freeze';
 
@@ -33,16 +34,6 @@ const DRAIN_SAFE_APPLICATION_READS = new Set([
   '/applications/board',
 ]);
 
-function normalizedPath(rawPath: string): string {
-  const queryAt = rawPath.indexOf('?');
-  const fragmentAt = rawPath.indexOf('#');
-  const cutAt = [queryAt, fragmentAt]
-    .filter((index) => index >= 0)
-    .reduce((lowest, index) => Math.min(lowest, index), rawPath.length);
-  const withoutQuery = rawPath.slice(0, cutAt) || '/';
-  return withoutQuery.length > 1 ? withoutQuery.replace(/\/+$/, '') : withoutQuery;
-}
-
 function applicationRouteSuffix(path: string): string | null {
   const matched = /^\/applications\/[^/]+\/(.+)$/.exec(path);
   return matched?.[1] ?? null;
@@ -52,10 +43,6 @@ function isDrainEvidenceSink(method: string, path: string): boolean {
   const suffix = applicationRouteSuffix(path);
   if (!suffix) return false;
   return DRAIN_APPLICATION_EVIDENCE_SINKS.get(suffix)?.has(method) === true;
-}
-
-function isAtOrBelow(path: string, root: string): boolean {
-  return path === root || path.startsWith(`${root}/`);
 }
 
 /**

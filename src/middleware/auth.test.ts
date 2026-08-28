@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { SignJWT } from 'jose';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { db } from '../db';
-import { issuedBeforeEpoch, requireAuth, sessionVersionIsStale } from './auth';
+import { onboarding_flow_runs as onboardingFlowRunsTable, users as usersTable } from '../db/schema';
+import { issuedBeforeEpoch, optionalAuth, requireAuth, sessionVersionIsStale } from './auth';
 
 test('no epoch set: every token passes', () => {
   assert.equal(issuedBeforeEpoch(1_700_000_000, null), false);
@@ -152,7 +153,7 @@ test('session lookups share only while the same token is in flight', async () =>
   }
 });
 
-test('THE CARD GATE, enforced through requireAuth', async (t) => {
+test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) => {
   const previousSecret = process.env.JWT_SIGNING_SECRET;
   const previousGate = process.env.CARD_GATE_FROM;
   const secret = 'test-signing-secret-32-chars-minimum!!';
@@ -169,7 +170,10 @@ test('THE CARD GATE, enforced through requireAuth', async (t) => {
     .setIssuedAt()
     .sign(new TextEncoder().encode(secret));
 
-  /** A user row shaped like resolveToken's SELECT, with card-gate columns overridable per test. */
+  /** A user row shaped like resolveToken's SELECT, with card-gate columns overridable per test.
+   *  onboarding_completed_at defaults to null on purpose: FINDING #1's fix means locking no longer
+   *  depends on it, and every test below that expects "locked" to hold should hold with it unset,
+   *  exactly like a fresh signup that has not reached /start's terminal screen yet. */
   const userRow = (overrides: Record<string, unknown> = {}) => ({
     session_valid_from: null,
     session_version: 0,
@@ -179,12 +183,18 @@ test('THE CARD GATE, enforced through requireAuth', async (t) => {
     billing_provider: null,
     billing_customer_id: null,
     created_at: new Date('2026-08-20T00:00:00.000Z'),
-    onboarding_completed_at: new Date('2026-08-21T00:00:00.000Z'),
+    onboarding_completed_at: null,
     ...overrides,
   });
 
   const requestFor = (token: string, url: string): FastifyRequest => ({
     headers: { authorization: `Bearer ${token}` },
+    url,
+    routeOptions: { url },
+  }) as unknown as FastifyRequest;
+
+  const anonymousRequest = (url: string): FastifyRequest => ({
+    headers: {},
     url,
     routeOptions: { url },
   }) as unknown as FastifyRequest;
@@ -203,12 +213,38 @@ test('THE CARD GATE, enforced through requireAuth', async (t) => {
     return { reply, calls };
   };
 
-  const withMockedUser = async (row: Record<string, unknown>, fn: () => Promise<void>) => {
-    const select = mock.method(db, 'select', (() => ({
-      from: () => ({
-        where: () => ({
-          limit: async () => [row],
-        }),
+  /** A .where() result shaped like drizzle's: awaitable directly (the acknowledgements query,
+   *  which chains no .limit()) and chainable with .limit() (both the user-row and run-row queries,
+   *  which do). */
+  function chainable<T>(value: T[], failure?: Error) {
+    // ONE promise instance for both call shapes (`await x` and `await x.limit(1)`): a second,
+    // separately-constructed rejected promise for .limit() to return would leave this one
+    // permanently unconsumed whenever only .limit() was called on it -- an unhandled rejection.
+    const promise = failure ? Promise.reject<T[]>(failure) : Promise.resolve(value);
+    return Object.assign(promise, { limit: () => promise });
+  }
+
+  /**
+   * Mocks db.select() for BOTH queries requireAuth/optionalAuth can now issue per request:
+   * resolveToken's user-row read (dispatched by table identity against `users`) and, only when the
+   * path actually needs it, onboardingFlowLedger's run/acknowledgements pair (lib/onboardingFlowLedger.ts).
+   */
+  const withMockedUser = async (
+    row: Record<string, unknown>,
+    fn: () => Promise<void>,
+    ledger: { available?: boolean; acknowledgedSteps?: string[] } = {},
+  ) => {
+    const { available = true, acknowledgedSteps = [] } = ledger;
+    const select = mock.method(db, 'select', ((..._args: unknown[]) => ({
+      from: (table: unknown) => ({
+        where: () => {
+          if (table === usersTable) return chainable([row]);
+          if (!available) {
+            return chainable([], Object.assign(new Error('relation does not exist'), { code: '42P01' }));
+          }
+          if (table === onboardingFlowRunsTable) return chainable([]);
+          return chainable(acknowledgedSteps.map((step) => ({ step })));
+        },
       }),
     })) as unknown as typeof db.select);
     try {
@@ -219,7 +255,7 @@ test('THE CARD GATE, enforced through requireAuth', async (t) => {
   };
 
   try {
-    await t.test('a gated, onboarding-complete account is turned away from a dashboard data route', async () => {
+    await t.test('FINDING #1: a gated account is locked from the moment it exists, mid-setup, before onboarding_completed_at is ever set', async () => {
       const token = await signToken('user-gated');
       await withMockedUser(userRow(), async () => {
         const request = requestFor(token, '/applications');
@@ -236,10 +272,21 @@ test('THE CARD GATE, enforced through requireAuth', async (t) => {
       });
     });
 
-    await t.test('the same account still reaches its onboarding and billing routes', async () => {
+    await t.test('...and is STILL locked once onboarding_completed_at is eventually set (the pre-existing case keeps working)', async () => {
+      const token = await signToken('user-gated-complete');
+      await withMockedUser(userRow({ onboarding_completed_at: new Date('2026-08-21T00:00:00.000Z') }), async () => {
+        const request = requestFor(token, '/applications');
+        const { reply, calls } = outcome();
+        await requireAuth(request, reply);
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].status, 402);
+      });
+    });
+
+    await t.test('the same account still reaches its onboarding and billing routes (TIER A)', async () => {
       const token = await signToken('user-gated-2');
       await withMockedUser(userRow(), async () => {
-        for (const url of ['/onboarding/state', '/billing/checkout', '/billing/state', '/me', '/auth/session']) {
+        for (const url of ['/onboarding/state', '/billing/checkout', '/billing/state', '/me', '/auth/session', '/account', '/account/export']) {
           const request = requestFor(token, url);
           const { reply, calls } = outcome();
           await requireAuth(request, reply);
@@ -249,14 +296,108 @@ test('THE CARD GATE, enforced through requireAuth', async (t) => {
       });
     });
 
-    await t.test('mid-setup (onboarding_completed_at still null) the same data route is not blocked', async () => {
-      const token = await signToken('user-mid-setup');
-      await withMockedUser(userRow({ onboarding_completed_at: null }), async () => {
-        const request = requestFor(token, '/applications');
+    await t.test('TIER B1: the account can read and edit its own profile facts for its whole locked lifetime', async () => {
+      const token = await signToken('user-gated-3');
+      await withMockedUser(userRow(), async () => {
+        for (const url of ['/profile', '/profile/application', '/profile/targeting', '/profile/recent-experience']) {
+          const request = requestFor(token, url);
+          const { reply, calls } = outcome();
+          await requireAuth(request, reply);
+          assert.equal(calls.length, 0, `expected ${url} to be reachable while gated`);
+        }
+      }, { acknowledgedSteps: ['match', 'questions', 'review', 'trial', 'notifications'] }); // even past the build window
+    });
+
+    await t.test('TIER B2: the build routes are reachable before notifications is acknowledged...', async () => {
+      const token = await signToken('user-gated-4');
+      await withMockedUser(userRow(), async () => {
+        // Fastify template strings, not a literal id substituted in -- request.routeOptions.url
+        // (what requestPathForCardGate actually reads) is always the registered template by the
+        // time a preHandler runs, never the resolved literal path. See lib/cardGate.ts's TIER B2
+        // comment for why exact-set matching depends on that.
+        for (const url of ['/jobs', '/jobs/:id', '/resume/generate', '/applications/from-job', '/applications/:id/submit-request']) {
+          const request = requestFor(token, url);
+          const { reply, calls } = outcome();
+          await requireAuth(request, reply);
+          assert.equal(calls.length, 0, `expected ${url} to be reachable mid-build`);
+        }
+      }, { acknowledgedSteps: ['match', 'questions'] });
+    });
+
+    await t.test('...and are blocked once notifications is acknowledged: the account has already built and sent its one application', async () => {
+      const token = await signToken('user-gated-5');
+      await withMockedUser(userRow(), async () => {
+        for (const url of ['/jobs', '/resume/generate', '/applications/from-job']) {
+          const request = requestFor(token, url);
+          const { reply, calls } = outcome();
+          await requireAuth(request, reply);
+          assert.equal(calls.length, 1, `expected ${url} to be blocked past the build window`);
+          assert.equal(calls[0].status, 402);
+        }
+      }, { acknowledgedSteps: ['match', 'questions', 'review', 'trial', 'notifications'] });
+    });
+
+    await t.test('FINDING #2: optionalAuth enforces THE CARD GATE for a session that resolved, exactly like requireAuth', async () => {
+      const token = await signToken('user-gated-optional');
+      await withMockedUser(userRow(), async () => {
+        // Mid-build: /jobs is reachable through optionalAuth too.
+        const midBuild = requestFor(token, '/jobs');
+        const { reply: midBuildReply, calls: midBuildCalls } = outcome();
+        await optionalAuth(midBuild, midBuildReply);
+        assert.equal(midBuildCalls.length, 0);
+        assert.equal(midBuild.jwtPayload?.userId, 'user-gated-optional');
+      }, { acknowledgedSteps: [] });
+
+      await withMockedUser(userRow(), async () => {
+        // /jobs/grouped is never TIER B2 -- ordinary board browsing, blocked even mid-build.
+        const request = requestFor(token, '/jobs/grouped');
         const { reply, calls } = outcome();
-        await requireAuth(request, reply);
-        assert.equal(calls.length, 0);
-        assert.equal(request.jwtPayload?.userId, 'user-mid-setup');
+        await optionalAuth(request, reply);
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].status, 402);
+      }, { acknowledgedSteps: [] });
+
+      await withMockedUser(userRow(), async () => {
+        // Past the build window, even the bare board closes.
+        const request = requestFor(token, '/jobs');
+        const { reply, calls } = outcome();
+        await optionalAuth(request, reply);
+        assert.equal(calls.length, 1);
+        assert.equal(calls[0].status, 402);
+      }, { acknowledgedSteps: ['match', 'questions', 'review', 'trial', 'notifications'] });
+    });
+
+    await t.test('FINDING #2: a genuinely anonymous caller is completely unaffected by THE CARD GATE', async () => {
+      // No mocked user row is installed at all here -- resolveSession returns 'anonymous' before
+      // any database read happens, so optionalAuth must never even ask whether anyone is locked.
+      const request = anonymousRequest('/jobs');
+      const { reply, calls } = outcome();
+      await optionalAuth(request, reply);
+      assert.equal(calls.length, 0);
+      assert.equal(request.jwtPayload, undefined);
+    });
+
+    await t.test('/jobs/grouped and /jobs/facets are never TIER B2 through requireAuth either', async () => {
+      const token = await signToken('user-gated-6');
+      await withMockedUser(userRow(), async () => {
+        for (const url of ['/jobs/grouped', '/jobs/facets']) {
+          const request = requestFor(token, url);
+          const { reply, calls } = outcome();
+          await requireAuth(request, reply);
+          assert.equal(calls.length, 1, `expected ${url} to stay blocked`);
+        }
+      }, { acknowledgedSteps: [] });
+    });
+
+    await t.test('FINDING #4: /account and /account/export are reachable while locked', async () => {
+      const token = await signToken('user-gated-7');
+      await withMockedUser(userRow(), async () => {
+        for (const url of ['/account', '/account/export']) {
+          const request = requestFor(token, url);
+          const { reply, calls } = outcome();
+          await requireAuth(request, reply);
+          assert.equal(calls.length, 0, `expected ${url} to be reachable while gated`);
+        }
       });
     });
 
@@ -271,7 +412,7 @@ test('THE CARD GATE, enforced through requireAuth', async (t) => {
       });
     });
 
-    await t.test('a paid account (billing_customer_id on file) is unaffected even when gated and complete', async () => {
+    await t.test('a paid account (billing_customer_id on file) is unaffected even when gated', async () => {
       const token = await signToken('user-paid');
       await withMockedUser(userRow({ billing_provider: 'stripe', billing_customer_id: 'cus_123' }), async () => {
         const request = requestFor(token, '/applications');
