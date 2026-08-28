@@ -3,17 +3,50 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const source = readFileSync('src/routes/billing.ts', 'utf8');
+const plansSource = readFileSync('src/routes/billingV2.ts', 'utf8');
+
+test('plans attach server-owned checkout terms to public and personalized catalog responses', () => {
+  const route = plansSource.slice(
+    plansSource.indexOf("fastify.get('/billing/plans'"),
+    plansSource.indexOf("fastify.get('/billing/state'"),
+  );
+  assert.match(route, /preHandler: optionalAuth/);
+  assert.match(route, /getEntitlementSnapshot\(identity\.userId\)/);
+  assert.match(route, /trial_started_at: users\.trial_started_at/);
+  assert.match(route, /billingCheckoutTerms\(/);
+  assert.match(route, /checkout_terms:/);
+  assert.match(route, /private, no-store/);
+  assert.match(route, /public, max-age=300/);
+  assert.match(route, /addVary\(reply, 'Authorization'\)/);
+});
+
+test('explicit catalog checkout requires the exact current terms revision and echoes accepted terms', () => {
+  const checkout = source.slice(
+    source.indexOf("fastify.post<{ Body: CheckoutBody }>('/billing/checkout'"),
+    source.indexOf("fastify.post('/billing/portal'"),
+  );
+  assert.match(source, /checkout_terms_revision: z\.string\(\)\.trim\(\)\.min\(20\)\.max\(200\)\.optional\(\)/);
+  assert.match(checkout, /body\.plan_id && body\.checkout_terms_revision !== checkoutTerms\.revision/);
+  assert.match(checkout, /!body\.plan_id[\s\S]{0,160}process\.env\.LITOS_BILLING_ENABLED/);
+  assert.match(checkout, /code: 'checkout_terms_changed'/);
+  assert.match(checkout, /checkout_terms: checkoutTerms/);
+  assert.match(source, /checkout_terms: expected\.checkoutTerms/);
+  assert.match(source, /checkoutOfferPolicyVersion\(ENTITLEMENT_POLICY_VERSION, checkoutTerms\.revision\)/);
+  assert.match(source, /prior\.policy_version !== acceptedPolicyVersion/);
+  assert.match(source, /set\(\{ status: 'expired'/);
+});
 
 test('checkout prevents recovery-state duplicates and preserves surface and customer ownership', () => {
   const checkout = source.slice(
     source.indexOf("fastify.post<{ Body: CheckoutBody }>('/billing/checkout'"),
     source.indexOf("fastify.post('/billing/portal'"),
   );
-  assert.match(checkout, /subscriptionNeedsPortalRecovery\(billingStatus\)/);
+  assert.match(checkout, /const checkoutTerms = billingCheckoutTerms\(/);
+  assert.match(checkout, /checkoutTerms\.checkout_status === 'billing_recovery_required'/);
   assert.match(checkout, /code: 'billing_recovery_required'/);
   assert.ok(
-    checkout.indexOf('subscriptionNeedsPortalRecovery(billingStatus)')
-      < checkout.indexOf("snapshot.access_class === 'plus_paid'"),
+    checkout.indexOf("checkoutTerms.checkout_status === 'billing_recovery_required'")
+      < checkout.indexOf("checkoutTerms.checkout_status === 'already_plus'"),
   );
   assert.match(checkout, /surface: expectedOffer\.surface/);
   assert.match(checkout, /actionNonce: body\.action_nonce/);

@@ -40,7 +40,12 @@ import {
   verifyLemonSqueezyAccountToken,
 } from '../lib/lemonSqueezy';
 import { billingCheckoutAvailable, billingPlan, stripeWebhookAvailable } from '../lib/billingCatalog';
-import { ENTITLEMENT_POLICY_VERSION, TRIAL_DAYS, getEntitlementSnapshot } from '../lib/entitlements';
+import {
+  billingCheckoutTerms,
+  checkoutOfferPolicyVersion,
+  type BillingCheckoutTerms,
+} from '../lib/billingCheckoutTerms';
+import { ENTITLEMENT_POLICY_VERSION, getEntitlementSnapshot } from '../lib/entitlements';
 import {
   cancelStripeSubscriptionOrThrow,
   createStripeCheckoutSessionV2,
@@ -69,6 +74,7 @@ type CheckoutBody = {
   placement?: string;
   trigger?: string;
   action_nonce?: string;
+  checkout_terms_revision?: string;
 };
 
 const checkoutBodySchema = z.object({
@@ -79,6 +85,7 @@ const checkoutBodySchema = z.object({
   placement: z.string().trim().max(120).optional(),
   trigger: z.string().trim().max(120).optional(),
   action_nonce: z.string().min(20).max(200).optional(),
+  checkout_terms_revision: z.string().trim().min(20).max(200).optional(),
 }).strict();
 
 type LitosTrialBody = {
@@ -206,10 +213,30 @@ async function replayCheckoutOffer(
     surface: string;
     placement?: string;
     pendingActionId?: string;
+    checkoutTerms: BillingCheckoutTerms;
   },
   conflict: 'idempotency_conflict' | 'checkout_in_progress' = 'idempotency_conflict',
   repairCreating?: () => Promise<typeof pricing_offers.$inferSelect | null>,
 ) {
+  const acceptedPolicyVersion = checkoutOfferPolicyVersion(
+    ENTITLEMENT_POLICY_VERSION,
+    expected.checkoutTerms.revision,
+  );
+  if (prior.policy_version !== acceptedPolicyVersion) {
+    /* Never put a current sentence beside an older Stripe session. Price, tax, or trial policy can
+       change during an offer's lifetime. Expiring the stale offer frees the account's one live
+       checkout slot, and the next click creates a session from the newly accepted terms. */
+    await db.update(pricing_offers).set({ status: 'expired', updated_at: new Date() }).where(and(
+      eq(pricing_offers.id, prior.id),
+      eq(pricing_offers.user_id, prior.user_id),
+      inArray(pricing_offers.status, ['creating', 'checkout_created']),
+    ));
+    return reply.status(409).send({
+      error: 'Checkout terms changed. Review the current terms before continuing.',
+      code: 'checkout_terms_changed',
+      checkout_terms: expected.checkoutTerms,
+    });
+  }
   if (
     prior.term_code !== expected.term
     || prior.trigger !== expected.trigger
@@ -259,6 +286,7 @@ async function replayCheckoutOffer(
       checkout_url: priorUrl,
       expires_at: replayed.expires_at.toISOString(),
       status_url: `/billing/offers/${replayed.id}`,
+      checkout_terms: expected.checkoutTerms,
     });
   }
   if (replayed.status === 'creating' && replayed.expires_at > new Date()) {
@@ -269,6 +297,7 @@ async function replayCheckoutOffer(
       code: 'checkout_creating',
       expires_at: replayed.expires_at.toISOString(),
       status_url: `/billing/offers/${replayed.id}`,
+      checkout_terms: expected.checkoutTerms,
     });
   }
   return reply.status(409).send({
@@ -627,7 +656,8 @@ export async function billingRoutes(fastify: FastifyInstance) {
     // acquiring path during rollout. Once LITOS_BILLING_ENABLED is true, incomplete v2 Stripe
     // configuration fails closed and can never silently route a new sale through the legacy path.
     if (
-      process.env.LITOS_BILLING_ENABLED !== 'true'
+      !body.plan_id
+      && process.env.LITOS_BILLING_ENABLED !== 'true'
       && litosProcessorConfigured()
       && (stripeAcquiringConfigured() || litosProcessorTrialConfigured())
     ) {
@@ -671,50 +701,43 @@ export async function billingRoutes(fastify: FastifyInstance) {
       }).from(users).where(eq(users.id, userId)).limit(1),
     ]);
     const account = accountRows[0];
-    /* The trial is once per account, and this is the only place that decides it.
-       Signup no longer grants one (routes/auth.ts), so the trial days now ride on
-       the Stripe subscription -- which means the question "has this account
-       already had its trial?" has to be answered HERE, before checkout is
-       created, or a student could spend a trial, cancel, and open a second free
-       week from the same pricing page.
-       The two gates cover the two eras, and neither covers both. The trial
-       columns catch accounts created BEFORE the card requirement, which is the
-       only thing that ever wrote them; nothing writes them now. Everyone who
-       starts a trial from here on is caught by `billing_customer_id` instead,
-       which the subscription webhook stamps on the first lifecycle event
-       (routes/billing.ts, the canonical-projection update) and never clears --
-       so cancelling a trial does not restore eligibility for another one. */
-    const hadTrialBefore = Boolean(account?.trial_started_at || account?.trial_ends_at);
-    const returningCustomer = account?.billing_provider === 'stripe' && Boolean(account?.billing_customer_id);
-    const trialDays = hadTrialBefore || returningCustomer ? 0 : TRIAL_DAYS;
-    const billingProvider = snapshot.subscription?.provider ?? account?.billing_provider;
-    const billingStatus = snapshot.subscription?.status ?? account?.billing_status;
-    if (billingProvider && subscriptionNeedsPortalRecovery(billingStatus)) {
+    const checkoutTerms = billingCheckoutTerms({
+      plan,
+      account: {
+        authenticated: true,
+        is_guest: isGuest,
+        access_class: snapshot.access_class,
+        subscription_status: snapshot.subscription?.status ?? null,
+        billing_provider: snapshot.subscription?.provider ?? account?.billing_provider ?? null,
+        billing_customer_id: account?.billing_customer_id ?? null,
+        billing_status: snapshot.subscription?.status ?? account?.billing_status ?? null,
+        trial_started_at: account?.trial_started_at ?? null,
+        trial_ends_at: account?.trial_ends_at ?? null,
+      },
+      checkout_available: billingCheckoutAvailable(),
+      automatic_tax_enabled: process.env.STRIPE_AUTOMATIC_TAX_ENABLED === 'true',
+    });
+    if (body.plan_id && body.checkout_terms_revision !== checkoutTerms.revision) {
+      return reply.status(409).send({
+        error: 'Checkout terms changed. Review the current terms before continuing.',
+        code: 'checkout_terms_changed',
+        checkout_terms: checkoutTerms,
+      });
+    }
+    if (checkoutTerms.checkout_status === 'billing_recovery_required') {
       return reply.status(409).send({
         error: 'Resolve the existing billing account before starting another subscription.',
         code: 'billing_recovery_required',
         portal_url: '/billing/portal',
       });
     }
-    /* A TRIAL ON A SUBSCRIPTION IS ALSO "already has it", and it has to be named here
-       explicitly now. This guard used to catch a trialling account for free: a Stripe
-       subscription in `trialing` satisfies subscriptionGrantsPlus, so it resolved to
-       plus_paid and fell inside the first clause. It resolves to trial_plus since the
-       trial moved onto the subscription, and without the third clause a student mid
-       trial who opens /pricing and picks a plan gets a SECOND subscription on the same
-       Stripe customer -- billed twice, while chooseCanonicalAccountSubscription shows
-       one healthy subscription and hides it.
-       Converting a trial early is a change to the subscription that already exists, not
-       a second checkout, which is what the portal link is for. */
-    const holdsLitosPlus = snapshot.access_class === 'plus_paid'
-      || snapshot.access_class === 'legacy_paid'
-      || snapshot.subscription?.status === 'trialing';
-    if (holdsLitosPlus) {
+    if (checkoutTerms.checkout_status === 'already_plus') {
       return reply.status(409).send({ error: 'This account already has Litos+.', code: 'already_plus', portal_url: '/billing/portal' });
     }
-    if (!billingCheckoutAvailable()) {
+    if (checkoutTerms.checkout_status === 'billing_not_configured') {
       return reply.status(503).send({ error: 'Checkout is temporarily unavailable.', code: 'billing_not_configured' });
     }
+    const trialDays = checkoutTerms.trial_days ?? 0;
     const idempotencyKey = typeof request.headers['idempotency-key'] === 'string'
       ? request.headers['idempotency-key']
       : body.idempotency_key;
@@ -738,6 +761,7 @@ export async function billingRoutes(fastify: FastifyInstance) {
       surface: body.surface ?? 'dashboard',
       placement: body.placement,
       pendingActionId: action?.id,
+      checkoutTerms,
     };
     const repairCreatingOffer = async (offer: typeof pricing_offers.$inferSelect) => {
       const session = await createStripeCheckoutSessionV2({
@@ -793,7 +817,7 @@ export async function billingRoutes(fastify: FastifyInstance) {
       user_id: userId,
       subject_id: email.trim().toLowerCase(),
       idempotency_key: `v2:${idempotencyKey}`,
-      policy_version: ENTITLEMENT_POLICY_VERSION,
+      policy_version: checkoutOfferPolicyVersion(ENTITLEMENT_POLICY_VERSION, checkoutTerms.revision),
       country_code: 'US',
       band: 'standard',
       experiment_variant: 'control',

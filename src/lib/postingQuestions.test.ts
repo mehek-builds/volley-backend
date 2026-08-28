@@ -10,6 +10,7 @@ import {
   postingQuestionsFromDiscovered,
   prescriptAskExplanation,
   readStoredPostingQuestionInventory,
+  reviewablePrescriptAnswers,
   resolvePrescript,
   storedPostingQuestionInventory,
   type PostingQuestion,
@@ -455,6 +456,39 @@ test('only what she has to answer is asked, and the profile answers the rest', (
   assert.equal(ask[0].reason, 'self_declaration');
   assert.deepEqual(ask[0].options, ['Beginner', 'Intermediate', 'Advanced', 'Expert']);
   assert.equal(ask[1].reason, 'needs_your_words');
+});
+
+test('the review evidence exposes every resolved value with its honest source', () => {
+  const scoreLabel = 'What was your SAT score?';
+  const missingLabel = 'Why do you want to work here?';
+  const saved = new Map([[savedAnswerKey(scoreLabel), '1510']]);
+  const resolution = resolvePrescript([
+    question({ label: 'What is your GPA?' }),
+    question({ label: scoreLabel }),
+    question({ label: missingLabel, input_type: 'textarea' }),
+  ], profile, saved, { company: 'Jane Street' });
+
+  assert.deepEqual(reviewablePrescriptAnswers(resolution), [
+    {
+      question: 'What is your GPA?',
+      answer: '3.89',
+      source: 'saved_details',
+      input_type: 'text',
+      options: null,
+      required: true,
+      max_length: null,
+    },
+    {
+      question: scoreLabel,
+      answer: '1510',
+      source: 'applicant_review',
+      input_type: 'text',
+      options: null,
+      required: true,
+      max_length: null,
+    },
+  ]);
+  assert.ok(resolution.ask.some((item) => item.label === missingLabel));
 });
 
 test('nothing on this screen is ever prefilled by a guess', () => {

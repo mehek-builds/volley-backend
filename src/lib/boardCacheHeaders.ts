@@ -71,7 +71,7 @@ export const BOARD_STALE_WHILE_REVALIDATE_S = 86_400;
  * Case-insensitive on the field names, because `Vary` tokens are, and a duplicate differing only in
  * case would still be a duplicate to a human reading the header.
  */
-function addVary(reply: FastifyReply, field: string): void {
+export function addVary(reply: FastifyReply, field: string): void {
   const existing = reply.getHeader('Vary');
   const tokens = String(existing ?? '')
     .split(',')

@@ -408,6 +408,44 @@ export type PrescriptResolution = {
   metadata_blockers: QuestionMetadataBlocker[];
 };
 
+export type ReviewablePrescriptAnswer = {
+  question: string;
+  answer: string;
+  source: 'applicant_review' | 'saved_details';
+  input_type: string;
+  options: string[] | null;
+  required: boolean;
+  max_length: number | null;
+};
+
+/**
+ * The exact values the irreversible review screen is allowed to show.
+ *
+ * `already_answered` used to leave the client with only a count. A count proves that a value
+ * exists but cannot let the applicant inspect what will be put on the employer's form. This list
+ * carries the same resolved rows without changing the short question screen: that screen still
+ * renders only `resolution.ask`, while Review can render the evidence behind the count.
+ *
+ * A remembered value is something the applicant confirmed on an earlier application. Every other
+ * nonblank resolved value comes from saved profile details or a standing permission. Neither is a
+ * model draft, and unresolved or optional blank controls never enter this list.
+ */
+export function reviewablePrescriptAnswers(
+  resolution: PrescriptResolution,
+): ReviewablePrescriptAnswer[] {
+  return resolution.questions
+    .filter((item) => !item.ask && item.answer.trim().length > 0)
+    .map((item) => ({
+      question: item.label,
+      answer: item.answer,
+      source: item.remembered ? 'applicant_review' : 'saved_details',
+      input_type: item.input_type,
+      options: item.options,
+      required: item.required,
+      max_length: item.max_length,
+    }));
+}
+
 /**
  * Split a posting's questions into the ones Litos answers and the ones she does.
  *

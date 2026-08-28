@@ -77,6 +77,20 @@ async function authToken(userId: string) {
     .sign(new TextEncoder().encode(process.env.JWT_SIGNING_SECRET!));
 }
 
+type CheckoutPlanId = 'litos_plus_week' | 'litos_plus_month' | 'litos_plus_quarter';
+
+async function checkoutTermsRevision(token: string, planId: CheckoutPlanId): Promise<string> {
+  const response = await app.inject({
+    method: 'GET',
+    url: '/billing/plans',
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(response.statusCode, 200, response.body);
+  const plan = response.json().plans.find((candidate: { id: string }) => candidate.id === planId);
+  assert.equal(plan.checkout_terms.checkout_status, 'available');
+  return plan.checkout_terms.revision;
+}
+
 function subscriptionPayload(input: {
   eventId: string;
   created: number;
@@ -623,6 +637,39 @@ test('a won dispute restores the provider scheduled-cancel boundary instead of i
   assert.equal(atEnd.access_class, 'free_new');
 });
 
+test('catalog checkout rejects missing and stale checkout terms revisions before creating an offer', async () => {
+  const userId = 'a1bc08b1-c487-499a-a453-21906a6426a3';
+  await database.exec(`
+    insert into "users" ("id", "email", "plan", "created_at", "entitlement_policy_version")
+    values (
+      '${userId}', 'checkout-terms@example.test', 'free',
+      '2026-08-14T00:00:00.000Z', 'litos-entitlements-v2'
+    );
+  `);
+  const token = await authToken(userId);
+  const currentRevision = await checkoutTermsRevision(token, 'litos_plus_month');
+  for (const checkoutTermsRevisionValue of [undefined, 'checkout_terms_v1_stale_revision_value']) {
+    const response = await app.inject({
+      method: 'POST',
+      url: '/billing/checkout',
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        plan_id: 'litos_plus_month',
+        ...(checkoutTermsRevisionValue
+          ? { checkout_terms_revision: checkoutTermsRevisionValue }
+          : {}),
+      },
+    });
+    assert.equal(response.statusCode, 409, response.body);
+    assert.equal(response.json().code, 'checkout_terms_changed');
+    assert.equal(response.json().checkout_terms.revision, currentRevision);
+  }
+  const offers = await database.query<{ count: string }>(`
+    select count(*)::text as "count" from "pricing_offers" where "user_id" = '${userId}'
+  `);
+  assert.equal(offers.rows[0].count, '0');
+});
+
 test('idempotent checkout replay repairs the action link after the persistence crash window', async () => {
   const userId = '0565cc78-12ef-45f1-a00e-ab272e6fc390';
   const actionId = 'da35bd0f-ecaf-4b43-bef3-771f76c7fe8c';
@@ -657,6 +704,12 @@ test('idempotent checkout replay repairs the action link after the persistence c
   `);
 
   const token = await authToken(userId);
+  const checkoutTerms = await checkoutTermsRevision(token, 'litos_plus_quarter');
+  await database.exec(`
+    update "pricing_offers"
+    set "policy_version" = 'litos-entitlements-v2:${checkoutTerms}'
+    where "id" = '${offerId}'
+  `);
   const response = await app.inject({
     method: 'POST',
     url: '/billing/checkout',
@@ -666,6 +719,7 @@ test('idempotent checkout replay repairs the action link after the persistence c
       surface: 'dashboard',
       trigger: 'account_upgrade',
       action_nonce: actionNonce,
+      checkout_terms_revision: checkoutTerms,
     },
   });
   assert.equal(response.statusCode, 200, response.body);
@@ -675,6 +729,30 @@ test('idempotent checkout replay repairs the action link after the persistence c
     select "offer_id" from "pending_premium_actions" where "id" = '${actionId}'
   `);
   assert.equal(action.rows[0].offer_id, offerId);
+
+  /* A replay can only return the existing Stripe URL while its stored policy still binds the
+     exact preview accepted above. A stale offer is expired so a new click can create a new session. */
+  await database.exec(`
+    update "pricing_offers" set "policy_version" = 'litos-entitlements-v2:stale' where "id" = '${offerId}'
+  `);
+  const staleReplay = await app.inject({
+    method: 'POST',
+    url: '/billing/checkout',
+    headers: { authorization: `Bearer ${token}`, 'idempotency-key': idempotencyKey },
+    payload: {
+      plan_id: 'litos_plus_quarter',
+      surface: 'dashboard',
+      trigger: 'account_upgrade',
+      action_nonce: actionNonce,
+      checkout_terms_revision: checkoutTerms,
+    },
+  });
+  assert.equal(staleReplay.statusCode, 409, staleReplay.body);
+  assert.equal(staleReplay.json().code, 'checkout_terms_changed');
+  const staleOffer = await database.query<{ status: string }>(`
+    select "status" from "pricing_offers" where "id" = '${offerId}'
+  `);
+  assert.equal(staleOffer.rows[0].status, 'expired');
 });
 
 test('idempotent checkout retry recovers a Stripe session created before local persistence', async () => {
@@ -712,6 +790,12 @@ test('idempotent checkout retry recovers a Stripe session created before local p
   `);
 
   const token = await authToken(userId);
+  const checkoutTerms = await checkoutTermsRevision(token, 'litos_plus_month');
+  await database.exec(`
+    update "pricing_offers"
+    set "policy_version" = 'litos-entitlements-v2:${checkoutTerms}'
+    where "id" = '${offerId}'
+  `);
   const response = await app.inject({
     method: 'POST',
     url: '/billing/checkout',
@@ -721,6 +805,7 @@ test('idempotent checkout retry recovers a Stripe session created before local p
       surface: 'extension',
       trigger: 'resume_limit',
       action_nonce: actionNonce,
+      checkout_terms_revision: checkoutTerms,
     },
   });
   assert.equal(response.statusCode, 200, response.body);
@@ -789,6 +874,7 @@ test('an abandoned checkout releases the sole-live slot and aligns the next offe
   `);
 
   const token = await authToken(userId);
+  const checkoutTerms = await checkoutTermsRevision(token, 'litos_plus_month');
   const response = await app.inject({
     method: 'POST',
     url: '/billing/checkout',
@@ -798,6 +884,7 @@ test('an abandoned checkout releases the sole-live slot and aligns the next offe
       surface: 'dashboard',
       trigger: 'resume_limit',
       action_nonce: newActionNonce,
+      checkout_terms_revision: checkoutTerms,
     },
   });
   assert.equal(response.statusCode, 200, response.body);
@@ -864,6 +951,7 @@ test('checkout returns the aligned expiry and keeps a pending action resumable a
   `);
 
   const token = await authToken(userId);
+  const checkoutTerms = await checkoutTermsRevision(token, 'litos_plus_month');
   const response = await app.inject({
     method: 'POST',
     url: '/billing/checkout',
@@ -873,6 +961,7 @@ test('checkout returns the aligned expiry and keeps a pending action resumable a
       surface: 'dashboard',
       trigger: 'resume_limit',
       action_nonce: actionNonce,
+      checkout_terms_revision: checkoutTerms,
     },
   });
   assert.equal(response.statusCode, 200, response.body);
