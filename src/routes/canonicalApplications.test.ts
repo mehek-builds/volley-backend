@@ -12,6 +12,7 @@ import {
   manualSubmissionOutcomeSchema,
   manualSubmissionTransition,
 } from './canonicalApplications';
+import { companyDomainFor } from '../lib/companyDomains';
 
 describe('canonical Free application contract', () => {
   test('prefers stable job identity and otherwise hashes portal identity', () => {
@@ -183,5 +184,42 @@ describe('canonical Free application contract', () => {
     assert.deepEqual(lifecycleStateAfterFill({
       tracker_state: 'saved', review_state: 'not_started', submission_state: 'not_started',
     }), { trackerState: 'applying', reviewState: 'filling' });
+  });
+});
+
+/*
+ * The Tracker draws a company's logo beside its name the way Jobs and Home already do, and it can
+ * only do that if this route tells it the employer's domain. The dashboard has the company NAME and
+ * nothing else, and a domain guessed from a name is how a row ends up wearing another company's
+ * logo - which tells a student this application is to a different employer than it is. So the
+ * resolution happens here, against the same verified map the job board and the notification emails
+ * use, and the client renders a monogram whenever this is null rather than a wrong icon.
+ */
+describe('the canonical application response carries the company domain', () => {
+  const source = readFileSync('src/routes/canonicalApplications.ts', 'utf8');
+
+  test('every listed application resolves its domain from the shared map', () => {
+    assert.match(source, /company_domain: companyDomainFor\(row\.company_name\)/);
+    assert.match(source, /import \{ companyDomainFor \} from '\.\.\/lib\/companyDomains'/);
+  });
+
+  test('it is resolved in the one response builder, so every route that returns an application has it', () => {
+    /* applicationResponse is what the list, the create and the detail routes all return. Resolving
+       it at one of those call sites instead would give the Tracker logos on some screens only. */
+    const builder = source.slice(source.indexOf('function applicationResponse('));
+    const body = builder.slice(0, builder.indexOf('\n}'));
+    assert.match(body, /company_domain:/);
+  });
+
+  test('a company the map does not know resolves to null, never to a guess', () => {
+    assert.equal(companyDomainFor('a company that is not in the map at all'), null);
+    assert.equal(companyDomainFor(''), null);
+    assert.equal(companyDomainFor(null), null);
+  });
+
+  test('a known company resolves to the employer domain and not to its job board', () => {
+    const notion = companyDomainFor('Notion');
+    assert.ok(notion, 'the map has to know at least one of the companies this dashboard shows');
+    assert.doesNotMatch(notion, /greenhouse|lever|ashby|workday|myworkdayjobs/);
   });
 });
