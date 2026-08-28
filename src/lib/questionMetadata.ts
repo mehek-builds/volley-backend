@@ -4,6 +4,7 @@ import {
   discoveredFieldIsRequired,
   isConsentRefusingWording,
   normalizeReviewQuestionLabel,
+  SINGLE_CHOICE_EXACT_OPTION_TYPE,
   type DiscoveredQuestion,
 } from './questionDiscovery';
 import { managedOptionProbeControlId, type SupportedPortal } from './portalSubmission';
@@ -218,8 +219,11 @@ export function dedupeQuestionMetadataBlockers(
  *     not answers to choose between.
  *   - select-multiple is excluded. Its stored answer can legitimately name several options at once,
  *     so whole-string equality against any single option would misread a correct answer as unfit.
+ *
+ * The gate itself now lives in questionDiscovery.ts (imported above) so the converse rule that KEEPS
+ * a reviewed answer matching one of these controls' options - reviewedAnswerIsAnOfferedOption in
+ * refreshKnownQuestionAnswers - is gated on exactly the same control set and cannot drift from it.
  */
-const SINGLE_CHOICE_EXACT_OPTION_TYPE = /^(?:select(?:-one)?|radio|listbox)$/i;
 
 /**
  * The stored question shape this module can judge without importing the review types (which import
