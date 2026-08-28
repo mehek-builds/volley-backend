@@ -2,6 +2,7 @@ import { mergeSubmittedApplicationReviewQuestions, type ApplicationReviewQuestio
 import type { JobCountry } from './jobLocation';
 import { knownAnswerLookup, refreshKnownQuestionAnswers, type ApplicationProfileLike } from './questionDiscovery';
 import { packetQuestionFixpoint } from './packetQuestionIdentity';
+import { reopenUnfitClosedChoiceQuestions } from './questionMetadata';
 
 /**
  * The answers POST /submit-request will fill the employer's form from, and the review round they are
@@ -50,9 +51,15 @@ export function resolveSubmittedApplicationAnswers(options: {
     questionsReviewedAt,
     resolverAnswerFor,
   );
+  /* The re-open pass rides the same fixpoint the refresh does, so a save cannot store an answer a
+   * strict closed control has no way to express: it settles as a blank question carrying the exact
+   * options (and the removed text as its draft) rather than as an unfillable value that deadlocks
+   * the packet at the final required-field confirmation. This path is reachable only through
+   * reviewAnswerSaveDisposition, which already refuses every packet that may be with the employer,
+   * so no sent record is ever rewritten here. */
   const questions = packetQuestionFixpoint(
     merged,
-    (candidate) => refreshKnownQuestionAnswers(
+    (candidate) => reopenUnfitClosedChoiceQuestions(refreshKnownQuestionAnswers(
       candidate,
       profile,
       current.jd_text,
@@ -60,7 +67,7 @@ export function resolveSubmittedApplicationAnswers(options: {
       postingCountry,
       postingCountryCode,
       asOf,
-    ),
+    )),
   );
   return { questions, questionsReviewedAt };
 }

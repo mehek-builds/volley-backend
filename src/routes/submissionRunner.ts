@@ -235,6 +235,7 @@ import {
   questionMetadataBlockersForOptionProbeFailures,
   questionMetadataBlockerReason,
   questionLabelIsGenericAnswerControl,
+  reopenUnfitClosedChoiceQuestions,
   type QuestionMetadataBlocker,
 } from '../lib/questionMetadata';
 import {
@@ -4307,7 +4308,13 @@ async function prepareManaged(
       'Stored machine-labelled questions retired: their controls re-discovered under real labels',
     );
   }
-  const mergedQuestions = resolveApplicantClosedChoiceFallbacks(
+  /* The re-open pass runs LAST, after the Other-fallbacks, so a truthful "Other" resolution of an
+   * off-list referral answer snaps onto the control's own option before anything judges fit. What
+   * remains unfit after that - a stored answer a strict closed control cannot express, like the
+   * Mytos degree-classification free text - is blanked here so the fill leaves the control empty
+   * and the run parks it as a required-and-blank question she can answer with the exact options,
+   * instead of failing the final required-field confirmation with no way back. */
+  const mergedQuestions = reopenUnfitClosedChoiceQuestions(resolveApplicantClosedChoiceFallbacks(
     discoveredFields,
     mergeDiscoveredPortalQuestions(
       discoveredQuestions,
@@ -4321,7 +4328,7 @@ async function prepareManaged(
       applicationProfile.referral_source_evidence,
     ),
     packet.mostRecentRole?.company,
-  );
+  ));
   const referralResolutionDiagnostics = mergedQuestions.flatMap((question) => {
     const label = normalizeReviewQuestionLabel(question.question);
     const family = REFERRAL_SOURCE_CHOICE_QUESTION.test(label)
@@ -5147,17 +5154,29 @@ export function resolvePacketAuditQuestionFixpoint(
     ...review,
     questions: [...questions],
   });
+  /* AN UNFIT CLOSED-CHOICE ANSWER RE-OPENS ITS QUESTION, but never on a packet that may already
+   * be with the employer. After a claim or a send, the stored answers are the record of what the
+   * form carried, and rewriting that record would make it describe a form nobody filled. Before
+   * either, blanking the unfillable answer is what lets the dashboard ask the question again with
+   * the exact options - the converse of the reviewed-answer-still-fits keep in
+   * discoverAndResolveQuestions, measured stuck on the Mytos Lever packet (application 55de7c9e). */
+  const packetMayBeWithEmployer = Boolean(review.submission_claimed_at)
+    || review.status === 'submitted'
+    || review.status === 'awaiting_security_code';
   return packetQuestionFixpoint(
     normalize(review.questions),
-    (questions) => normalize(refreshKnownQuestionAnswers(
-      questions,
-      profile,
-      questionContext,
-      review.questions_reviewed_at,
-      postingCountry,
-      postingCountryCode,
-      asOf,
-    )),
+    (questions) => {
+      const refreshed = refreshKnownQuestionAnswers(
+        questions,
+        profile,
+        questionContext,
+        review.questions_reviewed_at,
+        postingCountry,
+        postingCountryCode,
+        asOf,
+      );
+      return normalize(packetMayBeWithEmployer ? refreshed : reopenUnfitClosedChoiceQuestions(refreshed));
+    },
   );
 }
 

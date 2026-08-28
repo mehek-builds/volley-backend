@@ -74,6 +74,7 @@ import { monitoredDescriptionHash, monitoredJdAgrees } from '../lib/monitoredPor
 import { postingCountryCodeFromJobContext, postingCountryFromJobContext } from '../lib/jobLocation';
 import { applicationContextForQuestionResolution, normalizeStoredPortalQuestions, refreshKnownQuestionAnswers, type ApplicationProfileLike } from '../lib/questionDiscovery';
 import { packetQuestionFixpoint } from '../lib/packetQuestionIdentity';
+import { reopenUnfitClosedChoiceQuestions } from '../lib/questionMetadata';
 import { loadApplicationProfileLike } from '../lib/applicationProfileLike';
 import { specWithoutDocumentPointers } from '../lib/documentStore';
 import { recoverOwnedGeneratedDocument } from '../lib/downloadDocumentRecovery';
@@ -259,6 +260,13 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
   const normalize = (questions: typeof review.questions) => review.portal_url && isPortalSupported(review.portal_url)
     ? normalizeStoredPortalQuestions(questions, detectPortal(review.portal_url))
     : questions;
+  /* Same pre-send guard as resolvePacketAuditQuestionFixpoint: an unfit closed-choice answer
+   * re-opens its question on the reading the dashboard renders, so a stuck row shows the blank
+   * required question with its exact options without waiting for a new run - but a packet that may
+   * already be with the employer keeps its stored answers as the record of what was sent. */
+  const packetMayBeWithEmployer = Boolean(review.submission_claimed_at)
+    || review.status === 'submitted'
+    || review.status === 'awaiting_security_code';
   return {
     ...(spec as Record<string, unknown>),
     _review: {
@@ -266,15 +274,18 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
       // Same context every live fill resolves against; see applicationContextForQuestionResolution.
       questions: packetQuestionFixpoint(
         normalize(review.questions),
-        (questions) => normalize(refreshKnownQuestionAnswers(
-          questions,
-          profile,
-          applicationContextForQuestionResolution({ job_context: jobContext }, review),
-          review.questions_reviewed_at,
-          postingCountryFromJobContext(jobContext),
-          postingCountryCodeFromJobContext(jobContext),
-          asOf,
-        )),
+        (questions) => {
+          const refreshed = refreshKnownQuestionAnswers(
+            questions,
+            profile,
+            applicationContextForQuestionResolution({ job_context: jobContext }, review),
+            review.questions_reviewed_at,
+            postingCountryFromJobContext(jobContext),
+            postingCountryCodeFromJobContext(jobContext),
+            asOf,
+          );
+          return normalize(packetMayBeWithEmployer ? refreshed : reopenUnfitClosedChoiceQuestions(refreshed));
+        },
       ),
     },
   };
