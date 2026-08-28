@@ -129,11 +129,27 @@ export function employerDeliveryProjection(packet: SubmissionPacket): Record<str
     // A managed discovery pass reports an explicit empty inventory after an audit built before the
     // page was probed. Empty and absent both mean there is no behavior-bearing form evidence, so
     // one canonical omission prevents a false packet drift while nonempty evidence stays bound.
-    if (key === 'fieldOptions'
-      && value !== null
-      && typeof value === 'object'
-      && !Array.isArray(value)
-      && Object.keys(value as Record<string, unknown>).length === 0) continue;
+    //
+    // Nonempty inventories bind by OPTION CONTENT, not by map key. The keys are live-page
+    // addressing: on Ashby the name-attribute prefix embeds a per-page-load instance UUID
+    // (run 1 "name:03af8549-...._a05e892e...", run 2 "name:36604d41-...._a05e892e..." for the
+    // same control; built by controlNameOptionKeyFromDiscoveredSelector), so binding the keys
+    // makes every prepare of such a packet read as "how Litos reaches this employer changed",
+    // forever. The employer content is the option lists themselves, so the hash binds a
+    // deterministic multiset of them: each list kept in its original order (option order is
+    // employer content), the collection sorted by serialized form, duplicates preserved. Any
+    // change to a list's content or to the number of controls still changes the hash; the same
+    // lists under renamed keys do not. The snapshot keeps the full map; only the hash
+    // projection narrows.
+    if (key === 'fieldOptions' && value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      const optionLists = Object.values(value as Record<string, string[]>);
+      if (optionLists.length === 0) continue;
+      projection[key] = optionLists
+        .map((options) => ({ options, sortKey: JSON.stringify(options) }))
+        .sort((a, b) => (a.sortKey < b.sortKey ? -1 : a.sortKey > b.sortKey ? 1 : 0))
+        .map((entry) => entry.options);
+      continue;
+    }
     // failedFields entries carry live-page composition detail alongside the durable control id:
     // selector is a per-page-load [data-litos-discovered-N] marker that renumbers on every load,
     // inputType flaps between text and combobox while a react-select mounts, and label is composed
