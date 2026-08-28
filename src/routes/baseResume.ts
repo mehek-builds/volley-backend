@@ -7,6 +7,7 @@ import { MODEL_UNAVAILABLE_MESSAGE, isModelUnavailable } from '../lib/llmFailure
 import { readExperienceBank } from '../db/experienceBank';
 import {
   baseResumeSelectionIssues,
+  enforcePrioritySelection,
   generateBaseResumeSpec,
   priorityEntriesForBaseResume,
   repairBaseResumeBullets,
@@ -481,6 +482,21 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         return targets;
       };
 
+      /* Repaint from a locally-changed spec: same restart-then-pieces contract as a full
+       * regeneration, with no model in the path, so the client cannot tell the two apart.
+       * Education and skills pieces are emitted only when the spec actually carries them, so a
+       * build whose first paint never showed a skills line does not gain an empty one here. */
+      const repaint = (painted: ResumeSpec) => {
+        send({ event: 'restart' });
+        if (painted.education_position) {
+          send({ event: 'piece', type: 'education', education_position: painted.education_position });
+        }
+        painted.experience.forEach((entry, index) => send({ event: 'piece', type: 'entry', index, entry }));
+        if (painted.skills.length > 0) {
+          send({ event: 'piece', type: 'skills', skills: painted.skills });
+        }
+      };
+
       for (let pass = 1; pass <= MAX_REPAIR_PASSES; pass += 1) {
         const weak = weakVerbBullets(rawSpec);
         const overlong = overlongBullets(rawSpec);
@@ -499,33 +515,15 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
         send({ event: 'stage', stage: 'polishing' });
 
         if (missingPriorities.length > 0) {
-          // The client paints entries positionally, so it has to clear before the re-stream or a
-          // shorter later pass would leave stale entries from the first behind.
-          send({ event: 'restart' });
-          rawSpec = await generate([
-            `The previous selection displaced required current or role-defining work: ${missingPriorities.join('; ')}. Include every REQUIRED PRIORITY ENTRY, even when its source has only one grounded bullet.`,
-            /* The concrete menu travels with EVERY path that asks for a verb rewrite: restating
-             * the rule without it was measured not to converge (2026-07-27, "Stocked" three
-             * passes running). */
-            weak.length > 0
-              ? `These bullets also do not open with a strong action verb: ${weak
-                .map((w) => `"${w.verb}" in ${w.org}`)
-                .join('; ')}. Rewrite each weak opener with an approved strong verb, keeping every fact and number exactly as it is. For each one, pick whichever of these fits the action best: ${VERB_SUGGESTIONS.join(', ')}.`
-              : '',
-            weak.length > 0 && pass > 1
-              ? 'A previous attempt at this failed. Do not reuse the opener you used last time for these bullets.'
-              : '',
-            overlong.length > 0
-              ? `These bullets are too long and will not fit the page: ${overlong
-                .map((b) => `${b.org} at ${b.length} characters (${b.length - BULLET_MAX_CHARS} over the ${BULLET_MAX_CHARS} limit): "${b.bullet}"`)
-                .join('; ')}. Rewrite each to under ${BULLET_MAX_CHARS} characters without dropping a metric.`
-              : '',
-            misWorded.length > 0
-              ? `These bullets are outside the ${BULLET_MIN_WORDS}-${BULLET_MAX_WORDS} word rule: ${misWorded
-                .map((b) => `${b.org} at ${b.words} words: "${b.bullet}"`)
-                .join('; ')}. Rewrite each to ${BULLET_MIN_WORDS}-${BULLET_MAX_WORDS} words. Expand a short one using only the facts it already states; condense a long one without dropping a metric.`
-              : '',
-          ].filter(Boolean));
+          /* A selection defect is an insert and a reorder, not a reason to re-generate. The full
+           * regeneration this used to run was the slowest arm of the loop (5-8 seconds live,
+           * measured 2026-08-29 on a CMU trial resume) and could newly break bullets it had
+           * already written. enforcePrioritySelection mirrors baseResumeSelectionIssues exactly,
+           * so one application always clears the defect; a rebuilt entry's raw bank variants are
+           * the next pass's targeted-repair problem, the same division of labour the post-floor
+           * backstop uses. */
+          rawSpec = enforcePrioritySelection(rawSpec, priorityEntries, RESUME_CONTENT_LIMITS);
+          repaint(rawSpec);
           continue;
         }
 
@@ -538,20 +536,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
          * loop spend (or exhaust) its next pass. */
         if (repaired === rawSpec) continue;
         rawSpec = repaired;
-
-        // Repaint from the merged spec locally: same restart-then-pieces contract as a full
-        // regeneration, with no model in the path, so the client cannot tell the two apart.
-        send({ event: 'restart' });
-        // Mirrors the stream reader: education and skills pieces are emitted only when the spec
-        // actually carries them, so a build whose first paint never showed a skills line does not
-        // gain an empty one from a repaint.
-        if (rawSpec.education_position) {
-          send({ event: 'piece', type: 'education', education_position: rawSpec.education_position });
-        }
-        rawSpec.experience.forEach((entry, index) => send({ event: 'piece', type: 'entry', index, entry }));
-        if (rawSpec.skills.length > 0) {
-          send({ event: 'piece', type: 'skills', skills: rawSpec.skills });
-        }
+        repaint(rawSpec);
       }
 
       send({ event: 'stage', stage: 'fitting' });

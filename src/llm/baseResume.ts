@@ -225,6 +225,69 @@ export function baseResumeSelectionIssues(
   return issues;
 }
 
+/**
+ * Deterministically put the required priority entries back on the page. No model call.
+ *
+ * The regeneration this replaces was the slowest arm of the repair loop: a displaced priority
+ * entry cost a full re-generation (~5-8 seconds live) to fix what is, mechanically, an insert and
+ * a reorder. This mirrors baseResumeSelectionIssues exactly - every priority entry present, and
+ * priorities[0] first - so one application of it always clears the selection defect: an entry the
+ * model already wrote keeps its written bullets and is only moved; a missing one is rebuilt from
+ * its own bank variants verbatim, and the bullet-repair pass that follows fixes any variant that
+ * breaks a writing rule, the same division of labour the floor's backstop uses. Non-priority
+ * entries keep the model's order and are dropped from the END when the page is over the cap.
+ */
+export function enforcePrioritySelection(
+  spec: ResumeSpec,
+  priorities: ExperienceBankEntry[],
+  limits: { maxEntries: number; maxBulletsPerEntry: number },
+): ResumeSpec {
+  if (priorities.length === 0) return spec;
+
+  const specByIdentity = new Map(spec.experience.map((entry) => [entryIdentity(entry), entry]));
+  const priorityIdentities = new Set(priorities.map((entry) => entryIdentity(entry)));
+
+  const specEntryFor = (priority: ExperienceBankEntry): ResumeSpec['experience'][number] => {
+    const written = specByIdentity.get(entryIdentity(priority));
+    if (written) return written;
+    const bullets = (Array.isArray(priority.bullet_variants) ? priority.bullet_variants : [])
+      .filter((bullet): bullet is string => typeof bullet === 'string' && bullet.trim().length > 0)
+      .map((bullet) => bullet.trim())
+      .slice(0, limits.maxBulletsPerEntry);
+    const type: ResumeSpec['experience'][number]['type'] =
+      priority.type === 'project' || priority.type === 'leadership' ? priority.type : 'job';
+    return {
+      type,
+      org: priority.org,
+      title: priority.title ?? '',
+      date_range: priority.date_range ?? '',
+      bullets,
+    };
+  };
+
+  // priorities[0] leads; the rest of the model's ordering survives, with missing priorities
+  // inserted right behind the lead so they cannot be pushed off the end they must not fall off.
+  const lead = specEntryFor(priorities[0]);
+  const missingRest = priorities
+    .slice(1)
+    .filter((priority) => !specByIdentity.has(entryIdentity(priority)))
+    .map(specEntryFor);
+  const rest = spec.experience.filter((entry) => {
+    const identity = entryIdentity(entry);
+    return identity !== entryIdentity(priorities[0])
+      && !missingRest.some((inserted) => entryIdentity(inserted) === identity);
+  });
+  const experience = [lead, ...missingRest, ...rest];
+  /* Over the cap, non-priority entries fall off the END first, so the policy pass's own
+   * maxEntries slice can never be the thing that cuts a protected entry back off the page.
+   * priorityEntriesForBaseResume caps itself below maxEntries, so priorities alone never
+   * overflow the page. */
+  for (let i = experience.length - 1; i >= 0 && experience.length > limits.maxEntries; i -= 1) {
+    if (!priorityIdentities.has(entryIdentity(experience[i]))) experience.splice(i, 1);
+  }
+  return { ...spec, experience };
+}
+
 /** Emitted as the model streams, so /start can draw the resume as it is decided rather than after. */
 export type BaseResumeEvent =
   | { type: 'education'; education_position: 'top' | 'after_experience' }
