@@ -286,3 +286,36 @@ describe('applyBulletRepairs', () => {
     assert.equal(JSON.stringify(spec), before);
   });
 });
+
+describe('applyBulletRepairs guards', () => {
+  const spec = parseSpecText(JSON.stringify(SPEC));
+
+  test('whitespace drift in the echoed pair still matches', () => {
+    const reply = JSON.stringify([
+      { org: ' Acme  Labs ', bullet: 'Built  a thing ', rewritten: 'Engineered the ingestion service end to end' },
+    ]);
+    const repaired = applyBulletRepairs(spec, reply);
+    assert.equal(repaired.experience[0].bullets[0], 'Engineered the ingestion service end to end');
+  });
+
+  test('a rewrite that is itself overlong is refused and the original kept', () => {
+    const reply = JSON.stringify([
+      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: `Engineered ${'x'.repeat(240)}` },
+    ]);
+    assert.equal(applyBulletRepairs(spec, reply), spec);
+  });
+
+  test('a rewrite that opens weak is refused and the original kept', () => {
+    const reply = JSON.stringify([
+      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: 'Assisted with the data pipeline work' },
+    ]);
+    assert.equal(applyBulletRepairs(spec, reply), spec);
+  });
+
+  test('a reply that changes nothing returns the same spec reference', () => {
+    const reply = JSON.stringify([
+      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: 'Built a thing' },
+    ]);
+    assert.equal(applyBulletRepairs(spec, reply), spec);
+  });
+});

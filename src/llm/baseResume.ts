@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import type { ExperienceBankEntry } from '../db/schema';
 import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { relevanceScore } from '../engine/resumePolicy';
-import { BULLET_MAX_CHARS, STRONG_VERBS } from '../engine/resumeValidate';
+import { BULLET_MAX_CHARS, STRONG_VERBS, startsWithStrongVerb } from '../engine/resumeValidate';
 import { normalizeSpec, type ResumeSpec } from './resumeSpec';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -433,6 +433,21 @@ export interface BulletRepairTarget {
   reasons: string[];
 }
 
+/* A short menu of approved verbs, named in the repair prompt and in regeneration feedback.
+ *
+ * Chosen to span the KINDS of work students actually describe rather than to be a best-of list:
+ * operations and service, people, analysis, building, and writing. The bullets that stall are
+ * almost always operational ones ("Stocked and handled food items"), which is exactly where a
+ * software-flavoured suggestion is no help. Repeating "use an approved verb" was measured NOT to
+ * converge (2026-07-27, "Stocked" survived three passes); a concrete menu is what broke it, so the
+ * menu must reach every path that asks for a verb rewrite. Every entry is on STRONG_VERBS. */
+export const VERB_REPAIR_MENU = [
+  'Managed', 'Organized', 'Coordinated', 'Processed', 'Administered',
+  'Delivered', 'Prepared', 'Trained', 'Supervised', 'Facilitated',
+  'Analyzed', 'Evaluated', 'Tracked', 'Documented',
+  'Built', 'Designed', 'Improved', 'Streamlined',
+];
+
 const BULLET_REPAIR_SYSTEM_PROMPT = `You repair individual resume bullets that broke a house rule. You receive a JSON
 array of {"org", "bullet", "reasons"} and return ONLY a JSON array of {"org", "bullet", "rewritten"} with no
 explanation or markdown wrapping, where "org" and "bullet" are copied unchanged from the input and "rewritten" is the
@@ -440,6 +455,7 @@ corrected bullet.
 
 Rules for every rewritten bullet:
 - Start with one of these approved verbs: ${[...STRONG_VERBS].join(', ')}.
+- For an operational or service bullet, these approved verbs fit most actions: ${VERB_REPAIR_MENU.join(', ')}.
 - Keep every fact, number, tool and outcome exactly as the original has them. Rewording is allowed; invention is not,
   and dropping a metric to save space is not.
 - One sentence, 8-30 words, under ${BULLET_MAX_CHARS} characters. Cut filler, not facts.
@@ -468,23 +484,37 @@ export async function repairBaseResumeBullets(
 ): Promise<ResumeSpec> {
   if (targets.length === 0) return spec;
 
-  const response = await client.messages.create(
-    {
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 2048,
-      system: BULLET_REPAIR_SYSTEM_PROMPT,
-      messages: [{
-        role: 'user',
-        content: `Repair these bullets:\n${JSON.stringify(targets)}`,
-      }],
-    },
-    options.timeoutMs !== undefined
-      ? { signal: AbortSignal.timeout(options.timeoutMs), maxRetries: 0 }
-      : undefined,
-  );
-
-  const textBlock = response.content.find((block) => block.type === 'text');
-  return applyBulletRepairs(spec, textBlock?.type === 'text' ? textBlock.text : '');
+  try {
+    const response = await client.messages.create(
+      {
+        model: 'claude-haiku-4-5-20251001',
+        /* The reply echoes org + the full original bullet + the rewrite for every target, and a
+         * worst-case pass flags every bullet on the page (12 at the 4-entry x 3-bullet cap, each
+         * up to a few hundred characters). 2048 was measured to be truncatable on exactly that
+         * shape, and a truncated array parses to nothing, which turns every pass into a silent
+         * no-op. Output is billed on what is generated, so the headroom costs nothing. */
+        max_tokens: 8192,
+        system: BULLET_REPAIR_SYSTEM_PROMPT,
+        messages: [{
+          role: 'user',
+          content: `Repair these bullets:\n${JSON.stringify(targets)}`,
+        }],
+      },
+      options.timeoutMs !== undefined
+        ? { signal: AbortSignal.timeout(options.timeoutMs), maxRetries: 0 }
+        : undefined,
+    );
+    // Truncation means an unparseable array; fail toward the original like every other bad reply.
+    if (response.stop_reason === 'max_tokens') return spec;
+    const textBlock = response.content.find((block) => block.type === 'text');
+    return applyBulletRepairs(spec, textBlock?.type === 'text' ? textBlock.text : '');
+  } catch {
+    /* A rejected promise here - a timeout, an overloaded model, a transient 5xx - must not cost
+     * the student a complete, otherwise-shippable resume over one bullet's opener. The caller's
+     * re-check sees the surviving violation and either spends another pass or ships with the
+     * warning, which is the same contract as a malformed reply. */
+    return spec;
+  }
 }
 
 /**
@@ -511,21 +541,40 @@ export function applyBulletRepairs(spec: ResumeSpec, replyText: string): ResumeS
   }
   if (!Array.isArray(repairs)) return spec;
 
+  /* Whitespace-normalized on BOTH sides, because the key is a model echo: a trimmed trailing
+   * space or a collapsed double space in the echoed bullet must not silently strand the rewrite.
+   * Anything beyond whitespace drift still misses on purpose - a paraphrased echo is not evidence
+   * the model was looking at this bullet. */
+  const repairKey = (org: string, bullet: string) =>
+    `${org.replace(/\s+/g, ' ').trim()}\u0000${bullet.replace(/\s+/g, ' ').trim()}`;
+
   const rewrittenFor = new Map<string, string>();
   for (const item of repairs) {
     if (!item || typeof item !== 'object') continue;
     const { org, bullet, rewritten } = item as { org?: unknown; bullet?: unknown; rewritten?: unknown };
     if (typeof org !== 'string' || typeof bullet !== 'string') continue;
     if (typeof rewritten !== 'string' || rewritten.trim().length === 0) continue;
-    rewrittenFor.set(`${org}\u0000${bullet}`, rewritten.trim());
+    /* A rewrite is only mergeable when it clears the two deterministic house rules it exists to
+     * fix. The final pass's merge is never model-checked again before the fail-closed ATS gate,
+     * so a rewrite that is itself overlong or weak-opened would be strictly worse than keeping
+     * the original: same gate outcome, one more mutation. Refusing it here can never make the
+     * spec worse than what the reply offered. */
+    const candidate = rewritten.trim();
+    if (candidate.length > BULLET_MAX_CHARS || !startsWithStrongVerb(candidate)) continue;
+    rewrittenFor.set(repairKey(org, bullet), candidate);
   }
   if (rewrittenFor.size === 0) return spec;
 
-  return {
-    ...spec,
-    experience: spec.experience.map((entry) => ({
-      ...entry,
-      bullets: entry.bullets.map((bullet) => rewrittenFor.get(`${entry.org}\u0000${bullet}`) ?? bullet),
-    })),
-  };
+  let changed = false;
+  const experience = spec.experience.map((entry) => ({
+    ...entry,
+    bullets: entry.bullets.map((bullet) => {
+      const rewritten = rewrittenFor.get(repairKey(entry.org, bullet));
+      if (rewritten === undefined || rewritten === bullet) return bullet;
+      changed = true;
+      return rewritten;
+    }),
+  }));
+  // Same-reference return when nothing landed, so the caller can skip a pointless repaint.
+  return changed ? { ...spec, experience } : spec;
 }
