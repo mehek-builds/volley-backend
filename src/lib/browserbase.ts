@@ -15,6 +15,52 @@ import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from './
 
 export type BrowserProvider = 'browserbase' | 'stratus' | 'stratus-managed';
 
+export type ManagedSubmissionAttempt = {
+  runId: string;
+  claimId: string;
+  executionId: string;
+};
+
+const MANAGED_SUBMISSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function readManagedSubmissionAttempt(value: unknown): ManagedSubmissionAttempt | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  if (Object.keys(input).sort().join(',') !== 'claimId,executionId,runId'
+    || typeof input.runId !== 'string' || !MANAGED_SUBMISSION_UUID.test(input.runId)
+    || typeof input.claimId !== 'string' || !MANAGED_SUBMISSION_UUID.test(input.claimId)
+    || typeof input.executionId !== 'string' || !MANAGED_SUBMISSION_UUID.test(input.executionId)) return null;
+  return {
+    runId: input.runId.toLowerCase(),
+    claimId: input.claimId.toLowerCase(),
+    executionId: input.executionId.toLowerCase(),
+  };
+}
+
+function managedSubmissionAttempt(value: unknown, required: boolean): ManagedSubmissionAttempt | null {
+  if (value == null && !required) return null;
+  if (value == null) throw new Error('Managed Stratus submission attempt correlation is required');
+  const normalized = readManagedSubmissionAttempt(value);
+  if (!normalized) {
+    throw new Error('Managed Stratus submission attempt correlation must contain only UUID runId, claimId, and executionId fields');
+  }
+  return normalized;
+}
+
+function sameManagedSubmissionAttempt(left: unknown, right: ManagedSubmissionAttempt): boolean {
+  const normalized = readManagedSubmissionAttempt(left);
+  return Boolean(normalized
+    && normalized.runId === right.runId
+    && normalized.claimId === right.claimId
+    && normalized.executionId === right.executionId);
+}
+
+function assertManagedSubmissionAttemptEcho(result: ManagedBrowserResult, expected: ManagedSubmissionAttempt): void {
+  if (!sameManagedSubmissionAttempt(result.submissionAttempt, expected)) {
+    throw new Error('Managed browser result did not match its durable submission attempt');
+  }
+}
+
 export const MANAGED_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY;
 /** Managed application v4 policy. Its caller gate is narrower than managed submissions generally. */
 export const MANAGED_APPLICATION_SUBMIT_CHOOSER_POLICY = FINAL_SUBMIT_CHOOSER_POLICY_V4;
@@ -152,6 +198,8 @@ export type ManagedBrowserResult = {
   title: string;
   url: string;
   text: string;
+  /** Exact non-PII correlation echoed by Stratus for a submit-capable run or continuation. */
+  submissionAttempt?: ManagedSubmissionAttempt;
   screenshot?: string | null;
   filledFields?: string[];
   /**
@@ -297,12 +345,25 @@ export type ManagedBrowserRunProgress = {
   version: 1;
   phase: 0 | 1;
   stage: 'launch' | 'phase_started' | 'submit_activation_started'
-    | 'submit_blocked' | 'submit_released' | 'result_written';
+    | 'submit_blocked' | 'submit_released' | 'result_ready' | 'result_written';
   submitPressed: boolean;
   applicationSubmitPressed: boolean;
   verificationSubmitPressed: boolean;
   submitKind: 'application' | 'verification' | null;
   policyVersion: 3 | 4 | null;
+  employerOutcome?: {
+    kind: 'not_attempted' | 'pressed' | 'confirmed';
+    state: 'confirmed' | 'rejected' | 'unknown' | 'not_attempted';
+    source: 'ats_state' | 'ats_route' | 'ats_state_unconfirmed' | 'live_region'
+      | 'page_text' | 'unmatched_page_text' | 'client_validation' | null;
+    evidence: string | null;
+    message: string | null;
+    formStillPresent: boolean | null;
+  };
+  requiredFieldConfirmationStatus?: 'confirmed' | 'blocked';
+  securityCodeOutcome?: 'accepted' | 'rejected' | 'no_control' | 'not_entered';
+  /** Required before crash progress can be trusted as evidence for a retry. */
+  submissionAttempt?: ManagedSubmissionAttempt;
 };
 
 type ManagedBrowserError = string | {
@@ -326,6 +387,19 @@ export class ManagedBrowserPreSubmitCrashError extends Error {
   }
 }
 
+/** Correlated provider progress that crossed or resolved an employer boundary before its response. */
+export class ManagedBrowserProviderProgressError extends Error {
+  readonly code: string;
+  readonly runProgress: ManagedBrowserRunProgress;
+
+  constructor(message: string, code: string, runProgress: ManagedBrowserRunProgress) {
+    super(message);
+    this.name = 'ManagedBrowserProviderProgressError';
+    this.code = code;
+    this.runProgress = runProgress;
+  }
+}
+
 export type ManagedPreSubmitCrashRetryResult<T> =
   | { kind: 'completed'; result: T; retried: boolean }
   | { kind: 'authorization_revoked'; error: ManagedBrowserPreSubmitCrashError };
@@ -344,18 +418,140 @@ export async function runWithManagedPreSubmitCrashRetry<T>(
     return { kind: 'completed', result: await run(), retried: false };
   } catch (error) {
     if (!(error instanceof ManagedBrowserPreSubmitCrashError)) throw error;
+    if (!managedBrowserProgressAllowsPreSubmitRetry(error.runProgress)) {
+      throw new Error(error.message);
+    }
     if (!await retryAuthorized()) return { kind: 'authorization_revoked', error };
     return { kind: 'completed', result: await run(), retried: true };
   }
 }
 
-function managedBrowserRunProgress(value: unknown): ManagedBrowserRunProgress | null {
+type ManagedBrowserEmployerOutcome = NonNullable<ManagedBrowserRunProgress['employerOutcome']>;
+
+function exactManagedNotAttemptedOutcome(outcome: ManagedBrowserEmployerOutcome): boolean {
+  return outcome.kind === 'not_attempted'
+    && outcome.state === 'not_attempted'
+    && outcome.source === null
+    && outcome.evidence === null
+    && outcome.message === null
+    && outcome.formStillPresent === null;
+}
+
+/**
+ * Treat provider progress as one state-machine checkpoint. Individually valid fields are not
+ * evidence when their combined story is impossible, such as a confirmed employer outcome with no
+ * press, or an accepted security code with no verification submit. A contradictory checkpoint is
+ * discarded so it can neither authorize a retry nor recover a submitted outcome.
+ */
+function managedBrowserProgressStateIsConsistent(progress: ManagedBrowserRunProgress): boolean {
+  const applicationPressed = progress.applicationSubmitPressed;
+  const verificationPressed = progress.verificationSubmitPressed;
+  const anyPressed = applicationPressed || verificationPressed;
+  const finalProgress = progress.stage === 'result_ready' || progress.stage === 'result_written';
+  const activationProgress = progress.stage === 'submit_activation_started'
+    || progress.stage === 'submit_blocked';
+  const currentKindPressed = progress.submitKind === 'application'
+    ? applicationPressed
+    : progress.submitKind === 'verification'
+      ? verificationPressed
+      : false;
+
+  if (progress.submitPressed !== anyPressed) return false;
+  if (anyPressed && progress.submitKind === null) return false;
+  if (progress.phase === 0
+    && (verificationPressed || progress.submitKind === 'verification')) return false;
+  if (verificationPressed
+    && (progress.phase !== 1 || progress.submitKind !== 'verification')) return false;
+  if (progress.phase === 1 && progress.submitKind === 'application'
+    && (activationProgress || progress.stage === 'submit_released')) return false;
+
+  if (progress.stage === 'launch') {
+    if (progress.phase !== 0 || progress.submitKind !== null || anyPressed
+      || progress.policyVersion !== null || progress.employerOutcome
+      || progress.requiredFieldConfirmationStatus || progress.securityCodeOutcome) return false;
+  } else if (progress.stage === 'phase_started') {
+    if (progress.phase === 0 && anyPressed) return false;
+  } else if (activationProgress) {
+    if (progress.submitKind === null || currentKindPressed || progress.securityCodeOutcome) return false;
+  } else if (progress.stage === 'submit_released') {
+    if (progress.submitKind === null || !currentKindPressed || progress.securityCodeOutcome) return false;
+  }
+
+  const outcome = progress.employerOutcome;
+  if (finalProgress && !outcome) return false;
+  if (!finalProgress && progress.phase === 0 && outcome
+    && !exactManagedNotAttemptedOutcome(outcome)) return false;
+  if (outcome) {
+    if (outcome.kind === 'not_attempted') {
+      if (!exactManagedNotAttemptedOutcome(outcome) || anyPressed) return false;
+    } else if (!anyPressed || outcome.state === 'not_attempted') {
+      return false;
+    }
+    if (outcome.kind === 'confirmed'
+      && progress.requiredFieldConfirmationStatus !== 'confirmed') return false;
+  }
+
+  if (progress.requiredFieldConfirmationStatus === 'confirmed' && !anyPressed) return false;
+
+  if (progress.securityCodeOutcome) {
+    if (!finalProgress || progress.phase !== 1 || progress.submitKind !== 'verification') return false;
+    const codeSubmitReachedEmployer = progress.securityCodeOutcome === 'accepted'
+      || progress.securityCodeOutcome === 'rejected';
+    if (codeSubmitReachedEmployer !== verificationPressed) return false;
+    if (progress.securityCodeOutcome === 'accepted' && outcome?.state === 'rejected') return false;
+  }
+
+  return true;
+}
+
+function managedBrowserProgressAllowsPreSubmitRetry(progress: ManagedBrowserRunProgress): boolean {
+  return managedBrowserProgressStateIsConsistent(progress)
+    && progress.phase === 0
+    && progress.policyVersion === 4
+    && progress.submitKind === 'application'
+    && (progress.stage === 'phase_started' || progress.stage === 'submit_blocked')
+    && progress.submitPressed === false
+    && progress.applicationSubmitPressed === false
+    && progress.verificationSubmitPressed === false
+    && (!progress.employerOutcome
+      || exactManagedNotAttemptedOutcome(progress.employerOutcome));
+}
+
+function managedBrowserRunProgress(
+  value: unknown,
+  expectedSubmissionAttempt: ManagedSubmissionAttempt | null,
+): ManagedBrowserRunProgress | null {
   if (!value || typeof value !== 'object') return null;
   const input = value as Record<string, unknown>;
   const stages = new Set([
     'launch', 'phase_started', 'submit_activation_started',
-    'submit_blocked', 'submit_released', 'result_written',
+    'submit_blocked', 'submit_released', 'result_ready', 'result_written',
   ]);
+  const rawEmployerOutcome = input.employerOutcome;
+  const employerOutcome = (() => {
+    if (rawEmployerOutcome == null) return null;
+    if (typeof rawEmployerOutcome !== 'object' || Array.isArray(rawEmployerOutcome)) return undefined;
+    const value = rawEmployerOutcome as Record<string, unknown>;
+    if (Object.keys(value).sort().join(',') !== 'evidence,formStillPresent,kind,message,source,state') return undefined;
+    const kinds = new Set(['not_attempted', 'pressed', 'confirmed']);
+    const states = new Set(['confirmed', 'rejected', 'unknown', 'not_attempted']);
+    const sources = new Set([
+      'ats_state', 'ats_route', 'ats_state_unconfirmed', 'live_region', 'page_text',
+      'unmatched_page_text', 'client_validation',
+    ]);
+    const boundedNullableString = (entry: unknown) => entry === null
+      || (typeof entry === 'string' && entry.length <= 500);
+    if (typeof value.kind !== 'string' || !kinds.has(value.kind)
+      || typeof value.state !== 'string' || !states.has(value.state)
+      || (value.source !== null && (typeof value.source !== 'string' || !sources.has(value.source)))
+      || !boundedNullableString(value.evidence)
+      || !boundedNullableString(value.message)
+      || (value.formStillPresent !== null && typeof value.formStillPresent !== 'boolean')
+      || (value.kind === 'confirmed' && value.state !== 'confirmed')
+      || (value.kind === 'not_attempted' && value.state !== 'not_attempted')) return undefined;
+    return value as ManagedBrowserRunProgress['employerOutcome'];
+  })();
+  const finalProgress = input.stage === 'result_ready' || input.stage === 'result_written';
   if (input.version !== 1
     || (input.phase !== 0 && input.phase !== 1)
     || typeof input.stage !== 'string' || !stages.has(input.stage)
@@ -363,29 +559,55 @@ function managedBrowserRunProgress(value: unknown): ManagedBrowserRunProgress | 
     || typeof input.applicationSubmitPressed !== 'boolean'
     || typeof input.verificationSubmitPressed !== 'boolean'
     || (input.submitKind !== null && input.submitKind !== 'application' && input.submitKind !== 'verification')
-    || (input.policyVersion !== null && input.policyVersion !== 3 && input.policyVersion !== 4)) return null;
-  return input as ManagedBrowserRunProgress;
+    || (input.policyVersion !== null && input.policyVersion !== 3 && input.policyVersion !== 4)
+    || employerOutcome === undefined
+    || (finalProgress && !employerOutcome)
+    || (input.requiredFieldConfirmationStatus != null
+      && input.requiredFieldConfirmationStatus !== 'confirmed'
+      && input.requiredFieldConfirmationStatus !== 'blocked')
+    || (input.securityCodeOutcome != null
+      && input.securityCodeOutcome !== 'accepted'
+      && input.securityCodeOutcome !== 'rejected'
+      && input.securityCodeOutcome !== 'no_control'
+      && input.securityCodeOutcome !== 'not_entered')
+    || (expectedSubmissionAttempt != null
+      && !sameManagedSubmissionAttempt(input.submissionAttempt, expectedSubmissionAttempt))) return null;
+  const progressAttempt = readManagedSubmissionAttempt(input.submissionAttempt);
+  const progress = {
+    version: 1,
+    phase: input.phase,
+    stage: input.stage as ManagedBrowserRunProgress['stage'],
+    submitPressed: input.submitPressed,
+    applicationSubmitPressed: input.applicationSubmitPressed,
+    verificationSubmitPressed: input.verificationSubmitPressed,
+    submitKind: input.submitKind,
+    policyVersion: input.policyVersion,
+    ...(employerOutcome ? { employerOutcome } : {}),
+    ...(input.requiredFieldConfirmationStatus != null
+      ? { requiredFieldConfirmationStatus: input.requiredFieldConfirmationStatus }
+      : {}),
+    ...(input.securityCodeOutcome != null ? { securityCodeOutcome: input.securityCodeOutcome } : {}),
+    ...(progressAttempt ? { submissionAttempt: progressAttempt } : {}),
+  } as ManagedBrowserRunProgress;
+  return managedBrowserProgressStateIsConsistent(progress) ? progress : null;
 }
 
 function managedBrowserRequestError(
   error: ManagedBrowserError | undefined,
   status: number,
   actions: ManagedBrowserAction[] = [],
+  expectedSubmissionAttempt: ManagedSubmissionAttempt | null = null,
 ): Error {
   const message = managedBrowserErrorMessage(error, status, actions);
-  if (error && typeof error === 'object' && error.code === 'SANDBOX_RUN_FAILED') {
-    const progress = managedBrowserRunProgress(error.runProgress);
-    const transportStillContained = progress?.version === 1
-      && progress.phase === 0
-      && progress.policyVersion === 4
-      && progress.submitKind === 'application'
-      && (progress.stage === 'phase_started' || progress.stage === 'submit_blocked')
-      && progress.submitPressed === false
-      && progress.applicationSubmitPressed === false
-      && progress.verificationSubmitPressed === false;
+  if (error && typeof error === 'object' && typeof error.code === 'string') {
+    const progress = managedBrowserRunProgress(error.runProgress, expectedSubmissionAttempt);
+    const transportStillContained = expectedSubmissionAttempt != null
+      && progress != null
+      && managedBrowserProgressAllowsPreSubmitRetry(progress);
     if (progress && transportStillContained) {
       return new ManagedBrowserPreSubmitCrashError(message, progress);
     }
+    if (progress) return new ManagedBrowserProviderProgressError(message, error.code, progress);
   }
   return new Error(message);
 }
@@ -738,12 +960,132 @@ export function managedContinuationFingerprint(token: string): string {
  * Named and exported so the shape a real submit sends is a thing a test can hold, rather than a
  * literal that can only be grepped for.
  */
-export function managedApplicationSubmitOptions(continuationTtlSeconds: number): {
+export function managedApplicationSubmitOptions(
+  continuationTtlSeconds: number,
+  submissionAttempt: ManagedSubmissionAttempt,
+): {
   allowSubmit: true;
   requestContinuation: true;
   continuationTtlSeconds: number;
+  submissionAttempt: ManagedSubmissionAttempt;
 } {
-  return { allowSubmit: true, requestContinuation: true, continuationTtlSeconds };
+  return {
+    allowSubmit: true,
+    requestContinuation: true,
+    continuationTtlSeconds,
+    submissionAttempt: managedSubmissionAttempt(submissionAttempt, true)!,
+  };
+}
+
+/**
+ * Charge short-lived Vercel credential acquisition to the same absolute request budget as the
+ * provider fetch. The credential work itself may not accept an AbortSignal, so losing this race
+ * only abandons its result. Crucially, the caller returns at the deadline and can never dispatch a
+ * retained submit after the callback fence has expired.
+ */
+export async function acquireManagedStratusOidcAuthorization(
+  signal: AbortSignal | undefined,
+  acquireToken: () => Promise<string> = getVercelOidcToken,
+): Promise<string> {
+  signal?.throwIfAborted();
+  if (!signal) return `Bearer ${await acquireToken()}`;
+  return new Promise<string>((resolve, reject) => {
+    const rejectForAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', rejectForAbort, { once: true });
+    if (signal.aborted) rejectForAbort();
+    Promise.resolve().then(acquireToken).then(
+      (token) => {
+        signal.removeEventListener('abort', rejectForAbort);
+        if (signal.aborted) reject(signal.reason);
+        else resolve(`Bearer ${token}`);
+      },
+      (error) => {
+        signal.removeEventListener('abort', rejectForAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+export type ManagedBrowserRequestBudget = Readonly<{
+  /** The one timer created before a locked gate. Credential acquisition and fetch reuse it. */
+  signal: AbortSignal;
+  /** Original duration, used only to calculate how much of the pre-gate budget remains. */
+  timeoutMs: number;
+  /** Monotonic process time captured before the signal was created. */
+  startedAtMs: number;
+}>;
+
+function assertManagedBrowserTimeout(timeoutMs: number, label: string): void {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 5 * 60 * 1000) {
+    throw new Error(`${label} timeout must be between 1 ms and 5 minutes`);
+  }
+}
+
+function managedProviderDeadline(value: string | undefined, required: boolean): string | undefined {
+  if (value == null && !required) return undefined;
+  if (value == null) throw new Error('Managed Stratus absolute provider deadline is required');
+  const deadlineMs = Date.parse(value);
+  if (!Number.isFinite(deadlineMs) || value !== new Date(deadlineMs).toISOString()) {
+    throw new Error('Managed Stratus absolute provider deadline must be a canonical ISO timestamp');
+  }
+  if (deadlineMs <= Date.now()) throw new DOMException('Managed Stratus provider deadline expired', 'TimeoutError');
+  return value;
+}
+
+function managedProviderRequestTimeoutMs(timeoutMs: number | undefined, providerDeadlineAt: string | undefined): number | undefined {
+  const absoluteRemainingMs = providerDeadlineAt === undefined
+    ? undefined
+    : Math.floor(Date.parse(providerDeadlineAt) - Date.now());
+  const effective = timeoutMs === undefined
+    ? absoluteRemainingMs
+    : absoluteRemainingMs === undefined
+      ? timeoutMs
+      : Math.min(timeoutMs, absoluteRemainingMs);
+  if (effective !== undefined) assertManagedBrowserTimeout(effective, 'Managed Stratus request');
+  return effective;
+}
+
+/** Start a provider-call budget before any gate or credential work that must consume it. */
+export function startManagedBrowserRequestBudget(timeoutMs: number): ManagedBrowserRequestBudget {
+  assertManagedBrowserTimeout(timeoutMs, 'Managed Stratus request');
+  const startedAtMs = performance.now();
+  return Object.freeze({
+    signal: AbortSignal.timeout(timeoutMs),
+    timeoutMs,
+    startedAtMs,
+  });
+}
+
+function assertManagedBrowserRequestBudget(
+  budget: ManagedBrowserRequestBudget,
+  providerDeadlineAt: string,
+  minimumDispatchBudgetMs: number,
+): void {
+  assertManagedBrowserTimeout(budget.timeoutMs, 'Managed Stratus request');
+  if (!Number.isFinite(budget.startedAtMs) || budget.startedAtMs < 0) {
+    throw new Error('Managed Stratus request budget start must be a monotonic timestamp');
+  }
+  if (!Number.isSafeInteger(minimumDispatchBudgetMs)
+    || minimumDispatchBudgetMs <= 0
+    || minimumDispatchBudgetMs > budget.timeoutMs) {
+    throw new Error('Managed Stratus minimum dispatch budget must fit inside the request timeout');
+  }
+  const providerDeadlineMs = Date.parse(providerDeadlineAt);
+  if (!Number.isFinite(providerDeadlineMs)) {
+    throw new Error('Managed Stratus provider deadline must be a valid timestamp');
+  }
+  budget.signal.throwIfAborted();
+  const elapsedMs = Math.max(0, performance.now() - budget.startedAtMs);
+  const remainingBudgetMs = Math.floor(budget.timeoutMs - elapsedMs);
+  const remainingAbsoluteMs = Math.floor(providerDeadlineMs - Date.now());
+  if (remainingBudgetMs < minimumDispatchBudgetMs
+    || remainingAbsoluteMs < minimumDispatchBudgetMs) {
+    throw new DOMException(
+      'Managed Stratus continuation no longer has a safe provider dispatch window',
+      'TimeoutError',
+    );
+  }
 }
 
 // `screenshot` defaults to true because every existing caller wants the receipt image. The CAPTCHA
@@ -758,16 +1100,34 @@ export async function runManagedBrowser(
     requestContinuation?: boolean;
     continuationCheckpoint?: boolean;
     continuationTtlSeconds?: number;
+    submissionAttempt?: ManagedSubmissionAttempt;
+    /** Database-derived absolute cutoff shared with Stratus for every submit-capable run. */
+    providerDeadlineAt?: string;
+    /** Bounds the whole initial provider call, including credential acquisition and dispatch. */
+    timeoutMs?: number;
   } = {},
 ): Promise<ManagedBrowserResult> {
+  if (options.timeoutMs !== undefined) assertManagedBrowserTimeout(options.timeoutMs, 'Managed Stratus run');
+  const providerDeadlineAt = managedProviderDeadline(
+    options.providerDeadlineAt,
+    options.allowSubmit === true || options.requestContinuation === true,
+  );
+  // Start the duration fence before any awaited credential work. This keeps a slow OIDC lookup or
+  // dispatch from spending time outside the callback window persisted by the caller.
+  const effectiveTimeoutMs = managedProviderRequestTimeoutMs(options.timeoutMs, providerDeadlineAt);
+  const signal = effectiveTimeoutMs === undefined ? undefined : AbortSignal.timeout(effectiveTimeoutMs);
   const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.STRATUS_API_KEY?.trim();
   if (!baseUrl) throw new Error('Stratus managed browser is not configured');
   const authorization = !apiKey && (process.env.VERCEL_OIDC_TOKEN?.trim() || process.env.VERCEL_ENV === 'production')
-    ? `Bearer ${await getVercelOidcToken()}`
+    ? await acquireManagedStratusOidcAuthorization(signal)
     : undefined;
   if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');
   const outboundActions = normalizeStratusActions(actions);
+  const expectedSubmissionAttempt = managedSubmissionAttempt(
+    options.submissionAttempt,
+    options.allowSubmit === true || options.requestContinuation === true,
+  );
   const response = await fetch(`${baseUrl}/api/run`, {
     method: 'POST',
     headers: {
@@ -780,19 +1140,23 @@ export async function runManagedBrowser(
       actions: outboundActions,
       screenshot: options.screenshot ?? true,
       allowSubmit: options.allowSubmit === true,
+      ...(expectedSubmissionAttempt ? { submissionAttempt: expectedSubmissionAttempt } : {}),
+      ...(providerDeadlineAt ? { providerDeadlineAt } : {}),
       fullPage: true,
       waitUntil: 'domcontentloaded',
       ...(options.requestContinuation ? {
         requestContinuation: true,
         continuationCheckpoint: options.continuationCheckpoint === true,
-        continuationTtlSeconds: Math.min(Math.max(options.continuationTtlSeconds ?? 120, 15), 120),
+        continuationTtlSeconds: Math.min(Math.max(options.continuationTtlSeconds ?? 120, 15), 180),
       } : {}),
     }),
+    ...(signal ? { signal } : {}),
   });
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
   if (!response.ok || !payload.run) {
-    throw managedBrowserRequestError(payload.error, response.status, outboundActions);
+    throw managedBrowserRequestError(payload.error, response.status, outboundActions, expectedSubmissionAttempt);
   }
+  if (expectedSubmissionAttempt) assertManagedSubmissionAttemptEcho(payload.run, expectedSubmissionAttempt);
   assertRequiredManagedCapabilities(payload.run, outboundActions);
   return payload.run;
 }
@@ -800,17 +1164,65 @@ export async function runManagedBrowser(
 export async function continueManagedBrowser(
   continuationToken: string,
   actions: ManagedBrowserAction[],
-  options: { screenshot?: boolean } = {},
+  options: {
+    screenshot?: boolean;
+    submissionAttempt: ManagedSubmissionAttempt;
+    /** Bounds the retained-session HTTP call. The remote action budget remains independently bounded. */
+    timeoutMs?: number;
+    /** One request budget started before the continuation's locked database gate. */
+    requestBudget?: ManagedBrowserRequestBudget;
+    /** Exact database-clock provider deadline persisted by that gate. */
+    providerDeadlineAt?: string;
+    /** Refuse before OIDC or fetch unless this much of both approved windows remains. */
+    minimumDispatchBudgetMs?: number;
+  },
 ): Promise<ManagedBrowserResult> {
+  if (options.timeoutMs !== undefined) {
+    assertManagedBrowserTimeout(options.timeoutMs, 'Managed Stratus continuation');
+  }
+  if (options.requestBudget && options.timeoutMs !== undefined) {
+    throw new Error('Managed Stratus continuation must not restart a pre-existing request budget');
+  }
+  if (options.requestBudget) {
+    if (!options.providerDeadlineAt || options.minimumDispatchBudgetMs === undefined) {
+      throw new Error('Managed Stratus pre-gate request budget requires its provider deadline and minimum dispatch budget');
+    }
+    assertManagedBrowserRequestBudget(
+      options.requestBudget,
+      options.providerDeadlineAt,
+      options.minimumDispatchBudgetMs,
+    );
+  } else if (options.providerDeadlineAt !== undefined || options.minimumDispatchBudgetMs !== undefined) {
+    throw new Error('Managed Stratus provider deadline requires a pre-gate request budget');
+  }
+  // A submitting continuation supplies the signal it started before the database gate. Other,
+  // non-submitting observers may still create a local duration fence at this helper boundary.
+  const signal = options.requestBudget?.signal
+    ?? (options.timeoutMs === undefined ? undefined : AbortSignal.timeout(options.timeoutMs));
+  const providerDeadlineAt = options.providerDeadlineAt
+    ?? (options.timeoutMs !== undefined
+      ? new Date(Date.now() + options.timeoutMs).toISOString()
+      : undefined);
+  managedProviderDeadline(providerDeadlineAt, true);
   const baseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
   const apiKey = process.env.STRATUS_API_KEY?.trim();
   if (!baseUrl) throw new Error('Stratus managed browser is not configured');
   const authorization = !apiKey && (process.env.VERCEL_OIDC_TOKEN?.trim() || process.env.VERCEL_ENV === 'production')
-    ? `Bearer ${await getVercelOidcToken()}`
+    ? await acquireManagedStratusOidcAuthorization(signal)
     : undefined;
   if (!apiKey && !authorization) throw new Error('Stratus managed browser is not configured');
   if (!/^[A-Za-z0-9_-]{32,200}$/.test(continuationToken)) throw new Error('Managed Stratus continuation token is invalid');
   const outboundActions = normalizeStratusActions(actions);
+  const expectedSubmissionAttempt = managedSubmissionAttempt(options.submissionAttempt, true)!;
+  // Credential acquisition and local request preparation spend the same budget. Recheck at the
+  // last synchronous point before fetch so neither can consume the provider's safe start window.
+  if (options.requestBudget) {
+    assertManagedBrowserRequestBudget(
+      options.requestBudget,
+      options.providerDeadlineAt!,
+      options.minimumDispatchBudgetMs!,
+    );
+  }
   const response = await fetch(`${baseUrl}/api/run`, {
     method: 'POST',
     headers: {
@@ -818,8 +1230,11 @@ export async function continueManagedBrowser(
       ...(apiKey ? { 'X-Stratus-API-Key': apiKey } : {}),
       ...(authorization ? { Authorization: authorization } : {}),
     },
+    ...(signal ? { signal } : {}),
     body: JSON.stringify({
       continuationToken,
+      submissionAttempt: expectedSubmissionAttempt,
+      providerDeadlineAt,
       actions: outboundActions,
       screenshot: options.screenshot ?? true,
       fullPage: true,
@@ -827,8 +1242,9 @@ export async function continueManagedBrowser(
   });
   const payload = await response.json().catch(() => ({})) as { run?: ManagedBrowserResult; error?: ManagedBrowserError };
   if (!response.ok || !payload.run) {
-    throw managedBrowserRequestError(payload.error, response.status, outboundActions);
+    throw managedBrowserRequestError(payload.error, response.status, outboundActions, expectedSubmissionAttempt);
   }
+  assertManagedSubmissionAttemptEcho(payload.run, expectedSubmissionAttempt);
   assertRequiredManagedCapabilities(payload.run, outboundActions);
   return payload.run;
 }

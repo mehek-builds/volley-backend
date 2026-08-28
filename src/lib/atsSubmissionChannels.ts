@@ -212,38 +212,294 @@ export function genericKnownPosting(rawUrl: string | undefined): PostingRef | nu
   if (!url) return null;
   const host = url.hostname.toLowerCase();
   const parts = pathParts(url);
-  const joined = parts.join('/');
-  if (host === 'jobs.smartrecruiters.com' && parts.length >= 2) {
-    const uuid = parts.find((part) => /^[0-9a-fA-F-]{36}$/.test(part));
-    return providerPosting('smartrecruiters', parts[0], uuid ?? parts[1]);
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  if (host === 'jobs.smartrecruiters.com') {
+    const posting = url.pathname.match(/^\/([^/]+)\/(\d{6,})(?:-[^/]+)?\/?$/i);
+    return posting ? providerPosting('smartrecruiters', posting[1], posting[2]) : null;
   }
-  if (host === 'apply.workable.com' && parts.length >= 3 && parts[1] === 'j') return providerPosting('workable', parts[0], parts[2]);
-  if (host.endsWith('myworkdayjobs.com')) return providerPosting('workday', host.split('.')[0], parts.at(-1));
-  if (host.includes('icims.com')) return providerPosting('icims', host.split('.')[0], url.searchParams.get('job') ?? parts.at(-1));
-  if (host.endsWith('bamboohr.com')) return providerPosting('bamboohr', host.split('.')[0], url.searchParams.get('id') ?? parts.at(-1));
-  if (host.endsWith('applytojob.com')) return providerPosting('jazzhr', host.split('.')[0], parts.at(-1));
-  if (host.includes('paylocity.com')) return providerPosting('paylocity', host.split('.')[0], url.searchParams.get('jobid') ?? parts.at(-1));
-  if (host === 'jobs.rippling.com') return providerPosting('rippling', parts[0], parts.at(-1));
-  if (host === 'jobs.breezy.hr') return providerPosting('breezy', parts[0], parts.at(-1));
-  if (host.includes('taleo.net')) return providerPosting('oracle_taleo', host.split('.')[0], url.searchParams.get('job') ?? parts.at(-1));
-  if (host.includes('successfactors.com') || host.endsWith('jobs2web.com')) return providerPosting('sap_successfactors', host.split('.')[0], url.searchParams.get('job') ?? parts.at(-1));
-  if (host.includes('adp.com')) return providerPosting('adp', host.split('.')[0], url.searchParams.get('jobId') ?? parts.at(-1));
-  if (host.includes('ukg.com') || host.includes('ultipro.com')) return providerPosting('ukg', host.split('.')[0], url.searchParams.get('jobId') ?? parts.at(-1));
-  if (host.includes('jobvite.com')) return providerPosting('jobvite', host.split('.')[0], parts.at(-1));
-  if (host.includes('dayforcehcm.com') || host.includes('dayforce.com')) return providerPosting('dayforce', host.split('.')[0], url.searchParams.get('jobId') ?? parts.at(-1));
-  if (host === 'recruitee.com' || host.endsWith('.recruitee.com')) return providerPosting('recruitee', host.split('.')[0], parts.at(-1));
-  if (host.endsWith('teamtailor.com')) return providerPosting('teamtailor', host.split('.')[0], parts.at(-1));
-  if (host.includes('personio.')) return providerPosting('personio', host.split('.')[0], parts.at(-1));
-  if (host.includes('pinpointhq.com')) return providerPosting('pinpoint', host.split('.')[0], parts.at(-1));
-  if (host.includes('comeet.co')) return providerPosting('comeet', host.split('.')[0], parts.at(-1));
-  if (host.includes('zohorecruit.')) return providerPosting('zoho_recruit', host.split('.')[0], parts.at(-1));
-  if (host.includes('bullhornstaffing.com')) return providerPosting('bullhorn', host.split('.')[0], parts.at(-1));
-  if (host.endsWith('indeed.com')) return providerPosting('indeed', host.split('.').slice(-2).join('.'), url.searchParams.get('jk') ?? parts.at(-1));
-  if (host.endsWith('linkedin.com') && joined.includes('jobs/view')) return providerPosting('linkedin', 'linkedin', parts.at(-1));
-  if (host.endsWith('ziprecruiter.com')) return providerPosting('ziprecruiter', 'ziprecruiter', parts.at(-1));
-  if (host.endsWith('wellfound.com')) return providerPosting('wellfound', 'wellfound', parts.at(-1));
-  if (host.endsWith('joinhandshake.com')) return providerPosting('handshake', 'handshake', parts.at(-1));
+  if (host === 'apply.workable.com') {
+    const posting = url.pathname.match(/^\/([^/]+)\/j\/([^/]+)(?:\/apply)?\/?$/i);
+    return posting ? providerPosting('workable', posting[1], posting[2]) : null;
+  }
+  const workdayTenant = host.match(/^([a-z0-9-]+)(?:\.[a-z0-9-]+)*\.(?:myworkdayjobs|myworkdaysite)\.com$/)?.[1];
+  if (workdayTenant) {
+    const jobAnchor = parts.findIndex((part) => part.toLowerCase() === 'job');
+    const applyIndex = parts.findIndex((part) => part.toLowerCase() === 'apply');
+    if (jobAnchor >= 0 && (applyIndex < 0 || applyIndex === parts.length - 1)) {
+      const postingIndex = applyIndex === parts.length - 1 ? parts.length - 2 : parts.length - 1;
+      const postingSlug = parts[postingIndex];
+      const requisitionId = postingSlug?.match(/_([a-z0-9][a-z0-9-]*)$/i)?.[1]
+        ?? (postingSlug && /^\d+$/.test(postingSlug) ? postingSlug : undefined);
+      if (postingIndex > jobAnchor) {
+        const posting = providerPosting('workday', workdayTenant, requisitionId);
+        if (posting) return posting;
+      }
+    }
+    return null;
+  }
+  const icimsTenant = host.match(/^([a-z0-9-]+)\.icims\.com$/)?.[1];
+  if (icimsTenant && !new Set(['www', 'community', 'login', 'api']).has(icimsTenant)) {
+    if (parts.length === 4
+      && parts[0]?.toLowerCase() === 'jobs'
+      && /^\d+$/.test(parts[1] ?? '')
+      && /^(?:job|login)$/i.test(parts[3] ?? '')) {
+      return providerPosting('icims', icimsTenant, parts[1]);
+    }
+    return null;
+  }
+  const bambooTenant = host.match(/^([a-z0-9-]+)\.bamboohr\.com$/)?.[1];
+  if (bambooTenant && bambooTenant !== 'www') {
+    const posting = url.pathname.match(/^\/careers\/(\d+)\/?$/i);
+    return posting ? providerPosting('bamboohr', bambooTenant, posting[1]) : null;
+  }
+  const jazzhrTenant = host.match(/^([a-z0-9-]+)\.applytojob\.com$/)?.[1];
+  if (jazzhrTenant && jazzhrTenant !== 'www') {
+    const detailsCode = parts.length === 4
+      && parts[0]?.toLowerCase() === 'apply'
+      && parts[1]?.toLowerCase() === 'jobs'
+      && parts[2]?.toLowerCase() === 'details'
+      ? parts[3]
+      : undefined;
+    const directCode = (parts.length === 2 || parts.length === 3)
+      && parts[0]?.toLowerCase() === 'apply'
+      ? parts[1]
+      : undefined;
+    const postingCode = detailsCode ?? directCode;
+    if (/^[a-z0-9]{10}$/i.test(postingCode ?? '')) {
+      return providerPosting('jazzhr', jazzhrTenant, postingCode);
+    }
+    return null;
+  }
+  const paylocityTenant = host.match(/^([a-z0-9-]+)\.paylocity\.com$/)?.[1];
+  if (paylocityTenant && paylocityTenant !== 'access') {
+    const posting = url.pathname.match(/^\/recruiting\/jobs\/(?:details|apply)\/(\d+)(?:\/[^/]+)?\/?$/i);
+    return posting ? providerPosting('paylocity', paylocityTenant, posting[1]) : null;
+  }
+  if (host === 'jobs.rippling.com' || host === 'ats.rippling.com') {
+    const posting = url.pathname.match(/^\/([^/]+)\/jobs\/([^/]+)(?:\/apply)?\/?$/i);
+    return posting ? providerPosting('rippling', posting[1], posting[2]) : null;
+  }
+  if (host === 'jobs.breezy.hr') {
+    const posting = url.pathname.match(/^\/([^/]+)\/jobs\/([^/]+)(?:\/apply)?\/?$/i);
+    return posting ? providerPosting('breezy', posting[1], posting[2]) : null;
+  }
+  const breezyTenant = host.match(/^([a-z0-9-]+)\.breezy\.hr$/)?.[1];
+  if (breezyTenant) {
+    const posting = url.pathname.match(/^\/p\/([^/]+)(?:\/apply)?\/?$/i);
+    return posting ? providerPosting('breezy', breezyTenant, posting[1]) : null;
+  }
+  const taleoTenant = host.match(/^([a-z0-9-]+)\.taleo\.net$/)?.[1];
+  if (taleoTenant) {
+    const jobId = url.searchParams.get('job');
+    return /^\d+$/.test(jobId ?? '')
+      && /^\/careersection\/[^/]+\/jobdetail\.ftl$/i.test(url.pathname)
+      ? providerPosting('oracle_taleo', taleoTenant, jobId ?? undefined)
+      : null;
+  }
+  if (/(?:^|\.)successfactors\.(?:com|eu)$/i.test(host) || host.endsWith('.jobs2web.com')) {
+    const pathPosting = url.pathname.match(/\/job\/[^/]+\/(\d+)\/?$/i);
+    if (pathPosting && host.endsWith('.jobs2web.com')) {
+      return providerPosting('sap_successfactors', host.split('.')[0], pathPosting[1]);
+    }
+    const knownPath = /^\/(?:sfcareer\/jobreqcareer|career|portalcareer)\/?$/i.test(url.pathname);
+    const jobId = url.searchParams.get('jobId')
+      ?? url.searchParams.get('career_job_req_id')
+      ?? url.searchParams.get('job_application');
+    const company = url.searchParams.get('company');
+    return knownPath && /^\d+$/.test(jobId ?? '') && /^[a-z0-9_-]+$/i.test(company ?? '')
+      ? providerPosting('sap_successfactors', company ?? undefined, jobId ?? undefined)
+      : null;
+  }
+  if (host === 'myjobs.adp.com') {
+    const posting = url.pathname.match(/^\/([^/]+)\/cx\/job-details\/?$/i);
+    const reqId = url.searchParams.get('reqId');
+    return posting && /^\d+$/.test(reqId ?? '')
+      ? providerPosting('adp', posting[1], reqId ?? undefined)
+      : null;
+  }
+  if (host === 'workforcenow.adp.com') {
+    const jobId = url.searchParams.get('jobId');
+    const company = url.searchParams.get('cid') ?? url.searchParams.get('company');
+    return /^\/mascsr\/default\/mdf\/recruitment\/recruitment\.html$/i.test(url.pathname)
+      && /^[a-z0-9_-]+$/i.test(company ?? '')
+      && /^[a-z0-9_-]+$/i.test(jobId ?? '')
+      ? providerPosting('adp', company ?? undefined, jobId ?? undefined)
+      : null;
+  }
+  if (host === 'recruiting.ultipro.com') {
+    const posting = url.pathname.match(/^\/([^/]+)\/JobBoard\/[0-9a-f-]+\/OpportunityDetail\/?$/i);
+    const opportunityId = url.searchParams.get('opportunityId');
+    return posting && uuid.test(opportunityId ?? '')
+      ? providerPosting('ukg', posting[1], opportunityId ?? undefined)
+      : null;
+  }
+  const ukgTenant = host.match(/^([a-z0-9-]+)\.(?:ukg|ultipro)\.com$/)?.[1];
+  if (ukgTenant) {
+    const jobId = url.searchParams.get('jobId');
+    return jobId && /^[a-z0-9_-]+$/i.test(jobId)
+      ? providerPosting('ukg', ukgTenant, jobId)
+      : null;
+  }
+  if (host === 'jobs.jobvite.com') {
+    if ((parts.length === 3 || (parts.length === 4 && parts[3]?.toLowerCase() === 'apply'))
+      && parts[1]?.toLowerCase() === 'job'
+      && /^[a-z0-9]+$/i.test(parts[0] ?? '')
+      && /^[a-z0-9]+$/i.test(parts[2] ?? '')) {
+      return providerPosting('jobvite', parts[0], parts[2]);
+    }
+    return null;
+  }
+  if (host.endsWith('.dayforcehcm.com') || host.endsWith('.dayforce.com')) {
+    const postingAnchor = parts.findIndex((part, index) => part.toLowerCase() === 'posting'
+      && parts[index + 1]?.toLowerCase() === 'view');
+    const jobId = postingAnchor >= 0 ? parts[postingAnchor + 2] : undefined;
+    const site = postingAnchor >= 1 ? parts[postingAnchor - 1] : undefined;
+    return /^[a-z0-9_-]+$/i.test(jobId ?? '') && site
+      ? providerPosting('dayforce', site, jobId)
+      : null;
+  }
+  const recruiteeTenant = host.match(/^([^.]+)\.recruitee\.com$/)?.[1];
+  if (recruiteeTenant && recruiteeTenant !== 'www') {
+    if ((parts.length === 2 || (parts.length === 4
+      && parts[2]?.toLowerCase() === 'c'
+      && parts[3]?.toLowerCase() === 'new'))
+      && parts[0]?.toLowerCase() === 'o'
+      && parts[1]) {
+      return providerPosting('recruitee', recruiteeTenant, parts[1]);
+    }
+    return null;
+  }
+  const teamtailorTenant = host.match(/^([^.]+)\.teamtailor\.com$/)?.[1];
+  if (teamtailorTenant && !new Set(['www', 'app', 'api', 'partner', 'docs', 'support']).has(teamtailorTenant)) {
+    if ((parts.length === 2 || (parts.length === 4
+      && parts[2]?.toLowerCase() === 'applications'
+      && parts[3]?.toLowerCase() === 'new'))
+      && parts[0]?.toLowerCase() === 'jobs') {
+      const postingId = parts[1]?.match(/^(\d+)(?:-[^/]+)?$/)?.[1];
+      if (postingId) return providerPosting('teamtailor', teamtailorTenant, postingId);
+    }
+    return null;
+  }
+  const personioTenant = host.match(/^([a-z0-9-]+)\.jobs\.personio\.(?:de|com)$/)?.[1];
+  if (personioTenant) {
+    const posting = url.pathname.match(/^\/job\/(\d+)(?:\/apply)?\/?$/i);
+    return posting ? providerPosting('personio', personioTenant, posting[1]) : null;
+  }
+  const pinpointTenant = host.match(/^([a-z0-9-]+)\.pinpointhq\.com$/)?.[1];
+  if (pinpointTenant && pinpointTenant !== 'www') {
+    const postingAnchor = parts[0]?.toLowerCase() === 'postings'
+      ? 0
+      : (/^[a-z]{2}$/i.test(parts[0] ?? '') && parts[1]?.toLowerCase() === 'postings' ? 1 : -1);
+    if (postingAnchor >= 0) {
+      const postingId = parts[postingAnchor + 1];
+      const suffix = parts.slice(postingAnchor + 2);
+      const knownSuffix = suffix.length === 0
+        || (suffix.length === 2
+          && suffix[0]?.toLowerCase() === 'applications'
+          && suffix[1]?.toLowerCase() === 'new');
+      if (knownSuffix && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(postingId ?? '')) {
+        return providerPosting('pinpoint', pinpointTenant, postingId);
+      }
+    }
+    return null;
+  }
+  if (host === 'www.comeet.com' || host === 'www.comeet.co') {
+    const listing = host === 'www.comeet.com'
+      && parts.length === 5
+      && parts[0]?.toLowerCase() === 'jobs';
+    const application = host === 'www.comeet.co'
+      && parts.length === 4
+      && parts[0]?.toLowerCase() === 'jobs'
+      && parts[3]?.toLowerCase() === 'apply';
+    if (listing && /^[a-z0-9]+\.[a-z0-9.]+$/i.test(parts[2] ?? '') && /^[a-z0-9]+\.[a-z0-9.-]+$/i.test(parts[4] ?? '')) {
+      return providerPosting('comeet', parts[2], parts[4]);
+    }
+    if (application && /^[a-z0-9]+\.[a-z0-9.]+$/i.test(parts[1] ?? '') && /^[a-z0-9]+\.[a-z0-9.-]+$/i.test(parts[2] ?? '')) {
+      return providerPosting('comeet', parts[1], parts[2]);
+    }
+    return null;
+  }
+  const zohoTenant = host.match(/^([a-z0-9-]+)\.zohorecruit\.(?:com|eu|in)$/)?.[1];
+  if (zohoTenant) {
+    const posting = url.pathname.match(/^\/jobs\/Careers\/(\d+)\/[^/]+\/?$/i);
+    return posting ? providerPosting('zoho_recruit', zohoTenant, posting[1]) : null;
+  }
+  const bullhornTenant = host.match(/^([a-z0-9-]+)\.bullhornstaffing\.com$/)?.[1];
+  if (bullhornTenant) {
+    const posting = url.pathname.match(/^\/job\/(\d+)(?:\/apply)?\/?$/i);
+    return posting ? providerPosting('bullhorn', bullhornTenant, posting[1]) : null;
+  }
+  if (host === 'www.indeed.com' || host === 'indeed.com') {
+    const jobId = url.searchParams.get('jk');
+    return /^[a-z0-9]+$/i.test(jobId ?? '') ? providerPosting('indeed', 'indeed', jobId ?? undefined) : null;
+  }
+  if (host === 'www.linkedin.com') {
+    const posting = url.pathname.match(/^\/jobs\/view\/(\d+)\/?$/i);
+    return posting ? providerPosting('linkedin', 'linkedin', posting[1]) : null;
+  }
+  if (host === 'www.ziprecruiter.com' || host === 'ziprecruiter.com') {
+    const jobId = url.searchParams.get('jid');
+    return uuid.test(jobId ?? '') ? providerPosting('ziprecruiter', 'ziprecruiter', jobId ?? undefined) : null;
+  }
+  if (host === 'wellfound.com' || host === 'www.wellfound.com') {
+    const posting = url.pathname.match(/^\/jobs\/(\d+)(?:-[^/]+)?\/?$/i);
+    return posting ? providerPosting('wellfound', 'wellfound', posting[1]) : null;
+  }
+  if (host === 'app.joinhandshake.com') {
+    const posting = url.pathname.match(/^\/(?:stu\/)?jobs\/(\d+)\/?$/i);
+    return posting ? providerPosting('handshake', 'handshake', posting[1]) : null;
+  }
   return null;
+}
+
+/**
+ * Keep only public provider fields needed to reproduce a posting identity. Applicant tokens,
+ * tracking parameters, fragments, and URL credentials are never returned.
+ */
+export function canonicalPublicPostingUrl(rawUrl: string | undefined): string | null {
+  if (!rawUrl) return null;
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return null;
+  }
+  if ((url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password) return null;
+  const greenhouse = greenhousePostingFromUrl(rawUrl);
+  if (greenhouse) {
+    return `https://boards.greenhouse.io/${encodeURIComponent(greenhouse.boardToken)}/jobs/${greenhouse.jobId}`;
+  }
+  const posting = genericKnownPosting(rawUrl);
+  const allowedQueryNames = (() => {
+    if (!posting) return [] as string[];
+    if (posting.provider === 'oracle_taleo') return ['job'];
+    if (posting.provider === 'sap_successfactors') {
+      const jobKey = ['jobId', 'career_job_req_id', 'job_application']
+        .find((key) => url.searchParams.has(key));
+      return [...(jobKey ? [jobKey] : []), 'company'];
+    }
+    if (posting.provider === 'adp') {
+      if (url.hostname.toLowerCase() === 'myjobs.adp.com') return ['reqId'];
+      const companyKey = url.searchParams.has('cid') ? 'cid' : 'company';
+      return ['jobId', companyKey];
+    }
+    if (posting.provider === 'ukg') {
+      return url.hostname.toLowerCase() === 'recruiting.ultipro.com'
+        ? ['opportunityId']
+        : ['jobId'];
+    }
+    if (posting.provider === 'indeed') return ['jk'];
+    if (posting.provider === 'ziprecruiter') return ['jid'];
+    return [] as string[];
+  })();
+  const retained = allowedQueryNames
+    .map((name) => [name, url.searchParams.get(name)] as const)
+    .filter((entry): entry is readonly [string, string] => entry[1] !== null);
+  url.search = '';
+  for (const [name, value] of retained) url.searchParams.set(name, value);
+  url.hash = '';
+  return url.toString();
 }
 
 export function configuredAtsSubmissionChannels(env: NodeJS.ProcessEnv = process.env): ConfiguredChannel[] {

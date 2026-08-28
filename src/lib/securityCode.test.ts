@@ -442,11 +442,17 @@ test('the first managed run of a code finish is an application submit with no co
   // to scrape a mailbox: without a live token there is no second half to enter a code into. The
   // options themselves are asserted in browserbase.test.ts, against the runner's own rule for when
   // a continuation is offered, rather than by matching a literal that can move.
-  assert.match(firstRun, /managedApplicationSubmitOptions\(SECURITY_CODE_CONTINUATION_TTL_SECONDS\)/);
-  assert.deepEqual(managedApplicationSubmitOptions(180), {
+  assert.match(firstRun, /managedApplicationSubmitOptions\(\s*SECURITY_CODE_CONTINUATION_TTL_SECONDS,\s*managedSubmissionAttempt/);
+  const submissionAttempt = {
+    runId: '11111111-1111-4111-8111-111111111111',
+    claimId: '22222222-2222-4222-8222-222222222222',
+    executionId: '33333333-3333-4333-8333-333333333333',
+  };
+  assert.deepEqual(managedApplicationSubmitOptions(180, submissionAttempt), {
     allowSubmit: true,
     requestContinuation: true,
     continuationTtlSeconds: 180,
+    submissionAttempt,
   });
 });
 
@@ -489,7 +495,13 @@ test('a code finish is only recorded as submitted when the code was accepted AND
   // Both, not either. The challenge control being gone is not a receipt: Greenhouse unmounts it on
   // any re-render of the form, and it unmounts the whole form on success.
   assert.match(body, /codeOutcome !== 'accepted' \|\| verdict\.kind !== 'confirmed'/);
-  assert.match(body, /unverifiedSubmissionPatch/);
+  assert.match(body, /recordManagedAuthorizedAttemptUnverified\(row, attemptBinding/);
+  const unresolvedHelper = source.slice(
+    source.indexOf('export async function recordManagedAuthorizedAttemptUnverified('),
+    source.indexOf('export async function recordManagedSecurityCodeContinuationUnverified('),
+  );
+  assert.match(unresolvedHelper, /lockSubmissionAttemptUser\(tx, row\.user_id\)/);
+  assert.match(unresolvedHelper, /unverifiedSubmissionPatch\(latestReview/);
   // The attempt records what the runner actually said. 'accepted' used to be written here as a
   // literal, on every code run that got this far, whatever the runner reported.
   assert.match(body, /receiptResult\.securityCodeAttempt\?\.outcome/);
@@ -539,14 +551,14 @@ test('the duplicate gate refuses without demoting a security-code packet either'
      the security-code packet the same way or they drift apart, and the one that drifts is the one
      that quietly reopens the ordinary submit path on an application an employer already holds. */
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const start = source.indexOf("if (duplicate.kind === 'duplicate')");
+  const start = source.indexOf("if (duplicate.kind !== 'clear')");
   assert.ok(start > 0, 'the duplicate gate must still be there');
   const gate = source.slice(start, source.indexOf('const claimedRow = await claimSubmission', start));
   assert.match(gate, /finishingSecurityCode \? 'awaiting_security_code' : 'needs_attention'/);
   assert.match(gate, /Boolean\(options\.securityCode\) && Boolean\(current\.security_code\)/);
   // The duplicate finding is still reported. Refusing quietly would be its own defect.
   assert.match(gate, /duplicate\.reason/);
-  assert.match(gate, /'security_code', 'duplicate_application'/);
+  assert.match(gate, /'security_code', duplicate\.kind === 'duplicate'/);
 });
 
 test('nothing but the code endpoint can move a packet out of the waiting state', async () => {
@@ -570,19 +582,23 @@ test('a security-code challenge is persisted before any receipt is parsed', asyn
   const managedStart = source.indexOf('const challengeCandidate = readManagedSecurityCodeChallenge(receiptResult);');
   assert.ok(managedStart > 0, 'the managed result must inspect the challenge');
   const challengeBranch = source.indexOf('if (challenge)', managedStart);
-  const awaitingWrite = source.indexOf("status: 'awaiting_security_code'", challengeBranch);
+  const unresolvedWrite = source.indexOf(
+    'await recordManagedAuthorizedAttemptUnverified(row, attemptBinding',
+    challengeBranch,
+  );
   const receiptRead = source.indexOf('readManagedReceipt(receiptResult)', managedStart);
   assert.ok(challengeBranch > managedStart);
-  assert.ok(awaitingWrite > challengeBranch);
-  assert.ok(receiptRead > awaitingWrite, 'receipt parsing must happen only after the challenge branch returns');
+  assert.ok(unresolvedWrite > challengeBranch);
+  assert.ok(receiptRead > unresolvedWrite, 'receipt parsing must happen only after the challenge branch returns');
   const challengeWrite = source.slice(challengeBranch, receiptRead);
+  assert.match(challengeWrite, /attentionCategories: \['security_code', 'unverified_submission'\]/);
   assert.match(challengeWrite, /verification: verification\.status === 'not_needed'/);
   assert.match(challengeWrite, /claimedReview\.verification \?\? verification/);
 });
 
 test('automatic verification records one remote managed continuation without exposing its token', async () => {
   const source = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  const start = source.indexOf('const continuationEvidence = continuationIsLive');
+  const start = source.indexOf('const continuationIsLive = typeof continuationToken');
   const end = source.indexOf('if (!receiptEvidenceResult.screenshot)', start);
   assert.ok(start > 0 && end > start);
   const continuation = source.slice(start, end);
@@ -593,7 +609,12 @@ test('automatic verification records one remote managed continuation without exp
   // where buildManagedVerificationActions was ten - and it is the shape whose selector, chooser
   // policy and contract version the runner validates field by field.
   assert.match(continuation, /const codeActions = securityCodeContinuationActions\(initialActions, prepared\.code, result\.url\) \?\? prepared\.actions/);
-  assert.match(continuation, /receiptResult = await continueManagedBrowser\(continuationToken, codeActions\)/);
+  assert.match(continuation, /const continuationRequestBudget = startManagedBrowserRequestBudget\(/);
+  assert.match(continuation, /continuationAuthorization = await assertManagedSecurityCodeContinuationBoundaryClear\(/);
+  assert.match(continuation, /receiptResult = await continueManagedBrowser\(continuationToken, codeActions, \{/);
+  assert.match(continuation, /requestBudget: continuationRequestBudget/);
+  assert.match(continuation, /providerDeadlineAt: continuationAuthorization\.providerDeadlineAt/);
+  assert.match(continuation, /submissionAttempt: successfulSubmissionAttempt/);
   assert.match(continuation, /continuation_resumed: true/);
   assert.doesNotMatch(continuation, /continuation_token:/i);
   const receipt = source.slice(end, source.indexOf("fastify.log.info({ applicationId: row.id }", end));
@@ -641,7 +662,7 @@ test('an already-held claim cannot bypass the submit claim checks unless it is c
     source.indexOf('async function claimSubmission('),
     source.indexOf('async function claimSecurityCodeSubmission('),
   );
-  assert.match(claimHelper, /if \(alreadyHeld\) return submissionClaimIsHeld\(current\) \? row : null/);
+  assert.match(claimHelper, /if \(alreadyHeld\) \{[\s\S]*?if \(!submissionClaimIsHeld\(current\)\) return null;[\s\S]*?persistedRunnerAttemptBinding\(row, current!\)/);
   const claimUse = source.slice(
     source.indexOf('const claimedRow = await claimSubmission'),
     source.indexOf('let claimedReview = readApplicationReview', source.indexOf('const claimedRow = await claimSubmission')),

@@ -821,7 +821,7 @@ describe('the price of a repair is real and is stated in the header', () => {
 
   /* THE PACKET BECOMES UNSENDABLE UNTIL IT IS REGENERATED, and the before/after below is the whole
      shape of the defect in two assertions.
-     
+
      A packet generated against a form has NO lead_alignment: resumeSpec stores null rather than
      "fabricating a citation from boilerplate or form labels", and leadAlignmentIssues answers the
      empty array for "no alignment, and the posting states no ask" - it calls that unscoreable job

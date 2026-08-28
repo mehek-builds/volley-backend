@@ -20,10 +20,64 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync('src/routes/applications.ts', 'utf8');
+const passiveSubmissionRoute = source.slice(
+  source.indexOf("'/applications/:id/submission',"),
+  source.indexOf("'/applications/:id/submission/self-submit-start'"),
+);
+const selfSubmitStartRoute = source.slice(
+  source.indexOf("'/applications/:id/submission/self-submit-start'"),
+  source.indexOf("'/applications/:id/submission/handoff-complete'"),
+);
 const route = source.slice(
   source.indexOf("'/applications/:id/submission/self-submitted'"),
   source.indexOf("'/applications/:id/submission/approve'"),
 );
+
+test('passive submission reads never reserve or authorize an employer attempt', () => {
+  assert.doesNotMatch(passiveSubmissionRoute, /reserveAttendedManualAttempt/);
+  assert.doesNotMatch(passiveSubmissionRoute, /finalApplicationBoundaryGate/);
+  assert.doesNotMatch(passiveSubmissionRoute, /appendApplicationAttemptFact|handoff_url/);
+});
+
+test('passive reads recover only the exact already-authorized manual attempt id', () => {
+  assert.match(passiveSubmissionRoute, /retrySafety\.attemptId === claimedAttemptId/);
+  assert.match(passiveSubmissionRoute, /retrySafety\.reason === 'boundary_authorized'/);
+  assert.match(passiveSubmissionRoute, /attendedManualAttemptBinding\(row, claimedAttemptId\)/);
+  assert.match(passiveSubmissionRoute, /attendedManualAttemptMatchesCurrent\(row, review, binding\)/);
+  assert.match(passiveSubmissionRoute, /retrySafety\.leaseId === authorization\.leaseId/);
+  assert.match(passiveSubmissionRoute, /manual_handoff_resume_available: recoverableManualBoundary\?\.active === true/);
+  assert.match(passiveSubmissionRoute, /manual_attempt_id: recoverableManualBoundary\.attemptId/);
+  assert.match(passiveSubmissionRoute, /boundary_lease_id: recoverableManualBoundary\.leaseId/);
+  assert.match(passiveSubmissionRoute, /boundary_activation_id: recoverableManualBoundary\.activationId/);
+  assert.match(passiveSubmissionRoute, /review: passiveSubmissionReview\(review\)/);
+  assert.doesNotMatch(passiveSubmissionRoute, /portal_url: portalUrl/);
+  assert.doesNotMatch(passiveSubmissionRoute, /manual_handoff:\s*\{|url,|portal_url:\s*review\.portal_url/);
+});
+
+test('a user-pressed self-submit start owns reservation and the final duplicate gate', () => {
+  assert.match(selfSubmitStartRoute, /preHandler: requireAuth/);
+  assert.match(selfSubmitStartRoute, /attendedBoundaryRequestSchema\.safeParse\([\s\S]*request\.body === undefined \? \{\} : request\.body/);
+  assert.match(selfSubmitStartRoute, /const replay = attendedBoundaryReplay\(parsedBoundaryRequest\.data\)/);
+  assert.match(selfSubmitStartRoute, /review = await repairReviewPortalFromMonitoredJob\(row, review\)/);
+  assert.match(selfSubmitStartRoute, /documentAsksLitosCannotResolve/);
+  assert.match(selfSubmitStartRoute, /reserveAttendedManualAttempt/);
+  assert.match(selfSubmitStartRoute, /finalApplicationBoundaryGate/);
+  assert.match(selfSubmitStartRoute, /self-submit-start-final-duplicate-recheck/);
+  assert.match(selfSubmitStartRoute, /replay,/);
+  assert.match(selfSubmitStartRoute, /manual_attempt_id: reservation\.binding\.attemptId/);
+  assert.match(selfSubmitStartRoute, /boundary_lease_id: finalized\.authorization\.leaseId/);
+  assert.match(selfSubmitStartRoute, /boundary_activation_id: finalized\.authorization\.activationId/);
+  assert.match(selfSubmitStartRoute, /manual_handoff_resume_available: true/);
+  assert.match(selfSubmitStartRoute, /replay: boundaryGate\.replay/);
+  assert.match(selfSubmitStartRoute, /finalizeAttendedHandoffCapability\(\{/);
+  assert.match(selfSubmitStartRoute, /attended_handoff_capability: finalized\.attendedHandoffCapability/);
+  assert.match(selfSubmitStartRoute, /portal_url: finalized\.url/);
+});
+
+test('attended replay input is an all-or-none strict authorization tuple', () => {
+  assert.match(source, /const attendedBoundaryReplaySchema = z\.object\(\{[\s\S]*attempt_id: z\.string\(\)\.uuid\(\)[\s\S]*boundary_lease_id: z\.string\(\)\.uuid\(\)[\s\S]*boundary_activation_id: z\.string\(\)\.uuid\(\)[\s\S]*\}\)\.strict\(\)/);
+  assert.match(source, /const attendedBoundaryRequestSchema = z\.union\(\[[\s\S]*z\.object\(\{\}\)\.strict\(\)[\s\S]*attendedBoundaryReplaySchema/);
+});
 
 test('the exit is authenticated and owner-scoped, like every other route in this file', () => {
   /* There is no global auth hook and no auth decorator in this app, so a route declared without a

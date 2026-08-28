@@ -11,8 +11,13 @@ test('preparation and final submission each have an atomic database claim', asyn
 
 test('post-click failures retain the claimed row and become uncertain attention', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
-  assert.match(runner, /const latest = await db\.select\(\)\.from\(generated_resumes\)/);
-  assert.match(runner, /await fail\(latest\[0\] \?\? activeRow, error\)/);
+  const processStart = runner.indexOf('export async function processSubmissionApplication(');
+  const processEnd = runner.indexOf('\nexport async function submissionRunnerRoutes', processStart);
+  assert.ok(processStart >= 0 && processEnd > processStart);
+  const process = runner.slice(processStart, processEnd);
+  assert.match(process, /await fail\(activeRow, error\)/);
+  assert.doesNotMatch(process, /const latest = await db\.select/);
+  assert.match(runner, /error instanceof SubmissionExecutionError \? error\.actedOnRow : row/);
   /* The intent, not the formatting. This asserted the exact one-line ternary and broke when a
      third stop reason (NoSubmitControlError) was added and the expression wrapped. What matters is
      that an uncertain-after-claim failure still lands on needs_attention rather than failed. */

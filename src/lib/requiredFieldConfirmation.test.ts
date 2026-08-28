@@ -33,6 +33,11 @@ import {
 
 const FINAL_CHOOSER_URL = 'https://apply.workable.com/example/j/ABC123/';
 const FINAL_CHOOSER_SCREENSHOT = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+const MANAGED_SUBMISSION_ATTEMPT = Object.freeze({
+  runId: '11111111-1111-4111-8111-111111111111',
+  claimId: '22222222-2222-4222-8222-222222222222',
+  executionId: '33333333-3333-4333-8333-333333333333',
+});
 
 function finalChooserNoClick(
   outcome: 'no_submit_control' | 'ambiguous_submit' = 'no_submit_control',
@@ -946,7 +951,7 @@ test('managed wire contract sends one bounded confirmation action with its durab
   const previousFetch = globalThis.fetch;
   process.env.STRATUS_API_KEY = 'private-key';
   process.env.STRATUS_BASE_URL = 'https://stratus.example';
-  let body: { actions?: Array<Record<string, unknown>> } = {};
+  let body: { actions?: Array<Record<string, unknown>>; submissionAttempt?: unknown } = {};
   globalThis.fetch = (async (_input, init) => {
     body = JSON.parse(String(init?.body)) as typeof body;
     return new Response(JSON.stringify({
@@ -954,6 +959,7 @@ test('managed wire contract sends one bounded confirmation action with its durab
         title: 'Complete',
         url: 'https://portal.example/complete',
         text: 'Thank you',
+        submissionAttempt: body.submissionAttempt,
         requiredFieldConfirmation: {
           version: 2,
           status: 'confirmed',
@@ -994,7 +1000,11 @@ test('managed wire contract sends one bounded confirmation action with its durab
       contractVersion: 2,
       submitKind: 'application',
       chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
-    }], { allowSubmit: true });
+    }], {
+      allowSubmit: true,
+      submissionAttempt: MANAGED_SUBMISSION_ATTEMPT,
+      providerDeadlineAt: new Date(Date.now() + 4 * 60 * 1_000).toISOString(),
+    });
     assert.deepEqual(body.actions, [{
       type: 'confirmAndSubmit',
       selector: MANAGED_FINAL_SUBMIT_SELECTOR,
@@ -1100,9 +1110,9 @@ test('submission runner requires confirmation proof before any receipt can be re
  */
 test('no continuation may carry a code that came from outside the run', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  assert.equal((source.match(/continueManagedBrowser\(continuationToken, codeActions\)/g) ?? []).length, 1,
+  assert.equal((source.match(/continueManagedBrowser\(continuationToken, codeActions, \{/g) ?? []).length, 1,
     'one held verification session, one code answer: a second code call site would mean a second submit');
-  assert.equal((source.match(/continueManagedBrowser\(continuationToken, \[\], \{ screenshot: true \}\)/g) ?? []).length, 1,
+  assert.equal((source.match(/continueManagedBrowser\(continuationToken, \[\], \{\s*screenshot: true,/g) ?? []).length, 1,
     'the only other continuation is a read-only receipt observation with no actions');
   // The supplied code survives in exactly one place, and it is not an action list.
   const branch = source.indexOf('if (options.securityCode && initialChallenge) {');
@@ -1114,7 +1124,7 @@ test('no continuation may carry a code that came from outside the run', () => {
 
 test('automatic security-code continuation validates its own atomic confirmation receipt', () => {
   const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
-  const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions)');
+  const continuation = source.indexOf('receiptResult = await continueManagedBrowser(continuationToken, codeActions, {');
   const continuationBarrier = source.indexOf("assertManagedRequiredFieldsConfirmed(receiptResult, 'verification')", continuation);
   const receipt = source.indexOf("const receipt = verdict.kind === 'confirmed'", continuation);
   assert.ok(continuation >= 0);

@@ -5,6 +5,19 @@ import { submitRequestDisposition } from './submissionSafety';
 export type ExtensionAuthorization = 'standing_consent' | 'user_initiated';
 export type ExtensionOutcome = 'confirmed' | 'failed' | 'unknown' | 'cancelled';
 
+export function extensionOutcomeClaimDisposition(
+  review: ApplicationReviewState,
+  claimId: string,
+  outcome: ExtensionOutcome,
+): 'active' | 'replay_unverified' | 'promote_confirmed' | 'stale' {
+  if (review.submission_claim_id !== claimId) return 'stale';
+  if (review.status === 'submitting') return 'active';
+  const unresolved = review.status === 'needs_attention'
+    && Boolean(review.unverified_submission && !review.unverified_submission.resolution);
+  if (!unresolved) return 'stale';
+  return outcome === 'confirmed' ? 'promote_confirmed' : 'replay_unverified';
+}
+
 export function isSafeExtensionReceiptUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -88,7 +101,7 @@ export function canStartExtensionSubmission(
 export function extensionOutcomePatch(
   outcome: ExtensionOutcome,
   now: string,
-  evidence: { confirmationText?: string; finalUrl: string },
+  evidence: { confirmationText?: string; finalUrl: string; submissionRunId?: string },
 ): Partial<ApplicationReviewState> {
   if (outcome === 'confirmed') {
     return {
@@ -104,28 +117,28 @@ export function extensionOutcomePatch(
       },
     };
   }
-  if (outcome === 'failed') {
-    return {
-      status: 'failed',
-      submission_error: evidence.confirmationText ?? 'The company rejected the submission.',
-      attention_reason: undefined,
-      submission_claimed_at: undefined,
-      submission_claim_id: undefined,
-    };
-  }
-  if (outcome === 'cancelled') {
-    return {
-      status: 'ready_to_submit',
-      submission_error: undefined,
-      attention_reason: undefined,
-      submission_claimed_at: undefined,
-      submission_claim_id: undefined,
-      submission_authorization: undefined,
-    };
-  }
+  /* A client-side label is not no-click proof. `failed` can be reported after the employer accepted
+   * the request but before the extension read the receipt, and `cancelled` does not currently carry
+   * a typed press checkpoint. Releasing either claim would make the ordinary retry path capable of
+   * sending a duplicate. Treat every non-confirmed outcome as the same unresolved external side
+   * effect until the applicant resolves this exact attempt. */
+  const detail = outcome === 'failed'
+    ? 'The extension reported a failure after this application was reserved, but Litos cannot prove whether the employer received it.'
+    : outcome === 'cancelled'
+      ? 'The extension reported that this application was cancelled, but it did not provide proof that Send was never pressed.'
+      : 'Litos clicked Submit but could not verify the employer confirmation.';
   return {
     status: 'needs_attention',
-    attention_reason: 'Litos clicked Submit but could not verify the employer confirmation. Check the portal or your email before trying again.',
-    submission_error: undefined,
+    submission_attempted_at: now,
+    unverified_submission: {
+      at: now,
+      cause: 'no_confirmation_state',
+      portal_url: evidence.finalUrl,
+      ...(evidence.submissionRunId ? { submission_run_id: evidence.submissionRunId } : {}),
+    },
+    attention_reason: `${detail} Check the employer portal or your email before trying again.`,
+    submission_error: outcome === 'failed'
+      ? evidence.confirmationText ?? 'The extension could not verify the submission result.'
+      : undefined,
   };
 }

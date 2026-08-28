@@ -1,13 +1,37 @@
-import { and, eq, ne, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { generated_resumes } from '../db/schema';
 import {
-  ashbyPostingFromUrl,
-  genericKnownPosting,
-  greenhousePostingFromUrl,
-  leverPostingFromUrl,
-} from './atsSubmissionChannels';
-import { companyIdentity } from './companyIdentity';
+  canonicalExactPostingUrl,
+  loadPostingDistinctionCandidateByKey,
+  postingDistinctionApplies,
+  postingDistinctionCandidateIdentity,
+  postingDistinctionsForCurrentCandidate,
+  PostingDistinctionError,
+  type PostingDistinctionCandidateIdentity,
+  type PostingDistinctionRecord,
+} from './postingIdentityDistinction';
+import {
+  blockingSubmissionAttemptsForUser,
+  comparePostings,
+  freezePostingIdentity,
+  frozenPostingIdentityHasExactScope,
+  type BlockingSubmissionAttempt,
+  type FrozenPostingIdentity,
+  type PostingIdentity,
+  type PostingIdentityBasis,
+  type SubmissionAttemptLedgerExecutor,
+} from './submissionAttemptLedger';
+
+export {
+  atsPostingKey,
+  comparePostings,
+  freezePostingIdentity,
+  postingIdentity,
+  type FrozenPostingIdentity,
+  type PostingIdentity,
+  type PostingIdentityBasis,
+} from './submissionAttemptLedger';
 
 /**
  * WHAT "THE SAME POSTING" MEANS, and why it is three keys rather than one.
@@ -40,68 +64,13 @@ import { companyIdentity } from './companyIdentity';
  *     kept apart by every tier here, which is the case that stops this guard from refusing work
  *     the applicant is entitled to do.
  *
- * TIERS, most authoritative first. The first tier where BOTH sides have a value decides, and no
- * lower tier gets to overrule it. A union of all three would let the weakest key veto the
- * strongest, which is how two distinct requisitions with one shared title become one.
+ * TIERS, most authoritative first. Equality on an employer posting key, internal job id, exact
+ * public URL, or packet proves sameness. Difference is stricter: only distinct requisitions inside
+ * one trusted provider and tenant namespace prove it automatically. Everything else fails closed
+ * until the applicant records an exact pairwise distinction. A union of all tiers would let the
+ * weakest key veto the strongest, which is how two distinct requisitions with one shared title
+ * become one.
  */
-export type PostingIdentityBasis = 'ats_posting' | 'job_id' | 'company_role';
-
-export type PostingIdentity = {
-  /** "<provider>:<tenant>:<postingId>", parsed from the portal URL. The employer's own id. */
-  postingKey: string | null;
-  /** The monitored_jobs surrogate. Absent on extension packets and on anything pre-2026-07-28. */
-  jobId: string | null;
-  /** "<company>|<role>", both normalized. Last resort, and the only key a bare packet has. */
-  companyRole: string | null;
-};
-
-/** "<provider>:<tenant>:<postingId>" for a portal URL we can read, else null. */
-export function atsPostingKey(portalUrl: string | undefined | null): string | null {
-  const url = portalUrl?.trim();
-  if (!url) return null;
-  const greenhouse = greenhousePostingFromUrl(url);
-  if (greenhouse) return `greenhouse:${greenhouse.boardToken.toLowerCase()}:${greenhouse.jobId}`;
-  const ashby = ashbyPostingFromUrl(url);
-  if (ashby) return `ashby:${ashby.organization.toLowerCase()}:${ashby.jobPostingId.toLowerCase()}`;
-  const lever = leverPostingFromUrl(url);
-  if (lever) return `lever:${lever.site.toLowerCase()}:${lever.postingId.toLowerCase()}`;
-  const generic = genericKnownPosting(url);
-  if (generic) return `${generic.provider}:${generic.tenant.toLowerCase()}:${generic.jobId.toLowerCase()}`;
-  return null;
-}
-
-export function postingIdentity(jobContext: unknown, portalUrl: string | undefined | null): PostingIdentity {
-  const context = (jobContext && typeof jobContext === 'object' ? jobContext : {}) as Record<string, unknown>;
-  const rawJobId = context.job_id;
-  const jobId = typeof rawJobId === 'string' && rawJobId.trim() ? rawJobId.trim().toLowerCase() : null;
-  /* Both halves fold through lib/companyIdentity.ts, which is where this file's `normalizeText`
-     now lives. It is the one definition of "the same company" and it is shared with the
-     prior-application resolver, so the guard and the answer cannot come to disagree about which
-     employer a stored packet was for. */
-  const company = companyIdentity(context.company);
-  const role = companyIdentity(context.role);
-  return {
-    postingKey: atsPostingKey(portalUrl),
-    jobId,
-    companyRole: company && role ? `${company}|${role}` : null,
-  };
-}
-
-/**
- * Null is never "no match, carry on" silently. `unidentifiable` is returned when the two packets
- * share no tier at all, so the caller can log that the guard abstained rather than let an absent
- * job_id read as an all-clear.
- */
-export function comparePostings(a: PostingIdentity, b: PostingIdentity):
-  | { same: true; basis: PostingIdentityBasis }
-  | { same: false; basis: PostingIdentityBasis }
-  | { same: false; basis: null } {
-  if (a.postingKey && b.postingKey) return { same: a.postingKey === b.postingKey, basis: 'ats_posting' } as const;
-  if (a.jobId && b.jobId) return { same: a.jobId === b.jobId, basis: 'job_id' } as const;
-  if (a.companyRole && b.companyRole) return { same: a.companyRole === b.companyRole, basis: 'company_role' } as const;
-  return { same: false, basis: null };
-}
-
 export type DuplicateApplicationMatch = {
   application_id: string;
   company: string;
@@ -116,6 +85,7 @@ export type DuplicateApplicationMatch = {
    * owe the applicant different sentences, and telling her she has already applied when nobody
    * knows that is the kind of false certainty this codebase keeps having to delete. */
   certainty: 'submitted' | 'unverified';
+  tracker_available?: boolean;
 };
 
 const DATE_FORMAT = new Intl.DateTimeFormat('en-GB', {
@@ -160,11 +130,15 @@ export function duplicateApplicationReason(match: DuplicateApplicationMatch): st
   return `Not sent: you have already applied to ${role}${at}, ${submittedOn(match.submitted_at)}. `
     + 'Employers cap re-applications to the same posting and count a second one against you, and an '
     + 'application cannot be taken back once it is in. Nothing has been sent this time. '
-    + 'Open the earlier application in your Tracker to see where it stands.';
+    + (match.tracker_available === false
+      ? 'Review the confirmed duplicate-risk record in Litos to see where it stands.'
+      : 'Open the earlier application in your Tracker to see where it stands.');
 }
 
 export type SubmittedTwinRow = {
   id: string;
+  /** Immutable packet key when `id` is the newer canonical application key. */
+  packet_id?: string;
   job_context: unknown;
   portal_url: string | null;
   submitted_at: string | null;
@@ -175,6 +149,13 @@ export type SubmittedTwinRow = {
    * unverified_submission object and therefore no timestamp, but they carry the same duplicate-send
    * risk until the applicant resolves the earlier attempt. */
   legacy_unverified_attempt?: boolean;
+  /** Frozen on an immutable attempt fact. Legacy rows derive the same value from job_context. */
+  posting_identity?: FrozenPostingIdentity;
+  application_id?: string | null;
+  attempt_id?: string;
+  exact_url_scope?: boolean;
+  user_wide_scope?: boolean;
+  tracker_available?: boolean;
 };
 
 /* THE LEGACY UNVERIFIED MARKER.
@@ -236,8 +217,11 @@ function alreadyAtEmployer() {
  * added for. The residual risk is a run that clicked submit and then failed to record the receipt;
  * that one is already reported to the applicant as unverified, and it is hers to judge.
  */
-async function submittedApplications(userId: string, excludeId: string): Promise<SubmittedTwinRow[]> {
-  const rows = await db
+async function submittedApplications(
+  userId: string,
+  executor: Pick<typeof db, 'select'> = db,
+): Promise<SubmittedTwinRow[]> {
+  const rows = await executor
     .select({
       id: generated_resumes.id,
       job_context: generated_resumes.job_context,
@@ -255,10 +239,19 @@ async function submittedApplications(userId: string, excludeId: string): Promise
     .from(generated_resumes)
     .where(and(
       eq(generated_resumes.user_id, userId),
-      ne(generated_resumes.id, excludeId),
       alreadyAtEmployer(),
     ));
-  return rows;
+  return rows.map((row) => {
+    const identity = freezePostingIdentity(row.job_context, row.portal_url);
+    return {
+      ...row,
+      exact_url_scope: Boolean(
+        !identity.postingKey
+        && !identity.jobId
+        && frozenPostingIdentityHasExactScope(identity),
+      ),
+    };
+  });
 }
 
 /**
@@ -278,12 +271,16 @@ async function submittedApplications(userId: string, excludeId: string): Promise
  * speak for her - so they are not told apart.
  */
 export async function submittedApplicationCompanies(userId: string): Promise<string[]> {
-  const rows = await db
-    .select({ company: sql<string | null>`${generated_resumes.job_context}->>'company'` })
-    .from(generated_resumes)
-    .where(and(eq(generated_resumes.user_id, userId), alreadyAtEmployer()));
-  const companies = rows
-    .map((row) => row.company?.trim() ?? '')
+  const [rows, ledgerAttempts] = await Promise.all([
+    db.select({ company: sql<string | null>`${generated_resumes.job_context}->>'company'` })
+      .from(generated_resumes)
+      .where(and(eq(generated_resumes.user_id, userId), alreadyAtEmployer())),
+    blockingSubmissionAttemptsForUser(userId),
+  ]);
+  const companies = [
+    ...rows.map((row) => row.company?.trim() ?? ''),
+    ...ledgerAttempts.map((attempt) => attempt.postingIdentity.company.trim()),
+  ]
     .filter((company) => company.length > 0);
   /* SORTED, because this array's ORDER is hashed and its order used to be the query planner's.
    *
@@ -308,9 +305,93 @@ function companyRoleOf(jobContext: unknown): { company: string; role: string } {
 
 export type DuplicateApplicationVerdict =
   | { kind: 'clear' }
-  /** No tier had a value on both sides for any submitted row. The guard abstained; log it. */
-  | { kind: 'unidentifiable' }
+  /** Existing employer risk cannot be compared safely. This is a refusal, not an abstention. */
+  | {
+    kind: 'unidentifiable';
+    application_id: string;
+    reason: string;
+    prior_attempt_id: string | null;
+    prior_application_id: string | null;
+    prior_packet_id: string;
+    prior_company: string;
+    prior_role: string;
+    prior_portal_url: string | null;
+    prior_identity_exact: boolean;
+    candidate_application_id: string | null;
+    candidate_packet_id: string | null;
+    candidate_company: string;
+    candidate_role: string;
+    candidate_portal_url: string | null;
+    candidate_identity_version: PostingDistinctionCandidateIdentity['version'] | null;
+    candidate_identity_digest: string | null;
+  }
   | { kind: 'duplicate'; match: DuplicateApplicationMatch; reason: string };
+
+const UNIDENTIFIABLE_DUPLICATE_REASON = 'Not sent: Litos has an earlier application attempt whose '
+  + 'posting identity cannot be safely compared with this one. Sending now could create a duplicate. '
+  + 'Open the earlier application in your Tracker and resolve whether the employer received it first.';
+
+function ledgerTwin(attempt: BlockingSubmissionAttempt): SubmittedTwinRow {
+  const submittedAt = attempt.retrySafety.kind === 'blocked_confirmed'
+    ? attempt.retrySafety.confirmedAt
+    : null;
+  const unverifiedAt = attempt.retrySafety.kind === 'blocked_unverified'
+    ? attempt.retrySafety.at
+    : null;
+  const hasExactScope = frozenPostingIdentityHasExactScope(attempt.postingIdentity);
+  const isRootAutofillOrphan = attempt.applicationId === null
+    && !attempt.parentAttemptId
+    && attempt.operation === 'initial_submission'
+    && (attempt.source === 'chrome_extension' || attempt.source === 'legacy_backfill');
+  return {
+    id: attempt.applicationId ?? attempt.packetId,
+    packet_id: attempt.packetId,
+    application_id: attempt.applicationId,
+    attempt_id: attempt.attemptId,
+    job_context: {
+      company: attempt.postingIdentity.company,
+      role: attempt.postingIdentity.role,
+      ...(attempt.postingIdentity.jobId ? { job_id: attempt.postingIdentity.jobId } : {}),
+    },
+    portal_url: attempt.postingIdentity.portalUrl,
+    posting_identity: attempt.postingIdentity,
+    exact_url_scope: Boolean(
+      !attempt.postingIdentity.postingKey
+      && !attempt.postingIdentity.jobId
+      && hasExactScope,
+    ),
+    user_wide_scope: isRootAutofillOrphan && !hasExactScope,
+    tracker_available: Boolean(attempt.applicationId),
+    submitted_at: submittedAt,
+    unverified_at: unverifiedAt,
+  };
+}
+
+function compareExactAttributedUrls(left: string, right: string): 'same' | 'unknown' {
+  if (left === right) return 'same';
+  const leftUrl = new URL(left);
+  const rightUrl = new URL(right);
+  if (leftUrl.origin !== rightUrl.origin) return 'unknown';
+  const leftSegments = leftUrl.pathname.split('/').filter(Boolean);
+  const rightSegments = rightUrl.pathname.split('/').filter(Boolean);
+  if (leftSegments.length !== rightSegments.length || leftSegments.length === 0) return 'unknown';
+  if (leftSegments.slice(0, -1).join('/') !== rightSegments.slice(0, -1).join('/')) return 'unknown';
+  const leftKey = leftSegments.at(-1)!;
+  const rightKey = rightSegments.at(-1)!;
+  if (/^\d+$/.test(leftKey) && /^\d+$/.test(rightKey)) {
+    const normalizedLeft = leftKey.replace(/^0+(?=\d)/, '');
+    const normalizedRight = rightKey.replace(/^0+(?=\d)/, '');
+    /* Leading zeroes may be presentation padding or part of an opaque employer key. Either way,
+       treating two spellings of the same number as proven different would permit a duplicate. */
+    if (normalizedLeft === normalizedRight) return 'unknown';
+    return 'unknown';
+  }
+  const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (uuidPattern.test(leftKey) && uuidPattern.test(rightKey)) {
+    return leftKey.toLowerCase() === rightKey.toLowerCase() ? 'same' : 'unknown';
+  }
+  return 'unknown';
+}
 
 /**
  * THE GUARD. Refuse to send when this user already has a submitted application for this posting.
@@ -325,12 +406,63 @@ export async function duplicateApplicationVerdict(input: {
   applicationId: string;
   jobContext: unknown;
   portalUrl: string | undefined | null;
-}): Promise<DuplicateApplicationVerdict> {
-  return duplicateAmong(
+  /** Only for resuming the same already-open employer-boundary attempt. */
+  excludeAttemptId?: string;
+}, executor: SubmissionAttemptLedgerExecutor = db): Promise<DuplicateApplicationVerdict> {
+  const [attempts, legacyProjectionRows, distinctions] = await Promise.all([
+    blockingSubmissionAttemptsForUser(input.userId, { executor }),
+    submittedApplications(input.userId, executor),
+    postingDistinctionsForCurrentCandidate(
+      input.userId,
+      input.applicationId,
+      input.jobContext,
+      input.portalUrl,
+      executor,
+    ),
+  ]);
+  const allLedgerRows = attempts.map(ledgerTwin);
+  const ledgerRows = allLedgerRows.filter((row) => row.attempt_id !== input.excludeAttemptId);
+  const legacyRows = legacyProjectionRowsNotCoveredByLedger(legacyProjectionRows, allLedgerRows);
+  const verdict = duplicateAmong(
     input.jobContext,
     input.portalUrl,
-    await submittedApplications(input.userId, input.applicationId),
+    [...ledgerRows, ...legacyRows],
+    input.applicationId,
+    distinctions,
   );
+  if (verdict.kind !== 'unidentifiable') return verdict;
+  try {
+    const candidate = await loadPostingDistinctionCandidateByKey(
+      input.userId,
+      input.applicationId,
+      executor,
+    );
+    const candidateNames = companyRoleOf(candidate.jobContext);
+    return {
+      ...verdict,
+      candidate_application_id: candidate.applicationId,
+      candidate_packet_id: candidate.packetId,
+      candidate_company: candidateNames.company,
+      candidate_role: candidateNames.role,
+      candidate_portal_url: candidate.portalUrl,
+      candidate_identity_version: candidate.identity.version,
+      candidate_identity_digest: candidate.identity.digest,
+    };
+  } catch (error) {
+    if (error instanceof PostingDistinctionError) return verdict;
+    throw error;
+  }
+}
+
+/** Mutable packet projections must not reintroduce a second, weaker copy of ledger evidence. */
+export function legacyProjectionRowsNotCoveredByLedger(
+  legacyRows: readonly SubmittedTwinRow[],
+  ledgerRows: readonly SubmittedTwinRow[],
+): SubmittedTwinRow[] {
+  const coveredPacketIds = new Set(
+    ledgerRows.map((row) => row.packet_id).filter((packetId): packetId is string => Boolean(packetId)),
+  );
+  return legacyRows.filter((row) => !coveredPacketIds.has(row.id));
 }
 
 /**
@@ -342,14 +474,79 @@ export function duplicateAmong(
   jobContext: unknown,
   portalUrl: string | undefined | null,
   rows: readonly SubmittedTwinRow[],
+  applicationId?: string,
+  postingDistinctions: readonly PostingDistinctionRecord[] = [],
 ): DuplicateApplicationVerdict {
   const input = { jobContext, portalUrl };
-  const mine = postingIdentity(input.jobContext, input.portalUrl);
-  let comparedAnything = false;
+  const mine = freezePostingIdentity(input.jobContext, input.portalUrl);
+  const candidateIdentity = postingDistinctionCandidateIdentity(input.jobContext, input.portalUrl);
+  let unidentifiable: SubmittedTwinRow | null = null;
+  let unverifiedMatch: { match: DuplicateApplicationMatch; reason: string } | null = null;
   for (const row of rows) {
-    const theirs = postingIdentity(row.job_context, row.portal_url);
-    const verdict = comparePostings(mine, theirs);
-    if (verdict.basis !== null) comparedAnything = true;
+    const samePacket = Boolean(applicationId && (row.id === applicationId || row.packet_id === applicationId));
+    const priorIdentity = row.posting_identity ?? freezePostingIdentity(row.job_context, row.portal_url);
+    const exactUrlScope = Boolean(
+      row.exact_url_scope
+      || (!priorIdentity.postingKey
+        && !priorIdentity.jobId
+        && frozenPostingIdentityHasExactScope(priorIdentity)),
+    );
+    const verdict = (() => {
+      if (samePacket) return { same: true as const, basis: 'same_packet' as const };
+      if (row.user_wide_scope) return { same: false as const, basis: null };
+      const currentUrl = canonicalExactPostingUrl(input.portalUrl);
+      const priorUrl = canonicalExactPostingUrl(row.portal_url);
+      const urlComparison = currentUrl && priorUrl
+        ? compareExactAttributedUrls(currentUrl, priorUrl)
+        : 'unknown' as const;
+      if (mine.postingKey && priorIdentity.postingKey
+        && mine.postingKey === priorIdentity.postingKey) {
+        return { same: true as const, basis: 'ats_posting' as const };
+      }
+      if (mine.jobId && priorIdentity.jobId && mine.jobId === priorIdentity.jobId) {
+        return { same: true as const, basis: 'job_id' as const };
+      }
+      if (urlComparison === 'same') return { same: true as const, basis: 'portal_url' as const };
+      if (mine.postingKey || priorIdentity.postingKey) {
+        if (mine.postingKey && priorIdentity.postingKey) {
+          const strongComparison = comparePostings(mine, priorIdentity);
+          if (strongComparison.same || strongComparison.basis === 'ats_posting') return strongComparison;
+          return { same: false as const, basis: null };
+        }
+        return { same: false as const, basis: null };
+      }
+      if (mine.jobId || priorIdentity.jobId) {
+        if (mine.jobId && priorIdentity.jobId) {
+          return mine.jobId === priorIdentity.jobId
+            ? { same: true as const, basis: 'job_id' as const }
+            : { same: false as const, basis: null };
+        }
+        return { same: false as const, basis: null };
+      }
+      if (exactUrlScope) {
+        if (!currentUrl || !priorUrl) return { same: false as const, basis: null };
+        return { same: false as const, basis: null };
+      }
+      return comparePostings(mine, priorIdentity);
+    })();
+    if (verdict.basis === null) {
+      const repaired = Boolean(candidateIdentity && row.attempt_id && applicationId
+        && postingDistinctions.some((relation) => (
+          (relation.candidate_application_id === applicationId
+            || relation.candidate_packet_id === applicationId)
+          && postingDistinctionApplies({
+            relation,
+            priorAttemptId: row.attempt_id,
+            candidateApplicationId: relation.candidate_application_id,
+            candidatePacketId: relation.candidate_packet_id,
+            candidateIdentity,
+            priorIdentity,
+          })
+        )));
+      if (repaired) continue;
+      unidentifiable ??= row;
+      continue;
+    }
     if (!verdict.same) continue;
     const { company, role } = companyRoleOf(row.job_context);
     const mineNames = companyRoleOf(input.jobContext);
@@ -365,10 +562,36 @@ export function duplicateAmong(
       submitted_at: row.submitted_at ?? undefined,
       basis: verdict.basis,
       certainty,
+      ...(row.tracker_available === false ? { tracker_available: false } : {}),
     };
-    return { kind: 'duplicate', match, reason: duplicateApplicationReason(match) };
+    const reason = duplicateApplicationReason(match);
+    if (certainty === 'submitted') return { kind: 'duplicate', match, reason };
+    unverifiedMatch ??= { match, reason };
   }
-  if (rows.length > 0 && !comparedAnything) return { kind: 'unidentifiable' };
+  if (unverifiedMatch) return { kind: 'duplicate', ...unverifiedMatch };
+  if (unidentifiable) {
+    const priorNames = companyRoleOf(unidentifiable.job_context);
+    const priorExactUrl = canonicalExactPostingUrl(unidentifiable.portal_url);
+    return {
+      kind: 'unidentifiable',
+      application_id: unidentifiable.id,
+      reason: UNIDENTIFIABLE_DUPLICATE_REASON,
+      prior_attempt_id: unidentifiable.attempt_id ?? null,
+      prior_application_id: unidentifiable.application_id ?? null,
+      prior_packet_id: unidentifiable.packet_id ?? unidentifiable.id,
+      prior_company: priorNames.company,
+      prior_role: priorNames.role,
+      prior_portal_url: priorExactUrl,
+      prior_identity_exact: Boolean(priorExactUrl),
+      candidate_application_id: applicationId ?? null,
+      candidate_packet_id: applicationId ?? null,
+      candidate_company: companyRoleOf(input.jobContext).company,
+      candidate_role: companyRoleOf(input.jobContext).role,
+      candidate_portal_url: candidateIdentity?.portalUrl ?? null,
+      candidate_identity_version: candidateIdentity?.version ?? null,
+      candidate_identity_digest: candidateIdentity?.digest ?? null,
+    };
+  }
   return { kind: 'clear' };
 }
 
@@ -379,5 +602,32 @@ export function duplicateApplicationResponse(verdict: { match: DuplicateApplicat
     code: 'DUPLICATE_APPLICATION' as const,
     duplicate_of: verdict.match.application_id,
     matched_on: verdict.match.basis,
+  };
+}
+
+export function unidentifiableDuplicateApplicationResponse(
+  verdict: Extract<DuplicateApplicationVerdict, { kind: 'unidentifiable' }>,
+) {
+  return {
+    error: verdict.reason,
+    code: 'DUPLICATE_RISK_UNIDENTIFIABLE' as const,
+    duplicate_of: verdict.application_id,
+    matched_on: null,
+    resolution: {
+      prior_attempt_id: verdict.prior_attempt_id,
+      prior_application_id: verdict.prior_application_id,
+      prior_packet_id: verdict.prior_packet_id,
+      prior_company: verdict.prior_company,
+      prior_role: verdict.prior_role,
+      prior_portal_url: verdict.prior_portal_url,
+      prior_identity_exact: verdict.prior_identity_exact,
+      candidate_application_id: verdict.candidate_application_id,
+      candidate_packet_id: verdict.candidate_packet_id,
+      candidate_company: verdict.candidate_company,
+      candidate_role: verdict.candidate_role,
+      candidate_portal_url: verdict.candidate_portal_url,
+      candidate_identity_version: verdict.candidate_identity_version,
+      candidate_identity_digest: verdict.candidate_identity_digest,
+    },
   };
 }

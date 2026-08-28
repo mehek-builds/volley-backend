@@ -311,13 +311,16 @@ test('unsupported-portal email claims the exact verified packet before building 
   const exactClaim = handler.indexOf('sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`', verify);
   const packet = handler.indexOf('buildPacket(claimedRow, false, canonicalSubmittedQuestions)', exactClaim);
   const verifyPacket = handler.indexOf('transportVerifiedBuiltPacket(', packet);
+  const reserve = handler.indexOf("appendApplicationAttemptFact(attemptBinding, 'attempt_opened'", exactClaim);
+  const dispatchFact = handler.indexOf("appendApplicationAttemptFact(emailAttemptBinding, 'press_observed'", verifyPacket);
   const prepareEmail = handler.indexOf('prepareUnsupportedPortalApplicationEmail', exactClaim);
   const send = handler.indexOf('sendPreparedUnsupportedPortalApplicationEmail', exactClaim);
   assert.ok(verify > 0 && exactClaim > verify, 'the email claim must compare against the packet that passed verification');
-  assert.ok(packet > exactClaim && prepareEmail > packet && verifyPacket > prepareEmail && send > verifyPacket,
+  assert.ok(reserve > exactClaim && packet > reserve && prepareEmail > packet && verifyPacket > prepareEmail
+    && dispatchFact > verifyPacket && send > dispatchFact,
     'the exact claimed packet must be rebuilt, audit-verified, and only then sent to the employer');
   assert.match(handler,
-    /transportVerifiedBuiltPacket\([\s\S]{0,220}submitAudit\.audit,[\s\S]{0,120}canonicalSubmittedQuestions,[\s\S]{0,220}sendPreparedUnsupportedPortalApplicationEmail[\s\S]{0,180}'full'/,
+    /transportVerifiedBuiltPacket\([\s\S]*?submitAudit\.audit,[\s\S]*?canonicalSubmittedQuestions,[\s\S]*?appendApplicationAttemptFact\(emailAttemptBinding, 'press_observed'[\s\S]*?sendPreparedUnsupportedPortalApplicationEmail[\s\S]*?'full'/,
     'unsupported email must transport the exact object whose applicant snapshot and questions passed the audit');
 });
 
@@ -374,7 +377,12 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.match(applicationsRoute, /assessAtsSubmissionChannel\(review\.portal_url\)/);
   assert.doesNotMatch(applicationsRoute, /inArray\(career_page_sources\.ats_name,[\s\S]{0,80}AUTONOMOUS_PORTAL_FAMILIES/);
   assert.match(applicationsRoute, /sendPreparedUnsupportedPortalApplicationEmail/);
-  assert.match(applicationsRoute, /!isPortalSupported\(current\.portal_url\)[\s\S]{0,2600}sendPreparedUnsupportedPortalApplicationEmail/);
+  const unsupportedBranch = applicationsRoute.slice(
+    applicationsRoute.indexOf('if (current.portal_url && !isPortalSupported(current.portal_url))'),
+    applicationsRoute.indexOf("const controlledTest = process.env.LITOS_ENABLE_TEST_PORTAL"),
+  );
+  assert.match(unsupportedBranch, /sendPreparedUnsupportedPortalApplicationEmail/);
+  assert.match(unsupportedBranch, /appendApplicationAttemptFact\(emailAttemptBinding, 'press_observed'/);
   assert.doesNotMatch(applicationsRoute, /PORTAL_NOT_SUPPORTED/);
   const repairIndex = applicationsRoute.indexOf('repairReviewPortalFromMonitoredJob(row, current)');
   const guardIndex = applicationsRoute.indexOf('!isPortalSupported(current.portal_url)');
@@ -385,7 +393,8 @@ test('portal support is written at packet creation and unsupported portals use e
   assert.ok(browserConfigIndex > guardIndex, 'unsupported portal email fallback must not require a browser provider');
   assert.match(applicationsRoute, /pipeline_stage: 'applied'/);
   assert.match(applicationsRoute, /source: 'email_fallback'/);
-  assert.match(applicationsRoute, /status: 'failed'[\s\S]{0,900}UNSUPPORTED_PORTAL_EMAIL_UNAVAILABLE/);
+  assert.match(unsupportedBranch, /status: 'failed'/);
+  assert.match(unsupportedBranch, /UNSUPPORTED_PORTAL_EMAIL_UNAVAILABLE/);
   const failureStart = applicationsRoute.indexOf("Unsupported portal email fallback failed");
   const failureEnd = applicationsRoute.indexOf('const submittedAt', failureStart);
   assert.ok(failureStart > guardIndex, 'email fallback failure handling must be inside the unsupported branch');
@@ -396,7 +405,8 @@ test('portal support is written at packet creation and unsupported portals use e
      persist a failure with no stated cause. What matters is that the row lands on 'failed' through
      the shared merge, carrying a reason. */
   assert.match(failureBlock, /applyReviewPatch\([\s\S]{0,200}status: 'failed'/);
-  assert.match(failureBlock, /attention_reason: 'Litos could not email this application/);
+  assert.match(failureBlock, /attention_reason: 'Litos sent this application email but lost the delivery result/);
+  assert.match(failureBlock, /attention_reason: 'Litos stopped before sending this application email/);
   assert.match(failureBlock, /return reply\.status\(503\)\.send/);
   assert.doesNotMatch(failureBlock, /status: 'submitted'/);
   assert.doesNotMatch(failureBlock, /pipeline_stage: 'applied'/);

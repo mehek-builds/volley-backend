@@ -1085,7 +1085,11 @@ export type ApplicationReviewState = {
     completed_at?: string;
     runner?: 'stratus-managed';
     continuation_fingerprint?: string;
+    continuation_execution_fingerprint?: string;
     continuation_resumed?: boolean;
+    /** Database-clock window in which the one retained-session provider call may still be live. */
+    continuation_call_started_at?: string;
+    continuation_call_deadline_at?: string;
   };
   receipt?: {
     confirmation_text: string;

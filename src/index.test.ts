@@ -70,7 +70,7 @@ test('/v1/meta publishes the cacheable Litos client contract', async () => {
   const body = res.json();
   assert.equal(body.product.name, 'Litos');
   assert.equal(body.api.version, '1');
-  assert.equal(body.api.compatibility.extension.minimum, '0.4.4');
+  assert.equal(body.api.compatibility.extension.minimum, '0.6.2');
 });
 
 test('/health identifies the deployable service and revision contract', async () => {
@@ -205,6 +205,20 @@ test('submission cutover runs before auth and publishes only its effective confi
 
     const drainHealth = await drain.inject({ method: 'GET', url: '/health' });
     assert.deepEqual(drainHealth.json().submission_cutover, { mode: 'drain', config_valid: true });
+
+    /* THE LEDGER'S READINESS IS PART OF THE RELEASE'S STATE. This runtime reads four tables a
+     * hand-dispatched migration creates, and nothing runs that migration on deploy. Without this
+     * field a runtime that landed ahead of its migration answers a healthy 200 while the dashboard
+     * list 500s, which is the shape of the 2026-08-04 incident this endpoint was hardened against.
+     * Under test no migration has run, so the honest answer is "not ready", and it must never
+     * throw: a readiness probe that can take /health down with it is not a readiness probe. */
+    const ledger = drainHealth.json().submission_ledger;
+    assert.equal(ledger.ready, false, 'an unmigrated ledger must report itself unready');
+    assert.ok(['not_migrated', 'unreadable'].includes(ledger.reason), `unexpected reason ${ledger.reason}`);
+    // 200, or the 503 a degraded dependency already produces. The probe must not add a new way to
+    // fail: the migration workflow's own preflight accepts exactly these two.
+    assert.ok([200, 503].includes(drainHealth.statusCode),
+      `the readiness probe must not take the endpoint down (got ${drainHealth.statusCode})`);
 
     const invalidValue = 'invalid-value-must-not-be-echoed';
     const invalid = await appFor(invalidValue);
@@ -629,6 +643,67 @@ test('the website and the extension keep their allowlisted access', async () => 
   });
   assert.equal(ext.statusCode, 204);
   assert.equal(ext.headers['access-control-allow-origin'], EXT_ORIGIN);
+});
+
+test('extension capability is locked to 0.6.2 while stale clients can still report evidence', async () => {
+  const app = await getApp();
+  const staleHeaders = {
+    origin: EXT_ORIGIN,
+    'x-litos-client': 'extension',
+    'x-litos-version': '0.6.1',
+  };
+
+  const missing = await app.inject({ method: 'GET', url: '/profile', headers: { origin: EXT_ORIGIN } });
+  assert.equal(missing.statusCode, 426);
+  assert.deepEqual(missing.json(), {
+    error: 'Update the Litos extension to version 0.6.2 or newer, then close old application tabs and reopen them before continuing.',
+    code: 'extension_safety_update_required',
+    minimum_version: '0.6.2',
+  });
+  assert.equal(missing.headers['cache-control'], 'no-store');
+
+  const staleFill = await app.inject({ method: 'GET', url: '/profile', headers: staleHeaders });
+  assert.equal(staleFill.statusCode, 426);
+
+  const current = await app.inject({
+    method: 'GET',
+    url: '/profile',
+    headers: { ...staleHeaders, 'x-litos-version': '0.6.2' },
+  });
+  assert.equal(current.statusCode, 401, 'current extension requests pass the cutover and reach auth');
+
+  const meta = await app.inject({ method: 'GET', url: '/v1/meta', headers: staleHeaders });
+  assert.equal(meta.statusCode, 200);
+
+  const oldOutcome = await app.inject({
+    method: 'POST',
+    url: '/applications/00000000-0000-4000-8000-000000000001/manual-submission-outcome',
+    headers: staleHeaders,
+    payload: {},
+  });
+  assert.equal(oldOutcome.statusCode, 401, 'post-boundary evidence is not hidden behind the version gate');
+
+  const legacyAutofillEvidence = await app.inject({
+    method: 'POST',
+    url: '/autofill/event',
+    headers: staleHeaders,
+    payload: {},
+  });
+  assert.equal(
+    legacyAutofillEvidence.statusCode,
+    401,
+    'legacy submit telemetry reaches auth so its click evidence is not lost behind the version gate',
+  );
+
+  const legacyAutofillCapabilityShape = await app.inject({
+    method: 'GET',
+    url: '/autofill/event',
+    headers: staleHeaders,
+  });
+  assert.equal(legacyAutofillCapabilityShape.statusCode, 426, 'only the exact evidence write bypasses the gate');
+
+  const website = await app.inject({ method: 'GET', url: '/profile', headers: { origin: SITE_ORIGIN } });
+  assert.equal(website.statusCode, 401, 'web clients without extension headers remain unaffected');
 });
 
 test('the website checkout preflight permits the Idempotency-Key header', async () => {

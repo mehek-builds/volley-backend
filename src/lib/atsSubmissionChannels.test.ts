@@ -3,7 +3,9 @@ import test from 'node:test';
 import {
   assessAtsSubmissionChannel,
   ashbyPostingFromUrl,
+  canonicalPublicPostingUrl,
   configuredAtsSubmissionChannels,
+  genericKnownPosting,
   greenhousePostingFromUrl,
   leverPostingFromUrl,
   tryAtsSubmissionChannel,
@@ -42,6 +44,32 @@ test('parses Greenhouse board and job ids from supported job URLs', () => {
   assert.equal(greenhousePostingFromUrl('https://nuro.ai/careers?gh_jid=1234567'), null);
 });
 
+test('canonical public posting URLs preserve only validated provider identity fields', () => {
+  assert.equal(
+    canonicalPublicPostingUrl('https://boards.greenhouse.io/embed/job_app?for=postman&token=7654321&utm_source=secret'),
+    'https://boards.greenhouse.io/postman/jobs/7654321',
+  );
+  const queryIdentityCases = [
+    'https://acme.taleo.net/careersection/ext/jobdetail.ftl?job=456&utm_source=secret',
+    'https://career5.successfactors.eu/career?company=acme&career_job_req_id=789&tracking=secret',
+    'https://myjobs.adp.com/acme/cx/job-details/?reqId=12345&token=secret',
+    'https://recruiting.ultipro.com/ACM1000/JobBoard/11111111-1111-1111-1111-111111111111/OpportunityDetail?opportunityId=22222222-2222-2222-2222-222222222222&session=secret',
+    'https://www.indeed.com/viewjob?jk=abc123&utm_source=secret',
+    'https://www.ziprecruiter.com/jobs/example?jid=33333333-3333-3333-3333-333333333333&token=secret',
+  ];
+  for (const raw of queryIdentityCases) {
+    const canonical = canonicalPublicPostingUrl(raw);
+    assert.ok(canonical);
+    assert.deepEqual(genericKnownPosting(canonical), genericKnownPosting(raw));
+    assert.equal(canonical.includes('secret'), false);
+  }
+  assert.equal(
+    canonicalPublicPostingUrl('https://jobs.example.test/apply?token=secret#private'),
+    'https://jobs.example.test/apply',
+  );
+  assert.equal(canonicalPublicPostingUrl('https://user:pass@jobs.example.test/apply'), null);
+});
+
 test('parses Ashby organization and posting id from job URLs', () => {
   assert.deepEqual(ashbyPostingFromUrl('https://jobs.ashbyhq.com/fluency/f4436720-0c9a-44b1-b175-787bc0f8fa39'), {
     organization: 'fluency',
@@ -60,6 +88,132 @@ test('parses Lever site and posting ids from supported job URLs', () => {
     postingId: 'eu-123',
   });
   assert.equal(leverPostingFromUrl('https://jobs.example.com/acme/abc-123'), null);
+});
+
+test('known ATS identities keep listing and application routes equal while separating postings', () => {
+  const cases = [
+    {
+      provider: 'workday',
+      listing: 'https://acme.wd1.myworkdayjobs.com/en-US/External/job/Dubai/Product-Manager_JR123',
+      application: 'https://acme.wd1.myworkdayjobs.com/en-US/External/job/Dubai/Product-Manager_JR123/apply',
+      adjacent: 'https://acme.wd1.myworkdayjobs.com/en-US/External/job/Dubai/Product-Manager_JR124/apply',
+      jobId: 'JR123',
+    },
+    {
+      provider: 'icims',
+      listing: 'https://jobs-express.icims.com/jobs/48173/sales-associate/job',
+      application: 'https://jobs-express.icims.com/jobs/48173/sales-associate/login',
+      adjacent: 'https://jobs-express.icims.com/jobs/48174/sales-associate/login',
+      jobId: '48173',
+    },
+    {
+      provider: 'jobvite',
+      listing: 'https://jobs.jobvite.com/worldfirst/job/oknrAfws',
+      application: 'https://jobs.jobvite.com/worldfirst/job/oknrAfws/apply',
+      adjacent: 'https://jobs.jobvite.com/worldfirst/job/oknrAfwt/apply',
+      jobId: 'oknrAfws',
+    },
+    {
+      provider: 'recruitee',
+      listing: 'https://rebuy.recruitee.com/o/acquisition-manager-paid-search-pla-focused-mfx',
+      application: 'https://rebuy.recruitee.com/o/acquisition-manager-paid-search-pla-focused-mfx/c/new',
+      adjacent: 'https://rebuy.recruitee.com/o/senior-acquisition-manager/c/new',
+      jobId: 'acquisition-manager-paid-search-pla-focused-mfx',
+    },
+    {
+      provider: 'teamtailor',
+      listing: 'https://career.teamtailor.com/jobs/8124573-group-financial-controller',
+      application: 'https://career.teamtailor.com/jobs/8124573-group-financial-controller/applications/new',
+      adjacent: 'https://career.teamtailor.com/jobs/8124574-group-financial-controller/applications/new',
+      jobId: '8124573',
+    },
+    {
+      provider: 'pinpoint',
+      listing: 'https://discogsinc.pinpointhq.com/en/postings/5bccb603-bbe0-4e1f-8f92-d983f78f77a7',
+      application: 'https://discogsinc.pinpointhq.com/en/postings/5bccb603-bbe0-4e1f-8f92-d983f78f77a7/applications/new',
+      adjacent: 'https://discogsinc.pinpointhq.com/en/postings/6bccb603-bbe0-4e1f-8f92-d983f78f77a7/applications/new',
+      jobId: '5bccb603-bbe0-4e1f-8f92-d983f78f77a7',
+    },
+    {
+      provider: 'jazzhr',
+      listing: 'https://utilidata.applytojob.com/apply/jobs/details/VSeisrJblO',
+      application: 'https://utilidata.applytojob.com/apply/VSeisrJblO/software-engineer',
+      adjacent: 'https://utilidata.applytojob.com/apply/ZBfHaf2Nv9/software-engineer',
+      jobId: 'VSeisrJblO',
+    },
+    {
+      provider: 'paylocity',
+      listing: 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/123456/Product-Manager',
+      application: 'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/123456/Product-Manager',
+      adjacent: 'https://recruiting.paylocity.com/Recruiting/Jobs/Apply/123457/Product-Manager',
+      jobId: '123456',
+    },
+    {
+      provider: 'sap_successfactors',
+      listing: 'https://career5.successfactors.eu/career?career_job_req_id=123456&company=acme',
+      application: 'https://career5.successfactors.eu/sfcareer/jobreqcareer?jobId=123456&company=acme',
+      adjacent: 'https://career5.successfactors.eu/sfcareer/jobreqcareer?jobId=123457&company=acme',
+      jobId: '123456',
+    },
+    {
+      provider: 'adp',
+      listing: 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=ACME&jobId=123456',
+      application: 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?jobId=123456&cid=ACME&source=apply',
+      adjacent: 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=ACME&jobId=123457',
+      jobId: '123456',
+    },
+    {
+      provider: 'ukg',
+      listing: 'https://recruiting.ultipro.com/ACM1000/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9',
+      application: 'https://recruiting.ultipro.com/ACM1000/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?source=apply&opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9',
+      adjacent: 'https://recruiting.ultipro.com/ACM1000/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=4fc30c2a-e2b3-42e0-bcaf-7805f741c04a',
+      jobId: 'f6cd56f9-5b2f-4b53-9e86-2553b54524f9',
+    },
+    {
+      provider: 'personio',
+      listing: 'https://matrix42.jobs.personio.com/job/2663722',
+      application: 'https://matrix42.jobs.personio.com/job/2663722/apply?language=en',
+      adjacent: 'https://matrix42.jobs.personio.com/job/2663723/apply?language=en',
+      jobId: '2663722',
+    },
+    {
+      provider: 'comeet',
+      listing: 'https://www.comeet.com/jobs/gett/A0.002/application-security-lead/46.A6A',
+      application: 'https://www.comeet.co/jobs/A0.002/46.A6A/apply?token=public-token',
+      adjacent: 'https://www.comeet.co/jobs/A0.002/47.A6A/apply?token=public-token',
+      jobId: '46.A6A',
+    },
+  ] as const;
+
+  for (const fixture of cases) {
+    const listing = genericKnownPosting(fixture.listing);
+    const application = genericKnownPosting(fixture.application);
+    const adjacent = genericKnownPosting(fixture.adjacent);
+    assert.equal(listing?.provider, fixture.provider, fixture.listing);
+    assert.equal(listing?.jobId, fixture.jobId, fixture.listing);
+    assert.deepEqual(application, listing, `${fixture.provider} application route must retain listing identity`);
+    assert.equal(adjacent?.provider, fixture.provider, fixture.adjacent);
+    assert.notEqual(adjacent?.jobId, listing?.jobId, `${fixture.provider} must separate adjacent postings`);
+  }
+});
+
+test('known ATS identity parsing refuses unproven provider routes instead of keying control words', () => {
+  const unproven = [
+    'https://acme.wd1.myworkdayjobs.com/en-US/External/job/Dubai/product-manager/apply',
+    'https://jobs-express.icims.com/jobs/48173/sales-associate/apply',
+    'https://jobs.jobvite.com/worldfirst/jobs',
+    'https://rebuy.recruitee.com/o/product-manager/apply',
+    'https://career.teamtailor.com/jobs/product-manager/applications/new',
+    'https://discogsinc.pinpointhq.com/postings/abc123/applications/new',
+    'https://utilidata.applytojob.com/apply/jobs',
+    'https://recruiting.paylocity.com/Recruiting/Jobs/New/123456',
+    'https://career5.successfactors.eu/sfcareer/jobreqcareer?jobId=123456',
+    'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?jobId=123456',
+    'https://recruiting.ultipro.com/ACM1000/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail',
+    'https://matrix42.jobs.personio.com/job/new/apply',
+    'https://www.comeet.com/jobs/gett/A0.002/application-security-lead/apply',
+  ];
+  for (const url of unproven) assert.equal(genericKnownPosting(url), null, url);
 });
 
 test('channel config resolves only allowlisted employers with referenced secrets', () => {
@@ -111,26 +265,26 @@ test('recognizes the 30 common ATS and job-board families with explicit API avai
     ['workday', 'https://acme.wd1.myworkdayjobs.com/External/job/Seattle/Engineer_JR123'],
     ['icims', 'https://careers-acme.icims.com/jobs/1234/engineer/job'],
     ['bamboohr', 'https://acme.bamboohr.com/careers/123'],
-    ['jazzhr', 'https://acme.applytojob.com/apply/abc123/Engineer'],
+    ['jazzhr', 'https://acme.applytojob.com/apply/VSeisrJblO/Engineer'],
     ['paylocity', 'https://recruiting.paylocity.com/Recruiting/Jobs/Details/123'],
     ['rippling', 'https://jobs.rippling.com/acme/jobs/abc123'],
     ['breezy', 'https://jobs.breezy.hr/acme/jobs/abc123'],
     ['oracle_taleo', 'https://acme.taleo.net/careersection/ex/jobdetail.ftl?job=123'],
     ['sap_successfactors', 'https://acme.jobs2web.com/successfactors/job/Engineer/123'],
-    ['adp', 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?jobId=123'],
-    ['ukg', 'https://recruiting.ultipro.com/ACM1000/JobBoard/123'],
+    ['adp', 'https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=ACME&jobId=123'],
+    ['ukg', 'https://recruiting.ultipro.com/ACM1000/JobBoard/08eb8299-5b26-4208-adb7-897aa42c6959/OpportunityDetail?opportunityId=f6cd56f9-5b2f-4b53-9e86-2553b54524f9'],
     ['jobvite', 'https://jobs.jobvite.com/acme/job/abc123'],
     ['dayforce', 'https://acme.dayforcehcm.com/CandidatePortal/en-US/acme/Posting/View/123'],
     ['recruitee', 'https://acme.recruitee.com/o/engineer'],
     ['teamtailor', 'https://acme.teamtailor.com/jobs/123-engineer'],
     ['personio', 'https://acme.jobs.personio.com/job/123'],
-    ['pinpoint', 'https://acme.pinpointhq.com/postings/abc123'],
-    ['comeet', 'https://www.comeet.co/jobs/acme/123/engineer'],
+    ['pinpoint', 'https://acme.pinpointhq.com/postings/5bccb603-bbe0-4e1f-8f92-d983f78f77a7'],
+    ['comeet', 'https://www.comeet.co/jobs/A0.002/46.A6A/apply?token=public-token'],
     ['zoho_recruit', 'https://acme.zohorecruit.com/jobs/Careers/123/Engineer'],
     ['bullhorn', 'https://acme.bullhornstaffing.com/job/123'],
     ['indeed', 'https://www.indeed.com/viewjob?jk=abc123'],
     ['linkedin', 'https://www.linkedin.com/jobs/view/1234567890'],
-    ['ziprecruiter', 'https://www.ziprecruiter.com/jobs/acme-123-engineer'],
+    ['ziprecruiter', 'https://www.ziprecruiter.com/jobs/acme-123-engineer?jid=4a4dc523-53be-4c14-9b89-8ac0e14ab030'],
     ['wellfound', 'https://wellfound.com/jobs/123-engineer'],
     ['handshake', 'https://app.joinhandshake.com/stu/jobs/123'],
   ] as const;

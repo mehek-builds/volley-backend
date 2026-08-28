@@ -37,6 +37,8 @@ import { assertEncryptionKeyConfigured } from './lib/fieldCrypto';
 import { metaRoutes } from './routes/meta';
 import { applicationRoutes } from './routes/applications';
 import { canonicalApplicationRoutes } from './routes/canonicalApplications';
+import { submissionOrphanRiskRoutes } from './routes/submissionOrphanRisks';
+import { postingIdentityDistinctionRoutes } from './routes/postingIdentityDistinctions';
 import { submissionRunnerRoutes } from './routes/submissionRunner';
 import { autopilotMatcherRoutes } from './routes/autopilotMatcher';
 import { captchaStallRoutes } from './routes/captchaStalls';
@@ -47,7 +49,7 @@ import { coverLetterRoutes } from './routes/coverLetter';
 import { documentRoutes } from './routes/documents';
 import { emailConnectionRoutes } from './routes/emailConnections';
 import { applicationEmailRoutes } from './routes/applicationEmail';
-import { API_VERSION, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
+import { API_VERSION, CLIENT_COMPATIBILITY, PRODUCT_NAME, PRODUCT_LINKS } from './lib/product';
 import { createRateLimitHook, defaultRateLimitConfig, type RateLimitConfig } from './middleware/rateLimit';
 import { sharedRankingConfigured } from './lib/rankingCache';
 import { resolveBuild, resolveRevision } from './lib/buildInfo';
@@ -59,7 +61,12 @@ import { applicationEmailHealth } from './lib/applicationEmail';
 import { applicationEmailRouteSelection } from './lib/applicationEmailRoute';
 import { warmApplicationAliasDeliverability } from './lib/applicationEmailDeliverability';
 import { aggregateServiceHealthStatus } from './lib/serviceHealth';
+import { submissionLedgerReadiness } from './lib/submissionAttemptLedger';
 import { createSubmissionCutoverHook, resolveSubmissionCutover } from './lib/submissionCutover';
+import {
+  extensionClientNeedsSafetyUpdate,
+  extensionSafetyUpdatePathIsEvidenceOnly,
+} from './lib/clientCompatibility';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -196,6 +203,29 @@ export async function buildApp(options: BuildAppOptions = {}) {
     },
   });
 
+  /* Extension 0.6.2 is the first build that reserves and rechecks a canonical manual attempt
+   * before an employer boundary. Older installed builds can still have application tabs open,
+   * so this gate lives on the server rather than relying on Chrome Web Store propagation. Keep
+   * evidence-only endpoints reachable: a stale client that already crossed a boundary must be
+   * allowed to report what happened even though it cannot receive any new fill or submission
+   * capability. */
+  fastify.addHook('onRequest', async (request, reply) => {
+    const origin = typeof request.headers.origin === 'string' ? request.headers.origin : undefined;
+    if (
+      extensionClientNeedsSafetyUpdate(request.headers, origin)
+      && !extensionSafetyUpdatePathIsEvidenceOnly(request.method, request.url)
+    ) {
+      return reply
+        .status(426)
+        .header('Cache-Control', 'no-store')
+        .send({
+          error: `Update the Litos extension to version ${CLIENT_COMPATIBILITY.extension.minimum} or newer, then close old application tabs and reopen them before continuing.`,
+          code: 'extension_safety_update_required',
+          minimum_version: CLIENT_COMPATIBILITY.extension.minimum,
+        });
+    }
+  });
+
   // Front-door protection runs before route handlers and database work. Expensive product
   // operations keep their separate database-backed per-user limits in quota.ts.
   fastify.addHook('onRequest', createRateLimitHook(options.rateLimit ?? defaultRateLimitConfig(), options.now));
@@ -262,6 +292,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
      * that moved real bytes would spend the resource it exists to watch. It never throws and always
      * times out, so a degraded database cannot take this endpoint down with it. */
     const database = await probeDatabase(() => db.execute(sql`select 1`));
+    const submissionLedger = await submissionLedgerReadiness();
     if (database.status !== 'ok') {
       // The category is what the response carries; the driver's message can name hosts and roles,
       // so the detail goes to the log and the endpoint stays safe to expose.
@@ -400,6 +431,10 @@ export async function buildApp(options: BuildAppOptions = {}) {
       // Effective state only. An invalid nonempty environment value fails closed to freeze, while
       // the value itself stays out of this unauthenticated response.
       submission_cutover: submissionCutover,
+      /* Whether the ledger this runtime reads actually exists yet. The migration that creates it is
+       * dispatched by hand and does not follow a deploy, so a release that arrives first is caught
+       * here rather than in 500s on somebody's board. */
+      submission_ledger: submissionLedger,
       ts: new Date().toISOString(),
     });
   });
@@ -434,6 +469,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(sponsorshipRoutes);
   await fastify.register(applicationAnswerRoutes);
   await fastify.register(canonicalApplicationRoutes);
+  await fastify.register(submissionOrphanRiskRoutes);
+  await fastify.register(postingIdentityDistinctionRoutes);
   await fastify.register(applicationRoutes);
   await fastify.register(submissionRunnerRoutes);
   await fastify.register(autopilotMatcherRoutes);

@@ -38,6 +38,9 @@ import {
   packetQuestionsForFill,
   filterAutomaticallyResolvedReferralAttention,
   managedSearchFillableWindowedFailureIds,
+  managedInitialCallTimeoutMs,
+  managedInitialProviderDeadlineAt,
+  managedProviderProgressDisposition,
   truthfulOtherChoice,
   employerPageUrlIssue,
   packetDriftAttentionReason,
@@ -84,6 +87,91 @@ import {
   CONTROLLED_PORTAL_BINDING_PARAM,
   controlledPortalBinding,
 } from '../lib/controlledTestPortal';
+
+test('managed provider progress records physical presses and heals only strict confirmations', () => {
+  const pressed = {
+    version: 1 as const,
+    phase: 0 as const,
+    stage: 'submit_released' as const,
+    submitPressed: true,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: false,
+    submitKind: 'application' as const,
+    policyVersion: 4 as const,
+  };
+  assert.equal(managedProviderProgressDisposition(pressed, 'application'), 'pressed');
+  assert.equal(managedProviderProgressDisposition(pressed, 'verification'), 'none');
+  assert.equal(managedProviderProgressDisposition({
+    ...pressed,
+    stage: 'result_ready',
+    employerOutcome: {
+      kind: 'confirmed',
+      state: 'confirmed',
+      source: 'ats_state',
+      evidence: '.application-success',
+      message: 'Application received',
+      formStillPresent: false,
+    },
+    requiredFieldConfirmationStatus: 'confirmed',
+  }, 'application'), 'confirmed');
+  assert.equal(managedProviderProgressDisposition({
+    ...pressed,
+    stage: 'result_ready',
+    employerOutcome: {
+      kind: 'confirmed',
+      state: 'confirmed',
+      source: 'ats_state',
+      evidence: '.application-success',
+      message: 'Application received',
+      formStillPresent: false,
+    },
+    requiredFieldConfirmationStatus: 'blocked',
+  }, 'application'), 'pressed');
+
+  const verification = {
+    ...pressed,
+    phase: 1 as const,
+    stage: 'result_ready' as const,
+    applicationSubmitPressed: true,
+    verificationSubmitPressed: true,
+    submitKind: 'verification' as const,
+    employerOutcome: {
+      kind: 'confirmed' as const,
+      state: 'confirmed' as const,
+      source: 'ats_state' as const,
+      evidence: '.application-success',
+      message: 'Application received',
+      formStillPresent: false,
+    },
+    requiredFieldConfirmationStatus: 'confirmed' as const,
+  };
+  assert.equal(managedProviderProgressDisposition({
+    ...verification,
+    securityCodeOutcome: 'accepted',
+  }, 'verification'), 'confirmed');
+  assert.equal(managedProviderProgressDisposition({
+    ...verification,
+    securityCodeOutcome: 'rejected',
+  }, 'verification'), 'pressed');
+});
+
+test('initial managed provider deadline is derived once from the database authorization', () => {
+  const authorization = {
+    leaseId: 'lease-1',
+    attemptId: 'attempt-1',
+    activationId: 'activation-1',
+    authorizedAt: '2026-08-26T12:00:00.000Z',
+    expiresAt: '2026-08-26T12:05:00.000Z',
+    serverNow: '2026-08-26T12:00:00.000Z',
+    active: true,
+  };
+  assert.equal(managedInitialProviderDeadlineAt(authorization), '2026-08-26T12:04:50.000Z');
+  assert.equal(managedInitialCallTimeoutMs(authorization), 290_000);
+  assert.throws(() => managedInitialProviderDeadlineAt({
+    ...authorization,
+    expiresAt: '2026-08-26T12:00:10.000Z',
+  }));
+});
 
 // readMostRecentRole runs inside buildPacket, which every prepare and every submit goes through -
 // on EVERY portal, not just the one that needs work history. So its failure mode is not "Paylocity
@@ -4813,7 +4901,7 @@ test('every irreversible runner channel builds once, verifies, then sends that e
   const submitStart = source.indexOf('async function submit(row: ResumeRow');
   const submitEnd = source.indexOf('\n/**\n * What a failed run tells the applicant', submitStart);
   const submitBody = source.slice(submitStart, submitEnd);
-  assert.match(submitBody, /submitControlled\(row, claimedReview, fastify, packetAudit\.audit, packetAudit\.questions\)/);
+  assert.match(submitBody, /submitControlled\(row, claimedReview, fastify, packetAudit\.audit, packetAudit\.questions, attemptBinding\)/);
   assert.match(submitBody, /submitViaAtsSubmissionChannel\([\s\S]{0,180}packetAudit\.audit,[\s\S]{0,80}packetAudit\.questions/);
   const managedStart = submitBody.indexOf('if (isManagedStratusProvider())');
   const directStart = submitBody.indexOf("if (!claimedReview.browser_session_id)", managedStart);
@@ -4829,11 +4917,11 @@ test('every irreversible runner channel builds once, verifies, then sends that e
   assert.ok(direct.indexOf('assertVerifiedBuiltPacket(') < direct.indexOf('getBrowserSession('),
     'direct send must verify before it reconnects to the employer session');
   const controlled = source.slice(source.indexOf('async function submitControlled('), source.indexOf('async function submitViaAtsSubmissionChannel('));
-  assert.match(controlled, /transportVerifiedBuiltPacket\([\s\S]{0,500}'full', envelope\)/,
+  assert.match(controlled, /transportVerifiedBuiltPacket\([\s\S]{0,900}'full', envelope\)/,
     'the controlled transport must name its audit-time delivery mode');
-  assert.match(controlled, /fillPortal\(page, 'controlled_test', exactPacket\);\s*assertEmployerPageUrl\(review\.portal_url!, page\.url\(\)\);\s*await clickFinalSubmit\(page\);/,
+  assert.match(controlled, /fillPortal\(page, 'controlled_test', exactPacket\);\s*assertEmployerPageUrl\(review\.portal_url!, page\.url\(\)\);\s*await executeAfterFinalSubmissionBoundary\(\s*\(\) => assertFinalRunnerBoundaryClear\(row, review, attemptBinding\),\s*\(\) => clickFinalSubmit\(page\),\s*\);/,
     'controlled submit must recheck the exact posting URL immediately before its click');
-  assert.match(direct, /fillPortal\(page, directPortal, directPacket\);\s*assertEmployerPageUrl\(directEnvelope\.destinationUrl, page\.url\(\)\);\s*await clickFinalSubmit\(page\);/,
+  assert.match(direct, /fillPortal\(page, directPortal, directPacket\);\s*assertEmployerPageUrl\(directEnvelope\.destinationUrl, page\.url\(\)\);\s*await executeAfterFinalSubmissionBoundary\(\s*\(\) => assertFinalRunnerBoundaryClear\(row, claimedReview, attemptBinding\),\s*\(\) => clickFinalSubmit\(page\),\s*\);/,
     'direct submit must recheck the exact posting URL immediately before its click');
   const ats = source.slice(source.indexOf('async function submitViaAtsSubmissionChannel('), source.indexOf('const SECURITY_CODE_CONTINUATION_TTL_SECONDS'));
   const atsRefusal = ats.indexOf('ATS API delivery is withheld until Litos can verify and send one prebuilt request object');
@@ -5584,6 +5672,129 @@ test('a documented option snap of the acknowledged answer passes the drift gate;
   assert.equal(packetQuestionsMatchAcknowledged([...projected, projected[0]], projected), false);
 });
 
+test('a late run A failure cannot read or overwrite run B', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const writeReview = source.slice(
+    source.indexOf('async function writeReview('),
+    source.indexOf('async function standingAuthorization('),
+  );
+  assert.match(writeReview, /submission_run_id' = \$\{expected\.submission_run_id\}/);
+  assert.match(writeReview, /submission_run_id' is null/);
+  assert.match(writeReview, /submission_claim_id' = \$\{expected\.submission_claim_id\}/);
+  assert.match(writeReview, /submission_claim_id' is null/);
+
+  const submit = source.slice(
+    source.indexOf('async function submit(row: ResumeRow'),
+    source.indexOf('export type SubmissionFailureOutcome'),
+  );
+  assert.match(submit, /row = claimedRow;\s*try \{/);
+  assert.match(submit, /throw new SubmissionExecutionError\(row, error\)/);
+
+  const fail = source.slice(
+    source.indexOf('export async function recordSubmissionRunnerFailure('),
+    source.indexOf('/* WHAT A STOPPED RUN LEAVES'),
+  );
+  assert.match(fail, /lockSubmissionAttemptUser\(tx, row\.user_id\)/);
+  assert.match(fail, /latestReview\.submission_run_id \?\? null\) !== \(actedOnReview\.submission_run_id \?\? null\)/,
+    'a locked reread must reject a newer run rather than deriving a write from it');
+  assert.match(fail, /attemptId && latestReview\.submission_claim_id !== attemptId/);
+  assert.match(fail, /generated_resumes\.spec} = \$\{JSON\.stringify\(latest\.spec\)}::jsonb/,
+    'the failure projection must CAS the exact locked row it classified');
+
+  const failWrapper = source.slice(
+    source.indexOf('async function fail('),
+    source.indexOf('/* WHAT A STOPPED RUN LEAVES'),
+  );
+  assert.match(failWrapper, /error instanceof SubmissionExecutionError \? error\.actedOnRow : row/);
+  assert.match(failWrapper, /recordSubmissionRunnerFailure\(actedOnRow, cause, securityCodeAttemptFingerprint\)/);
+
+  const finish = source.slice(
+    source.indexOf('export async function finishSecurityCodeSubmission('),
+    source.indexOf('export async function processSubmissionApplication('),
+  );
+  assert.match(finish, /await fail\(activeRow, error, fingerprint\)/,
+    'a late security-code failure must record its fingerprint only on the exact acted-on attempt');
+
+  const process = source.slice(
+    source.indexOf('export async function processSubmissionApplication('),
+    source.indexOf('export async function submissionRunnerRoutes('),
+  );
+  assert.match(process, /await fail\(activeRow, error\)/);
+  assert.doesNotMatch(process, /const latest = await db\.select/,
+    'process failure handling must never substitute a newer row for the row run A acted on');
+});
+
+test('every runner employer boundary rechecks the exact reservation, consent, and duplicates under the user lock', () => {
+  const source = readFileSync('src/routes/submissionRunner.ts', 'utf8');
+  const gate = source.slice(
+    source.indexOf('async function assertFinalRunnerBoundaryClear('),
+    source.indexOf('async function claimSubmission('),
+  );
+  const lock = gate.indexOf('lockSubmissionAttemptUser(tx, row.user_id)');
+  const currentRow = gate.indexOf('tx.select().from(generated_resumes)', lock);
+  const freshness = gate.indexOf('finalRunnerReservationMatches(', currentRow);
+  const currentConsent = gate.indexOf('users.automatic_submission_enabled', freshness);
+  const entitlement = gate.indexOf('getEntitlementSnapshot(', currentConsent);
+  const authorization = gate.indexOf('finalBoundaryAuthorizationMatches(', entitlement);
+  const duplicate = gate.indexOf('duplicateApplicationVerdict({', authorization);
+  assert.ok(lock >= 0 && currentRow > lock && freshness > currentRow && currentConsent > freshness
+    && entitlement > currentConsent && authorization > entitlement && duplicate > authorization,
+  'claim replacement or consent revocation must stop the run before the final duplicate result can clear it');
+  assert.match(gate, /getEntitlementSnapshot\(\s*row\.user_id,\s*new Date\(\),\s*tx,/,
+    'the entitlement decision must use the same locked transaction snapshot');
+  assert.match(gate, /excludeAttemptId: attemptBinding\.attemptId/);
+  const reservationMatcher = source.slice(
+    source.indexOf('export function finalRunnerReservationMatches('),
+    source.indexOf('export async function executeAfterFinalSubmissionBoundary('),
+  );
+  assert.match(reservationMatcher, /latestReview\.submission_claim_id === attemptBinding\.attemptId/);
+  assert.match(reservationMatcher, /latestReview\.submission_run_id \?\? null\) === attemptBinding\.submissionRunId/);
+  assert.match(reservationMatcher, /latest\.resume_object_key === row\.resume_object_key/);
+  assert.match(reservationMatcher, /isDeepStrictEqual\(latest\.job_context, row\.job_context\)/);
+  const authorizationMatcher = source.slice(
+    source.indexOf('function finalBoundaryAuthorizationMatches('),
+    source.indexOf('async function assertFinalRunnerBoundaryClear('),
+  );
+  assert.match(authorizationMatcher, /authorization\.consented_at === user\.consentedAt\?\.toISOString\(\)/);
+  assert.match(authorizationMatcher, /authorization\.consent_version === user\.consentVersion/);
+
+  const controlled = source.slice(
+    source.indexOf('async function submitControlled('),
+    source.indexOf('async function submitViaAtsSubmissionChannel('),
+  );
+  assert.match(controlled, /executeAfterFinalSubmissionBoundary\(\s*\(\) => assertFinalRunnerBoundaryClear\(row, review, attemptBinding\),\s*\(\) => clickFinalSubmit\(page\),\s*\)/);
+  const submit = source.slice(
+    source.indexOf('async function submit(row: ResumeRow'),
+    source.indexOf('export type SubmissionFailureOutcome'),
+  );
+  assert.match(submit, /executeAfterFinalSubmissionBoundary\(\s*\(\) => assertFinalRunnerBoundaryClear\(row, claimedReview, attemptBinding\),\s*\(\) => clickFinalSubmit\(page\),\s*\)/);
+  assert.match(submit, /assertFinalRunnerBoundaryClear\(row, claimedReview, attemptBinding, \{[\s\S]*?reuseAuthorization: managedBoundaryAuthorization[\s\S]*?runManagedBrowser\([\s\S]*?timeoutMs: managedInitialCallTimeoutMs\(authorization\)/,
+    'the initial managed execution must reuse only its exact crash-safe authorization and stay behind its persisted callback deadline');
+  assert.match(submit, /timeoutMs: managedInitialCallTimeoutMs\(authorization\),\s*providerDeadlineAt: managedInitialProviderDeadlineAt\(authorization\)/,
+    'the initial managed call must send the same absolute database deadline through the provider boundary');
+  assert.match(submit, /error instanceof ManagedBrowserProviderProgressError[\s\S]*?managedProviderProgressDisposition\(error\.runProgress, 'application'\)[\s\S]*?appendRunnerAttemptFact\(attemptBinding, 'press_observed', 'managed-initial-submit'[\s\S]*?recordManagedSubmissionConfirmed\(row, attemptBinding/,
+    'response loss must persist a correlated press and let strict confirmation heal without screenshot work');
+  assert.match(submit, /const continuationRequestBudget = startManagedBrowserRequestBudget\(\s*MANAGED_SECURITY_CODE_CONTINUATION_CALL_TIMEOUT_MS,\s*\);[\s\S]*?continuationAuthorization = await assertManagedSecurityCodeContinuationBoundaryClear\(\s*searchingProjection\.row,\s*searchingReview,\s*attemptBinding,\s*continuationFingerprint,\s*successfulSubmissionAttempt,\s*continuationExpiresAt,\s*enteredSecurityCodeState,\s*\);[\s\S]*?receiptResult = await continueManagedBrowser\(continuationToken, codeActions, \{\s*submissionAttempt: successfulSubmissionAttempt,\s*requestBudget: continuationRequestBudget,\s*providerDeadlineAt: continuationAuthorization\.providerDeadlineAt,\s*minimumDispatchBudgetMs: MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS,/,
+    'the retained continuation must start one budget before its exact parent gate and carry it through the second physical submit');
+  assert.match(submit, /appendRunnerAttemptFact\(attemptBinding, 'press_observed', 'managed-security-code-submit'/,
+    'the second physical submit must remain on the parent so one confirmation closes the whole flow');
+  assert.match(submit, /managedProviderProgressDisposition\(error\.runProgress, 'verification'\)[\s\S]*?appendRunnerAttemptFact\(attemptBinding, 'press_observed', 'managed-security-code-submit'[\s\S]*?recordManagedSubmissionConfirmed\(row, attemptBinding/,
+    'verification response loss must preserve the second press and strict accepted-code confirmation');
+  assert.match(submit, /error instanceof ManagedSecurityCodeContinuationRefusedError[\s\S]*?error instanceof FinalSubmissionBoundaryChangedError[\s\S]*?error instanceof FinalSubmissionBoundaryAlreadyAuthorizedError\) return/,
+    'a continuation gate loser or conservative refusal must not enter a stale outer failure writer');
+
+  const failure = source.slice(
+    source.indexOf('export function submissionFailureReview('),
+    source.indexOf('export async function finishSecurityCodeSubmission('),
+  );
+  assert.match(failure, /error instanceof FinalSubmissionAuthorizationChangedError[\s\S]*?preClickNoSubmitReleasePatch\(\)/);
+  const fail = source.slice(
+    source.indexOf('export async function recordSubmissionRunnerFailure('),
+    source.indexOf('export function submissionFailureReview'),
+  );
+  assert.match(fail, /lockSubmissionAttemptUser\(tx, row\.user_id\)[\s\S]*?submissionBoundaryAuthorization\(row\.user_id, attemptId, \{ executor: tx \}\)[\s\S]*?appendSubmissionAttemptEvent\([\s\S]*?eventKind: 'not_sent_proven'[\s\S]*?executor: tx[\s\S]*?tx\.update\(generated_resumes\)/,
+    'boundary state, any pre-authorization no-send fact, and the exact row CAS must share one user-lock transaction');
+});
 /* THE BUILD-TIME RESOLUTION SHAPE OF discoverAndResolveQuestions, for the closed-choice path.
  *
  * Three calls in the order the runner makes them: the profile reading, the snap onto the control's
@@ -5952,4 +6163,3 @@ test('a REWRITTEN acknowledged answer is not laundered as an extra', () => {
   const rewritten = { ...acknowledged[0], answer: 'PhD in Computer Science', answerSource: undefined };
   assert.equal(packetQuestionsMatchAcknowledged([rewritten], acknowledged), false);
 });
-

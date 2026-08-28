@@ -75,7 +75,7 @@ test('the final click refuses a blank required answer on every provider, includi
   );
   // Before every send. Each of these is a separate way to reach an employer from this function.
   for (const send of [
-    'submitControlled(row, claimedReview, fastify, packetAudit.audit, packetAudit.questions)',
+    'submitControlled(row, claimedReview, fastify, packetAudit.audit, packetAudit.questions, attemptBinding)',
     'submitViaAtsSubmissionChannel(',
     'buildManagedPortalActions(portal, packet, true, applicationUrl)',
     'clickFinalSubmit(page)',

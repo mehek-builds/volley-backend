@@ -6,6 +6,7 @@ import { db, withDedicatedDatabase } from '../db';
 import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import {
   application_artifacts,
+  application_submission_attempt_events,
   application_submission_events,
   applications,
   artifacts,
@@ -21,8 +22,106 @@ import { requireAuth } from '../middleware/auth';
 import { apiBaseFor } from '../lib/apiBase';
 import { mintDownloadToken } from '../lib/resumeAccess';
 import { manualSubmissionTransition } from '../lib/canonicalApplicationLifecycle';
+import { exactAttemptPermanentlyBlocksNegativeResolution } from './applications';
+import {
+  duplicateApplicationResponse,
+  duplicateApplicationVerdict,
+  unidentifiableDuplicateApplicationResponse,
+} from '../lib/duplicateApplication';
+import {
+  appendSubmissionAttemptEvent,
+  blockingSubmissionAttemptsForUser,
+  comparePostings,
+  freezePostingIdentity,
+  frozenPostingIdentityFromEvent,
+  lockSubmissionAttemptUser,
+  submissionAttemptBindingFromEvent,
+  submissionAttemptEventId,
+  submissionAttemptEventsForUser,
+  submissionAttemptRetrySafety,
+  submissionAttemptRetrySafetyForPacketEvents,
+  type SubmissionAttemptBinding,
+  type SubmissionAttemptLedgerExecutor,
+  type SubmissionAttemptRetrySafety,
+} from '../lib/submissionAttemptLedger';
 
 export { manualSubmissionTransition };
+
+async function appendCanonicalManualSubmissionFacts(input: {
+  tx: SubmissionAttemptLedgerExecutor;
+  application: typeof applications.$inferSelect;
+  userId: string;
+  clientEventId: string;
+  outcome: ManualSubmissionOutcome;
+  finalUrl: string;
+}): Promise<void> {
+  /* The extension reports this route only after the applicant has activated the employer's final
+   * control. A generic failed or unknown result is therefore still employer-boundary risk. Keep
+   * that fact open until an exact later resolution instead of treating a client-side label as
+   * proof that nothing was filed. */
+  const attemptId = input.clientEventId;
+  const [existingOpening] = await input.tx.select()
+    .from(application_submission_attempt_events)
+    .where(and(
+      eq(application_submission_attempt_events.user_id, input.userId),
+      eq(application_submission_attempt_events.attempt_id, attemptId),
+      eq(application_submission_attempt_events.event_kind, 'attempt_opened'),
+    ))
+    .limit(1);
+  const expectedPacketId = input.application.legacy_generated_resume_id ?? input.application.id;
+  if (existingOpening && (
+    !(await canonicalAttemptEventMayMutateApplication(
+      input.tx,
+      input.userId,
+      existingOpening,
+      input.application,
+    ))
+    || existingOpening.source !== 'chrome_extension'
+    || existingOpening.operation !== 'manual_submission'
+  )) {
+    throw Object.assign(new Error('This event id belongs to another submission attempt'), {
+      statusCode: 409,
+      code: 'submission_event_binding_conflict',
+    });
+  }
+  const binding: SubmissionAttemptBinding = existingOpening
+    ? submissionAttemptBindingFromEvent(existingOpening)
+    : {
+      attemptId,
+      userId: input.userId,
+      // Canonical-only applications have no generated packet. Their own stable UUID is the safe
+      // synthetic packet key until a legacy packet exists.
+      packetId: expectedPacketId,
+      applicationId: input.application.id,
+      source: 'chrome_extension',
+      operation: 'manual_submission',
+      postingIdentity: freezePostingIdentity({
+        company: input.application.company_name,
+        role: input.application.role,
+        job_id: input.application.job_id,
+      }, input.application.portal_url ?? input.finalUrl),
+    };
+  await appendSubmissionAttemptEvent({
+    ...binding,
+    eventId: submissionAttemptEventId(attemptId, 'attempt_opened', 'canonical-manual-reservation'),
+    eventKind: 'attempt_opened',
+    evidenceCode: 'canonical_manual_submit_reserved',
+  }, { executor: input.tx });
+  await appendSubmissionAttemptEvent({
+    ...binding,
+    eventId: submissionAttemptEventId(attemptId, 'press_observed', 'canonical-manual-outcome'),
+    eventKind: 'press_observed',
+    evidenceCode: 'canonical_manual_submit_pressed',
+  }, { executor: input.tx });
+  if (input.outcome === 'confirmed') {
+    await appendSubmissionAttemptEvent({
+      ...binding,
+      eventId: submissionAttemptEventId(attemptId, 'submission_confirmed', 'canonical-manual-outcome'),
+      eventKind: 'submission_confirmed',
+      evidenceCode: 'canonical_manual_receipt_confirmed',
+    }, { executor: input.tx });
+  }
+}
 
 const createApplicationSchema = z.object({
   job_id: z.string().uuid().optional(),
@@ -57,15 +156,184 @@ export const fillApplicationSchema = z.object({
 
 const paramsSchema = z.object({ id: z.string().uuid() });
 const listSchema = z.object({ limit: z.coerce.number().int().min(1).max(100).default(50) });
+const fillDataQuerySchema = z.object({ event_id: z.string().uuid() });
 
 export const manualSubmissionOutcomeSchema = z.object({
   event_id: z.string().uuid(),
+  lease_id: z.string().uuid().optional(),
+  activation_id: z.string().uuid().optional(),
   outcome: z.enum(['confirmed', 'failed', 'unknown']),
   final_url: z.string().url().max(2_048),
   confirmation_text: z.string().trim().min(1).max(1_000).optional(),
 });
 
+export const manualSubmissionStartSchema = z.object({
+  event_id: z.string().uuid(),
+  current_url: z.string().url().max(2_048),
+});
+
+export const manualSubmissionPreflightSchema = manualSubmissionStartSchema.extend({
+  activation_id: z.string().uuid(),
+});
+
+export const MANUAL_SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS = 3 * 60_000;
+
+export const manualSubmissionResolutionSchema = z.object({
+  attempt_id: z.string().uuid(),
+  found: z.boolean(),
+  reason: z.literal('extension_cancelled_before_press').optional(),
+  lease_id: z.string().uuid().optional(),
+}).superRefine((value, context) => {
+  if (value.reason && value.found) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['found'],
+      message: 'A pre-click cancellation cannot report that the application was found',
+    });
+  }
+});
+
 type ManualSubmissionOutcome = z.infer<typeof manualSubmissionOutcomeSchema>['outcome'];
+
+export function manualSubmissionResolutionDecision(
+  safety: SubmissionAttemptRetrySafety,
+  found: boolean,
+): 'resolve' | 'exact_replay' | 'terminal_conflict' | 'not_resolvable' {
+  if (safety.kind === 'blocked_confirmed') return found ? 'exact_replay' : 'terminal_conflict';
+  // A later positive observation is stronger evidence than an earlier not-sent answer. Keep the
+  // ledger append-only and promote it to confirmed. The reverse transition is never allowed.
+  if (safety.kind === 'safe_not_sent') return found ? 'resolve' : 'exact_replay';
+  if (safety.kind === 'blocked_unverified') {
+    if (safety.reason === 'invalid_sequence') return 'not_resolvable';
+    if (safety.reason === 'boundary_authorized' && !found) return 'not_resolvable';
+    return 'resolve';
+  }
+  return 'not_resolvable';
+}
+
+async function canonicalSubmissionRetrySafety(
+  application: Pick<typeof applications.$inferSelect,
+  'id' | 'legacy_generated_resume_id' | 'user_id' | 'job_id' | 'company_name' | 'role' | 'portal_url'>,
+  executor?: Pick<SubmissionAttemptLedgerExecutor, 'select'>,
+): Promise<SubmissionAttemptRetrySafety> {
+  const events = await submissionAttemptEventsForUser(
+    application.user_id,
+    executor ? { executor } : {},
+  );
+  return submissionAttemptRetrySafetyForPacketEvents(
+    events.filter((event) => canonicalAttemptEventMatchesApplication(event, application)),
+  );
+}
+
+type ManualSubmissionBoundaryAuthorization = {
+  leaseId: string;
+  attemptId: string;
+  activationId: string;
+  authorizedAt: string;
+  expiresAt: string;
+  serverNow: string;
+  active: boolean;
+};
+
+async function manualSubmissionBoundaryAuthorization(
+  executor: Pick<SubmissionAttemptLedgerExecutor, 'select'>,
+  userId: string,
+  attemptId: string,
+): Promise<ManualSubmissionBoundaryAuthorization | null> {
+  const [authorization] = await executor.select({
+    event_id: application_submission_attempt_events.event_id,
+    attempt_id: application_submission_attempt_events.attempt_id,
+    observed_at: application_submission_attempt_events.observed_at,
+    boundary_activation_id: application_submission_attempt_events.boundary_activation_id,
+    boundary_expires_at: application_submission_attempt_events.boundary_expires_at,
+    server_now: sql<Date>`clock_timestamp()`,
+    active: sql<boolean>`
+      ${application_submission_attempt_events.boundary_expires_at} > clock_timestamp()
+    `,
+  }).from(application_submission_attempt_events).where(and(
+    eq(application_submission_attempt_events.user_id, userId),
+    eq(application_submission_attempt_events.attempt_id, attemptId),
+    eq(application_submission_attempt_events.event_kind, 'boundary_authorized'),
+  )).limit(1);
+  if (!authorization) return null;
+  if (!authorization.boundary_activation_id || !authorization.boundary_expires_at) return null;
+  const authorizedAt = authorization.observed_at;
+  return {
+    leaseId: authorization.event_id,
+    attemptId: authorization.attempt_id,
+    activationId: authorization.boundary_activation_id,
+    authorizedAt: authorizedAt.toISOString(),
+    expiresAt: authorization.boundary_expires_at.toISOString(),
+    serverNow: new Date(authorization.server_now).toISOString(),
+    active: authorization.active,
+  };
+}
+
+function canonicalAttemptEventMatchesApplication(
+  event: typeof application_submission_attempt_events.$inferSelect,
+  application: Pick<typeof applications.$inferSelect,
+  'id' | 'legacy_generated_resume_id' | 'job_id' | 'company_name' | 'role' | 'portal_url'>,
+): boolean {
+  if (
+    event.application_id === application.id
+    || event.packet_id === application.id
+    || event.packet_id === application.legacy_generated_resume_id
+  ) return true;
+  const identity = freezePostingIdentity({
+    company: application.company_name,
+    role: application.role,
+    job_id: application.job_id,
+  }, application.portal_url);
+  if (event.posting_key && identity.postingKey) return event.posting_key === identity.postingKey;
+  if (event.job_id && identity.jobId) return event.job_id === identity.jobId;
+  return Boolean(
+    event.company_role
+    && identity.companyRole
+    && event.company_role === identity.companyRole
+    && safeStoredPortalUrl(event.portal_url) === safeStoredPortalUrl(application.portal_url),
+  );
+}
+
+function canonicalAttemptEventDirectlyMatchesApplication(
+  event: typeof application_submission_attempt_events.$inferSelect,
+  application: Pick<typeof applications.$inferSelect, 'id' | 'legacy_generated_resume_id'>,
+): boolean {
+  return event.application_id === application.id
+    || event.packet_id === application.id
+    || event.packet_id === application.legacy_generated_resume_id;
+}
+
+async function canonicalAttemptEventMayMutateApplication(
+  executor: Pick<typeof db, 'select'>,
+  userId: string,
+  event: typeof application_submission_attempt_events.$inferSelect,
+  application: typeof applications.$inferSelect,
+): Promise<boolean> {
+  if (event.user_id !== userId) return false;
+  if (canonicalAttemptEventDirectlyMatchesApplication(event, application)) return true;
+  const owned = await executor.select().from(applications).where(eq(applications.user_id, userId));
+  // Posting identity may recover a consolidated alias only after the row named by the immutable
+  // binding no longer exists. It may never choose between two still-live rows for the same posting.
+  if (owned.some((row) => canonicalAttemptEventDirectlyMatchesApplication(event, row))) return false;
+  const aliases = owned.filter((row) => canonicalAttemptEventMatchesApplication(event, row));
+  return aliases.length === 1 && aliases[0]!.id === application.id;
+}
+
+function manualSubmissionPostingMatches(
+  frozen: SubmissionAttemptBinding['postingIdentity'],
+  application: Pick<typeof applications.$inferSelect, 'company_name' | 'role' | 'job_id'>,
+  currentUrl: string,
+): boolean {
+  const live = freezePostingIdentity({
+    company: application.company_name,
+    role: application.role,
+  }, currentUrl);
+  const comparison = comparePostings(frozen, live);
+  return comparison.same
+    && frozen.portalIdentity === live.portalIdentity
+    && (comparison.basis !== 'company_role'
+      || safeStoredPortalUrl(frozen.portalUrl) === safeStoredPortalUrl(currentUrl));
+}
 
 export function canonicalPortalIdentity(raw: string): string {
   const normalized = canonicalPortalUrl(raw, true);
@@ -92,7 +360,8 @@ export function manualOutcomeEventDecision(existing: {
   if (existing.outcome === incoming.outcome
     && existing.final_url === incoming.finalUrl
     && existing.confirmation_text === incoming.confirmationText) return 'exact_replay';
-  if (existing.outcome === 'unknown' && (incoming.outcome === 'confirmed' || incoming.outcome === 'failed')) {
+  if ((existing.outcome === 'unknown' || existing.outcome === 'failed')
+    && (incoming.outcome === 'confirmed' || incoming.outcome === 'failed' || incoming.outcome === 'unknown')) {
     return 'promote';
   }
   return 'terminal_conflict';
@@ -245,6 +514,10 @@ export async function upsertCanonicalApplicationForUser(input: {
     role: input.role,
   });
   return db.transaction(async (tx) => {
+    // Canonical alias consolidation can move or delete an application referenced by an active
+    // manual attempt. Serialize it with reservations, preflights, and outcomes for this user.
+    // The submission-user lock is always acquired before the narrower canonical lock.
+    await lockSubmissionAttemptUser(tx, input.userId);
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`canonical-application:${input.userId}`}, 0::bigint))`);
     const owned = await tx.select().from(applications).where(eq(applications.user_id, input.userId));
     const canonical = owned.find((row) => row.application_fingerprint === fingerprint);
@@ -384,16 +657,47 @@ function fillHandoffResponse(row: typeof applications.$inferSelect) {
   };
 }
 
-async function ownedApplication(request: FastifyRequest, reply: FastifyReply) {
+async function canonicalApplicationForExactAttempt(
+  executor: Pick<typeof db, 'select'>,
+  userId: string,
+  requestedApplicationId: string,
+  attemptId: string,
+): Promise<typeof applications.$inferSelect | null> {
+  const [exact] = await executor.select().from(applications).where(and(
+    eq(applications.id, requestedApplicationId),
+    eq(applications.user_id, userId),
+  )).limit(1);
+  if (exact) return exact;
+  const [opening] = await executor.select().from(application_submission_attempt_events).where(and(
+    eq(application_submission_attempt_events.user_id, userId),
+    eq(application_submission_attempt_events.attempt_id, attemptId),
+    eq(application_submission_attempt_events.event_kind, 'attempt_opened'),
+  )).limit(1);
+  if (!opening || (opening.application_id !== requestedApplicationId && opening.packet_id !== requestedApplicationId)) {
+    return null;
+  }
+  const owned = await executor.select().from(applications).where(eq(applications.user_id, userId));
+  const aliases = owned.filter((row) => canonicalAttemptEventMatchesApplication(opening, row));
+  return aliases.length === 1 ? aliases[0]! : null;
+}
+
+async function ownedApplication(request: FastifyRequest, reply: FastifyReply, attemptId?: string) {
   const parsed = paramsSchema.safeParse(request.params);
   if (!parsed.success) {
     reply.status(400).send({ error: 'Invalid application id' });
     return null;
   }
-  const [application] = await db.select().from(applications).where(and(
-    eq(applications.id, parsed.data.id),
-    eq(applications.user_id, request.jwtPayload!.userId),
-  )).limit(1);
+  const application = attemptId
+    ? await canonicalApplicationForExactAttempt(
+      db,
+      request.jwtPayload!.userId,
+      parsed.data.id,
+      attemptId,
+    )
+    : (await db.select().from(applications).where(and(
+      eq(applications.id, parsed.data.id),
+      eq(applications.user_id, request.jwtPayload!.userId),
+    )).limit(1))[0];
   if (!application) {
     reply.status(404).send({ error: 'Application not found' });
     return null;
@@ -405,12 +709,23 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
   fastify.get('/applications', { preHandler: requireAuth }, async (request, reply) => {
     const parsed = listSchema.safeParse(request.query ?? {});
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid application list request' });
-    const rows = await db.select().from(applications).where(eq(
-      applications.user_id,
-      request.jwtPayload!.userId,
-    )).orderBy(desc(applications.updated_at)).limit(parsed.data.limit);
+    const userId = request.jwtPayload!.userId;
+    const [rows, attemptEvents] = await Promise.all([
+      db.select().from(applications).where(eq(
+        applications.user_id,
+        userId,
+      )).orderBy(desc(applications.updated_at)).limit(parsed.data.limit),
+      submissionAttemptEventsForUser(userId),
+    ]);
     return reply.header('Cache-Control', 'private, no-store').send({
-      applications: rows.map(applicationResponse),
+      applications: rows.map((row) => {
+        return {
+          ...applicationResponse(row),
+          retry_safety: submissionAttemptRetrySafetyForPacketEvents(
+            attemptEvents.filter((event) => canonicalAttemptEventMatchesApplication(event, row)),
+          ),
+        };
+      }),
     });
   });
 
@@ -540,6 +855,661 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
     });
   });
 
+  /* Reserve the Free extension's manual employer boundary before the form is filled.
+   *
+   * The click remains the applicant's native trusted click, but it cannot race an automatic Litos
+   * attempt. GET_FREE_FILL_DATA waits for this response before it gives the content script any data
+   * to put on the employer page. The opening fact is created under the same user lock as automatic
+   * claims and duplicate checks. A page reload may resume one exact pre-click manual attempt; once
+   * a press or confirmation exists, it can never be reused for another click. */
+  fastify.post('/applications/:id/manual-submission-start', { preHandler: requireAuth }, async (request, reply) => {
+    const parsed = manualSubmissionStartSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: 'Invalid manual submission reservation',
+        code: 'invalid_submission_reservation',
+        detail: parsed.error.issues,
+      });
+    }
+    const application = await ownedApplication(request, reply, parsed.data.event_id);
+    if (!application) return;
+    const requestedApplicationId = paramsSchema.parse(request.params).id;
+    const userId = request.jwtPayload!.userId;
+    let currentUrl: string;
+    try {
+      currentUrl = canonicalPortalUrl(parsed.data.current_url, true)!;
+      if (!application.portal_url) throw new Error('Application portal URL is required');
+      if (canonicalPortalIdentity(currentUrl) !== canonicalPortalIdentity(application.portal_url)) {
+        return reply.status(409).send({
+          error: 'Manual submission page does not match this application portal',
+          code: 'portal_identity_mismatch',
+          retry_safety: await canonicalSubmissionRetrySafety(application),
+        });
+      }
+    } catch (error) {
+      return reply.status(409).send({
+        error: error instanceof Error ? error.message : 'Manual submission page is not safe',
+        code: 'unsafe_submission_reservation_url',
+        retry_safety: await canonicalSubmissionRetrySafety(application),
+      });
+    }
+
+    const result = await db.transaction(async (tx) => {
+      await lockSubmissionAttemptUser(tx, userId);
+      const currentApplication = await canonicalApplicationForExactAttempt(
+        tx,
+        userId,
+        paramsSchema.parse(request.params).id,
+        parsed.data.event_id,
+      );
+      if (!currentApplication) return { kind: 'not_found' as const };
+      if (currentApplication.submission_state === 'submitted' || currentApplication.tracker_state === 'applied') {
+        return { kind: 'already_submitted' as const };
+      }
+
+      const exactEvents = await tx.select().from(application_submission_attempt_events).where(and(
+        eq(application_submission_attempt_events.user_id, userId),
+        eq(application_submission_attempt_events.attempt_id, parsed.data.event_id),
+      ));
+      if (exactEvents.length > 0) {
+        const opening = exactEvents.find((event) => event.event_kind === 'attempt_opened');
+        if (!opening
+          || !(await canonicalAttemptEventMayMutateApplication(tx, userId, opening, currentApplication))
+          || opening.source !== 'chrome_extension'
+          || opening.operation !== 'manual_submission') {
+          return { kind: 'event_conflict' as const };
+        }
+        if (!manualSubmissionPostingMatches(
+          frozenPostingIdentityFromEvent(opening),
+          currentApplication,
+          currentUrl,
+        )) return { kind: 'posting_mismatch' as const };
+        const safety = submissionAttemptRetrySafety(exactEvents);
+        if (safety.kind === 'blocked_unverified' && safety.reason === 'opened') {
+          const duplicate = await duplicateApplicationVerdict({
+            userId,
+            applicationId: currentApplication.legacy_generated_resume_id ?? currentApplication.id,
+            jobContext: {
+              company: currentApplication.company_name,
+              role: currentApplication.role,
+              job_id: currentApplication.job_id,
+            },
+            portalUrl: currentApplication.portal_url,
+            excludeAttemptId: parsed.data.event_id,
+          }, tx);
+          if (duplicate.kind !== 'clear') return { kind: 'duplicate' as const, duplicate };
+          return { kind: 'started' as const, eventId: parsed.data.event_id, resumed: true };
+        }
+        return { kind: 'attempt_terminal' as const };
+      }
+
+      const blocking = await blockingSubmissionAttemptsForUser(userId, { executor: tx });
+      const resumable = blocking.filter((attempt) => attempt.applicationId === currentApplication.id
+        && attempt.source === 'chrome_extension'
+        && attempt.operation === 'manual_submission'
+        && attempt.retrySafety.kind === 'blocked_unverified'
+        && attempt.retrySafety.reason === 'opened');
+      /* A tab owns only the UUID it requested. Returning another tab's opened attempt would let
+       * two independent page capabilities share one ledger boundary. Exact same-event retries were
+       * handled above; every different UUID must remain blocked without exposing the winner. */
+      if (resumable.length > 0) return { kind: 'attempt_terminal' as const };
+
+      const storedPosting = freezePostingIdentity({
+        company: currentApplication.company_name,
+        role: currentApplication.role,
+        job_id: currentApplication.job_id,
+      }, currentApplication.portal_url);
+      if (!manualSubmissionPostingMatches(storedPosting, currentApplication, currentUrl)) {
+        return { kind: 'posting_mismatch' as const };
+      }
+
+      const duplicate = await duplicateApplicationVerdict({
+        userId,
+        applicationId: currentApplication.legacy_generated_resume_id ?? currentApplication.id,
+        jobContext: {
+          company: currentApplication.company_name,
+          role: currentApplication.role,
+          job_id: currentApplication.job_id,
+        },
+        portalUrl: currentApplication.portal_url,
+      }, tx);
+      if (duplicate.kind !== 'clear') return { kind: 'duplicate' as const, duplicate };
+
+      const binding: SubmissionAttemptBinding = {
+        attemptId: parsed.data.event_id,
+        userId,
+        packetId: currentApplication.legacy_generated_resume_id ?? currentApplication.id,
+        applicationId: currentApplication.id,
+        source: 'chrome_extension',
+        operation: 'manual_submission',
+        postingIdentity: freezePostingIdentity({
+          company: currentApplication.company_name,
+          role: currentApplication.role,
+          job_id: currentApplication.job_id,
+        }, currentUrl),
+      };
+      await appendSubmissionAttemptEvent({
+        ...binding,
+        eventId: submissionAttemptEventId(binding.attemptId, 'attempt_opened', 'canonical-manual-reservation'),
+        eventKind: 'attempt_opened',
+        evidenceCode: 'canonical_manual_submit_reserved',
+      }, { executor: tx });
+      return { kind: 'started' as const, eventId: binding.attemptId, resumed: false };
+    });
+
+    const retrySafety = await canonicalSubmissionRetrySafety(application);
+    if (result.kind === 'not_found') {
+      return reply.status(404).send({ error: 'Application not found', retry_safety: retrySafety });
+    }
+    if (result.kind === 'already_submitted') {
+      return reply.status(409).send({
+        error: 'This application is already recorded as submitted.',
+        code: 'application_already_submitted',
+        retry_safety: retrySafety,
+      });
+    }
+    if (result.kind === 'event_conflict') {
+      return reply.status(409).send({
+        error: 'This manual submission reservation belongs to another attempt.',
+        code: 'submission_event_binding_conflict',
+        retry_safety: retrySafety,
+      });
+    }
+    if (result.kind === 'posting_mismatch') {
+      return reply.status(409).send({
+        error: 'This page is not the exact posting bound to the manual submission reservation.',
+        code: 'manual_submission_posting_mismatch',
+        retry_safety: retrySafety,
+      });
+    }
+    if (result.kind === 'attempt_terminal') {
+      return reply.status(409).send({
+        error: 'An earlier manual attempt may already have reached the employer. Resolve it before trying again.',
+        code: 'manual_submission_outcome_unresolved',
+        retry_safety: retrySafety,
+      });
+    }
+    if (result.kind === 'duplicate') {
+      const refusal = result.duplicate.kind === 'duplicate'
+        ? duplicateApplicationResponse(result.duplicate)
+        : unidentifiableDuplicateApplicationResponse(result.duplicate);
+      return reply.status(409).send({ ...refusal, retry_safety: retrySafety });
+    }
+    return reply.header('Cache-Control', 'private, no-store').send({
+      application_id: requestedApplicationId,
+      canonical_application_id: application.id,
+      event_id: parsed.data.event_id,
+      resumed: result.resumed,
+      retry_safety: retrySafety,
+    });
+  });
+
+  /* Recheck the exact still-open manual reservation under the user lock immediately before the
+   * extension replays the applicant's intercepted final activation. This endpoint records no press:
+   * the employer boundary still has not happened, so a rejected acknowledgement remains provably
+   * cancellable as not sent. */
+  fastify.post('/applications/:id/manual-submission-preflight', { preHandler: requireAuth }, async (request, reply) => {
+    const parsed = manualSubmissionPreflightSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: 'Invalid manual submission preflight',
+        code: 'invalid_manual_submission_preflight',
+        detail: parsed.error.issues,
+      });
+    }
+    const application = await ownedApplication(request, reply, parsed.data.event_id);
+    if (!application) return;
+    const requestedApplicationId = paramsSchema.parse(request.params).id;
+    const userId = request.jwtPayload!.userId;
+    let currentUrl: string;
+    try {
+      currentUrl = canonicalPortalUrl(parsed.data.current_url, true)!;
+      if (!application.portal_url) throw new Error('Application portal URL is required');
+      if (canonicalPortalIdentity(currentUrl) !== canonicalPortalIdentity(application.portal_url)) {
+        return reply.status(409).send({
+          error: 'Manual submission page does not match this application portal',
+          code: 'portal_identity_mismatch',
+          retry_safety: await canonicalSubmissionRetrySafety(application),
+        });
+      }
+    } catch (error) {
+      return reply.status(409).send({
+        error: error instanceof Error ? error.message : 'Manual submission page is not safe',
+        code: 'unsafe_manual_submission_preflight_url',
+        retry_safety: await canonicalSubmissionRetrySafety(application),
+      });
+    }
+
+    const result = await db.transaction(async (tx) => {
+      await lockSubmissionAttemptUser(tx, userId);
+      const currentApplication = await canonicalApplicationForExactAttempt(
+        tx,
+        userId,
+        paramsSchema.parse(request.params).id,
+        parsed.data.event_id,
+      );
+      if (!currentApplication) return { kind: 'not_found' as const };
+      if (currentApplication.submission_state === 'submitted' || currentApplication.tracker_state === 'applied') {
+        return { kind: 'already_submitted' as const };
+      }
+      const exactEvents = await tx.select().from(application_submission_attempt_events).where(and(
+        eq(application_submission_attempt_events.user_id, userId),
+        eq(application_submission_attempt_events.attempt_id, parsed.data.event_id),
+      ));
+      const opening = exactEvents.find((event) => event.event_kind === 'attempt_opened');
+      if (!opening
+        || !(await canonicalAttemptEventMayMutateApplication(tx, userId, opening, currentApplication))
+        || opening.source !== 'chrome_extension'
+        || opening.operation !== 'manual_submission') {
+        return { kind: 'binding_conflict' as const };
+      }
+      if (!manualSubmissionPostingMatches(
+        frozenPostingIdentityFromEvent(opening),
+        currentApplication,
+        currentUrl,
+      )) return { kind: 'posting_mismatch' as const };
+      const retrySafety = submissionAttemptRetrySafety(exactEvents);
+      if (
+        retrySafety.kind !== 'blocked_unverified'
+        || (retrySafety.reason !== 'opened' && retrySafety.reason !== 'boundary_authorized')
+      ) {
+        return { kind: 'attempt_terminal' as const, retrySafety };
+      }
+      const existingAuthorization = await manualSubmissionBoundaryAuthorization(
+        tx,
+        userId,
+        parsed.data.event_id,
+      );
+      if (existingAuthorization && existingAuthorization.activationId !== parsed.data.activation_id) {
+        return { kind: 'activation_conflict' as const, retrySafety };
+      }
+      if (existingAuthorization && !existingAuthorization.active) {
+        return {
+          kind: 'authorization_expired' as const,
+          retrySafety,
+          authorization: existingAuthorization,
+        };
+      }
+      const duplicate = await duplicateApplicationVerdict({
+        userId,
+        applicationId: currentApplication.legacy_generated_resume_id ?? currentApplication.id,
+        jobContext: {
+          company: currentApplication.company_name,
+          role: currentApplication.role,
+          job_id: currentApplication.job_id,
+        },
+        portalUrl: currentApplication.portal_url ?? currentUrl,
+        excludeAttemptId: parsed.data.event_id,
+      }, tx);
+      if (duplicate.kind !== 'clear') return { kind: 'duplicate' as const, duplicate, retrySafety };
+      let authorization = existingAuthorization;
+      if (!authorization) {
+        const binding = submissionAttemptBindingFromEvent(opening);
+        const clockResult = await tx.execute(sql`select clock_timestamp() as authorized_at`);
+        const clockValue = (clockResult.rows[0] as { authorized_at?: Date | string } | undefined)?.authorized_at;
+        const authorizedAt = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);
+        if (Number.isNaN(authorizedAt.getTime())) throw new Error('Database authorization clock was unavailable');
+        const boundaryExpiresAt = new Date(
+          authorizedAt.getTime() + MANUAL_SUBMISSION_BOUNDARY_AUTHORIZATION_TTL_MS,
+        );
+        await appendSubmissionAttemptEvent({
+          ...binding,
+          eventId: submissionAttemptEventId(
+            binding.attemptId,
+            'boundary_authorized',
+            'canonical-manual-preflight',
+          ),
+          eventKind: 'boundary_authorized',
+          evidenceCode: 'canonical_manual_boundary_authorized',
+          boundaryActivationId: parsed.data.activation_id,
+          boundaryExpiresAt,
+          observedAt: authorizedAt,
+          createdAt: authorizedAt,
+        }, { executor: tx });
+      }
+      // The duplicate check and a contended lock can consume part of a short lease. Re-read the
+      // database clock immediately before echoing either a fresh or idempotently replayed lease.
+      authorization = await manualSubmissionBoundaryAuthorization(tx, userId, parsed.data.event_id);
+      if (!authorization) return { kind: 'binding_conflict' as const };
+      if (!authorization.active) {
+        return { kind: 'authorization_expired' as const, retrySafety, authorization };
+      }
+      const authorizedEvents = await tx.select().from(application_submission_attempt_events).where(and(
+        eq(application_submission_attempt_events.user_id, userId),
+        eq(application_submission_attempt_events.attempt_id, parsed.data.event_id),
+      ));
+      return {
+        kind: 'authorized' as const,
+        retrySafety: submissionAttemptRetrySafety(authorizedEvents),
+        authorization,
+      };
+    });
+
+    if (result.kind === 'not_found') {
+      return reply.status(404).send({
+        error: 'Application not found',
+        retry_safety: await canonicalSubmissionRetrySafety(application),
+      });
+    }
+    if (result.kind === 'already_submitted') {
+      return reply.status(409).send({
+        error: 'This application is already recorded as submitted.',
+        code: 'application_already_submitted',
+        retry_safety: await canonicalSubmissionRetrySafety(application),
+      });
+    }
+    if (result.kind === 'binding_conflict') {
+      return reply.status(409).send({
+        error: 'This manual submission acknowledgement belongs to another attempt.',
+        code: 'submission_event_binding_conflict',
+        retry_safety: await canonicalSubmissionRetrySafety(application),
+      });
+    }
+    if (result.kind === 'posting_mismatch') {
+      return reply.status(409).send({
+        error: 'The current employer page is not the exact posting bound to this reservation.',
+        code: 'manual_submission_posting_mismatch',
+        retry_safety: await canonicalSubmissionRetrySafety(application),
+      });
+    }
+    if (result.kind === 'attempt_terminal') {
+      return reply.status(409).send({
+        error: 'This manual submission attempt is no longer open before the employer boundary.',
+        code: 'manual_submission_preflight_not_open',
+        retry_safety: result.retrySafety,
+      });
+    }
+    if (result.kind === 'activation_conflict') {
+      return reply.status(409).send({
+        error: 'Another page delegate already owns this final submission authorization.',
+        code: 'manual_submission_boundary_activation_conflict',
+        retry_safety: result.retrySafety,
+      });
+    }
+    if (result.kind === 'authorization_expired') {
+      return reply.status(409).send({
+        error: 'The final submission authorization expired before the employer boundary.',
+        code: 'manual_submission_boundary_authorization_expired',
+        lease_id: result.authorization.leaseId,
+        attempt_id: result.authorization.attemptId,
+        activation_id: result.authorization.activationId,
+        authorized_at: result.authorization.authorizedAt,
+        expires_at: result.authorization.expiresAt,
+        server_now: result.authorization.serverNow,
+        retry_safety: result.retrySafety,
+      });
+    }
+    if (result.kind === 'duplicate') {
+      const refusal = result.duplicate.kind === 'duplicate'
+        ? duplicateApplicationResponse(result.duplicate)
+        : unidentifiableDuplicateApplicationResponse(result.duplicate);
+      return reply.status(409).send({ ...refusal, retry_safety: result.retrySafety });
+    }
+    return reply.header('Cache-Control', 'private, no-store').send({
+      application_id: requestedApplicationId,
+      canonical_application_id: application.id,
+      event_id: parsed.data.event_id,
+      lease_id: result.authorization.leaseId,
+      attempt_id: result.authorization.attemptId,
+      activation_id: result.authorization.activationId,
+      authorized_at: result.authorization.authorizedAt,
+      expires_at: result.authorization.expiresAt,
+      server_now: result.authorization.serverNow,
+      authorized: true,
+      retry_safety: result.retrySafety,
+    });
+  });
+
+  /* Resolve one exact manual attempt only after the applicant has checked the employer portal.
+   * This never sends anything. It appends the applicant's observation to the immutable ledger, so
+   * clearing a mutable application state cannot erase the evidence or release a different attempt. */
+  fastify.post('/applications/:id/manual-submission-resolution', { preHandler: requireAuth }, async (request, reply) => {
+    const parsed = manualSubmissionResolutionSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: 'Say whether you found this exact application, with found true or false.',
+        code: 'invalid_submission_resolution',
+        detail: parsed.error.issues,
+      });
+    }
+    const application = await ownedApplication(request, reply, parsed.data.attempt_id);
+    if (!application) return;
+    const requestedApplicationId = paramsSchema.parse(request.params).id;
+    const userId = request.jwtPayload!.userId;
+
+    const result = await db.transaction(async (tx) => {
+      await lockSubmissionAttemptUser(tx, userId);
+      const currentApplication = await canonicalApplicationForExactAttempt(
+        tx,
+        userId,
+        paramsSchema.parse(request.params).id,
+        parsed.data.attempt_id,
+      );
+      if (!currentApplication) return { kind: 'not_found' as const };
+
+      const events = await tx.select().from(application_submission_attempt_events).where(and(
+        eq(application_submission_attempt_events.user_id, userId),
+        eq(application_submission_attempt_events.attempt_id, parsed.data.attempt_id),
+      ));
+      const opening = events.find((event) => event.event_kind === 'attempt_opened');
+      const exactManualAttempt = opening?.operation === 'manual_submission'
+        && (opening.source === 'chrome_extension' || opening.source === 'legacy_backfill');
+      const exactLegacyGeneratedAttempt = opening?.source === 'legacy_backfill'
+        && opening.operation === 'initial_submission'
+        && Boolean(currentApplication.legacy_generated_resume_id)
+        && opening.packet_id === currentApplication.legacy_generated_resume_id;
+      if (!opening
+        || !(await canonicalAttemptEventMayMutateApplication(tx, userId, opening, currentApplication))
+        || (!exactManualAttempt && !exactLegacyGeneratedAttempt)) {
+        return {
+          kind: 'binding_conflict' as const,
+          retrySafety: await canonicalSubmissionRetrySafety(currentApplication, tx),
+        };
+      }
+
+      const exactSafety = submissionAttemptRetrySafety(events);
+      const machinePreClickCleanup = parsed.data.reason === 'extension_cancelled_before_press';
+      /* Boundary authorization is an irreversible uncertainty boundary for canonical Free manual
+       * attempts. Its TTL limits use of the capability, not the lifetime of the risk fact. Read the
+       * immutable event directly so an expired or malformed lease can never make a negative answer
+       * append not_sent_proven. A positive observation remains admissible for the exact attempt. */
+      const boundaryAuthorizationEvent = events.find(
+        (event) => event.event_kind === 'boundary_authorized',
+      );
+      const exactBoundaryAuthorization = boundaryAuthorizationEvent
+        && await canonicalAttemptEventMayMutateApplication(
+          tx,
+          userId,
+          boundaryAuthorizationEvent,
+          currentApplication,
+        )
+        && boundaryAuthorizationEvent.source === opening.source
+        && boundaryAuthorizationEvent.operation === opening.operation;
+      const authorization = await manualSubmissionBoundaryAuthorization(
+        tx,
+        userId,
+        parsed.data.attempt_id,
+      );
+      const suppliedLeaseId = parsed.data.lease_id ?? null;
+      if (suppliedLeaseId) {
+        return { kind: 'lease_conflict' as const, retrySafety: exactSafety };
+      }
+      if (machinePreClickCleanup && boundaryAuthorizationEvent) {
+        return {
+          kind: 'authorization_not_cancellable' as const,
+          retrySafety: exactSafety,
+        };
+      }
+      if (!parsed.data.found && boundaryAuthorizationEvent) {
+        return {
+          kind: 'authorization_present' as const,
+          retrySafety: exactSafety,
+          authorization,
+        };
+      }
+      if (!parsed.data.found
+        && exactSafety.kind === 'blocked_unverified'
+        && exactAttemptPermanentlyBlocksNegativeResolution(events, parsed.data.attempt_id)) {
+        return {
+          kind: 'permanent_risk' as const,
+          retrySafety: exactSafety,
+        };
+      }
+      const machinePreClickCleanupReplay = machinePreClickCleanup
+        && opening.source === 'chrome_extension'
+        && exactSafety.kind === 'safe_not_sent'
+        && exactSafety.proofKind === 'extension_cancelled_before_press';
+      if (machinePreClickCleanup && !machinePreClickCleanupReplay && (
+        opening.source !== 'chrome_extension'
+        || parsed.data.found
+        || exactSafety.kind !== 'blocked_unverified'
+        || exactSafety.reason !== 'opened'
+        || events.some((event) => event.event_kind !== 'attempt_opened')
+      )) {
+        return { kind: 'not_resolvable' as const, retrySafety: exactSafety };
+      }
+      const decision = manualSubmissionResolutionDecision(exactSafety, parsed.data.found);
+      if (decision === 'terminal_conflict') {
+        return { kind: 'terminal_conflict' as const, retrySafety: exactSafety };
+      }
+      const exactBoundaryConfirmation = parsed.data.found
+        && Boolean(exactBoundaryAuthorization)
+        && exactSafety.kind === 'blocked_unverified';
+      if (decision === 'not_resolvable' && !exactBoundaryConfirmation) {
+        return { kind: 'not_resolvable' as const, retrySafety: exactSafety };
+      }
+      if (decision === 'exact_replay') {
+        return {
+          kind: 'resolved' as const,
+          idempotent: true,
+          application: currentApplication,
+          retrySafety: exactSafety,
+        };
+      }
+
+      const binding = submissionAttemptBindingFromEvent(opening);
+      const eventKind = parsed.data.found ? 'submission_confirmed' as const : 'not_sent_proven' as const;
+      const proofKind = machinePreClickCleanup
+        ? 'extension_cancelled_before_press' as const
+        : 'applicant_checked_not_sent' as const;
+      const evidenceCode = machinePreClickCleanup
+        ? 'extension_cancelled_before_press'
+        : parsed.data.found ? 'applicant_found_submission' : 'applicant_checked_not_sent';
+      const nextSubmissionState = parsed.data.found ? 'submitted' : 'needs_attention';
+      const nextTrackerState = parsed.data.found ? 'applied' : 'applying';
+      const [updatedApplication] = await tx.update(applications).set({
+        submission_state: nextSubmissionState,
+        tracker_state: nextTrackerState,
+        updated_at: new Date(),
+      }).where(and(
+        eq(applications.id, currentApplication.id),
+        eq(applications.user_id, userId),
+        eq(applications.submission_state, currentApplication.submission_state),
+        eq(applications.tracker_state, currentApplication.tracker_state),
+      )).returning();
+      if (!updatedApplication) return { kind: 'state_conflict' as const };
+      await appendSubmissionAttemptEvent({
+        ...binding,
+        eventId: submissionAttemptEventId(
+          binding.attemptId,
+          eventKind,
+          machinePreClickCleanup ? 'extension-cancelled-before-press' : 'applicant-resolution',
+        ),
+        eventKind,
+        ...(parsed.data.found ? {} : { proofKind }),
+        evidenceCode,
+      }, { executor: tx });
+      const updatedEvents = await tx.select().from(application_submission_attempt_events).where(and(
+        eq(application_submission_attempt_events.user_id, userId),
+        eq(application_submission_attempt_events.attempt_id, parsed.data.attempt_id),
+      ));
+      return {
+        kind: 'resolved' as const,
+        idempotent: false,
+        application: updatedApplication,
+        retrySafety: submissionAttemptRetrySafety(updatedEvents),
+      };
+    });
+
+    if (result.kind === 'not_found') return reply.status(404).send({
+      error: 'Application not found',
+      retry_safety: await canonicalSubmissionRetrySafety(application),
+    });
+    if (result.kind === 'binding_conflict') {
+      return reply.status(409).send({
+        error: 'That answer belongs to a different manual submission attempt.',
+        code: 'submission_event_binding_conflict',
+        retry_safety: result.retrySafety,
+      });
+    }
+    if (result.kind === 'lease_conflict') {
+      return reply.status(409).send({
+        error: 'That boundary authorization does not belong to this manual submission attempt.',
+        code: 'manual_submission_boundary_lease_mismatch',
+        retry_safety: result.retrySafety,
+      });
+    }
+    if (result.kind === 'authorization_present') {
+      return reply.status(409).send({
+        error: 'This exact attempt crossed the final authorization boundary, so it cannot be recorded as not sent. Confirm it only if you found evidence that it was submitted.',
+        code: 'manual_submission_boundary_authorized',
+        ...(result.authorization ? {
+          lease_id: result.authorization.leaseId,
+          attempt_id: result.authorization.attemptId,
+          authorized_at: result.authorization.authorizedAt,
+          expires_at: result.authorization.expiresAt,
+        } : {}),
+        retry_safety: result.retrySafety,
+      });
+    }
+    if (result.kind === 'authorization_not_cancellable') {
+      return reply.status(409).send({
+        error: 'A final boundary authorization was issued, so the extension cannot mark this attempt not sent.',
+        code: 'manual_submission_boundary_not_machine_cancellable',
+        retry_safety: result.retrySafety,
+      });
+    }
+    if (result.kind === 'permanent_risk') {
+      return reply.status(409).send({
+        error: 'This exact attempt crossed the employer submission boundary and cannot be marked not sent. Confirm it only if you found evidence that it was submitted.',
+        code: 'manual_submission_permanent_duplicate_risk',
+        retry_safety: result.retrySafety,
+      });
+    }
+    if (result.kind === 'terminal_conflict') {
+      return reply.status(409).send({
+        error: 'This attempt already has contradictory terminal evidence and remains blocked.',
+        code: 'submission_resolution_terminal_conflict',
+        retry_safety: result.retrySafety,
+      });
+    }
+    if (result.kind === 'not_resolvable') {
+      return reply.status(409).send({
+        error: 'This attempt does not have a valid unresolved sequence to resolve.',
+        code: 'submission_attempt_not_resolvable',
+        retry_safety: result.retrySafety,
+      });
+    }
+    if (result.kind === 'state_conflict') {
+      return reply.status(409).send({
+        error: 'This application changed while the answer was being recorded. Reload it first.',
+        code: 'submission_resolution_state_conflict',
+        retry_safety: await canonicalSubmissionRetrySafety(application),
+      });
+    }
+    const aggregateRetrySafety = await canonicalSubmissionRetrySafety(result.application);
+    return reply.header('Cache-Control', 'private, no-store').send({
+      application_id: requestedApplicationId,
+      canonical_application_id: result.application.id,
+      attempt_id: parsed.data.attempt_id,
+      found: parsed.data.found,
+      idempotent: result.idempotent,
+      retry_safety: aggregateRetrySafety,
+      resolved_attempt_retry_safety: result.retrySafety,
+      application: applicationResponse(result.application),
+    });
+  });
+
   // The extension observes the native employer submission result after a user-initiated click and
   // records it here. This is Free tracking, never automatic submission, and therefore deliberately
   // has no premium feature gate or usage reservation.
@@ -552,8 +1522,9 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
         detail: parsed.error.issues,
       });
     }
-    const application = await ownedApplication(request, reply);
+    const application = await ownedApplication(request, reply, parsed.data.event_id);
     if (!application) return;
+    const requestedApplicationId = paramsSchema.parse(request.params).id;
     const userId = request.jwtPayload!.userId;
     let finalUrl: string;
     let portalIdentity: string;
@@ -565,12 +1536,14 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({
           error: 'Submission outcome URL does not match this application portal',
           code: 'portal_identity_mismatch',
+          retry_safety: await canonicalSubmissionRetrySafety(application),
         });
       }
     } catch (error) {
       return reply.status(409).send({
         error: error instanceof Error ? error.message : 'Submission outcome URL is not safe',
         code: 'unsafe_submission_outcome_url',
+        retry_safety: await canonicalSubmissionRetrySafety(application),
       });
     }
 
@@ -578,16 +1551,54 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
       idempotent: boolean;
       event: typeof application_submission_events.$inferSelect;
       application: typeof applications.$inferSelect;
+      retrySafety: SubmissionAttemptRetrySafety;
     };
     try {
       const runManualSubmissionOutcomeTransaction = (database: typeof db) => database.transaction(async (tx): Promise<OutcomeResult> => {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`manual-submission:${userId}:${parsed.data.event_id}`}, 0::bigint))`);
-        const [currentApplication] = await tx.select().from(applications).where(and(
-          eq(applications.id, application.id),
-          eq(applications.user_id, userId),
-        )).limit(1);
+        // Share the same user-wide lock as every automatic reservation. A manual receipt and an
+        // automatic retry for an alias of the same posting must never pass each other unseen.
+        await lockSubmissionAttemptUser(tx, userId);
+        const currentApplication = await canonicalApplicationForExactAttempt(
+          tx,
+          userId,
+          paramsSchema.parse(request.params).id,
+          parsed.data.event_id,
+        );
         if (!currentApplication) {
           throw Object.assign(new Error('Application not found'), { statusCode: 404, code: 'application_not_found' });
+        }
+        const exactAttemptEvents = await tx.select()
+          .from(application_submission_attempt_events)
+          .where(and(
+            eq(application_submission_attempt_events.user_id, userId),
+            eq(application_submission_attempt_events.attempt_id, parsed.data.event_id),
+          ));
+        const boundaryAuthorization = exactAttemptEvents.find(
+          (event) => event.event_kind === 'boundary_authorized',
+        );
+        const boundaryLeaseMismatch = (
+          (boundaryAuthorization && (
+            parsed.data.lease_id !== boundaryAuthorization.event_id
+            || parsed.data.activation_id !== boundaryAuthorization.boundary_activation_id
+          ))
+          || (!boundaryAuthorization && (parsed.data.lease_id || parsed.data.activation_id))
+        );
+        if (boundaryLeaseMismatch && parsed.data.outcome !== 'confirmed') {
+          throw Object.assign(new Error('The outcome does not match this attempt boundary authorization'), {
+            statusCode: 409,
+            code: 'manual_submission_boundary_lease_mismatch',
+          });
+        }
+        const exactRetrySafety = submissionAttemptRetrySafety(exactAttemptEvents);
+        /* A delayed unknown or failed callback is not evidence that an already proved pre-click
+         * cancellation crossed the employer boundary. Reject it before the mutable event row or
+         * immutable press fact can be written. A confirmed receipt is different: it is stronger
+         * positive evidence, so it must be preserved even when it contradicts the earlier check. */
+        if (exactRetrySafety.kind === 'safe_not_sent' && parsed.data.outcome !== 'confirmed') {
+          throw Object.assign(new Error('This manual submission attempt was already proved not sent'), {
+            statusCode: 409,
+            code: 'manual_submission_attempt_already_not_sent',
+          });
         }
         const [existing] = await tx.select().from(application_submission_events).where(and(
           eq(application_submission_events.user_id, userId),
@@ -609,7 +1620,20 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
             });
           }
           if (decision === 'exact_replay') {
-            return { idempotent: true, event: existing, application: currentApplication };
+            await appendCanonicalManualSubmissionFacts({
+              tx,
+              application: currentApplication,
+              userId,
+              clientEventId: parsed.data.event_id,
+              outcome: parsed.data.outcome,
+              finalUrl,
+            });
+            return {
+              idempotent: true,
+              event: existing,
+              application: currentApplication,
+              retrySafety: await canonicalSubmissionRetrySafety(currentApplication, tx),
+            };
           }
           if (decision === 'terminal_conflict') {
             throw Object.assign(new Error('A terminal submission event cannot be changed'), {
@@ -634,7 +1658,20 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
             applied_submission_state: transition.submissionState,
             observed_at: now,
           }).where(eq(application_submission_events.id, existing.id)).returning();
-          return { idempotent: false, event: promoted, application: updatedApplication };
+          await appendCanonicalManualSubmissionFacts({
+            tx,
+            application: updatedApplication,
+            userId,
+            clientEventId: parsed.data.event_id,
+            outcome: parsed.data.outcome,
+            finalUrl,
+          });
+          return {
+            idempotent: false,
+            event: promoted,
+            application: updatedApplication,
+            retrySafety: await canonicalSubmissionRetrySafety(updatedApplication, tx),
+          };
         }
 
         const transition = manualSubmissionTransition(currentApplication.submission_state, parsed.data.outcome);
@@ -658,7 +1695,20 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
           applied_submission_state: transition.submissionState,
           observed_at: now,
         }).returning();
-        return { idempotent: false, event: createdEvent, application: updatedApplication };
+        await appendCanonicalManualSubmissionFacts({
+          tx,
+          application: updatedApplication,
+          userId,
+          clientEventId: parsed.data.event_id,
+          outcome: parsed.data.outcome,
+          finalUrl,
+        });
+        return {
+          idempotent: false,
+          event: createdEvent,
+          application: updatedApplication,
+          retrySafety: await canonicalSubmissionRetrySafety(updatedApplication, tx),
+        };
       });
       const result = await withReadOnlyRetry(
         () => runManualSubmissionOutcomeTransaction(db),
@@ -677,11 +1727,13 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
         },
       );
       return reply.header('Cache-Control', 'private, no-store').send({
-        application_id: result.application.id,
+        application_id: requestedApplicationId,
+        canonical_application_id: result.application.id,
         event_id: result.event.event_id,
         outcome: result.event.outcome,
         idempotent: result.idempotent,
         applied_submission_state: result.event.applied_submission_state,
+        retry_safety: result.retrySafety,
         event: {
           event_id: result.event.event_id,
           outcome: result.event.outcome,
@@ -694,7 +1746,11 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
     } catch (error) {
       const typed = error as Error & { statusCode?: number; code?: string };
       if (typed.statusCode && typed.code) {
-        return reply.status(typed.statusCode).send({ error: typed.message, code: typed.code });
+        return reply.status(typed.statusCode).send({
+          error: typed.message,
+          code: typed.code,
+          retry_safety: await canonicalSubmissionRetrySafety(application),
+        });
       }
       throw error;
     }
@@ -704,24 +1760,101 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
   // artifacts use a short-lived capability URL. The saved base resume uses an authenticated render
   // URL that the extension background fetches with the account token before attaching the bytes.
   fastify.get('/applications/:id/fill-data', { preHandler: requireAuth }, async (request, reply) => {
-    const application = await ownedApplication(request, reply);
+    const parsedQuery = fillDataQuerySchema.safeParse(request.query ?? {});
+    if (!parsedQuery.success) {
+      const application = await ownedApplication(request, reply);
+      if (!application) return;
+      return reply.status(409).send({
+        error: 'Reserve this exact manual submission before loading any fill data.',
+        code: 'manual_submission_reservation_required',
+        retry_safety: await canonicalSubmissionRetrySafety(application),
+      });
+    }
+    const application = await ownedApplication(request, reply, parsedQuery.data.event_id);
     if (!application) return;
+    const requestedApplicationId = paramsSchema.parse(request.params).id;
+    const userId = request.jwtPayload!.userId;
+    const gate = await db.transaction(async (tx) => {
+      await lockSubmissionAttemptUser(tx, userId);
+      const currentApplication = await canonicalApplicationForExactAttempt(
+        tx,
+        userId,
+        paramsSchema.parse(request.params).id,
+        parsedQuery.data.event_id,
+      );
+      if (!currentApplication) return { kind: 'not_found' as const };
+      const exactEvents = await tx.select().from(application_submission_attempt_events).where(and(
+        eq(application_submission_attempt_events.user_id, userId),
+        eq(application_submission_attempt_events.attempt_id, parsedQuery.data.event_id),
+      ));
+      const opening = exactEvents.find((event) => event.event_kind === 'attempt_opened');
+      if (!opening
+        || !(await canonicalAttemptEventMayMutateApplication(tx, userId, opening, currentApplication))
+        || opening.source !== 'chrome_extension'
+        || opening.operation !== 'manual_submission') {
+        return { kind: 'binding_conflict' as const };
+      }
+      const retrySafety = submissionAttemptRetrySafety(exactEvents);
+      if (retrySafety.kind !== 'blocked_unverified' || retrySafety.reason !== 'opened') {
+        return { kind: 'attempt_terminal' as const, retrySafety };
+      }
+      const duplicate = await duplicateApplicationVerdict({
+        userId,
+        applicationId: currentApplication.legacy_generated_resume_id ?? currentApplication.id,
+        jobContext: {
+          company: currentApplication.company_name,
+          role: currentApplication.role,
+          job_id: currentApplication.job_id,
+        },
+        portalUrl: currentApplication.portal_url,
+        excludeAttemptId: parsedQuery.data.event_id,
+      }, tx);
+      if (duplicate.kind !== 'clear') return { kind: 'duplicate' as const, duplicate, retrySafety };
+      return { kind: 'allowed' as const, application: currentApplication, retrySafety };
+    });
+    if (gate.kind === 'not_found') {
+      return reply.status(404).send({
+        error: 'Application not found',
+        retry_safety: await canonicalSubmissionRetrySafety(application),
+      });
+    }
+    if (gate.kind === 'binding_conflict') {
+      return reply.status(409).send({
+        error: 'This fill request is not bound to the active manual submission reservation.',
+        code: 'submission_event_binding_conflict',
+        retry_safety: await canonicalSubmissionRetrySafety(application),
+      });
+    }
+    if (gate.kind === 'attempt_terminal') {
+      return reply.status(409).send({
+        error: 'This manual submission reservation is no longer safe to fill.',
+        code: 'manual_submission_reservation_not_open',
+        retry_safety: gate.retrySafety,
+      });
+    }
+    if (gate.kind === 'duplicate') {
+      const refusal = gate.duplicate.kind === 'duplicate'
+        ? duplicateApplicationResponse(gate.duplicate)
+        : unidentifiableDuplicateApplicationResponse(gate.duplicate);
+      return reply.status(409).send({ ...refusal, retry_safety: gate.retrySafety });
+    }
+    const activeApplication = gate.application;
     // New writes are already normalized by POST /applications. This second check protects the
     // extension from historical or manually imported rows that predate that invariant.
     let portalUrl: string | null;
     try {
-      portalUrl = canonicalPortalUrl(application.portal_url ?? undefined);
+      portalUrl = canonicalPortalUrl(activeApplication.portal_url ?? undefined);
     } catch {
       return reply.status(409).send({
         error: 'This saved application does not have a safe HTTPS portal URL.',
         code: 'unsafe_portal_url',
+        retry_safety: gate.retrySafety,
       });
     }
-    const userId = request.jwtPayload!.userId;
     const [selectedArtifact, baseProfile, entitlement, account] = await Promise.all([
-      application.selected_resume_artifact_id
+      activeApplication.selected_resume_artifact_id
         ? db.select().from(artifacts).where(and(
-          eq(artifacts.id, application.selected_resume_artifact_id),
+          eq(artifacts.id, activeApplication.selected_resume_artifact_id),
           eq(artifacts.user_id, userId),
           isNull(artifacts.deleted_at),
         )).limit(1)
@@ -758,12 +1891,15 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
       && account[0]?.automatic_submission_enabled === true;
     return reply.header('Cache-Control', 'private, no-store').send({
       account_id: userId,
-      application_id: application.id,
-      application: applicationResponse({ ...application, portal_url: portalUrl }),
+      application_id: requestedApplicationId,
+      canonical_application_id: activeApplication.id,
+      submission_event_id: parsedQuery.data.event_id,
+      retry_safety: gate.retrySafety,
+      application: applicationResponse({ ...activeApplication, portal_url: portalUrl }),
       application_fill: true,
       selected_resume: selectedResume,
-      resume_attached: application.resume_attached,
-      resume_source: application.resume_source,
+      resume_attached: activeApplication.resume_attached,
+      resume_source: activeApplication.resume_source,
       resume_required: selectedResume === null,
       automatic_submission_available: entitlement.features.automatic_submission,
       automatic_submission_enabled: automaticSubmissionEnabled,
@@ -773,7 +1909,7 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
         ? ['continue_without_attaching']
         : ['upload_resume', 'continue_without_attaching'],
       portal_url: portalUrl,
-      handoff: fillHandoffResponse({ ...application, portal_url: portalUrl }),
+      handoff: fillHandoffResponse({ ...activeApplication, portal_url: portalUrl }),
     });
   });
 }

@@ -187,32 +187,46 @@ test('packet acknowledgement binds the exact rendered audit and PDF with an exac
 test('manual dashboard navigation comes only from an action-time current acknowledged packet check', () => {
   const route = routeSlice("'/applications/:id/submission/manual-handoff'", "'/applications/:id/submission/extension-packet'");
   const ownership = route.indexOf('ownedResume(request, reply)');
-  const audit = route.indexOf('currentAcknowledgedPacketAudit(row');
+  const audit = route.indexOf('attendedPacketAudit(row');
   const refresh = route.indexOf('const refreshed = await ownedResume(request, reply)', audit);
-  const binding = route.indexOf('verifiedDashboardHandoffUrl({');
+  const binding = route.indexOf("attendedHandoffCapabilityForRow(\n        refreshed,\n        refreshedReview,\n        'manual_handoff'");
+  const finalization = route.indexOf('finalizeAttendedHandoffCapability({', binding);
   const response = route.indexOf('manual_handoff:');
-  assert.ok(ownership >= 0 && audit > ownership && refresh > audit && binding > refresh && response > binding);
+  assert.ok(ownership >= 0 && audit > ownership && refresh > audit && binding > refresh
+    && finalization > binding && response > finalization);
+  assert.match(route, /review = await repairReviewPortalFromMonitoredJob\(row, review\)/);
+  assert.match(route, /refreshedReview = await repairReviewPortalFromMonitoredJob\(refreshed, refreshedReview\)/);
+  assert.match(route, /!isDeepStrictEqual\(refreshedReview, review\)/);
   assert.match(route, /const auditedRow = audit\.row/,
     'a retention restore must replace the pre-audit row before the handoff CAS');
   assert.match(route, /refreshed\.resume_object_key !== auditedRow\.resume_object_key/);
   assert.match(route, /!isDeepStrictEqual\(refreshed\.spec, auditedRow\.spec\)/);
-  assert.match(route, /frozenUrl: refreshedReview\.portal_url/);
-  assert.match(route, /frozenHandoffUrl: refreshedReview\.extension_handoff_url/);
-  assert.match(route, /frozenAtsName: refreshedReview\.ats_name/);
-  assert.match(route, /status: refreshedReview\.status/);
-  assert.match(route, /attentionReason: refreshedReview\.attention_reason/);
-  assert.match(route, /attentionCategories: refreshedReview\.attention_categories/);
-  assert.match(route, /submissionClaimedAt: refreshedReview\.submission_claimed_at/);
-  assert.match(route, /submissionClaimId: refreshedReview\.submission_claim_id/);
-  assert.match(route, /submissionPacketVersion: refreshedReview\.submission_packet_version/);
-  assert.match(route, /submissionAttemptedAt: refreshedReview\.submission_attempted_at/);
-  assert.match(route, /submittedAt: refreshedReview\.submitted_at/);
-  assert.match(route, /receipt: refreshedReview\.receipt/);
-  assert.match(route, /unverifiedSubmission: refreshedReview\.unverified_submission/);
+  assert.match(applications, /function exactManualHandoffUrl[\s\S]*?frozenUrl: review\.portal_url[\s\S]*?frozenHandoffUrl: review\.extension_handoff_url[\s\S]*?frozenHandoffBinding: review\.extension_handoff_binding/);
   assert.match(route, /audit_digest: audit\.audit\.audit_digest/);
   assert.match(route, /packet_version: audit\.audit\.packet_version/);
   assert.match(route, /pdf_sha256: audit\.audit\.bindings\.pdf\.sha256/);
   assert.match(route, /size_bytes: audit\.audit\.bindings\.pdf\.sizeBytes/);
+  const reservation = route.indexOf('reserveAttendedManualAttempt(refreshed, refreshedReview');
+  const boundary = route.indexOf('finalApplicationBoundaryGate({', reservation);
+  assert.ok(reservation > binding && boundary > reservation && response > boundary,
+    'the URL must stay server-side until an exact manual attempt and final locked recheck exist');
+  assert.match(route, /reservation\.kind === 'duplicate_risk'/,
+    'a confirmed alias must refuse the manual handoff before the URL is returned');
+  assert.match(route, /reservation\.kind === 'blocked'/,
+    'a runner claim must win its race against a manual handoff reservation');
+  assert.match(route, /manual_attempt_id: reservation\.binding\.attemptId/,
+    'a replay must return the exact durable manual attempt id');
+  assert.match(route, /application_id: finalized\.row\.id/);
+  assert.match(route, /boundary_lease_id: finalized\.authorization\.leaseId/);
+  assert.match(route, /boundary_activation_id: finalized\.authorization\.activationId/);
+  assert.match(route, /manual_handoff_resume_available: true/);
+  assert.match(route, /replay: boundaryGate\.replay/);
+  assert.match(route, /attended_handoff_capability: finalized\.attendedHandoffCapability/);
+  assert.match(route, /review: finalized\.review/);
+  assert.match(route, /attendedBoundaryRequestSchema\.safeParse\([\s\S]*request\.body === undefined \? \{\} : request\.body/);
+  assert.match(route, /replay,/,
+    'the final locked gate must receive the exact client replay tuple');
+  assert.match(route, /retry_safety: finalized\.retrySafety/);
 });
 
 test('resume generation and edits persist an immutable exact spec-to-PDF binding', () => {
@@ -227,15 +241,18 @@ test('every employer-bound path names the current packet audit gate', () => {
   const submitRequest = routeSlice("'/applications/:id/submit-request'", "'/applications/:id/submission'");
   const approve = routeSlice("'/applications/:id/submission/approve'", "registerWorkdayVerificationRoute");
   const extensionStart = routeSlice("'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
-  const extensionOutcome = routeSlice("'/applications/:id/submission/extension-outcome'", "'/applications/:id/resume'");
+  const extensionOutcome = applications.slice(
+    applications.indexOf('async function verifyExtensionOutcomePacket('),
+    applications.indexOf('function finalApplicationAuthorizationMatches('),
+  );
   assert.match(submitRequest, /currentAcknowledgedPacketAudit/);
   assert.match(approve, /currentAcknowledgedPacketAudit/);
   assert.match(extensionStart, /currentAcknowledgedPacketAudit/);
   assert.match(extensionStart, /precheckPacketVersion = auditVerdict\.audit\.packet_version/);
   assert.match(extensionStart, /submission_packet_version: precheckPacketVersion!/);
   assert.match(extensionOutcome, /currentAcknowledgedPacketAudit/);
-  assert.match(extensionOutcome, /current\.submission_packet_version !== outcomeAudit\.audit\.packet_version/);
-  assert.match(extensionOutcome, /JSON\.stringify\(row\.spec\)/);
+  assert.match(extensionOutcome, /review\.submission_packet_version !== verdict\.audit\.packet_version/);
+  assert.match(extensionOutcome, /JSON\.stringify\(latest\.spec\)/);
   const handoffComplete = routeSlice("'/applications/:id/submission/handoff-complete'", "'/applications/:id/submission/approve'");
   assert.match(handoffComplete, /currentAcknowledgedPacketAudit/);
   assert.match(handoffComplete, /JSON\.stringify\(row\.spec\)/);
@@ -273,6 +290,17 @@ test('extension start retries read-only transactions without repeating external 
   );
 });
 
+test('the paused generated lane cannot reach packet authorization or boundary exposure', () => {
+  const extensionStart = routeSlice("'/applications/:id/submission/extension-start'", "'/applications/:id/submission/extension-outcome'");
+  const paused = extensionStart.indexOf('if (!GENERATED_EXTENSION_SUBMISSION_ENABLED)');
+  const audit = extensionStart.indexOf('currentAcknowledgedPacketAudit', paused);
+  const claim = extensionStart.indexOf('tx.update(generated_resumes)', audit);
+  const boundary = extensionStart.indexOf('finalApplicationBoundaryGate({', claim);
+  assert.ok(paused >= 0 && audit > paused && claim > audit && boundary > claim,
+    'the release pause must answer before audit authorization, claim mutation, or employer-boundary exposure');
+  assert.match(extensionStart.slice(paused, audit), /code: 'GENERATED_EXTENSION_SUBMISSION_PAUSED'/);
+});
+
 test('reviewed per-application approval stays free while unattended submission remains entitled', () => {
   const approve = routeSlice("'/applications/:id/submission/approve'", "registerWorkdayVerificationRoute");
   assert.doesNotMatch(approve, /requireFeature|automatic_submission|dashboard_automatic_submission/);
@@ -282,10 +310,21 @@ test('reviewed per-application approval stays free while unattended submission r
   assert.match(extensionStart, /requireFeature\([\s\S]*?'automatic_submission'/);
 });
 
-test('submission polling hides a retained handoff when the current packet identity is no longer valid', () => {
-  assert.match(applications, /review\.status === 'filling' \|\| review\.status === 'needs_attention'[\s\S]*currentAcknowledgedPacketAudit\(row[,)]/);
-  assert.match(applications, /handoff_packet_valid = audit\.valid/);
-  assert.match(applications, /if \(audit\.valid\)[\s\S]*getLiveViewUrl/);
+test('submission polling reports packet validity without exposing or reopening the employer handoff', () => {
+  const submissionPoll = routeSlice(
+    "'/applications/:id/submission'",
+    "'/applications/:id/submission/self-submit-start'",
+  );
+  assert.match(submissionPoll, /review\.status === 'needs_attention'[\s\S]*attendedPacketAudit\(row[,)]/);
+  assert.match(submissionPoll, /handoff_packet_valid = audit\.valid/);
+  assert.doesNotMatch(submissionPoll, /getLiveViewUrl|\bhandoff_url\b/);
+  assert.match(submissionPoll, /retrySafety\.reason === 'boundary_authorized'[\s\S]*submissionBoundaryAuthorization\(row\.user_id, claimedAttemptId\)/);
+  assert.match(submissionPoll, /attendedManualAttemptMatchesCurrent\(row, review, binding\)[\s\S]*retrySafety\.leaseId === authorization\.leaseId/);
+  assert.match(submissionPoll, /manual_handoff_resume_available: recoverableManualBoundary\?\.active === true/);
+  assert.match(submissionPoll, /manual_attempt_id: recoverableManualBoundary\.attemptId/);
+  assert.match(submissionPoll, /passiveAttendedHandoffCapabilityForRow\(row, review/);
+  assert.match(submissionPoll, /attended_handoff_capability: passiveAttendedCapability/);
+  assert.match(submissionPoll, /review: passiveSubmissionReview\(review\)/);
 });
 
 test('resume edits refuse a stale personal email before rendering or storing a replacement PDF', () => {
@@ -452,11 +491,19 @@ test('every pre-send canonicalization uses the shared enriched-context fixpoint 
   );
 });
 
-test('extension receipt paths verify the captured stored snapshot without post-send resolver drift', () => {
-  const extensionOutcome = routeSlice("'/applications/:id/submission/extension-outcome'", "'/applications/:id/resume'");
-  assert.match(extensionOutcome, /questions:\s*current\.questions/);
+test('extension non-confirmed transitions verify the captured snapshot without vetoing exact receipts', () => {
+  const extensionOutcome = applications.slice(
+    applications.indexOf('async function verifyExtensionOutcomePacket('),
+    applications.indexOf('function finalApplicationAuthorizationMatches('),
+  );
+  assert.match(extensionOutcome, /questions:\s*review\.questions/);
   assert.doesNotMatch(extensionOutcome, /resolvedPacketAuditQuestions\(/);
-  assert.match(extensionOutcome, /current\.submission_packet_version !== outcomeAudit\.audit\.packet_version/);
+  assert.match(extensionOutcome, /review\.submission_packet_version !== verdict\.audit\.packet_version/);
+  assert.match(extensionOutcome, /if \(outcome !== 'confirmed'\)[\s\S]*?audited\.verification\.valid/);
+  assert.doesNotMatch(extensionOutcome, /if \(outcome === 'confirmed'\)[\s\S]{0,160}verifyPacket/);
+  // The audit is the pooled, resume-fetching read. It runs before the lock, never inside it.
+  assert.match(extensionOutcome, /await verifyPacket\(candidate, review\)/,
+    'the audit must be computed against an unlocked read');
 
   const handoffComplete = routeSlice("'/applications/:id/submission/handoff-complete'", "'/applications/:id/submission/approve'");
   assert.match(handoffComplete, /questions:\s*current\.questions/);
