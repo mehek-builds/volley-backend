@@ -303,6 +303,55 @@ test('managed Workable phone evidence replaces stale fill success with country a
   }).includes('phone'), true);
 });
 
+test('managed Workable terminal re-reads corroborate or refuse the early phone proof', () => {
+  const base = {
+    title: 'Apply',
+    url: 'https://apply.workable.com/pony-ai/j/example/apply',
+    text: 'Apply for this job',
+    filledFields: ['phone'],
+    capabilities: [MANAGED_EXTRACT_ASSERTIONS_CAPABILITY],
+  };
+  const proofs = [
+    { selector: '#country', label: 'filled_field:phone_country', value: 'United States +1', expectedValueDigits: '1' },
+    { selector: '#phone', label: 'filled_field:phone', value: '(213) 574-6270', expectedValueDigits: '2135746270' },
+  ];
+  // A terminal read that agrees with the proven digits corroborates the early proof.
+  assert.equal(managedResultFilledFields({
+    ...base,
+    extracted: [
+      ...proofs,
+      { selector: '#phone', label: 'workable_phone_terminal:phone', value: '213-574-6270' },
+      { selector: '#dial', label: 'workable_phone_terminal:phone_country', value: '+1' },
+    ],
+  }).includes('phone'), true);
+  // A widget the parse remount left unreadable is TOLERATED: the strict proof ran before the
+  // resume upload and stands as the record, with the skip as its provenance.
+  assert.equal(managedResultFilledFields({
+    ...base,
+    extracted: [...proofs, { selector: '#phone', label: 'workable_phone_terminal:phone', value: null }],
+    skipped: ['workable_phone_terminal:phone_country'],
+  }).includes('phone'), true);
+  // A parse that REWROTE the committed number after the proof fails closed, as a phone fact.
+  assert.equal(managedResultFilledFields({
+    ...base,
+    extracted: [...proofs, { selector: '#phone', label: 'workable_phone_terminal:phone', value: '(415) 555-0100' }],
+  }).includes('phone'), false);
+  // A parse that EMPTIED the field fails closed too: an empty read is not an absent widget.
+  assert.equal(managedResultFilledFields({
+    ...base,
+    extracted: [...proofs, { selector: '#phone', label: 'workable_phone_terminal:phone', value: '' }],
+  }).includes('phone'), false);
+  // A rewritten country selection fails closed on the dial code alone.
+  assert.equal(managedResultFilledFields({
+    ...base,
+    extracted: [
+      ...proofs,
+      { selector: '#phone', label: 'workable_phone_terminal:phone', value: '2135746270' },
+      { selector: '#dial', label: 'workable_phone_terminal:phone_country', value: '+44' },
+    ],
+  }).includes('phone'), false);
+});
+
 test('managed cover-letter detection requires an actual file input extraction', () => {
   const selector = coverLetterUploadSelector('greenhouse');
   assert.equal(managedResultHasCoverLetterUpload({ title: 'Apply', url: 'https://example.com', text: 'Cover letter is optional', extracted: [{ selector, value: 'file' }] }, 'greenhouse'), true);
@@ -4722,7 +4771,7 @@ test('only the Workable phone proofs summon the evidence run', () => {
   assert.equal(isWorkablePhoneReadbackAssertionLabel(null), false);
 });
 
-test('managed Workable phone selects exact UAE and verifies the final post-upload value', () => {
+test('managed Workable phone selects exact UAE and proves the value before the resume upload', () => {
   const actions = buildManagedPortalActions('workable', {
     ...capturePacket,
     phone: '+971 567417451',
@@ -4750,11 +4799,19 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
   const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
   const countryWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_country_visible');
+  const terminalVisibleIndex = actions.findIndex((action) => action.label === 'workable_phone_terminal_visible');
+  const terminalPhoneIndex = actions.findIndex((action) => action.label === 'workable_phone_terminal:phone');
+  const terminalCountryIndex = actions.findIndex((action) => action.label === 'workable_phone_terminal:phone_country');
 
-  assert.ok(capabilityIndex > Math.max(...uploadIndexes, ...addressIndexes));
-  assert.equal(lateCookieDeclineIndex, capabilityIndex + 1);
-  assert.equal(lateCookieClearedIndex, lateCookieDeclineIndex + 1);
-  assert.equal(countryOpenIndex, lateCookieClearedIndex + 1);
+  /* THE SEQUENCING FACT this whole block exists to pin: the fill and both strict proofs run after
+   * the address commit and BEFORE every upload, because the resume upload is what triggers the
+   * asynchronous parse remount that destroyed the widget under five successive terminal-position
+   * readbacks (found 0, value visibly on screen - Pony.ai runs fdcf4ccb, 8c81e9ad and the three
+   * before them). */
+  assert.ok(capabilityIndex > Math.max(...addressIndexes));
+  assert.ok(capabilityIndex < Math.min(...uploadIndexes));
+  assert.ok(countryProofIndex < Math.min(...uploadIndexes));
+  assert.equal(countryOpenIndex, capabilityIndex + 1);
   assert.equal(countryOptionIndex, countryOpenIndex + 1);
   assert.equal(countryCloseIndex, countryOptionIndex + 1);
   assert.equal(phoneIndex, countryCloseIndex + 1);
@@ -4762,6 +4819,31 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(phoneProofIndex, phoneWaitIndex + 1);
   assert.equal(countryWaitIndex, phoneProofIndex + 1);
   assert.equal(countryProofIndex, countryWaitIndex + 1);
+  /* The cookie boundary moved to the END with the tolerant terminal re-reads it now guards: a
+   * fresh post-parse consent dialog intercepts the submit click, not the country combobox. */
+  assert.ok(lateCookieDeclineIndex > Math.max(...uploadIndexes));
+  assert.equal(lateCookieClearedIndex, lateCookieDeclineIndex + 1);
+  assert.equal(terminalVisibleIndex, lateCookieClearedIndex + 1);
+  assert.equal(terminalPhoneIndex, terminalVisibleIndex + 1);
+  assert.equal(terminalCountryIndex, terminalPhoneIndex + 1);
+  /* The terminal re-reads TOLERATE widget absence - optional, no assertions - because a required
+   * read in this position is exactly what failed five times. The strict proof stays the record;
+   * managedResultFilledFields fails closed if a readable terminal value disagrees with it. */
+  assert.deepEqual(actions[terminalPhoneIndex], {
+    type: 'extract',
+    selector: WIDENED_WORKABLE_PHONE_READBACK,
+    attribute: 'value',
+    label: 'workable_phone_terminal:phone',
+    optional: true,
+    timeout: 10_000,
+  });
+  assert.deepEqual(actions[terminalCountryIndex], {
+    type: 'extract',
+    selector: '.iti__selected-dial-code:visible',
+    label: 'workable_phone_terminal:phone_country',
+    optional: true,
+    timeout: 10_000,
+  });
   assert.deepEqual(actions[countryOpenIndex], {
     type: 'click',
     selector: WIDENED_WORKABLE_PHONE_COUNTRY_OPENER,
@@ -4911,6 +4993,7 @@ test('managed Workable US phone selects exact United States and proves national 
   const lateCookieClearedIndex = actions.findIndex(
     (action) => action.label === 'workable_cookie_final_cleared',
   );
+  const capabilityIndex = actions.findIndex((action) => action.type === 'requireCapability');
   const countryOpenIndex = actions.findIndex((action) => action.label === 'phone_country_open');
   const countryOptionIndex = actions.findIndex((action) => action.label === 'phone_country_option');
   const countryCloseIndex = actions.findIndex((action) => action.label === 'phone_country_close');
@@ -4919,9 +5002,14 @@ test('managed Workable US phone selects exact United States and proves national 
   const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
   const phoneProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone');
   const countryWaitIndex = actions.findIndex((action) => action.label === 'workable_phone_country_visible');
+  const resumeUploadIndex = actions.findIndex((action) => action.type === 'upload' && action.label === 'resume');
 
+  // The strict proofs precede the resume upload; the cookie boundary follows it with the
+  // tolerant terminal re-reads (see the sequencing comment on the UAE test above).
+  assert.ok(countryProofIndex < resumeUploadIndex);
+  assert.ok(lateCookieDeclineIndex > resumeUploadIndex);
   assert.equal(lateCookieClearedIndex, lateCookieDeclineIndex + 1);
-  assert.equal(countryOpenIndex, lateCookieClearedIndex + 1);
+  assert.equal(countryOpenIndex, capabilityIndex + 1);
   assert.equal(countryOptionIndex, countryOpenIndex + 1);
   assert.equal(countryCloseIndex, countryOptionIndex + 1);
   assert.deepEqual(actions[countryOptionIndex], {
@@ -4981,6 +5069,9 @@ test('managed Workable submit is gated by invalid nonempty phones but not an abs
 });
 
 test('managed Workable final cookie boundary handles both a late modal and no modal', () => {
+  // The boundary sits at the END of the plan now, where the post-parse consent dialog actually
+  // mounts: it clears the pointer-intercepting backdrop ahead of the terminal re-reads and the
+  // submit click, not ahead of the country combobox (which runs before the resume upload).
   const actions = buildManagedPortalActions('workable', {
     ...capturePacket,
     phone: '+971 567417451',
@@ -4988,7 +5079,7 @@ test('managed Workable final cookie boundary handles both a late modal and no mo
   const boundaryLabels = new Set([
     'workable_cookie_final_decline',
     'workable_cookie_final_cleared',
-    'phone_country_open',
+    'workable_phone_terminal:phone',
   ]);
   const boundary = actions.filter((action) => boundaryLabels.has(action.label ?? ''));
 
@@ -5010,16 +5101,93 @@ test('managed Workable final cookie boundary handles both a late modal and no mo
         assert.equal(dialogPresent, false);
         assert.equal(backdropPresent, false);
         events.push('cleared');
-      } else if (action.label === 'phone_country_open') {
-        assert.equal(dialogPresent || backdropPresent, false, 'cookie overlay would intercept the phone trigger');
-        events.push('country-open');
+      } else if (action.label === 'workable_phone_terminal:phone') {
+        assert.equal(dialogPresent || backdropPresent, false, 'cookie overlay would sit over the terminal boundary');
+        events.push('terminal-read');
       }
     }
     return events;
   };
 
-  assert.deepEqual(replay(true), ['decline', 'cleared', 'country-open']);
-  assert.deepEqual(replay(false), ['optional-miss', 'cleared', 'country-open']);
+  assert.deepEqual(replay(true), ['decline', 'cleared', 'terminal-read']);
+  assert.deepEqual(replay(false), ['optional-miss', 'cleared', 'terminal-read']);
+});
+
+/* THE PRODUCTION-SHAPED REPLAY of the five live refutations, and of the fix. The resume upload
+ * triggers Workable's asynchronous parse remount, which destroys the intl-tel-input widget for the
+ * rest of the run's readable window (measured: Pony.ai fdcf4ccb on 2026-08-28 with the value
+ * visibly on screen, 8c81e9ad on 2026-08-27, and the three refutations before them - always
+ * `found 0` on the readback, always AFTER the upload). The replay executes the built plan against
+ * that model: every widget-reading action succeeds while the widget stands and finds 0 once the
+ * remount has landed, with destruction swept across every possible number of actions of parse lag.
+ * The shipped ordering must survive every lag; the OLD terminal ordering must reproduce the exact
+ * live refusal. */
+test('Workable phone proofs survive the resume-parse remount that refuted the terminal readback', () => {
+  const actions = buildManagedPortalActions('workable', {
+    ...capturePacket,
+    phone: '+1 213 574 6270',
+  }, true);
+  const capabilityIndex = actions.findIndex((action) => action.type === 'requireCapability');
+  const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
+  const phoneFillIndex = actions.findIndex((action) => action.type === 'fill' && action.label === 'phone');
+  const resumeUploadIndex = actions.findIndex((action) => action.type === 'upload' && action.label === 'resume');
+  assert.ok(capabilityIndex >= 0 && countryProofIndex > capabilityIndex);
+  assert.ok(resumeUploadIndex > countryProofIndex, 'both strict proofs must precede the remount trigger');
+  // Nothing that can remount or navigate stands between the fill and its proofs: only the block's
+  // own settling waits and extracts run in that window.
+  for (const action of actions.slice(phoneFillIndex + 1, countryProofIndex + 1)) {
+    assert.ok(action.type === 'waitForSelector' || action.type === 'extract', action.label);
+  }
+
+  const widgetSelectors = new Set([
+    'input[name="phone"][type="tel"]:visible',
+    WIDENED_WORKABLE_PHONE_READBACK,
+    '.iti__selected-dial-code:visible',
+  ]);
+  /* Runs the plan with the parse remount landing `parseLagActions` actions after the resume
+   * upload, and returns the first required widget action's refusal, spelled the way the runner
+   * spells it, or null when the run survives. Optional widget actions land in `skipped`, exactly
+   * like the tolerant terminal re-reads on a destroyed widget. */
+  const replay = (list: typeof actions, parseLagActions: number): string | null => {
+    let actionsSinceUpload: number | null = null;
+    for (const action of list) {
+      const widgetDestroyed = actionsSinceUpload !== null && actionsSinceUpload >= parseLagActions;
+      if (actionsSinceUpload !== null) actionsSinceUpload += 1;
+      if (action.type === 'upload' && action.label === 'resume') {
+        actionsSinceUpload = 0;
+        continue;
+      }
+      if (!widgetSelectors.has(action.selector ?? '')) continue;
+      if (!widgetDestroyed || action.optional) continue;
+      return `${action.label}: expected exactly one match for ${action.selector}, found 0`;
+    }
+    return null;
+  };
+
+  // The shipped ordering survives EVERY parse lag: the strict proofs already ran.
+  for (let lag = 0; lag <= actions.length; lag += 1) {
+    assert.equal(replay(actions, lag), null, `parse lag ${lag}`);
+  }
+
+  // The counterfactual: the same block moved back to its old terminal position dies exactly as
+  // the five live runs did, on the phone readback, after a successful fill.
+  const block = actions.slice(capabilityIndex, countryProofIndex + 1);
+  const withoutBlock = [...actions.slice(0, capabilityIndex), ...actions.slice(countryProofIndex + 1)];
+  const terminalIndex = withoutBlock.findIndex((action) => action.label === 'workable_cookie_final_decline');
+  const oldOrdering = [
+    ...withoutBlock.slice(0, terminalIndex),
+    ...block,
+    ...withoutBlock.slice(terminalIndex),
+  ];
+  const oldFillOffset = oldOrdering.findIndex((action) => action.type === 'fill' && action.label === 'phone')
+    - oldOrdering.findIndex((action) => action.type === 'upload' && action.label === 'resume');
+  // A parse that lands between the fill and its readback: the fill verifies against the old node,
+  // the required extract then finds nothing - the measured shape of all five refutations.
+  const refusal = replay(oldOrdering, oldFillOffset + 1);
+  assert.equal(
+    refusal,
+    `filled_field:phone: expected exactly one match for ${WIDENED_WORKABLE_PHONE_READBACK}, found 0`,
+  );
 });
 
 /* The 2026-07-29 Rippling capture was taken at .../jobs/<id>/apply; a posting saved from the JD
