@@ -1249,6 +1249,18 @@ test('fillResolvedRequiredField still holds a bare "Source" field when the packe
   assert.ok(result.blockers.some((blocker) => /source/i.test(blocker)));
 });
 
+/* The widened country-list opener chain, spelled out once: the aria contract first (combobox div,
+ * then aria-labelled button), then the structural widget contract anchored on Workable's own
+ * data-ui container, the structural arm active only when BOTH aria arms match nothing, via the
+ * same body:not(:has(...)) technique as the readback chain, so the comma list can never
+ * double-match and requireUnique keeps meaning exactly one opener on the page. */
+const WIDENED_WORKABLE_PHONE_COUNTRY_OPENER =
+  'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
+  + 'button[aria-label="Telephone country code"][aria-controls]:visible, '
+  + 'body:not(:has(div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible))'
+  + ':not(:has(button[aria-label="Telephone country code"][aria-controls]:visible)) '
+  + 'div[data-ui="phone"] .iti :is(button.iti__selected-country, .iti__selected-flag):visible';
+
 function workablePhoneUploadFixture(
   countryOptionCount = 1,
   overwritePhoneAfterMs?: number,
@@ -1403,8 +1415,7 @@ function workablePhoneUploadFixture(
       if (selector === 'body:not(:has(div[role="dialog"][data-ui="cookie-consent"][aria-label="Cookie Consent"])):not(:has(div[data-ui="backdrop"]))') {
         return cookieOverlayCleared;
       }
-      if (selector === 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
-        + 'button[aria-label="Telephone country code"][aria-controls]:visible') {
+      if (selector === WIDENED_WORKABLE_PHONE_COUNTRY_OPENER) {
         return countryTrigger;
       }
       if (selector === '[role="option"][data-country-code="ae"][data-dial-code="971"][id$="__item-ae"]:visible') {
@@ -1464,10 +1475,7 @@ test('direct Workable phone is selected and refilled after resume autofill clear
   assert.ok(phoneIndex > optionIndex, fixture.events.join(', '));
   assert.equal(fixture.countryText(), '+971');
   assert.equal(fixture.phoneValue(), '0567417451');
-  assert.ok(fixture.queriedSelectors.includes(
-    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
-      + 'button[aria-label="Telephone country code"][aria-controls]:visible',
-  ));
+  assert.ok(fixture.queriedSelectors.includes(WIDENED_WORKABLE_PHONE_COUNTRY_OPENER));
   assert.equal(fixture.queriedSelectors.includes(
     'button[aria-label="Telephone country code"][aria-controls]:visible',
   ), false);
@@ -4560,6 +4568,70 @@ test('every arm of the widened readback matches the live Pony.ai steady-state ma
   assert.match(PONY_AI_PHONE_CONTAINER_HTML, /class="iti__selected-dial-code"/);
 });
 
+/* The opener current upstream intl-tel-input builds render, for the structural arm's other half:
+ * a `button.iti__selected-country` whose accessible name is no longer "Telephone country code" at
+ * all, so neither aria arm can ever see it. */
+const CURRENT_INTL_TEL_INPUT_OPENER_HTML =
+  '<div class="iti__country-container"><button type="button" class="iti__selected-country" '
+  + 'aria-expanded="false" aria-label="Selected country" aria-haspopup="dialog">'
+  + '<div class="iti__flag iti__us"></div><div class="iti__selected-dial-code">+1</div>'
+  + '<div class="iti__arrow"></div></button></div>';
+
+test('Workable phone country opener is a mutually exclusive fallback chain the runner can hold', () => {
+  const actions = buildManagedPortalActions('workable', {
+    ...capturePacket,
+    phone: '+1 213 574 6270',
+  });
+  const open = actions.find((action) => action.label === 'phone_country_open');
+  assert.equal(open?.selector, WIDENED_WORKABLE_PHONE_COUNTRY_OPENER);
+  // The runner refuses any selector past 500 characters during normalization, before the browser
+  // opens, so the chain being holdable is a fact worth pinning rather than assuming.
+  assert.ok((open?.selector?.length ?? 0) <= 500, String(open?.selector?.length));
+  // The aria contract leads, unchanged from every shipped selector before it.
+  assert.ok(open!.selector!.startsWith(
+    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
+    + 'button[aria-label="Telephone country code"][aria-controls]:visible, ',
+  ));
+  // The structural arm exists only when BOTH aria arms match nothing, so two arms can never both
+  // match and requireUnique keeps meaning exactly one opener on the page.
+  assert.ok(open!.selector!.includes(
+    'body:not(:has(div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible))'
+    + ':not(:has(button[aria-label="Telephone country code"][aria-controls]:visible)) ',
+  ));
+  // The structural arm anchors on Workable's own data-ui container and names both build shapes;
+  // one .iti renders exactly one of the two, so the :is() member cannot double-match one widget.
+  assert.ok(open!.selector!.endsWith(
+    'div[data-ui="phone"] .iti :is(button.iti__selected-country, .iti__selected-flag):visible',
+  ));
+  // The click discipline survives the widening untouched: no opener, or two, still refuses.
+  assert.equal(open?.optional, false);
+  assert.equal(open?.requireUnique, true);
+  // Escape rides the same chain, so a widened open never strands the close on the old claim.
+  const close = actions.find((action) => action.label === 'phone_country_close');
+  assert.equal(close?.selector, WIDENED_WORKABLE_PHONE_COUNTRY_OPENER);
+});
+
+test('every arm of the widened opener matches its captured Workable shape', () => {
+  /* No DOM engine runs in this suite, so this pins the structural facts each arm rests on against
+   * the captured markup itself. Arm 1, the aria contract, is what the live Pony.ai capture's
+   * opener carries on a fresh mount (2026-08-28, the same capture the readback chain rests on). */
+  assert.match(
+    PONY_AI_PHONE_CONTAINER_HTML,
+    /<div class="iti__selected-flag" role="combobox" [^>]*aria-controls="iti-0__country-listbox" [^>]*aria-label="Telephone country code"/,
+  );
+  /* The structural arm's anchors survive the aria-stripping remount that refused live on 2026-08-28
+   * (application fdcf4ccb, `phone_country_open ... found 0` on the aria arms alone): Workable's own
+   * data-ui hook, the .iti wrapper, and the opener's build-determined class are not aria
+   * attributes, so the remount that drops the accessible name leaves all three standing. */
+  assert.match(PONY_AI_PHONE_CONTAINER_HTML, /data-ui="phone"/);
+  assert.match(PONY_AI_PHONE_CONTAINER_HTML, /class="iti /);
+  assert.match(PONY_AI_PHONE_CONTAINER_HTML, /class="iti__selected-flag"/);
+  /* And the current upstream build's opener, which no aria arm can see: the accessible name is not
+   * "Telephone country code" there, so only the structural arm's button half reaches it. */
+  assert.match(CURRENT_INTL_TEL_INPUT_OPENER_HTML, /<button [^>]*class="iti__selected-country"/);
+  assert.doesNotMatch(CURRENT_INTL_TEL_INPUT_OPENER_HTML, /Telephone country code/);
+});
+
 test('Workable phone evidence actions are all optional, value-free, and bounded', () => {
   const actions = buildWorkablePhoneEvidenceActions();
   // An evidence run must always come home: a probe that matches nothing is a finding, never a stop.
@@ -4692,8 +4764,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   assert.equal(countryProofIndex, countryWaitIndex + 1);
   assert.deepEqual(actions[countryOpenIndex], {
     type: 'click',
-    selector: 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
-      + 'button[aria-label="Telephone country code"][aria-controls]:visible',
+    selector: WIDENED_WORKABLE_PHONE_COUNTRY_OPENER,
     label: 'phone_country_open',
     optional: false,
     timeout: 10_000,
@@ -4730,8 +4801,7 @@ test('managed Workable phone selects exact UAE and verifies the final post-uploa
   });
   assert.deepEqual(actions[countryCloseIndex], {
     type: 'press',
-    selector: 'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
-      + 'button[aria-label="Telephone country code"][aria-controls]:visible',
+    selector: WIDENED_WORKABLE_PHONE_COUNTRY_OPENER,
     value: 'Escape',
     label: 'phone_country_close',
     optional: true,
@@ -4803,11 +4873,7 @@ test('managed Workable waits through phone remounts before its final value proof
   const countryProofIndex = actions.findIndex((action) => action.label === 'filled_field:phone_country');
   const countryProof = actions.find((action) => action.label === 'filled_field:phone_country');
 
-  assert.equal(
-    countryOpen?.selector,
-    'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
-      + 'button[aria-label="Telephone country code"][aria-controls]:visible',
-  );
+  assert.equal(countryOpen?.selector, WIDENED_WORKABLE_PHONE_COUNTRY_OPENER);
   assert.equal(actions.some((action) => action.label === 'workable_phone_dial_code_visible'), false);
   assert.equal(countryOption?.optional, true);
   assert.equal(
