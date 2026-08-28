@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, test } from 'node:test';
+import { billingPlan } from './billingCatalog';
 import {
   cancelStripeSubscriptionOrThrow,
   createStripeCheckoutSessionV2,
+  expireStripeCheckoutSession,
   retrieveStripeCheckoutForReconcile,
   parseStripeBillingEvent,
   retrieveStripeBillingAuthority,
@@ -28,7 +30,7 @@ afterEach(() => {
 
 describe('Stripe Litos+ adapter', () => {
   const completeSession = (over = {}) => ({
-    id: 'cs_test_reconcile', object: 'checkout.session', status: 'complete',
+    id: 'cs_test_reconcile', object: 'checkout.session', status: 'complete', payment_status: 'no_payment_required',
     client_reference_id: 'offer-1', subscription: 'sub_reconcile',
     metadata: { litos_user_id: 'user-1' }, ...over,
   });
@@ -54,6 +56,7 @@ describe('Stripe Litos+ adapter', () => {
     assert.ok(result);
     assert.equal(result.session.id, 'cs_test_reconcile');
     assert.equal(result.subscription.status, 'trialing');
+    assert.equal(result.paymentStatus, 'no_payment_required');
   });
 
   test('reconcile refuses a session that has not completed', async () => {
@@ -93,6 +96,86 @@ describe('Stripe Litos+ adapter', () => {
       fetchImpl: stripeStub(completeSession({ subscription: null }), trialingSub) as never,
     });
     assert.equal(result, null);
+  });
+
+  test('reconcile retrieves current subscription state for a completed unpaid hosted flow', async () => {
+    const result = await retrieveStripeCheckoutForReconcile({
+      sessionId: 'cs_test_reconcile',
+      fetchImpl: stripeStub(
+        completeSession({ payment_status: 'unpaid' }),
+        { ...trialingSub, status: 'incomplete_expired' },
+      ) as never,
+    });
+    assert.ok(result);
+    assert.equal(result.paymentStatus, 'unpaid');
+    assert.equal(result.subscription.status, 'incomplete_expired');
+  });
+
+  test('reconcile refuses an unknown completed hosted-flow payment state', async () => {
+    const result = await retrieveStripeCheckoutForReconcile({
+      sessionId: 'cs_test_reconcile',
+      fetchImpl: stripeStub(completeSession({ payment_status: 'pending' }), trialingSub) as never,
+    });
+    assert.equal(result, null);
+  });
+
+  test('expires a Checkout Session only when Stripe confirms the exact session', async () => {
+    let requestMethod: string | undefined;
+    let idempotencyKey: string | undefined;
+    const expired = await expireStripeCheckoutSession({
+      offerId: '401cb36f-119f-4d02-a56f-876acc184be8',
+      sessionId: 'cs_test_stale_terms',
+      fetchImpl: async (url, init) => {
+        assert.equal(String(url), 'https://api.stripe.com/v1/checkout/sessions/cs_test_stale_terms/expire');
+        requestMethod = init?.method;
+        idempotencyKey = (init?.headers as Record<string, string>)['idempotency-key'];
+        return new Response(JSON.stringify({
+          id: 'cs_test_stale_terms',
+          object: 'checkout.session',
+          status: 'expired',
+        }), { status: 200 });
+      },
+    });
+    assert.equal(expired, 'expired');
+    assert.equal(requestMethod, 'POST');
+    assert.equal(idempotencyKey, 'litos-checkout-expire:401cb36f-119f-4d02-a56f-876acc184be8');
+
+    const mismatched = await expireStripeCheckoutSession({
+      offerId: '401cb36f-119f-4d02-a56f-876acc184be8',
+      sessionId: 'cs_test_stale_terms',
+      fetchImpl: async (url) => new Response(JSON.stringify({
+        id: String(url).endsWith('/expire') ? 'cs_test_someone_else' : 'cs_test_stale_terms',
+        status: 'complete',
+      }), { status: 200 }),
+    });
+    assert.equal(mismatched, 'completed');
+  });
+
+  test('an already-expired Session is recoverable after a lost expiration response', async () => {
+    const calls: string[] = [];
+    const result = await expireStripeCheckoutSession({
+      offerId: '261977dd-6c8b-47d8-9836-0445608f91e2',
+      sessionId: 'cs_test_already_expired',
+      fetchImpl: async (url) => {
+        calls.push(String(url));
+        if (String(url).endsWith('/expire')) return new Response('{}', { status: 409 });
+        return new Response(JSON.stringify({
+          id: 'cs_test_already_expired',
+          status: 'expired',
+        }), { status: 200 });
+      },
+    });
+    assert.equal(result, 'expired');
+    assert.equal(calls.length, 2);
+  });
+
+  test('an unknown provider result cannot release a local checkout lock', async () => {
+    const result = await expireStripeCheckoutSession({
+      offerId: '957b7940-7df6-4ba6-80c1-de886e66f179',
+      sessionId: 'cs_test_unknown',
+      fetchImpl: async () => { throw new Error('network unavailable'); },
+    });
+    assert.equal(result, 'unknown');
   });
 
 
@@ -484,6 +567,47 @@ describe('Stripe Litos+ adapter', () => {
       }), { status: 200 }),
     });
     assert.equal(authority, null);
+  });
+
+  test('accepts only an exact immutable historical price binding after catalog rotation', async () => {
+    const parsed = parseStripeBillingEvent({
+      id: 'evt_subscription_rotated_price', type: 'customer.subscription.updated', created: 1_786_000_000,
+      livemode: true,
+      data: { object: {
+        id: 'sub_rotated_price', customer: 'cus_rotated_price', status: 'active',
+        items: { data: [{ price: { id: 'price_month_previous' }, current_period_end: 1_788_592_000 }] },
+      } },
+    });
+    assert.ok(parsed);
+    const providerResponse = async () => new Response(JSON.stringify({
+      id: 'sub_rotated_price', customer: 'cus_rotated_price', status: 'active',
+      items: { data: [{
+        quantity: 1,
+        price: { id: 'price_month_previous' },
+        current_period_end: 1_788_592_000,
+      }] },
+    }), { status: 200 });
+
+    const rejected = await retrieveStripeBillingAuthority({
+      event: parsed,
+      acceptedPrice: {
+        priceId: 'price_different_history',
+        plan: billingPlan('litos_plus_month')!,
+      },
+      fetchImpl: providerResponse,
+    });
+    assert.equal(rejected, null);
+
+    const accepted = await retrieveStripeBillingAuthority({
+      event: parsed,
+      acceptedPrice: {
+        priceId: 'price_month_previous',
+        plan: billingPlan('litos_plus_month')!,
+      },
+      fetchImpl: providerResponse,
+    });
+    assert.equal(accepted?.subscription.priceId, 'price_month_previous');
+    assert.equal(accepted?.subscription.plan.id, 'litos_plus_month');
   });
 
   test('retrieves the current dispute, charge, invoice, and subscription before resolving access', async () => {

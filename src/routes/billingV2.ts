@@ -13,7 +13,7 @@ import {
   users,
 } from '../db/schema';
 import { FEATURE_KEYS, getEntitlementSnapshot } from '../lib/entitlements';
-import { publicBillingPlans } from '../lib/billingCatalog';
+import { publicBillingPlans, stripePriceIdForPlan } from '../lib/billingCatalog';
 import { billingCheckoutTerms, type BillingCheckoutAccountFacts } from '../lib/billingCheckoutTerms';
 import { addVary } from '../lib/boardCacheHeaders';
 import { packetAuditSha256 } from '../lib/packetAudit';
@@ -166,6 +166,7 @@ export async function billingV2Routes(fastify: FastifyInstance) {
           ...plan,
           checkout_terms: billingCheckoutTerms({
             plan,
+            provider_price_id: stripePriceIdForPlan(plan.id),
             account,
             checkout_available: catalog.checkout_available,
             automatic_tax_enabled: process.env.STRIPE_AUTOMATIC_TAX_ENABLED === 'true',

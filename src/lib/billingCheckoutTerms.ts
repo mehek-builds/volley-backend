@@ -54,6 +54,7 @@ export type BillingCheckoutAccountFacts = {
 
 type CheckoutTermsInput = {
   plan: Pick<BillingCatalogPlan, 'amount_cents' | 'currency' | 'interval' | 'interval_count'>;
+  provider_price_id: string | null;
   account: BillingCheckoutAccountFacts;
   checkout_available: boolean;
   automatic_tax_enabled: boolean;
@@ -83,8 +84,14 @@ function trialDays(input: CheckoutTermsInput, status: BillingCheckoutStatus): nu
   return hadTrialBefore || returningStripeCustomer ? 0 : TRIAL_DAYS;
 }
 
-function termsRevision(terms: Omit<BillingCheckoutTerms, 'revision'>): string {
-  const digest = createHash('sha256').update(JSON.stringify(terms)).digest('base64url');
+function termsRevision(terms: Omit<BillingCheckoutTerms, 'revision'>, providerPriceId: string | null): string {
+  /* The provider Price ID is intentionally not exposed in the public terms object, but it is part
+     of the binding. Rotating an equivalent Stripe Price must invalidate an older Session because
+     webhook ownership checks use the currently configured Price catalog. */
+  const digest = createHash('sha256').update(JSON.stringify({
+    terms,
+    provider_price_id: providerPriceId,
+  })).digest('base64url');
   return `checkout_terms_v1_${digest}`;
 }
 
@@ -129,7 +136,7 @@ export function billingCheckoutTerms(input: CheckoutTermsInput): BillingCheckout
     promotion_codes_allowed: true,
     price_basis: 'catalog_before_tax_and_promotions',
   };
-  return { ...unsigned, revision: termsRevision(unsigned) };
+  return { ...unsigned, revision: termsRevision(unsigned, input.provider_price_id) };
 }
 
 /**

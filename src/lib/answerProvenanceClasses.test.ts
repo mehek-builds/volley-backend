@@ -173,6 +173,21 @@ describe('the branch that replaces nothing keeps every answer-claim', () => {
       assert.equal(merged[0][field], undefined, `${field} must not be assertable by a caller`);
     }
   });
+
+  test('an explicitly confirmed onboarding question mints only its own applicant claim', () => {
+    const merged = mergeSubmittedApplicationReviewQuestions(
+      [],
+      [
+        { ...submitted('Yes'), id: 'prescript-sponsorship', question: 'Will you require sponsorship?', confirmed: true },
+        { ...submitted('A Candidate'), id: 'prescript-legal-name', question: 'Legal name' },
+      ],
+      REVIEWED_AT,
+    ) as ApplicationReviewQuestion[];
+    assert.equal(merged[0].answer_source, 'applicant_review');
+    assert.equal(merged[0].answer_reviewed_at, REVIEWED_AT);
+    assert.equal(merged[1].answer_source, undefined, 'a visible prefilled value was falsely attributed to the applicant');
+    assert.equal(merged[1].answer_reviewed_at, undefined);
+  });
 });
 
 describe('the classification itself', () => {

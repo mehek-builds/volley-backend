@@ -161,6 +161,59 @@ export async function createStripeCheckoutSessionV2(input: {
   };
 }
 
+/**
+ * Expire an open Checkout Session before releasing its local one-live lock.
+ *
+ * A local status change alone does not stop an already-issued Stripe URL from
+ * completing. Callers may mark the corresponding offer expired only after this
+ * endpoint confirms that Stripe has made the Session unusable.
+ */
+export async function expireStripeCheckoutSession(input: {
+  offerId: string;
+  sessionId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<'expired' | 'completed' | 'open' | 'unknown'> {
+  const secretKey = env('STRIPE_SECRET_KEY');
+  if (!secretKey || !input.sessionId.startsWith('cs_')) return 'unknown';
+  const stripeFetch = input.fetchImpl ?? fetch;
+  const sessionUrl = `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(input.sessionId)}`;
+  const state = async (response: Response): Promise<'expired' | 'completed' | 'open' | 'unknown'> => {
+    if (!response.ok) return 'unknown';
+    try {
+      const session = await response.json() as Record<string, unknown>;
+      if (scalar(session.id) !== input.sessionId) return 'unknown';
+      const status = scalar(session.status);
+      if (status === 'expired') return 'expired';
+      if (status === 'complete') return 'completed';
+      if (status === 'open') return 'open';
+      return 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  };
+
+  try {
+    const expired = await state(await stripeFetch(`${sessionUrl}/expire`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${secretKey}`,
+        'idempotency-key': `litos-checkout-expire:${input.offerId}`,
+      },
+    }));
+    if (expired === 'expired' || expired === 'completed') return expired;
+  } catch {
+    // A lost response can follow a successful provider write. The read below resolves that state.
+  }
+
+  try {
+    return await state(await stripeFetch(sessionUrl, {
+      headers: { authorization: `Bearer ${secretKey}` },
+    }));
+  } catch {
+    return 'unknown';
+  }
+}
+
 export async function cancelStripeSubscription(input: {
   subscriptionId: string;
   idempotencyKey?: string;
@@ -376,13 +429,17 @@ function firstSubscriptionItem(object: any): any | null {
   return Array.isArray(object?.items?.data) ? object.items.data[0] ?? null : null;
 }
 
-function providerSubscription(object: any): StripeSubscriptionAuthority | null {
+export function stripeSubscriptionAuthority(
+  object: any,
+  acceptedPrice?: { priceId: string; plan: BillingCatalogPlan },
+): StripeSubscriptionAuthority | null {
   const subscriptionId = scalar(object?.id);
   const customerId = scalar(object?.customer?.id) || scalar(object?.customer);
   const status = scalar(object?.status);
   const item = firstSubscriptionItem(object);
   const priceId = scalar(item?.price?.id) || scalar(item?.price);
-  const plan = billingPlanForPriceId(priceId);
+  const plan = billingPlanForPriceId(priceId)
+    ?? (acceptedPrice?.priceId === priceId ? acceptedPrice.plan : null);
   const subscriptionMetadata = metadata(object);
   const supportedStatuses = new Set([
     'trialing', 'active', 'past_due', 'paused', 'unpaid', 'canceled',
@@ -480,7 +537,11 @@ async function stripeRetrieveObject(input: {
 export async function retrieveStripeCheckoutForReconcile(input: {
   sessionId: string;
   fetchImpl?: typeof fetch;
-}): Promise<{ session: Record<string, any>; subscription: Record<string, any> } | null> {
+}): Promise<{
+  session: Record<string, any>;
+  subscription: Record<string, any>;
+  paymentStatus: 'paid' | 'no_payment_required' | 'unpaid';
+} | null> {
   const secretKey = env('STRIPE_SECRET_KEY');
   if (!secretKey || !input.sessionId.startsWith('cs_')) return null;
   const stripeFetch = input.fetchImpl ?? fetch;
@@ -491,17 +552,28 @@ export async function retrieveStripeCheckoutForReconcile(input: {
   // Only a finished session may move an account. `open` is still in progress and
   // `expired` never completed.
   if (scalar(session.status) !== 'complete') return null;
+  /* A completed Checkout UI is not necessarily a successful payment. Retrieve the subscription
+     for `unpaid` too, because its current provider status distinguishes a recoverable async
+     payment from an `incomplete_expired` subscription whose local lock can safely be released. */
+  const paymentStatus = scalar(session.payment_status);
+  if (paymentStatus !== 'paid' && paymentStatus !== 'no_payment_required' && paymentStatus !== 'unpaid') return null;
   const subscriptionId = scalar(session.subscription?.id) || scalar(session.subscription);
   if (!subscriptionId?.startsWith('sub_')) return null;
   const subscription = await stripeRetrieveObject({
     kind: 'subscriptions', id: subscriptionId, fetchImpl: stripeFetch, secretKey,
   });
   if (!subscription || scalar(subscription.id) !== subscriptionId) return null;
-  return { session, subscription };
+  return { session, subscription, paymentStatus };
 }
 
 export async function retrieveStripeBillingAuthority(input: {
   event: StripeBillingEvent;
+  /**
+   * An exact immutable price binding already stored for this event's offer or subscription.
+   * This permits an open Session to finish after an equivalent catalog Price rotation without
+   * accepting an arbitrary historical Price from the provider payload.
+   */
+  acceptedPrice?: { priceId: string; plan: BillingCatalogPlan };
   fetchImpl?: typeof fetch;
 }): Promise<StripeBillingAuthority | null> {
   const secretKey = env('STRIPE_SECRET_KEY');
@@ -563,7 +635,9 @@ export async function retrieveStripeBillingAuthority(input: {
     fetchImpl: stripeFetch,
     secretKey,
   });
-  const subscription = subscriptionObject ? providerSubscription(subscriptionObject) : null;
+  const subscription = subscriptionObject
+    ? stripeSubscriptionAuthority(subscriptionObject, input.acceptedPrice)
+    : null;
   if (!subscription || subscription.subscriptionId !== subscriptionId) return null;
   if (event.customerId && event.customerId !== subscription.customerId) return null;
   if (event.userId && subscription.userId && event.userId !== subscription.userId) return null;

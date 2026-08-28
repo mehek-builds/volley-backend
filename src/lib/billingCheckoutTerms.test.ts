@@ -28,6 +28,7 @@ function terms(
   assert.ok(plan);
   return billingCheckoutTerms({
     plan,
+    provider_price_id: `price_${plan.term}`,
     account,
     checkout_available: checkoutAvailable,
     automatic_tax_enabled: true,
@@ -123,6 +124,7 @@ test('revision is stable for the same facts and changes with user, plan, or tax 
   assert.ok(plan);
   const noTax = billingCheckoutTerms({
     plan,
+    provider_price_id: 'price_month',
     account: newAccount,
     checkout_available: true,
     automatic_tax_enabled: false,
@@ -131,6 +133,15 @@ test('revision is stable for the same facts and changes with user, plan, or tax 
   assert.notEqual(first.revision, noTrial.revision);
   assert.notEqual(first.revision, quarter.revision);
   assert.notEqual(first.revision, noTax.revision);
+
+  const rotatedPrice = billingCheckoutTerms({
+    plan,
+    provider_price_id: 'price_month_rotated',
+    account: newAccount,
+    checkout_available: true,
+    automatic_tax_enabled: true,
+  });
+  assert.notEqual(first.revision, rotatedPrice.revision);
 });
 
 test('an offer policy binds entitlement policy to the exact accepted checkout revision', () => {

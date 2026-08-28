@@ -422,15 +422,22 @@ export function usesLegacyMonthlyProductQuota(snapshot: EntitlementSnapshot): bo
   return snapshot.access_class !== 'plus_paid' && snapshot.access_class !== 'legacy_paid';
 }
 
-export async function getEntitlementSnapshot(userId: string, now = new Date()): Promise<EntitlementSnapshot> {
-  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+export async function getEntitlementSnapshot(
+  userId: string,
+  now = new Date(),
+  database: typeof db = db,
+): Promise<EntitlementSnapshot> {
+  const [user] = await database.select().from(users).where(eq(users.id, userId)).limit(1);
   if (!user) throw Object.assign(new Error('Account not found'), { statusCode: 404 });
-  const [subscriptions, generationRows, companyRows] = await Promise.all([
-    db.select().from(billing_subscriptions).where(eq(billing_subscriptions.user_id, userId)),
-    db.select().from(trial_generation_usage).where(eq(trial_generation_usage.user_id, userId)).limit(1),
-    db.select().from(trial_company_usage).where(eq(trial_company_usage.user_id, userId))
-      .orderBy(trial_company_usage.created_at),
-  ]);
+  const readSubscriptions = () => database.select().from(billing_subscriptions)
+    .where(eq(billing_subscriptions.user_id, userId));
+  const readGeneration = () => database.select().from(trial_generation_usage)
+    .where(eq(trial_generation_usage.user_id, userId)).limit(1);
+  const readCompanies = () => database.select().from(trial_company_usage)
+    .where(eq(trial_company_usage.user_id, userId)).orderBy(trial_company_usage.created_at);
+  const [subscriptions, generationRows, companyRows] = database === db
+    ? await Promise.all([readSubscriptions(), readGeneration(), readCompanies()])
+    : [await readSubscriptions(), await readGeneration(), await readCompanies()];
   return buildEntitlementSnapshot({
     user,
     subscription: chooseCanonicalAccountSubscription(subscriptions, now),

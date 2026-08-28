@@ -10,7 +10,7 @@ import {
   pricing_offers,
   users,
 } from '../db/schema';
-import { and, desc, eq, gt, inArray, lte, sql } from 'drizzle-orm';
+import { and, desc, eq, gt, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { requireAuth } from '../middleware/auth';
 import { allowHourly, getEntitlements, getCount, monthPeriod, rateLimitedReply, upgradeUrl } from '../middleware/quota';
 import {
@@ -24,7 +24,6 @@ import {
   createStripePortalSession,
   createStripeCheckoutSession,
   parseStripeCheckoutCompleted,
-  parseStripeSubscriptionChanged,
   secureStripeCheckoutUrl,
   stripeAcquiringConfigured,
   stripePriceIdForInterval,
@@ -39,7 +38,13 @@ import {
   verifyLemonSqueezySignature,
   verifyLemonSqueezyAccountToken,
 } from '../lib/lemonSqueezy';
-import { billingCheckoutAvailable, billingPlan, stripeWebhookAvailable } from '../lib/billingCatalog';
+import {
+  billingCheckoutAvailable,
+  billingPlan,
+  billingPlanForTerm,
+  stripePriceIdForPlan,
+  stripeWebhookAvailable,
+} from '../lib/billingCatalog';
 import {
   billingCheckoutTerms,
   checkoutOfferPolicyVersion,
@@ -49,11 +54,13 @@ import { ENTITLEMENT_POLICY_VERSION, getEntitlementSnapshot } from '../lib/entit
 import {
   cancelStripeSubscriptionOrThrow,
   createStripeCheckoutSessionV2,
+  expireStripeCheckoutSession,
   parseStripeBillingEvent,
   retrieveStripeBillingAuthority,
   retrieveStripeCheckoutForReconcile,
   retrieveStripeChargeBillingContext,
   secureLegacyBillingPortalUrl,
+  stripeSubscriptionAuthority,
 } from '../lib/stripeBilling';
 import {
   chooseCanonicalAccountSubscription,
@@ -65,6 +72,7 @@ import {
 } from '../lib/subscriptionState';
 import { z } from 'zod';
 import { billingSubscriptionTombstoneHash } from '../lib/accountDeletionBilling';
+import { withBillingAccountLock } from '../lib/billingAccountLock';
 
 type CheckoutBody = {
   interval?: 'weekly' | 'monthly' | 'annual';
@@ -87,6 +95,48 @@ const checkoutBodySchema = z.object({
   action_nonce: z.string().min(20).max(200).optional(),
   checkout_terms_revision: z.string().trim().min(20).max(200).optional(),
 }).strict();
+
+type CatalogBillingPlan = NonNullable<ReturnType<typeof billingPlan>>;
+
+async function checkoutTermsForUser(input: {
+  userId: string;
+  isGuest: boolean;
+  plan: CatalogBillingPlan;
+}, database: typeof db = db) {
+  const evaluatedAt = new Date();
+  const readSnapshot = () => getEntitlementSnapshot(input.userId, evaluatedAt, database);
+  const readAccount = () => database.select({
+      billing_provider: users.billing_provider,
+      billing_customer_id: users.billing_customer_id,
+      billing_status: users.billing_status,
+      trial_started_at: users.trial_started_at,
+      trial_ends_at: users.trial_ends_at,
+    }).from(users).where(eq(users.id, input.userId)).limit(1);
+  const [snapshot, accountRows] = database === db
+    ? await Promise.all([readSnapshot(), readAccount()])
+    : [await readSnapshot(), await readAccount()];
+  const account = accountRows[0];
+  return {
+    account,
+    checkoutTerms: billingCheckoutTerms({
+      plan: input.plan,
+      provider_price_id: stripePriceIdForPlan(input.plan.id),
+      account: {
+        authenticated: true,
+        is_guest: input.isGuest,
+        access_class: snapshot.access_class,
+        subscription_status: snapshot.subscription?.status ?? null,
+        billing_provider: snapshot.subscription?.provider ?? account?.billing_provider ?? null,
+        billing_customer_id: account?.billing_customer_id ?? null,
+        billing_status: snapshot.subscription?.status ?? account?.billing_status ?? null,
+        trial_started_at: account?.trial_started_at ?? null,
+        trial_ends_at: account?.trial_ends_at ?? null,
+      },
+      checkout_available: billingCheckoutAvailable(),
+      automatic_tax_enabled: process.env.STRIPE_AUTOMATIC_TAX_ENABLED === 'true',
+    }),
+  };
+}
 
 type LitosTrialBody = {
   token?: string;
@@ -142,12 +192,17 @@ async function repairCheckoutActionBinding(
   });
 }
 
+type StripeCheckoutPersistenceResult =
+  | { kind: 'persisted'; offer: typeof pricing_offers.$inferSelect; actionBindingValid: boolean }
+  | { kind: 'offer_missing' }
+  | { kind: 'provider_conflict'; offer: typeof pricing_offers.$inferSelect };
+
 async function persistStripeCheckoutSession(input: {
   offer: typeof pricing_offers.$inferSelect;
   pendingActionId?: string;
   session: NonNullable<Awaited<ReturnType<typeof createStripeCheckoutSessionV2>>>;
-}): Promise<typeof pricing_offers.$inferSelect | null> {
-  return db.transaction(async (tx) => {
+}, database: typeof db = db): Promise<StripeCheckoutPersistenceResult> {
+  return database.transaction(async (tx) => {
     if (input.pendingActionId) {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`checkout-action:${input.pendingActionId}`}, 0::bigint))`);
     }
@@ -155,41 +210,51 @@ async function persistStripeCheckoutSession(input: {
       eq(pricing_offers.id, input.offer.id),
       eq(pricing_offers.user_id, input.offer.user_id),
     )).limit(1);
-    if (!currentOffer || currentOffer.pending_action_id !== (input.pendingActionId ?? null)) return null;
+    if (!currentOffer) return { kind: 'offer_missing' as const };
+    if (currentOffer.provider_checkout_id && currentOffer.provider_checkout_id !== input.session.id) {
+      return { kind: 'provider_conflict' as const, offer: currentOffer };
+    }
 
     let action: typeof pending_premium_actions.$inferSelect | undefined;
-    if (input.pendingActionId) {
+    let actionBindingValid = currentOffer.pending_action_id === (input.pendingActionId ?? null)
+      && (currentOffer.status === 'creating' || currentOffer.status === 'checkout_created');
+    if (input.pendingActionId && actionBindingValid) {
       [action] = await tx.select().from(pending_premium_actions).where(and(
         eq(pending_premium_actions.id, input.pendingActionId),
         eq(pending_premium_actions.user_id, input.offer.user_id),
       )).limit(1);
-      if (!action || action.state !== 'pending' || action.expires_at <= new Date()) return null;
+      if (!action || action.state !== 'pending' || action.expires_at <= new Date()) actionBindingValid = false;
       if (action.offer_id && action.offer_id !== currentOffer.id) {
         const [linkedOffer] = await tx.select().from(pricing_offers)
           .where(eq(pricing_offers.id, action.offer_id)).limit(1);
-        if (linkedOffer && ['creating', 'checkout_created', 'paid'].includes(linkedOffer.status)) return null;
+        if (linkedOffer && ['creating', 'checkout_created', 'paid'].includes(linkedOffer.status)) {
+          actionBindingValid = false;
+        }
       }
     }
 
-    let persistedOffer = currentOffer;
-    if (currentOffer.status === 'creating' || currentOffer.status === 'checkout_created') {
-      const now = new Date();
-      [persistedOffer] = await tx.update(pricing_offers).set({
-        status: 'checkout_created',
-        provider_checkout_id: input.session.id,
-        provider_checkout_url: input.session.url,
-        provider_customer_id: input.session.customerId,
-        provider_subscription_id: input.session.subscriptionId,
-        expires_at: input.session.expiresAt,
-        checkout_created_at: currentOffer.checkout_created_at ?? now,
-        updated_at: now,
-      }).where(and(
-        eq(pricing_offers.id, currentOffer.id),
-        inArray(pricing_offers.status, ['creating', 'checkout_created']),
-      )).returning();
-      if (!persistedOffer) return null;
-    }
-    if (action) {
+    const now = new Date();
+    const liveOffer = currentOffer.status === 'creating' || currentOffer.status === 'checkout_created';
+    const [persistedOffer] = await tx.update(pricing_offers).set({
+      ...(liveOffer ? { status: 'checkout_created' } : {}),
+      provider_checkout_id: input.session.id,
+      provider_checkout_url: input.session.url,
+      provider_customer_id: input.session.customerId,
+      provider_subscription_id: input.session.subscriptionId,
+      expires_at: input.session.expiresAt,
+      checkout_created_at: currentOffer.checkout_created_at ?? now,
+      updated_at: now,
+    }).where(and(
+      eq(pricing_offers.id, currentOffer.id),
+      eq(pricing_offers.user_id, input.offer.user_id),
+      or(
+        isNull(pricing_offers.provider_checkout_id),
+        eq(pricing_offers.provider_checkout_id, input.session.id),
+      ),
+    )).returning();
+    if (!persistedOffer) return { kind: 'provider_conflict' as const, offer: currentOffer };
+
+    if (action && actionBindingValid) {
       const [linked] = await tx.update(pending_premium_actions).set({
         offer_id: persistedOffer.id,
         expires_at: input.session.expiresAt,
@@ -198,11 +263,20 @@ async function persistStripeCheckoutSession(input: {
         eq(pending_premium_actions.user_id, persistedOffer.user_id),
         eq(pending_premium_actions.state, 'pending'),
       )).returning({ id: pending_premium_actions.id });
-      if (!linked) throw new Error('Checkout action binding changed during persistence');
+      if (!linked) actionBindingValid = false;
     }
-    return persistedOffer;
+    return { kind: 'persisted' as const, offer: persistedOffer, actionBindingValid };
   });
 }
+
+type StripeCheckoutRepairResult =
+  | { kind: 'ready'; offer: typeof pricing_offers.$inferSelect }
+  | { kind: 'terms_changed'; checkoutTerms: BillingCheckoutTerms }
+  | { kind: 'already_plus' }
+  | { kind: 'recovery_required' }
+  | { kind: 'action_binding_conflict' }
+  | { kind: 'checkout_expired' }
+  | { kind: 'in_progress' };
 
 async function replayCheckoutOffer(
   reply: FastifyReply,
@@ -216,27 +290,12 @@ async function replayCheckoutOffer(
     checkoutTerms: BillingCheckoutTerms;
   },
   conflict: 'idempotency_conflict' | 'checkout_in_progress' = 'idempotency_conflict',
-  repairCreating?: () => Promise<typeof pricing_offers.$inferSelect | null>,
+  repairCreating?: () => Promise<StripeCheckoutRepairResult | null>,
 ) {
   const acceptedPolicyVersion = checkoutOfferPolicyVersion(
     ENTITLEMENT_POLICY_VERSION,
     expected.checkoutTerms.revision,
   );
-  if (prior.policy_version !== acceptedPolicyVersion) {
-    /* Never put a current sentence beside an older Stripe session. Price, tax, or trial policy can
-       change during an offer's lifetime. Expiring the stale offer frees the account's one live
-       checkout slot, and the next click creates a session from the newly accepted terms. */
-    await db.update(pricing_offers).set({ status: 'expired', updated_at: new Date() }).where(and(
-      eq(pricing_offers.id, prior.id),
-      eq(pricing_offers.user_id, prior.user_id),
-      inArray(pricing_offers.status, ['creating', 'checkout_created']),
-    ));
-    return reply.status(409).send({
-      error: 'Checkout terms changed. Review the current terms before continuing.',
-      code: 'checkout_terms_changed',
-      checkout_terms: expected.checkoutTerms,
-    });
-  }
   if (
     prior.term_code !== expected.term
     || prior.trigger !== expected.trigger
@@ -251,25 +310,126 @@ async function replayCheckoutOffer(
       code: conflict,
     });
   }
+  if (prior.status === 'paid') {
+    return reply.status(409).send({
+      error: 'This account already has Litos+.',
+      code: 'already_plus',
+      portal_url: '/billing/portal',
+    });
+  }
+  if (prior.policy_version !== acceptedPolicyVersion) {
+    /* Never put current terms beside an older Stripe Session. The provider Session must become
+       unusable before the local row releases the account's one-live checkout slot. If Stripe
+       cannot confirm expiration, keep the lock so two usable subscription Sessions cannot exist. */
+    const isLive = (prior.status === 'creating' || prior.status === 'checkout_created')
+      && prior.expires_at > new Date();
+    if (isLive) {
+      /* A stale creating row cannot be repaired safely. The retry closure uses current plan and
+         trial inputs, while Stripe may already hold an older request under the same key. */
+      const providerState = prior.provider_checkout_id
+        ? await expireStripeCheckoutSession({ offerId: prior.id, sessionId: prior.provider_checkout_id })
+        : 'unknown';
+      if (providerState === 'completed') {
+        const reconciled = await reconcileStripeCheckoutOffer(prior).catch(() => 'unverified' as const);
+        if (reconciled === 'grants_plus') {
+          return reply.status(409).send({
+            error: 'This account already has Litos+.',
+            code: 'already_plus',
+            portal_url: '/billing/portal',
+          });
+        }
+        if (reconciled === 'recovery_required') {
+          return reply.status(409).send({
+            error: 'Resolve the existing billing account before starting another subscription.',
+            code: 'billing_recovery_required',
+            portal_url: '/billing/portal',
+          });
+        }
+        if (reconciled === 'terminal_without_plus') {
+          return reply.status(409).send({
+            error: 'Checkout terms changed. Review the current terms before continuing.',
+            code: 'checkout_terms_changed',
+            checkout_terms: expected.checkoutTerms,
+          });
+        }
+      }
+      if (providerState !== 'expired') {
+        return reply.status(409).send({
+          error: 'Another checkout is already in progress for this account.',
+          code: 'checkout_in_progress',
+        });
+      }
+      await db.update(pricing_offers).set({ status: 'expired', updated_at: new Date() }).where(and(
+        eq(pricing_offers.id, prior.id),
+        eq(pricing_offers.user_id, prior.user_id),
+        eq(pricing_offers.provider_checkout_id, prior.provider_checkout_id!),
+        inArray(pricing_offers.status, ['creating', 'checkout_created']),
+      ));
+    }
+    return reply.status(409).send({
+      error: 'Checkout terms changed. Review the current terms before continuing.',
+      code: 'checkout_terms_changed',
+      checkout_terms: expected.checkoutTerms,
+    });
+  }
   let replayed = prior;
   if (replayed.status === 'creating' && replayed.expires_at > new Date() && repairCreating) {
     const repaired = await repairCreating();
     if (!repaired) {
       return reply.status(503).send({ error: 'Checkout is temporarily unavailable.', code: 'checkout_failed' });
     }
-    replayed = repaired;
-  }
-  if (!(await repairCheckoutActionBinding(replayed, expected.pendingActionId))) {
-    return reply.status(409).send({
-      error: 'The checkout and pending action no longer match.',
-      code: 'action_binding_conflict',
-    });
+    if (repaired.kind === 'already_plus') {
+      return reply.status(409).send({
+        error: 'This account already has Litos+.',
+        code: 'already_plus',
+        portal_url: '/billing/portal',
+      });
+    }
+    if (repaired.kind === 'recovery_required') {
+      return reply.status(409).send({
+        error: 'Resolve the existing billing account before starting another subscription.',
+        code: 'billing_recovery_required',
+        portal_url: '/billing/portal',
+      });
+    }
+    if (repaired.kind === 'action_binding_conflict') {
+      return reply.status(409).send({
+        error: 'The checkout and pending action no longer match.',
+        code: 'action_binding_conflict',
+      });
+    }
+    if (repaired.kind === 'checkout_expired') {
+      return reply.status(409).send({
+        error: 'This checkout attempt can no longer be reused.',
+        code: 'checkout_expired',
+      });
+    }
+    if (repaired.kind === 'terms_changed') {
+      return reply.status(409).send({
+        error: 'Checkout terms changed. Review the current terms before continuing.',
+        code: 'checkout_terms_changed',
+        checkout_terms: repaired.checkoutTerms,
+      });
+    }
+    if (repaired.kind === 'in_progress') {
+      return reply.status(409).send({
+        error: 'Another checkout is already in progress for this account.',
+        code: 'checkout_in_progress',
+      });
+    }
+    replayed = repaired.offer;
   }
   if (replayed.status === 'paid') {
     return reply.status(409).send({
       error: 'This account already has Litos+.',
       code: 'already_plus',
       portal_url: '/billing/portal',
+    });
+  }
+  if (!(await repairCheckoutActionBinding(replayed, expected.pendingActionId))) {
+    return reply.status(409).send({
+      error: 'The checkout and pending action no longer match.',
+      code: 'action_binding_conflict',
     });
   }
   const priorUrl = secureStripeCheckoutUrl(replayed.provider_checkout_url);
@@ -420,35 +580,144 @@ async function applyStripePaidCheckout(event: NonNullable<ReturnType<typeof pars
   return { ...event, processed };
 }
 
-async function applyStripeSubscriptionChange(
-  event: NonNullable<ReturnType<typeof parseStripeSubscriptionChanged>>,
-  userId: string,
-) {
-  let processed = false;
-  await db.transaction(async (tx) => {
-    const inserted = await tx.insert(billing_webhook_events).values({
-      event_key: event.eventKey,
-      provider: 'stripe',
-      event_name: event.eventName,
-      result: 'processed',
-      processed_at: event.happenedAt,
-    }).onConflictDoNothing().returning({ event_key: billing_webhook_events.event_key });
-    if (inserted.length === 0) return;
-    processed = true;
-    await tx.update(users).set({
-      plan: event.plan!,
-      billing_provider: 'stripe',
-      billing_customer_id: event.customerId,
-      billing_subscription_id: event.subscriptionId,
-      billing_variant_id: event.priceId,
-      billing_status: event.status,
-      billing_renews_at: event.renewsAt,
-      billing_ends_at: event.endsAt,
-      billing_portal_url: null,
-      billing_event_updated_at: event.happenedAt,
-    }).where(eq(users.id, userId));
+/**
+ * Project a provider-confirmed completed Session before any local expiry can release its lock.
+ * Session and account ownership are proved against the immutable offer before the user or offer
+ * rows move. A false result means the caller must retain the live lock.
+ */
+async function reconcileStripeCheckoutOfferUnlocked(
+  offer: typeof pricing_offers.$inferSelect,
+  database: typeof db,
+): Promise<'grants_plus' | 'terminal_without_plus' | 'recovery_required' | 'unverified'> {
+  const providerCheckoutId = offer.provider_checkout_id;
+  if (!providerCheckoutId) return 'unverified';
+  const pair = await retrieveStripeCheckoutForReconcile({ sessionId: providerCheckoutId });
+  if (!pair) return 'unverified';
+  const sessionOfferId = typeof pair.session.client_reference_id === 'string'
+    ? pair.session.client_reference_id
+    : null;
+  const sessionUserId = typeof pair.session.metadata?.litos_user_id === 'string'
+    ? pair.session.metadata.litos_user_id
+    : null;
+  if (sessionOfferId !== offer.id || sessionUserId !== offer.user_id) return 'unverified';
+  const offerPlan = billingPlanForTerm(offer.term_code);
+  if (!offerPlan || !offer.provider_price_id) return 'unverified';
+  const authority = stripeSubscriptionAuthority(pair.subscription, {
+    priceId: offer.provider_price_id,
+    plan: offerPlan,
   });
-  return processed;
+  if (!authority) return 'unverified';
+  const sessionCustomerId = typeof pair.session.customer?.id === 'string'
+    ? pair.session.customer.id
+    : typeof pair.session.customer === 'string'
+      ? pair.session.customer
+      : null;
+  if (sessionCustomerId && sessionCustomerId !== authority.customerId) return 'unverified';
+  if (authority.userId && authority.userId !== offer.user_id) return 'unverified';
+  if (authority.offerId && authority.offerId !== offer.id) return 'unverified';
+
+  const reconciledAt = new Date();
+  const terminal = authority.status === 'canceled'
+    || authority.status === 'incomplete_expired';
+  const recoveryRequired = subscriptionNeedsPortalRecovery(authority.status);
+  const paymentConfirmed = pair.paymentStatus === 'paid' || pair.paymentStatus === 'no_payment_required';
+  /* Do not let an unpaid Session project an access-granting provider state. Stripe normally pairs
+     unpaid with incomplete, but an unexpected active shape must retain its lock until a webhook or
+     later provider read resolves the contradiction. */
+  if (!paymentConfirmed && subscriptionGrantsPlus(authority, reconciledAt) && !recoveryRequired) {
+    return 'unverified';
+  }
+  if (!terminal && !recoveryRequired && !(paymentConfirmed && subscriptionGrantsPlus(authority, reconciledAt))) {
+    return 'unverified';
+  }
+  const outcome = await database.transaction(async (tx) => {
+    await tx.insert(billing_subscriptions).values({
+      user_id: offer.user_id,
+      provider: 'stripe',
+      provider_customer_id: authority.customerId,
+      provider_subscription_id: authority.subscriptionId,
+      provider_price_id: authority.priceId,
+      product_code: 'litos_plus',
+      term_code: authority.plan.term,
+      status: authority.status,
+      cancel_at_period_end: authority.cancelAtPeriodEnd,
+      current_period_start: authority.currentPeriodStart,
+      current_period_end: authority.currentPeriodEnd,
+      access_ends_at: authority.accessEndsAt,
+      ended_at: terminal ? authority.accessEndsAt ?? reconciledAt : null,
+      provider_event_created_at: reconciledAt,
+      updated_at: reconciledAt,
+    }).onConflictDoUpdate({
+      target: billing_subscriptions.provider_subscription_id,
+      set: {
+        provider_customer_id: authority.customerId,
+        provider_price_id: authority.priceId,
+        term_code: authority.plan.term,
+        status: authority.status,
+        cancel_at_period_end: authority.cancelAtPeriodEnd,
+        current_period_start: authority.currentPeriodStart,
+        current_period_end: authority.currentPeriodEnd,
+        access_ends_at: authority.accessEndsAt,
+        ended_at: terminal ? authority.accessEndsAt ?? reconciledAt : null,
+        provider_event_created_at: reconciledAt,
+        updated_at: reconciledAt,
+      },
+    });
+    const ownedSubscriptions = await tx.select().from(billing_subscriptions)
+      .where(eq(billing_subscriptions.user_id, offer.user_id));
+    const projectedSubscription = chooseCanonicalAccountSubscription(ownedSubscriptions, reconciledAt);
+    if (!projectedSubscription) throw new Error('Stripe reconciliation left no subscription projection');
+    const projectedGrantsPlus = subscriptionGrantsPlus(projectedSubscription, reconciledAt);
+    const result = recoveryRequired
+      ? 'recovery_required' as const
+      : projectedGrantsPlus
+        ? 'grants_plus' as const
+        : terminal && !projectedGrantsPlus
+          ? 'terminal_without_plus' as const
+          : 'unverified' as const;
+    const offerStatus = terminal
+      ? pair.paymentStatus === 'unpaid' ? 'failed' : 'paid'
+      : result === 'grants_plus' ? 'paid' : offer.status;
+    await tx.update(pricing_offers).set({
+      status: offerStatus,
+      provider_customer_id: authority.customerId,
+      provider_subscription_id: authority.subscriptionId,
+      paid_at: pair.paymentStatus === 'unpaid' ? offer.paid_at : offer.paid_at ?? reconciledAt,
+      completed_at: reconciledAt,
+      verified_at: reconciledAt,
+      updated_at: reconciledAt,
+    }).where(and(
+      eq(pricing_offers.id, offer.id),
+      eq(pricing_offers.user_id, offer.user_id),
+      eq(pricing_offers.provider_checkout_id, providerCheckoutId),
+    ));
+    await tx.update(users).set({
+      plan: projectedGrantsPlus ? 'pro' : 'free',
+      billing_provider: 'stripe',
+      billing_customer_id: projectedSubscription.provider_customer_id,
+      billing_subscription_id: projectedSubscription.provider_subscription_id,
+      billing_variant_id: projectedSubscription.term_code,
+      billing_status: projectedSubscription.status,
+      billing_renews_at: projectedSubscription.cancel_at_period_end
+        ? null
+        : projectedSubscription.current_period_end,
+      billing_ends_at: projectedSubscription.access_ends_at,
+      billing_portal_url: null,
+      billing_event_updated_at: reconciledAt,
+      entitlement_revision: randomUUID(),
+    }).where(eq(users.id, offer.user_id));
+    return result;
+  });
+  return outcome;
+}
+
+async function reconcileStripeCheckoutOffer(
+  offer: typeof pricing_offers.$inferSelect,
+): Promise<'grants_plus' | 'terminal_without_plus' | 'recovery_required' | 'unverified'> {
+  return withBillingAccountLock(
+    offer.user_id,
+    (lockedDb) => reconcileStripeCheckoutOfferUnlocked(offer, lockedDb),
+  );
 }
 
 export async function billingRoutes(fastify: FastifyInstance) {
@@ -507,11 +776,10 @@ export async function billingRoutes(fastify: FastifyInstance) {
    * happened instead of hoping it was told, which makes the webhook a backstop
    * rather than the only writer.
    *
-   * IT IS STILL THE SAME WRITER. This parses the live subscription into the exact
-   * event shape the webhook produces and hands it to applyStripeSubscriptionChange,
-   * so there is one place that projects Stripe state onto an account. A second
-   * writer here would be two implementations of the most consequential update in
-   * the product, free to disagree.
+   * IT WRITES THE CANONICAL SUBSCRIPTION FIRST. The reconciliation helper uses the
+   * same billing_subscriptions projection and account-selection policy as the
+   * webhook. A trial therefore stays trial_plus instead of falling through the
+   * legacy users row as unmetered paid access.
    *
    * Ownership is proved, not assumed. The offer is looked up scoped to the caller,
    * and the session must carry that offer as its client_reference_id and the
@@ -540,35 +808,22 @@ export async function billingRoutes(fastify: FastifyInstance) {
       return reply.status(200).send({ reconciled: false, reason: 'no_checkout' });
     }
 
-    const pair = await retrieveStripeCheckoutForReconcile({ sessionId: offer.provider_checkout_id });
-    // An abandoned or still-open session is the ordinary case, not a failure.
-    if (!pair) return reply.status(200).send({ reconciled: false, reason: 'not_complete' });
-
-    const sessionOfferId = typeof pair.session.client_reference_id === 'string' ? pair.session.client_reference_id : null;
-    const sessionUserId = typeof pair.session.metadata?.litos_user_id === 'string' ? pair.session.metadata.litos_user_id : null;
-    if (sessionOfferId !== offer.id || sessionUserId !== userId) {
-      fastify.log.error({ offerId: offer.id }, 'Stripe session did not match the offer it was stored on');
-      return reply.status(409).send({ error: 'Checkout did not match this account.', code: 'checkout_mismatch' });
-    }
-
-    /* The webhook's own shape, so the webhook's own applier can take it. The
-       synthetic id is namespaced and carries the subscription's status, so
-       repeating a reconcile is a no-op through the billing_webhook_events key
-       while a genuine status change still applies, and it can never collide with
-       a real Stripe event id. */
-    const parsed = parseStripeSubscriptionChanged({
-      id: `reconcile_${pair.subscription.id}_${pair.subscription.status}`,
-      type: 'customer.subscription.created',
-      created: Math.floor(Date.now() / 1000),
-      livemode: pair.subscription.livemode === true,
-      data: { object: pair.subscription },
+    const result = await reconcileStripeCheckoutOffer(offer).catch((error) => {
+      fastify.log.error({ error, offerId: offer.id }, 'live Stripe checkout reconciliation failed');
+      return 'unverified' as const;
     });
-    if (!parsed) {
-      fastify.log.error({ offerId: offer.id }, 'live Stripe subscription did not parse into a billing event');
-      return reply.status(200).send({ reconciled: false, reason: 'unparseable' });
+    // An abandoned, pending-payment, or still-open Session is ordinary here. It must not move
+    // access and must not be reported as a successful reconciliation.
+    if (result === 'unverified') {
+      return reply.status(200).send({ reconciled: false, reason: 'not_complete' });
     }
-
-    await applyStripeSubscriptionChange(parsed, userId);
+    if (result === 'recovery_required') {
+      return reply.status(409).send({
+        error: 'Resolve the existing billing account before starting another subscription.',
+        code: 'billing_recovery_required',
+        portal_url: '/billing/portal',
+      });
+    }
     const snapshot = await getEntitlementSnapshot(userId);
     return reply.header('Cache-Control', 'private, no-store').status(200).send({
       reconciled: true,
@@ -657,6 +912,7 @@ export async function billingRoutes(fastify: FastifyInstance) {
     // configuration fails closed and can never silently route a new sale through the legacy path.
     if (
       !body.plan_id
+      && !body.checkout_terms_revision
       && process.env.LITOS_BILLING_ENABLED !== 'true'
       && litosProcessorConfigured()
       && (stripeAcquiringConfigured() || litosProcessorTrialConfigured())
@@ -690,54 +946,81 @@ export async function billingRoutes(fastify: FastifyInstance) {
       });
     }
 
-    const [snapshot, accountRows] = await Promise.all([
-      getEntitlementSnapshot(userId),
-      db.select({
-        billing_provider: users.billing_provider,
-        billing_customer_id: users.billing_customer_id,
-        billing_status: users.billing_status,
-        trial_started_at: users.trial_started_at,
-        trial_ends_at: users.trial_ends_at,
-      }).from(users).where(eq(users.id, userId)).limit(1),
-    ]);
-    const account = accountRows[0];
-    const checkoutTerms = billingCheckoutTerms({
-      plan,
-      account: {
-        authenticated: true,
-        is_guest: isGuest,
-        access_class: snapshot.access_class,
-        subscription_status: snapshot.subscription?.status ?? null,
-        billing_provider: snapshot.subscription?.provider ?? account?.billing_provider ?? null,
-        billing_customer_id: account?.billing_customer_id ?? null,
-        billing_status: snapshot.subscription?.status ?? account?.billing_status ?? null,
-        trial_started_at: account?.trial_started_at ?? null,
-        trial_ends_at: account?.trial_ends_at ?? null,
-      },
-      checkout_available: billingCheckoutAvailable(),
-      automatic_tax_enabled: process.env.STRIPE_AUTOMATIC_TAX_ENABLED === 'true',
-    });
-    if (body.plan_id && body.checkout_terms_revision !== checkoutTerms.revision) {
-      return reply.status(409).send({
-        error: 'Checkout terms changed. Review the current terms before continuing.',
-        code: 'checkout_terms_changed',
-        checkout_terms: checkoutTerms,
-      });
+    const legacyOnboardingDisclosure = Boolean(body.plan_id)
+      && body.surface === 'website'
+      && body.placement === 'onboarding'
+      && body.trigger === 'start_plan'
+      && !body.action_nonce;
+    const checkoutTermsFailure = (checkoutTerms: BillingCheckoutTerms, logMissingRevision: boolean) => {
+      if (checkoutTerms.checkout_status === 'billing_recovery_required') {
+        return {
+          status: 409,
+          payload: {
+            error: 'Resolve the existing billing account before starting another subscription.',
+            code: 'billing_recovery_required',
+            portal_url: '/billing/portal',
+          },
+        };
+      }
+      if (checkoutTerms.checkout_status === 'already_plus') {
+        return {
+          status: 409,
+          payload: { error: 'This account already has Litos+.', code: 'already_plus', portal_url: '/billing/portal' },
+        };
+      }
+      if (checkoutTerms.checkout_status === 'billing_not_configured') {
+        return {
+          status: 503,
+          payload: { error: 'Checkout is temporarily unavailable.', code: 'billing_not_configured' },
+        };
+      }
+      if (body.checkout_terms_revision && body.checkout_terms_revision !== checkoutTerms.revision) {
+        return {
+          status: 409,
+          payload: {
+            error: 'Checkout terms changed. Review the current terms before continuing.',
+            code: 'checkout_terms_changed',
+            checkout_terms: checkoutTerms,
+          },
+        };
+      }
+      if (!body.checkout_terms_revision) {
+        /* Compatibility exists only for the older onboarding client whose exact seven-day-trial
+           disclosure remains true for this account. The locked reservation repeats this check so
+           an entitlement transition cannot spend a stale compatibility exception. */
+        if (logMissingRevision) {
+          request.log.warn({
+            userId,
+            planId: plan.id,
+            legacyOnboardingDisclosure,
+            strict: process.env.LITOS_CHECKOUT_TERMS_REVISION_REQUIRED === 'true',
+          }, 'checkout request omitted the terms revision');
+        }
+        if (
+          process.env.LITOS_CHECKOUT_TERMS_REVISION_REQUIRED === 'true'
+          || !legacyOnboardingDisclosure
+          || checkoutTerms.trial_eligible !== true
+        ) {
+          return {
+            status: 409,
+            payload: {
+              error: 'Review the current checkout terms in the latest Litos client before continuing.',
+              code: 'checkout_terms_revision_required',
+              checkout_terms: checkoutTerms,
+            },
+          };
+        }
+      }
+      return null;
+    };
+
+    /* Fast preflight. The same checks run again while the account reservation lock is held, so this
+       early answer saves work but never authorizes a Session or a reusable URL. */
+    const initialTerms = await checkoutTermsForUser({ userId, isGuest, plan });
+    const initialTermsFailure = checkoutTermsFailure(initialTerms.checkoutTerms, true);
+    if (initialTermsFailure) {
+      return reply.status(initialTermsFailure.status).send(initialTermsFailure.payload);
     }
-    if (checkoutTerms.checkout_status === 'billing_recovery_required') {
-      return reply.status(409).send({
-        error: 'Resolve the existing billing account before starting another subscription.',
-        code: 'billing_recovery_required',
-        portal_url: '/billing/portal',
-      });
-    }
-    if (checkoutTerms.checkout_status === 'already_plus') {
-      return reply.status(409).send({ error: 'This account already has Litos+.', code: 'already_plus', portal_url: '/billing/portal' });
-    }
-    if (checkoutTerms.checkout_status === 'billing_not_configured') {
-      return reply.status(503).send({ error: 'Checkout is temporarily unavailable.', code: 'billing_not_configured' });
-    }
-    const trialDays = checkoutTerms.trial_days ?? 0;
     const idempotencyKey = typeof request.headers['idempotency-key'] === 'string'
       ? request.headers['idempotency-key']
       : body.idempotency_key;
@@ -755,15 +1038,169 @@ export async function billingRoutes(fastify: FastifyInstance) {
         return reply.status(409).send({ error: 'Pending action is invalid or expired.', code: 'action_invalid' });
       }
     }
-    const expectedOffer = {
-      term: plan.term,
-      trigger: body.trigger ?? 'account_upgrade',
-      surface: body.surface ?? 'dashboard',
-      placement: body.placement,
-      pendingActionId: action?.id,
-      checkoutTerms,
-    };
-    const repairCreatingOffer = async (offer: typeof pricing_offers.$inferSelect) => {
+    const checkoutNow = new Date();
+    const liveOfferStatuses = ['creating', 'checkout_created'];
+    const expiredCandidates = await db.select().from(pricing_offers).where(and(
+      eq(pricing_offers.user_id, userId),
+      eq(pricing_offers.product_code, 'litos_plus'),
+      inArray(pricing_offers.status, liveOfferStatuses),
+      lte(pricing_offers.expires_at, checkoutNow),
+    ));
+    for (const candidate of expiredCandidates) {
+      if (candidate.provider_checkout_id) {
+        const providerState = await expireStripeCheckoutSession({
+          offerId: candidate.id,
+          sessionId: candidate.provider_checkout_id,
+        });
+        if (providerState === 'completed') {
+          const reconciled = await reconcileStripeCheckoutOffer(candidate).catch((error) => {
+            request.log.error({ error, offerId: candidate.id }, 'completed checkout reconciliation failed');
+            return 'unverified' as const;
+          });
+          if (reconciled === 'grants_plus') {
+            return reply.status(409).send({
+              error: 'This account already has Litos+.',
+              code: 'already_plus',
+              portal_url: '/billing/portal',
+            });
+          }
+          if (reconciled === 'recovery_required') {
+            return reply.status(409).send({
+              error: 'Resolve the existing billing account before starting another subscription.',
+              code: 'billing_recovery_required',
+              portal_url: '/billing/portal',
+            });
+          }
+          if (reconciled === 'terminal_without_plus') {
+            /* Reconciliation just changed customer ownership and trial eligibility. This request's
+               preview was computed before that provider state was known, so it cannot safely create
+               a replacement Session. Make the client fetch and accept a fresh revision first. */
+            return reply.status(409).send({
+              error: 'Billing state changed. Review the current checkout terms before continuing.',
+              code: 'checkout_terms_changed',
+            });
+          }
+        }
+        if (providerState !== 'expired') {
+          return reply.status(409).send({
+            error: 'Another checkout is already in progress for this account.',
+            code: 'checkout_in_progress',
+          });
+        }
+      }
+      await db.update(pricing_offers).set({ status: 'expired', updated_at: checkoutNow }).where(and(
+        eq(pricing_offers.id, candidate.id),
+        eq(pricing_offers.user_id, userId),
+        inArray(pricing_offers.status, liveOfferStatuses),
+        lte(pricing_offers.expires_at, checkoutNow),
+      ));
+    }
+    /* This is the actual reservation decision. All checkout requests and billing projections share
+       the same entitlement lock, so terms, idempotency, the live slot, and the inserted policy are
+       one serial account snapshot. The lock is released before Stripe I/O. */
+    const reservation = await withBillingAccountLock(userId, async (lockedDb) => {
+      const fresh = await checkoutTermsForUser({ userId, isGuest, plan }, lockedDb);
+      const termsFailure = checkoutTermsFailure(fresh.checkoutTerms, false);
+      if (termsFailure) return { kind: 'response' as const, ...termsFailure };
+      const expectedOffer = {
+        term: plan.term,
+        trigger: body.trigger ?? 'account_upgrade',
+        surface: body.surface ?? 'dashboard',
+        placement: body.placement,
+        pendingActionId: action?.id,
+        checkoutTerms: fresh.checkoutTerms,
+      };
+      const existing = await lockedDb.select().from(pricing_offers).where(and(
+        eq(pricing_offers.user_id, userId),
+        eq(pricing_offers.client_idempotency_key, idempotencyKey),
+      )).limit(1);
+      if (existing[0]) {
+        return {
+          kind: 'offer' as const,
+          offer: existing[0],
+          conflict: 'idempotency_conflict' as const,
+          repairAllowed: true,
+          expectedOffer,
+          account: fresh.account,
+        };
+      }
+      const [liveOffer] = await lockedDb.select().from(pricing_offers).where(and(
+        eq(pricing_offers.user_id, userId),
+        eq(pricing_offers.product_code, 'litos_plus'),
+        inArray(pricing_offers.status, liveOfferStatuses),
+        gt(pricing_offers.expires_at, new Date()),
+      )).limit(1);
+      if (liveOffer) {
+        return {
+          kind: 'offer' as const,
+          offer: liveOffer,
+          conflict: 'checkout_in_progress' as const,
+          repairAllowed: liveOffer.client_idempotency_key === idempotencyKey,
+          expectedOffer,
+          account: fresh.account,
+        };
+      }
+      const offerId = randomUUID();
+      // Stripe requires at least 30 minutes. The extra minute covers live Price verification.
+      const expiresAt = new Date(Date.now() + 31 * 60 * 1000);
+      const [insertedOffer] = await lockedDb.insert(pricing_offers).values({
+        id: offerId,
+        user_id: userId,
+        subject_id: email.trim().toLowerCase(),
+        idempotency_key: `v2:${idempotencyKey}`,
+        policy_version: checkoutOfferPolicyVersion(ENTITLEMENT_POLICY_VERSION, fresh.checkoutTerms.revision),
+        country_code: 'US',
+        band: 'standard',
+        experiment_variant: 'control',
+        billing_interval: plan.term,
+        currency: plan.currency,
+        base_amount_cents: plan.amount_cents,
+        amount_cents: plan.amount_cents,
+        status: 'creating',
+        expires_at: expiresAt,
+        product_code: plan.product_code,
+        term_code: plan.term,
+        provider_price_id: stripePriceIdForPlan(plan.id),
+        surface: expectedOffer.surface,
+        placement: body.placement,
+        trigger: expectedOffer.trigger,
+        client_idempotency_key: idempotencyKey,
+        pending_action_id: action?.id,
+      }).onConflictDoNothing().returning();
+      if (insertedOffer) {
+        return {
+          kind: 'offer' as const,
+          offer: insertedOffer,
+          conflict: 'idempotency_conflict' as const,
+          repairAllowed: true,
+          expectedOffer,
+          account: fresh.account,
+        };
+      }
+      const [racedOffer] = await lockedDb.select().from(pricing_offers).where(and(
+        eq(pricing_offers.user_id, userId),
+        eq(pricing_offers.product_code, 'litos_plus'),
+        inArray(pricing_offers.status, liveOfferStatuses),
+      )).limit(1);
+      if (!racedOffer) throw new Error('Checkout idempotency conflict did not return an offer');
+      return {
+        kind: 'offer' as const,
+        offer: racedOffer,
+        conflict: racedOffer.client_idempotency_key === idempotencyKey
+          ? 'idempotency_conflict' as const
+          : 'checkout_in_progress' as const,
+        repairAllowed: racedOffer.client_idempotency_key === idempotencyKey,
+        expectedOffer,
+        account: fresh.account,
+      };
+    });
+    if (reservation.kind === 'response') {
+      return reply.status(reservation.status).send(reservation.payload);
+    }
+
+    const repairCreatingOffer = async (
+      offer: typeof pricing_offers.$inferSelect,
+    ): Promise<StripeCheckoutRepairResult | null> => {
       const session = await createStripeCheckoutSessionV2({
         offerId: offer.id,
         userId,
@@ -772,86 +1209,123 @@ export async function billingRoutes(fastify: FastifyInstance) {
         idempotencyKey,
         actionId: action?.id,
         actionNonce: body.action_nonce,
-        surface: expectedOffer.surface,
-        existingCustomerId: account?.billing_provider === 'stripe' ? account.billing_customer_id : null,
+        surface: reservation.expectedOffer.surface,
+        existingCustomerId: reservation.account?.billing_provider === 'stripe'
+          ? reservation.account.billing_customer_id
+          : null,
         expiresAt: offer.expires_at,
-        trialDays,
+        trialDays: reservation.expectedOffer.checkoutTerms.trial_days ?? 0,
       });
       if (!session) return null;
-      return persistStripeCheckoutSession({ offer, pendingActionId: action?.id, session });
-    };
-    const checkoutNow = new Date();
-    const liveOfferStatuses = ['creating', 'checkout_created'];
-    await db.update(pricing_offers).set({ status: 'expired', updated_at: checkoutNow }).where(and(
-      eq(pricing_offers.user_id, userId),
-      eq(pricing_offers.product_code, 'litos_plus'),
-      inArray(pricing_offers.status, liveOfferStatuses),
-      lte(pricing_offers.expires_at, checkoutNow),
-    ));
-    const existing = await db.select().from(pricing_offers).where(and(
-      eq(pricing_offers.user_id, userId),
-      eq(pricing_offers.client_idempotency_key, idempotencyKey),
-    )).limit(1);
-    if (existing[0]) {
-      return replayCheckoutOffer(reply, existing[0], expectedOffer, 'idempotency_conflict', () => repairCreatingOffer(existing[0]));
-    }
-    const [liveOffer] = await db.select().from(pricing_offers).where(and(
-      eq(pricing_offers.user_id, userId),
-      eq(pricing_offers.product_code, 'litos_plus'),
-      inArray(pricing_offers.status, liveOfferStatuses),
-      gt(pricing_offers.expires_at, checkoutNow),
-    )).limit(1);
-    if (liveOffer) {
-      const repair = liveOffer.client_idempotency_key === idempotencyKey
-        ? () => repairCreatingOffer(liveOffer)
-        : undefined;
-      return replayCheckoutOffer(reply, liveOffer, expectedOffer, 'checkout_in_progress', repair);
-    }
-    const offerId = randomUUID();
-    // Stripe requires expires_at to be at least 30 minutes after Session creation. The extra
-    // minute covers the live Price verification that happens before the Session POST while
-    // preserving one deterministic expiry across retries, the offer, and the pending action.
-    const expiresAt = new Date(Date.now() + 31 * 60 * 1000);
-    const [insertedOffer] = await db.insert(pricing_offers).values({
-      id: offerId,
-      user_id: userId,
-      subject_id: email.trim().toLowerCase(),
-      idempotency_key: `v2:${idempotencyKey}`,
-      policy_version: checkoutOfferPolicyVersion(ENTITLEMENT_POLICY_VERSION, checkoutTerms.revision),
-      country_code: 'US',
-      band: 'standard',
-      experiment_variant: 'control',
-      billing_interval: plan.term,
-      currency: plan.currency,
-      base_amount_cents: plan.amount_cents,
-      amount_cents: plan.amount_cents,
-      status: 'creating',
-      expires_at: expiresAt,
-      product_code: plan.product_code,
-      term_code: plan.term,
-      provider_price_id: process.env[plan.price_env]?.trim(),
-      surface: expectedOffer.surface,
-      placement: body.placement,
-      trigger: expectedOffer.trigger,
-      client_idempotency_key: idempotencyKey,
-      pending_action_id: action?.id,
-    }).onConflictDoNothing().returning();
-    if (!insertedOffer) {
-      const [racedOffer] = await db.select().from(pricing_offers).where(and(
-        eq(pricing_offers.user_id, userId),
-        eq(pricing_offers.product_code, 'litos_plus'),
-        inArray(pricing_offers.status, liveOfferStatuses),
-      )).limit(1);
-      if (!racedOffer) throw new Error('Checkout idempotency conflict did not return an offer');
-      return replayCheckoutOffer(
-        reply,
-        racedOffer,
-        expectedOffer,
-        racedOffer.client_idempotency_key === idempotencyKey ? 'idempotency_conflict' : 'checkout_in_progress',
-        racedOffer.client_idempotency_key === idempotencyKey ? () => repairCreatingOffer(racedOffer) : undefined,
+
+      /* Stripe I/O deliberately happens outside the account lock. When it returns, attach the
+         provider identity while holding that lock, then compare the current account policy with
+         the immutable reservation before any URL can leave this process. */
+      let checked: {
+        persistence: StripeCheckoutPersistenceResult;
+        checkoutTerms: BillingCheckoutTerms;
+        policyMatches: boolean;
+      } | null = null;
+      try {
+        checked = await withBillingAccountLock(userId, async (lockedDb) => {
+          const current = await checkoutTermsForUser({ userId, isGuest, plan }, lockedDb);
+          const persistence = await persistStripeCheckoutSession(
+            { offer, pendingActionId: action?.id, session },
+            lockedDb,
+          );
+          return {
+            persistence,
+            checkoutTerms: current.checkoutTerms,
+            policyMatches: persistence.kind === 'persisted'
+              && persistence.actionBindingValid
+              && (persistence.offer.status === 'creating' || persistence.offer.status === 'checkout_created')
+              && offer.policy_version === checkoutOfferPolicyVersion(
+                ENTITLEMENT_POLICY_VERSION,
+                current.checkoutTerms.revision,
+              ),
+          };
+        });
+      } catch (error) {
+        request.log.error({ error, offerId: offer.id }, 'Stripe checkout Session persistence failed');
+      }
+      if (checked?.policyMatches && checked.persistence.kind === 'persisted') {
+        return { kind: 'ready', offer: checked.persistence.offer };
+      }
+
+      /* A known provider Session is now bound to the local offer but cannot be shown under stale
+         terms. Make it unusable at Stripe before releasing the live local slot. */
+      const providerState = await expireStripeCheckoutSession({
+        offerId: offer.id,
+        sessionId: session.id,
+      });
+      if (providerState === 'completed') {
+        const trackedOffer = checked?.persistence.kind === 'persisted'
+          ? checked.persistence.offer
+          : { ...offer, provider_checkout_id: session.id, provider_checkout_url: session.url };
+        const reconciled = await reconcileStripeCheckoutOffer(trackedOffer).catch((error) => {
+          request.log.error({ error, offerId: offer.id }, 'stale checkout reconciliation failed');
+          return 'unverified' as const;
+        });
+        if (reconciled === 'grants_plus') return { kind: 'already_plus' };
+        if (reconciled === 'recovery_required') return { kind: 'recovery_required' };
+        if (reconciled === 'terminal_without_plus') {
+          const current = await checkoutTermsForUser({ userId, isGuest, plan });
+          return { kind: 'terms_changed', checkoutTerms: current.checkoutTerms };
+        }
+        return { kind: 'in_progress' };
+      }
+      if (providerState !== 'expired') return { kind: 'in_progress' };
+      if (checked?.persistence.kind === 'provider_conflict') return { kind: 'in_progress' };
+      let current: Awaited<ReturnType<typeof checkoutTermsForUser>>;
+      try {
+        current = await withBillingAccountLock(userId, async (lockedDb) => {
+          const [released] = await lockedDb.update(pricing_offers).set({
+            status: 'expired',
+            provider_checkout_id: session.id,
+            provider_checkout_url: session.url,
+            provider_customer_id: session.customerId,
+            provider_subscription_id: session.subscriptionId,
+            updated_at: new Date(),
+          }).where(and(
+            eq(pricing_offers.id, offer.id),
+            eq(pricing_offers.user_id, userId),
+            inArray(pricing_offers.status, liveOfferStatuses),
+            or(
+              isNull(pricing_offers.provider_checkout_id),
+              eq(pricing_offers.provider_checkout_id, session.id),
+            ),
+          )).returning({ id: pricing_offers.id });
+          if (!released && checked?.persistence.kind !== 'persisted') {
+            throw new Error('Expired Stripe Session could not be attached to its local offer');
+          }
+          return checkoutTermsForUser({ userId, isGuest, plan }, lockedDb);
+        });
+      } catch (error) {
+        request.log.error({ error, offerId: offer.id }, 'expired Stripe Session persistence failed');
+        return { kind: 'in_progress' };
+      }
+      if (current.checkoutTerms.checkout_status === 'already_plus') return { kind: 'already_plus' };
+      if (current.checkoutTerms.checkout_status === 'billing_recovery_required') return { kind: 'recovery_required' };
+      if (checked?.persistence.kind === 'persisted' && !checked.persistence.actionBindingValid) {
+        return { kind: 'action_binding_conflict' };
+      }
+      const currentPolicy = checkoutOfferPolicyVersion(
+        ENTITLEMENT_POLICY_VERSION,
+        current.checkoutTerms.revision,
       );
-    }
-    return replayCheckoutOffer(reply, insertedOffer, expectedOffer, 'idempotency_conflict', () => repairCreatingOffer(insertedOffer));
+      if (offer.policy_version !== currentPolicy) {
+        return { kind: 'terms_changed', checkoutTerms: current.checkoutTerms };
+      }
+      return { kind: 'checkout_expired' };
+    };
+
+    return replayCheckoutOffer(
+      reply,
+      reservation.offer,
+      reservation.expectedOffer,
+      reservation.conflict,
+      reservation.repairAllowed ? () => repairCreatingOffer(reservation.offer) : undefined,
+    );
   });
 
   fastify.post('/billing/portal', { preHandler: requireAuth }, async (request, reply) => {
@@ -1042,8 +1516,20 @@ export async function billingRoutes(fastify: FastifyInstance) {
         const isDispute = event.eventName.startsWith('charge.dispute.');
         const requiresProviderAuthority = isSubscription || isInvoice || isRefund || isDispute
           || (isCheckout && event.eventName !== 'checkout.session.async_payment_failed');
+        let offer = event.offerId
+          ? (await tx.select().from(pricing_offers).where(eq(pricing_offers.id, event.offerId)).limit(1))[0]
+          : undefined;
+        let subscription = event.subscriptionId
+          ? (await tx.select().from(billing_subscriptions)
+            .where(eq(billing_subscriptions.provider_subscription_id, event.subscriptionId)).limit(1))[0]
+          : undefined;
         if (requiresProviderAuthority) {
-          const authority = await retrieveStripeBillingAuthority({ event });
+          const immutablePlan = billingPlanForTerm(offer?.term_code ?? subscription?.term_code);
+          const immutablePriceId = offer?.provider_price_id ?? subscription?.provider_price_id;
+          const acceptedPrice = immutablePlan && immutablePriceId
+            ? { priceId: immutablePriceId, plan: immutablePlan }
+            : undefined;
+          const authority = await retrieveStripeBillingAuthority({ event, acceptedPrice });
           if (!authority) throw new Error('Stripe current billing state could not be verified');
           providerSubscriptionStatus = authority.subscription.status;
           event = {
@@ -1066,14 +1552,15 @@ export async function billingRoutes(fastify: FastifyInstance) {
             amountRefunded: authority.amountRefunded,
             disputeOutcome: authority.disputeOutcome,
           };
+          if (!offer && event.offerId) {
+            offer = (await tx.select().from(pricing_offers)
+              .where(eq(pricing_offers.id, event.offerId)).limit(1))[0];
+          }
+          if (!subscription && event.subscriptionId) {
+            subscription = (await tx.select().from(billing_subscriptions)
+              .where(eq(billing_subscriptions.provider_subscription_id, event.subscriptionId)).limit(1))[0];
+          }
         }
-        const offer = event.offerId
-          ? (await tx.select().from(pricing_offers).where(eq(pricing_offers.id, event.offerId)).limit(1))[0]
-          : undefined;
-        let subscription = event.subscriptionId
-          ? (await tx.select().from(billing_subscriptions)
-            .where(eq(billing_subscriptions.provider_subscription_id, event.subscriptionId)).limit(1))[0]
-          : undefined;
         const customerSubscription = event.customerId
           ? (await tx.select().from(billing_subscriptions)
             .where(eq(billing_subscriptions.provider_customer_id, event.customerId))
@@ -1095,6 +1582,11 @@ export async function billingRoutes(fastify: FastifyInstance) {
         }
         if (!user && event.customerId) {
           user = (await tx.select().from(users).where(eq(users.billing_customer_id, event.customerId)).limit(1))[0];
+        }
+        if (user) {
+          /* Checkout uses this same account lock for both its reservation and post-Stripe policy
+             check. Billing projection waits here before mutating any offer, subscription, or user. */
+          await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`entitlement:${user.id}`}, 0::bigint))`);
         }
 
         if (isCheckout && event.eventName === 'checkout.session.async_payment_failed') {
@@ -1155,12 +1647,12 @@ export async function billingRoutes(fastify: FastifyInstance) {
               .where(eq(billing_webhook_events.event_key, event.eventKey));
             return { ignored: true, userId: user.id, state: 'awaiting_payment' };
           }
-          const plan = billingPlan(`litos_plus_${offer.term_code === 'quarter' ? 'quarter' : offer.term_code}`);
+          const plan = billingPlanForTerm(offer.term_code);
           if (!plan
-            || offer.provider_price_id !== process.env[plan.price_env]?.trim()
+            || !offer.provider_price_id
             || event.priceId !== offer.provider_price_id
             || event.plan?.term !== plan.term) {
-            throw new Error('Stripe checkout offer price is not in the live Litos+ catalog');
+            throw new Error('Stripe checkout price does not match the immutable offer');
           }
           if (applySubscriptionState) {
             const checkoutStatus = event.status ?? 'incomplete';
@@ -1513,22 +2005,33 @@ export async function billingRoutes(fastify: FastifyInstance) {
       fastify.log.error({ subscriptionId: parsed.subscriptionId }, 'Lemon Squeezy subscription did not match a Litos account');
       return reply.status(422).send({ error: 'account not found' });
     }
-    if (user.billing_event_updated_at && parsed.updatedAt < user.billing_event_updated_at) {
+    const projection = await withBillingAccountLock(user.id, async (lockedDb) => {
+      const [current] = await lockedDb.select().from(users).where(eq(users.id, user.id)).limit(1);
+      if (!current) return 'missing' as const;
+      if (current.billing_event_updated_at && parsed.updatedAt < current.billing_event_updated_at) {
+        return 'stale' as const;
+      }
+      await lockedDb.update(users).set({
+        plan,
+        billing_provider: 'lemonsqueezy',
+        billing_customer_id: parsed.customerId,
+        billing_subscription_id: parsed.subscriptionId,
+        billing_variant_id: parsed.variantId,
+        billing_status: parsed.status,
+        billing_renews_at: parsed.renewsAt,
+        billing_ends_at: parsed.endsAt,
+        billing_portal_url: parsed.portalUrl,
+        billing_event_updated_at: parsed.updatedAt,
+        entitlement_revision: randomUUID(),
+      }).where(eq(users.id, user.id));
+      return 'applied' as const;
+    });
+    if (projection === 'missing') {
+      return reply.status(422).send({ error: 'account not found' });
+    }
+    if (projection === 'stale') {
       return reply.status(200).send({ received: true, ignored: true, reason: 'stale_event' });
     }
-
-    await db.update(users).set({
-      plan,
-      billing_provider: 'lemonsqueezy',
-      billing_customer_id: parsed.customerId,
-      billing_subscription_id: parsed.subscriptionId,
-      billing_variant_id: parsed.variantId,
-      billing_status: parsed.status,
-      billing_renews_at: parsed.renewsAt,
-      billing_ends_at: parsed.endsAt,
-      billing_portal_url: parsed.portalUrl,
-      billing_event_updated_at: parsed.updatedAt,
-    }).where(eq(users.id, user.id));
 
     fastify.log.info({ userId: user.id, status: parsed.status, plan }, 'synced Lemon Squeezy subscription');
     return reply.status(200).send({ received: true });

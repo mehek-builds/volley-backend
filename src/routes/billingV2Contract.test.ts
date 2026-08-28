@@ -14,26 +14,42 @@ test('plans attach server-owned checkout terms to public and personalized catalo
   assert.match(route, /getEntitlementSnapshot\(identity\.userId\)/);
   assert.match(route, /trial_started_at: users\.trial_started_at/);
   assert.match(route, /billingCheckoutTerms\(/);
+  assert.match(route, /provider_price_id: stripePriceIdForPlan\(plan\.id\)/);
   assert.match(route, /checkout_terms:/);
   assert.match(route, /private, no-store/);
   assert.match(route, /public, max-age=300/);
   assert.match(route, /addVary\(reply, 'Authorization'\)/);
 });
 
-test('explicit catalog checkout requires the exact current terms revision and echoes accepted terms', () => {
+test('explicit catalog checkout validates supplied terms revisions and keeps rollout compatibility', () => {
   const checkout = source.slice(
     source.indexOf("fastify.post<{ Body: CheckoutBody }>('/billing/checkout'"),
     source.indexOf("fastify.post('/billing/portal'"),
   );
   assert.match(source, /checkout_terms_revision: z\.string\(\)\.trim\(\)\.min\(20\)\.max\(200\)\.optional\(\)/);
-  assert.match(checkout, /body\.plan_id && body\.checkout_terms_revision !== checkoutTerms\.revision/);
-  assert.match(checkout, /!body\.plan_id[\s\S]{0,160}process\.env\.LITOS_BILLING_ENABLED/);
+  assert.match(checkout, /body\.checkout_terms_revision && body\.checkout_terms_revision !== checkoutTerms\.revision/);
+  assert.match(checkout, /!body\.plan_id[\s\S]{0,80}!body\.checkout_terms_revision[\s\S]{0,160}process\.env\.LITOS_BILLING_ENABLED/);
+  assert.match(checkout, /LITOS_CHECKOUT_TERMS_REVISION_REQUIRED/);
+  assert.match(checkout, /if \(!body\.checkout_terms_revision\)/);
+  assert.match(checkout, /const legacyOnboardingDisclosure = Boolean\(body\.plan_id\)/);
+  assert.match(checkout, /body\.surface === 'website'/);
+  assert.match(checkout, /body\.placement === 'onboarding'/);
+  assert.match(checkout, /body\.trigger === 'start_plan'/);
+  assert.match(checkout, /!legacyOnboardingDisclosure/);
+  assert.match(checkout, /checkoutTerms\.trial_eligible !== true/);
+  assert.match(checkout, /code: 'checkout_terms_revision_required'/);
   assert.match(checkout, /code: 'checkout_terms_changed'/);
   assert.match(checkout, /checkout_terms: checkoutTerms/);
   assert.match(source, /checkout_terms: expected\.checkoutTerms/);
-  assert.match(source, /checkoutOfferPolicyVersion\(ENTITLEMENT_POLICY_VERSION, checkoutTerms\.revision\)/);
+  assert.match(source, /checkoutOfferPolicyVersion\(ENTITLEMENT_POLICY_VERSION, fresh\.checkoutTerms\.revision\)/);
   assert.match(source, /prior\.policy_version !== acceptedPolicyVersion/);
-  assert.match(source, /set\(\{ status: 'expired'/);
+  assert.match(source, /expireStripeCheckoutSession\(/);
+  const replay = source.slice(
+    source.indexOf('async function replayCheckoutOffer'),
+    source.indexOf('async function createLitosCheckoutOffer'),
+  );
+  assert.ok(replay.indexOf('await expireStripeCheckoutSession') < replay.indexOf("set({ status: 'expired'"));
+  assert.match(replay, /if \(providerState !== 'expired'\)[\s\S]*code: 'checkout_in_progress'/);
 });
 
 test('checkout prevents recovery-state duplicates and preserves surface and customer ownership', () => {
@@ -41,7 +57,7 @@ test('checkout prevents recovery-state duplicates and preserves surface and cust
     source.indexOf("fastify.post<{ Body: CheckoutBody }>('/billing/checkout'"),
     source.indexOf("fastify.post('/billing/portal'"),
   );
-  assert.match(checkout, /const checkoutTerms = billingCheckoutTerms\(/);
+  assert.match(source, /async function checkoutTermsForUser[\s\S]*billingCheckoutTerms\(/);
   assert.match(checkout, /checkoutTerms\.checkout_status === 'billing_recovery_required'/);
   assert.match(checkout, /code: 'billing_recovery_required'/);
   assert.ok(
@@ -52,7 +68,7 @@ test('checkout prevents recovery-state duplicates and preserves surface and cust
   assert.match(checkout, /actionNonce: body\.action_nonce/);
   assert.match(checkout, /pendingActionId: action\?\.id/);
   assert.match(source, /prior\.pending_action_id \?\? undefined/);
-  assert.match(checkout, /existingCustomerId: account\?\.billing_provider === 'stripe'/);
+  assert.match(checkout, /existingCustomerId: reservation\.account\?\.billing_provider === 'stripe'/);
   assert.match(checkout, /expiresAt: offer\.expires_at/);
   assert.match(checkout, /Date\.now\(\) \+ 31 \* 60 \* 1000/);
   assert.match(checkout, /liveOfferStatuses = \['creating', 'checkout_created'\]/);
@@ -65,7 +81,10 @@ test('webhooks reconcile provider state while failed invoices retain their first
     source.indexOf("fastify.post('/billing/stripe-webhook'"),
     source.indexOf("fastify.post('/billing/lemonsqueezy-webhook'"),
   );
-  assert.match(webhook, /const authority = await retrieveStripeBillingAuthority\(\{ event \}\)/);
+  assert.match(webhook, /const authority = await retrieveStripeBillingAuthority\(\{ event, acceptedPrice \}\)/);
+  assert.match(webhook, /const immutablePriceId = offer\?\.provider_price_id \?\? subscription\?\.provider_price_id/);
+  assert.match(webhook, /event\.priceId !== offer\.provider_price_id/);
+  assert.doesNotMatch(webhook, /offer\.provider_price_id !== process\.env/);
   assert.match(webhook, /const nextStatus = event\.status/);
   assert.match(webhook, /const invoiceAccessEndsAt = subscriptionEventAccessBoundary\(/);
   assert.match(webhook, /incomingAccessEndsAt: nextStatus === 'past_due' \? event\.createdAt : event\.accessEndsAt/);
@@ -95,13 +114,36 @@ test('checkout session persistence and pending-action linkage share a transactio
     source.indexOf('async function replayCheckoutOffer'),
     source.indexOf('async function createLitosCheckoutOffer'),
   );
-  assert.match(persist, /return db\.transaction\(async \(tx\) =>/);
+  assert.match(persist, /return database\.transaction\(async \(tx\) =>/);
   assert.match(persist, /tx\.update\(pricing_offers\)/);
   assert.match(persist, /tx\.update\(pending_premium_actions\)/);
   assert.match(persist, /expires_at: input\.session\.expiresAt/);
   assert.match(replay, /repairCreating/);
   assert.match(replay, /repairCheckoutActionBinding/);
+  assert.ok(replay.indexOf('prior.policy_version !== acceptedPolicyVersion') < replay.indexOf('const repaired = await repairCreating()'));
   assert.equal((replay.match(/expires_at: replayed\.expires_at\.toISOString\(\)/g) ?? []).length, 2);
+});
+
+test('account-locked checkout work stays on the dedicated locked database client', () => {
+  const reservation = source.slice(
+    source.indexOf('const reservation = await withBillingAccountLock'),
+    source.indexOf('if (reservation.kind ==='),
+  );
+  const postStripeCheck = source.slice(
+    source.indexOf('checked = await withBillingAccountLock'),
+    source.indexOf("if (checked?.policyMatches"),
+  );
+  const reconciliation = source.slice(
+    source.indexOf('async function reconcileStripeCheckoutOfferUnlocked'),
+    source.indexOf('async function reconcileStripeCheckoutOffer('),
+  );
+  assert.match(reservation, /async \(lockedDb\) =>/);
+  assert.match(reservation, /checkoutTermsForUser\([^;]+lockedDb\)/);
+  assert.doesNotMatch(reservation, /\bdb\.(select|insert|update|transaction)\(/);
+  assert.match(postStripeCheck, /persistStripeCheckoutSession\([\s\S]*lockedDb/);
+  assert.doesNotMatch(postStripeCheck, /\bdb\.(select|insert|update|transaction)\(/);
+  assert.match(reconciliation, /database\.transaction\(async \(tx\) =>/);
+  assert.doesNotMatch(reconciliation, /\bdb\.(select|insert|update|transaction)\(/);
 });
 
 test('an exact terminal event for a provider-confirmed deleted account is acknowledged narrowly', () => {
