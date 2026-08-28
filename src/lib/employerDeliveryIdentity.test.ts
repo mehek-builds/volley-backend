@@ -147,6 +147,80 @@ test('failed fields bind by durable control identity, not per-load selector, inp
   assert.equal(employerDeliverySha256(measuredEmpty, envelope), employerDeliverySha256(packet(), envelope));
 });
 
+test('field options bind by option content, not by per-load addressing keys', () => {
+  const envelope = employerDeliveryEnvelope({
+    channel: 'browser:stratus-managed',
+    destinationUrl: 'https://jobs.ashbyhq.com/example/123',
+    portalFamily: 'ashby',
+  });
+  // (a) the same option lists under different per-load name keys (Ashby embeds a per-page-load
+  // instance UUID in the name-attribute prefix) are one delivery identity, whatever the key order.
+  const firstLoad = {
+    ...packet(),
+    fieldOptions: {
+      'name:03af8549-1c2d-4e5f-8a9b-0c1d2e3f4a5b_a05e892e': ['Yes', 'No'],
+      'name:03af8549-1c2d-4e5f-8a9b-0c1d2e3f4a5b_b16f903f': ['Dubai', 'London', 'Remote'],
+    },
+  };
+  const secondLoad = {
+    ...packet(),
+    fieldOptions: {
+      'name:36604d41-9f8e-4d7c-b6a5-4c3b2a190807_b16f903f': ['Dubai', 'London', 'Remote'],
+      'name:36604d41-9f8e-4d7c-b6a5-4c3b2a190807_a05e892e': ['Yes', 'No'],
+    },
+  };
+  assert.deepEqual(
+    employerDeliveryProjection(firstLoad).fieldOptions,
+    [['Dubai', 'London', 'Remote'], ['Yes', 'No']],
+  );
+  assert.equal(employerDeliverySha256(firstLoad, envelope), employerDeliverySha256(secondLoad, envelope));
+
+  // (b) changed option content, reordered options within a list (option order is employer
+  // content), or an added control still changes the hash.
+  const changedOption = {
+    ...packet(),
+    fieldOptions: {
+      'name:03af8549-1c2d-4e5f-8a9b-0c1d2e3f4a5b_a05e892e': ['Yes', 'No'],
+      'name:03af8549-1c2d-4e5f-8a9b-0c1d2e3f4a5b_b16f903f': ['Dubai', 'London', 'Hybrid'],
+    },
+  };
+  const reorderedOptions = {
+    ...packet(),
+    fieldOptions: {
+      'name:03af8549-1c2d-4e5f-8a9b-0c1d2e3f4a5b_a05e892e': ['No', 'Yes'],
+      'name:03af8549-1c2d-4e5f-8a9b-0c1d2e3f4a5b_b16f903f': ['Dubai', 'London', 'Remote'],
+    },
+  };
+  const addedControl = {
+    ...packet(),
+    fieldOptions: { ...firstLoad.fieldOptions, extra_control: ['A', 'B'] },
+  };
+  assert.notEqual(employerDeliverySha256(firstLoad, envelope), employerDeliverySha256(changedOption, envelope));
+  assert.notEqual(employerDeliverySha256(firstLoad, envelope), employerDeliverySha256(reorderedOptions, envelope));
+  assert.notEqual(employerDeliverySha256(firstLoad, envelope), employerDeliverySha256(addedControl, envelope));
+
+  // (c) it is a MULTISET: two different controls carrying identical option lists do not collapse
+  // into one entry, so two identical lists and one identical list hash differently.
+  const twoIdenticalLists = {
+    ...packet(),
+    fieldOptions: { control_a: ['Yes', 'No'], control_b: ['Yes', 'No'] },
+  };
+  const oneList = {
+    ...packet(),
+    fieldOptions: { control_a: ['Yes', 'No'] },
+  };
+  assert.deepEqual(
+    employerDeliveryProjection(twoIdenticalLists).fieldOptions,
+    [['Yes', 'No'], ['Yes', 'No']],
+  );
+  assert.notEqual(employerDeliverySha256(twoIdenticalLists, envelope), employerDeliverySha256(oneList, envelope));
+
+  // (d) a measured-empty inventory is still omitted: hash equals the absent case.
+  const measuredEmpty = { ...packet(), fieldOptions: {} };
+  assert.equal(employerDeliveryProjection(measuredEmpty).fieldOptions, undefined);
+  assert.equal(employerDeliverySha256(measuredEmpty, envelope), employerDeliverySha256(packet(), envelope));
+});
+
 test('managed form snapshots do not alter the separate attended extension payload', () => {
   const base = {
     target_role: 'Engineer',
