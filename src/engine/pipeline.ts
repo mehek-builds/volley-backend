@@ -15,9 +15,28 @@
  * accumulates and stays theirs.
  */
 
-/** Most recent applications returned by the board. Bounded so a heavy account cannot ship
- *  thousands of cards, each with its own control, to a page nobody scrolls that far down. */
-export const BOARD_LIMIT = 200;
+/**
+ * Most recent applications returned by any one view of a student's inventory.
+ *
+ * Bounded so a heavy account cannot ship thousands of cards, each with its own control, to a page
+ * nobody scrolls that far down.
+ *
+ * ONE CEILING, BECAUSE TWO VIEWS OF THIS INVENTORY RENDER ON ONE SCREEN. The dashboard's Tracker
+ * draws GET /applications/board directly underneath a ledger counted from GET /applications, and
+ * while those routes carried different ceilings the two were honest counts of two different
+ * universes six pixels apart: measured on trylitos.com 2026-08-29, "Your applications 100" sat
+ * directly above "187 of 200 have not been sent yet", and a card could sit in the board's Applied
+ * column while falling outside the ledger's window - which is how "Applied 13" and "12 Sent" were
+ * both correct and irreconcilable. The web app cannot fix that on its own: it asks for the limit,
+ * and the answer to what the maximum IS lives here.
+ *
+ * canonicalApplications.ts validates its `limit` against this, so raising or lowering it moves both
+ * routes together. pipeline.test.ts pins them to the same number.
+ */
+export const INVENTORY_LIMIT = 200;
+
+/** The board's own name for it, kept so existing readers need no edit. Identical by construction. */
+export const BOARD_LIMIT = INVENTORY_LIMIT;
 
 export const STAGES = ['saved', 'applied', 'interview', 'offer', 'closed'] as const;
 export type Stage = (typeof STAGES)[number];
