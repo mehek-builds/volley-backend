@@ -7,7 +7,7 @@ import { users, email_verification_codes, monitored_jobs, career_page_sources } 
 import { and, eq, gte, inArray, lt, sql } from 'drizzle-orm';
 import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
 import { v4 as uuidv4 } from 'uuid';
-import { allowHourly, rateLimitedReply, LIMITS, TRIAL_DAYS } from '../middleware/quota';
+import { TRIAL_DAYS } from '../middleware/quota';
 import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
 import { emailSender, sendEmail } from '../lib/email';
 import { requireAuth, type JWTPayload } from '../middleware/auth';
@@ -426,9 +426,6 @@ export async function authRoutes(fastify: FastifyInstance) {
         });
       }
 
-      const ipAllowed = await allowHourly(`ip:${request.ip}`, 'guest-create-ip', 3);
-      if (!ipAllowed) return rateLimitedReply(reply);
-
       const now = new Date();
       /* A guest has no email and no card, so a guest cannot start a trial at
          all any more. The guest session itself is unchanged -- it still lasts
@@ -710,11 +707,6 @@ export async function authRoutes(fastify: FastifyInstance) {
 
     const email = parsed.data.email.toLowerCase();
     const password = normalizePassword(parsed.data.password);
-    const [emailAllowed, ipAllowed] = await Promise.all([
-      allowHourly(email, 'password-login', LIMITS.perHour.passwordLogin),
-      allowHourly(`ip:${request.ip}`, 'password-login-ip', LIMITS.perHour.passwordLoginPerIp),
-    ]);
-    if (!emailAllowed || !ipAllowed) return rateLimitedReply(reply);
 
     try {
       const account = (await db
@@ -811,11 +803,6 @@ export async function authRoutes(fastify: FastifyInstance) {
         }
 
         const recoverySession = isRecentVerification(identity.authMethod, identity.authenticatedAt);
-        const [userAllowed, ipAllowed] = await Promise.all([
-          allowHourly(account.id, 'password-change', LIMITS.perHour.passwordChange),
-          allowHourly(`ip:${request.ip}`, 'password-change-ip', LIMITS.perHour.passwordChangePerIp),
-        ]);
-        if (!userAllowed || !ipAllowed) return rateLimitedReply(reply);
 
         const updateError = await passwordUpdateError({
           existingHash: account.password_hash,
@@ -903,14 +890,6 @@ export async function authRoutes(fastify: FastifyInstance) {
       return reply.status(500).send({ error: 'JWT_SIGNING_SECRET not configured' });
     }
 
-    const [emailAllowed, ipAllowed] = await Promise.all([
-      allowHourly(email, 'session', LIMITS.perHour.session),
-      allowHourly(`ip:${request.ip}`, 'session-ip', LIMITS.perHour.sessionPerIp),
-    ]);
-    if (!emailAllowed || !ipAllowed) {
-      return rateLimitedReply(reply);
-    }
-
     try {
       // This legacy path does NO proof that the caller owns `email`, so when email verification is
       // available it must not mint a 30-day token AT ALL - not for an account that already exists
@@ -981,13 +960,6 @@ export async function authRoutes(fastify: FastifyInstance) {
     }
 
     const email = body.email.toLowerCase();
-    const [emailAllowed, ipAllowed] = await Promise.all([
-      allowHourly(email, 'request-code', LIMITS.perHour.requestCode),
-      allowHourly(`ip:${request.ip}`, 'request-code-ip', LIMITS.perHour.requestCodePerIp),
-    ]);
-    if (!emailAllowed || !ipAllowed) {
-      return rateLimitedReply(reply);
-    }
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
 
     try {
@@ -1030,13 +1002,6 @@ export async function authRoutes(fastify: FastifyInstance) {
       guestUserId = await optionalGuestUserId(request);
     } catch {
       return reply.status(401).send({ error: 'Invalid or expired guest session' });
-    }
-    const [emailAllowed, ipAllowed] = await Promise.all([
-      allowHourly(email, 'verify-code', 15),
-      allowHourly(`ip:${request.ip}`, 'verify-code-ip', LIMITS.perHour.verifyCodePerIp),
-    ]);
-    if (!emailAllowed || !ipAllowed) {
-      return rateLimitedReply(reply);
     }
 
     try {

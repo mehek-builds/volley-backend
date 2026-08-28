@@ -6,7 +6,7 @@ import { v5 as uuidv5 } from 'uuid';
 import { db } from '../db/index';
 import { applications, companies, contacts, entitlement_usage_reservations, monetization_events, outreach_draft_generations, profiles, user_contact_unlocks } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
-import { allowHourly, getEntitlements, getCount, monthPeriod, quotaExceededPayload, rateLimitedReply, LIMITS } from '../middleware/quota';
+import { getEntitlements, getCount, monthPeriod, quotaExceededPayload } from '../middleware/quota';
 import { generateDraft } from '../llm/draft';
 import { declaredSkillsList } from './profile';
 import { upsertCanonicalApplicationForUser } from './canonicalApplications';
@@ -593,10 +593,6 @@ export async function draftRoutes(fastify: FastifyInstance) {
       application_id: context.applicationId,
     });
     if (reservation.replay) return reply.status(reservation.replay.statusCode).send(reservation.replay.body);
-    if (!(await allowHourly(userId, 'draft', LIMITS.perHour.draft))) {
-      await releaseEntitledUsage(reservation.reservationId);
-      return rateLimitedReply(reply);
-    }
     const ent = await getEntitlements(userId);
     const useLegacyMonthlyCounter = usesLegacyMonthlyProductQuota(reservation.snapshot);
     if (useLegacyMonthlyCounter) {

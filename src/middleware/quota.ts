@@ -22,10 +22,10 @@ export const LIMITS = {
     monthlyDrafts: parseInt(process.env.PRO_MONTHLY_DRAFTS || '1000', 10),
     monthlyResumes: parseInt(process.env.PRO_MONTHLY_RESUMES || '1000', 10),
   },
-  // Abuse protection (rolling hour, per user or per email)
+  // Abuse protection (rolling hour, per user or per email). resolve/draft/auth are
+  // uncapped by request (2026-08-29); the remaining LLM-cost-bearing routes below
+  // still meter through allowHourly().
   perHour: {
-    resolve: parseInt(process.env.RATE_RESOLVE_PER_HOUR || '15', 10),
-    draft: parseInt(process.env.RATE_DRAFT_PER_HOUR || '40', 10),
     // The dashboard prepares the user's top 30 daily matches as soon as the session opens.
     // Keep a small retry margin above that batch while preserving the per-user abuse ceiling.
     resume: parseInt(process.env.RATE_RESUME_PER_HOUR || '40', 10),
@@ -41,15 +41,6 @@ export const LIMITS = {
        here to stop a loop, not to ration ordinary use. */
     jdRequirements: parseInt(process.env.RATE_JD_REQUIREMENTS_PER_HOUR || '60', 10),
     packetAudit: parseInt(process.env.RATE_PACKET_AUDIT_PER_HOUR || '30', 10),
-    requestCode: parseInt(process.env.RATE_CODE_PER_HOUR || '5', 10),
-    session: parseInt(process.env.RATE_SESSION_PER_HOUR || '10', 10),
-    requestCodePerIp: parseInt(process.env.RATE_CODE_IP_PER_HOUR || '50', 10),
-    verifyCodePerIp: parseInt(process.env.RATE_VERIFY_IP_PER_HOUR || '200', 10),
-    sessionPerIp: parseInt(process.env.RATE_SESSION_IP_PER_HOUR || '100', 10),
-    passwordLogin: parseInt(process.env.RATE_PASSWORD_LOGIN_PER_HOUR || '10', 10),
-    passwordLoginPerIp: parseInt(process.env.RATE_PASSWORD_LOGIN_IP_PER_HOUR || '100', 10),
-    passwordChange: parseInt(process.env.RATE_PASSWORD_CHANGE_PER_HOUR || '5', 10),
-    passwordChangePerIp: parseInt(process.env.RATE_PASSWORD_CHANGE_IP_PER_HOUR || '30', 10),
   },
 } as const;
 
