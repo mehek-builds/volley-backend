@@ -5345,13 +5345,52 @@ const WORKABLE_PHONE_READBACK_SELECTOR =
   `${WORKABLE_PHONE_READBACK_WIDGET_SELECTOR}, `
   + `body:not(:has(${WORKABLE_PHONE_READBACK_WIDGET_SELECTOR})) ${WORKABLE_PHONE_READBACK_CONTAINER_SELECTOR}, `
   + `body:not(:has(${WORKABLE_PHONE_READBACK_WIDGET_SELECTOR})):not(:has(${WORKABLE_PHONE_READBACK_CONTAINER_SELECTOR})) ${WORKABLE_PHONE_READBACK_NAMED_SELECTOR}`;
+/* The country-list opener, as a gated fallback chain, because the aria contract alone was refuted
+ * live. MEASURED 2026-08-28, Pony.ai application fdcf4ccb-eca9-44dc-b0cb-d400805ebdeb:
+ * `phone_country_open: expected exactly one match for div[role="combobox"][aria-label="Telephone
+ * country code"][aria-controls]:visible, button[...], found 0`. The same page fetched fresh in a
+ * real browser the same day carries EXACTLY that element - `div.iti__selected-flag` with
+ * role="combobox", aria-haspopup="listbox", aria-controls="iti-0__country-listbox" and
+ * aria-label="Telephone country code", inside `.iti` inside Workable's own `div[data-ui="phone"]`
+ * container - and the aria arm counts one on it. So the aria attributes are present on initial
+ * mount and gone in the state the managed run reached: the same post-resume-parse remount that took
+ * `name="phone"` off the tel input (see WORKABLE_PHONE_READBACK_SELECTOR above) can strip the
+ * opener's accessible name too. Current upstream intl-tel-input builds also replace the opener
+ * wholesale: a `button.iti__selected-country` whose accessible name is not "Telephone country code"
+ * at all.
+ *
+ * The arms, ordered strongest-claim-first, each later arm active only when every earlier arm
+ * matches NOTHING (the same `body:not(:has(...))` conditional-arm technique as
+ * WORKABLE_LOCATION_SELECTOR and the phone readback, so the comma list can never double-match):
+ *
+ *   1. the aria contract, unchanged: combobox div or aria-labelled button with aria-controls
+ *   2. the structural widget contract, anchored on Workable's `div[data-ui="phone"]` container:
+ *      the opener inside `.iti`, which is `button.iti__selected-country` in current upstream
+ *      builds and the `.iti__selected-flag` div in the build Workable ships today. One `.iti`
+ *      renders exactly one of the two (the classes are build-determined and never coexist), so
+ *      the merged `:is()` member cannot double-match a single widget.
+ *
+ * NOTHING IS WEAKENED: the click keeps optional false and requireUnique, so zero openers or two
+ * phone widgets still refuse. Validated against a real Chromium via the Playwright selector
+ * engine on 2026-08-28: exactly one match on the live steady-state capture, on the aria-stripped
+ * remount shape, and on the current-build button shape; two on a two-widget page (refused); and
+ * one - the aria element, with the fallback arm silent - when an aria opener and a stray
+ * structural widget coexist. The whole chain stays under the runner's 500-character cap. */
+const WORKABLE_PHONE_COUNTRY_TRIGGER_COMBOBOX_SELECTOR =
+  'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible';
+const WORKABLE_PHONE_COUNTRY_TRIGGER_BUTTON_SELECTOR =
+  'button[aria-label="Telephone country code"][aria-controls]:visible';
+const WORKABLE_PHONE_COUNTRY_TRIGGER_WIDGET_SELECTOR =
+  'div[data-ui="phone"] .iti :is(button.iti__selected-country, .iti__selected-flag):visible';
 const WORKABLE_PHONE_COUNTRY_TRIGGER_SELECTOR =
-  'div[role="combobox"][aria-label="Telephone country code"][aria-controls]:visible, '
-  + 'button[aria-label="Telephone country code"][aria-controls]:visible';
-// The open trigger carries aria-controls. Workable remounts the phone widget after a value write
-// and can drop the trigger's accessible name. The live widget keeps the selected dial code in the
-// intl-tel-input container, so bind readback to that unique value. The final atomic chooser still
-// binds submission to MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR after these exact proofs pass.
+  `${WORKABLE_PHONE_COUNTRY_TRIGGER_COMBOBOX_SELECTOR}, `
+  + `${WORKABLE_PHONE_COUNTRY_TRIGGER_BUTTON_SELECTOR}, `
+  + `body:not(:has(${WORKABLE_PHONE_COUNTRY_TRIGGER_COMBOBOX_SELECTOR}))`
+  + `:not(:has(${WORKABLE_PHONE_COUNTRY_TRIGGER_BUTTON_SELECTOR})) `
+  + WORKABLE_PHONE_COUNTRY_TRIGGER_WIDGET_SELECTOR;
+// The live widget keeps the selected dial code in the intl-tel-input container, so bind readback
+// to that unique value. The final atomic chooser still binds submission to
+// MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR after these exact proofs pass.
 const WORKABLE_PHONE_COUNTRY_READBACK_SELECTOR = '.iti__selected-dial-code:visible';
 // Selector lists resolve in DOM order, not in the order written. Workable keeps a hidden legacy
 // city input before the visible address autocomplete on current forms, so a plain comma list can
