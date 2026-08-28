@@ -266,10 +266,10 @@ describe('applyBulletRepairs', () => {
 
   test('a fenced reply is unwrapped before parsing', () => {
     const reply = '```json\n' + JSON.stringify([
-      { org: 'Litos', bullet: 'Designed a system', rewritten: 'Architected a streaming build system' },
+      { org: 'Litos', bullet: 'Designed a system', rewritten: 'Architected a streaming build system serving three hundred users' },
     ]) + '\n```';
     const repaired = applyBulletRepairs(spec, reply);
-    assert.equal(repaired.experience[1].bullets[0], 'Architected a streaming build system');
+    assert.equal(repaired.experience[1].bullets[0], 'Architected a streaming build system serving three hundred users');
   });
 
   test('malformed replies leave the spec untouched', () => {
@@ -292,10 +292,10 @@ describe('applyBulletRepairs guards', () => {
 
   test('whitespace drift in the echoed pair still matches', () => {
     const reply = JSON.stringify([
-      { org: ' Acme  Labs ', bullet: 'Built  a thing ', rewritten: 'Engineered the ingestion service end to end' },
+      { org: ' Acme  Labs ', bullet: 'Built  a thing ', rewritten: 'Engineered the data ingestion service end to end reliably' },
     ]);
     const repaired = applyBulletRepairs(spec, reply);
-    assert.equal(repaired.experience[0].bullets[0], 'Engineered the ingestion service end to end');
+    assert.equal(repaired.experience[0].bullets[0], 'Engineered the data ingestion service end to end reliably');
   });
 
   test('a rewrite that is itself overlong is refused and the original kept', () => {
@@ -317,5 +317,24 @@ describe('applyBulletRepairs guards', () => {
       { org: 'Acme Labs', bullet: 'Built a thing', rewritten: 'Built a thing' },
     ]);
     assert.equal(applyBulletRepairs(spec, reply), spec);
+  });
+});
+
+describe('applyBulletRepairs word band', () => {
+  const spec = parseSpecText(JSON.stringify(SPEC));
+
+  test('a rewrite under the minimum word count is refused', () => {
+    const reply = JSON.stringify([
+      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: 'Engineered the whole pipeline' },
+    ]);
+    assert.equal(applyBulletRepairs(spec, reply), spec);
+  });
+
+  test('a rewrite inside the band lands', () => {
+    const reply = JSON.stringify([
+      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: 'Engineered a data ingestion pipeline processing two million rows daily' },
+    ]);
+    const repaired = applyBulletRepairs(spec, reply);
+    assert.equal(repaired.experience[0].bullets[0], 'Engineered a data ingestion pipeline processing two million rows daily');
   });
 });

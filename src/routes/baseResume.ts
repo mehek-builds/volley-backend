@@ -32,11 +32,14 @@ import {
 import { extractPdfText } from '../lib/pdfText';
 import {
   BULLET_MAX_CHARS,
+  BULLET_MIN_WORDS,
+  BULLET_MAX_WORDS,
   validateResumeSpec,
   validatePdfLayout,
   pruneUngroundedContent,
   weakVerbBullets,
   overlongBullets,
+  misWordedBullets,
 } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
@@ -430,8 +433,9 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       for (let pass = 1; pass <= MAX_REPAIR_PASSES; pass += 1) {
         const weak = weakVerbBullets(rawSpec);
         const overlong = overlongBullets(rawSpec);
+        const misWorded = misWordedBullets(rawSpec);
         const missingPriorities = baseResumeSelectionIssues(rawSpec, priorityEntries);
-        if (weak.length === 0 && overlong.length === 0 && missingPriorities.length === 0) break;
+        if (weak.length === 0 && overlong.length === 0 && misWorded.length === 0 && missingPriorities.length === 0) break;
         /* REQUEST_DEADLINE_MS bounds one model call, not the request. A repair pass is seconds
          * now, but the regeneration branch can still spend a full call, and blowing vercel.json's
          * 300s maxDuration kills the function mid-stream: the client gets a truncated SSE with
@@ -465,6 +469,11 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
                 .map((b) => `${b.org} at ${b.length} characters (${b.length - BULLET_MAX_CHARS} over the ${BULLET_MAX_CHARS} limit): "${b.bullet}"`)
                 .join('; ')}. Rewrite each to under ${BULLET_MAX_CHARS} characters without dropping a metric.`
               : '',
+            misWorded.length > 0
+              ? `These bullets are outside the ${BULLET_MIN_WORDS}-${BULLET_MAX_WORDS} word rule: ${misWorded
+                .map((b) => `${b.org} at ${b.words} words: "${b.bullet}"`)
+                .join('; ')}. Rewrite each to ${BULLET_MIN_WORDS}-${BULLET_MAX_WORDS} words. Expand a short one using only the facts it already states; condense a long one without dropping a metric.`
+              : '',
           ].filter(Boolean));
           continue;
         }
@@ -488,6 +497,18 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
             w.org,
             w.bullet,
             `opens with "${w.verb}", which is not an approved strong verb${retried ? '. A previous rewrite of this bullet also failed; choose a different approved opener' : ''}`,
+          );
+        }
+        for (const b of misWorded) {
+          /* The word band is a hard gate ("bullet has N words (min 8)") and until 2026-08-29 it
+           * was the one bullet rule with no repair path: a 7-word bullet died at the fail-closed
+           * ATS gate with nothing saved, measured live on an onboarding trial. */
+          addReason(
+            b.org,
+            b.bullet,
+            b.words < BULLET_MIN_WORDS
+              ? `only ${b.words} words; the rule is ${BULLET_MIN_WORDS}-${BULLET_MAX_WORDS}. Expand it using only the facts it already states`
+              : `${b.words} words; the rule is ${BULLET_MIN_WORDS}-${BULLET_MAX_WORDS}. Condense without dropping a metric`,
           );
         }
         for (const b of overlong) {

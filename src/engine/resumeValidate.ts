@@ -299,6 +299,30 @@ export function overlongBullets(spec: ResumeSpec): Array<{ org: string; bullet: 
   }
   return out;
 }
+
+/**
+ * Bullets outside the 8-30 word band, with their count, for prompt feedback.
+ *
+ * Same walk as the two above and the same split validateResumeSpec uses, so the repair loop and
+ * the gate can never disagree about which bullets break the band. The word band was the one hard
+ * bullet rule with NO repair path at all: measured 2026-08-29 on a live onboarding trial, a
+ * 7-word bullet sailed through every pass untouched and killed the build at the fail-closed ATS
+ * gate ("bullet has 7 words (min 8)"), leaving the student with nothing saved and a Try again
+ * button, which is the exact stranding the repair loop exists to prevent.
+ */
+export function misWordedBullets(spec: ResumeSpec): Array<{ org: string; bullet: string; words: number }> {
+  const out: Array<{ org: string; bullet: string; words: number }> = [];
+  for (const entry of spec.experience ?? []) {
+    for (const bullet of entry.bullets ?? []) {
+      if (typeof bullet !== 'string') continue;
+      const words = bullet.trim().split(/\s+/).filter(Boolean).length;
+      if (words < BULLET_MIN_WORDS || words > BULLET_MAX_WORDS) {
+        out.push({ org: entry.org, bullet, words });
+      }
+    }
+  }
+  return out;
+}
 const MIN_KEYWORD_COVERAGE = 18; // % of JD terms that must appear (ATS safety floor)
 const METRIC_RE = /(\$|%|\d|\b0\.\d+\b|\b\d+x\b)/i;
 
