@@ -37,6 +37,7 @@ import { assertEncryptionKeyConfigured } from './lib/fieldCrypto';
 import { metaRoutes } from './routes/meta';
 import { applicationRoutes } from './routes/applications';
 import { canonicalApplicationRoutes } from './routes/canonicalApplications';
+import { applicationFromJobRoutes } from './routes/applicationFromJob';
 import { submissionRunnerRoutes } from './routes/submissionRunner';
 import { autopilotMatcherRoutes } from './routes/autopilotMatcher';
 import { captchaStallRoutes } from './routes/captchaStalls';
@@ -434,6 +435,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(sponsorshipRoutes);
   await fastify.register(applicationAnswerRoutes);
   await fastify.register(canonicalApplicationRoutes);
+  await fastify.register(applicationFromJobRoutes);
   await fastify.register(applicationRoutes);
   await fastify.register(submissionRunnerRoutes);
   await fastify.register(autopilotMatcherRoutes);
