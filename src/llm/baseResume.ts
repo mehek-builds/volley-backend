@@ -536,8 +536,9 @@ Rules for every rewritten bullet:
  * rewrite is a few hundred tokens on the small model and leaves the selection - which already
  * passed its own checks - untouched.
  *
- * Merging is by exact (org, bullet) match, and an unmatched or empty reply keeps the original
- * bullet: the caller re-checks the merged spec, so a failed repair surfaces as the same violation
+ * Merging is by the index this call assigns to each target (see applyBulletRepairs for why the
+ * model's echo can never be the key), and an unmatched or empty reply keeps the original bullet:
+ * the caller re-checks the merged spec, so a failed repair surfaces as the same violation
  * on the next pass rather than as silent damage. Selection defects (a missing required priority
  * entry) still go through the full regeneration, because no bullet rewrite can change which
  * entries are on the page.
@@ -553,11 +554,10 @@ export async function repairBaseResumeBullets(
     const response = await client.messages.create(
       {
         model: 'claude-haiku-4-5-20251001',
-        /* The reply echoes org + the full original bullet + the rewrite for every target, and a
-         * worst-case pass flags every bullet on the page (12 at the 4-entry x 3-bullet cap, each
-         * up to a few hundred characters). 2048 was measured to be truncatable on exactly that
-         * shape, and a truncated array parses to nothing, which turns every pass into a silent
-         * no-op. Output is billed on what is generated, so the headroom costs nothing. */
+        /* The reply is only {index, rewritten} per target now, but a worst-case pass still
+         * rewrites every bullet on the page (12 at the 4-entry x 3-bullet cap, each up to a few
+         * hundred characters), and a truncated array parses to nothing, which turns the pass into
+         * a silent no-op. Output is billed on what is generated, so the headroom costs nothing. */
         max_tokens: 8192,
         system: BULLET_REPAIR_SYSTEM_PROMPT,
         messages: [{
