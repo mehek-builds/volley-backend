@@ -78,8 +78,8 @@ test('Phase 2 configures exactly 49 verified Workable employers with canonical c
 });
 
 test('Phase 2 keeps the verified employer catalog diverse across all seven pollable ATS families', () => {
-  // 393 current sources, plus one seeded source each for Rippling, Breezy and Recruitee.
-  assert.equal(JOB_SOURCES.length, 396, 'the reviewed catalog must not silently shrink or grow');
+  // 393 current sources, plus three seed sources and a 48-source verified probe round.
+  assert.equal(JOB_SOURCES.length, 444, 'the reviewed catalog must not silently shrink or grow');
   const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
   assert.deepEqual(
     [...families].sort(),
@@ -95,13 +95,20 @@ test('Phase 2 keeps the verified employer catalog diverse across all seven polla
    * 400, and the test named "source 401 completes on the second pass of the same drain run"
    * covers exactly this.
    *
-   * The assertion is kept anyway, deliberately: crossing 400 means the daily cron starts needing
-   * a second pass to finish, which changes its runtime and its failure modes, and that is worth
-   * one deliberate edit rather than discovering it from a slow morning. When a sourcing round
-   * genuinely needs source 401, raise the number here and confirm the workflow still completes
-   * inside its five passes - do not treat this as a reason not to add sources. */
-  assert.ok(JOB_SOURCES.length <= POLL_SEGMENT_SIZE, 'crossing 400 makes the cron a two-pass drain');
+   * CROSSED DELIBERATELY on 2026-08-29 (445 sources): the 2026-08-29 probe round is the "source 401"
+   * this comment always said would come. The daily cron now needs two passes to finish rather than
+   * one, which changes its runtime and log shape - worth noticing here rather than on a slow
+   * morning. The tripwire moves to the real ceiling (five passes of POLL_SEGMENT_SIZE) so the NEXT
+   * deliberate crossing is the one that needs a look, not this one re-flagging itself forever. */
   assert.equal(POLL_SEGMENT_SIZE, 400, 'one segment; the drain carries whatever does not fit');
+  assert.ok(
+    JOB_SOURCES.length > POLL_SEGMENT_SIZE,
+    'this assertion is itself the record of when the catalog first crossed one segment',
+  );
+  assert.ok(
+    JOB_SOURCES.length <= POLL_SEGMENT_SIZE * 5,
+    'the real ceiling: five drain passes of one segment each, per .github/workflows/job-monitor.yml',
+  );
 });
 
 test('no two sources claim the same board, and none is blank', () => {

@@ -573,6 +573,74 @@ const PHASE_3_AUTONOMOUS_POLLER_ENTRIES: Entry[] = [
   ['cbs Corporate Business Solutions', 'recruitee', 'cbsconsulting'],
 ];
 
+/* ── Added 2026-08-29 (same day): the probe round PHASE_3's own note asked for ──────────────────
+ *
+ * 61 tokens found by site-scoped search against ats.rippling.com, breezy.hr and recruitee.com
+ * (the same discovery technique as the international round above, substituting search for blind
+ * guessing - a guessed token risks exactly the sas/bcg/tcs/disney trap the top of this file warns
+ * about, so every one of these was found via a real indexed posting first, THEN verified live
+ * against the platform's own API with the platform's own company-name field checked against the
+ * name the search result already gave it, not the other way around). 48 of 61 confirmed live and
+ * non-empty on 2026-08-29; 13 dropped (duckduckgo, karllagerfeld and digitalinsurancegroup 404 -
+ * search indexed a page from before they moved off their platform subdomain; constellr, 1x,
+ * intramotev-autonomous-rail, amanda-rosengreen, teal-media and nextec-group answered but currently
+ * carry zero open postings; the remainder are folded into the counts above). Small yield per probed
+ * token, same as canon's prior rounds - this is the ceiling of what site-scoped search surfaces in
+ * one pass, not a claim that no more exist.
+ */
+const PHASE_4_AUTONOMOUS_POLLER_PROBE_ENTRIES: Entry[] = [
+  ['TalentNeuron', 'rippling', 'talentneuroncareers'],
+
+  ['Vosyn', 'breezy', 'vosyn'],
+  ['Center for a New American Security', 'breezy', 'center-for-a-new-american-security'],
+  ['American Antiquarian Society', 'breezy', 'american-antiquarian-society'],
+  ['Turning Point USA', 'breezy', 'turning-point-usa'],
+  ['Sports Reference', 'breezy', 'sports-reference-llc'],
+  ['Envisio', 'breezy', 'envisio'],
+  ['Awakened Ambition', 'breezy', 'awakened-ambition'],
+  ['ProperExpression', 'breezy', 'proper-expression'],
+  ['Spotlight Marketing and Branding', 'breezy', 'spotlight-marketing-and-branding'],
+  ['Evolve Physical Therapy', 'breezy', 'evolve-physical-therapy'],
+  ['Inspiring Lives Today', 'breezy', 'inspiring-lives-today'],
+  ['VetsEZ', 'breezy', 'vetsez'],
+  ['Beta Bionics', 'breezy', 'beta-bionics-inc'],
+  ['Sunday', 'breezy', 'sunday'],
+  ['Reveleer', 'breezy', 'reveleer'],
+  ['Clever Real Estate', 'breezy', 'clever-real-estate'],
+  ['NuView Analytics', 'breezy', 'nuview'],
+  ['SalesDraft Recruiting', 'breezy', 'salesdraft-recruiting'],
+  ['JWay Group', 'breezy', 'jway-group'],
+  ['Getty Advance', 'breezy', 'getty-advance'],
+  ['Chicago Retail Consulting', 'breezy', 'chicago-retail-consulting'],
+  ['Property Leads', 'breezy', 'property-leads'],
+
+  ['AnywhereWorks', 'recruitee', 'anywhereworks'],
+  ['Framestore', 'recruitee', 'framestore'],
+  ['Amsterdam Music Harbour', 'recruitee', 'spinninrecordsandwmgbenelux'],
+  ['SkyGeo', 'recruitee', 'skygeo'],
+  ['Third Way', 'recruitee', 'thirdway'],
+  ['Blue Forest', 'recruitee', 'blueforest'],
+  ['Freeday', 'recruitee', 'freeday'],
+  ['Ibexa', 'recruitee', 'ibexa'],
+  ['GreenFlux', 'recruitee', 'greenflux'],
+  ['Envipco', 'recruitee', 'envipco'],
+  ['Famly', 'recruitee', 'famly'],
+  ['ChargerHelp', 'recruitee', 'chargerhelp'],
+  ['PrimeWorks', 'recruitee', 'primeworks'],
+  ['Appetiser', 'recruitee', 'appetiser'],
+  ['Pugpig', 'recruitee', 'pugpig'],
+  ['Polaroid', 'recruitee', 'polaroid'],
+  ['Crowdsec', 'recruitee', 'crowdsec'],
+  ['Mercedes-Benz.io', 'recruitee', 'mbio'],
+  ['WEBB Traders', 'recruitee', 'webbtraders'],
+  ['Hudson Manpower', 'recruitee', 'hudsonmanpower'],
+  ['Student Medicover', 'recruitee', 'studentmedicover'],
+  ['everdrop', 'recruitee', 'everdrop'],
+  ['Yource', 'recruitee', 'yource'],
+  ['Creative Clicks', 'recruitee', 'creativeclicks'],
+  ['Bundl', 'recruitee', 'bundl'],
+];
+
 const ENTRIES: readonly Entry[] = [
   ...BASE_ENTRIES,
   ...PHASE_2_WORKABLE_ENTRIES,
@@ -580,6 +648,7 @@ const ENTRIES: readonly Entry[] = [
   ...INTERNSHIP_DENSITY_ENTRIES,
   ...INTERNATIONAL_INTERNSHIP_ENTRIES,
   ...PHASE_3_AUTONOMOUS_POLLER_ENTRIES,
+  ...PHASE_4_AUTONOMOUS_POLLER_PROBE_ENTRIES,
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {

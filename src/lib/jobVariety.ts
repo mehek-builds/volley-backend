@@ -70,6 +70,8 @@ const HEALTH = new Set([
   'onemedical', 'openevidence', 'papa', 'parsleyhealth', 'recursion', 'science 37',
   'suki', 'talkspace', 'tebra', 'truveta', 'veracyte', 'zocdoc',
   'twist bioscience', 'alan', 'wellhub',
+  // The 2026-08-29 autonomous-poller probe round (Rippling, Breezy, Recruitee).
+  'beta bionics', 'reveleer',
 ]);
 
 const AEROSPACE_MOBILITY = new Set([
@@ -87,6 +89,8 @@ const AEROSPACE_MOBILITY = new Set([
 const CONSUMER = new Set([
   'airbnb', 'calendly', 'duolingo', 'faire', 'instacart', 'match group', 'peloton',
   'pinterest', 'quintoandar', 'reddit', 'remote', 'squarespace', 'tripadvisor',
+  // The 2026-08-29 autonomous-poller probe round.
+  'polaroid',
 ]);
 
 const MEDIA_GAMING = new Set([
@@ -126,6 +130,11 @@ const TECHNOLOGY = new Set([
   'zscaler', 'etched', 'snowflake', 'cohere', 'together ai',
   // The international round, 2026-08-04.
   'celonis', 'enpal',
+  // The 2026-08-29 autonomous-poller probe round (Rippling, Breezy, Recruitee). All seven are
+  // software/SaaS companies proper, not merely employers who happen to publish software roles -
+  // the bar this list has always held to (see the note above).
+  'rippling', 'talentneuron', 'vosyn', 'envipco', 'ibexa', 'greenflux', 'crowdsec',
+  'mercedes-benz.io', 'famly', 'freeday', 'cbs corporate business solutions', 'property leads',
 ]);
 
 export function classifyEmployerIndustry(company: string): EmployerIndustry {
