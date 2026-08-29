@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   applyBulletRepairs,
   baseResumeSelectionIssues,
+  enforcePrioritySelection,
   BaseResumeStreamReader,
   parseSpecText,
   priorityEntriesForBaseResume,
@@ -336,5 +337,49 @@ describe('applyBulletRepairs word band', () => {
     ]);
     const repaired = applyBulletRepairs(spec, reply);
     assert.equal(repaired.experience[0].bullets[0], 'Engineered a data ingestion pipeline processing two million rows daily');
+  });
+});
+
+describe('enforcePrioritySelection', () => {
+  const limits = { maxEntries: 4, maxBulletsPerEntry: 3 };
+  const specOf = (entries: Array<Record<string, unknown>>) => parseSpecText(JSON.stringify({
+    ...SPEC,
+    experience: entries,
+  }));
+  const entry = (org: string, title: string) => (
+    { type: 'job', org, title, date_range: '2025', bullets: ['Built the first grounded thing for this role here', 'Shipped the second grounded thing for this role here'] }
+  );
+
+  test('one application clears every selection issue baseResumeSelectionIssues reports', () => {
+    const current = bankEntry({ id: 'cur', org: 'Current Lab', title: 'Engineer', date_range: '2026 - Present', bullet_variants: ['Ran the lab build pipeline for nine research teams daily'] });
+    const spec = specOf([entry('Older Firm', 'Analyst'), entry('Side Project', 'Creator')]);
+    const fixed = enforcePrioritySelection(spec, [current], limits);
+    assert.deepEqual(baseResumeSelectionIssues(fixed, [current]), []);
+    assert.equal(fixed.experience[0].org, 'Current Lab');
+    assert.deepEqual(fixed.experience[0].bullets, ['Ran the lab build pipeline for nine research teams daily']);
+  });
+
+  test('a priority the model already wrote keeps its written bullets and is only moved', () => {
+    const current = bankEntry({ id: 'cur', org: 'Current Lab', title: 'Engineer', date_range: '2026 - Present', bullet_variants: ['raw variant'] });
+    const written = entry('Current Lab', 'Engineer');
+    const spec = specOf([entry('Older Firm', 'Analyst'), written]);
+    const fixed = enforcePrioritySelection(spec, [current], limits);
+    assert.equal(fixed.experience[0].org, 'Current Lab');
+    assert.deepEqual(fixed.experience[0].bullets, written.bullets);
+    assert.equal(fixed.experience[1].org, 'Older Firm');
+  });
+
+  test('over the cap, non-priority entries fall off the end first', () => {
+    const current = bankEntry({ id: 'cur', org: 'Current Lab', title: 'Engineer', date_range: '2026 - Present', bullet_variants: ['Ran the lab build pipeline for nine research teams daily'] });
+    const spec = specOf([entry('A', 'a'), entry('B', 'b'), entry('C', 'c'), entry('D', 'd')]);
+    const fixed = enforcePrioritySelection(spec, [current], limits);
+    assert.equal(fixed.experience.length, 4);
+    assert.equal(fixed.experience[0].org, 'Current Lab');
+    assert.deepEqual(fixed.experience.slice(1).map((e) => e.org), ['A', 'B', 'C']);
+  });
+
+  test('no priorities means the spec is untouched', () => {
+    const spec = specOf([entry('A', 'a')]);
+    assert.equal(enforcePrioritySelection(spec, [], limits), spec);
   });
 });
