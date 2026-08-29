@@ -467,8 +467,14 @@ export async function generateBaseResumeSpec(
        * long resume compressed to one page is the headline case for this feature. Output is billed
        * on what is generated, so the higher ceiling costs nothing on a small resume. */
       max_tokens: 16384,
+      /* TWO breakpoints, not one. The second caches the per-student context for the retry within
+       * one build, which the comment on contextBlock has always covered. The first caches the
+       * static rules prefix ACROSS students: with only the trailing breakpoint, a new student's
+       * context changed the prefix and the ~3K-token rule block was re-read at full price and
+       * full latency on the very first call of every onboarding, which is the exact call the
+       * 15-second promise is spent on. */
       system: [
-        { type: 'text', text: BASE_RESUME_SYSTEM_PROMPT },
+        { type: 'text', text: BASE_RESUME_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } },
         { type: 'text', text: contextBlock, cache_control: { type: 'ephemeral' } },
       ],
       messages: [{ role: 'user', content: `Return the base resume JSON.${feedbackBlock}` }],
@@ -559,7 +565,9 @@ export async function repairBaseResumeBullets(
          * hundred characters), and a truncated array parses to nothing, which turns the pass into
          * a silent no-op. Output is billed on what is generated, so the headroom costs nothing. */
         max_tokens: 8192,
-        system: BULLET_REPAIR_SYSTEM_PROMPT,
+        // Static across every repair of every student: cached, so the repair pass's latency is
+        // the rewrite itself rather than re-reading the rule block each time.
+        system: [{ type: 'text', text: BULLET_REPAIR_SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
         messages: [{
           role: 'user',
           content: `Repair these bullets:\n${JSON.stringify(targets.map((target, index) => ({ index, ...target })))}`,
