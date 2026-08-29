@@ -154,6 +154,28 @@ const CARD_GATE_ALLOWED_PATH_ROOTS: readonly string[] = [
  * "poking the API to avoid paying" TIER B2 exists to stop, applied to a route that was never product
  * access in the first place). Moving all three routes here fixes both by removing the premise: they
  * are not part of the one free build, so they do not belong on the tier that is limited to it.
+ *
+ * '/resume/base' AND '/resume/base/stream' JOINED THIS TIER in the round-3 code review (2026-08-29,
+ * FINDING #2). They used to live in TIER B2, but /start's own revisit affordance (components/start/
+ * ui.tsx, REVISITABLE) lets a student return to the 'resume' screen "from as late as the 'plan'
+ * screen itself" -- i.e. after the application sequence TIER B2 gates has already finished -- and
+ * BaseResumeStep.tsx (role-quick-website origin/main) calls exactly these two routes on that screen.
+ * So a locked account that had already sent its one free application got a 402 revisiting the very
+ * screen this tier's own comment says must stay open. Both routes only read, rebuild or hand-edit the
+ * account's OWN base resume from its OWN profile facts (routes/baseResume.ts) -- never a job-specific
+ * tailoring or a send -- so they belong beside the other profile-fact routes above, not on the tier
+ * limited to the one free build.
+ *
+ * POST '/applications/:id/submission/unverified' JOINED THIS TIER in the same review (FINDING #1's
+ * companion fix). See hasApprovedSubmittedApplication's own comment
+ * (lib/approvedApplicationSubmissions.ts) for the full story: TIER B2 now correctly closes the moment
+ * an account's one send attempt lands on an unresolved unverified_submission, not only on a clean
+ * 'submitted'. But that route is the ONLY thing that lets the applicant resolve that ambiguity
+ * ("did the employer get it or not" -- routes/applications.ts), and it cannot live on TIER B2's own
+ * path set: TIER B2 is exactly what has just closed for this account, for this reason, so gating the
+ * one way out on the same closed tier would wall the account off with no door. It belongs here
+ * instead, permanently reachable for as long as the account is locked -- the same as the account's
+ * other own-state routes -- regardless of whether TIER B2 is open or closed.
  */
 const CARD_GATE_PROFILE_PATHS: ReadonlySet<string> = new Set([
   '/profile',
@@ -163,6 +185,9 @@ const CARD_GATE_PROFILE_PATHS: ReadonlySet<string> = new Set([
   '/notifications/preferences',
   '/notifications/push/subscribe',
   '/notifications/push/unsubscribe',
+  '/resume/base',
+  '/resume/base/stream',
+  '/applications/:id/submission/unverified',
 ]);
 
 /**
@@ -186,19 +211,42 @@ const CARD_GATE_PROFILE_PATHS: ReadonlySet<string> = new Set([
  * built and seen nothing, defeating the whole "see it work before paying" point of the redesign
  * (see onboardingBuildGrant.ts's own comment).
  *
- * Once an account has at least one submission that clears approvedSubmissionPredicate
- * (lib/approvedApplicationSubmissions.ts) -- status='submitted', written only by submissionRunner.ts
- * after a REAL, VERIFIED send, and submission_authorization.source='per_application_approval', the
- * one authorization value the student's own review-and-send screen (POST
- * /applications/:id/submit-request, itself on this tier) writes -- it has used everything on this
- * list already and has nothing left to build. From then on a locked account is at the payment wall
- * with nothing to do but pay, check its own profile or settings (TIER B1) or leave (TIER A) -- it
- * must not be able to keep building or sending MORE applications, browse the job board, or attach
- * another job via /applications/from-job, all of which is exactly "poking the API to avoid paying"
- * rather than finishing the one free application onboarding grants. This signal cannot trip
- * prematurely (nothing writes 'submitted' before a verified send actually happens, so mid-review or
- * mid-claim states never count) and cannot be left open forever by a voluntary client action (there is
- * no request a client can send that fabricates a real send).
+ * Once an account has at least one row that clears hasApprovedSubmittedApplication
+ * (lib/approvedApplicationSubmissions.ts), it has used everything on this list already and has
+ * nothing left to build. From then on a locked account is at the payment wall with nothing to do but
+ * pay, check its own profile or settings (TIER B1) or leave (TIER A) -- it must not be able to keep
+ * building or sending MORE applications, browse the job board, or attach another job via
+ * /applications/from-job, all of which is exactly "poking the API to avoid paying" rather than
+ * finishing the one free application onboarding grants.
+ *
+ * THE FINDING #1 FIX, ROUND 3 (2026-08-29 code review): hasApprovedSubmittedApplication used to run
+ * its own narrower predicate -- status='submitted' AND
+ * submission_authorization.source='per_application_approval' ONLY. That missed a real, common
+ * outcome this product's own submission runner names in its incident notes: an account whose one
+ * send attempt lands in needs_attention with an UNRESOLVED unverified_submission (a Send that was
+ * pressed and the confirmation lost) never wrote 'submitted', so this tier never closed for it --
+ * unbounded free job-board and build access, on the exact outcome the duplicate-application guard
+ * (lib/duplicateApplication.ts) already treats as "reached an employer," because a lost confirmation
+ * is a real risk the employer already has it, not evidence that nothing happened.
+ * hasApprovedSubmittedApplication now delegates to duplicateApplication.ts's alreadyAtEmployer() --
+ * the SAME predicate that guard uses to refuse a second send -- rather than reimplementing a third
+ * answer to "has this account already reached an employer." It closes on status='submitted',
+ * pipeline_stage='applied' (written in the same breath by every send path), or an unresolved
+ * unverified_submission (or its legacy attention-text twin). It does not check
+ * submission_authorization.source and does not need to: a locked account cannot reach
+ * standing_consent or the extension's own send route at all (neither is on any of THE CARD GATE's
+ * three tiers), so every row it can find for a locked account was necessarily reached through the one
+ * free per_application_approval send onboarding grants.
+ *
+ * The companion half of this fix: POST /applications/:id/submission/unverified -- the ONLY route that
+ * lets the applicant resolve an unverified send ("did the employer get it or not") -- is now on
+ * TIER B1 (CARD_GATE_PROFILE_PATHS above), not on this tier and not on no tier at all, so an account
+ * that lands in this exact state is not walled off with no way out.
+ *
+ * This signal cannot trip prematurely (nothing writes any of the four qualifying facts before a send
+ * is actually attempted, so mid-review or mid-claim states never count) and cannot be left open
+ * forever by a voluntary client action (there is no request a client can send that fabricates any of
+ * them).
  *
  * '/jobs' is listed bare rather than as a path root on purpose: '/jobs/grouped' and '/jobs/facets'
  * (jobMonitor.ts) are ordinary dashboard job-board browsing and must never be open here, even during
@@ -213,8 +261,6 @@ const CARD_GATE_ONBOARDING_BUILD_PATHS: ReadonlySet<string> = new Set([
   '/jobs',
   '/jobs/:id',
   '/resume/generate',
-  '/resume/base',
-  '/resume/base/stream',
   '/postings/:jobId/questions',
   '/applications/from-job',
   '/applications/:id/submit-request',

@@ -146,6 +146,14 @@ test('isCardGateProfilePath (TIER B1: permanent profile facts and account settin
     // FINDING #2 (round 2): these two were reachable from NO tier at all before this fix.
     '/notifications/push/subscribe',
     '/notifications/push/unsubscribe',
+    // FINDING #2 (round 3): the resume revisit screen (BaseResumeStep.tsx) calls these from as
+    // late as the 'plan' screen, after TIER B2's own application sequence has finished, and they
+    // only touch the account's own base resume -- so they moved here from TIER B2.
+    '/resume/base',
+    '/resume/base/stream',
+    // FINDING #1's companion fix (round 3): the ONLY route that lets a locked account resolve an
+    // unverified send must stay reachable even after TIER B2 has closed because of that exact send.
+    '/applications/:id/submission/unverified',
   ];
   for (const path of allowed) {
     await t.test(`allows ${path}`, () => {
@@ -163,6 +171,9 @@ test('isCardGateProfilePath (TIER B1: permanent profile facts and account settin
     '/applications',
     '/jobs',
     '/notifications/digest/preview',
+    // A prefix collision on the new exact template must not slip through either.
+    '/applications/abc-123',
+    '/applications/abc-123/submission/extension-start',
   ];
   for (const path of blocked) {
     await t.test(`blocks ${path}`, () => {
@@ -245,11 +256,33 @@ test('cardGateRouteReachable (folds TIER A, TIER B1 and TIER B2 together)', asyn
       assert.equal(await cardGateRouteReachable('/jobs', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/jobs/:id', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/resume/generate', 'user-1'), true);
-      assert.equal(await cardGateRouteReachable('/resume/base', 'user-1'), true);
-      assert.equal(await cardGateRouteReachable('/resume/base/stream', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/postings/:jobId/questions', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/applications/from-job', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/applications/:id/submit-request', 'user-1'), true);
+    } finally {
+      select.mock.restore();
+    }
+  });
+
+  /* FINDING #2 (round 3), PROVEN: /resume/base and /resume/base/stream moved to TIER B1, so they
+     answer 'true' from the path check alone -- no DB call, and true regardless of submission state. */
+  await t.test('the resume revisit routes are reachable with no DB call at all, before or after the free build is spent', async () => {
+    const select = mock.method(db, 'select', NO_DB_CALL_ALLOWED as unknown as typeof db.select);
+    try {
+      assert.equal(await cardGateRouteReachable('/resume/base', 'user-1'), true);
+      assert.equal(await cardGateRouteReachable('/resume/base/stream', 'user-1'), true);
+    } finally {
+      select.mock.restore();
+    }
+  });
+
+  /* FINDING #1's companion fix (round 3), PROVEN: the unverified-submission resolution route stays
+     reachable with no DB call at all, same as any other TIER B1 route -- including once TIER B2 has
+     closed, which is exactly the state a locked account is in when it needs this route most. */
+  await t.test('the unverified-submission resolution route is reachable with no DB call at all', async () => {
+    const select = mock.method(db, 'select', NO_DB_CALL_ALLOWED as unknown as typeof db.select);
+    try {
+      assert.equal(await cardGateRouteReachable('/applications/:id/submission/unverified', 'user-1'), true);
     } finally {
       select.mock.restore();
     }

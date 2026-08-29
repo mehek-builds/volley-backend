@@ -208,12 +208,25 @@ function legacyUnverifiedAttempt() {
  *
  * `status = 'submitted'` is the receipt; `pipeline_stage = 'applied'` is its twin, written in the
  * same breath by every send path; an unresolved `unverified_submission` is the Send that was
- * pressed and lost. Two callers read it: submittedApplications below, and
- * submittedApplicationCompanies, which the prior-application resolver uses to decide whether it may
- * answer "No" on the applicant's behalf. A second copy of this WHERE clause is how the two would
- * come to disagree about what counts as having applied.
+ * pressed and lost. Exported (round 3 code review, 2026-08-29) because a THIRD caller now reads it:
+ * lib/approvedApplicationSubmissions.ts's hasApprovedSubmittedApplication, which cardGate.ts's TIER
+ * B2 reads to decide whether a locked account has spent its one free onboarding build. That check
+ * used to run its own narrower predicate (status='submitted' AND
+ * submission_authorization.source='per_application_approval' only), which meant an account whose one
+ * send attempt landed in needs_attention with an unresolved unverified_submission never closed TIER
+ * B2 -- unbounded free access, exactly what the gate exists to prevent, from the same outcome this
+ * predicate was written to treat as "already applied." Delegating TIER B2's closure signal to THIS
+ * predicate, instead of a third reimplementation, is what keeps all three questions -- "may she send
+ * a second application here," "has she applied to this employer before," and "has this locked
+ * account used its one free build" -- answering from one definition of "reached an employer" rather
+ * than three that could drift apart.
+ *
+ * Three callers read it now: submittedApplications below, submittedApplicationCompanies (which the
+ * prior-application resolver uses to decide whether it may answer "No" on the applicant's behalf),
+ * and hasApprovedSubmittedApplication in lib/approvedApplicationSubmissions.ts. A second copy of this
+ * WHERE clause is how any of them would come to disagree about what counts as having applied.
  */
-function alreadyAtEmployer() {
+export function alreadyAtEmployer() {
   return sql`(${generated_resumes.spec}->'_review'->>'status' = 'submitted'
     or ${generated_resumes.pipeline_stage} = 'applied'
     or (${generated_resumes.spec}->'_review'->'unverified_submission' is not null

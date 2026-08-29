@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
 import { generateDrizzleJson, generateMigration } from 'drizzle-kit/api';
+import { eq } from 'drizzle-orm';
 import { SignJWT } from 'jose';
 import Fastify, { type FastifyInstance } from 'fastify';
 
@@ -122,6 +123,10 @@ async function buildApp(): Promise<FastifyInstance> {
   app.post('/notifications/push/subscribe', { preHandler: requireAuth }, stub200);
   app.post('/notifications/push/unsubscribe', { preHandler: requireAuth }, stub200);
   app.get('/profile', { preHandler: requireAuth }, stub200);
+  // FINDING #1's companion fix (round 3): the resolution route for an unresolved unverified send.
+  // Stubbed the same way -- what is under test is THE GATE's decision to let the request reach a
+  // handler at all, not routes/applications.ts's real resolution logic.
+  app.post('/applications/:id/submission/unverified', { preHandler: requireAuth }, stub200);
   // Never-onboarding, always-blocked-while-locked routes -- the direct-hit bypass this whole gate
   // exists to close.
   app.get('/network/people', { preHandler: requireAuth }, stub200);
@@ -169,6 +174,54 @@ async function markSubmitted(userId: string) {
       },
     },
   });
+}
+
+/**
+ * Writes the row lib/duplicateApplication.ts's alreadyAtEmployer() -- and therefore, since round 3,
+ * hasApprovedSubmittedApplication -- finds via its unresolved-unverified-submission arm: no
+ * status='submitted', standing in for submissionRunner.ts pressing Send and losing the confirmation
+ * (see submissionRunner.ts's own comments, e.g. "4 of 25 packets stuck exactly here on 2026-08-08").
+ * FINDING #1, round 3's whole point is that THIS row, not only a clean 'submitted' one, must close
+ * TIER B2.
+ */
+async function markUnresolvedUnverifiedSubmission(userId: string) {
+  await db.insert(schema.generated_resumes).values({
+    user_id: userId,
+    job_context: {},
+    resume_object_key: 'test-resume-key-unverified',
+    spec: {
+      _review: {
+        status: 'needs_attention',
+        unverified_submission: { at: new Date().toISOString(), portal_url: 'https://example.com/apply' },
+        attention_reason: 'Litos pressed Send and could not confirm what came back.',
+        attention_categories: ['unverified_submission'],
+      },
+    },
+  });
+}
+
+/** Resolves the row markUnresolvedUnverifiedSubmission wrote, the way POST
+ *  /applications/:id/submission/unverified's found=false branch does: the claim is released and the
+ *  employer provably does not have it, so alreadyAtEmployer()'s unresolved-only arm must stop
+ *  matching it. */
+async function resolveUnverifiedSubmissionAsNotSent(userId: string) {
+  await db.update(schema.generated_resumes)
+    .set({
+      spec: {
+        _review: {
+          status: 'needs_attention',
+          unverified_submission: {
+            at: new Date().toISOString(),
+            portal_url: 'https://example.com/apply',
+            resolution: 'not_sent',
+            resolved_at: new Date().toISOString(),
+          },
+          attention_reason: 'You checked and the employer does not have this one, so nothing was sent.',
+          attention_categories: ['unverified_submission'],
+        },
+      },
+    })
+    .where(eq(schema.generated_resumes.user_id, userId));
 }
 
 const NEVER_ONBOARDING_PATHS: readonly { method: 'GET' | 'POST'; url: string }[] = [
@@ -368,6 +421,93 @@ test('THE CARD GATE, a locked account that acknowledges "notifications" as its v
     assert.equal((await app.inject({ method: 'GET', url: '/jobs?limit=5', headers: auth })).statusCode, 200);
     assert.equal((await app.inject({ method: 'POST', url: '/resume/generate', headers: auth })).statusCode, 200);
     assert.equal((await app.inject({ method: 'POST', url: '/applications/from-job', headers: auth })).statusCode, 200);
+  } finally {
+    await app.close();
+  }
+});
+
+test('THE CARD GATE, an unresolved unverified_submission closes TIER B2 too, and the resolution route stays open (FINDING #1, round 3)', async (t) => {
+  // Round 3 code review: hasApprovedSubmittedApplication used to require a clean status='submitted'
+  // row, so an account whose one send attempt landed in needs_attention with an unresolved
+  // unverified_submission never closed TIER B2 -- unbounded free build access on exactly the outcome
+  // the duplicate-application guard already treats as "reached an employer." It now delegates to
+  // lib/duplicateApplication.ts's alreadyAtEmployer(), which covers this row too.
+  process.env.CARD_GATE_FROM = '2026-08-19T00:00:00.000Z';
+  const app = await buildApp();
+  const user = await lockedUser('cardgate-unverified@example.com');
+  const token = await signToken(user.id);
+  const auth = { authorization: `Bearer ${token}` };
+
+  try {
+    await t.test('TIER B2 is open before any submission attempt', async () => {
+      assert.equal((await app.inject({ method: 'GET', url: '/jobs?limit=5', headers: auth })).statusCode, 200);
+    });
+
+    await markUnresolvedUnverifiedSubmission(user.id);
+
+    await t.test('TIER B2 closes on the unresolved unverified send, not only on a clean "submitted"', async () => {
+      const response = await app.inject({ method: 'POST', url: '/applications/from-job', headers: auth });
+      assert.equal(response.statusCode, 402, 'an unresolved unverified_submission is a real risk the employer already has this application and must close TIER B2');
+      assert.equal(response.json().code, 'payment_method_required');
+    });
+
+    await t.test('the account is NOT walled off: the resolution route stays reachable even though TIER B2 just closed because of the very thing it resolves', async () => {
+      const response = await app.inject({ method: 'POST', url: '/applications/some-id/submission/unverified', headers: auth });
+      assert.equal(response.statusCode, 200, 'FINDING #1\'s companion fix: this route is TIER B1 now, not gated by TIER B2\'s own closure');
+    });
+  } finally {
+    await app.close();
+  }
+});
+
+test('THE CARD GATE, resolving an unverified submission as "not sent" reopens TIER B2', async (t) => {
+  // The other half of the same predicate: once the applicant has looked and said the employer does
+  // not have it, alreadyAtEmployer()'s unresolved-only arm must stop matching the row, and -- with no
+  // other qualifying row -- TIER B2 must reopen so the account can actually use its one free build.
+  process.env.CARD_GATE_FROM = '2026-08-19T00:00:00.000Z';
+  const app = await buildApp();
+  const user = await lockedUser('cardgate-unverified-resolved@example.com');
+  const token = await signToken(user.id);
+  const auth = { authorization: `Bearer ${token}` };
+
+  try {
+    await markUnresolvedUnverifiedSubmission(user.id);
+    assert.equal((await app.inject({ method: 'POST', url: '/applications/from-job', headers: auth })).statusCode, 402);
+
+    await resolveUnverifiedSubmissionAsNotSent(user.id);
+
+    assert.equal(
+      (await app.inject({ method: 'POST', url: '/applications/from-job', headers: auth })).statusCode,
+      200,
+      'a resolved (not_sent) unverified_submission carries no more risk of a duplicate send, so TIER B2 must reopen',
+    );
+  } finally {
+    await app.close();
+  }
+});
+
+test('THE CARD GATE, the resume revisit screen stays open after the free build is spent (FINDING #2, round 3)', async (t) => {
+  // /start's own revisit affordance (components/start/ui.tsx, REVISITABLE) lets a student return to
+  // the 'resume' screen from as late as the 'plan' screen, after the application sequence has already
+  // finished -- and BaseResumeStep.tsx calls exactly GET /resume/base and POST /resume/base/stream on
+  // that screen. Before this fix both were TIER B2 and 402ed the moment the free build was spent,
+  // contradicting the comment describing this exact affordance.
+  process.env.CARD_GATE_FROM = '2026-08-19T00:00:00.000Z';
+  const app = await buildApp();
+  const user = await lockedUser('cardgate-resume-revisit@example.com');
+  const token = await signToken(user.id);
+  const auth = { authorization: `Bearer ${token}` };
+
+  try {
+    await markSubmitted(user.id);
+
+    // The free build is spent: TIER B2 is closed.
+    assert.equal((await app.inject({ method: 'GET', url: '/jobs?limit=5', headers: auth })).statusCode, 402);
+
+    // But the resume revisit screen's own two routes stay open, with no DB call standing between the
+    // request and the handler (they are TIER B1, a pure path check).
+    assert.equal((await app.inject({ method: 'GET', url: '/resume/base', headers: auth })).statusCode, 200);
+    assert.equal((await app.inject({ method: 'POST', url: '/resume/base/stream', headers: auth })).statusCode, 200);
   } finally {
     await app.close();
   }
