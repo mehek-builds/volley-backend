@@ -441,7 +441,11 @@ async function readFilings(cacheDir) {
    copy of the company list is exactly the kind of drift the file it reads was created to end. */
 function boardCompanies() {
   const source = readFileSync(join(HERE, '..', 'src', 'lib', 'jobSources.ts'), 'utf8');
-  const entries = source.match(/\[\s*'([^']+)'\s*,\s*'(greenhouse|lever|ashby|workable)'\s*,\s*'([^']+)'\s*\]/g) ?? [];
+  // Kept in step with POLLABLE_JOB_BOARDS by hand - this script parses text and cannot import the
+  // type that constrains it. Fell behind once already (rippling/breezy/recruitee wired 2026-08-29,
+  // this alternation still said greenhouse|lever|ashby|workable and silently skipped all three new
+  // entries rather than erroring). If POLLABLE_JOB_BOARDS grows again, this line is the other half.
+  const entries = source.match(/\[\s*'([^']+)'\s*,\s*'(greenhouse|lever|ashby|workable|rippling|breezy|recruitee)'\s*,\s*'([^']+)'\s*\]/g) ?? [];
   return entries.map((raw) => {
     const [, company] = raw.match(/\[\s*'([^']+)'/);
     return company;

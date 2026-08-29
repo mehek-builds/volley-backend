@@ -1187,6 +1187,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "cbs Corporate Business Solutions",
+      "normalized": "CBS CORPORATE BUSINESS SOLUTIONS",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Celonis",
       "normalized": "CELONIS",
       "sponsors": true,
@@ -2596,26 +2610,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
-      "company": "Fireworks",
-      "normalized": "FIREWORKS",
-      "sponsors": true,
-      "evidence": "dol_lca",
-      "matched_key": "FIREWORKS AI",
-      "legal_names": [
-        "Fireworks.ai, Inc."
-      ],
-      "approvals": 0,
-      "denials": 0,
-      "fiscal_years": [],
-      "lca_certifications": 11,
-      "filing_states": [
-        "CA"
-      ],
-      "filing_cities": [
-        "REDWOOD CITY"
-      ]
-    },
-    {
       "company": "Five Rings",
       "normalized": "FIVE RINGS",
       "sponsors": true,
@@ -2792,31 +2786,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "BRISBANE",
         "SOUTH SAN FRANCISCO"
-      ]
-    },
-    {
-      "company": "fullstory",
-      "normalized": "FULLSTORY",
-      "sponsors": true,
-      "evidence": "both",
-      "matched_key": "FULLSTORY",
-      "legal_names": [
-        "FULLSTORY INC",
-        "FullStory, Inc."
-      ],
-      "approvals": 7,
-      "denials": 0,
-      "fiscal_years": [
-        2021,
-        2022,
-        2023
-      ],
-      "lca_certifications": 3,
-      "filing_states": [
-        "GA"
-      ],
-      "filing_cities": [
-        "ATLANTA"
       ]
     },
     {
@@ -4964,20 +4933,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
-      "company": "Opslevel",
-      "normalized": "OPSLEVEL",
-      "sponsors": false,
-      "evidence": null,
-      "matched_key": null,
-      "legal_names": [],
-      "approvals": 0,
-      "denials": 0,
-      "fiscal_years": [],
-      "lca_certifications": 0,
-      "filing_states": [],
-      "filing_cities": []
-    },
-    {
       "company": "Optiver",
       "normalized": "OPTIVER",
       "sponsors": false,
@@ -5907,6 +5862,33 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         2023
       ],
       "lca_certifications": 44,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "SAN FRANCISCO"
+      ]
+    },
+    {
+      "company": "Rippling",
+      "normalized": "RIPPLING",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "PEOPLE CENTER INC D B A RIPPLING",
+      "legal_names": [
+        "PEOPLE CENTER INC D B A RIPPLING",
+        "PEOPLE CENTER INC D/B/A RIPPLING",
+        "PEOPLE CTR INC D/B/A RIPPLING",
+        "People Center, Inc. d/b/a Rippling"
+      ],
+      "approvals": 163,
+      "denials": 1,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 89,
       "filing_states": [
         "CA"
       ],
@@ -7284,6 +7266,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Transparent Hiring",
+      "normalized": "TRANSPARENT HIRING",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "TripAdvisor",
       "normalized": "TRIPADVISOR",
       "sponsors": true,
@@ -7707,20 +7703,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         "NEW YORK",
         "TAMPA"
       ]
-    },
-    {
-      "company": "Vitesse PSP",
-      "normalized": "VITESSE PSP",
-      "sponsors": false,
-      "evidence": null,
-      "matched_key": null,
-      "legal_names": [],
-      "approvals": 0,
-      "denials": 0,
-      "fiscal_years": [],
-      "lca_certifications": 0,
-      "filing_states": [],
-      "filing_cities": []
     },
     {
       "company": "Vox Media Group",

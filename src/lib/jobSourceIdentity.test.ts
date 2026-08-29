@@ -77,11 +77,14 @@ test('Phase 2 configures exactly 49 verified Workable employers with canonical c
   }
 });
 
-test('Phase 2 keeps the verified employer catalog diverse across Greenhouse, Lever, Ashby, and Workable', () => {
-  // 398 reviewed sources, minus five dead or stale boards removed by CI source-identity reviews.
-  assert.equal(JOB_SOURCES.length, 393, 'the reviewed Phase 2 catalog must not silently shrink');
+test('Phase 2 keeps the verified employer catalog diverse across all seven pollable ATS families', () => {
+  // 393 current sources, plus one seeded source each for Rippling, Breezy and Recruitee.
+  assert.equal(JOB_SOURCES.length, 396, 'the reviewed catalog must not silently shrink or grow');
   const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
-  assert.deepEqual([...families].sort(), ['ashby', 'greenhouse', 'lever', 'workable']);
+  assert.deepEqual(
+    [...families].sort(),
+    ['ashby', 'breezy', 'greenhouse', 'lever', 'recruitee', 'rippling', 'workable'],
+  );
   /* A REVIEW TRIPWIRE, NOT A CAPACITY LIMIT, and the comment that used to be here was wrong.
    *
    * It claimed that past 400 "the poller leaves the tail of the catalog unpolled". It does not.

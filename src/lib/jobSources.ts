@@ -558,12 +558,28 @@ const INTERNATIONAL_INTERNSHIP_ENTRIES: Entry[] = [
   ['Ninja Van', 'lever', 'ninjavan'],
 ];
 
+/* ── Added 2026-08-29: Rippling, Breezy and Recruitee, the day fetchSourceJobs learned to poll them ──
+ *
+ * These three sat in AUTONOMOUS_PORTAL_FAMILIES unpolled for weeks (see the 2026-08-04 note by
+ * POLLABLE_JOB_BOARDS): Litos could finish an application on any of them, but nothing ever fetched
+ * their boards. Only three tokens are seeded here - one per platform, each confirmed live and
+ * non-empty by hand on 2026-08-29 - rather than a probed batch like the lists above. A wider probe
+ * round (the same shape as INTERNATIONAL_INTERNSHIP_ENTRIES) is the next real lever on these three,
+ * not a reason to hold this PR for it.
+ */
+const PHASE_3_AUTONOMOUS_POLLER_ENTRIES: Entry[] = [
+  ['Rippling', 'rippling', 'rippling'],
+  ['Transparent Hiring', 'breezy', 'transparent-hiring'],
+  ['cbs Corporate Business Solutions', 'recruitee', 'cbsconsulting'],
+];
+
 const ENTRIES: readonly Entry[] = [
   ...BASE_ENTRIES,
   ...PHASE_2_WORKABLE_ENTRIES,
   ...PHASE_2_UNDERREPRESENTED_ENTRIES,
   ...INTERNSHIP_DENSITY_ENTRIES,
   ...INTERNATIONAL_INTERNSHIP_ENTRIES,
+  ...PHASE_3_AUTONOMOUS_POLLER_ENTRIES,
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {
@@ -572,6 +588,9 @@ function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {
     case 'lever': return `https://jobs.lever.co/${token}`;
     case 'ashby': return `https://jobs.ashbyhq.com/${token}`;
     case 'workable': return `https://apply.workable.com/${token}/`;
+    case 'rippling': return `https://ats.rippling.com/${token}/jobs`;
+    case 'breezy': return `https://${token}.breezy.hr`;
+    case 'recruitee': return `https://${token}.recruitee.com`;
   }
 }
 
