@@ -31,7 +31,7 @@ import {
   consentAcceptanceGranted,
 } from '../lib/automationConsent';
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
-import { generated_resumes, monitored_jobs } from '../db/schema';
+import { monitored_jobs } from '../db/schema';
 import { isComposioConfigured } from '../lib/composioConnections';
 import { isUndefinedColumnError, selectApplicationProfileRow, upsertApplicationProfile } from '../lib/applicationFacts';
 import { verificationEmailSource } from '../lib/verificationEmailSource';
@@ -40,14 +40,8 @@ import { requireFeature } from '../lib/entitlements';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { accountSponsorshipAnswer, declarationFromEmployerAnswers } from '../lib/declarationFromEmployerAnswers';
 import { persistProfileWithCountryEligibility } from '../lib/countryEligibilityPersistence';
+import { reviewedSubmitCount } from '../lib/approvedApplicationSubmissions';
 
-/**
- * How many submissions has this student personally approved AND seen reach the employer?
- *
- * This is now profile evidence, not an unlock. `per_application_approval` means the student clicked
- * the final submit themselves, and `submitted` means it actually landed. The value is still returned
- * in onboarding state for transparency, but standing consent no longer waits for a minimum count.
- */
 /**
  * The ONE way either route may turn automatic submission on.
  *
@@ -82,18 +76,6 @@ async function verificationConnectionProblem(
     return { status: 503, error: 'The Litos application inbox is unavailable and email connections are not configured yet' };
   }
   return { status: 409, error: 'Connect Gmail or Outlook, or wait until the Litos application inbox is available' };
-}
-
-async function reviewedSubmitCount(userId: string): Promise<number> {
-  const [row] = await db
-    .select({ n: sql<number>`count(*)::int` })
-    .from(generated_resumes)
-    .where(
-      sql`${generated_resumes.user_id} = ${userId}
-        and ${generated_resumes.spec}->'_review'->>'status' = 'submitted'
-        and ${generated_resumes.spec}->'_review'->'submission_authorization'->>'source' = 'per_application_approval'`,
-    );
-  return row?.n ?? 0;
 }
 
 // GET /onboarding/state - the one call /start needs to decide what to render.
@@ -174,10 +156,15 @@ export const MIGRATION_PENDING_COLUMNS: ReadonlySet<string> = new Set([
  */
 export { cardGateInstant, requiresPaymentMethodFor };
 /**
- * CURRENT_ONBOARDING_FLOW_VERSION and onboardingFlowLedger now live in
- * lib/onboardingFlowLedger.ts (imported above), so lib/cardGate.ts can read the application-sequence
- * acknowledgement ledger without importing this route file. Re-exported here so every existing
- * import of them from './onboarding' keeps working unchanged.
+ * CURRENT_ONBOARDING_FLOW_VERSION and onboardingFlowLedger live in lib/onboardingFlowLedger.ts
+ * (imported above) purely so this file and its own routes (POST /onboarding/flow/steps and
+ * /onboarding/flow/complete, the version-2 replay walk) do not have to duplicate them. THE CARD GATE
+ * (lib/cardGate.ts) no longer reads this ledger at all -- FINDING #1 (2026-08-29 code review) moved
+ * TIER B2's closure signal off the client-driven acknowledgement ledger onto a server-owned "has this
+ * account actually sent an application" fact (lib/approvedApplicationSubmissions.ts), because nothing
+ * required a client to ever send the acknowledgement that used to close it, and nothing stopped one
+ * from sending it as its literal first call, before building anything. Re-exported here anyway so
+ * every existing import of them from './onboarding' keeps working unchanged.
  */
 export { CURRENT_ONBOARDING_FLOW_VERSION, onboardingFlowLedger };
 
@@ -214,9 +201,8 @@ type Step =
    this deploys can still acknowledge 'build'. Removing them would turn a harmless late
    acknowledgement into a 400 in the one window where a student is mid-flow. */
 
-/* CURRENT_ONBOARDING_FLOW_VERSION now lives in lib/onboardingFlowLedger.ts (imported above) so
-   lib/cardGate.ts can read the same ledger without importing this route file. Re-exported below so
-   every existing import of it from here keeps working unchanged. */
+/* CURRENT_ONBOARDING_FLOW_VERSION lives in lib/onboardingFlowLedger.ts (imported above); see the
+   comment on the re-export below for why lib/cardGate.ts no longer needs it. */
 /* ORDER IS THE RENDER ORDER, and 'focus' leads it now. See onboardingStepFrom for why. */
 const REPLAY_STEPS_WITHOUT_GAPS = ['focus', 'resume', 'impact', 'sponsorship', 'base'] as const;
 

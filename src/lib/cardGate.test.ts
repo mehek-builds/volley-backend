@@ -79,8 +79,8 @@ test('isCardGateAllowedPath (TIER A: standing, always reachable while locked)', 
     '/auth/request-code',
     '/me',
     '/v1/meta',
-    // FINDING #4: /account was missing from the allowlist, so a locked account could not export
-    // its own data or delete its account without paying first.
+    // FINDING #4 (round 1): /account was missing from the allowlist, so a locked account could not
+    // export its own data or delete its account without paying first.
     '/account',
     '/account/export',
   ];
@@ -126,7 +126,7 @@ test('isCardGateAllowedPath (TIER A: standing, always reachable while locked)', 
     assert.equal(isCardGateAllowedPath('/billing/'), true);
   });
 
-  await t.test('FINDING #5: a fragment does not defeat the allowlist match either', () => {
+  await t.test('FINDING #5 (round 1): a fragment does not defeat the allowlist match either', () => {
     // cardGate's own normalizer used to drop only the query string, not a fragment, while
     // submissionCutover's dropped both -- the same literal path got two different answers
     // depending which allowlist asked. Both now share lib/httpPath.ts.
@@ -134,12 +134,18 @@ test('isCardGateAllowedPath (TIER A: standing, always reachable while locked)', 
   });
 });
 
-test('isCardGateProfilePath (TIER B1: the account\'s own intake facts, open for the whole locked lifetime)', async (t) => {
+test('isCardGateProfilePath (TIER B1: permanent profile facts and account settings, open for the whole locked lifetime)', async (t) => {
   const allowed = [
     '/profile',
     '/profile/application',
     '/profile/targeting',
     '/profile/recent-experience',
+    // FINDING #1 (round 2): notification settings are ordinary account settings with no legitimate
+    // reason to be limited to the one free build, so they moved here from TIER B2.
+    '/notifications/preferences',
+    // FINDING #2 (round 2): these two were reachable from NO tier at all before this fix.
+    '/notifications/push/subscribe',
+    '/notifications/push/unsubscribe',
   ];
   for (const path of allowed) {
     await t.test(`allows ${path}`, () => {
@@ -156,6 +162,7 @@ test('isCardGateProfilePath (TIER B1: the account\'s own intake facts, open for 
     '/documents',
     '/applications',
     '/jobs',
+    '/notifications/digest/preview',
   ];
   for (const path of blocked) {
     await t.test(`blocks ${path}`, () => {
@@ -164,33 +171,21 @@ test('isCardGateProfilePath (TIER B1: the account\'s own intake facts, open for 
   }
 });
 
-/** A ledger .where() result that is both awaitable directly (the acknowledgements query, which
- *  chains no .limit()) and chainable with .limit() (the run query, which does). Mirrors the shape
- *  a real drizzle query builder result has, which is what lets one mock serve both call sites. */
-function whereResult<T>(value: T[], failure?: Error): Promise<T[]> & { limit: (n: number) => Promise<T[]> } {
-  // ONE promise instance, reused for both call shapes (`await x` and `await x.limit(1)`), never
-  // two: a second, separately-constructed rejected promise for .limit() to return would leave the
-  // FIRST one (the base object itself) permanently unconsumed whenever only .limit() was called on
-  // it, which is exactly an unhandled rejection.
-  const promise = failure ? Promise.reject<T[]>(failure) : Promise.resolve(value);
+/** A ledger .where() result that is both awaitable directly and chainable with .limit(), mirroring
+ *  the shape a real drizzle query builder result has -- what lets one mock serve
+ *  hasApprovedSubmittedApplication's `.select().from().where().limit(1)` call shape. */
+function whereResult<T>(value: T[]): Promise<T[]> & { limit: (n: number) => Promise<T[]> } {
+  const promise = Promise.resolve(value);
   return Object.assign(promise, { limit: () => promise });
 }
 
-/** Mocks db.select() for lib/onboardingFlowLedger.ts's two-query Promise.all, keyed off which
- *  table .from() names -- the run row is never read by these tests, only the acknowledged steps. */
-function mockLedgerDb(options: { available?: boolean; acknowledgedSteps?: string[] } = {}) {
-  const { available = true, acknowledgedSteps = [] } = options;
+/** Mocks db.select() for lib/approvedApplicationSubmissions.ts's hasApprovedSubmittedApplication:
+ *  a single generated_resumes lookup, present (submitted) or absent (nothing sent yet). */
+function mockSubmissionDb(options: { hasSubmittedApplication?: boolean } = {}) {
+  const { hasSubmittedApplication = false } = options;
   return mock.method(db, 'select', ((_columns?: unknown) => ({
     from: (_table: unknown) => ({
-      where: () => {
-        if (!available) {
-          return whereResult([], Object.assign(new Error('relation does not exist'), { code: '42P01' }));
-        }
-        // The acknowledgements query is the only one these tests read; the run query can answer
-        // empty (no run row) without changing anything `cardGateRouteReachable` cares about.
-        const isAcknowledgementsQuery = _columns !== undefined;
-        return whereResult(isAcknowledgementsQuery ? acknowledgedSteps.map((step) => ({ step })) : []);
-      },
+      where: () => whereResult(hasSubmittedApplication ? [{ id: 'resume-1' }] : []),
     }),
   })) as unknown as typeof db.select);
 }
@@ -218,6 +213,17 @@ test('cardGateRouteReachable (folds TIER A, TIER B1 and TIER B2 together)', asyn
     }
   });
 
+  await t.test('the notification routes (moved to TIER B1) are reachable with no DB call at all', async () => {
+    const select = mock.method(db, 'select', NO_DB_CALL_ALLOWED as unknown as typeof db.select);
+    try {
+      assert.equal(await cardGateRouteReachable('/notifications/preferences', 'user-1'), true);
+      assert.equal(await cardGateRouteReachable('/notifications/push/subscribe', 'user-1'), true);
+      assert.equal(await cardGateRouteReachable('/notifications/push/unsubscribe', 'user-1'), true);
+    } finally {
+      select.mock.restore();
+    }
+  });
+
   await t.test('a path on none of the three tiers is blocked with no DB call at all', async () => {
     const select = mock.method(db, 'select', NO_DB_CALL_ALLOWED as unknown as typeof db.select);
     try {
@@ -230,8 +236,11 @@ test('cardGateRouteReachable (folds TIER A, TIER B1 and TIER B2 together)', asyn
     }
   });
 
-  await t.test('a TIER B2 build path is reachable before notifications has been acknowledged', async () => {
-    const select = mockLedgerDb({ acknowledgedSteps: ['match', 'questions'] });
+  /* THE FINDING #1 FIX, PROVEN: TIER B2 closure no longer reads any ledger acknowledgement at all --
+     not the order it arrived in, not whether it arrived, not any other step's acknowledgement. The
+     ONLY thing that matters is whether hasApprovedSubmittedApplication found a real submitted row. */
+  await t.test('a TIER B2 build path is reachable when nothing has been submitted yet, regardless of ledger state', async () => {
+    const select = mockSubmissionDb({ hasSubmittedApplication: false });
     try {
       assert.equal(await cardGateRouteReachable('/jobs', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/jobs/:id', 'user-1'), true);
@@ -241,27 +250,47 @@ test('cardGateRouteReachable (folds TIER A, TIER B1 and TIER B2 together)', asyn
       assert.equal(await cardGateRouteReachable('/postings/:jobId/questions', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/applications/from-job', 'user-1'), true);
       assert.equal(await cardGateRouteReachable('/applications/:id/submit-request', 'user-1'), true);
-      assert.equal(await cardGateRouteReachable('/notifications/preferences', 'user-1'), true);
     } finally {
       select.mock.restore();
     }
   });
 
-  await t.test('a TIER B2 build path is BLOCKED once notifications has been acknowledged: the account has already built and sent its one application and is only waiting on payment', async () => {
-    const select = mockLedgerDb({ acknowledgedSteps: ['match', 'questions', 'review', 'trial', 'notifications'] });
+  await t.test('a TIER B2 build path is BLOCKED once a real submission exists: the account has already spent its one free build and is only waiting on payment', async () => {
+    const select = mockSubmissionDb({ hasSubmittedApplication: true });
     try {
       assert.equal(await cardGateRouteReachable('/jobs', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/resume/generate', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/applications/from-job', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/applications/:id/submit-request', 'user-1'), false);
-      assert.equal(await cardGateRouteReachable('/notifications/preferences', 'user-1'), false);
     } finally {
       select.mock.restore();
     }
   });
 
-  await t.test('/jobs/grouped and /jobs/facets are never TIER B2, even mid-build: only the exact board and single-job templates are, matching the match screen and BuildStep\'s own calls', async () => {
-    const select = mockLedgerDb({ acknowledgedSteps: [] });
+  await t.test('the closure survives even if a client never acknowledges any onboarding flow step at all (FINDING #1a: never-closes is fixed)', async () => {
+    // No ledger is read here at all -- this mock only ever answers the submission-count query, and
+    // the closure still fires correctly, proving the old ledger dependency is gone.
+    const select = mockSubmissionDb({ hasSubmittedApplication: true });
+    try {
+      assert.equal(await cardGateRouteReachable('/applications/from-job', 'user-1'), false);
+    } finally {
+      select.mock.restore();
+    }
+  });
+
+  await t.test("notification routes stay reachable even after TIER B2 has closed, because they are TIER B1 now, not TIER B2 (FINDING #1's related question)", async () => {
+    const select = mockSubmissionDb({ hasSubmittedApplication: true });
+    try {
+      assert.equal(await cardGateRouteReachable('/notifications/preferences', 'user-1'), true);
+      assert.equal(await cardGateRouteReachable('/notifications/push/subscribe', 'user-1'), true);
+      assert.equal(await cardGateRouteReachable('/notifications/push/unsubscribe', 'user-1'), true);
+    } finally {
+      select.mock.restore();
+    }
+  });
+
+  await t.test('/jobs/grouped and /jobs/facets are never TIER B2, even with nothing submitted yet: only the exact board and single-job templates are, matching the match screen and BuildStep\'s own calls', async () => {
+    const select = mockSubmissionDb({ hasSubmittedApplication: false });
     try {
       assert.equal(await cardGateRouteReachable('/jobs/grouped', 'user-1'), false);
       assert.equal(await cardGateRouteReachable('/jobs/facets', 'user-1'), false);
@@ -272,10 +301,56 @@ test('cardGateRouteReachable (folds TIER A, TIER B1 and TIER B2 together)', asyn
     }
   });
 
-  await t.test('TIER B2 fails OPEN when the acknowledgement ledger table has not migrated yet, same posture onboarding.ts itself takes', async () => {
-    const select = mockLedgerDb({ available: false });
+  /* FINDING #4: concurrent TIER B2 requests for the same account share one in-flight DB call rather
+     than issuing one each. */
+  await t.test('concurrent TIER B2 checks for the same user share one DB call', async () => {
+    let calls = 0;
+    const select = mock.method(db, 'select', ((_columns?: unknown) => ({
+      from: (_table: unknown) => ({
+        where: () => {
+          calls += 1;
+          return whereResult([]);
+        },
+      }),
+    })) as unknown as typeof db.select);
     try {
-      assert.equal(await cardGateRouteReachable('/resume/generate', 'user-1'), true);
+      const results = await Promise.all([
+        cardGateRouteReachable('/jobs', 'user-shared'),
+        cardGateRouteReachable('/resume/generate', 'user-shared'),
+        cardGateRouteReachable('/postings/:jobId/questions', 'user-shared'),
+      ]);
+      assert.deepEqual(results, [true, true, true]);
+      assert.equal(calls, 1, 'three concurrent TIER B2 requests for the same user should issue one DB call, not three');
+    } finally {
+      select.mock.restore();
+    }
+
+    // A later, non-concurrent call gets its own fresh lookup rather than reusing a stale settled one.
+    const select2 = mockSubmissionDb({ hasSubmittedApplication: false });
+    try {
+      assert.equal(await cardGateRouteReachable('/jobs', 'user-shared'), true);
+    } finally {
+      select2.mock.restore();
+    }
+  });
+
+  await t.test('concurrent TIER B2 checks for DIFFERENT users do not share a DB call', async () => {
+    let calls = 0;
+    const select = mock.method(db, 'select', ((_columns?: unknown) => ({
+      from: (_table: unknown) => ({
+        where: () => {
+          calls += 1;
+          return whereResult([]);
+        },
+      }),
+    })) as unknown as typeof db.select);
+    try {
+      const results = await Promise.all([
+        cardGateRouteReachable('/jobs', 'user-a'),
+        cardGateRouteReachable('/jobs', 'user-b'),
+      ]);
+      assert.deepEqual(results, [true, true]);
+      assert.equal(calls, 2, 'two different users must never share a submission lookup');
     } finally {
       select.mock.restore();
     }

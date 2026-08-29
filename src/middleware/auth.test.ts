@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { SignJWT } from 'jose';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { db } from '../db';
-import { onboarding_flow_runs as onboardingFlowRunsTable, users as usersTable } from '../db/schema';
+import { generated_resumes as generatedResumesTable, users as usersTable } from '../db/schema';
 import { issuedBeforeEpoch, optionalAuth, requireAuth, sessionVersionIsStale } from './auth';
 
 test('no epoch set: every token passes', () => {
@@ -213,37 +213,36 @@ test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) =
     return { reply, calls };
   };
 
-  /** A .where() result shaped like drizzle's: awaitable directly (the acknowledgements query,
-   *  which chains no .limit()) and chainable with .limit() (both the user-row and run-row queries,
-   *  which do). */
-  function chainable<T>(value: T[], failure?: Error) {
+  /** A .where() result shaped like drizzle's: awaitable directly and chainable with .limit()
+   *  (both the user-row query and hasApprovedSubmittedApplication's generated_resumes query use
+   *  .limit()). */
+  function chainable<T>(value: T[]) {
     // ONE promise instance for both call shapes (`await x` and `await x.limit(1)`): a second,
-    // separately-constructed rejected promise for .limit() to return would leave this one
-    // permanently unconsumed whenever only .limit() was called on it -- an unhandled rejection.
-    const promise = failure ? Promise.reject<T[]>(failure) : Promise.resolve(value);
+    // separately-constructed promise for .limit() to return would leave this one permanently
+    // unconsumed whenever only .limit() was called on it -- an unhandled rejection risk.
+    const promise = Promise.resolve(value);
     return Object.assign(promise, { limit: () => promise });
   }
 
   /**
    * Mocks db.select() for BOTH queries requireAuth/optionalAuth can now issue per request:
    * resolveToken's user-row read (dispatched by table identity against `users`) and, only when the
-   * path actually needs it, onboardingFlowLedger's run/acknowledgements pair (lib/onboardingFlowLedger.ts).
+   * path actually needs it, hasApprovedSubmittedApplication's generated_resumes lookup
+   * (lib/approvedApplicationSubmissions.ts) -- THE FINDING #1 FIX's server-owned TIER B2 signal,
+   * replacing the old client-driven acknowledgement ledger this suite used to mock here.
    */
   const withMockedUser = async (
     row: Record<string, unknown>,
     fn: () => Promise<void>,
-    ledger: { available?: boolean; acknowledgedSteps?: string[] } = {},
+    options: { hasSubmittedApplication?: boolean } = {},
   ) => {
-    const { available = true, acknowledgedSteps = [] } = ledger;
+    const { hasSubmittedApplication = false } = options;
     const select = mock.method(db, 'select', ((..._args: unknown[]) => ({
       from: (table: unknown) => ({
         where: () => {
           if (table === usersTable) return chainable([row]);
-          if (!available) {
-            return chainable([], Object.assign(new Error('relation does not exist'), { code: '42P01' }));
-          }
-          if (table === onboardingFlowRunsTable) return chainable([]);
-          return chainable(acknowledgedSteps.map((step) => ({ step })));
+          if (table === generatedResumesTable) return chainable(hasSubmittedApplication ? [{ id: 'resume-1' }] : []);
+          throw new Error('unexpected db.select().from() table in THE CARD GATE test mock');
         },
       }),
     })) as unknown as typeof db.select);
@@ -296,19 +295,24 @@ test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) =
       });
     });
 
-    await t.test('TIER B1: the account can read and edit its own profile facts for its whole locked lifetime', async () => {
+    await t.test('TIER B1: the account can read and edit its own profile facts, and its notification settings, for its whole locked lifetime', async () => {
       const token = await signToken('user-gated-3');
       await withMockedUser(userRow(), async () => {
-        for (const url of ['/profile', '/profile/application', '/profile/targeting', '/profile/recent-experience']) {
+        for (const url of [
+          '/profile', '/profile/application', '/profile/targeting', '/profile/recent-experience',
+          // FINDING #1 (round 2): moved here from TIER B2, they are ordinary account settings.
+          // FINDING #2: push/subscribe and /unsubscribe used to be on no tier at all.
+          '/notifications/preferences', '/notifications/push/subscribe', '/notifications/push/unsubscribe',
+        ]) {
           const request = requestFor(token, url);
           const { reply, calls } = outcome();
           await requireAuth(request, reply);
           assert.equal(calls.length, 0, `expected ${url} to be reachable while gated`);
         }
-      }, { acknowledgedSteps: ['match', 'questions', 'review', 'trial', 'notifications'] }); // even past the build window
+      }, { hasSubmittedApplication: true }); // even past the build window
     });
 
-    await t.test('TIER B2: the build routes are reachable before notifications is acknowledged...', async () => {
+    await t.test('TIER B2: the build routes are reachable before any application has been submitted...', async () => {
       const token = await signToken('user-gated-4');
       await withMockedUser(userRow(), async () => {
         // Fastify template strings, not a literal id substituted in -- request.routeOptions.url
@@ -321,10 +325,10 @@ test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) =
           await requireAuth(request, reply);
           assert.equal(calls.length, 0, `expected ${url} to be reachable mid-build`);
         }
-      }, { acknowledgedSteps: ['match', 'questions'] });
+      }, { hasSubmittedApplication: false });
     });
 
-    await t.test('...and are blocked once notifications is acknowledged: the account has already built and sent its one application', async () => {
+    await t.test('...and are blocked once a real submission exists: the account has already spent its one free build (THE FINDING #1 FIX)', async () => {
       const token = await signToken('user-gated-5');
       await withMockedUser(userRow(), async () => {
         for (const url of ['/jobs', '/resume/generate', '/applications/from-job']) {
@@ -334,7 +338,7 @@ test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) =
           assert.equal(calls.length, 1, `expected ${url} to be blocked past the build window`);
           assert.equal(calls[0].status, 402);
         }
-      }, { acknowledgedSteps: ['match', 'questions', 'review', 'trial', 'notifications'] });
+      }, { hasSubmittedApplication: true });
     });
 
     await t.test('FINDING #2: optionalAuth enforces THE CARD GATE for a session that resolved, exactly like requireAuth', async () => {
@@ -346,7 +350,7 @@ test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) =
         await optionalAuth(midBuild, midBuildReply);
         assert.equal(midBuildCalls.length, 0);
         assert.equal(midBuild.jwtPayload?.userId, 'user-gated-optional');
-      }, { acknowledgedSteps: [] });
+      }, { hasSubmittedApplication: false });
 
       await withMockedUser(userRow(), async () => {
         // /jobs/grouped is never TIER B2 -- ordinary board browsing, blocked even mid-build.
@@ -355,7 +359,7 @@ test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) =
         await optionalAuth(request, reply);
         assert.equal(calls.length, 1);
         assert.equal(calls[0].status, 402);
-      }, { acknowledgedSteps: [] });
+      }, { hasSubmittedApplication: false });
 
       await withMockedUser(userRow(), async () => {
         // Past the build window, even the bare board closes.
@@ -364,7 +368,7 @@ test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) =
         await optionalAuth(request, reply);
         assert.equal(calls.length, 1);
         assert.equal(calls[0].status, 402);
-      }, { acknowledgedSteps: ['match', 'questions', 'review', 'trial', 'notifications'] });
+      }, { hasSubmittedApplication: true });
     });
 
     await t.test('FINDING #2: a genuinely anonymous caller is completely unaffected by THE CARD GATE', async () => {
@@ -386,7 +390,7 @@ test('THE CARD GATE, enforced through requireAuth and optionalAuth', async (t) =
           await requireAuth(request, reply);
           assert.equal(calls.length, 1, `expected ${url} to stay blocked`);
         }
-      }, { acknowledgedSteps: [] });
+      }, { hasSubmittedApplication: false });
     });
 
     await t.test('FINDING #4: /account and /account/export are reachable while locked', async () => {

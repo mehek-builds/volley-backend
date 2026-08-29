@@ -7,7 +7,7 @@
  */
 
 import { isAtOrBelowPath, normalizedRequestPath } from './httpPath';
-import { onboardingFlowLedger } from './onboardingFlowLedger';
+import { hasApprovedSubmittedApplication } from './approvedApplicationSubmissions';
 
 /**
  * The instant the card gate starts applying to newly created accounts, or null.
@@ -139,29 +139,66 @@ const CARD_GATE_ALLOWED_PATH_ROOTS: readonly string[] = [
  * bounded product decision -- it grants no ability to browse jobs, build or send an application, or
  * see the dashboard, only to keep its own intake answers current -- and it is called out explicitly
  * in this PR for that reason.
+ *
+ * NOTIFICATION SETTINGS JOINED THIS TIER in the same review that fixed FINDING #1 below (2026-08-29).
+ * /notifications/preferences (both GET and PUT -- this is a template set, not method-aware, see
+ * cardGateRouteReachable) used to live in TIER B2 because NotificationsStep.tsx happens to be the
+ * screen that reads and writes it during onboarding. But there is nothing about a notification
+ * preference, or a push subscription token, that belongs behind "have you used your one free
+ * build" -- they are ordinary account settings, exactly like the profile facts above, and gating
+ * them on TIER B2 produced two real bugs: FINDING #2 (POST /notifications/push/subscribe and
+ * /unsubscribe were reachable from NO tier at all, so a locked account's own "daily summary" toggle
+ * 402ed, and the frontend's catch-all swallowed the real error behind an unrelated Safari message)
+ * and half of FINDING #1 (closing TIER B2 correctly, on a real send, would otherwise have walled a
+ * locked account off from ever changing its notification settings again -- exactly the kind of
+ * "poking the API to avoid paying" TIER B2 exists to stop, applied to a route that was never product
+ * access in the first place). Moving all three routes here fixes both by removing the premise: they
+ * are not part of the one free build, so they do not belong on the tier that is limited to it.
  */
 const CARD_GATE_PROFILE_PATHS: ReadonlySet<string> = new Set([
   '/profile',
   '/profile/application',
   '/profile/targeting',
   '/profile/recent-experience',
+  '/notifications/preferences',
+  '/notifications/push/subscribe',
+  '/notifications/push/unsubscribe',
 ]);
 
 /**
  * TIER B2 -- exact route templates a locked account may reach ONLY while it has not yet finished
  * the one application /start's own flow builds and sends it: match, build (folded into 'match' on
- * the wire, see onboarding.ts's Step union), the questions screen, review/send, and the base-resume
- * screen mid-setup. Traced from role-quick-website origin/main by reading every step component
- * /start renders (components/start/MatchStep.tsx, BuildStep.tsx, ReviewStep.tsx,
- * BaseResumeStep.tsx, NotificationsStep.tsx) and following each api() call to lib/api.ts.
+ * the wire, see onboarding.ts's Step union), the questions screen, and review/send. Traced from
+ * role-quick-website origin/main by reading every step component /start renders
+ * (components/start/MatchStep.tsx, BuildStep.tsx, ReviewStep.tsx) and following each api() call to
+ * lib/api.ts.
  *
- * isBuildingFirstOnboardingApplication (below) is what turns this tier off: once notifications --
- * the last data-consuming screen /start walks before 'plan' -- has been acknowledged, an account has
- * used everything on this list already and has nothing left to build. From then on a locked account
- * is at the payment wall with nothing to do but pay, check its own profile (TIER B1) or leave
- * (TIER A) -- it must not be able to keep building or sending MORE applications, browse the job
- * board, or attach another job via /applications/from-job, all of which is exactly "poking the API
- * to avoid paying" rather than finishing the one free application onboarding grants.
+ * hasSpentFreeOnboardingBuild (below) is what turns this tier off, and what it reads is a SERVER-OWNED
+ * fact -- an actual submitted application -- rather than a client-driven acknowledgement. THE FINDING
+ * #1 FIX (2026-08-29 code review): this used to close on `flow.acknowledged.includes('notifications')`,
+ * a voluntary POST to /onboarding/flow/steps with no server-side ordering or requirement, and that had
+ * two confirmed failure modes. (a) NEVER CLOSES: nothing required a client to ever send
+ * `step:'notifications'`, so this tier stayed open indefinitely -- free, personalized job-board
+ * browsing forever, no payment. (b) CLOSES TOO EARLY: 'notifications' is an APPLICATION_STEPS member,
+ * not a replay step, so onboarding.ts's replay-ordering check (isReplayStep, POST
+ * /onboarding/flow/steps) never engaged for it -- a client could POST `step:'notifications'` as its
+ * literal first call, before building anything, and slam this tier shut on a fresh account that had
+ * built and seen nothing, defeating the whole "see it work before paying" point of the redesign
+ * (see onboardingBuildGrant.ts's own comment).
+ *
+ * Once an account has at least one submission that clears approvedSubmissionPredicate
+ * (lib/approvedApplicationSubmissions.ts) -- status='submitted', written only by submissionRunner.ts
+ * after a REAL, VERIFIED send, and submission_authorization.source='per_application_approval', the
+ * one authorization value the student's own review-and-send screen (POST
+ * /applications/:id/submit-request, itself on this tier) writes -- it has used everything on this
+ * list already and has nothing left to build. From then on a locked account is at the payment wall
+ * with nothing to do but pay, check its own profile or settings (TIER B1) or leave (TIER A) -- it
+ * must not be able to keep building or sending MORE applications, browse the job board, or attach
+ * another job via /applications/from-job, all of which is exactly "poking the API to avoid paying"
+ * rather than finishing the one free application onboarding grants. This signal cannot trip
+ * prematurely (nothing writes 'submitted' before a verified send actually happens, so mid-review or
+ * mid-claim states never count) and cannot be left open forever by a voluntary client action (there is
+ * no request a client can send that fabricates a real send).
  *
  * '/jobs' is listed bare rather than as a path root on purpose: '/jobs/grouped' and '/jobs/facets'
  * (jobMonitor.ts) are ordinary dashboard job-board browsing and must never be open here, even during
@@ -181,10 +218,6 @@ const CARD_GATE_ONBOARDING_BUILD_PATHS: ReadonlySet<string> = new Set([
   '/postings/:jobId/questions',
   '/applications/from-job',
   '/applications/:id/submit-request',
-  // NotificationsStep.tsx: the 'notifications' screen itself reads and writes the two permissions
-  // before acknowledging -- has to be reachable up to and including the moment that acknowledgement
-  // is what CLOSES this tier (see isBuildingFirstOnboardingApplication above).
-  '/notifications/preferences',
 ]);
 
 export function isCardGateAllowedPath(rawPath: string): boolean {
@@ -193,10 +226,10 @@ export function isCardGateAllowedPath(rawPath: string): boolean {
 }
 
 /**
- * Whether `rawPath` is one of TIER B1's permanent, locked-lifetime profile-fact routes.
- * Exported separately from isCardGateAllowedPath (TIER A) so a caller that wants to charge the
- * TIER B2 ledger lookup only when it might actually matter can check the free tiers first -- see
- * cardGateRouteReachable below.
+ * Whether `rawPath` is one of TIER B1's permanent, locked-lifetime profile-fact and account-setting
+ * routes. Exported separately from isCardGateAllowedPath (TIER A) so a caller that wants to charge
+ * the TIER B2 submission lookup only when it might actually matter can check the free tiers first --
+ * see cardGateRouteReachable below.
  */
 export function isCardGateProfilePath(rawPath: string): boolean {
   return CARD_GATE_PROFILE_PATHS.has(normalizedRequestPath(rawPath));
@@ -207,30 +240,51 @@ function isCardGateOnboardingBuildPath(rawPath: string): boolean {
 }
 
 /**
+ * Per-userId in-flight dedup for hasSpentFreeOnboardingBuild's DB call, mirroring
+ * middleware/auth.ts's inFlightSessions for resolveToken's user-row read.
+ *
+ * FINDING #4: worth doing here for the same reason it is worth doing there -- TIER B2's own
+ * templates are exactly the kind of routes a single /start screen fires several of at once
+ * (BuildStep.tsx alone calls /resume/generate, /jobs/:id and /postings/:jobId/questions together),
+ * so more than one TIER B2 request for the same account can land in the same tick. Keyed by userId
+ * rather than by token: unlike resolveSession, the caller here (cardGateRouteReachable) is already
+ * one layer past the token, so userId is what every concurrent caller actually shares.
+ */
+const inFlightSubmissionChecks = new Map<string, Promise<boolean>>();
+
+function dedupedHasApprovedSubmittedApplication(userId: string): Promise<boolean> {
+  const existing = inFlightSubmissionChecks.get(userId);
+  if (existing) return existing;
+  const check = hasApprovedSubmittedApplication(userId);
+  inFlightSubmissionChecks.set(userId, check);
+  const cleanup = () => {
+    if (inFlightSubmissionChecks.get(userId) === check) inFlightSubmissionChecks.delete(userId);
+  };
+  check.then(cleanup, cleanup);
+  return check;
+}
+
+/**
  * Whether this (already known locked) account has not yet finished the one application /start's
  * flow builds and sends -- i.e. TIER B2 should still be open for it.
  *
- * 'notifications' is the boundary: it is the last APPLICATION_STEPS entry the flow walks before
- * 'plan' (onboarding.ts), and unlike 'sponsorship' it is never conditionally skipped, so
- * "notifications has been acknowledged" means the account has already used every TIER B2 route it
- * is ever going to need and is now sitting at the payment screen with nothing left to build.
- *
- * Fails OPEN (keeps TIER B2 available) when the ledger table has not migrated yet. onboarding.ts's
- * own /onboarding/state handler takes the same posture for the same reason: the alternative is
- * blocking a legitimate, still-mid-setup account out of the one flow that lets it finish, in a
- * deploy window nobody chose to be in.
+ * See CARD_GATE_ONBOARDING_BUILD_PATHS above (THE FINDING #1 FIX) for the full history of why this
+ * reads a real submission rather than a ledger acknowledgement. There is no failure-open branch here
+ * the way the old ledger-backed version needed one for an unmigrated table: generated_resumes is a
+ * long-established table with no migration-window concern, and hasApprovedSubmittedApplication
+ * simply returns false (tier stays open) for an account with no matching row, which is exactly right
+ * for a brand new account that has not built anything yet.
  */
-async function isBuildingFirstOnboardingApplication(userId: string): Promise<boolean> {
-  const flow = await onboardingFlowLedger(userId);
-  if (!flow.available) return true;
-  return !flow.acknowledged.includes('notifications');
+async function hasSpentFreeOnboardingBuild(userId: string): Promise<boolean> {
+  return dedupedHasApprovedSubmittedApplication(userId);
 }
 
 /**
  * THE CARD GATE's full per-request reachability decision, folding all three tiers together.
  *
  * Deliberately cheap in the common case: TIER A and TIER B1 are pure path checks, and the one
- * DB-backed check (TIER B2's ledger lookup) only runs when the path is actually one of the TIER B2
+ * DB-backed check (TIER B2's submission lookup, deduped across concurrent requests -- see
+ * dedupedHasApprovedSubmittedApplication) only runs when the path is actually one of the TIER B2
  * templates -- every other blocked route (dashboard bootstrap, network, documents, the applications
  * list, ordinary job-board browsing once onboarding is behind the account) is turned away on the
  * path check alone, with no extra query.
@@ -238,5 +292,5 @@ async function isBuildingFirstOnboardingApplication(userId: string): Promise<boo
 export async function cardGateRouteReachable(rawPath: string, userId: string): Promise<boolean> {
   if (isCardGateAllowedPath(rawPath) || isCardGateProfilePath(rawPath)) return true;
   if (!isCardGateOnboardingBuildPath(rawPath)) return false;
-  return isBuildingFirstOnboardingApplication(userId);
+  return !(await hasSpentFreeOnboardingBuild(userId));
 }
