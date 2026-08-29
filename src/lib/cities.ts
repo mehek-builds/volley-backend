@@ -221,13 +221,18 @@ export function parsePlace(raw: string, knownCities: Set<string> = new Set()): P
     if (!trimmed) continue;
 
     const canon = REGION_CANON[trimmed.toLowerCase()];
-    if (canon) {
+    /* Same carve-out as the head check above, applied here for the same reason: "Dubai, Hong Kong"
+       is two cities, not Dubai in the region of Hong Kong. Without it, a city-state named anywhere
+       but first in the list silently became the region of whatever came before it. */
+    if (canon && !(CITY_STATES.has(fold(trimmed)) && knownCities.has(fold(trimmed)))) {
       if (!region && fold(canon) !== fold(city)) region = canon;
       continue;
     }
     if (knownCities.has(fold(CITY_ALIASES[trimmed.toLowerCase()] ?? trimmed))) {
       const alias = CITY_ALIASES[trimmed.toLowerCase()] ?? trimmed;
       if (!NOT_A_CITY.test(alias)) extra.push({ city: alias });
+    } else if (canon) {
+      if (!region && fold(canon) !== fold(city)) region = canon;
     } else if (!region && fold(trimmed) !== fold(city)) {
       region = trimmed;
     }

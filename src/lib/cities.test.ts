@@ -107,6 +107,17 @@ describe('parsePlace with the board vocabulary', () => {
   test('a comma before a REGION still yields one place', () => {
     assert.deepEqual(parsePlace('New York, NY', known), [{ city: 'New York', region: 'NY' }]);
   });
+
+  test('a city-state named after the comma is a second city, not a region', () => {
+    /* Found live: "Dubai, Hong Kong, London" is three postings' worth of city, not Dubai filed
+       under the region "Hong Kong". Hong Kong and Singapore are both a country name AND a real
+       city on the board, so REGION_CANON alone cannot tell this case from "New York, NY". */
+    const withCityStates = new Set([...known, 'hongkong', 'singapore', 'dubai'].map(fold));
+    assert.deepEqual(parsePlace('Dubai, Hong Kong', withCityStates).map((p) => p.city),
+      ['Dubai', 'Hong Kong']);
+    assert.deepEqual(parsePlace('London, Singapore', withCityStates).map((p) => p.city),
+      ['London', 'Singapore']);
+  });
 });
 
 describe('rankCities', () => {

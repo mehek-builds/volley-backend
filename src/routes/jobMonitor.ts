@@ -2176,15 +2176,26 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        column offered "United States" as a city and spent three of the fifty
        slots on New York. A wide slice is read here and ranked in rankCities,
        which merges the spellings — see src/lib/cities.ts for why that judgement
-       lives in a tested function rather than in SQL. */
+       lives in a tested function rather than in SQL.
+
+       NO row limit here on purpose, even though there used to be one (LIMIT 400).
+       Global employers post one row with a location listing a dozen offices
+       ("London | Dubai | Singapore | ..."), so any one city's raw string sits
+       far down the by-count ordering even when that city has real volume once
+       every listing mentioning it is added up. A row cap taken before rankCities
+       ever runs throws away exactly the rows a real, less-common city depends on
+       to be counted at all — measured live, this is why Dubai (68 postings) never
+       reached the suggestion list despite being on the board. Safe to leave
+       unbounded: distinct `location` values are ~4,200 rows, a few hundred KB
+       total, nothing like the per-row description scan that hit the Neon egress
+       quota on 2026-08-04 (src/lib/egressBudget.ts). */
     const locationRows = await db
       .select({ location: monitored_jobs.location, n: sql<number>`count(*)::int` })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
       .where(where)
       .groupBy(monitored_jobs.location)
-      .orderBy(sql`count(*) desc`)
-      .limit(400);
+      .orderBy(sql`count(*) desc`);
 
     return applyBoardCacheHeaders(request, reply).send({
       companies: companies.map((r) => r.v).filter(Boolean),
