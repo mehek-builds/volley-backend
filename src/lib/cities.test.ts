@@ -107,6 +107,29 @@ describe('parsePlace with the board vocabulary', () => {
   test('a comma before a REGION still yields one place', () => {
     assert.deepEqual(parsePlace('New York, NY', known), [{ city: 'New York', region: 'NY' }]);
   });
+
+  test('a city-state named after the comma is a second city, not a region', () => {
+    /* Found live: "Dubai, Hong Kong, London" is three postings' worth of city, not Dubai filed
+       under the region "Hong Kong". Hong Kong and Singapore are both a country name AND a real
+       city on the board, so REGION_CANON alone cannot tell this case from "New York, NY". */
+    const withCityStates = new Set([...known, 'hongkong', 'singapore', 'dubai'].map(fold));
+    assert.deepEqual(parsePlace('Dubai, Hong Kong', withCityStates).map((p) => p.city),
+      ['Dubai', 'Hong Kong']);
+    assert.deepEqual(parsePlace('London, Singapore', withCityStates).map((p) => p.city),
+      ['London', 'Singapore']);
+  });
+
+  test('a city-state repeating itself after the comma still yields one place', () => {
+    /* "Singapore, Singapore" and "Hong Kong, Hong Kong" are the same self-repeat pattern already
+       covered for the general case (see normalizeCity's "drops a region that only repeats the
+       city" test) - the city-state carve-out above must not reopen it by treating the repeat as a
+       second city. */
+    const withCityStates = new Set([...known, 'hongkong', 'singapore'].map(fold));
+    assert.deepEqual(parsePlace('Singapore, Singapore', withCityStates).map((p) => p.city),
+      ['Singapore']);
+    assert.deepEqual(parsePlace('Hong Kong, Hong Kong', withCityStates).map((p) => p.city),
+      ['Hong Kong']);
+  });
 });
 
 describe('rankCities', () => {
@@ -187,6 +210,16 @@ describe('rankCities', () => {
       { location: 'San Francisco, Seattle', n: 6 },
     ], 10);
     assert.deepEqual(ranked, ['San Francisco, CA', 'Seattle, WA']);
+  });
+
+  test('does not double-count a city-state that repeats itself in one listing', () => {
+    /* A city-state carve-out that doesn't guard the self-repeat case pushes "Singapore" twice for
+       one row, inflating its count past a genuinely bigger city. */
+    const ranked = rankCities([
+      { location: 'Singapore, Singapore', n: 100 },
+      { location: 'Tokyo, Japan', n: 150 },
+    ], 10);
+    assert.deepEqual(ranked, ['Tokyo, Japan', 'Singapore']);
   });
 
   test('honours the limit and keeps the non-cities out', () => {

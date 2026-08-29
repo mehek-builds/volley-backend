@@ -2141,11 +2141,21 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       sponsorOnly,
       employmentType: facetQuery?.employment_type,
     }));
-    /* FIFTY of each, ranked by how much of the board they actually account for
-       (Mehek, 2026-07-29). The lists used to be 202 companies alphabetically
-       and 120 raw location strings: a dropdown nobody scrolls, opening on "AQR"
-       rather than on the employers most of the board belongs to. */
+    /* FIFTY companies, ranked by how much of the board they actually account for
+       (Mehek, 2026-07-29). Used to be 202 companies alphabetically: a dropdown
+       nobody scrolls, opening on "AQR" rather than on the employers most of the
+       board belongs to. */
     const TOP = 50;
+    /* Cities get a taller list than companies. A single global company can
+       already cover 50 companies' worth of board share, but a real, searched-for
+       city like Dubai (~70 postings once every spelling and every compound
+       "London | Dubai | Singapore" listing is counted correctly - see below)
+       sits well past the 50th slot, behind a long tail of individually smaller
+       US metros. 150 is the smallest round number past where that tail with
+       genuine international demand starts showing up, without opening the list
+       on someone's one-off "Denver, CO - Hybrid" (2026-08-29, Mehek reported
+       Dubai never suggesting despite being on the board). */
+    const TOP_LOCATIONS = 150;
 
     const companies = await db
       .select({ v: monitored_jobs.company_name, n: sql<number>`count(*)::int` })
@@ -2176,19 +2186,30 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        column offered "United States" as a city and spent three of the fifty
        slots on New York. A wide slice is read here and ranked in rankCities,
        which merges the spellings — see src/lib/cities.ts for why that judgement
-       lives in a tested function rather than in SQL. */
+       lives in a tested function rather than in SQL.
+
+       NO row limit here on purpose, even though there used to be one (LIMIT 400).
+       Global employers post one row with a location listing a dozen offices
+       ("London | Dubai | Singapore | ..."), so any one city's raw string sits
+       far down the by-count ordering even when that city has real volume once
+       every listing mentioning it is added up. A row cap taken before rankCities
+       ever runs throws away exactly the rows a real, less-common city depends on
+       to be counted at all: measured live, this is why Dubai (68 postings) never
+       reached the suggestion list despite being on the board. Safe to leave
+       unbounded: distinct `location` values are ~4,200 rows, a few hundred KB
+       total, nothing like the per-row description scan that hit the Neon egress
+       quota on 2026-08-04 (src/lib/egressBudget.ts). */
     const locationRows = await db
       .select({ location: monitored_jobs.location, n: sql<number>`count(*)::int` })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
       .where(where)
       .groupBy(monitored_jobs.location)
-      .orderBy(sql`count(*) desc`)
-      .limit(400);
+      .orderBy(sql`count(*) desc`);
 
     return applyBoardCacheHeaders(request, reply).send({
       companies: companies.map((r) => r.v).filter(Boolean),
-      locations: rankCities(locationRows, TOP),
+      locations: rankCities(locationRows, TOP_LOCATIONS),
       /* Only present when asked for, so the default response stays byte-identical for the website.
          `rows` is what the board actually holds per employer, which is what a coverage figure has
          to be weighted by: one employer with 300 postings matters 300 times more than one with a
