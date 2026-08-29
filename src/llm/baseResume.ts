@@ -512,9 +512,9 @@ export const VERB_REPAIR_MENU = [
 ];
 
 const BULLET_REPAIR_SYSTEM_PROMPT = `You repair individual resume bullets that broke a house rule. You receive a JSON
-array of {"org", "bullet", "reasons"} and return ONLY a JSON array of {"org", "bullet", "rewritten"} with no
-explanation or markdown wrapping, where "org" and "bullet" are copied unchanged from the input and "rewritten" is the
-corrected bullet.
+array of {"index", "org", "bullet", "reasons"} and return ONLY a JSON array of {"index", "rewritten"} with no
+explanation or markdown wrapping, where "index" is copied unchanged from the input item and "rewritten" is that
+item's corrected bullet.
 
 Rules for every rewritten bullet:
 - Start with one of these approved verbs: ${[...STRONG_VERBS].join(', ')}.
@@ -536,8 +536,9 @@ Rules for every rewritten bullet:
  * rewrite is a few hundred tokens on the small model and leaves the selection - which already
  * passed its own checks - untouched.
  *
- * Merging is by exact (org, bullet) match, and an unmatched or empty reply keeps the original
- * bullet: the caller re-checks the merged spec, so a failed repair surfaces as the same violation
+ * Merging is by the index this call assigns to each target (see applyBulletRepairs for why the
+ * model's echo can never be the key), and an unmatched or empty reply keeps the original bullet:
+ * the caller re-checks the merged spec, so a failed repair surfaces as the same violation
  * on the next pass rather than as silent damage. Selection defects (a missing required priority
  * entry) still go through the full regeneration, because no bullet rewrite can change which
  * entries are on the page.
@@ -553,16 +554,15 @@ export async function repairBaseResumeBullets(
     const response = await client.messages.create(
       {
         model: 'claude-haiku-4-5-20251001',
-        /* The reply echoes org + the full original bullet + the rewrite for every target, and a
-         * worst-case pass flags every bullet on the page (12 at the 4-entry x 3-bullet cap, each
-         * up to a few hundred characters). 2048 was measured to be truncatable on exactly that
-         * shape, and a truncated array parses to nothing, which turns every pass into a silent
-         * no-op. Output is billed on what is generated, so the headroom costs nothing. */
+        /* The reply is only {index, rewritten} per target now, but a worst-case pass still
+         * rewrites every bullet on the page (12 at the 4-entry x 3-bullet cap, each up to a few
+         * hundred characters), and a truncated array parses to nothing, which turns the pass into
+         * a silent no-op. Output is billed on what is generated, so the headroom costs nothing. */
         max_tokens: 8192,
         system: BULLET_REPAIR_SYSTEM_PROMPT,
         messages: [{
           role: 'user',
-          content: `Repair these bullets:\n${JSON.stringify(targets)}`,
+          content: `Repair these bullets:\n${JSON.stringify(targets.map((target, index) => ({ index, ...target })))}`,
         }],
       },
       options.timeoutMs !== undefined
@@ -572,7 +572,7 @@ export async function repairBaseResumeBullets(
     // Truncation means an unparseable array; fail toward the original like every other bad reply.
     if (response.stop_reason === 'max_tokens') return spec;
     const textBlock = response.content.find((block) => block.type === 'text');
-    return applyBulletRepairs(spec, textBlock?.type === 'text' ? textBlock.text : '');
+    return applyBulletRepairs(spec, textBlock?.type === 'text' ? textBlock.text : '', targets);
   } catch {
     /* A rejected promise here - a timeout, an overloaded model, a transient 5xx - must not cost
      * the student a complete, otherwise-shippable resume over one bullet's opener. The caller's
@@ -585,11 +585,18 @@ export async function repairBaseResumeBullets(
 /**
  * Merge a repair reply into the spec. Pure, exported for tests.
  *
+ * KEYED BY THE INDEX WE ASSIGNED, NEVER BY THE MODEL'S ECHO. The first shape of this asked the
+ * model to echo org and bullet back and merged on that pair; measured 2026-08-29, the model
+ * sometimes writes the REWRITTEN text into the echoed "bullet" field, which silently strands the
+ * rewrite, burns every pass on an identical no-op, and dies at the fail-closed ATS gate - the
+ * exact stranding the loop exists to prevent. The caller already knows precisely which (org,
+ * bullet) each target names, so the reply only needs to say which target a rewrite belongs to.
+ *
  * Fails toward the original on every malformed shape: unparseable text, a non-array, an entry
- * missing its keys, an empty rewrite, or an (org, bullet) pair that matches nothing all leave the
- * spec untouched, and the caller's re-check turns that into another pass or a shipped warning.
+ * with no valid index, an empty rewrite, or a rewrite that breaks a deterministic rule all leave
+ * that bullet untouched, and the caller's re-check turns that into another pass or a warning.
  */
-export function applyBulletRepairs(spec: ResumeSpec, replyText: string): ResumeSpec {
+export function applyBulletRepairs(spec: ResumeSpec, replyText: string, targets: BulletRepairTarget[]): ResumeSpec {
   const cleaned = replyText.replace(/^```(?:json)?\n?/m, '').replace(/\n?```$/m, '').trim();
   let repairs: unknown;
   try {
@@ -606,24 +613,24 @@ export function applyBulletRepairs(spec: ResumeSpec, replyText: string): ResumeS
   }
   if (!Array.isArray(repairs)) return spec;
 
-  /* Whitespace-normalized on BOTH sides, because the key is a model echo: a trimmed trailing
-   * space or a collapsed double space in the echoed bullet must not silently strand the rewrite.
-   * Anything beyond whitespace drift still misses on purpose - a paraphrased echo is not evidence
-   * the model was looking at this bullet. */
+  /* The reply names targets by index; the ORIGINAL (org, bullet) comes from our own target list.
+   * Whitespace-normalized when matching the spec, so the target text always finds its bullet. */
   const repairKey = (org: string, bullet: string) =>
     `${org.replace(/\s+/g, ' ').trim()}\u0000${bullet.replace(/\s+/g, ' ').trim()}`;
 
   const rewrittenFor = new Map<string, string>();
   for (const item of repairs) {
     if (!item || typeof item !== 'object') continue;
-    const { org, bullet, rewritten } = item as { org?: unknown; bullet?: unknown; rewritten?: unknown };
-    if (typeof org !== 'string' || typeof bullet !== 'string') continue;
+    const { index, rewritten } = item as { index?: unknown; rewritten?: unknown };
+    if (typeof index !== 'number' || !Number.isInteger(index)) continue;
+    const target = targets[index];
+    if (!target) continue;
     if (typeof rewritten !== 'string' || rewritten.trim().length === 0) continue;
-    /* A rewrite is only mergeable when it clears the two deterministic house rules it exists to
-     * fix. The final pass's merge is never model-checked again before the fail-closed ATS gate,
-     * so a rewrite that is itself overlong or weak-opened would be strictly worse than keeping
-     * the original: same gate outcome, one more mutation. Refusing it here can never make the
-     * spec worse than what the reply offered. */
+    /* A rewrite is only mergeable when it clears the deterministic house rules it exists to fix.
+     * The final pass's merge is never model-checked again before the fail-closed ATS gate, so a
+     * rewrite that is itself overlong, weak-opened, or outside the word band would be strictly
+     * worse than keeping the original: same gate outcome, one more mutation. Refusing it here can
+     * never make the spec worse than what the reply offered. */
     const candidate = rewritten.trim();
     const candidateWords = candidate.split(/\s+/).filter(Boolean).length;
     if (
@@ -632,7 +639,7 @@ export function applyBulletRepairs(spec: ResumeSpec, replyText: string): ResumeS
       || candidateWords > BULLET_MAX_WORDS
       || !startsWithStrongVerb(candidate)
     ) continue;
-    rewrittenFor.set(repairKey(org, bullet), candidate);
+    rewrittenFor.set(repairKey(target.org, target.bullet), candidate);
   }
   if (rewrittenFor.size === 0) return spec;
 

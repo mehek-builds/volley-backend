@@ -245,98 +245,83 @@ describe('base resume priority selection', () => {
 
 describe('applyBulletRepairs', () => {
   const spec = parseSpecText(JSON.stringify(SPEC));
+  const target = (org: string, bullet: string) => ({ org, bullet, reasons: ['opens weak'] });
 
-  test('replaces exactly the matched (org, bullet) pair and nothing else', () => {
-    const reply = JSON.stringify([
-      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: 'Engineered a data pipeline processing 2M rows daily' },
-    ]);
-    const repaired = applyBulletRepairs(spec, reply);
+  test('an index-keyed rewrite replaces exactly the targeted bullet and nothing else', () => {
+    const targets = [target('Acme Labs', 'Built a thing')];
+    const reply = JSON.stringify([{ index: 0, rewritten: 'Engineered a data pipeline processing 2M rows daily' }]);
+    const repaired = applyBulletRepairs(spec, reply, targets);
     assert.equal(repaired.experience[0].bullets[0], 'Engineered a data pipeline processing 2M rows daily');
     assert.equal(repaired.experience[0].bullets[1], 'Shipped it');
     assert.equal(repaired.experience[1].bullets[0], 'Designed a system');
   });
 
-  test('the same bullet text under a different org is not touched', () => {
+  test('the rewrite lands even when the model would have mangled an echo, because no echo is read', () => {
+    const targets = [target('Acme Labs', 'Built a thing')];
     const reply = JSON.stringify([
-      { org: 'Litos', bullet: 'Built a thing', rewritten: 'Should not land anywhere' },
+      { index: 0, org: 'wrong echo', bullet: 'Engineered stuff already', rewritten: 'Engineered a data pipeline processing 2M rows daily' },
     ]);
-    const repaired = applyBulletRepairs(spec, reply);
-    assert.deepEqual(repaired.experience[0].bullets, ['Built a thing', 'Shipped it']);
-    assert.deepEqual(repaired.experience[1].bullets, ['Designed a system']);
+    const repaired = applyBulletRepairs(spec, reply, targets);
+    assert.equal(repaired.experience[0].bullets[0], 'Engineered a data pipeline processing 2M rows daily');
+  });
+
+  test('an out-of-range or missing index is ignored', () => {
+    const targets = [target('Acme Labs', 'Built a thing')];
+    for (const reply of [
+      JSON.stringify([{ index: 5, rewritten: 'Engineered a data pipeline processing 2M rows daily' }]),
+      JSON.stringify([{ rewritten: 'Engineered a data pipeline processing 2M rows daily' }]),
+      JSON.stringify([{ index: 'zero', rewritten: 'Engineered a data pipeline processing 2M rows daily' }]),
+    ]) {
+      assert.deepEqual(applyBulletRepairs(spec, reply, targets), spec);
+    }
   });
 
   test('a fenced reply is unwrapped before parsing', () => {
+    const targets = [target('Litos', 'Designed a system')];
     const reply = '```json\n' + JSON.stringify([
-      { org: 'Litos', bullet: 'Designed a system', rewritten: 'Architected a streaming build system serving three hundred users' },
+      { index: 0, rewritten: 'Architected a streaming build system serving three hundred users' },
     ]) + '\n```';
-    const repaired = applyBulletRepairs(spec, reply);
+    const repaired = applyBulletRepairs(spec, reply, targets);
     assert.equal(repaired.experience[1].bullets[0], 'Architected a streaming build system serving three hundred users');
   });
 
   test('malformed replies leave the spec untouched', () => {
-    for (const reply of ['not json', '{"org":"x"}', '[]', JSON.stringify([{ org: 'Acme Labs' }]), JSON.stringify([{ org: 'Acme Labs', bullet: 'Built a thing', rewritten: '   ' }])]) {
-      assert.deepEqual(applyBulletRepairs(spec, reply), spec);
+    const targets = [target('Acme Labs', 'Built a thing')];
+    for (const reply of ['not json', '{"index":0}', '[]', JSON.stringify([{ index: 0 }]), JSON.stringify([{ index: 0, rewritten: '   ' }])]) {
+      assert.deepEqual(applyBulletRepairs(spec, reply, targets), spec);
     }
   });
 
-  test('the original spec object is never mutated', () => {
-    const before = JSON.stringify(spec);
-    applyBulletRepairs(spec, JSON.stringify([
-      { org: 'Acme Labs', bullet: 'Shipped it', rewritten: 'Delivered the feature to 300 users' },
-    ]));
-    assert.equal(JSON.stringify(spec), before);
-  });
-});
-
-describe('applyBulletRepairs guards', () => {
-  const spec = parseSpecText(JSON.stringify(SPEC));
-
-  test('whitespace drift in the echoed pair still matches', () => {
-    const reply = JSON.stringify([
-      { org: ' Acme  Labs ', bullet: 'Built  a thing ', rewritten: 'Engineered the data ingestion service end to end reliably' },
-    ]);
-    const repaired = applyBulletRepairs(spec, reply);
-    assert.equal(repaired.experience[0].bullets[0], 'Engineered the data ingestion service end to end reliably');
-  });
-
-  test('a rewrite that is itself overlong is refused and the original kept', () => {
-    const reply = JSON.stringify([
-      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: `Engineered ${'x'.repeat(240)}` },
-    ]);
-    assert.equal(applyBulletRepairs(spec, reply), spec);
-  });
-
-  test('a rewrite that opens weak is refused and the original kept', () => {
-    const reply = JSON.stringify([
-      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: 'Assisted with the data pipeline work' },
-    ]);
-    assert.equal(applyBulletRepairs(spec, reply), spec);
+  test('a rewrite that is itself overlong, weak-opened, or outside the word band is refused', () => {
+    const targets = [target('Acme Labs', 'Built a thing')];
+    for (const rewritten of [
+      `Engineered ${'x'.repeat(240)}`,
+      'Assisted with the data pipeline work every day',
+      'Engineered the whole pipeline',
+    ]) {
+      const reply = JSON.stringify([{ index: 0, rewritten }]);
+      assert.equal(applyBulletRepairs(spec, reply, targets), spec);
+    }
   });
 
   test('a reply that changes nothing returns the same spec reference', () => {
-    const reply = JSON.stringify([
-      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: 'Built a thing' },
-    ]);
-    assert.equal(applyBulletRepairs(spec, reply), spec);
-  });
-});
-
-describe('applyBulletRepairs word band', () => {
-  const spec = parseSpecText(JSON.stringify(SPEC));
-
-  test('a rewrite under the minimum word count is refused', () => {
-    const reply = JSON.stringify([
-      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: 'Engineered the whole pipeline' },
-    ]);
-    assert.equal(applyBulletRepairs(spec, reply), spec);
+    const targets = [target('Acme Labs', 'Built a thing')];
+    const reply = JSON.stringify([{ index: 0, rewritten: 'Built a thing' }]);
+    assert.equal(applyBulletRepairs(spec, reply, targets), spec);
   });
 
-  test('a rewrite inside the band lands', () => {
-    const reply = JSON.stringify([
-      { org: 'Acme Labs', bullet: 'Built a thing', rewritten: 'Engineered a data ingestion pipeline processing two million rows daily' },
-    ]);
-    const repaired = applyBulletRepairs(spec, reply);
-    assert.equal(repaired.experience[0].bullets[0], 'Engineered a data ingestion pipeline processing two million rows daily');
+  test('whitespace drift between the target text and the spec still matches', () => {
+    const targets = [target(' Acme  Labs ', 'Built  a thing ')];
+    const reply = JSON.stringify([{ index: 0, rewritten: 'Engineered the data ingestion service end to end reliably' }]);
+    const repaired = applyBulletRepairs(spec, reply, targets);
+    assert.equal(repaired.experience[0].bullets[0], 'Engineered the data ingestion service end to end reliably');
+  });
+
+  test('the original spec object is never mutated', () => {
+    const targets = [target('Acme Labs', 'Shipped it')];
+    const before = JSON.stringify(spec);
+    applyBulletRepairs(spec, JSON.stringify([{ index: 0, rewritten: 'Delivered the feature to three hundred users in production' }]), targets);
+    assert.equal(JSON.stringify(spec), before);
   });
 });
 
