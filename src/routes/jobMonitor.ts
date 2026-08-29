@@ -2141,11 +2141,21 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       sponsorOnly,
       employmentType: facetQuery?.employment_type,
     }));
-    /* FIFTY of each, ranked by how much of the board they actually account for
-       (Mehek, 2026-07-29). The lists used to be 202 companies alphabetically
-       and 120 raw location strings: a dropdown nobody scrolls, opening on "AQR"
-       rather than on the employers most of the board belongs to. */
+    /* FIFTY companies, ranked by how much of the board they actually account for
+       (Mehek, 2026-07-29). Used to be 202 companies alphabetically: a dropdown
+       nobody scrolls, opening on "AQR" rather than on the employers most of the
+       board belongs to. */
     const TOP = 50;
+    /* Cities get a taller list than companies. A single global company can
+       already cover 50 companies' worth of board share, but a real, searched-for
+       city like Dubai (~70 postings once every spelling and every compound
+       "London | Dubai | Singapore" listing is counted correctly - see below)
+       sits well past the 50th slot, behind a long tail of individually smaller
+       US metros. 150 is the smallest round number past where that tail with
+       genuine international demand starts showing up, without opening the list
+       on someone's one-off "Denver, CO - Hybrid" (2026-08-29, Mehek reported
+       Dubai never suggesting despite being on the board). */
+    const TOP_LOCATIONS = 150;
 
     const companies = await db
       .select({ v: monitored_jobs.company_name, n: sql<number>`count(*)::int` })
@@ -2199,7 +2209,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
 
     return applyBoardCacheHeaders(request, reply).send({
       companies: companies.map((r) => r.v).filter(Boolean),
-      locations: rankCities(locationRows, TOP),
+      locations: rankCities(locationRows, TOP_LOCATIONS),
       /* Only present when asked for, so the default response stays byte-identical for the website.
          `rows` is what the board actually holds per employer, which is what a coverage figure has
          to be weighted by: one employer with 300 postings matters 300 times more than one with a
