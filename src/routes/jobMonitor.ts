@@ -2194,7 +2194,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        far down the by-count ordering even when that city has real volume once
        every listing mentioning it is added up. A row cap taken before rankCities
        ever runs throws away exactly the rows a real, less-common city depends on
-       to be counted at all — measured live, this is why Dubai (68 postings) never
+       to be counted at all: measured live, this is why Dubai (68 postings) never
        reached the suggestion list despite being on the board. Safe to leave
        unbounded: distinct `location` values are ~4,200 rows, a few hundred KB
        total, nothing like the per-row description scan that hit the Neon egress
