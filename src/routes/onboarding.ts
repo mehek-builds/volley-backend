@@ -13,6 +13,8 @@ import {
   onboarding_flow_step_acknowledgements,
 } from '../db/schema';
 import { requireAuth } from '../middleware/auth';
+import { cardGateInstant, requiresPaymentMethodFor } from '../lib/cardGate';
+import { CURRENT_ONBOARDING_FLOW_VERSION, onboardingFlowLedger } from '../lib/onboardingFlowLedger';
 import { decryptField } from '../lib/fieldCrypto';
 import { decryptRow, ENCRYPTED_FIELDS } from './applicationProfile';
 import {
@@ -29,7 +31,7 @@ import {
   consentAcceptanceGranted,
 } from '../lib/automationConsent';
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
-import { generated_resumes, monitored_jobs } from '../db/schema';
+import { monitored_jobs } from '../db/schema';
 import { isComposioConfigured } from '../lib/composioConnections';
 import { isUndefinedColumnError, selectApplicationProfileRow, upsertApplicationProfile } from '../lib/applicationFacts';
 import { verificationEmailSource } from '../lib/verificationEmailSource';
@@ -38,14 +40,8 @@ import { requireFeature } from '../lib/entitlements';
 import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { accountSponsorshipAnswer, declarationFromEmployerAnswers } from '../lib/declarationFromEmployerAnswers';
 import { persistProfileWithCountryEligibility } from '../lib/countryEligibilityPersistence';
+import { reviewedSubmitCount } from '../lib/approvedApplicationSubmissions';
 
-/**
- * How many submissions has this student personally approved AND seen reach the employer?
- *
- * This is now profile evidence, not an unlock. `per_application_approval` means the student clicked
- * the final submit themselves, and `submitted` means it actually landed. The value is still returned
- * in onboarding state for transparency, but standing consent no longer waits for a minimum count.
- */
 /**
  * The ONE way either route may turn automatic submission on.
  *
@@ -80,18 +76,6 @@ async function verificationConnectionProblem(
     return { status: 503, error: 'The Litos application inbox is unavailable and email connections are not configured yet' };
   }
   return { status: 409, error: 'Connect Gmail or Outlook, or wait until the Litos application inbox is available' };
-}
-
-async function reviewedSubmitCount(userId: string): Promise<number> {
-  const [row] = await db
-    .select({ n: sql<number>`count(*)::int` })
-    .from(generated_resumes)
-    .where(
-      sql`${generated_resumes.user_id} = ${userId}
-        and ${generated_resumes.spec}->'_review'->>'status' = 'submitted'
-        and ${generated_resumes.spec}->'_review'->'submission_authorization'->>'source' = 'per_application_approval'`,
-    );
-  return row?.n ?? 0;
 }
 
 // GET /onboarding/state - the one call /start needs to decide what to render.
@@ -164,52 +148,25 @@ export const MIGRATION_PENDING_COLUMNS: ReadonlySet<string> = new Set([
  * state every account is in anyway until it does.
  */
 /**
- * The instant the card gate starts applying to newly created accounts, or null.
- *
- * Null -- the unset default, and also what an unparseable value gives -- means no
- * account is gated. See THE CARD GATE in the state handler for why this reads its
- * own env var instead of borrowing the entitlement cutover.
+ * cardGateInstant and requiresPaymentMethodFor now live in lib/cardGate.ts (imported
+ * above), so middleware/auth.ts can enforce the gate server-side (see
+ * accountIsCardGateLocked there) without importing a route file. Re-exported here so
+ * every existing import of them from './onboarding' -- including onboarding.test.ts --
+ * keeps working unchanged.
  */
-export function cardGateInstant(env: NodeJS.ProcessEnv = process.env): number | null {
-  const raw = env.CARD_GATE_FROM?.trim();
-  if (!raw) return null;
-  const value = Date.parse(raw);
-  return Number.isFinite(value) ? value : null;
-}
-
+export { cardGateInstant, requiresPaymentMethodFor };
 /**
- * Whether this account still owes us a card before the dashboard opens.
- *
- * Pure, exported, and separate from the route handler because it is the single
- * sentence that decides whether a student can use the product at all, and a rule
- * that important should be readable and testable without standing up a request.
+ * CURRENT_ONBOARDING_FLOW_VERSION and onboardingFlowLedger live in lib/onboardingFlowLedger.ts
+ * (imported above) purely so this file and its own routes (POST /onboarding/flow/steps and
+ * /onboarding/flow/complete, the version-2 replay walk) do not have to duplicate them. THE CARD GATE
+ * (lib/cardGate.ts) no longer reads this ledger at all -- FINDING #1 (2026-08-29 code review) moved
+ * TIER B2's closure signal off the client-driven acknowledgement ledger onto a server-owned "has this
+ * account actually sent an application" fact (lib/approvedApplicationSubmissions.ts), because nothing
+ * required a client to ever send the acknowledgement that used to close it, and nothing stopped one
+ * from sending it as its literal first call, before building anything. Re-exported here anyway so
+ * every existing import of them from './onboarding' keeps working unchanged.
  */
-export function requiresPaymentMethodFor(
-  user: {
-    billing_provider?: string | null;
-    billing_customer_id?: string | null;
-    created_at?: Date | null;
-  },
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  const from = cardGateInstant(env);
-  if (from === null) return false;
-  /* GUESTS ARE NOT EXEMPT. Mehek's call 2026-08-19, and it reverses the exemption
-     that shipped a few hours earlier in this same file.
-     The exemption was added for a real reason: /billing/checkout refuses a guest
-     outright ("Verify an email before starting checkout"), so a gated guest was
-     redirected to /start, handed the plan screen, and 409ed by the only control on
-     it. But exempting them fixed the brick wall by opening a door instead -- Guest
-     mode is a button on the front of /login, so anyone could walk around the payment
-     gate by using it, which is the opposite of what the gate is for.
-     So the gate applies to everyone and the WAY OUT is what changed: a guest who
-     hits checkout now gets sent to claim an email (components/start/PlanStep.tsx
-     reads the claim_required code), and a claimed account can pay like any other.
-     Guests are gated; they are simply gated one step earlier. */
-  if (!user.created_at || user.created_at.getTime() < from) return false;
-  const paymentMethodOnFile = user.billing_provider === 'stripe' && Boolean(user.billing_customer_id);
-  return !paymentMethodOnFile;
-}
+export { CURRENT_ONBOARDING_FLOW_VERSION, onboardingFlowLedger };
 
 async function selectOnboardingUserRow(userId: string) {
   try {
@@ -244,13 +201,8 @@ type Step =
    this deploys can still acknowledge 'build'. Removing them would turn a harmless late
    acknowledgement into a 400 in the one window where a student is mid-flow. */
 
-/* Bumped to 3 by the roles-first reorder. The bump is what keeps the change off accounts that are
-   already through setup: onboardingFlowLedger only reads runs and acknowledgements AT THIS
-   VERSION, so an account carrying a completed version-2 run starts version 3 with an empty ledger
-   and `replayRequired` false (the column is only ever written false in code and defaults false).
-   Nothing replays unless a migration deliberately sets replay_required, and `onboardingStepFrom`
-   short-circuits on `completed` before it reads a single order-dependent branch. */
-export const CURRENT_ONBOARDING_FLOW_VERSION = 3;
+/* CURRENT_ONBOARDING_FLOW_VERSION lives in lib/onboardingFlowLedger.ts (imported above); see the
+   comment on the re-export below for why lib/cardGate.ts no longer needs it. */
 /* ORDER IS THE RENDER ORDER, and 'focus' leads it now. See onboardingStepFrom for why. */
 const REPLAY_STEPS_WITHOUT_GAPS = ['focus', 'resume', 'impact', 'sponsorship', 'base'] as const;
 
@@ -351,38 +303,6 @@ export function flowAcknowledgementDecision(
     return { accepted: true, alreadyRecorded: true, expected };
   }
   return { accepted: expected === submitted, alreadyRecorded: false, expected };
-}
-
-function isUndefinedTableError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'code' in error && error.code === '42P01';
-}
-
-async function onboardingFlowLedger(userId: string) {
-  try {
-    const [[run], acknowledgements] = await Promise.all([
-      db.select().from(onboarding_flow_runs).where(sql`${onboarding_flow_runs.user_id} = ${userId}
-        and ${onboarding_flow_runs.flow_version} = ${CURRENT_ONBOARDING_FLOW_VERSION}`).limit(1),
-      db.select({ step: onboarding_flow_step_acknowledgements.step })
-        .from(onboarding_flow_step_acknowledgements)
-        .where(sql`${onboarding_flow_step_acknowledgements.user_id} = ${userId}
-          and ${onboarding_flow_step_acknowledgements.flow_version} = ${CURRENT_ONBOARDING_FLOW_VERSION}`),
-    ]);
-    return {
-      available: true as const,
-      /* DELIBERATELY UNREAD, and not a substitute for replayRequired. A version bump leaves every
-         pre-existing account with an empty ledger AT THE NEW VERSION, so this is false for exactly
-         the accounts a bump means to leave alone. Gating on it once served those accounts `done`
-         and then refused to record it, which locked all of them out of the dashboard. Enrolment is
-         replay_required and nothing else. */
-      exists: !!run,
-      completed: run?.completed_at != null,
-      replayRequired: run?.replay_required === true,
-      acknowledged: acknowledgements.map((row) => row.step),
-    };
-  } catch (error) {
-    if (!isUndefinedTableError(error)) throw error;
-    return { available: false as const, exists: false, completed: false, replayRequired: false, acknowledged: [] as string[] };
-  }
 }
 
 /* 'gaps' IS BACK IN THIS UNION, and the reason #116 took it out is the reason this is safe now.

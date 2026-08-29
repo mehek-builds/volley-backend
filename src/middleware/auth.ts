@@ -3,6 +3,7 @@ import { jwtVerify } from 'jose';
 import { db } from '../db/index';
 import { users } from '../db/schema';
 import { eq } from 'drizzle-orm';
+import { accountIsCardGateLocked, cardGateRouteReachable } from '../lib/cardGate';
 
 export interface JWTPayload {
   userId: string;
@@ -37,7 +38,11 @@ export function sessionVersionIsStale(tokenVersion: unknown, storedVersion: numb
 
 /** Why a session either verifies or does not, with no third answer. */
 type SessionOutcome =
-  | { ok: true; payload: JWTPayload }
+  /* cardGateLocked travels separately from JWTPayload on purpose: it is a fact read off the
+     user row at resolution time (see resolveToken), not a claim the token itself carries, and
+     JWTPayload is the shape handed to callers as request.jwtPayload -- routes destructuring it
+     should not have to know the card gate exists. Only requireAuth reads cardGateLocked. */
+  | { ok: true; payload: JWTPayload; cardGateLocked: boolean }
   /** No credential was presented at all. Distinct from a bad one: optionalAuth continues here. */
   | { ok: false; reason: 'anonymous' }
   /** A credential was presented and did not hold up. Never treated as anonymous. */
@@ -108,6 +113,13 @@ async function resolveToken(token: string, secret: string): Promise<SessionOutco
         email: users.email,
         is_guest: users.is_guest,
         guest_expires_at: users.guest_expires_at,
+        // The three columns THE CARD GATE (lib/cardGate.ts) needs. Added to this same indexed
+        // PK read rather than a second query -- resolveToken already runs on every authed
+        // request via the inFlightSessions cache, so a separate lookup would double it.
+        billing_provider: users.billing_provider,
+        billing_customer_id: users.billing_customer_id,
+        created_at: users.created_at,
+        onboarding_completed_at: users.onboarding_completed_at,
       })
       .from(users)
       .where(eq(users.id, userId))
@@ -133,16 +145,63 @@ async function resolveToken(token: string, secret: string): Promise<SessionOutco
         sessionVersion: row[0].session_version,
         authenticatedAt: payload.iat ?? 0,
       },
+      cardGateLocked: accountIsCardGateLocked(row[0]),
     };
   } catch {
     return { ok: false, reason: 'invalid' };
   }
 }
 
+/**
+ * The path this request actually matched, for the card gate's route allowlist.
+ *
+ * By the time a preHandler runs, Fastify has already resolved routing, so
+ * routeOptions.url is the registered template ('/onboarding/state', not
+ * '/onboarding/state?x=1', and not a dynamic segment's literal value). request.url is
+ * the fallback for the rare case routing has not attached it (matches the pattern
+ * lib/submissionCutover.ts's onRequest hook already uses for the same reason).
+ */
+function requestPathForCardGate(request: FastifyRequest): string {
+  return request.routeOptions?.url ?? request.url ?? '/';
+}
+
+/**
+ * THE CARD GATE's shared enforcement point, called from both requireAuth and optionalAuth (for a
+ * caller optionalAuth actually resolved a session for -- see the comment on optionalAuth's own call
+ * site). Sends the 402 itself and reports whether it did, so each caller's own control flow stays a
+ * one-line `if`.
+ */
+async function rejectIfCardGateLocked(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  cardGateLocked: boolean,
+  userId: string,
+): Promise<boolean> {
+  if (!cardGateLocked) return false;
+  if (await cardGateRouteReachable(requestPathForCardGate(request), userId)) return false;
+  reply.status(402).send({
+    error: 'A payment method is required to continue using Litos.',
+    code: 'payment_method_required',
+    onboarding_state_url: '/onboarding/state',
+    billing_checkout_url: '/billing/checkout',
+  });
+  return true;
+}
+
+/**
+ * THE CARD GATE's enforcement point. See lib/cardGate.ts for what "locked" means and what the
+ * three route tiers cover.
+ *
+ * Lives inside requireAuth, not as a separate hook chained after it, so every one of the ~40
+ * route files that already do `preHandler: requireAuth` gets the enforcement for free: no route
+ * file needs to import a second preHandler, and a future route that adds `preHandler: requireAuth`
+ * is gated by default rather than by remembering to opt in.
+ */
 export async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
   const outcome = await resolveSession(request);
   if (outcome.ok) {
     request.jwtPayload = outcome.payload;
+    if (await rejectIfCardGateLocked(request, reply, outcome.cardGateLocked, outcome.payload.userId)) return;
     return;
   }
   if (outcome.reason === 'misconfigured') {
@@ -165,11 +224,22 @@ export async function requireAuth(request: FastifyRequest, reply: FastifyReply) 
  * revoked or forged credential we answer 401 rather than silently downgrading them to anonymous,
  * because a client whose session just died needs to find that out and sign in again, not quietly
  * receive a stranger's view of the page for the next thirty days.
+ *
+ * THE CARD GATE applies here too, for a session that DID resolve. jobMonitor.ts's GET /jobs,
+ * /jobs/grouped, /jobs/facets and /jobs/:id all sit behind optionalAuth rather than requireAuth
+ * specifically so an anonymous visitor can browse the public board, and a code review (2026-08-29)
+ * found that same design meant a locked, signed-in account reading request.jwtPayload.userId off
+ * these routes got real, personalized, resume-ranked job data with zero enforcement -- the exact
+ * bypass requireAuth's own gate exists to close, just reached through a route that does not require
+ * a session instead of one that does. A genuinely anonymous caller (outcome.reason === 'anonymous',
+ * checked below and returned on before this ever runs) is completely unaffected: cardGateLocked is
+ * only ever read off a session this branch already knows resolved.
  */
 export async function optionalAuth(request: FastifyRequest, reply: FastifyReply) {
   const outcome = await resolveSession(request);
   if (outcome.ok) {
     request.jwtPayload = outcome.payload;
+    if (await rejectIfCardGateLocked(request, reply, outcome.cardGateLocked, outcome.payload.userId)) return;
     return;
   }
   if (outcome.reason === 'anonymous') return;
