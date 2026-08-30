@@ -88,8 +88,9 @@ before(async () => {
         description: 'x'.repeat(50),
         apply_url: `https://example.com/${company}/${i}`,
         posting_url: `https://example.com/${company}/${i}`,
-        // Inside JOB_FRESHNESS_DAYS, so boardConditions surfaces it exactly as GET /jobs would.
+        // Recently verified, so boardConditions surfaces it exactly as GET /jobs would.
         posted_at: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        last_seen_at: new Date(),
         is_active: true,
       });
     }
@@ -148,8 +149,8 @@ test('counts describe the same board GET /jobs serves', async () => {
   assert.equal(counted, jobs.json().total, 'grouped count must equal the board total');
 });
 
-test('a posting outside the freshness window is counted by neither', async () => {
-  // The board hides stale postings, so a count that included them would overstate the denominator
+test('a posting outside the verification window is counted by neither', async () => {
+  // The board hides unverified postings, so a count that included them would overstate the denominator
   // and quietly drag measured coverage down for rows no job seeker is shown.
   const { career_page_sources, monitored_jobs } = schema;
   const [source] = await db.select().from(career_page_sources).limit(1);
@@ -162,10 +163,32 @@ test('a posting outside the freshness window is counted by neither', async () =>
     apply_url: 'https://example.com/stale',
     posting_url: 'https://example.com/stale',
     posted_at: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000),
+    last_seen_at: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
     is_active: true,
   });
 
   const res = await app.inject({ method: 'GET', url: '/jobs/facets?counts=true' });
   const names = res.json().company_counts.map((c: { company_name: string }) => c.company_name);
-  assert.ok(!names.includes('Ancient Co'), 'a stale posting must not enter the denominator');
+  assert.ok(!names.includes('Ancient Co'), 'an unverified posting must not enter the denominator');
+});
+
+test('an old posting still counts when its employer feed verified it recently', async () => {
+  const { career_page_sources, monitored_jobs } = schema;
+  const [source] = await db.select().from(career_page_sources).limit(1);
+  await db.insert(monitored_jobs).values({
+    source_id: source.id,
+    external_id: 'old-but-open',
+    company_name: 'Long Running Requisition Co',
+    title: 'Engineer',
+    description: 'A full role description that the employer still publishes on its live careers feed.',
+    apply_url: 'https://example.com/old-but-open',
+    posting_url: 'https://example.com/old-but-open',
+    posted_at: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000),
+    last_seen_at: new Date(),
+    is_active: true,
+  });
+
+  const res = await app.inject({ method: 'GET', url: '/jobs/facets?counts=true' });
+  const names = res.json().company_counts.map((c: { company_name: string }) => c.company_name);
+  assert.ok(names.includes('Long Running Requisition Co'));
 });

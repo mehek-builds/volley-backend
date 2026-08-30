@@ -3,8 +3,8 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
   CLOSED_POSTING_RETENTION_DAYS,
-  PURGE_POSTINGS_OLDER_THAN_DAYS,
-  JOB_FRESHNESS_DAYS,
+  PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS,
+  VERIFIED_ACTIVE_WINDOW_DAYS,
   MINIMUM_SPONSOR_SURFACED_JOBS,
   MONITOR_METRICS_STATEMENT_TIMEOUT_MS,
   TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS,
@@ -24,21 +24,22 @@ import {
   mergeJobSources,
   shouldKeepPostingsOnEmptyFetch,
   targetRoleCoverageMetrics,
+  sponsorshipCountryCodeFor,
 } from './jobMonitor';
 import type { JobSourceInput } from '../lib/jobMonitor';
 import { AUTONOMOUS_PORTAL_FAMILIES, portalCanAutoSubmit } from '../lib/portalSubmission';
 import { hasUsableDescription, POLLABLE_JOB_BOARDS } from '../lib/jobMonitor';
 import { POLL_TIME_BUDGET_MS } from '../lib/jobPollScheduler';
 
-test('the board has independent hundred-thousand posting and ten-thousand grouped-role floors', () => {
+test('the board has independent five-hundred-thousand posting and fifty-thousand grouped-role floors', () => {
   // Pinned as a value, not just a comparison. If someone "fixes" a breach by lowering the number,
   // this test is what makes that show up as a deliberate edit in a diff rather than a quiet tweak.
-  assert.equal(MINIMUM_SURFACED_JOBS, 100_000);
-  assert.equal(MINIMUM_SURFACED_GROUPED_ROLES, 10_000);
+  assert.equal(MINIMUM_SURFACED_JOBS, 500_000);
+  assert.equal(MINIMUM_SURFACED_GROUPED_ROLES, 50_000);
   assert.equal(MINIMUM_SPONSOR_SURFACED_JOBS, 5_000);
-  assert.equal(boardIsBelowFloor(99_999), true);
-  assert.equal(boardIsBelowFloor(100_000), false, 'exactly at the floor is not below it');
-  assert.equal(boardIsBelowFloor(100_001), false);
+  assert.equal(boardIsBelowFloor(499_999), true);
+  assert.equal(boardIsBelowFloor(500_000), false, 'exactly at the floor is not below it');
+  assert.equal(boardIsBelowFloor(500_001), false);
   assert.equal(boardIsBelowFloor(0), true, 'an empty board is the case this exists for');
 });
 
@@ -130,65 +131,55 @@ test('the floor and the autonomy rule are enforced against the same set of porta
   assert.ok(POLLABLE_JOB_BOARDS.length > 0, 'no pollable boards means the floor can never be met');
 });
 
-test('the freshness window is three months', () => {
-  assert.equal(JOB_FRESHNESS_DAYS, 90);
-  /* The floor under the value, not a restatement of it. Hiring is weekday work - Saturday carries
-     143 postings against a weekday 700-3,500 - so any window that does not span whole weeks changes
-     size depending on which days it covers. Fourteen was the smallest number that absorbed that;
-     nothing may take the window back under it without deliberately editing this line. */
-  assert.ok(JOB_FRESHNESS_DAYS >= 14, 'a window under two weeks is resized by the weekend it covers');
+test('current inventory is verified by a recent successful ATS observation', () => {
+  assert.equal(VERIFIED_ACTIVE_WINDOW_DAYS, 7);
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  assert.match(source, /freshnessPredicate[\s\S]{0,300}monitored_jobs\.last_seen_at/);
+  assert.doesNotMatch(source, /freshnessPredicate[\s\S]{0,300}monitored_jobs\.posted_at/);
 });
 
 test('posting and grouped-role warnings are evaluated together', () => {
   assert.equal(REQUIRED_HEADROOM_MULTIPLE, 1.2);
-  assert.equal(REQUIRED_SURFACED_JOBS, 120_000);
-  assert.equal(REQUIRED_SURFACED_GROUPED_ROLES, 11_000);
-  assert.equal(GROUPED_ROLE_ALERT_THRESHOLD, 11_000);
-  assert.equal(groupedRoleAlertTriggered(11_000), false, 'the threshold itself is healthy');
-  assert.equal(groupedRoleAlertTriggered(10_999), true, 'the alert fires before the hard floor');
-  assert.equal(groupedRoleAlertTriggered(10_000), true, 'the hard-floor boundary remains alerted');
-  assert.equal(boardHealth(120_001, 11_001), 'ok');
-  assert.equal(boardHealth(120_000, 11_000), 'ok', 'exactly at both warning lines is healthy');
-  assert.equal(boardHealth(119_999, 11_000), 'low', 'posting headroom warns');
-  assert.equal(boardHealth(120_000, 10_999), 'low', 'grouped-role headroom warns');
-  assert.equal(boardHealth(100_000, 10_000), 'low', 'exactly at both floors is not a breach');
-  assert.equal(boardHealth(99_999, 12_000), 'breached', 'postings can breach independently');
-  assert.equal(boardHealth(120_000, 9_999), 'breached', 'grouped roles can breach independently');
+  assert.equal(REQUIRED_SURFACED_JOBS, 600_000);
+  assert.equal(REQUIRED_SURFACED_GROUPED_ROLES, 55_000);
+  assert.equal(GROUPED_ROLE_ALERT_THRESHOLD, 55_000);
+  assert.equal(groupedRoleAlertTriggered(55_000), false, 'the threshold itself is healthy');
+  assert.equal(groupedRoleAlertTriggered(54_999), true, 'the alert fires before the hard floor');
+  assert.equal(groupedRoleAlertTriggered(50_000), true, 'the hard-floor boundary remains alerted');
+  assert.equal(boardHealth(600_001, 55_001), 'ok');
+  assert.equal(boardHealth(600_000, 55_000), 'ok', 'exactly at both warning lines is healthy');
+  assert.equal(boardHealth(599_999, 55_000), 'low', 'posting headroom warns');
+  assert.equal(boardHealth(600_000, 54_999), 'low', 'grouped-role headroom warns');
+  assert.equal(boardHealth(500_000, 50_000), 'low', 'exactly at both floors is not a breach');
+  assert.equal(boardHealth(499_999, 60_000), 'breached', 'postings can breach independently');
+  assert.equal(boardHealth(600_000, 49_999), 'breached', 'grouped roles can breach independently');
   assert.equal(boardHealth(0, 0), 'breached');
 });
 
 test('supply targets remain above both early warning lines', () => {
-  assert.equal(TARGET_SURFACED_POSTINGS, 125_000);
-  assert.equal(TARGET_SURFACED_GROUPED_ROLES, 12_000);
+  assert.equal(TARGET_SURFACED_POSTINGS, 625_000);
+  assert.equal(TARGET_SURFACED_GROUPED_ROLES, 60_000);
   assert.ok(TARGET_SURFACED_POSTINGS > REQUIRED_SURFACED_JOBS);
   assert.ok(TARGET_SURFACED_GROUPED_ROLES > REQUIRED_SURFACED_GROUPED_ROLES);
-  assert.equal(inventoryTargetMet(125_000, 12_000), true, 'exactly at both targets passes');
-  assert.equal(inventoryTargetMet(124_999, 12_000), false, 'posting target is independent');
-  assert.equal(inventoryTargetMet(125_000, 11_999), false, 'grouped-role target is independent');
+  assert.equal(inventoryTargetMet(625_000, 60_000), true, 'exactly at both targets passes');
+  assert.equal(inventoryTargetMet(624_999, 60_000), false, 'posting target is independent');
+  assert.equal(inventoryTargetMet(625_000, 59_999), false, 'grouped-role target is independent');
 });
 
 test('a thin board warns without failing the run, so the 5xx keeps meaning "broken now"', () => {
   // Encoded as a property of the two predicates rather than of the route: 'low' must never satisfy
   // boardIsBelowFloor, or the early warning would page someone and the real breach signal would be
   // trained away.
-  for (const n of [10_999, 10_500, 10_000]) {
-    assert.equal(boardHealth(120_000, n), 'low', String(n));
+  for (const n of [54_999, 52_000, 50_000]) {
+    assert.equal(boardHealth(600_000, n), 'low', String(n));
     assert.ok(n >= MINIMUM_SURFACED_GROUPED_ROLES, `${n} must warn, not 5xx`);
   }
 });
 
-test('a board whose postings are all stale is NOT mistaken for a board that returned nothing', () => {
-  // The subtle one. The ingest filter drops postings outside the window, so it is tempting to feed
-  // the filtered count to the empty-response guard. That would make "the API returned nothing" and
-  // "the API returned nothing FRESH" indistinguishable, and the run would refuse to deactivate
-  // postings that genuinely aged out - the board would then keep showing them forever.
-  // Only the first of those is a fault, so the guard must key off the RAW fetch count.
-  const rawFetched = 400;   // the board answered with 400 postings...
-  const freshOfThem = 0;    // ...none from the last 14 days
-  assert.equal(shouldKeepPostingsOnEmptyFetch(rawFetched, 600), false,
-    'a board that answered with postings must still be swept, even if none are fresh');
-  assert.equal(shouldKeepPostingsOnEmptyFetch(freshOfThem, 600), true,
-    'and a genuinely empty answer must still be protected');
+test('an old publication still counts when the employer live feed returns it', () => {
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  assert.doesNotMatch(source, /const cutoff = new Date/);
+  assert.doesNotMatch(source, /job\.posted_at\s*>=/);
 });
 
 test('a board whose postings are all placeholders is NOT mistaken for a board that returned nothing', () => {
@@ -217,19 +208,17 @@ test('closed postings leave the product immediately, and the row lingers only br
   assert.equal(CLOSED_POSTING_RETENTION_DAYS, 2);
   assert.ok(CLOSED_POSTING_RETENTION_DAYS > 0,
     'zero would delete the evidence on the same run that created it');
-  assert.ok(CLOSED_POSTING_RETENTION_DAYS < JOB_FRESHNESS_DAYS,
-    'a closed posting must not outlive the window it could have been shown in');
+  assert.ok(CLOSED_POSTING_RETENTION_DAYS < VERIFIED_ACTIVE_WINDOW_DAYS,
+    'a closed posting must not outlive the verification window');
 });
 
-test('the purge keeps a full window of slack, so it cannot fight the poller', () => {
-  // Reads the constant the purge query actually uses. An earlier version of this test recomputed
-  // JOB_FRESHNESS_DAYS * 2 locally, which meant changing the query to purge at the boundary kept the
-  // test green - it was asserting its own arithmetic rather than the code's.
-  assert.ok(PURGE_POSTINGS_OLDER_THAN_DAYS > JOB_FRESHNESS_DAYS,
+test('the purge keeps a full verification window of slack, so it cannot fight the poller', () => {
+  // Reads the constant the purge query actually uses. Recomputing the value locally would let a
+  // boundary regression stay green because the test would only assert its own arithmetic.
+  assert.ok(PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS > VERIFIED_ACTIVE_WINDOW_DAYS,
     'purging at or inside the window churns rows the poller keeps restoring');
-  // 180, because the slack is a full window and the window is now 90. This is the storage cost of
-  // the longer board window, pinned as a number so it is noticed rather than inferred.
-  assert.equal(PURGE_POSTINGS_OLDER_THAN_DAYS, 180);
+  // Fourteen days gives a complete seven-day verification cycle of slack.
+  assert.equal(PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS, 14);
 });
 
 test('the internship commitment is pinned at 2,000 and is not yet a 5xx', async () => {
@@ -273,34 +262,23 @@ test('internship supply is never grown by loosening what counts as an internship
   assert.equal(resolveEmploymentType('Software Engineering Co-Op'), 'Internship');
 });
 
-test('internships get a window twice the board\'s, and the purge honours it', async () => {
-  const {
-    INTERNSHIP_FRESHNESS_DAYS,
-    PURGE_INTERNSHIPS_OLDER_THAN_DAYS,
-    JOB_FRESHNESS_DAYS: boardWindow,
-  } = await import('./jobMonitor');
-  assert.equal(INTERNSHIP_FRESHNESS_DAYS, 180);
-  /* STRICTLY longer, which is the whole reason the branch exists. It briefly was not: the board
-     window moved 14 -> 90 on 2026-08-26 while this still read 90, and for those minutes the branch
-     admitted nothing the general one did not. 180 restored the gap. If a later change makes these
-     equal again, this line should fail rather than quietly pass - an inert branch reads like a rule
-     that is being enforced. */
-  assert.ok(INTERNSHIP_FRESHNESS_DAYS > boardWindow, 'the whole point is that it is longer');
-
-  /* The purge must keep a full internship window of slack, exactly as the board window does.
-     Purging internships on the BOARD's schedule would delete the row nightly and re-fetch it each
-     morning, so the 90 would be true in the read path and false in production. */
-  assert.equal(PURGE_INTERNSHIPS_OLDER_THAN_DAYS, INTERNSHIP_FRESHNESS_DAYS * 2);
-
-  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
-  /* Enforced in all THREE places or it is enforced in none: the read predicate, the ingest gate,
-     and the purge. An internship the poll refuses to store cannot be shown by any read window. */
-  assert.ok(/freshnessPredicate[\s\S]{0,600}INTERNSHIP_FRESHNESS_DAYS/.test(source), 'read path');
-  assert.ok(/internshipCutoff/.test(source), 'ingest gate');
-  assert.ok(/PURGE_INTERNSHIPS_OLDER_THAN_DAYS/.test(source), 'purge');
-  /* Untyped postings are the majority of the board (Greenhouse states no type) and `ne` does not
-     match NULL, so a two-branch purge would leave every untyped row immortal. */
-  assert.ok(/isNull\(monitored_jobs\.employment_type\)/.test(source), 'the NULL branch of the purge');
+test('country-aware sponsorship evidence names the jurisdiction', () => {
+  assert.equal(sponsorshipCountryCodeFor({
+    sponsorship_status: 'offers',
+    employer_sponsors: false,
+    raw_json: { portal_country: 'Germany' },
+    location: 'Berlin',
+  }), 'DE');
+  assert.equal(sponsorshipCountryCodeFor({
+    sponsorship_status: 'unstated',
+    employer_sponsors: true,
+    location: 'New York, NY',
+  }), 'US');
+  assert.equal(sponsorshipCountryCodeFor({
+    sponsorship_status: 'refuses',
+    employer_sponsors: true,
+    location: 'New York, NY',
+  }), null);
 });
 
 test('employment type is filterable, and an unstated type is not swept into Full-time', async () => {
