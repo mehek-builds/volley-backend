@@ -24,6 +24,7 @@ const previousEnv = {
   DATABASE_URL: process.env.DATABASE_URL,
   ENCRYPTION_KEY: process.env.ENCRYPTION_KEY,
   JWT_SIGNING_SECRET: process.env.JWT_SIGNING_SECRET,
+  OBJECT_STORAGE_PUBLIC_BASE_URL: process.env.OBJECT_STORAGE_PUBLIC_BASE_URL,
 };
 
 let socketDir: string;
@@ -42,6 +43,7 @@ let buildJobCertificationFingerprint:
 before(async () => {
   process.env.ENCRYPTION_KEY = 'certified-inventory-test-key';
   process.env.JWT_SIGNING_SECRET = 'certified-inventory-test-secret';
+  process.env.OBJECT_STORAGE_PUBLIC_BASE_URL = 'https://api.trylitos.com';
 
   socketDir = mkdtempSync(join(tmpdir(), 'litos-certified-inventory-'));
   database = await PGlite.create();
@@ -260,7 +262,7 @@ test('a discovery-only Rippling source reaches current-drain certification only 
       headers: { 'content-type': 'text/html; charset=utf-8' },
     });
   }, (asset) => persistDurableAtsLogo(asset, async (pathname) => ({
-    url: `https://litos.public.blob.vercel-storage.com/${pathname}`,
+    url: `https://api.trylitos.com/storage/logo/rippling/utility/${pathname.split('/').at(-1)}`,
   })));
   assert.equal(branding.verified, true);
   if (!branding.verified) return;

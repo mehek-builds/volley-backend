@@ -138,14 +138,16 @@ async function seedAttachableWorld(overrides: {
         "logo_verification_status", "logo_verification_method", "logo_verified_at")
      values ($1, 'Verkada', $2, 'verkada', 'https://job-boards.greenhouse.io/verkada', $3,
              'Verkada', false, 'https://assets.example/verkada-logo.png',
-             'verified', 'test_fixture', now())`,
+             'verified', 'first_party_ats_employer_logo', now())`,
     [SOURCE, overrides.atsName ?? 'greenhouse', overrides.sourceEnabled !== false],
   );
   await database.query(
     `insert into "monitored_jobs"
-       ("id", "source_id", "external_id", "company_name", "title", "description", "ingest_eligible", "apply_url", "posting_url", "is_active")
+       ("id", "source_id", "external_id", "company_name", "title", "description", "ingest_eligible",
+        "apply_url", "posting_url", "last_seen_at", "is_active")
      values ($1, $2, 'gh-1', 'Verkada', 'Backend Software Engineering Intern 2027', $3,
-             true, 'https://job-boards.greenhouse.io/verkada/jobs/1', 'https://job-boards.greenhouse.io/verkada/jobs/1', $4)`,
+             true, 'https://job-boards.greenhouse.io/verkada/jobs/1',
+             'https://job-boards.greenhouse.io/verkada/jobs/1', now(), $4)`,
     [JOB, SOURCE, DESCRIPTION, overrides.jobActive !== false],
   );
 }
