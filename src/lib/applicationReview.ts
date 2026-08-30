@@ -650,7 +650,19 @@ export function mergeSubmittedApplicationReviewQuestions(
       confirmed: _confirmed,
       ...submittedWithoutProvenance
     } = question;
-    merged.push(submittedWithoutProvenance);
+    /* A generated onboarding packet starts with an empty question list. Its first application-
+       scoped save therefore lands in this append branch, not the stored-question branch above.
+       An explicit per-question confirmation is still the applicant's own statement, and must
+       mint the same round-bound provenance here or the next resolver refresh erases the answer.
+       Unflagged prefilled values remain unclaimed, which is what keeps a whole visible packet from
+       becoming a blanket EEO or work-authorization declaration. */
+    const appendedAnswer = question.answer.trim();
+    merged.push({
+      ...submittedWithoutProvenance,
+      ...(questionsReviewedAt && appendedAnswer && question.confirmed === true
+        ? { answer_source: 'applicant_review' as const, answer_reviewed_at: questionsReviewedAt }
+        : {}),
+    });
   }
   return normalizeApplicationReviewQuestions(merged);
 }

@@ -30,6 +30,10 @@ test('the pre-script scan reads the form and does not touch it', () => {
   assert.ok(actions.some((action) => action.label?.startsWith('options:')));
 });
 
+test('the authenticated response containing saved values is never cacheable', () => {
+  assert.match(ROUTE, /reply\.header\('Cache-Control', 'private, no-store'\)/);
+});
+
 test('the read-only scan is a fraction of the submission-time discovery pass', () => {
   const prescript = buildManagedPrescriptActions('greenhouse');
   // buildManagedDiscoveryActions trims itself to a 120-action ceiling and lands near it, because it
@@ -154,10 +158,11 @@ test('a missing table degrades to "nothing cached" rather than a 500', () => {
   assert.ok(missingRelation >= 2, 'both the read and the write must tolerate a missing table');
 });
 
-test('the response lists only the questions that need her, and counts the rest', () => {
+test('the response lists only the questions that need her, and exposes review evidence for the rest', () => {
   const response = ROUTE.slice(ROUTE.indexOf('function prescriptResponse('));
   assert.match(response, /ask: resolution\.ask\.map/);
-  assert.match(response, /already_answered: resolution\.questions\.filter/);
+  assert.match(response, /filled_answers: filledAnswers/);
+  assert.match(response, /already_answered: filledAnswers\.length/);
   // The answer travelling to the client for an ask is either blank or something she typed herself.
   // Nothing on this endpoint drafts, and nothing infers.
   assert.doesNotMatch(ROUTE, /draftApplicationAnswer/);

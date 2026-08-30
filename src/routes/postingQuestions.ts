@@ -40,6 +40,7 @@ import {
   postingQuestionInventoryStatus,
   prescriptAskExplanation,
   readStoredPostingQuestionInventory,
+  reviewablePrescriptAnswers,
   resolvePrescript,
   storedPostingQuestionInventory,
   type PostingQuestion,
@@ -259,6 +260,9 @@ export async function scanPostingQuestions(
 export async function postingQuestionsRoutes(fastify: FastifyInstance) {
   fastify.get('/postings/:jobId/questions', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
+    /* This response now carries exact saved form values. It belongs only to this signed-in
+       applicant and must not survive in a shared or browser HTTP cache. */
+    reply.header('Cache-Control', 'private, no-store');
 
     let params: z.infer<typeof paramsSchema>;
     try {
@@ -342,6 +346,7 @@ export function prescriptResponse(
     ...metadataBlockers,
     ...resolution.metadata_blockers,
   ]);
+  const filledAnswers = reviewablePrescriptAnswers(resolution);
   return {
     job_id: jobId,
     company: target.company,
@@ -370,8 +375,9 @@ export function prescriptResponse(
       reason: item.reason,
       explanation: item.reason ? prescriptAskExplanation(item.reason, item.label) : undefined,
     })),
-    /* What she does NOT have to do, as a number rather than a list. It is the honest counterweight
-     * to the ask list and the thing that makes a four-question screen read as progress. */
-    already_answered: resolution.questions.filter((item) => !item.ask && item.answer.trim()).length,
+    /* The short question screen still renders only `ask`. Review receives the exact evidence
+     * behind this count so an applicant can inspect every nonblank value before a real send. */
+    filled_answers: filledAnswers,
+    already_answered: filledAnswers.length,
   };
 }

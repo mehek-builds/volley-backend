@@ -10,11 +10,14 @@ import {
   pending_premium_actions,
   pricing_offers,
   user_contact_unlocks,
+  users,
 } from '../db/schema';
 import { FEATURE_KEYS, getEntitlementSnapshot } from '../lib/entitlements';
-import { publicBillingPlans } from '../lib/billingCatalog';
+import { publicBillingPlans, stripePriceIdForPlan } from '../lib/billingCatalog';
+import { billingCheckoutTerms, type BillingCheckoutAccountFacts } from '../lib/billingCheckoutTerms';
+import { addVary } from '../lib/boardCacheHeaders';
 import { packetAuditSha256 } from '../lib/packetAudit';
-import { requireAuth } from '../middleware/auth';
+import { optionalAuth, requireAuth } from '../middleware/auth';
 
 const offerParams = z.object({ id: z.string().uuid() });
 const actionParams = z.object({ nonce: z.string().min(20).max(200) });
@@ -119,12 +122,57 @@ function publicOfferStatus(row: typeof pricing_offers.$inferSelect): 'creating' 
 }
 
 export async function billingV2Routes(fastify: FastifyInstance) {
-  fastify.get('/billing/plans', async (request, reply) => {
-    const personalized = Boolean(request.headers.authorization);
+  fastify.get('/billing/plans', { preHandler: optionalAuth }, async (request, reply) => {
+    const catalog = publicBillingPlans();
+    const identity = request.jwtPayload;
+    let account: BillingCheckoutAccountFacts = {
+      authenticated: false,
+      is_guest: false,
+    };
+    if (identity) {
+      const [snapshot, accountRows] = await Promise.all([
+        getEntitlementSnapshot(identity.userId),
+        db.select({
+          billing_provider: users.billing_provider,
+          billing_customer_id: users.billing_customer_id,
+          billing_status: users.billing_status,
+          trial_started_at: users.trial_started_at,
+          trial_ends_at: users.trial_ends_at,
+        }).from(users).where(eq(users.id, identity.userId)).limit(1),
+      ]);
+      const row = accountRows[0];
+      account = {
+        authenticated: true,
+        is_guest: identity.isGuest,
+        access_class: snapshot.access_class,
+        subscription_status: snapshot.subscription?.status ?? null,
+        billing_provider: snapshot.subscription?.provider ?? row?.billing_provider ?? null,
+        billing_customer_id: row?.billing_customer_id ?? null,
+        billing_status: snapshot.subscription?.status ?? row?.billing_status ?? null,
+        trial_started_at: row?.trial_started_at ?? null,
+        trial_ends_at: row?.trial_ends_at ?? null,
+      };
+    }
+    const personalized = Boolean(identity);
+    /* CORS already varies by Origin. Append rather than replace it, because the anonymous response
+       is public and must never be reused across either origin or authorization boundaries. */
+    addVary(reply, 'Authorization');
     return reply
       .header('Cache-Control', personalized ? 'private, no-store' : 'public, max-age=300')
       .status(200)
-      .send(publicBillingPlans());
+      .send({
+        ...catalog,
+        plans: catalog.plans.map((plan) => ({
+          ...plan,
+          checkout_terms: billingCheckoutTerms({
+            plan,
+            provider_price_id: stripePriceIdForPlan(plan.id),
+            account,
+            checkout_available: catalog.checkout_available,
+            automatic_tax_enabled: process.env.STRIPE_AUTOMATIC_TAX_ENABLED === 'true',
+          }),
+        })),
+      });
   });
 
   fastify.get('/billing/state', { preHandler: requireAuth }, async (request: FastifyRequest, reply) => {
