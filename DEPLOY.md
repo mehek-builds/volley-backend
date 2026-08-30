@@ -1,4 +1,8 @@
-# Deploying the Litos backend to Vercel
+# Deploying the Litos backend
+
+The active production migration targets Railway. The Vercel instructions below remain only for
+rollback reference during cutover. Use the Railway verified-job inventory cutover section for the
+current API, worker, object storage, and scheduler configuration.
 
 The app is a Fastify server wrapped as a single Vercel serverless function
 (`api/index.ts`); `vercel.json` rewrites every path to it and raises the function
@@ -60,6 +64,7 @@ Set these for Production (and Preview if you want):
 | `JWT_SIGNING_SECRET` | any 32+ char random string |
 | `GOOGLE_CLIENT_ID` | Google OAuth web client ID, must match the website's `NEXT_PUBLIC_GOOGLE_CLIENT_ID` |
 | `ENCRYPTION_KEY` | any 32+ char random string, encrypts `application_profile` columns at rest |
+| `ENCRYPTION_KEY_NEXT` | temporary rotation target only; new profile writes use it and reads accept both keys until the guarded rekey pass completes |
 | `BLOB_READ_WRITE_TOKEN` | Vercel Storage tab -> Create -> Blob; stores generated resume files |
 | `ANTHROPIC_API_KEY` | your Anthropic key |
 | `HUNTER_API_KEY` | your Hunter key |
@@ -97,6 +102,24 @@ Set these for Production (and Preview if you want):
 | `UPSTASH_REDIS_REST_URL` | optional, turns on the ranking cache's shared tier; see below |
 | `UPSTASH_REDIS_REST_TOKEN` | optional, pairs with the URL above |
 | `NODE_ENV` | `production` |
+
+### Guarded encryption-key transition
+
+Never replace `ENCRYPTION_KEY` directly while encrypted profile values exist. Use one transition
+release that keeps the current `ENCRYPTION_KEY`, adds a distinct `ENCRYPTION_KEY_NEXT`, and keeps
+`INTERNAL_CRON_SECRET` configured. That release writes new profile envelopes with the next key and
+reads envelopes written by either key.
+
+Invoke `POST /internal/encryption-rekey` once with `Authorization: Bearer <INTERNAL_CRON_SECRET>`.
+The route locks every `application_profile` row in one database transaction, verifies that every
+authenticated envelope can be decrypted, rewrites it with the next key, verifies each rewrite with
+that key, and commits only if the entire pass succeeds. Its response contains counts only. It never
+returns protected values.
+
+The expected response must match a fresh database inventory. Then deploy the destination with the
+next value promoted to `ENCRYPTION_KEY` and with `ENCRYPTION_KEY_NEXT` removed. Verify protected
+profile reads before retiring the transition deployment. A failure or count mismatch means the
+transaction must be treated as unverified and the current key retained.
 
 ### Submission ledger cutover fence
 
@@ -279,7 +302,9 @@ Use this order for the Railway migration:
    the workflow's manual fallback.
 5. Run `npm run db:job-logo-evidence:finalize`.
 6. Set the Railway worker service start command to `npm run worker:job-monitor` and scale it to
-   exactly one replica. Set the API service start command to `node dist/index.js`.
+   exactly one replica. Set the API service start command to `node dist/index.js` and its health
+   check path to `/health`. The shared `railway.json` intentionally declares neither command so the
+   two services cannot inherit the wrong process.
 7. Wait for the worker's `complete_drain` event and verify every certified inventory floor.
 8. Route public traffic to Railway only after the evidence gate is enabled and the floors pass.
 
@@ -310,9 +335,10 @@ evidence. After consecutive timeouts the worker emits `persistent_metrics_timeou
 emits `complete_drain`.
 
 In GitHub, set `INTERNAL_CRON_SECRET` to the same value as Railway and set the `LITOS_API_BASE`
-Actions variable to the Railway API before retiring Vercel. The job-monitor workflow is manual-only;
-the other maintenance workflows still require their own migration before their Vercel ownership is
-removed.
+Actions variable to the Railway API before retiring Vercel. The job-monitor workflow is manual-only.
+Daily maintenance and the dedicated sub-daily workflows call the explicit Railway API target, fail
+closed when that target is absent, and never fall back to the retired Vercel hostname. Vercel owns
+no scheduled jobs after cutover.
 
 Before enabling Google sign-in, add the identity column without touching existing users:
 
