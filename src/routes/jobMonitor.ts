@@ -1956,11 +1956,10 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
           inArray(monitored_jobs.external_id, ids),
         ));
       }
-      /* One statement per posting meant 7,109 round trips for a full sweep and
-         a 469s run, against a 300s Vercel ceiling (vercel.json) — the daily
-         cron would have died halfway through the alphabet, leaving every
-         un-reached source's jobs flipped to is_active = false by the sweep
-         above. That failure empties the public board rather than staling it.
+      /* One statement per posting meant 7,109 round trips for a full sweep and a 469s run. A
+         scheduler deadline could stop halfway through the alphabet, leaving every unreached
+         source's jobs flipped to is_active = false by the sweep above. That failure empties the
+         public board rather than staling it.
          Chunked so a single board the size of Databricks still fits well
          inside Postgres's 65,535-parameter cap: 21 columns x 200 rows. */
       for (let index = 0; index < ingestable.length; index += UPSERT_CHUNK) {
