@@ -19,6 +19,15 @@ export type PutObjectOptions = {
   addRandomSuffix?: boolean;
 };
 
+const PUBLIC_LOGO_KEY_RE = /^company-logos\/(rippling)\/([a-z0-9][a-z0-9._-]{0,199})\/([a-f0-9]{64})\.(png|jpg|gif|webp)$/;
+const PUBLIC_LOGO_CONTENT_TYPES = new Map([
+  ['png', 'image/png'],
+  ['jpg', 'image/jpeg'],
+  ['gif', 'image/gif'],
+  ['webp', 'image/webp'],
+]);
+const PUBLIC_LOGO_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+
 function railwayConfigured(): boolean {
   return Boolean(
     (process.env.OBJECT_STORAGE_BUCKET?.trim() || process.env.BUCKET?.trim())
@@ -113,6 +122,50 @@ function publicBaseUrl(): string {
 
 export function objectReadUrl(objectKey: string): string {
   return `${publicBaseUrl()}/storage/object?t=${encodeURIComponent(mintObjectReadToken(objectKey))}`;
+}
+
+export function publicLogoObjectUrl(objectKey: string): string {
+  const match = PUBLIC_LOGO_KEY_RE.exec(objectKey);
+  if (!match) throw new Error('Invalid public logo object key');
+  const [, providerName, tenant, digest, extension] = match;
+  return `${publicBaseUrl()}/storage/logo/${providerName}/${encodeURIComponent(tenant)}/${digest}.${extension}`;
+}
+
+export function publicLogoObjectKey(input: {
+  provider?: string;
+  tenant?: string;
+  file?: string;
+}): string | null {
+  const providerName = input.provider ?? '';
+  const tenant = input.tenant ?? '';
+  const file = input.file ?? '';
+  const candidate = `company-logos/${providerName}/${tenant}/${file}`;
+  return PUBLIC_LOGO_KEY_RE.test(candidate) ? candidate : null;
+}
+
+export function publicLogoContentType(objectKey: string): string | null {
+  const match = PUBLIC_LOGO_KEY_RE.exec(objectKey);
+  return match ? PUBLIC_LOGO_CONTENT_TYPES.get(match[4]) ?? null : null;
+}
+
+export async function putPublicLogoObject(
+  objectKey: string,
+  body: Buffer,
+  contentType: string,
+): Promise<{ url: string; pathname: string }> {
+  if (provider() !== 'railway') throw new Error('Railway object storage is required for public logos');
+  const expectedContentType = publicLogoContentType(objectKey);
+  if (!expectedContentType || expectedContentType !== contentType) {
+    throw new Error('Invalid public logo object');
+  }
+  await client().send(new PutObjectCommand({
+    Bucket: bucket(),
+    Key: objectKey,
+    Body: body,
+    ContentType: contentType,
+    CacheControl: PUBLIC_LOGO_CACHE_CONTROL,
+  }));
+  return { url: publicLogoObjectUrl(objectKey), pathname: objectKey };
 }
 
 export async function putObject(

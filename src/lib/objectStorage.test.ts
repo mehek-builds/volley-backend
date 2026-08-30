@@ -5,6 +5,9 @@ import {
   objectReadUrl,
   objectStorageConfigured,
   objectStorageUsesRailway,
+  publicLogoContentType,
+  publicLogoObjectKey,
+  publicLogoObjectUrl,
   readObjectReadToken,
 } from './objectStorage';
 
@@ -81,5 +84,21 @@ test('object tokens refuse traversal-shaped keys', async () => {
     assert.equal(readObjectReadToken(mintObjectReadToken('../private.pdf')), null);
     assert.equal(readObjectReadToken(mintObjectReadToken('users\\private.pdf')), null);
     assert.equal(readObjectReadToken(mintObjectReadToken('/absolute.pdf')), null);
+  });
+});
+
+test('public logo links accept only content-addressed Rippling image keys', async () => {
+  await withStorageEnv({ PUBLIC_API_BASE: 'https://api.trylitos.com' }, () => {
+    const digest = 'a'.repeat(64);
+    const key = `company-logos/rippling/utility/${digest}.webp`;
+    assert.equal(
+      publicLogoObjectUrl(key),
+      `https://api.trylitos.com/storage/logo/rippling/utility/${digest}.webp`,
+    );
+    assert.equal(publicLogoContentType(key), 'image/webp');
+    assert.equal(publicLogoObjectKey({ provider: 'rippling', tenant: 'utility', file: `${digest}.webp` }), key);
+    assert.equal(publicLogoObjectKey({ provider: 'rippling', tenant: '..', file: `${digest}.png` }), null);
+    assert.equal(publicLogoObjectKey({ provider: 'lever', tenant: 'utility', file: `${digest}.png` }), null);
+    assert.throws(() => publicLogoObjectUrl('users/user-1/resume.pdf'), /Invalid public logo object key/);
   });
 });
