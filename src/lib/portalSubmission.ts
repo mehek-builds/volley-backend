@@ -105,6 +105,7 @@ export type PortalFamily =
   | 'personio'
   | 'pinpoint'
   | 'comeet'
+  | 'crelate'
   | 'zoho_recruit'
   | 'bullhorn'
   | 'sap_successfactors'
@@ -628,6 +629,11 @@ export const AUTONOMOUS_PORTAL_FAMILIES = [
   // Recruitee is a single-page form. Its optional invisible hCaptcha is handled by the shared
   // pre-submit challenge probe, and any tenant agreement remains an empty required-field blocker.
   'recruitee',
+  // Crelate's first-party candidate portal is a single-page application form. The captured form
+  // has exact identity and document controls, no CAPTCHA or legal-choice control, and routes a
+  // successful SubmitApplication response to an applicationId-bearing thank-you page. Both receipt
+  // shape and the exact final control are independently pinned below.
+  'crelate',
 ] as const satisfies readonly AutonomousPortalFamily[];
 
 export function isAutonomousPortalFamily(value: string): value is AutonomousPortalFamily {
@@ -1180,6 +1186,55 @@ function receiptReference(body: string): string | undefined {
 }
 
 const RECEIPT_PROOF_RE = /thank you|thanks for your application|application (?:has been )?(?:submitted|received)|we received your application|your application has been successfully submitted|all done![\s\S]{0,160}application|success/i;
+
+/* Crelate receipt proof is structural, not just a broad thank-you match.
+ *
+ * The public bundle routes a successful SubmitApplication response to
+ * /portal/{org}/job/applythanks/{JobCode}?applicationId={ApplicationId}. It renders either
+ * "Thank you for applying to {Title} at {CompanyName}" or the stock fallback "Thank you for
+ * applying to this position." Requiring the first-party host, exact route, one bounded opaque
+ * applicationId and that narrow sentence prevents an unrelated portal thank-you or footer from
+ * being recorded as an employer receipt. */
+const CRELATE_RECEIPT_PATH_RE =
+  /^\/portal\/[a-z0-9][a-z0-9_-]{0,127}\/job\/applythanks\/[a-z0-9]{26}\/?$/i;
+const CRELATE_RECEIPT_TEXT_RE =
+  /\bthank you for applying to (?:this position\b|.{1,300}\bat\b.{1,300})/i;
+
+function isCrelateHostUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return url.protocol === 'https:' && url.hostname.toLowerCase() === 'jobs.crelate.com';
+  } catch {
+    return false;
+  }
+}
+
+function crelateReceiptReference(rawUrl: string): string | undefined {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'jobs.crelate.com'
+      || !CRELATE_RECEIPT_PATH_RE.test(url.pathname) || url.hash) return undefined;
+    const keys = [...url.searchParams.keys()];
+    const values = url.searchParams.getAll('applicationId');
+    if (keys.length !== 1 || keys[0] !== 'applicationId' || values.length !== 1) return undefined;
+    const applicationId = values[0] ?? '';
+    return /^[A-Za-z0-9_-]{8,200}$/.test(applicationId) ? applicationId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function receiptProof(body: string, finalUrl: string): { proven: boolean; referenceId?: string } {
+  if (isCrelateHostUrl(finalUrl)) {
+    const referenceId = crelateReceiptReference(finalUrl);
+    return referenceId && CRELATE_RECEIPT_TEXT_RE.test(body)
+      ? { proven: true, referenceId }
+      : { proven: false };
+  }
+  return RECEIPT_PROOF_RE.test(body)
+    ? { proven: true, referenceId: receiptReference(body) }
+    : { proven: false };
+}
 
 // Bounded auto-wait for every managed action. Playwright defaults to 30s, so a single selector
 // that never matches (e.g. a Greenhouse posting proxied through a branded domain whose form does
@@ -2903,7 +2958,7 @@ function shouldSkipPortalConsentQuestion(family: PortalFamily, questionText: str
       || ROUTINE_APPLICANT_CONSENT_QUESTION.test(questionText)
       || /\b(?:privacy|retain|retention|store|sensitive|race|ethnicity|gender|sex|age|religion|religious|marital|pregnan(?:cy|t)|national\s+origin|genetic\s+(?:data|information)|disab(?:ility|led)|veteran|eeo|equal employment|attest|certif(?:y|ication)|acknowledg(?:e|ment)|captcha)\b/i.test(questionText);
   }
-  if (family !== 'recruitee' && family !== 'teamtailor') return false;
+  if (family !== 'recruitee' && family !== 'teamtailor' && family !== 'crelate') return false;
   return isLegalConsentQuestion(questionText)
     || ROUTINE_APPLICANT_CONSENT_QUESTION.test(questionText)
     || FUTURE_JOBS_RETENTION_CONSENT_RE.test(questionText);
@@ -6371,6 +6426,26 @@ function pushManagedConsentTickActions(actions: ManagedBrowserAction[], plan: Ma
 /** The number of actions pushManagedConsentTickActions reserves out of the managed budget. */
 const CONSENT_TICK_ACTION_COUNT = 3;
 
+/* Crelate candidate portal, captured live 2026-08-30 on Canon Recruiting.
+ *
+ * The public posting and application form share jobs.crelate.com, but only these exact controls
+ * belong to the fixed applicant card. Crelate tenants may append a custom application form below
+ * it, which remains owned by the reviewed-question and required-field paths. Nothing here maps a
+ * checkbox, consent, legal statement, EEO answer, or CAPTCHA control.
+ *
+ * The submit selector includes id, native type, and the exact captured value. Crelate uses a
+ * type=button control whose click calls SubmitApplication, so a generic type=submit selector would
+ * miss it and a generic button selector would expand the click boundary to unrelated portal UI. */
+const CRELATE_FIRST_NAME_SELECTOR = 'input#firstName[name="firstName"]';
+const CRELATE_LAST_NAME_SELECTOR = 'input#lastName[name="lastName"]';
+const CRELATE_EMAIL_SELECTOR = 'input#email[name="email"]';
+const CRELATE_PHONE_SELECTOR = 'input#phone[name="phone"]';
+const CRELATE_RESUME_SELECTOR = 'input#file-uploadResume[name="file-uploadResume"][type="file"]';
+export const CRELATE_FINAL_SUBMIT_SELECTOR =
+  'input#submitButton[type="button"][value="SUBMIT APPLICATION"]';
+const CRELATE_NO_COVER_LETTER_SELECTOR =
+  'input[type="file"][name="noCoverLetterControlCapturedOnCrelate"]';
+
 // Zoho Recruit renders the application inside the public detail route. Field ids are tenant data,
 // while the Candidate API names and the resume attachment marker are stable across the two live
 // tenants inspected. Consent, retention, EEO and CAPTCHA controls are deliberately absent.
@@ -6430,6 +6505,7 @@ const RESUME_UPLOAD_SELECTORS: Record<PortalFamily, string> = {
   personio: PERSONIO_RESUME_SELECTOR,
   pinpoint: PINPOINT_RESUME_SELECTOR,
   comeet: COMEET_RESUME_SELECTOR,
+  crelate: CRELATE_RESUME_SELECTOR,
   zoho_recruit: ZOHO_RECRUIT_RESUME_SELECTOR,
   bullhorn: BULLHORN_RESUME_SELECTOR,
   // The account-walled families reach no application form, so no control on the page in front of a
@@ -6524,6 +6600,7 @@ const COVER_LETTER_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   personio: PERSONIO_COVER_LETTER_SELECTOR,
   pinpoint: PINPOINT_COVER_LETTER_SELECTOR,
   comeet: COMEET_COVER_LETTER_SELECTOR,
+  crelate: CRELATE_NO_COVER_LETTER_SELECTOR,
   zoho_recruit: ZOHO_RECRUIT_COVER_LETTER_SELECTOR,
   bullhorn: BULLHORN_COVER_LETTER_SELECTOR,
   sap_successfactors: 'input[type="file"][name="noFormReachableWithoutSuccessFactorsAccount"]',
@@ -6829,6 +6906,7 @@ const TRANSCRIPT_UPLOAD_SELECTORS: Record<SupportedPortal, string> = {
   personio: TRANSCRIPT_UPLOAD_SELECTOR,
   pinpoint: TRANSCRIPT_UPLOAD_SELECTOR,
   comeet: TRANSCRIPT_UPLOAD_SELECTOR,
+  crelate: NO_TRANSCRIPT_UPLOAD_SELECTOR,
   // SmartRecruiters' capability ends at the captured first page, before any employer question can
   // render, so there is nothing here to attach to even when the posting asks for a transcript later
   // in its wizard.
@@ -7589,6 +7667,16 @@ function pushFixedFieldActions(
     managedUpload(actions, COMEET_COVER_LETTER_SELECTOR, 'cover_letter', packet.coverLetter, packet.coverLetterName);
     // The phone-country combobox, personal note, and tenant questions stay in the generic reviewed
     // question path. Both captured tenants render g-recaptcha-response, so submit stays gated.
+  } else if (family === 'crelate') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    managedFill(actions, CRELATE_FIRST_NAME_SELECTOR, parts[0], 'first_name');
+    managedFill(actions, CRELATE_LAST_NAME_SELECTOR, parts.slice(1).join(' '), 'last_name');
+    managedFill(actions, CRELATE_EMAIL_SELECTOR, packet.email, 'email');
+    managedFill(actions, CRELATE_PHONE_SELECTOR, packet.phone, 'phone');
+    managedUpload(actions, CRELATE_RESUME_SELECTOR, 'resume', packet.resume, packet.resumeName);
+    // The captured stock form has no cover-letter, consent, legal, EEO, honeypot, or CAPTCHA
+    // control. Tenant-added questions continue through the reviewed-question path below, where
+    // consent-shaped questions are skipped and any unfilled required control blocks the final click.
   } else if (family === 'zoho_recruit') {
     const parts = packet.fullName.trim().split(/\s+/);
     managedFill(actions, 'input[name="First_Name"], input[name="firstName"]', parts[0], 'first_name');
@@ -8292,7 +8380,7 @@ export function buildManagedPortalActions(
       // opaque fingerprints, confirms that form, then clicks that exact node inside this action.
       // Only the measured native Workable path may admit bare Send after its DOM scope proof.
       // Every other managed submit and the direct path retain v3.
-      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
+      selector: family === 'crelate' ? CRELATE_FINAL_SUBMIT_SELECTOR : MANAGED_FINAL_SUBMIT_SELECTOR,
       label: 'required_field_confirmation',
       optional: false,
       timeout: MANAGED_FILL_TIMEOUT_MS,
@@ -8371,10 +8459,11 @@ export function readManagedReceipt(result: ManagedBrowserResult): {
   referenceId?: string;
 } {
   const body = result.text.replace(/\s+/g, ' ').trim();
-  if (!RECEIPT_PROOF_RE.test(body)) {
+  const proof = receiptProof(body, result.url);
+  if (!proof.proven) {
     throw new Error('The company never showed a confirmation we could check');
   }
-  return { confirmationText: body.slice(0, 1000), finalUrl: result.url, referenceId: receiptReference(body) };
+  return { confirmationText: body.slice(0, 1000), finalUrl: result.url, referenceId: proof.referenceId };
 }
 
 const HOSTS: Record<PortalFamily, RegExp> = {
@@ -8444,6 +8533,9 @@ const HOSTS: Record<PortalFamily, RegExp> = {
   // on www.comeet.co, and that token cannot be derived from the posting URL. Only the real form URL
   // is supported so the backend never promises a fill it cannot reach.
   comeet: /^www\.comeet\.co$/i,
+  // Exact first-party candidate portal only. Crelate's marketing, product, API, and arbitrary
+  // customer domains must not inherit application capability from the vendor name.
+  crelate: /^jobs\.crelate\.com$/i,
   zoho_recruit: /^[^.]+\.zohorecruit\.(?:com|eu|in)$/i,
   // Bullhorn's OSCP is intentionally self-hosted. Only exact tenants inspected live are claimed;
   // no arbitrary marketing domain becomes a supported ATS because it happens to link to Bullhorn.
@@ -8512,6 +8604,10 @@ const APPLY_PATHS: Partial<Record<PortalFamily, RegExp>> = {
   personio: /^\/job\/\d+(?:\/apply)?\/?$/i,
   pinpoint: /^\/(?:[a-z]{2}\/)?postings\/[0-9a-f-]+(?:\/applications\/new)?\/?$/i,
   comeet: /^\/jobs\/[A-Z0-9.]+\/[A-Z0-9.-]+\/apply\/?$/i,
+  // Crelate job codes are 26-character lowercase alphanumeric opaque ids. A posting may carry one
+  // optional display slug after the id; the application route may not. Portal roots, general
+  // consideration, thank-you pages, API paths, and additional segments stay outside the adapter.
+  crelate: /^\/portal\/[a-z0-9][a-z0-9_-]{0,127}\/job\/(?:[a-z0-9]{26}(?:\/[a-z0-9][a-z0-9_-]{0,199})?|apply\/[a-z0-9]{26})\/?$/i,
   zoho_recruit: /^\/jobs\/Careers\/\d+\/[^/]+\/?$/i,
   bullhorn: /^\/wp-content\/plugins\/bullhorn-oscp\/?$/i,
   sap_successfactors: /^\/(?:sfcareer\/jobreqcareer|career|portalcareer)\/?$/i,
@@ -8534,6 +8630,12 @@ function hasComeetApplicationToken(url: URL): boolean {
 
 function isExactResearchedBatchIdentity(portal: PortalFamily, url: URL): boolean {
   const host = url.hostname.toLowerCase();
+  if (portal === 'crelate') {
+    // The candidate portal has no query or fragment state on either supported route. Reject those
+    // bytes instead of letting a saved redirect or applicationId-bearing receipt masquerade as a
+    // fresh form. portalApplicationUrl emits the clean application route below.
+    return !url.search && !url.hash;
+  }
   if (portal === 'recruitee'
     && /^\/o\/software-engineer-intern(?:\/c\/new)?\/?$/.test(url.pathname)) return false;
   if (portal === 'teamtailor'
@@ -8696,7 +8798,7 @@ export function detectPortal(rawUrl: string): SupportedPortal {
   // Names the platforms it can actually DO something useful on. The account-walled four are
   // recognised by the loop above and explained by portalHandoffReason, but listing them here would
   // read as a promise to fill them, which is the opposite of what recognising them is for.
-  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR, BambooHR, Recruitee, Teamtailor, Personio, Pinpoint and Comeet.');
+  throw new Error('Litos cannot fill in this company\u2019s application page yet. It works on Greenhouse, Lever, Ashby, SmartRecruiters, Workable, JazzHR, Paylocity, Rippling, BreezyHR, BambooHR, Recruitee, Teamtailor, Personio, Pinpoint, Comeet and Crelate.');
 }
 
 /**
@@ -8826,7 +8928,7 @@ export function canonicalSupportedPortalUrl(rawUrl: string | undefined, atsName?
       if (language && /^[a-z]{2}$/i.test(language)) url.searchParams.set('language', language.toLowerCase());
       return url.toString();
     }
-    if (family === 'recruitee' || family === 'teamtailor') {
+    if (family === 'recruitee' || family === 'teamtailor' || family === 'crelate') {
       const url = new URL(portalApplicationUrl(portal, rawUrl));
       url.search = '';
       url.hash = '';
@@ -8909,7 +9011,7 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   // this normalization, an already-canonical form URL received the same suffix a second time.
   const family = portalFamily(portal);
   if (family === 'ashby' || family === 'recruitee' || family === 'teamtailor'
-    || family === 'personio' || family === 'pinpoint') {
+    || family === 'personio' || family === 'pinpoint' || family === 'crelate') {
     url.pathname = url.pathname.replace(/\/$/, '');
   }
   if (family === 'ashby' && !url.pathname.endsWith('/application')) {
@@ -8961,6 +9063,18 @@ export function portalApplicationUrl(portal: SupportedPortal, rawUrl: string): s
   }
   if ((family === 'teamtailor' || family === 'pinpoint') && !url.pathname.endsWith('/applications/new')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/applications/new`;
+  }
+  /* Crelate's JD may carry a single human-readable display slug after the opaque job code. The
+   * application form does not: the client router navigates to /job/apply/{JobCode}. Derive only
+   * from that exact posting shape and remove the display slug rather than carrying untrusted text
+   * into the action URL. An already-canonical form is left byte-stable apart from a trailing slash. */
+  if (family === 'crelate') {
+    const posting = url.pathname.match(
+      /^\/portal\/([a-z0-9][a-z0-9_-]{0,127})\/job\/([a-z0-9]{26})(?:\/[a-z0-9][a-z0-9_-]{0,199})?$/i,
+    );
+    if (posting) url.pathname = `/portal/${posting[1]}/job/apply/${posting[2]}`;
+    url.search = '';
+    url.hash = '';
   }
   if (family === 'jobvite' && !url.pathname.endsWith('/apply')) {
     url.pathname = `${url.pathname.replace(/\/$/, '')}/apply`;
@@ -10004,6 +10118,13 @@ export async function fillPortal(page: Page, portal: SupportedPortal, packet: Su
     await fillFirst(page, ['input[name="websiteUrl"]'], packet.portfolioUrl ?? packet.linkedinUrl ?? packet.githubUrl, 'portfolio', filledFields);
     await uploadFirst(page, [COMEET_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
     await uploadFirst(page, [COMEET_COVER_LETTER_SELECTOR], packet.coverLetter, packet.coverLetterName, 'cover_letter', filledFields, claims);
+  } else if (family === 'crelate') {
+    const parts = packet.fullName.trim().split(/\s+/);
+    await fillFirst(page, [CRELATE_FIRST_NAME_SELECTOR], parts[0], 'first_name', filledFields);
+    await fillFirst(page, [CRELATE_LAST_NAME_SELECTOR], parts.slice(1).join(' '), 'last_name', filledFields);
+    await fillFirst(page, [CRELATE_EMAIL_SELECTOR], packet.email, 'email', filledFields);
+    await fillFirst(page, [CRELATE_PHONE_SELECTOR], packet.phone, 'phone', filledFields);
+    await uploadFirst(page, [CRELATE_RESUME_SELECTOR], packet.resume, packet.resumeName, 'resume', filledFields, claims);
   } else if (family === 'zoho_recruit') {
     const parts = packet.fullName.trim().split(/\s+/);
     await fillFirst(page, ['input[name="First_Name"]', 'input[name="firstName"]'], parts[0], 'first_name', filledFields);
@@ -12319,6 +12440,21 @@ export const COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT = new Function(
   'return (' + COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT_SCRIPT + ')(node);',
 ) as (node: PlaywrightEvaluationTarget) => Promise<CommitRequiredControlsResult>;
 
+/**
+ * Crelate's captured send control is a type=button input, while the page also carries ordinary
+ * portal buttons. Narrow the direct path to the exact id, type and value before it obtains an
+ * element handle. Every other portal retains the semantic candidate set and chooser.
+ */
+function directSubmitCandidateSelector(page: Page): string {
+  try {
+    if (portalFamily(detectPortal(page.url())) === 'crelate') return CRELATE_FINAL_SUBMIT_SELECTOR;
+  } catch {
+    // A receipt page, test double, or unrecognised page cannot widen Crelate because only a URL
+    // positively detected as Crelate reaches its exact selector. Other callers keep v3 behavior.
+  }
+  return SUBMIT_CANDIDATE_SELECTOR;
+}
+
 export async function clickFinalSubmit(page: Page): Promise<void> {
   /* ELEMENT HANDLES, NOT nth(). An index is only meaningful against the DOM that produced it, and
      the captcha probe below sits between the two: it can spend the better part of fifteen seconds
@@ -12336,7 +12472,8 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
      was attempted... check the portal or your email", for a run that never pressed anything. */
   let clicked = false;
   try {
-    handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
+    const candidateSelector = directSubmitCandidateSelector(page);
+    handles = await page.locator(candidateSelector).elementHandles();
     let labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
     let chosen = chooseSubmitControl(labels);
 
@@ -12350,7 +12487,7 @@ export async function clickFinalSubmit(page: Page): Promise<void> {
     if (chosen === null) {
       await page.waitForTimeout(SUBMIT_ENABLE_WAIT_MS);
       await Promise.all(handles.map((handle) => handle.dispose().catch(() => undefined)));
-      handles = await page.locator(SUBMIT_CANDIDATE_SELECTOR).elementHandles();
+      handles = await page.locator(candidateSelector).elementHandles();
       labels = await Promise.all(handles.map((handle) => handle.evaluate(READ_CONTROL_LABEL)));
       chosen = chooseSubmitControl(labels);
     }
@@ -12482,9 +12619,11 @@ export async function readReceipt(page: Page): Promise<{ confirmationText: strin
    * of them. Required to reach SECURITY_CODE_CONFIRM_POLLS before the fail-fast below fires - see
    * that constant for why a single sighting is not enough. */
   let securityCodeStreak = 0;
+  let proof: { proven: boolean; referenceId?: string } = { proven: false };
   for (;;) {
     body = (await page.locator('body').innerText()).replace(/\s+/g, ' ').trim();
-    if (RECEIPT_PROOF_RE.test(body)) break;
+    proof = receiptProof(body, page.url());
+    if (proof.proven) break;
     /* FAIL FAST ON A SECURITY-CODE WALL, RATHER THAN RIDING OUT THE REST OF THE DEADLINE - BUT ONLY
      * ONCE IT HAS HELD FOR SECURITY_CODE_CONFIRM_POLLS IN A ROW.
      *
@@ -12537,5 +12676,5 @@ export async function readReceipt(page: Page): Promise<{ confirmationText: strin
     }
     await page.waitForTimeout(1_000).catch(() => undefined);
   }
-  return { confirmationText: body.slice(0, 1000), finalUrl: page.url(), referenceId: receiptReference(body) };
+  return { confirmationText: body.slice(0, 1000), finalUrl: page.url(), referenceId: proof.referenceId };
 }

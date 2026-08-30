@@ -711,6 +711,7 @@ function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {
     case 'rippling': return `https://ats.rippling.com/${token}/jobs`;
     case 'breezy': return `https://${token}.breezy.hr`;
     case 'recruitee': return `https://${token}.recruitee.com`;
+    case 'crelate': return `https://jobs.crelate.com/portal/${token}`;
   }
 }
 

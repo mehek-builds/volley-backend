@@ -51,6 +51,7 @@ const ALL_PORTAL_FAMILIES = [
   'personio',
   'pinpoint',
   'comeet',
+  'crelate',
   'zoho_recruit',
   'bullhorn',
   'sap_successfactors',
