@@ -8,8 +8,14 @@ import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:
 // rotation only means changing one env var"), and that promise is what made R-021 look safe:
 // scrypt derives the AES key from the secret deterministically, so changing the secret makes every
 // existing row undecryptable. Worse, a lost key did not fail loudly, it put base64 ciphertext into
-// a real job application. Real rotation needs a key-version tag stored per value plus a
-// re-encryption pass. Until that exists, this secret is permanent and losing it is data loss.
+// a real job application.
+//
+// ENCRYPTION_KEY_NEXT is the deliberately narrow transition mechanism. While it is present, new
+// values are written with it and reads accept either it or ENCRYPTION_KEY. That makes a live,
+// transactionally locked re-encryption pass safe: a request waiting behind the lock cannot add a
+// fresh old-key value after the pass. Once every stored envelope is rewritten, the deployment
+// promotes NEXT to ENCRYPTION_KEY and removes NEXT. This is not an invitation to change one env var
+// casually. The database pass and its verification remain mandatory.
 
 // Frozen storage identifier. It predates the Litos brand and participates in
 // key derivation for every encrypted profile value. Renaming it is data loss.
@@ -47,20 +53,46 @@ export class FieldDecryptError extends Error {
 // and plaintext are byte-identical before and after. Verified explicitly that a value encrypted by
 // the old per-call code decrypts under the cache and that both derived keys are .equals().
 //
-// Still keyed on the secret. R-021 established above that ENCRYPTION_KEY is not rotatable on its
-// own, so in practice this can never miss - but a cache that silently serves a key derived from a
-// secret it no longer matches is a bad failure mode to build in on purpose, and the comparison is
-// free.
-let cachedKey: Buffer | null = null;
-let cachedSecret: string | null = null;
+// Still keyed on the secret. The transition deployment can hold two derived keys at once, while a
+// normal deployment holds one. The map prevents either path from silently serving a key derived
+// from a different secret.
+const cachedKeys = new Map<string, Buffer>();
 
-function getKey(): Buffer {
+function configuredPrimarySecret(): string {
   const secret = process.env.ENCRYPTION_KEY;
   if (!secret) throw new Error('ENCRYPTION_KEY not configured');
-  if (cachedKey && cachedSecret === secret) return cachedKey;
-  cachedKey = scryptSync(secret, FIELD_CRYPTO_SALT_ID, 32);
-  cachedSecret = secret;
-  return cachedKey;
+  return secret;
+}
+
+function configuredNextSecret(): string | null {
+  const secret = process.env.ENCRYPTION_KEY_NEXT?.trim();
+  return secret || null;
+}
+
+function keyForSecret(secret: string): Buffer {
+  const cached = cachedKeys.get(secret);
+  if (cached) return cached;
+  const key = scryptSync(secret, FIELD_CRYPTO_SALT_ID, 32);
+  cachedKeys.set(secret, key);
+  return key;
+}
+
+function encryptWithSecret(plaintext: string, secret: string): string {
+  const iv = randomBytes(IV_BYTES);
+  const cipher = createCipheriv('aes-256-gcm', keyForSecret(secret), iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return Buffer.concat([iv, authTag, ciphertext]).toString('base64');
+}
+
+function decryptWithSecret(encoded: string, secret: string): string {
+  const raw = Buffer.from(encoded, 'base64');
+  const iv = raw.subarray(0, IV_BYTES);
+  const authTag = raw.subarray(IV_BYTES, IV_BYTES + TAG_BYTES);
+  const ciphertext = raw.subarray(IV_BYTES + TAG_BYTES);
+  const decipher = createDecipheriv('aes-256-gcm', keyForSecret(secret), iv);
+  decipher.setAuthTag(authTag);
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
 }
 
 // Boot gate (R-021). A missing key is a CONFIG error and must surface at startup, never later as a
@@ -71,7 +103,13 @@ function getKey(): Buffer {
 // not protect prod at all: on Vercel `start()` is skipped and the app is built per-invocation from
 // api/index.ts.
 export function assertEncryptionKeyConfigured(): void {
-  getKey();
+  keyForSecret(configuredPrimarySecret());
+  const next = configuredNextSecret();
+  if (next) keyForSecret(next);
+}
+
+export function encryptionKeyTransitionConfigured(): boolean {
+  return configuredNextSecret() !== null;
 }
 
 // Does this value look like OUR envelope (iv + authTag + ciphertext, base64), rather than a legacy
@@ -96,26 +134,35 @@ export function looksEncrypted(value: string): boolean {
 
 // Format: iv(12) + authTag(16) + ciphertext, all base64.
 export function encryptField(plaintext: string): string {
-  const iv = randomBytes(IV_BYTES);
-  const cipher = createCipheriv('aes-256-gcm', getKey(), iv);
-  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return Buffer.concat([iv, authTag, ciphertext]).toString('base64');
+  return encryptWithSecret(plaintext, configuredNextSecret() ?? configuredPrimarySecret());
 }
 
 // Throws FieldDecryptError when the value will not decrypt under the configured key. Callers must
 // NOT treat that as "legacy plaintext" and pass the value through: gate on looksEncrypted() first,
 // and treat a failure after that as the config error it is.
 export function decryptField(encoded: string): string {
-  const raw = Buffer.from(encoded, 'base64');
-  const iv = raw.subarray(0, IV_BYTES);
-  const authTag = raw.subarray(IV_BYTES, IV_BYTES + TAG_BYTES);
-  const ciphertext = raw.subarray(IV_BYTES + TAG_BYTES);
+  const primary = configuredPrimarySecret();
+  const next = configuredNextSecret();
+  let lastError: unknown;
+  for (const secret of next && next !== primary ? [next, primary] : [primary]) {
+    try {
+      return decryptWithSecret(encoded, secret);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw new FieldDecryptError({ cause: lastError });
+}
+
+/** Rewrite one authenticated envelope with ENCRYPTION_KEY_NEXT, without exposing its plaintext. */
+export function reencryptFieldWithNextKey(encoded: string): string {
+  const next = configuredNextSecret();
+  if (!next) throw new Error('ENCRYPTION_KEY_NEXT not configured');
+  const rewritten = encryptWithSecret(decryptField(encoded), next);
   try {
-    const decipher = createDecipheriv('aes-256-gcm', getKey(), iv);
-    decipher.setAuthTag(authTag);
-    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+    decryptWithSecret(rewritten, next);
   } catch (err) {
     throw new FieldDecryptError({ cause: err });
   }
+  return rewritten;
 }
