@@ -9,6 +9,7 @@ import {
   normalizeAshbyJobs,
   normalizeGreenhouseJobs,
   normalizeLeverJobs,
+  normalizeRecruiteeJobs,
   normalizeWorkableJobs,
   sourceEndpoint,
 } from './jobMonitor';
@@ -552,6 +553,166 @@ test('Workable fetch rejects provider errors and malformed successful payloads',
     ),
     /invalid jobs payload/,
   );
+});
+
+test('normalizes a Recruitee offer, preferring the direct apply link over the careers page', () => {
+  const jobs = normalizeRecruiteeJobs({ offers: [{
+    id: 2713947,
+    title: '(Senior) Consultant SAP TECH PMO (m/w/d)',
+    careers_url: 'https://cbsconsulting.recruitee.com/o/senior-consultant',
+    careers_apply_url: 'https://cbsconsulting.recruitee.com/o/senior-consultant/c/new',
+    city: 'Heidelberg',
+    country: 'Deutschland',
+    country_code: 'DE',
+    department: 'Transformation Management',
+    company_name: 'cbs Corporate Business Solutions GmbH',
+    employment_type_code: 'full_time',
+    remote: false,
+    published_at: '2026-08-20 08:09:56 UTC',
+    description: '<p>Wir suchen dich fuer die Beratung.</p>',
+  }] });
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].external_id, '2713947');
+  assert.equal(jobs[0].apply_url, 'https://cbsconsulting.recruitee.com/o/senior-consultant/c/new');
+  assert.equal(jobs[0].posting_url, 'https://cbsconsulting.recruitee.com/o/senior-consultant');
+  assert.equal(jobs[0].location, 'Heidelberg, Deutschland');
+  assert.equal(jobs[0].portal_country, 'DE');
+  assert.equal(jobs[0].portal_company_name, 'cbs Corporate Business Solutions GmbH');
+  assert.equal(jobs[0].description, 'Wir suchen dich fuer die Beratung.');
+});
+
+test('rejects a Recruitee payload with no offers array', () => {
+  assert.throws(() => normalizeRecruiteeJobs({ error: 'nope' }), /invalid jobs payload/);
+});
+
+test('accepts an explicit empty Recruitee offer collection', () => {
+  assert.deepEqual(normalizeRecruiteeJobs({ offers: [] }), []);
+});
+
+test('fetches and dispatches a Recruitee offers response through the public ingestion function', async () => {
+  let requestedUrl = '';
+  const jobs = await fetchSourceJobs(
+    { ats_name: 'recruitee', board_token: 'cbsconsulting' },
+    async (input) => {
+      requestedUrl = String(input);
+      return new Response(JSON.stringify({ offers: [{
+        id: 1,
+        title: 'Working Student Finance',
+        careers_url: 'https://cbsconsulting.recruitee.com/o/working-student',
+        description: 'Werkstudent Finance role supporting the team with daily reporting tasks and analysis.',
+      }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    },
+  );
+  assert.equal(requestedUrl, 'https://cbsconsulting.recruitee.com/api/offers/');
+  assert.equal(jobs[0]?.external_id, '1');
+});
+
+test('Rippling deduplicates one job repeated per work location and reads the detail endpoint for date and description', async () => {
+  const requestedUrls: string[] = [];
+  const jobs = await fetchSourceJobs(
+    { ats_name: 'rippling', board_token: 'rippling' },
+    async (input) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      if (url.endsWith('/jobs')) {
+        return new Response(JSON.stringify([
+          { uuid: 'job-1', name: 'Account Executive', url: 'https://ats.rippling.com/rippling/jobs/job-1', workLocation: { label: 'New York, NY' } },
+          { uuid: 'job-1', name: 'Account Executive', url: 'https://ats.rippling.com/rippling/jobs/job-1', workLocation: { label: 'Remote (NJ)' } },
+        ]), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        uuid: 'job-1',
+        name: 'Account Executive',
+        url: 'https://ats.rippling.com/rippling/jobs/job-1',
+        workLocations: ['New York, NY', 'Remote (NJ)'],
+        department: { name: 'Sales', base_department: 'Sales' },
+        employmentType: { label: 'SALARIED_FT', id: 'Salaried, full-time' },
+        createdOn: '2023-10-31T10:40:35.194000-07:00',
+        description: {
+          role: `<p>${'Own the full sales cycle for our accountant channel partners. '.repeat(6)}</p>`,
+          company: '<p>About Rippling, repeated on every posting.</p>',
+        },
+      }), { status: 200 });
+    },
+  );
+  // One list request, then exactly one detail request for the deduplicated uuid, not two.
+  assert.equal(requestedUrls.filter((url) => url.includes('/jobs/job-1')).length, 1);
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].location, 'New York, NY | Remote (NJ)');
+  assert.match(jobs[0].description, /Own the full sales cycle/);
+  assert.doesNotMatch(jobs[0].description, /repeated on every posting/, 'role text is preferred over the boilerplate company text');
+  assert.ok(jobs[0].posted_at instanceof Date);
+});
+
+test('Rippling drops a posting whose detail fetch fails, without losing the rest of the board', async () => {
+  const jobs = await fetchSourceJobs(
+    { ats_name: 'rippling', board_token: 'rippling' },
+    async (input) => {
+      const url = String(input);
+      if (url.endsWith('/jobs')) {
+        return new Response(JSON.stringify([
+          { uuid: 'ok', name: 'Kept', url: 'https://ats.rippling.com/rippling/jobs/ok' },
+          { uuid: 'broken', name: 'Dropped', url: 'https://ats.rippling.com/rippling/jobs/broken' },
+        ]), { status: 200 });
+      }
+      if (url.includes('/jobs/broken')) return new Response('server error', { status: 500 });
+      return new Response(JSON.stringify({
+        uuid: 'ok',
+        name: 'Kept',
+        url: 'https://ats.rippling.com/rippling/jobs/ok',
+        description: { role: 'A real role description long enough to be usable on its own merits here.' },
+      }), { status: 200 });
+    },
+  );
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].external_id, 'ok');
+});
+
+test('Breezy reads its list endpoint for structure and the detail page\'s JSON-LD block for description', async () => {
+  const detailHtml = `<!DOCTYPE html><html><head>
+    <script type="application/ld+json">{"@context":"https://schema.org/","@type":"JobPosting","title":"B2C Sales Manager","description":"${'Convert incoming leads into paying clients for our services. '.repeat(4)}"}</script>
+  </head><body></body></html>`;
+  const jobs = await fetchSourceJobs(
+    { ats_name: 'breezy', board_token: 'transparent-hiring' },
+    async (input) => {
+      const url = String(input);
+      if (url.endsWith('/json')) {
+        return new Response(JSON.stringify([{
+          id: 'abc123',
+          name: 'B2C Sales Manager',
+          url: 'https://transparent-hiring.breezy.hr/p/abc123-b2c-sales-manager',
+          published_date: '2026-08-13T12:10:22.640Z',
+          type: { id: 'fullTime', name: 'Full-Time' },
+          location: { name: 'Worldwide', is_remote: true },
+          department: 'Sales',
+        }]), { status: 200 });
+      }
+      return new Response(detailHtml, { status: 200, headers: { 'content-type': 'text/html' } });
+    },
+  );
+  assert.equal(jobs.length, 1);
+  assert.match(jobs[0].description, /Convert incoming leads/);
+  assert.equal(jobs[0].remote, true);
+  assert.equal(jobs[0].employment_type, 'Full-time');
+});
+
+test('Breezy keeps a posting even when its detail page fails to load, just without a description', async () => {
+  const jobs = await fetchSourceJobs(
+    { ats_name: 'breezy', board_token: 'transparent-hiring' },
+    async (input) => {
+      const url = String(input);
+      if (url.endsWith('/json')) {
+        return new Response(JSON.stringify([{
+          id: 'abc123',
+          name: 'Data Engineer',
+          url: 'https://transparent-hiring.breezy.hr/p/abc123-data-engineer',
+        }]), { status: 200 });
+      }
+      return new Response('server error', { status: 500 });
+    },
+  );
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].description, '');
 });
 
 test('a Greenhouse internship is classified through the DECODED description, not raw markup', () => {

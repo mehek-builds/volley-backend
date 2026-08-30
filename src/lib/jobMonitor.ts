@@ -17,14 +17,20 @@ import {
 // choosing it and tailoring a resume to it.
 //
 // To add a board: make the portal genuinely autonomous in portalSubmission.ts first (an adapter that
-// reaches a real receipt), and it becomes available here automatically. 'workable' is eligible today
-// and not yet polled - adding sources for it is pure upside.
+// reaches a real receipt), and it becomes available here automatically.
 // Two different questions, and a source has to satisfy BOTH:
 //   1. Can Litos finish an application on that portal alone?  -> AutonomousPortalFamily
 //   2. Can this module actually poll that portal's boards?     -> needs a fetchSourceJobs branch
-// Workable answers yes to both as of 2026-07-31. Its public account feed is normalized below and
-// its application adapter already reaches a real receipt, so Workable jobs may now be surfaced.
-export const POLLABLE_JOB_BOARDS = ['greenhouse', 'lever', 'ashby', 'workable'] as const satisfies readonly AutonomousPortalFamily[];
+//
+// Rippling, Breezy and Recruitee answered yes to (1) as far back as 2026-07-29/08-19 and sat unpolled
+// for months - a gap the 2026-08-04 audit named explicitly ("Rippling and Breezy are already proven
+// single-step and CAPTCHA-free but have no fetchSourceJobs branch"). Wired 2026-08-29. Rippling and
+// Breezy could not reuse the single-fetch-then-normalize shape the other five share: both publish a
+// list endpoint with no description (Rippling has no date either), so surfacing either one costs one
+// detail request per distinct posting. See fetchRipplingJobs and fetchBreezyJobs.
+export const POLLABLE_JOB_BOARDS = [
+  'greenhouse', 'lever', 'ashby', 'workable', 'rippling', 'breezy', 'recruitee',
+] as const satisfies readonly AutonomousPortalFamily[];
 
 export type SupportedJobBoard = typeof POLLABLE_JOB_BOARDS[number];
 
@@ -624,15 +630,262 @@ export function sourceEndpoint(source: Pick<JobSourceInput, 'ats_name' | 'board_
       return `https://api.ashbyhq.com/posting-api/job-board/${token}?includeCompensation=true`;
     case 'workable':
       return `https://www.workable.com/api/accounts/${token}?details=true`;
+    // The list endpoint only. Rippling and Breezy both need a second, per-posting request for
+    // anything ingestible - see fetchRipplingJobs and fetchBreezyJobs, which call this for the
+    // list URL and never reach the generic single-fetch path below.
+    case 'rippling':
+      return `https://api.rippling.com/platform/api/ats/v1/board/${token}/jobs`;
+    case 'breezy':
+      return `https://${token}.breezy.hr/json`;
+    case 'recruitee':
+      return `https://${token}.recruitee.com/api/offers/`;
     default:
       return assertNever(source.ats_name);
   }
+}
+
+/**
+ * Runs `items` through `fn` with at most `limit` in flight at once.
+ *
+ * Exists for Rippling and Breezy, whose list endpoints carry no usable description and force one
+ * detail request per posting. Reused rather than firing every request at once, which would either
+ * blow past each provider's own rate limiting or eat the whole cron's POLL_TIME_BUDGET_MS on one
+ * oversized board.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    for (let index = next++; index < items.length; index = next++) {
+      results[index] = await fn(items[index]);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+const DETAIL_FETCH_CONCURRENCY = 8;
+/* One oversized board (Rippling's own is 752 rows before de-duplication by posting) must not eat the
+   whole cron's time budget by itself. Sources past the cap keep polling on later runs; a cap this
+   size covers essentially every real board, so it is a backstop rather than a routine truncation. */
+const MAX_DETAIL_FETCHES_PER_SOURCE = 600;
+
+function detailRequestInit(): RequestInit {
+  return { headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' }, signal: AbortSignal.timeout(20_000) };
+}
+
+/**
+ * Rippling's list endpoint (see sourceEndpoint) repeats one job once per work location and carries
+ * neither a create date nor a description - both live only on the per-job detail endpoint
+ * (`.../jobs/{uuid}`), alongside the employer's own employmentType and a `workLocations` array of
+ * plain location strings that REPLACES the list endpoint's per-row `workLocation` object. Verified
+ * live 2026-08-29 against the rippling/rippling board (752 list rows, 372 distinct postings).
+ */
+async function fetchRipplingJobs(
+  source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
+  fetcher: typeof fetch,
+): Promise<NormalizedJob[]> {
+  const listResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
+  if (!listResponse.ok) throw new Error(`rippling board returned HTTP ${listResponse.status}`);
+  const listPayload = await listResponse.json();
+  if (!Array.isArray(listPayload)) throw new Error('Rippling board returned an invalid jobs payload');
+
+  const token = encodeURIComponent(source.board_token.trim());
+  const uuids = [...new Set(
+    listPayload
+      .map((raw) => text((raw as Record<string, unknown>).uuid))
+      .filter((value): value is string => Boolean(value)),
+  )].slice(0, MAX_DETAIL_FETCHES_PER_SOURCE);
+
+  const details = await mapWithConcurrency(uuids, DETAIL_FETCH_CONCURRENCY, async (uuid) => {
+    try {
+      const response = await fetcher(
+        `https://api.rippling.com/platform/api/ats/v1/board/${token}/jobs/${encodeURIComponent(uuid)}`,
+        detailRequestInit(),
+      );
+      return response.ok ? await response.json() : null;
+    } catch {
+      /* One posting's detail request failing (timeout, transient 5xx) costs that posting, not the
+         whole board - the list call already succeeded, so every other row still ingests normally. */
+      return null;
+    }
+  });
+
+  return details.flatMap((raw) => {
+    if (!raw || typeof raw !== 'object') return [];
+    const job = raw as Record<string, unknown>;
+    const id = text(job.uuid);
+    const title = text(job.name);
+    const postingUrl = text(job.url);
+    if (!id || !title || !postingUrl) return [];
+
+    const location = Array.isArray(job.workLocations)
+      ? job.workLocations
+        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+        .join(' | ') || undefined
+      : undefined;
+    const department = job.department as Record<string, unknown> | undefined;
+    const employmentType = job.employmentType as Record<string, unknown> | undefined;
+    /* `role` is the job-specific body; `company` is generic "about us" boilerplate that reads
+       nearly identically across every posting on the same board. Preferring role keeps descriptions
+       distinct and avoids feeding the title-echo/placeholder guards a paragraph that says nothing
+       about this particular job. Only fall back to the boilerplate when role is genuinely empty. */
+    const descriptionFields = job.description as Record<string, unknown> | undefined;
+    const ripplingDescription = cleanHtml(descriptionFields?.role) || cleanHtml(descriptionFields?.company);
+
+    return [{
+      external_id: id,
+      title,
+      location,
+      department: text(department?.name) ?? text(department?.base_department),
+      employment_type: resolveEmploymentType(title, text(employmentType?.id), ripplingDescription),
+      description: ripplingDescription,
+      apply_url: postingUrl,
+      posting_url: postingUrl,
+      remote: /\bremote\b/i.test(location ?? ''),
+      posted_at: date(job.createdOn),
+    }];
+  });
+}
+
+/* A single JobPosting entry from a Breezy detail page's schema.org JSON-LD block. */
+type BreezyLdJson = { '@type'?: unknown; description?: unknown };
+
+const LD_JSON_BLOCK = /<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi;
+
+/** Breezy's detail page is an Angular SPA with no plain JSON endpoint, but it server-renders one
+ *  schema.org JobPosting block per page for search engines, and that block carries the real
+ *  description. Verified live 2026-08-29 against a transparent-hiring.breezy.hr posting. */
+function extractBreezyDescription(html: string): string | undefined {
+  for (const match of html.matchAll(LD_JSON_BLOCK)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(match[1]);
+    } catch {
+      continue;
+    }
+    const candidates = Array.isArray(parsed) ? parsed : [parsed];
+    for (const candidate of candidates) {
+      const entry = candidate as BreezyLdJson;
+      if (entry?.['@type'] === 'JobPosting' && typeof entry.description === 'string') return entry.description;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Breezy's list endpoint (see sourceEndpoint) carries `published_date`, a structured `location`
+ * with `is_remote`, `salary`, `department` and a native `type` field, but no description at all -
+ * that lives only on the public posting page, and only inside an embedded JSON-LD block (Breezy has
+ * no separate JSON detail endpoint; both `/p/{id}.json` and `/json/{id}` answer with the same SPA
+ * shell). See extractBreezyDescription.
+ */
+async function fetchBreezyJobs(
+  source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
+  fetcher: typeof fetch,
+): Promise<NormalizedJob[]> {
+  const listResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
+  if (!listResponse.ok) throw new Error(`breezy board returned HTTP ${listResponse.status}`);
+  const listPayload = await listResponse.json();
+  if (!Array.isArray(listPayload)) throw new Error('Breezy board returned an invalid jobs payload');
+
+  const candidates = listPayload.slice(0, MAX_DETAIL_FETCHES_PER_SOURCE);
+  const jobs = await mapWithConcurrency(candidates, DETAIL_FETCH_CONCURRENCY, async (raw) => {
+    const job = raw as Record<string, unknown>;
+    const id = text(job.id);
+    const title = text(job.name);
+    const postingUrl = text(job.url);
+    if (!id || !title || !postingUrl) return null;
+
+    let breezyDescription = '';
+    try {
+      const detailResponse = await fetcher(postingUrl, {
+        headers: { Accept: 'text/html', 'User-Agent': 'LitosJobMonitor/1.0' },
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (detailResponse.ok) breezyDescription = cleanHtml(extractBreezyDescription(await detailResponse.text()));
+    } catch {
+      /* Same reasoning as Rippling above: one posting's detail page failing to load costs this one
+         row, not the source's whole poll. */
+    }
+
+    const type = job.type as Record<string, unknown> | undefined;
+    const location = job.location as Record<string, unknown> | undefined;
+    const locations = Array.isArray(job.locations) ? job.locations : [];
+    const locationName = text(location?.name) ?? (locations
+      .map((item) => text((item as Record<string, unknown>).name))
+      .filter(Boolean)
+      .join(' | ') || undefined);
+    const isRemote = location?.is_remote === true
+      || locations.some((item) => (item as Record<string, unknown>).is_remote === true);
+
+    const result: NormalizedJob = {
+      external_id: id,
+      title,
+      location: locationName,
+      department: text(job.department),
+      employment_type: resolveEmploymentType(title, text(type?.name), breezyDescription),
+      description: breezyDescription,
+      apply_url: postingUrl,
+      posting_url: postingUrl,
+      remote: isRemote || /\bremote\b/i.test(locationName ?? ''),
+      posted_at: date(job.published_date),
+    };
+    return result;
+  });
+
+  return jobs.filter((job): job is NormalizedJob => job !== null);
+}
+
+/** Recruitee's `/api/offers/` list endpoint carries the full posting - title, HTML description,
+ *  location, department, an ISO country code and both a careers page and a direct apply link - so,
+ *  unlike Rippling and Breezy, this fits the same single-fetch-then-normalize shape as the first
+ *  four boards. Verified live 2026-08-29 against cbsconsulting.recruitee.com (201 offers). */
+export function normalizeRecruiteeJobs(payload: unknown): NormalizedJob[] {
+  const offers = (payload as { offers?: unknown[] } | null)?.offers;
+  if (!Array.isArray(offers)) throw new Error('Recruitee board returned an invalid jobs payload');
+  return offers.flatMap((raw) => {
+    const job = raw as Record<string, unknown>;
+    const id = job.id !== undefined && job.id !== null ? String(job.id) : undefined;
+    const title = text(job.title);
+    const postingUrl = text(job.careers_url);
+    const applyUrl = text(job.careers_apply_url) ?? postingUrl;
+    if (!id || !title || !postingUrl || !applyUrl) return [];
+
+    const location = text(job.city) && text(job.country)
+      ? [text(job.city), text(job.country)].filter(Boolean).join(', ')
+      : text(job.location);
+    const recruiteeDescription = cleanHtml(job.description);
+    return [{
+      external_id: id,
+      title,
+      location,
+      department: text(job.department),
+      employment_type: resolveEmploymentType(title, text(job.employment_type_code), recruiteeDescription),
+      description: recruiteeDescription,
+      apply_url: applyUrl,
+      posting_url: postingUrl,
+      remote: job.remote === true || /\bremote\b/i.test(location ?? ''),
+      posted_at: date(job.published_at) ?? date(job.created_at),
+      portal_country: text(job.country_code),
+      portal_company_name: text(job.company_name),
+    }];
+  });
 }
 
 export async function fetchSourceJobs(
   source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
   fetcher: typeof fetch = fetch,
 ): Promise<NormalizedJob[]> {
+  // Rippling and Breezy cannot go through the generic single-fetch path below: neither one's list
+  // endpoint carries a usable description, so both need their own multi-request fetch.
+  if (source.ats_name === 'rippling') return fetchRipplingJobs(source, fetcher);
+  if (source.ats_name === 'breezy') return fetchBreezyJobs(source, fetcher);
+
   const response = await fetcher(sourceEndpoint(source), {
     headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' },
     signal: AbortSignal.timeout(20_000),
@@ -644,6 +897,7 @@ export async function fetchSourceJobs(
     case 'lever': return normalizeLeverJobs(payload);
     case 'ashby': return normalizeAshbyJobs(payload);
     case 'workable': return normalizeWorkableJobs(payload);
+    case 'recruitee': return normalizeRecruiteeJobs(payload);
     default: return assertNever(source.ats_name);
   }
 }
