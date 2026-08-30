@@ -47,6 +47,11 @@ function openAIClient(): OpenAI {
   return client;
 }
 
+/** Verify that the configured OpenAI credential can access the production generation model. */
+export async function probeOpenAIModel(): Promise<void> {
+  await openAIClient().models.retrieve(OPENAI_GENERATION_MODEL);
+}
+
 /**
  * Generate one server-side text response through OpenAI.
  *

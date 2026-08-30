@@ -61,6 +61,7 @@ import { applicationEmailRouteSelection } from './lib/applicationEmailRoute';
 import { warmApplicationAliasDeliverability } from './lib/applicationEmailDeliverability';
 import { aggregateServiceHealthStatus } from './lib/serviceHealth';
 import { createSubmissionCutoverHook, resolveSubmissionCutover } from './lib/submissionCutover';
+import { openAIConfigured, probeOpenAIModel } from './llm/openAIProvider';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -68,10 +69,9 @@ export interface BuildAppOptions {
   /**
    * The /health model probe's call, injected for the same reason probeDatabase injects its query.
    *
-   * Without this the test suite makes a REAL, BILLED call to Anthropic: src/index.ts imports
-   * dotenv/config, so a repo .env supplies ANTHROPIC_API_KEY, and src/index.test.ts hits /health a
-   * dozen times. Measured at 419ms of live network per run. It happens to be free today only
-   * because the balance this whole change is about is empty. Tests pass a stub.
+   * Without this the test suite makes a real provider call: src/index.ts imports dotenv/config,
+   * so a repo .env can supply provider credentials, and src/index.test.ts hits /health repeatedly.
+   * Tests pass a stub.
    */
   modelPing?: () => Promise<unknown>;
 }
@@ -201,11 +201,14 @@ export async function buildApp(options: BuildAppOptions = {}) {
   // operations keep their separate database-backed per-user limits in quota.ts.
   fastify.addHook('onRequest', createRateLimitHook(options.rateLimit ?? defaultRateLimitConfig(), options.now));
 
-  /* The smallest call the API will accept: one cheap model, one token in, one token out, and no
-     system prompt. It exists to learn whether we will be served AT ALL, so it asks for the least
-     answer that still proves it. Haiku deliberately, and deliberately not the model any real
-     feature uses: this is a reachability and billing check, not a capability check. */
+  /* Probe the provider the resume parser actually uses first. Model retrieval proves that the
+     OpenAI credential can access the configured production model without generating or storing
+     user content. Anthropic remains the health path when it is the only configured provider. */
   const modelPing = options.modelPing ?? (async () => {
+    if (openAIConfigured()) {
+      await probeOpenAIModel();
+      return;
+    }
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     await client.messages.create({
       model: 'claude-haiku-4-5-20251001',
@@ -235,7 +238,10 @@ export async function buildApp(options: BuildAppOptions = {}) {
     }
     if (modelHealthInFlight) return modelHealthInFlight;
     modelHealthInFlight = probeModel(modelPing, {
-      configured: Boolean(options.modelPing) || Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
+      configured:
+        Boolean(options.modelPing)
+        || openAIConfigured()
+        || Boolean(process.env.ANTHROPIC_API_KEY?.trim()),
     }).then((value) => {
       if (value.status === 'unavailable') {
         // Same split as the database probe: the category goes in the response, the provider's own
