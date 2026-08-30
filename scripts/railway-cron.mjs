@@ -20,11 +20,11 @@ export async function runRailwayCron(
   );
   const totalTimeoutMs = Math.max(
     requestTimeoutMs,
-    positiveNumber(env.CRON_TOTAL_TIMEOUT_MS, 45 * 60_000, 'CRON_TOTAL_TIMEOUT_MS'),
+    positiveNumber(env.CRON_TOTAL_TIMEOUT_MS, 6 * 60 * 60_000, 'CRON_TOTAL_TIMEOUT_MS'),
   );
   const maxSegments = Math.max(
     1,
-    Math.floor(positiveNumber(env.CRON_MAX_SEGMENTS, 5, 'CRON_MAX_SEGMENTS')),
+    Math.floor(positiveNumber(env.CRON_MAX_SEGMENTS, 100, 'CRON_MAX_SEGMENTS')),
   );
 
   if (!baseUrl || !path || !path.startsWith('/') || !secret) {
