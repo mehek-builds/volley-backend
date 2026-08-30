@@ -17,6 +17,18 @@ const client = new pg.Client({
 await client.connect();
 try {
   await client.query('begin');
+  const fingerprintConstraint = await client.query(`
+    select convalidated
+    from pg_constraint
+    where conrelid = 'monitored_jobs'::regclass
+      and conname = 'monitored_jobs_certification_fingerprint_check'
+      and contype = 'c'
+  `);
+  if (fingerprintConstraint.rowCount !== 1 || fingerprintConstraint.rows[0].convalidated !== true) {
+    throw new Error(
+      'monitored_jobs_certification_fingerprint_check must exist and be validated before installing the job board projection',
+    );
+  }
   await client.query('create extension if not exists pg_trgm');
   await client.query(`
     create table if not exists job_board_group_projection_state (
@@ -228,7 +240,7 @@ try {
             ) as is_sponsor,
           j.last_seen_at >= p_certified_since
             and s.last_successful_poll_at >= p_certified_since
-            and j.certification_fingerprint ~ '^v1:[0-9a-f]{64}:[0-9a-f]{64}$' as is_certified
+            and j.certification_fingerprint is not null as is_certified
         from monitored_jobs j
         inner join career_page_sources s on s.id = j.source_id
         where j.is_active = true

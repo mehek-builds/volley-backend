@@ -40,6 +40,10 @@ function collectPlanFacts(node, facts) {
     'Shared Written Blocks',
     'Temp Read Blocks',
     'Temp Written Blocks',
+    'Local Hit Blocks',
+    'Local Read Blocks',
+    'Local Dirtied Blocks',
+    'Local Written Blocks',
   ]) {
     facts.buffers[key] = (facts.buffers[key] ?? 0) + Number(node[key] ?? 0);
   }
@@ -144,7 +148,11 @@ try {
       salary_max double precision,
       salary_currency text,
       salary_interval text,
-      raw_json jsonb
+      raw_json jsonb,
+      constraint monitored_jobs_certification_fingerprint_check check (
+        certification_fingerprint is null
+        or certification_fingerprint ~ '^v1:[0-9a-f]{64}:[0-9a-f]{64}$'
+      )
     ) on commit drop
   `);
 
@@ -275,11 +283,6 @@ try {
       where is_active and ingest_eligible
   `);
   await client.query(`
-    create index monitored_jobs_certification_idx
-      on monitored_jobs (last_seen_at, certification_fingerprint)
-      where is_active and ingest_eligible and certification_fingerprint is not null
-  `);
-  await client.query(`
     create index monitored_jobs_title_trgm_idx
       on monitored_jobs using gin (title gin_trgm_ops)
       where is_active and ingest_eligible
@@ -309,6 +312,11 @@ try {
       and s.logo_verification_status = 'verified'
       and s.logo_verified_at between $1::timestamptz - interval '30 days' and $1::timestamptz + interval '5 minutes'
       and nullif(btrim(s.logo_verification_method), '') is not null
+      and s.logo_verification_method in (
+        'first_party_ats_employer_logo',
+        'first_party_ats_employer_logo_durable_copy',
+        'first_party_ats_identity_and_homepage_logo_asset'
+      )
       and s.company_logo_url ~ '^https://[^[:space:]]+$'
     order by j.posted_at desc nulls last, j.first_seen_at desc, j.id desc
     offset $3::int limit 1
@@ -336,6 +344,11 @@ try {
       and s.logo_verification_status = 'verified'
       and s.logo_verified_at between $1::timestamptz - interval '30 days' and $1::timestamptz + interval '5 minutes'
       and nullif(btrim(s.logo_verification_method), '') is not null
+      and s.logo_verification_method in (
+        'first_party_ats_employer_logo',
+        'first_party_ats_employer_logo_durable_copy',
+        'first_party_ats_identity_and_homepage_logo_asset'
+      )
       and s.company_logo_url ~ '^https://[^[:space:]]+$'
     order by
       case when j.title ilike $3::text then 0 else 1 end,
@@ -369,6 +382,11 @@ try {
       and s.logo_verification_status = 'verified'
       and s.logo_verified_at between $1::timestamptz - interval '30 days' and $1::timestamptz + interval '5 minutes'
       and nullif(btrim(s.logo_verification_method), '') is not null
+      and s.logo_verification_method in (
+        'first_party_ats_employer_logo',
+        'first_party_ats_employer_logo_durable_copy',
+        'first_party_ats_identity_and_homepage_logo_asset'
+      )
       and s.company_logo_url ~ '^https://[^[:space:]]+$'
     group by j.company_name, j.title, s.ats_name
   `, [asOf, ['greenhouse', 'lever', 'ashby', 'workable', 'rippling', 'breezy', 'recruitee', 'crelate']]);
@@ -435,6 +453,11 @@ try {
       and s.logo_verification_status = 'verified'
       and s.logo_verified_at between $1::timestamptz - interval '30 days' and $1::timestamptz + interval '5 minutes'
       and nullif(btrim(s.logo_verification_method), '') is not null
+      and s.logo_verification_method in (
+        'first_party_ats_employer_logo',
+        'first_party_ats_employer_logo_durable_copy',
+        'first_party_ats_identity_and_homepage_logo_asset'
+      )
       and s.company_logo_url ~ '^https://[^[:space:]]+$'
       and (
         j.posted_at is null
@@ -462,6 +485,11 @@ try {
       and s.logo_verification_status = 'verified'
       and s.logo_verified_at between $1::timestamptz - interval '30 days' and $1::timestamptz + interval '5 minutes'
       and nullif(btrim(s.logo_verification_method), '') is not null
+      and s.logo_verification_method in (
+        'first_party_ats_employer_logo',
+        'first_party_ats_employer_logo_durable_copy',
+        'first_party_ats_identity_and_homepage_logo_asset'
+      )
       and s.company_logo_url ~ '^https://[^[:space:]]+$'
       and (
         case when j.title ilike $3::text then 0 else 1 end > $4::int
@@ -529,6 +557,11 @@ try {
       and s.logo_verification_status = 'verified'
       and s.logo_verified_at between $1::timestamptz - interval '30 days' and $1::timestamptz + interval '5 minutes'
       and nullif(btrim(s.logo_verification_method), '') is not null
+      and s.logo_verification_method in (
+        'first_party_ats_employer_logo',
+        'first_party_ats_employer_logo_durable_copy',
+        'first_party_ats_identity_and_homepage_logo_asset'
+      )
       and s.company_logo_url ~ '^https://[^[:space:]]+$'
     group by j.company_name, j.title, s.ats_name, selected.posted_at, selected.first_seen_at, selected.tie_id
     order by selected.posted_at desc nulls last, selected.first_seen_at desc, selected.tie_id desc
@@ -541,11 +574,20 @@ try {
         split_part(j.certification_fingerprint, ':', 2) as grouped_fingerprint,
         j.employment_type = 'Internship' as is_internship,
         j.sponsorship_status <> 'refuses'
-          and (j.sponsorship_status = 'offers'
-            or (s.sponsor_employer_id is not null and j.job_country <> 'non_us')) as is_sponsor,
+          and (
+            (
+              j.sponsorship_status = 'offers'
+              and (
+                j.sponsorship_scope is null
+                or j.sponsorship_scope <> 'us_h1b'
+                or j.job_country <> 'non_us'
+              )
+            )
+            or (s.sponsor_employer_id is not null and j.job_country <> 'non_us')
+          ) as is_sponsor,
         j.last_seen_at >= $1::timestamptz - interval '2 hours'
           and s.last_successful_poll_at >= $1::timestamptz - interval '2 hours'
-          and j.certification_fingerprint ~ '^v1:[0-9a-f]{64}:[0-9a-f]{64}$' as is_certified
+          and j.certification_fingerprint is not null as is_certified
       from monitored_jobs j
       join career_page_sources s on s.id = j.source_id
       where j.is_active
@@ -559,6 +601,11 @@ try {
         and s.logo_verification_status = 'verified'
         and s.logo_verified_at between $1::timestamptz - interval '30 days' and $1::timestamptz + interval '5 minutes'
         and nullif(btrim(s.logo_verification_method), '') is not null
+        and s.logo_verification_method in (
+          'first_party_ats_employer_logo',
+          'first_party_ats_employer_logo_durable_copy',
+          'first_party_ats_identity_and_homepage_logo_asset'
+        )
         and s.company_logo_url ~ '^https://[^[:space:]]+$'
     ), board_counts as (
       select

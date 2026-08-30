@@ -83,7 +83,7 @@ async function startEphemeralPostgres() {
   };
 }
 
-async function createBaseSchema(client) {
+async function createBaseSchema(client, { withFingerprintConstraint = true } = {}) {
   await client.query(`
     create table career_page_sources (
       id uuid primary key,
@@ -128,6 +128,10 @@ async function createBaseSchema(client) {
       salary_currency text,
       salary_interval text,
       raw_json jsonb
+      ${withFingerprintConstraint ? `,constraint monitored_jobs_certification_fingerprint_check check (
+        certification_fingerprint is null
+        or certification_fingerprint ~ '^v1:[0-9a-f]{64}:[0-9a-f]{64}$'
+      )` : ''}
     );
   `);
 }
@@ -171,6 +175,30 @@ test('migration and route pin the same verified public evidence contract', () =>
   assert.match(route, /export const VERIFIED_ACTIVE_WINDOW_DAYS = 7/);
   assert.match(migration, /s\.logo_verified_at >= v_as_of - interval '30 days'/);
   assert.match(route, /export const VERIFIED_LOGO_EVIDENCE_WINDOW_DAYS = 30/);
+  assert.match(migration, /monitored_jobs_certification_fingerprint_check/);
+  assert.match(migration, /convalidated/);
+  assert.match(migration, /j\.certification_fingerprint is not null as is_certified/);
+});
+
+test('migration refuses to trust non-null fingerprints before the format constraint is validated', {
+  timeout: 120_000,
+}, async () => {
+  const postgres = await startEphemeralPostgres();
+  const client = new pg.Client({ connectionString: postgres.databaseUrl });
+  try {
+    await client.connect();
+    await createBaseSchema(client, { withFingerprintConstraint: false });
+    await assert.rejects(
+      runProcess(process.execPath, [MIGRATION], {
+        cwd: process.cwd(),
+        env: { ...process.env, DATABASE_URL: postgres.databaseUrl },
+      }),
+      /monitored_jobs_certification_fingerprint_check must exist and be validated/,
+    );
+  } finally {
+    await client.end().catch(() => undefined);
+    await postgres.stop();
+  }
 });
 
 test('migration reruns safely and rotates a complete indexed generation', {
