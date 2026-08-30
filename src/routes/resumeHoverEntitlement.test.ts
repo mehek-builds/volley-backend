@@ -22,7 +22,7 @@ test('trial tailoring stays click-only while both paid classes can initiate hove
 test('hover entitlement is checked before posting work, reservation, or generation', () => {
   const source = readFileSync('src/routes/resume.ts', 'utf8');
   const gate = source.indexOf('for (const feature of resumeGenerationFeatureSequence(body.initiation))');
-  const postingRead = source.indexOf('const row = await postingRow(body.job_id)');
+  const postingRead = source.indexOf('resolvedPosting = await actionPostingRowForUser(body.job_id, userId)');
   const reservation = source.indexOf('const entitlementReservation = await reserveEntitledUsage');
   const generation = source.indexOf('await generateResumeSpec');
   assert.ok(gate >= 0);

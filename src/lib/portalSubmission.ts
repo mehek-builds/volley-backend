@@ -8961,16 +8961,20 @@ export function canonicalMonitoredPortalUrl(
   rawUrl: string | undefined,
   atsName?: string | null,
   boardToken?: string | null,
+  externalId?: string | null,
 ): string | undefined {
   if (!rawUrl) return undefined;
+  const expectedFamily = atsName?.trim().toLowerCase();
   const token = boardToken?.trim();
-  if (atsName?.trim().toLowerCase() === 'greenhouse' && token) {
+  if (!expectedFamily || !isAutonomousPortalFamily(expectedFamily) || !token) return undefined;
+  if (expectedFamily === 'greenhouse') {
     try {
       const url = new URL(rawUrl);
       if (url.protocol !== 'https:') return undefined;
       const pathJobId = url.pathname.match(/^\/[^/]+\/jobs\/(\d+)/)?.[1] ?? '';
       const greenhouseJobId = url.searchParams.get('gh_jid') ?? url.searchParams.get('token') ?? pathJobId;
-      if (/^\d+$/.test(greenhouseJobId)) {
+      if (/^\d+$/.test(greenhouseJobId)
+        && (!externalId || greenhouseJobId === externalId)) {
         const embedHost = url.hostname.toLowerCase() === 'job-boards.eu.greenhouse.io'
           ? 'job-boards.eu.greenhouse.io'
           : 'job-boards.greenhouse.io';
@@ -8980,9 +8984,116 @@ export function canonicalMonitoredPortalUrl(
       return undefined;
     }
   }
-  const canonical = canonicalSupportedPortalUrl(rawUrl, atsName);
-  if (canonical && !greenhousePortalUrlNeedsBoardToken(canonical)) return canonical;
-  return undefined;
+
+  let raw: URL;
+  try {
+    raw = new URL(rawUrl);
+  } catch {
+    return undefined;
+  }
+  if (raw.protocol !== 'https:' || raw.username || raw.password || raw.port || raw.search || raw.hash) {
+    return undefined;
+  }
+  const canonical = canonicalSupportedPortalUrl(rawUrl, expectedFamily);
+  if (!canonical || greenhousePortalUrlNeedsBoardToken(canonical)) return undefined;
+
+  let portal: SupportedPortal;
+  let url: URL;
+  try {
+    portal = detectPortal(canonical);
+    url = new URL(canonical);
+  } catch {
+    return undefined;
+  }
+  /* Monitored rows are stricter than caller-supplied links. The stored provider is authority, so a
+     valid URL from a different supported family must not become an action target. Controlled test
+     portals and manual aliases are excluded here for the same reason. */
+  if (portal !== expectedFamily) return undefined;
+
+  const rawSegments = url.pathname.split('/').filter(Boolean);
+  const segments: string[] = [];
+  for (const rawSegment of rawSegments) {
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(rawSegment);
+    } catch {
+      return undefined;
+    }
+    if (!decoded || decoded === '.' || decoded === '..'
+      || /[/\\\u0000-\u001f\u007f]/.test(decoded)) return undefined;
+    segments.push(decoded);
+  }
+  const expectedId = externalId?.trim();
+  const tokenMatches = (value: string | undefined) => value?.toLowerCase() === token.toLowerCase();
+  const idMatches = (value: string | undefined) => Boolean(value)
+    && (!expectedId || value === expectedId);
+
+  switch (expectedFamily) {
+    case 'lever': {
+      if (!['jobs.lever.co', 'jobs.eu.lever.co'].includes(url.hostname.toLowerCase())
+        || !tokenMatches(segments[0]) || !idMatches(segments[1])
+        || (segments.length !== 2 && !(segments.length === 3 && segments[2] === 'apply'))) {
+        return undefined;
+      }
+      return `https://${url.hostname.toLowerCase()}/${encodeURIComponent(segments[0])}/${encodeURIComponent(segments[1])}/apply`;
+    }
+    case 'ashby': {
+      if (url.hostname.toLowerCase() !== 'jobs.ashbyhq.com'
+        || !tokenMatches(segments[0]) || !idMatches(segments[1])
+        || (segments.length !== 2 && !(segments.length === 3 && segments[2] === 'application'))) {
+        return undefined;
+      }
+      return `https://jobs.ashbyhq.com/${encodeURIComponent(segments[0])}/${encodeURIComponent(segments[1])}/application`;
+    }
+    case 'workable': {
+      if (url.hostname.toLowerCase() !== 'apply.workable.com'
+        || segments[0]?.toLowerCase() !== 'j' || !idMatches(segments[1])
+        || (segments.length !== 2 && !(segments.length === 3 && segments[2] === 'apply'))) {
+        return undefined;
+      }
+      return `https://apply.workable.com/j/${encodeURIComponent(segments[1])}/apply`;
+    }
+    case 'rippling': {
+      if (url.hostname.toLowerCase() !== 'ats.rippling.com'
+        || !tokenMatches(segments[0]) || segments[1]?.toLowerCase() !== 'jobs'
+        || !idMatches(segments[2])
+        || (segments.length !== 3 && !(segments.length === 4 && segments[3] === 'apply'))) {
+        return undefined;
+      }
+      return `https://ats.rippling.com/${encodeURIComponent(segments[0])}/jobs/${encodeURIComponent(segments[2])}/apply`;
+    }
+    case 'breezy': {
+      if (url.hostname.toLowerCase() !== `${token.toLowerCase()}.breezy.hr`
+        || segments[0]?.toLowerCase() !== 'p' || !segments[1]
+        || (expectedId && segments[1] !== expectedId && !segments[1].startsWith(`${expectedId}-`))
+        || (segments.length !== 2 && !(segments.length === 3 && segments[2] === 'apply'))) {
+        return undefined;
+      }
+      return `https://${token.toLowerCase()}.breezy.hr/p/${encodeURIComponent(segments[1])}/apply`;
+    }
+    case 'recruitee': {
+      if (url.hostname.toLowerCase() !== `${token.toLowerCase()}.recruitee.com`
+        || segments[0]?.toLowerCase() !== 'o' || !segments[1]
+        || (segments.length !== 2
+          && !(segments.length === 4 && segments[2]?.toLowerCase() === 'c'
+            && segments[3]?.toLowerCase() === 'new'))) {
+        return undefined;
+      }
+      return `https://${token.toLowerCase()}.recruitee.com/o/${encodeURIComponent(segments[1])}/c/new`;
+    }
+    case 'crelate': {
+      const postingId = segments[3]?.toLowerCase() === 'apply' ? segments[4] : segments[3];
+      if (url.hostname.toLowerCase() !== 'jobs.crelate.com'
+        || segments[0]?.toLowerCase() !== 'portal' || !tokenMatches(segments[1])
+        || segments[2]?.toLowerCase() !== 'job' || !idMatches(postingId)
+        || (segments.length !== 4 && !(segments.length === 5 && segments[3]?.toLowerCase() === 'apply'))) {
+        return undefined;
+      }
+      return `https://jobs.crelate.com/portal/${encodeURIComponent(segments[1])}/job/apply/${encodeURIComponent(postingId!)}`;
+    }
+    default:
+      return undefined;
+  }
 }
 
 export function greenhousePortalUrlNeedsBoardToken(rawUrl: string | undefined): boolean {

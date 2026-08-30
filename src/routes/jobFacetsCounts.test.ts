@@ -7,6 +7,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import { PGlite } from '@electric-sql/pglite';
 import { PGLiteSocketServer } from '@electric-sql/pglite-socket';
 import { generateDrizzleJson, generateMigration } from 'drizzle-kit/api';
+import { eq } from 'drizzle-orm';
 
 /* WHY THIS ROUTE IS TESTED AGAINST A REAL DATABASE.
  *
@@ -44,6 +45,8 @@ let app: FastifyInstance;
 let db: typeof import('../db/index')['db'];
 let pool: typeof import('../db/index')['pool'];
 let schema: typeof import('../db/schema');
+let upsertSources: typeof import('./jobMonitor')['upsertSources'];
+let unverifiedJobId: string;
 
 /** Postings per employer, chosen so a row-weighted count differs sharply from a company count. */
 const SEED: Record<string, number> = { Zscaler: 5, Lucid: 3, Huckberry: 1 };
@@ -75,6 +78,13 @@ before(async () => {
     ats_name: 'greenhouse',
     board_token: 'fixture',
     career_url: 'https://job-boards.greenhouse.io/fixture',
+    company_domain: 'fixture.example',
+    company_logo_url: 'https://assets.example/fixture-logo.png',
+    logo_verification_status: 'verified',
+    logo_verification_method: 'first_party_ats_employer_logo',
+    logo_verified_at: new Date(),
+    portal_company_name: 'Fixture Source',
+    portal_name_mismatch: false,
     enabled: true,
   }).returning();
 
@@ -85,7 +95,8 @@ before(async () => {
         external_id: `${company}-${i}`,
         company_name: company,
         title: `Engineer ${i}`,
-        description: 'x'.repeat(50),
+        description: 'A complete verified role description with enough detail for an applicant to evaluate the work, requirements, responsibilities, and expected qualifications.'.repeat(2),
+        ingest_eligible: true,
         apply_url: `https://example.com/${company}/${i}`,
         posting_url: `https://example.com/${company}/${i}`,
         // Recently verified, so boardConditions surfaces it exactly as GET /jobs would.
@@ -96,7 +107,30 @@ before(async () => {
     }
   }
 
-  const { jobMonitorRoutes } = await import('./jobMonitor');
+  const [unverifiedSource] = await db.insert(career_page_sources).values({
+    company_name: 'No Logo Co',
+    ats_name: 'greenhouse',
+    board_token: 'no-logo',
+    career_url: 'https://job-boards.greenhouse.io/no-logo',
+    enabled: true,
+  }).returning();
+  const [unverifiedJob] = await db.insert(monitored_jobs).values({
+    source_id: unverifiedSource.id,
+    external_id: 'no-logo-job',
+    company_name: 'No Logo Co',
+    title: 'Engineer',
+    description: 'A complete role description whose source still has no verified logo evidence, with responsibilities, requirements, qualifications, and enough detail for an applicant.'.repeat(2),
+    ingest_eligible: true,
+    apply_url: 'https://example.com/no-logo/apply',
+    posting_url: 'https://example.com/no-logo',
+    last_seen_at: new Date(),
+    is_active: true,
+  }).returning({ id: monitored_jobs.id });
+  unverifiedJobId = unverifiedJob.id;
+
+  const monitor = await import('./jobMonitor');
+  const { jobMonitorRoutes } = monitor;
+  upsertSources = monitor.upsertSources;
   app = Fastify({ logger: false });
   await app.register(jobMonitorRoutes);
   await app.ready();
@@ -149,6 +183,237 @@ test('counts describe the same board GET /jobs serves', async () => {
   assert.equal(counted, jobs.json().total, 'grouped count must equal the board total');
 });
 
+test('every surfaced shape carries persisted, renderable logo evidence', async () => {
+  const [list, grouped] = await Promise.all([
+    app.inject({ method: 'GET', url: '/jobs?limit=100' }),
+    app.inject({ method: 'GET', url: '/jobs/grouped?limit=100' }),
+  ]);
+  assert.equal(list.statusCode, 200);
+  assert.equal(grouped.statusCode, 200);
+
+  for (const job of [...list.json().jobs, ...grouped.json().jobs]) {
+    assert.equal(job.company_domain, 'fixture.example');
+    assert.equal(job.company_logo_verification_status, 'verified');
+    assert.equal(job.company_logo_verification_method, 'first_party_ats_employer_logo');
+    assert.ok(job.company_logo_verified_at);
+    assert.equal(job.company_logo_url, 'https://assets.example/fixture-logo.png');
+  }
+
+  const id = list.json().jobs[0].id;
+  const detail = await app.inject({ method: 'GET', url: `/jobs/${id}` });
+  assert.equal(detail.statusCode, 200);
+  assert.equal(detail.json().job.company_logo_verification_status, 'verified');
+  assert.equal(detail.json().job.company_logo_url, 'https://assets.example/fixture-logo.png');
+});
+
+test('an otherwise live job without persisted verified logo evidence exists on no public surface', async () => {
+  const [list, grouped, facets, detail] = await Promise.all([
+    app.inject({ method: 'GET', url: '/jobs?limit=100' }),
+    app.inject({ method: 'GET', url: '/jobs/grouped?limit=100' }),
+    app.inject({ method: 'GET', url: '/jobs/facets?counts=true' }),
+    app.inject({ method: 'GET', url: `/jobs/${unverifiedJobId}` }),
+  ]);
+  assert.ok(!list.json().jobs.some((job: { company_name: string }) => job.company_name === 'No Logo Co'));
+  assert.ok(!grouped.json().jobs.some((job: { company_name: string }) => job.company_name === 'No Logo Co'));
+  assert.ok(!facets.json().company_counts.some((row: { company_name: string }) => row.company_name === 'No Logo Co'));
+  assert.equal(detail.statusCode, 404, 'a bookmark must not bypass the logo-evidence gate');
+});
+
+test('grouped roles aggregate sponsorship countries from affirmative copies only', async () => {
+  const { career_page_sources, monitored_jobs } = schema;
+  const company = 'Sponsorship Jurisdiction Fixture';
+  const [source] = await db.select().from(career_page_sources)
+    .where(eq(career_page_sources.board_token, 'fixture'))
+    .limit(1);
+  const description = 'A complete role description with responsibilities, requirements, qualifications, and enough detail for an applicant to evaluate this verified opening.'.repeat(2);
+
+  await db.insert(monitored_jobs).values([
+    {
+      source_id: source.id,
+      external_id: 'mixed-country-us-offer',
+      company_name: company,
+      title: 'Mixed Country Engineer',
+      location: 'New York, NY',
+      description,
+      ingest_eligible: true,
+      apply_url: 'https://example.com/mixed-country-us-offer/apply',
+      posting_url: 'https://example.com/mixed-country-us-offer',
+      sponsorship_status: 'offers',
+      sponsorship_scope: 'job_country',
+      job_country: 'us',
+      last_seen_at: new Date(),
+      is_active: true,
+    },
+    {
+      source_id: source.id,
+      external_id: 'mixed-country-berlin-unstated',
+      company_name: company,
+      title: 'Mixed Country Engineer',
+      location: 'Berlin',
+      description,
+      ingest_eligible: true,
+      apply_url: 'https://example.com/mixed-country-berlin-unstated/apply',
+      posting_url: 'https://example.com/mixed-country-berlin-unstated',
+      sponsorship_status: 'unstated',
+      sponsorship_scope: null,
+      job_country: 'non_us',
+      raw_json: { portal_country: 'Germany' },
+      last_seen_at: new Date(),
+      is_active: true,
+    },
+    {
+      source_id: source.id,
+      external_id: 'berlin-h1b-only',
+      company_name: company,
+      title: 'Berlin H1B Engineer',
+      location: 'Berlin',
+      description,
+      ingest_eligible: true,
+      apply_url: 'https://example.com/berlin-h1b-only/apply',
+      posting_url: 'https://example.com/berlin-h1b-only',
+      sponsorship_status: 'offers',
+      sponsorship_scope: 'us_h1b',
+      job_country: 'non_us',
+      raw_json: { portal_country: 'Germany' },
+      last_seen_at: new Date(),
+      is_active: true,
+    },
+  ]);
+
+  try {
+    const response = await app.inject({
+      method: 'GET',
+      url: `/jobs/grouped?company=${encodeURIComponent(company)}&limit=100`,
+    });
+    assert.equal(response.statusCode, 200);
+    type GroupedJob = {
+      title: string;
+      sponsorship_evidence: string | null;
+      sponsorship_country_codes: string[];
+    };
+    const jobs = response.json().jobs as GroupedJob[];
+    const byTitle = Object.fromEntries(jobs.map((job) => [job.title, job]));
+    assert.equal(byTitle['Mixed Country Engineer'].sponsorship_evidence, 'posting_offers');
+    assert.deepEqual(byTitle['Mixed Country Engineer'].sponsorship_country_codes, ['US'],
+      'the unstated Berlin copy cannot donate DE to the US offer');
+    assert.equal(byTitle['Berlin H1B Engineer'].sponsorship_evidence, null);
+    assert.deepEqual(byTitle['Berlin H1B Engineer'].sponsorship_country_codes, [],
+      'H-1B text on a Berlin posting is not German visa evidence');
+  } finally {
+    await db.delete(monitored_jobs).where(eq(monitored_jobs.company_name, company));
+  }
+});
+
+test('a recent row rejected by the full ingest validator exists on no public surface', async () => {
+  const { career_page_sources, monitored_jobs } = schema;
+  const [source] = await db.select().from(career_page_sources)
+    .where(eq(career_page_sources.board_token, 'fixture'))
+    .limit(1);
+  const [rejected] = await db.insert(monitored_jobs).values({
+    source_id: source.id,
+    external_id: 'rejected-description',
+    company_name: 'Rejected Description Co',
+    title: 'Engineer',
+    description: 'Engineer',
+    ingest_eligible: false,
+    apply_url: 'https://example.com/rejected/apply',
+    posting_url: 'https://example.com/rejected',
+    last_seen_at: new Date(),
+    is_active: true,
+  }).returning({ id: monitored_jobs.id });
+
+  const [list, grouped, facets, detail] = await Promise.all([
+    app.inject({ method: 'GET', url: '/jobs?limit=100' }),
+    app.inject({ method: 'GET', url: '/jobs/grouped?limit=100' }),
+    app.inject({ method: 'GET', url: '/jobs/facets?counts=true' }),
+    app.inject({ method: 'GET', url: `/jobs/${rejected.id}` }),
+  ]);
+  assert.ok(!list.json().jobs.some((job: { company_name: string }) => job.company_name === 'Rejected Description Co'));
+  assert.ok(!grouped.json().jobs.some((job: { company_name: string }) => job.company_name === 'Rejected Description Co'));
+  assert.ok(!facets.json().company_counts.some((row: { company_name: string }) => row.company_name === 'Rejected Description Co'));
+  assert.equal(detail.statusCode, 404);
+});
+
+test('source sync seeds reviewed domains as candidates and lets fetched ATS evidence replace them', async () => {
+  const source = {
+    company_name: 'Airbnb',
+    ats_name: 'greenhouse' as const,
+    board_token: 'logo-upsert-airbnb',
+    career_url: 'https://job-boards.greenhouse.io/logo-upsert-airbnb',
+    enabled: true,
+  };
+  await upsertSources([source]);
+  let row = (await db.select().from(schema.career_page_sources))
+    .find((candidate) => candidate.board_token === source.board_token)!;
+  assert.equal(row.company_domain, 'airbnb.com');
+  assert.equal(row.company_logo_url, null);
+  assert.equal(row.logo_verification_status, 'unverified');
+  assert.equal(row.logo_verification_method, 'reviewed_company_domain_candidate');
+  assert.equal(row.logo_verified_at, null);
+
+  await upsertSources([source]);
+  row = (await db.select().from(schema.career_page_sources))
+    .find((candidate) => candidate.board_token === source.board_token)!;
+  assert.equal(row.logo_verified_at, null,
+    'daily catalog reconciliation must not mint verification proof');
+
+  const atsVerifiedAt = new Date('2026-08-30T12:00:00.000Z');
+  await upsertSources([{
+    ...source,
+    company_domain: null,
+    company_logo_url: 'https://assets.example/airbnb-employer-logo.png',
+    logo_verification_status: 'verified',
+    logo_verification_method: 'first_party_ats_employer_logo',
+    logo_verified_at: atsVerifiedAt,
+  }]);
+  row = (await db.select().from(schema.career_page_sources))
+    .find((candidate) => candidate.board_token === source.board_token)!;
+  assert.equal(row.company_domain, null);
+  assert.equal(row.company_logo_url, 'https://assets.example/airbnb-employer-logo.png');
+  assert.equal(row.logo_verification_status, 'verified');
+  assert.equal(row.logo_verification_method, 'first_party_ats_employer_logo');
+  assert.equal(row.logo_verified_at!.toISOString(), atsVerifiedAt.toISOString());
+
+  await upsertSources([{
+    ...source,
+    company_name: source.board_token,
+    logo_verification_status: 'unverified',
+    logo_verification_method: 'cc0_board_identifier_candidate',
+    logo_verified_at: null,
+  }]);
+  row = (await db.select().from(schema.career_page_sources))
+    .find((candidate) => candidate.board_token === source.board_token)!;
+  assert.equal(row.company_name, 'Airbnb', 'a provisional slug must not overwrite verified identity');
+  assert.equal(row.company_logo_url, 'https://assets.example/airbnb-employer-logo.png');
+  assert.equal(row.logo_verification_status, 'verified');
+  assert.equal(row.logo_verification_method, 'first_party_ats_employer_logo');
+  assert.equal(row.logo_verified_at!.toISOString(), atsVerifiedAt.toISOString());
+});
+
+test('scheduled discovery preserves an operator disable until an explicit operator restore', async () => {
+  const source = {
+    company_name: 'Airbnb',
+    ats_name: 'greenhouse' as const,
+    board_token: 'operator-disabled-airbnb',
+    career_url: 'https://job-boards.greenhouse.io/operator-disabled-airbnb',
+    enabled: true,
+  };
+  await upsertSources([source]);
+  await db.update(schema.career_page_sources)
+    .set({ enabled: false })
+    .where(eq(schema.career_page_sources.board_token, source.board_token));
+
+  await upsertSources([source], { preserveExistingDisabled: true });
+  let row = (await db.select().from(schema.career_page_sources))
+    .find((candidate) => candidate.board_token === source.board_token)!;
+  assert.equal(row.enabled, false, 'catalog refresh cannot silently undo an operator decision');
+
+  await upsertSources([source]);
+  row = (await db.select().from(schema.career_page_sources))
+    .find((candidate) => candidate.board_token === source.board_token)!;
+  assert.equal(row.enabled, true, 'the operator write path can deliberately restore the source');
+});
+
 test('a posting outside the verification window is counted by neither', async () => {
   // The board hides unverified postings, so a count that included them would overstate the denominator
   // and quietly drag measured coverage down for rows no job seeker is shown.
@@ -180,7 +445,8 @@ test('an old posting still counts when its employer feed verified it recently', 
     external_id: 'old-but-open',
     company_name: 'Long Running Requisition Co',
     title: 'Engineer',
-    description: 'A full role description that the employer still publishes on its live careers feed.',
+    description: 'A full role description that the employer still publishes on its live careers feed, including responsibilities, requirements, qualifications, and enough detail to evaluate the opening.'.repeat(2),
+    ingest_eligible: true,
     apply_url: 'https://example.com/old-but-open',
     posting_url: 'https://example.com/old-but-open',
     posted_at: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000),

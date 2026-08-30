@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readPostingSponsorship } from './sponsorship';
-import { fetchSourceJobs, sourceEndpoint } from './jobMonitor';
+import { fetchSourceJobBatch, fetchSourceJobs, sourceEndpoint } from './jobMonitor';
 
 const JOB_CODE = 'fy9xmctquz688dahdmafcmch7r';
 const BROKEN_JOB_CODE = 'aaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -14,8 +14,8 @@ function requestEnvelope(rawUrl: string): Record<string, unknown> {
 
 test('Crelate source endpoint base64-encodes the slug on the first-party metadata route', () => {
   assert.equal(
-    sourceEndpoint({ ats_name: 'crelate', board_token: 'canon recruiting' }),
-    'https://jobs.crelate.com/api/candidateportal/getclientvars?onv=Y2Fub24gcmVjcnVpdGluZw%3D%3D',
+    sourceEndpoint({ ats_name: 'crelate', board_token: 'Canon%2DRecruiting' }),
+    'https://jobs.crelate.com/api/candidateportal/getclientvars?onv=Y2Fub24tcmVjcnVpdGluZw%3D%3D',
   );
 });
 
@@ -28,7 +28,7 @@ test('Crelate fetches full first-party details and preserves country-aware spons
     `<p>${'You will design, ship, measure, and improve production systems with the engineering team. '.repeat(4)}</p>`,
   ].join('');
 
-  const jobs = await fetchSourceJobs(
+  const fetched = await fetchSourceJobBatch(
     { ats_name: 'crelate', board_token: 'canonrecruiting' },
     async (input, init) => {
       const url = String(input);
@@ -92,9 +92,10 @@ test('Crelate fetches full first-party details and preserves country-aware spons
     },
   );
 
+  const jobs = fetched.jobs;
   assert.equal(jobs.length, 1, 'a failed detail is excluded without suppressing the healthy role');
   const [job] = jobs;
-  assert.equal(job.external_id, 'job-id-1');
+  assert.equal(job.external_id, JOB_CODE);
   assert.equal(job.title, 'Platform Engineer');
   assert.equal(job.location, 'Berlin, Berlin, Germany');
   assert.equal(job.portal_country, 'Germany');
@@ -114,6 +115,47 @@ test('Crelate fetches full first-party details and preserves country-aware spons
   assert.ok(requests.every((request) => request.method === undefined), 'the poller only performs reads');
 });
 
+test('Crelate resumes its detail pass strictly after the prior JobCode', async () => {
+  const jobCodes = ['a'.repeat(26), 'b'.repeat(26), 'c'.repeat(26)];
+  const detailRequests: string[] = [];
+  const fetched = await fetchSourceJobBatch(
+    { ats_name: 'crelate', board_token: 'canonrecruiting' },
+    async (input) => {
+      const url = String(input);
+      if (url.includes('/getclientvars?')) {
+        return new Response(JSON.stringify({
+          ORG_ID: 'org-id',
+          ORG_NAME: 'canonrecruiting',
+          BASE_URL: 'jobs.crelate.com',
+        }), { status: 200 });
+      }
+      if (url.includes('/GetAllJobs?')) {
+        return new Response(JSON.stringify({
+          Jobs: [jobCodes[2], jobCodes[0], jobCodes[1]].map((JobCode) => ({ JobCode, Title: `Role ${JobCode[0]}` })),
+          IsError: false,
+        }), { status: 200 });
+      }
+      const jobCode = String(requestEnvelope(url).JobCode);
+      detailRequests.push(jobCode);
+      return new Response(JSON.stringify({
+        Job: {
+          JobCode: jobCode,
+          Title: `Role ${jobCode[0]}`,
+          Description: 'Build and operate reliable production services with the engineering team.',
+        },
+        IsError: false,
+      }), { status: 200 });
+    },
+    { detail_fetch_limit: 1, detail_cursor_key: jobCodes[0] },
+  );
+
+  assert.deepEqual(detailRequests, [jobCodes[1]]);
+  assert.deepEqual(fetched.jobs.map((job) => job.external_id), [jobCodes[1]]);
+  assert.deepEqual(fetched.listed_external_ids, jobCodes);
+  assert.equal(fetched.detail_progress?.cursor_key, jobCodes[0]);
+  assert.equal(fetched.detail_progress?.next_cursor_key, jobCodes[1]);
+});
+
 test('Crelate rejects malformed list payloads instead of treating them as an empty board', async () => {
   await assert.rejects(
     fetchSourceJobs(
@@ -131,7 +173,7 @@ test('Crelate rejects malformed list payloads instead of treating them as an emp
 });
 
 test('Crelate accepts an explicit empty current-jobs collection', async () => {
-  const jobs = await fetchSourceJobs(
+  const fetched = await fetchSourceJobBatch(
     { ats_name: 'crelate', board_token: 'canonrecruiting' },
     async (input) => String(input).includes('/getclientvars?')
       ? new Response(JSON.stringify({
@@ -141,7 +183,7 @@ test('Crelate accepts an explicit empty current-jobs collection', async () => {
       }), { status: 200 })
       : new Response(JSON.stringify({ Jobs: [], IsError: false }), { status: 200 }),
   );
-  assert.deepEqual(jobs, []);
+  assert.deepEqual(fetched.jobs, []);
 });
 
 test('Crelate fails closed on a custom host, versioned portal, or cross-job detail response', async () => {
@@ -159,7 +201,7 @@ test('Crelate fails closed on a custom host, versioned portal, or cross-job deta
     );
   }
 
-  const jobs = await fetchSourceJobs(
+  const fetched = await fetchSourceJobBatch(
     { ats_name: 'crelate', board_token: 'canonrecruiting' },
     async (input) => {
       const url = String(input);
@@ -175,5 +217,21 @@ test('Crelate fails closed on a custom host, versioned portal, or cross-job deta
       }), { status: 200 });
     },
   );
-  assert.deepEqual(jobs, [], 'a detail response for another JobCode is never attached to this role');
+  assert.deepEqual(fetched.jobs, [], 'a detail response for another JobCode is never attached to this role');
+  assert.deepEqual(fetched.listed_external_ids, [JOB_CODE]);
+  assert.deepEqual(fetched.preserve_external_ids, [JOB_CODE], 'the current list still protects its prior row');
+});
+
+test('Crelate metadata must resolve to the requested tenant', async () => {
+  await assert.rejects(
+    fetchSourceJobs(
+      { ats_name: 'crelate', board_token: 'canonrecruiting' },
+      async () => new Response(JSON.stringify({
+        ORG_ID: 'org-id',
+        ORG_NAME: 'anotherrecruiter',
+        BASE_URL: 'jobs.crelate.com',
+      }), { status: 200 }),
+    ),
+    /invalid organization metadata/,
+  );
 });

@@ -4,8 +4,8 @@ import { createRemoteJWKSet, jwtVerify, SignJWT, type JWTPayload as JoseJWTPaylo
 import { createHash, randomInt } from 'node:crypto';
 import { db, withDedicatedDatabase } from '../db/index';
 import { users, email_verification_codes, monitored_jobs, career_page_sources } from '../db/schema';
-import { and, eq, gte, inArray, lt, sql } from 'drizzle-orm';
-import { AUTONOMOUS_PORTAL_FAMILIES } from '../lib/portalSubmission';
+import { and, eq, gte, lt, sql } from 'drizzle-orm';
+import { boardConditions } from './jobMonitor';
 import { v4 as uuidv4 } from 'uuid';
 import { TRIAL_DAYS } from '../middleware/quota';
 import { PRODUCT_LINKS, PRODUCT_NAME } from '../lib/product';
@@ -385,9 +385,7 @@ export async function authRoutes(fastify: FastifyInstance) {
             .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
             .where(and(
               eq(monitored_jobs.id, targetJobId),
-              eq(monitored_jobs.is_active, true),
-              eq(career_page_sources.enabled, true),
-              inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
+              ...boardConditions({ requireVerifiedEvidence: true }),
             ))
             .limit(1)
         : [];

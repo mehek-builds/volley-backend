@@ -4,6 +4,7 @@ import {
   answerRequiresSponsorship,
   normalizeEmployerName,
   readPostingSponsorship,
+  readPostingSponsorshipAssessment,
   sponsorOnlyBoardRequired,
   sponsorshipVerdict,
 } from './sponsorship';
@@ -48,6 +49,24 @@ test('a posting that offers sponsorship is read as offering', () => {
   for (const text of offers) {
     assert.equal(readPostingSponsorship(text), 'offers', text);
   }
+});
+
+test('affirmative clauses persist the jurisdiction they actually cover', () => {
+  assert.deepEqual(
+    readPostingSponsorshipAssessment('H-1B sponsorship is offered for qualified applicants.'),
+    { status: 'offers', scope: 'us_h1b' },
+  );
+  assert.deepEqual(
+    readPostingSponsorshipAssessment('Visa sponsorship is available for this role in Berlin.'),
+    { status: 'offers', scope: 'job_country' },
+  );
+  assert.deepEqual(
+    readPostingSponsorshipAssessment(
+      'Visa sponsorship is available for this role. We also sponsor H-1Bs for US openings.',
+    ),
+    { status: 'offers', scope: 'job_country' },
+    'a separate generic offer must not inherit the jurisdiction of an H-1B-specific clause',
+  );
 });
 
 test('REFUSAL WINS when a posting says both, which is the common case', () => {
@@ -112,6 +131,27 @@ test('the verdict: the posting first, then the filings, then no', () => {
   assert.deepEqual(
     sponsorshipVerdict({ posting: 'unstated', employerFilesH1b: false }),
     { surfaced: false, evidence: null },
+  );
+});
+
+test('an H-1B-only offer is US evidence and never German sponsorship', () => {
+  assert.deepEqual(
+    sponsorshipVerdict({
+      posting: 'offers',
+      postingScope: 'us_h1b',
+      jobCountry: 'non_us',
+      employerFilesH1b: false,
+    }),
+    { surfaced: false, evidence: null },
+  );
+  assert.deepEqual(
+    sponsorshipVerdict({
+      posting: 'offers',
+      postingScope: 'us_h1b',
+      jobCountry: 'us',
+      employerFilesH1b: false,
+    }),
+    { surfaced: true, evidence: 'posting_offers' },
   );
 });
 

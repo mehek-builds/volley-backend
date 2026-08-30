@@ -59,6 +59,7 @@ export async function repairReviewPortalFromMonitoredJob(
   const expectedJdHash = jobContextText(row, 'jd_hash');
   if (!expectedCompany || !expectedRole || !expectedJdHash) return current;
   const [job] = await db.select({
+    external_id: monitored_jobs.external_id,
     apply_url: monitored_jobs.apply_url,
     ats_name: career_page_sources.ats_name,
     board_token: career_page_sources.board_token,
@@ -74,7 +75,12 @@ export async function repairReviewPortalFromMonitoredJob(
     ))
     .limit(1);
   if (!job) return current;
-  const applyUrl = canonicalMonitoredPortalUrl(job.apply_url, job.ats_name, job.board_token);
+  const applyUrl = canonicalMonitoredPortalUrl(
+    job.apply_url,
+    job.ats_name,
+    job.board_token,
+    job.external_id,
+  );
   if (!applyUrl) return current;
   if (normalizedIdentity(job.company_name) !== normalizedIdentity(expectedCompany)) return current;
   if (normalizedIdentity(job.title) !== normalizedIdentity(expectedRole)) return current;

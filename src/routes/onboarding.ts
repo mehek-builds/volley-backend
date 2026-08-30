@@ -31,7 +31,6 @@ import {
   consentAcceptanceGranted,
 } from '../lib/automationConsent';
 import { standingConsentEligibility, mayChangeStandingConsent } from '../engine/standingConsent';
-import { monitored_jobs } from '../db/schema';
 import { isComposioConfigured } from '../lib/composioConnections';
 import { isUndefinedColumnError, selectApplicationProfileRow, upsertApplicationProfile } from '../lib/applicationFacts';
 import { verificationEmailSource } from '../lib/verificationEmailSource';
@@ -41,6 +40,7 @@ import { rememberReusableAnswers } from '../lib/savedAnswerStore';
 import { accountSponsorshipAnswer, declarationFromEmployerAnswers } from '../lib/declarationFromEmployerAnswers';
 import { persistProfileWithCountryEligibility } from '../lib/countryEligibilityPersistence';
 import { reviewedSubmitCount } from '../lib/approvedApplicationSubmissions';
+import { actionPostingRowForUser } from './jdMatch';
 
 /**
  * The ONE way either route may turn automatic submission on.
@@ -591,7 +591,7 @@ const completeBodySchema = z.object({
   automatic_account_creation_enabled: z.boolean().optional(),
 });
 const onboardingAnswersBodySchema = z.object({
-  job_id: z.string().trim().min(1).max(200).optional().nullable(),
+  job_id: z.string().uuid().optional().nullable(),
   company: z.string().trim().max(200).optional().nullable(),
   answers: z.array(z.object({
     question: z.string().trim().min(1).max(2000),
@@ -1031,6 +1031,13 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const parsed = onboardingAnswersBodySchema.safeParse(request.body ?? {});
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid answers', detail: parsed.error.issues });
     const userId = request.jwtPayload!.userId;
+    const posting = await actionPostingRowForUser(parsed.data.job_id, userId);
+    if (parsed.data.job_id && !posting) {
+      return reply.status(404).send({
+        error: 'Current verified posting not found',
+        code: 'job_not_available',
+      });
+    }
     const stored = await rememberReusableAnswers(
       userId,
       parsed.data.answers,
@@ -1053,15 +1060,11 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
      * and can never overwrite one the student made herself. */
     let declaredCountry: string | null = null;
     if (parsed.data.job_id) {
-      /* Read fresh rather than threaded in: this route is called once per onboarding and the read
-         is what makes the first-write-wins check honest about what is already on file. */
+      /* The posting was resolved before any answer write. A raw job id passed the exact current
+         board predicate, while a closed row was available only when this account already owned an
+         application or packet bound to it. */
       const appProfileRow = await selectApplicationProfileRow(userId);
-      const [job] = await db
-        .select({ country: monitored_jobs.job_country })
-        .from(monitored_jobs)
-        .where(eq(monitored_jobs.id, parsed.data.job_id))
-        .limit(1);
-      const record = declarationFromEmployerAnswers(parsed.data.answers, job?.country ?? null);
+      const record = declarationFromEmployerAnswers(parsed.data.answers, posting?.job_country ?? null);
       if (record) {
         const existing = countryEligibilityForRead({ stored: appProfileRow?.work_eligibility_by_country });
         const already = (existing ?? []).some((row) => row.country_code === record.country_code);

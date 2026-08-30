@@ -1,23 +1,17 @@
-# Runs the job-monitor poll on a sub-daily cadence, and drains bounded follow-up passes within
-# each run.
+# Manual fallback for a bounded job-monitor diagnostic.
+#
+# The recurring owner is the single-replica Railway worker. This workflow has no schedule so it
+# cannot advance source timestamps during that worker's current-drain certification cycle.
 #
 # The endpoint stops starting polls after three minutes and keeps another 30 seconds for the final
 # batch, leaving at least one minute before Vercel's hard limit. If the
-# source queue is larger than one bounded pass can finish, this workflow calls it again. Every pass
+# source queue is larger than one bounded pass can finish, this fallback calls it again. Every pass
 # selects sources by oldest last_polled_at first, so it resumes the deferred tail automatically.
 name: job-monitor
 
 on:
-  schedule:
-    # Every two hours, offset ten minutes past the Vercel floor run's own slot (0/2/4/.../22:10
-    # UTC). Widened from a single 6:10 daily pass on 2026-08-20: strong-match-notifications.yml now
-    # promises a very-strong-fit posting reaches a student within 3 hours of being FOUND, and
-    # "found" means monitored_jobs.first_seen_at, which this job is what sets. A posting can only be
-    # emailed within 3 hours of being found if it is FOUND within a couple of hours of going live,
-    # so the barrier in the notifications workflow is hollow unless this one also runs sub-daily.
-    # The two schedules stay intentionally independent: the application still gets its one Vercel-
-    # native daily poll (see vercel.json) if GitHub Actions is delayed or unavailable that day.
-    - cron: '10 */2 * * *'
+  # Railway's single-replica worker owns the recurring drain. Keep this only as an operator-run
+  # diagnostic so a second scheduler cannot advance source timestamps during certification.
   workflow_dispatch:
 
 concurrency:
@@ -102,7 +96,7 @@ jobs:
               echo "### Job monitor pass ${pass}"
               echo ""
               echo '```json'
-              jq '{sources, enabled_sources, selected_sources, deferred_sources, polling_complete, poll_segment_size, drain_started_at, polling_elapsed_ms, failed, failed_sources: [.results[] | select(.ok == false) | {company, error}], surfaced_postings, surfaced_grouped_roles, surfaced_sponsor_only_jobs, grouped_role_alert_threshold, grouped_role_alert_triggered, target_surfaced_postings, target_surfaced_grouped_roles, inventory_target_met, board_health, variety, classification_coverage, target_role_coverage}' "${response_file}"
+              jq '{sources, enabled_sources, selected_sources, deferred_sources, polling_complete, poll_segment_size, drain_started_at, polling_elapsed_ms, failed, failed_sources: [.results[] | select(.ok == false) | {company, error}], surfaced_postings, surfaced_grouped_roles, surfaced_sponsor_only_jobs, certified_unique_jobs, certified_unique_grouped_roles, certified_unique_sponsor_jobs, certification_started_at, grouped_role_alert_threshold, grouped_role_alert_triggered, target_surfaced_postings, target_surfaced_grouped_roles, inventory_target_met, board_health, variety, classification_coverage, target_role_coverage}' "${response_file}"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
 
