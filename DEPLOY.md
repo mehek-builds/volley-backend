@@ -302,16 +302,17 @@ Use this order for the Railway migration:
 8. Route public traffic to Railway only after the evidence gate is enabled and the floors pass.
 
 The API requires `DATABASE_URL`, `JWT_SIGNING_SECRET` or `JOB_BOARD_CURSOR_SECRET`,
-`INTERNAL_CRON_SECRET`, `PUBLIC_API_BASE`, an explicitly validated `TRUST_PROXY_HOPS`, and `GIT_SHA`
-from Railway's deployed commit metadata. The worker requires the same `INTERNAL_CRON_SECRET` and a
-private Railway `LITOS_API_BASE`. Run the worker with exactly one replica and set
-`JOB_MONITOR_CYCLE_INTERVAL_MS=7200000`. Its `complete_drain.deployed_sha` uses
+`INTERNAL_CRON_SECRET`, `PUBLIC_API_BASE`, an explicitly validated `TRUST_PROXY_HOPS`, `GIT_SHA`,
+and the Railway object-storage credentials. The worker requires only the same
+`INTERNAL_CRON_SECRET`, a private Railway `LITOS_API_BASE`, its cycle settings, and the deployed
+SHA. It does not connect directly to Postgres or object storage. Run the worker with exactly one
+replica and set `JOB_MONITOR_CYCLE_INTERVAL_MS=7200000`. Its `complete_drain.deployed_sha` uses
 `RAILWAY_GIT_COMMIT_SHA`, falling back to `GIT_SHA`, so retain the former Railway-provided variable
-and set the latter when the runtime does not provide it. Both services require
-`BLOB_READ_WRITE_TOKEN`: resume storage uses it, and the verifier copies expiring first-party
-Rippling logos into durable public storage before their evidence can qualify. Set `STRATUS_API_KEY`
-when autonomous submission runs on Railway. Keep the Vercel-specific `VERCEL` variable unset. The
-API and worker secret values must match.
+and set the latter when the runtime does not provide it. The API copies expiring first-party
+Rippling logos into durable public storage before their evidence can qualify. `BLOB_READ_WRITE_TOKEN`
+is a rollback compatibility input, not a worker requirement. Set `STRATUS_API_KEY` when autonomous
+submission runs on Railway. Keep the Vercel-specific `VERCEL` variable unset. The API and worker
+`INTERNAL_CRON_SECRET` values must match.
 
 The worker keeps one `drain_started_at` watermark while it processes bounded 400-source polling
 segments and the independent logo-proof queue. The hard certification floors are 500,000 unique
