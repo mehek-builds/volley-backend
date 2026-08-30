@@ -20,6 +20,7 @@ async function connect(connectionString, name, readOnly) {
   await client.connect();
   await client.query("set statement_timeout = '10min'");
   await client.query("set lock_timeout = '10s'");
+  await client.query("set timezone = 'UTC'");
   if (readOnly) await client.query('set default_transaction_read_only = on');
   return client;
 }
@@ -29,34 +30,32 @@ async function rows(client, text) {
 }
 
 async function catalog(client) {
-  const [version, size, tables, columns, constraints, indexes, triggers, views, sequences, extensions] = await Promise.all([
-    rows(client, "select current_setting('server_version_num')::int as version_num, version() as version"),
-    rows(client, 'select pg_database_size(current_database())::text as bytes'),
-    rows(client, `select table_name from information_schema.tables
-      where table_schema = 'public' and table_type = 'BASE TABLE' order by table_name`),
-    rows(client, `select table_name, column_name, ordinal_position, data_type, udt_schema, udt_name,
-      is_nullable, column_default, character_maximum_length, numeric_precision, numeric_scale,
-      datetime_precision, is_identity, identity_generation, is_generated, generation_expression
-      from information_schema.columns where table_schema = 'public'
-      order by table_name, ordinal_position`),
-    rows(client, `select c.relname as table_name, con.conname as constraint_name,
-      con.contype as constraint_type, pg_get_constraintdef(con.oid, true) as definition
-      from pg_constraint con join pg_class c on c.oid = con.conrelid
-      join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public'
-      order by c.relname, con.conname`),
-    rows(client, `select tablename as table_name, indexname as index_name, indexdef as definition
-      from pg_indexes where schemaname = 'public' order by tablename, indexname`),
-    rows(client, `select event_object_table as table_name, trigger_name, action_timing,
-      event_manipulation, action_statement, action_orientation
-      from information_schema.triggers where trigger_schema = 'public'
-      order by event_object_table, trigger_name, event_manipulation`),
-    rows(client, `select table_name as view_name, view_definition
-      from information_schema.views where table_schema = 'public' order by table_name`),
-    rows(client, `select sequencename as sequence_name, data_type, start_value::text, min_value::text,
-      max_value::text, increment_by::text, cycle, cache_size::text, last_value::text
-      from pg_sequences where schemaname = 'public' order by sequencename`),
-    rows(client, 'select extname as name, extversion as version from pg_extension order by extname'),
-  ]);
+  const version = await rows(client, "select current_setting('server_version_num')::int as version_num, version() as version");
+  const size = await rows(client, 'select pg_database_size(current_database())::text as bytes');
+  const tables = await rows(client, `select table_name from information_schema.tables
+    where table_schema = 'public' and table_type = 'BASE TABLE' order by table_name`);
+  const columns = await rows(client, `select table_name, column_name, data_type, udt_schema, udt_name,
+    is_nullable, column_default, character_maximum_length, numeric_precision, numeric_scale,
+    datetime_precision, is_identity, identity_generation, is_generated, generation_expression
+    from information_schema.columns where table_schema = 'public'
+    order by table_name, column_name`);
+  const constraints = await rows(client, `select c.relname as table_name, con.conname as constraint_name,
+    con.contype as constraint_type, pg_get_constraintdef(con.oid, true) as definition
+    from pg_constraint con join pg_class c on c.oid = con.conrelid
+    join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public'
+    order by c.relname, con.conname`);
+  const indexes = await rows(client, `select tablename as table_name, indexname as index_name, indexdef as definition
+    from pg_indexes where schemaname = 'public' order by tablename, indexname`);
+  const triggers = await rows(client, `select event_object_table as table_name, trigger_name, action_timing,
+    event_manipulation, action_statement, action_orientation
+    from information_schema.triggers where trigger_schema = 'public'
+    order by event_object_table, trigger_name, event_manipulation`);
+  const views = await rows(client, `select table_name as view_name, view_definition
+    from information_schema.views where table_schema = 'public' order by table_name`);
+  const sequences = await rows(client, `select sequencename as sequence_name, data_type, start_value::text, min_value::text,
+    max_value::text, increment_by::text, cycle, cache_size::text, last_value::text
+    from pg_sequences where schemaname = 'public' order by sequencename`);
+  const extensions = await rows(client, 'select extname as name, extversion as version from pg_extension order by extname');
   return {
     version: version[0],
     databaseBytes: size[0].bytes,
@@ -75,8 +74,8 @@ async function tableFingerprint(client, table) {
   const qualified = `${quoteIdentifier('public')}.${quoteIdentifier(table)}`;
   const result = await client.query(
     `select count(*)::text as row_count,
-      coalesce(bit_xor(hashtextextended(row_to_json(t)::text, 0)), 0)::text as content_fingerprint
-      from ${qualified} t`,
+      md5(coalesce(string_agg(row_digest, '' order by row_digest), '')) as content_fingerprint
+      from (select md5(row_to_json(t)::text) as row_digest from ${qualified} t) digests`,
   );
   return result.rows[0];
 }

@@ -2366,7 +2366,7 @@ export const notification_sends = pgTable('notification_sends', {
    *
    * SET NULL, NEVER CASCADE, and the difference is the whole value of this table. postings are
    * HARD DELETED on a schedule: purgeExpiredPostings drops every monitored_jobs row past
-   * PURGE_POSTINGS_OLDER_THAN_DAYS. Under a cascade that purge would silently destroy the record
+   * the unverified-posting retention. Under a cascade that purge would silently destroy the record
    * that a student was ever emailed, one month after the fact, taking with it the only evidence an
    * unsubscribe complaint or a duplicate-send report has to look at, and resetting that account's
    * place in the sweep's longest-waiting-first rotation to "never mailed".

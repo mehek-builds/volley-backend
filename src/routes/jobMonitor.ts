@@ -11,7 +11,7 @@ import {
   sponsorshipVerdict,
   type PostingSponsorship,
 } from '../lib/sponsorship';
-import { resolveJobCountry } from '../lib/jobLocation';
+import { postingCountryCodeFromJobContext, resolveJobCountry } from '../lib/jobLocation';
 import { portalNameAgrees } from '../lib/sponsorIdentity';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { fetchSourceJobs, isIngestablePosting, POLLABLE_JOB_BOARDS, type JobSourceInput, type SupportedJobBoard } from '../lib/jobMonitor';
@@ -134,13 +134,13 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
 /**
  * THE BOARD MUST NEVER FALL BELOW THIS MANY SURFACED JOBS.
  *
- * A hard product floor, not a target and not a nice-to-have. Below fifty thousand postings the board
+ * A hard product floor, not a target and not a nice-to-have. Below five hundred thousand postings the board
  * stops being a place a job seeker can browse and becomes a list they exhaust in one sitting, so a
  * board that quietly shrinks is a broken product that still returns HTTP 200.
  *
- * RAISED TO 100,000 on 2026-08-30 (Mehek's call), with all seven autonomous families pollable and
- * 1,049 reviewed sources projected to surface 119,240 postings. The floor is deliberately below the
- * 120,000 early warning line and 125,000 operating target. Never fix a breach by lowering it.
+ * RAISED FROM 50,000 to 500,000 on 2026-08-30 (Mehek's call). The floor is intentionally above
+ * current supply until source expansion genuinely clears it. Never repair a breach by lowering the
+ * number: the 5xx is the alarm doing its job.
  *
  * COUNTED THE WAY A USER SEES IT, which is the only count that means anything: active postings, from
  * enabled sources, on portals Litos can finish autonomously. That last clause is why this constant
@@ -153,14 +153,12 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
  *   - sources failing their polls (check career_page_sources.last_error)
  *   - a portal demoted out of AUTONOMOUS_PORTAL_FAMILIES, taking its boards with it
  *   - the deactivation sweep in pollSource wiping boards (see the empty-response guard there)
- * The fix is more sources. All seven pollable families now have a fetchSourceJobs branch (see
- * POLLABLE_JOB_BOARDS); the cheapest remaining lever is another verified source round across these
- * families, not a new adapter.
+ * The fix is more verified sources on application portals that remain autonomous.
  */
-export const MINIMUM_SURFACED_JOBS = 100_000;
+export const MINIMUM_SURFACED_JOBS = 500_000;
 
 /** Distinct roles use the public board's exact grouping key: company, title, and ATS family. */
-export const MINIMUM_SURFACED_GROUPED_ROLES = 10_000;
+export const MINIMUM_SURFACED_GROUPED_ROLES = 50_000;
 
 /** The sponsor-only view has a separate floor because it is a strict subset of the full board. */
 export const MINIMUM_SPONSOR_SURFACED_JOBS = 5_000;
@@ -185,8 +183,9 @@ export const MINIMUM_SPONSOR_SURFACED_JOBS = 5_000;
  *      which is the reason a year-round floor is the hard version of this problem.
  *   2. A longer window for internships specifically. An internship req is posted once and stays
  *      open for months; nobody re-saves it, and Greenhouse's date is updated_at, so it ages out of
- *      JOB_FRESHNESS_DAYS while still live. That single mechanism costs 54% - 367 open internships
- *      exist upstream against 170 inside the window.
+ *      the old publication-date window while still live. That single mechanism cost 54% - 367 open internships
+ *      existed upstream against 170 inside the old publication window. The current verification
+ *      model fixes that loss by using successful source observation rather than publication age.
  *   3. More density-sourced boards. Real but slow: 1,501 probed tokens returned 26 usable sources.
  *
  * DO NOT close the gap by loosening what counts as an internship. That was measured too:
@@ -200,12 +199,12 @@ export const MINIMUM_SURFACED_INTERNSHIPS = 2_000;
 /**
  * REQUIRED HEADROOM OVER THE FLOOR.
  *
- * 100,000 is the committed inventory. The warning line is 20 percent above it, giving source decay
+ * 500,000 is the committed inventory. The warning line is 20 percent above it, giving source decay
  * room before the product breaks its commitment.
  */
 export const REQUIRED_HEADROOM_MULTIPLE = 1.2;
 export const REQUIRED_SURFACED_JOBS = MINIMUM_SURFACED_JOBS * REQUIRED_HEADROOM_MULTIPLE;
-export const REQUIRED_SURFACED_GROUPED_ROLES = 11_000;
+export const REQUIRED_SURFACED_GROUPED_ROLES = 55_000;
 /** Early alert boundary, named separately so monitoring consumers do not infer it from health. */
 export const GROUPED_ROLE_ALERT_THRESHOLD = REQUIRED_SURFACED_GROUPED_ROLES;
 
@@ -216,13 +215,10 @@ export function groupedRoleAlertTriggered(surfacedGroupedRoles: number): boolean
 /**
  * Supply goals measured separately from the hard floor and early warning line.
  *
- * Raised 15,000 -> 100,000 on 2026-08-29 alongside the floor (Mehek's call), matching the scale a
- * competitor board claims ("100,000+ top-notch positions daily") - though that number is itself
- * inconsistent across the competitor's own marketing (see litos-competitor-teardown-4-new-2026-08-02
- * .md), so treat it as a stretch target set for parity, not as a verified market ceiling.
+ * Raised to 625,000 on 2026-08-30, leaving 25 percent operating headroom above the committed floor.
  */
-export const TARGET_SURFACED_POSTINGS = 125_000;
-export const TARGET_SURFACED_GROUPED_ROLES = 12_000;
+export const TARGET_SURFACED_POSTINGS = 625_000;
+export const TARGET_SURFACED_GROUPED_ROLES = 60_000;
 
 export function inventoryTargetMet(surfacedPostings: number, surfacedGroupedRoles: number): boolean {
   return surfacedPostings >= TARGET_SURFACED_POSTINGS
@@ -234,104 +230,28 @@ export const MONITOR_METRICS_STATEMENT_TIMEOUT_MS = 30_000;
 export const TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS = 5_000;
 
 /**
- * ONLY POSTINGS FROM THE LAST THREE MONTHS ARE SHOWN.
+ * A posting is current when its employer's live ATS has confirmed it recently.
  *
- * NINETY DAYS, Mehek's call on 2026-08-26, and the third value this constant has held: seven days,
- * then fourteen, now a season.
- *
- * WHAT THE EARLIER NUMBERS WERE SOLVING, kept because it is the reason none of them can be restored
- * casually. Hiring is weekday work: measured on this board on 2026-07-28, weekdays carry 700-3,500
- * postings a day while **Saturday carries 143 and Sunday 22**. A window shorter than a week
- * therefore changes size depending on which days it happens to cover - a rolling 3-day window
- * measured 3,917 on a Tuesday and would hold roughly 2,000 on a Monday, when it spans Sat+Sun+Mon.
- * Fourteen days fixed that by containing exactly two Saturdays and two Sundays. Ninety contains
- * twelve or thirteen of each, so the weekend shape has stopped being what governs the number.
- *
- * Measured windows before the 10,000-job commitment: 3d = 3,917, 4d = 6,927, 5d = 7,815,
- * 7d = 9,664, and 14d = 12,516. NINETY WAS NOT MEASURED BEFORE IT SHIPPED - state that plainly
- * rather than implying a number that was never taken. What it will hold is whatever the sources
- * carry, which is why the daily cron reports surfaced postings and grouped roles on every run.
- *
- * WHAT NOW GOVERNS THE NUMBER is how long an untouched DATE stays believable, which is the same
- * argument INTERNSHIP_FRESHNESS_DAYS rests on. Internships keep the longer window - 180 against
- * this 90 - because their dates go untouched for longer still.
- *
- * THIS DOES NOT SURFACE CLOSED POSTINGS. `is_active` is a separate predicate and the poll's sweep
- * flips it the moment a posting leaves its board, so a 90-day window can still only show reqs the
- * employer is listing today. The window governs how long an untouched date stays believable, not
- * how long a dead posting survives.
- *
- * WHAT TO WATCH, and it is no longer supply: a longer window cannot thin the board, so the headroom
- * warnings should now sit far above their lines. The cost moved to STORAGE, and both purges are
- * derived, so widening a window silently doubles a retention: ordinary rows are kept 180 days
- * against the old 28, and internships 360 against the old 180. That is close to a year of rows on a
- * 512 MB database. purged_postings and the table's own size are the numbers that matter on the
- * daily run, and if they turn bad the honest fix is a tighter purge multiple - breaking the exact
- * doubling - not a quietly narrowed window.
- *
- * Greenhouse note: `posted_at` is Greenhouse's `updated_at` (it publishes no create date), so for
- * 77% of the board this is "changed in the last 90 days" rather than "posted". That is a deliberate
- * call, and it is why the board card says UPDATED for Greenhouse rows and POSTED for Lever/Ashby.
- * Do not collapse those two words - claiming a publish date we do not have is the one thing the
- * board's copy tests exist to prevent.
+ * Publication age is not a validity signal. Long-running requisitions and internships can stay
+ * open for months without being edited, while every supported provider's listing endpoint is a
+ * current-openings feed. `last_seen_at` records the stronger fact: Litos fetched the posting from
+ * that live feed during a successful source poll. Seven days gives the segmented Railway drain
+ * time to cover the full catalog without letting a source that has stopped verifying remain on the
+ * product indefinitely.
  */
-export const JOB_FRESHNESS_DAYS = 90;
+export const VERIFIED_ACTIVE_WINDOW_DAYS = 7;
+
+/** A full verification window of slack before an unrefreshed row is deleted. */
+export const PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS = VERIFIED_ACTIVE_WINDOW_DAYS * 2;
 
 /**
- * HOW LONG AN INTERNSHIP STAYS ON THE BOARD. A hundred and eighty days.
- *
- * TWICE THE BOARD WINDOW, restored to that ratio on 2026-08-26 (Mehek's call) in the same breath as
- * the board moved 14 -> 90. For a few minutes the two were equal at 90 and this branch admitted
- * nothing the general one did not; 180 makes it load-bearing again, which is the state the code was
- * written for and the state its test asserts.
- *
- * WHY THE RULE IS ITS OWN: an internship req is posted once and stays open for months, and NOBODY
- * EVER RE-SAVES IT. Greenhouse publishes no create date so `posted_at` is its `updated_at`, and a
- * full-time req is edited often enough to keep re-entering a short window; an internship posted in
- * the August burst is untouched from then until it closes. Under the old 14-day board window it aged
- * out in mid-September while still open, and still the most valuable posting on the board for the
- * student it was written for.
- *
- * Measured 2026-08-03, which is what set the number: 367 internships were open across our sources
- * and only 170 were inside 14 days. The window alone was costing 54% of internship supply.
- *
- * THIS DOES NOT SURFACE CLOSED INTERNSHIPS, and at this length that sentence is carrying more
- * weight than it used to. `is_active` is a separate predicate and the poll's sweep flips it the
- * moment a posting leaves its board, so even a 180-day window can only show reqs the employer is
- * listing TODAY. The window governs how long an untouched DATE stays believable, not how long a
- * dead posting survives. Without that sweep this number would be indefensible; with it, the worst
- * case is a live req whose date is old, which is exactly the internship case.
- *
- * A HUNDRED AND EIGHTY IS THE CYCLE, not a season. Ninety was chosen to span the Aug-Oct opening
- * and the interviews that run into winter. 180 spans the whole of it: a summer-2027 req posted in
- * August is still shown in February, by which time the employer has either closed it - and the
- * sweep has already removed it - or is still hiring against it. What it gives up is the ability to
- * read anything into the date at all, which is why the board card says FOUND or UPDATED rather than
- * POSTED wherever the employer did not publish a real publish date.
- */
-export const INTERNSHIP_FRESHNESS_DAYS = 180;
-
-/**
- * The window, which is now two windows.
- *
- * Still ONE helper, for the reason the single-window version was: `/jobs`, `/jobs/grouped`,
+ * One helper for every public surface. `/jobs`, `/jobs/grouped`,
  * `/jobs/facets` and `surfacedJobCount()` all call it, and a second copy of this rule is precisely
  * how the floor check ends up watching a number no visitor ever sees. One helper is also why
- * widening the board window widens the dashboard's job feed by the same amount: that is the design,
- * not a side effect.
- *
- * Two windows, two lengths: 90 for the board and 180 for internships, so the second branch decides
- * a real set of rows rather than restating the first. See INTERNSHIP_FRESHNESS_DAYS for why an
- * internship's date ages differently from everything else's.
+ * changing the verification window changes the dashboard's job feed by the same amount.
  */
 function freshnessPredicate() {
-  return sql`(
-    ${monitored_jobs.posted_at} >= now() - (${JOB_FRESHNESS_DAYS} || ' days')::interval
-    or (
-      ${monitored_jobs.employment_type} = 'Internship'
-      and ${monitored_jobs.posted_at} >= now() - (${INTERNSHIP_FRESHNESS_DAYS} || ' days')::interval
-    )
-  )`;
+  return sql`${monitored_jobs.last_seen_at} >= now() - (${VERIFIED_ACTIVE_WINDOW_DAYS} || ' days')::interval`;
 }
 
 /**
@@ -348,29 +268,6 @@ function freshnessPredicate() {
  * enough that the dead rows never accumulate.
  */
 export const CLOSED_POSTING_RETENTION_DAYS = 2;
-
-/**
- * How old a posting must be before its row is deleted outright.
- *
- * A FULL WINDOW OF SLACK past the window itself, and the slack is the whole point: purging at the
- * freshness boundary would delete rows the very next poll re-inserts, forever, for any posting
- * sitting near the edge. Exported so the relationship to JOB_FRESHNESS_DAYS is pinned by a test
- * rather than recomputed in one.
- */
-export const PURGE_POSTINGS_OLDER_THAN_DAYS = JOB_FRESHNESS_DAYS * 2;
-
-/**
- * The same rule for internships, derived from THEIR window rather than the board's.
- *
- * Not optional bookkeeping: the purge is what decides whether the longer internship window can
- * actually be honoured. Purging internships at 28 days while the board is willing to show them for
- * 90 would delete the row every night and re-fetch it every morning, so the window would read as
- * "90 days" in the code and behave as 28 in production - and only for the one category the longer
- * window exists to serve.
- *
- * Same doubling, same reason: a full window of slack so the purge can never fight the poller.
- */
-export const PURGE_INTERNSHIPS_OLDER_THAN_DAYS = INTERNSHIP_FRESHNESS_DAYS * 2;
 
 /**
  * Delete rows that can never be shown again: closed postings past their retention, and anything that
@@ -393,28 +290,10 @@ export async function purgeExpiredPostings(): Promise<number> {
       eq(monitored_jobs.is_active, false),
       sql`${monitored_jobs.last_seen_at} < now() - (${CLOSED_POSTING_RETENTION_DAYS} || ' days')::interval`,
     ),
-    /* Outside the window with a full window of slack. The slack matters: deleting exactly at the
-       boundary would fight the poller over any posting sitting near it, deleting a row the next run
-       re-inserts, forever. A posting still listed by its employer is re-added by the very next poll
-       anyway, so this only ever removes rows nothing is refreshing.
-
-       Internships are held to their OWN window, which is the half of the longer-window change that
-       is easy to leave out: this predicate is what makes 90 days real rather than something the
-       read path claims while the purge quietly enforces 28. */
-    and(
-      ne(monitored_jobs.employment_type, 'Internship'),
-      sql`${monitored_jobs.posted_at} < now() - (${PURGE_POSTINGS_OLDER_THAN_DAYS} || ' days')::interval`,
-    ),
-    and(
-      eq(monitored_jobs.employment_type, 'Internship'),
-      sql`${monitored_jobs.posted_at} < now() - (${PURGE_INTERNSHIPS_OLDER_THAN_DAYS} || ' days')::interval`,
-    ),
-    /* employment_type is NULL for most of the board (Greenhouse states no type), and `ne` does not
-       match NULL, so the two branches above would together leave every untyped posting immortal. */
-    and(
-      isNull(monitored_jobs.employment_type),
-      sql`${monitored_jobs.posted_at} < now() - (${PURGE_POSTINGS_OLDER_THAN_DAYS} || ' days')::interval`,
-    ),
+    /* A row no supported ATS has returned for two full verification windows cannot be counted as
+       current. This applies equally to internships and every other role because it measures the
+       observation, not the employer's publication date. */
+    sql`${monitored_jobs.last_seen_at} < now() - (${PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS} || ' days')::interval`,
   ));
   const purged = (result as { rowCount?: number }).rowCount ?? 0;
 
@@ -976,6 +855,22 @@ function evidenceFor(row: { sponsorship_status: string | null; employer_sponsors
   }).evidence;
 }
 
+/** The jurisdiction the evidence applies to, never a generic worldwide sponsorship claim. */
+export function sponsorshipCountryCodeFor(row: {
+  sponsorship_status: string | null;
+  employer_sponsors: boolean | null;
+  location?: string | null;
+  raw_json?: unknown;
+}): string | null {
+  const evidence = evidenceFor(row);
+  if (evidence === 'employer_h1b_filings') return 'US';
+  if (evidence !== 'posting_offers') return null;
+  const metadata = row.raw_json && typeof row.raw_json === 'object'
+    ? row.raw_json as Record<string, unknown>
+    : {};
+  return postingCountryCodeFromJobContext({ ...metadata, location: row.location ?? undefined }) ?? null;
+}
+
 export async function studentResumeFacts(userId: string | undefined): Promise<{ resumeText: string | null; degree: string | null }> {
   if (!userId) return { resumeText: null, degree: null };
   const [profile] = await db
@@ -1214,7 +1109,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       }
     }
 
-    /* THE WINDOW IS ENFORCED AT INGEST, not only at read time.
+    /* CURRENTNESS IS ESTABLISHED AT INGEST, not inferred from publication age.
      *
      * Filtering only in boardConditions() meant the table stored every posting a board had ever
      * carried and then hid most of them on every single read: 22,125 rows active, 10,008 shown,
@@ -1235,11 +1130,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
        poll refuses to store can never be shown by a longer read window, so leaving this behind the
        constants would make the other two changes inert. The employment type is resolved by the
        normalizers before this point, which is what lets the gate ask. */
-    const cutoff = new Date(Date.now() - JOB_FRESHNESS_DAYS * 86_400_000);
-    const internshipCutoff = new Date(Date.now() - INTERNSHIP_FRESHNESS_DAYS * 86_400_000);
-    const fresh = jobs
-      .filter((job) => job.posted_at instanceof Date
-        && job.posted_at >= (job.employment_type === 'Internship' ? internshipCutoff : cutoff))
+    const ingestable = jobs
       /* Same reasoning as the window, and deliberately on the same side of the guard. Two things
          never reach the table: a posting whose description is a placeholder or the title repeated
          (nothing a student can evaluate or the matcher can score), and a posting that declares
@@ -1260,8 +1151,8 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
          public board rather than staling it.
          Chunked so a single board the size of Databricks still fits well
          inside Postgres's 65,535-parameter cap: 21 columns x 200 rows. */
-      for (let index = 0; index < fresh.length; index += UPSERT_CHUNK) {
-        const chunk = fresh.slice(index, index + UPSERT_CHUNK).map(({
+      for (let index = 0; index < ingestable.length; index += UPSERT_CHUNK) {
+        const chunk = ingestable.slice(index, index + UPSERT_CHUNK).map(({
           pay,
           portal_country: portalCountry,
           portal_company_name: _portalCompanyName,
@@ -1345,8 +1236,8 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
      * about the board list. It does mean we no longer know WHOSE board it is, and an employer's
      * H-1B record cannot be attached to a board we cannot identify.
      *
-     * `jobs`, not `fresh`: the freshness window can empty the latter, and the portal's name for
-     * itself has nothing to do with how recently it posted. */
+     * `jobs`, not `ingestable`: identity evidence remains available even when every description is
+     * rejected by the product-quality gate. */
     const portalName = jobs.map((job) => job.portal_company_name).find(Boolean) ?? null;
     const agrees = portalNameAgrees(source.company_name, portalName);
     await db.update(career_page_sources).set({
@@ -1359,7 +1250,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
     return {
       source_id: source.id,
       company: source.company_name,
-      jobs: fresh.length,
+      jobs: ingestable.length,
       fetched: jobs.length,
       ok: true as const,
       ...(agrees === false ? { portal_says: portalName } : {}),
@@ -1661,6 +1552,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
          "sponsors: true" would let a badge outlive a change to the rule that drew it. */
       sponsorship_status: monitored_jobs.sponsorship_status,
       employer_sponsors: sql<boolean>`${career_page_sources.sponsor_employer_id} is not null`,
+      raw_json: monitored_jobs.raw_json,
     };
 
     /* A search matches the title OR the body, and the body is the whole job description, so
@@ -1708,6 +1600,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
           ...withCompanyDomain(row),
           match_score: null,
           sponsorship_evidence: evidenceFor(row),
+          sponsorship_country_code: sponsorshipCountryCodeFor(row),
         })),
         total: await jobCount(),
         limit,
@@ -1950,6 +1843,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
           preference_score: scored ? fit.score : null,
           preference_reasons: scored ? fit.reasons : [],
           sponsorship_evidence: evidenceFor(row),
+          sponsorship_country_code: sponsorshipCountryCodeFor(row),
         };
       });
 
@@ -2091,15 +1985,26 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const countRow = counted.rows[0];
 
     return applyBoardCacheHeaders(request, reply).send({
-      jobs: rows.slice(0, limit).map(({ offers_any, refuses_any, employer_sponsors, ...row }) => ({
-        ...row,
-        sponsorship_evidence: refuses_any
+      jobs: rows.slice(0, limit).map(({ offers_any, refuses_any, employer_sponsors, ...row }) => {
+        const sponsorshipEvidence = refuses_any
           ? null
           : evidenceFor({
             sponsorship_status: offers_any ? 'offers' : 'unstated',
             employer_sponsors,
-          }),
-      })),
+          });
+        const sponsorshipCountryCodes = sponsorshipEvidence === 'employer_h1b_filings'
+          ? ['US']
+          : sponsorshipEvidence === 'posting_offers'
+            ? [...new Set(row.locations
+              .map((location) => postingCountryCodeFromJobContext({ location }))
+              .filter((code): code is string => Boolean(code)))]
+            : [];
+        return {
+          ...withCompanyDomain(row),
+          sponsorship_evidence: sponsorshipEvidence,
+          sponsorship_country_codes: sponsorshipCountryCodes,
+        };
+      }),
       total: Number(countRow?.total ?? 0),
       postings_total: Number(countRow?.postings_total ?? 0),
       limit,
@@ -2191,6 +2096,24 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .orderBy(sql`count(*) desc`)
       : null;
 
+    /* The production logo gate needs the same weighted inventory, split by the exact employer
+       board that proves identity. Company name alone is insufficient: Block is the canonical
+       example, where guessing the name finds block.co while its Greenhouse board proves block.xyz.
+       Only returned to the explicit counts=true measurement request. */
+    const companyLogoSources = facetQuery?.counts === 'true'
+      ? await db
+        .select({
+          company_name: monitored_jobs.company_name,
+          career_url: career_page_sources.career_url,
+          rows: sql<number>`count(*)::int`,
+        })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(where)
+        .groupBy(monitored_jobs.company_name, career_page_sources.career_url)
+        .orderBy(sql`count(*) desc`)
+      : null;
+
     /* Cities, not location strings.
        An employer's `location` is whatever they typed: often a list ("Boston;
        New York City; Pennsylvania"), often carrying a country ("San Mateo, CA,
@@ -2233,6 +2156,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
             .map((r) => ({ company_name: r.v, rows: r.n })),
         }
         : {}),
+      ...(companyLogoSources ? { company_logo_sources: companyLogoSources } : {}),
       /* `titles` is gone on purpose. It returned the board's most common RAW
          posting titles — "Senior Product Manager - Network Path" — which is not
          what a person types into a field labelled Job title. The board now
@@ -2274,6 +2198,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         career_url: career_page_sources.career_url,
         sponsorship_status: monitored_jobs.sponsorship_status,
         employer_sponsors: sql<boolean>`${career_page_sources.sponsor_employer_id} is not null`,
+        raw_json: monitored_jobs.raw_json,
       })
       .from(monitored_jobs)
       .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
@@ -2289,7 +2214,11 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       ))
       .limit(1);
     if (!rows[0]) return reply.status(404).send({ error: 'Job not found' });
-    return reply.send({ job: { ...withCompanyDomain(rows[0]), sponsorship_evidence: evidenceFor(rows[0]) } });
+    return reply.send({ job: {
+      ...withCompanyDomain(rows[0]),
+      sponsorship_evidence: evidenceFor(rows[0]),
+      sponsorship_country_code: sponsorshipCountryCodeFor(rows[0]),
+    } });
   });
 
   fastify.post('/internal/job-monitor/sources', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -2322,7 +2251,11 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     await upsertSources(allSources);
     /* Every run reconciles the database against the reviewed list, so a company removed in a pull
        request stops appearing on the board without anybody remembering to go and disable it. */
-    const retired = await retireUnlistedSources(allSources);
+    /* Remote discovery makes the persisted fleet larger than the static catalog. Automatic
+       retirement is therefore unsafe: an older release or a partial catalog must not disable
+       sources that were independently verified by a newer release. Explicit operator actions
+       remain the only authority for disabling a source. */
+    const retired: string[] = [];
     const [sourceCount] = await db
       .select({ total: sql<number>`count(*)::int` })
       .from(career_page_sources)
@@ -2419,13 +2352,13 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       minimum_sponsor_surfaced_jobs: MINIMUM_SPONSOR_SURFACED_JOBS,
       /* THE SUSTAINABILITY CHECK, run every day rather than once.
        *
-       * Whether the 90-day window keeps both postings and grouped roles above their warning lines
+       * Whether the verification window keeps both postings and grouped roles above their warning lines
        * depends on hiring volume and sources still resolving. Reporting both makes the answer
        * observable instead of relying on a one-time measurement.
        *
-       * headroom_multiple is the number to watch. A slide toward 1.0 is the signal to widen
-       * JOB_FRESHNESS_DAYS or add sources before anything breaks. */
-      freshness_window_days: JOB_FRESHNESS_DAYS,
+       * headroom_multiple is the number to watch. A slide toward 1.0 is the signal to repair
+       * verification throughput or add sources before anything breaks. */
+      verification_window_days: VERIFIED_ACTIVE_WINDOW_DAYS,
       /* The rolling window's two halves, reported so both are visible: how many stale/closed rows
          this run removed, and how long a closed posting is kept before deletion. A purge that
          suddenly deletes thousands, or nothing at all, is the first sign something upstream changed. */
@@ -2475,10 +2408,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
           surfacedGroupedRoles,
           requiredPostings: REQUIRED_SURFACED_JOBS,
           requiredGroupedRoles: REQUIRED_SURFACED_GROUPED_ROLES,
-          windowDays: JOB_FRESHNESS_DAYS,
+          windowDays: VERIFIED_ACTIVE_WINDOW_DAYS,
         },
         `Job board has thin headroom: ${surfaced} postings and ${surfacedGroupedRoles} grouped roles. `
-        + `Widen JOB_FRESHNESS_DAYS or add sources before it reaches the floor.`,
+        + `Complete the source drain or add sources before it reaches the floor.`,
       );
     }
     if (surfacedInternships < MINIMUM_SURFACED_INTERNSHIPS) {
@@ -2486,7 +2419,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         {
           surfacedInternships,
           committedInternships: MINIMUM_SURFACED_INTERNSHIPS,
-          windowDays: JOB_FRESHNESS_DAYS,
+          windowDays: VERIFIED_ACTIVE_WINDOW_DAYS,
         },
         `Internship inventory is ${surfacedInternships} against a committed ${MINIMUM_SURFACED_INTERNSHIPS}. `
         + 'Levers, measured, in order: internship-specific freshness window, seasonal ramp, more '

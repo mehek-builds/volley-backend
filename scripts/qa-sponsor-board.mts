@@ -114,9 +114,8 @@ const rows = [
   { source: notSponsoring.id, company: 'QA Unconfirmed Employer', title: 'QA Unconfirmed Offered', status: 'offers', surfaced: true },
 ];
 
-/* posted_at is REQUIRED on a fixture now, not optional. The board gained a freshness window
-   (`posted_at >= now() - JOB_FRESHNESS_DAYS`), so a row without one is filtered out before any
-   sponsorship rule is reached and every check in this file fails with an empty board. */
+/* Keep a publication date for display. Currentness is established separately by last_seen_at,
+   whose schema default marks these freshly inserted QA rows as recently verified. */
 const postedAt = new Date();
 rows.push(
   { source: sponsoring.id, company: 'QA Sponsoring Employer', title: 'QA Sponsored Abroad', status: 'unstated', surfaced: false, country: 'non_us' },

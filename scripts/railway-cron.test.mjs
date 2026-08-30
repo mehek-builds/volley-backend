@@ -46,6 +46,40 @@ test('job monitor drains three 400-source segments under one timestamp', async (
   assert.equal(logs.filter((line) => line.includes('segment ')).length, 3);
 });
 
+test('the default Railway drain clears five thousand sources under one timestamp', async () => {
+  const calls = [];
+  const segmentCount = 13;
+  const replies = Array.from({ length: segmentCount }, (_, index) => {
+    const finalSegment = index === segmentCount - 1;
+    return response(finalSegment ? 200 : 500, {
+      polling_complete: finalSegment,
+      sources: finalSegment ? 200 : 400,
+      deferred_sources: finalSegment ? 0 : 5_000 - ((index + 1) * 400),
+    });
+  });
+
+  const result = await runRailwayCron({
+    INTERNAL_API_BASE: 'http://api.railway.internal:3001',
+    CRON_PATH: '/internal/job-monitor',
+    INTERNAL_CRON_SECRET: 'cron-secret',
+    CRON_DRAIN_UNTIL_COMPLETE: '1',
+  }, {
+    now: () => Date.parse('2026-08-30T16:00:00.000Z'),
+    logger: { log: () => {} },
+    fetcher: async (url) => {
+      calls.push(new URL(url));
+      return replies.shift();
+    },
+  });
+
+  assert.equal(result.segments, segmentCount);
+  assert.equal(calls.length, segmentCount);
+  assert.deepEqual(
+    calls.map((url) => url.searchParams.get('drain_started_at')),
+    Array(segmentCount).fill('2026-08-30T16:00:00.000Z'),
+  );
+});
+
 test('a completed drain still fails when the final inventory response is unhealthy', async () => {
   await assert.rejects(
     runRailwayCron({

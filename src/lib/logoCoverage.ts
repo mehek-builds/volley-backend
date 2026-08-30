@@ -1,4 +1,4 @@
-export const MINIMUM_LOGO_COVERAGE = 0.75;
+export const MINIMUM_LOGO_COVERAGE = 1;
 
 export function logoCoverageFloor(configured: string | undefined): number {
   if (configured === undefined) return MINIMUM_LOGO_COVERAGE;

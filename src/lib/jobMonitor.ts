@@ -29,7 +29,7 @@ import {
 // list endpoint with no description (Rippling has no date either), so surfacing either one costs one
 // detail request per distinct posting. See fetchRipplingJobs and fetchBreezyJobs.
 export const POLLABLE_JOB_BOARDS = [
-  'greenhouse', 'lever', 'ashby', 'workable', 'rippling', 'breezy', 'recruitee',
+  'greenhouse', 'lever', 'ashby', 'workable', 'rippling', 'breezy', 'recruitee', 'crelate',
 ] as const satisfies readonly AutonomousPortalFamily[];
 
 export type SupportedJobBoard = typeof POLLABLE_JOB_BOARDS[number];
@@ -93,6 +93,17 @@ const NAMED_ENTITIES: Record<string, string> = {
   quot: '"',
   apos: "'",
   nbsp: ' ',
+  /* Crelate's full-detail HTML uses these named entities throughout ordinary prose. Keeping the
+     entity spellings would technically retain the words but would not produce a readable full
+     description for matching, sponsorship evidence, or the job detail page. */
+  rsquo: '\u2019',
+  lsquo: '\u2018',
+  rdquo: '\u201d',
+  ldquo: '\u201c',
+  ndash: '\u2013',
+  mdash: '\u2014',
+  middot: '\u00b7',
+  bull: '\u2022',
 };
 
 function decodeEntities(value: string): string {
@@ -639,6 +650,10 @@ export function sourceEndpoint(source: Pick<JobSourceInput, 'ats_name' | 'board_
       return `https://${token}.breezy.hr/json`;
     case 'recruitee':
       return `https://${token}.recruitee.com/api/offers/`;
+    /* Crelate needs this metadata request before its public jobs request. The board token is
+       base64-encoded by Crelate itself, then query-encoded so padding cannot become query syntax. */
+    case 'crelate':
+      return `https://jobs.crelate.com/api/candidateportal/getclientvars?onv=${encodeURIComponent(Buffer.from(source.board_token.trim(), 'utf8').toString('base64'))}`;
     default:
       return assertNever(source.ats_name);
   }
@@ -877,6 +892,164 @@ export function normalizeRecruiteeJobs(payload: unknown): NormalizedJob[] {
   });
 }
 
+type CrelateClientVars = {
+  ORG_ID?: unknown;
+  ORG_NAME?: unknown;
+  ORG_DISPLAY_NAME?: unknown;
+  BASE_URL?: unknown;
+  PORTAL_VERSION?: unknown;
+};
+
+type CrelateJob = {
+  Id?: unknown;
+  JobCode?: unknown;
+  Title?: unknown;
+  Description?: unknown;
+  City?: unknown;
+  State?: unknown;
+  Country?: unknown;
+  LastPostedOnDate?: unknown;
+  Tags?: unknown;
+  CompanyName?: unknown;
+};
+
+const CRELATE_JOB_CODE = /^[a-z0-9]{26}$/i;
+const CRELATE_ORG_NAME = /^[a-z0-9][a-z0-9_-]{0,127}$/i;
+
+function crelateApiEndpoint(path: 'GetAllJobs' | 'GetJob', envelope: Record<string, unknown>): string {
+  return `https://app.crelate.com/api/candidateportal/${path}?requestEnvelope=${encodeURIComponent(JSON.stringify(envelope))}`;
+}
+
+function crelateTags(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value
+    .map((tag) => text((tag as Record<string, unknown> | null)?.Name))
+    .filter((name): name is string => Boolean(name))
+    .join(', ') || undefined;
+}
+
+/**
+ * Crelate exposes a public, account-free candidate-portal API in three steps:
+ *
+ * 1. `getclientvars?onv=base64(slug)` resolves the public tenant to an organization id.
+ * 2. `GetAllJobs` returns the current posting identities, but only description snippets.
+ * 3. `GetJob` returns the complete HTML description for one posting.
+ *
+ * Verified live 2026-08-30 against Canon Recruiting. Full details are required here because a
+ * snippet can cut off the employer's visa policy, and the country-aware sponsorship classifier
+ * reads the normalized description together with `portal_country` downstream. Any detail that
+ * cannot be tied back to its requested JobCode is dropped rather than borrowing another role.
+ */
+async function fetchCrelateJobs(
+  source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
+  fetcher: typeof fetch,
+): Promise<NormalizedJob[]> {
+  const varsResponse = await fetcher(sourceEndpoint(source), detailRequestInit());
+  if (!varsResponse.ok) throw new Error(`crelate board returned HTTP ${varsResponse.status}`);
+  const varsPayload = await varsResponse.json();
+  if (!varsPayload || typeof varsPayload !== 'object' || Array.isArray(varsPayload)) {
+    throw new Error('Crelate board returned invalid client variables');
+  }
+  const vars = varsPayload as CrelateClientVars;
+  const organizationId = text(vars.ORG_ID);
+  const organizationName = text(vars.ORG_NAME);
+  const organizationDisplayName = text(vars.ORG_DISPLAY_NAME) ?? organizationName;
+  const baseUrl = text(vars.BASE_URL) ?? 'jobs.crelate.com';
+  const portalVersion = text(vars.PORTAL_VERSION);
+  if (!organizationId || !organizationName || !CRELATE_ORG_NAME.test(organizationName)) {
+    throw new Error('Crelate board returned invalid organization metadata');
+  }
+  /* The autonomous submission adapter is intentionally scoped to this first-party, unversioned
+     route. A custom host or a different portal generation has not passed that receipt proof. */
+  if (baseUrl.toLowerCase() !== 'jobs.crelate.com' || portalVersion) {
+    throw new Error('Crelate board returned an unsupported portal route');
+  }
+
+  const listResponse = await fetcher(crelateApiEndpoint('GetAllJobs', {
+    OrganizationId: organizationId,
+    Locations: null,
+    SearchText: null,
+    Tags: null,
+  }), detailRequestInit());
+  if (!listResponse.ok) throw new Error(`crelate board returned HTTP ${listResponse.status}`);
+  const listPayload = await listResponse.json() as {
+    Jobs?: unknown;
+    IsError?: unknown;
+    ErrorMessage?: unknown;
+  };
+  if (!listPayload || typeof listPayload !== 'object' || listPayload.IsError === true
+    || !Array.isArray(listPayload.Jobs)) {
+    const providerError = text(listPayload?.ErrorMessage);
+    throw new Error(`Crelate board returned an invalid jobs payload${providerError ? `: ${providerError}` : ''}`);
+  }
+
+  const listedByCode = new Map<string, CrelateJob>();
+  for (const raw of listPayload.Jobs) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
+    const listed = raw as CrelateJob;
+    const jobCode = text(listed.JobCode);
+    if (!jobCode || !CRELATE_JOB_CODE.test(jobCode)) continue;
+    if (!listedByCode.has(jobCode.toLowerCase())) listedByCode.set(jobCode.toLowerCase(), listed);
+  }
+
+  const details = await mapWithConcurrency(
+    [...listedByCode.entries()],
+    DETAIL_FETCH_CONCURRENCY,
+    async ([requestedCode, listed]) => {
+      try {
+        const response = await fetcher(
+          crelateApiEndpoint('GetJob', { JobCode: text(listed.JobCode) }),
+          detailRequestInit(),
+        );
+        if (!response.ok) return null;
+        const payload = await response.json() as {
+          Job?: unknown;
+          IsError?: unknown;
+        };
+        if (!payload || typeof payload !== 'object' || payload.IsError === true
+          || !payload.Job || typeof payload.Job !== 'object' || Array.isArray(payload.Job)) return null;
+        const job = payload.Job as CrelateJob;
+        const jobCode = text(job.JobCode);
+        const title = text(job.Title) ?? text(listed.Title);
+        if (!jobCode || jobCode.toLowerCase() !== requestedCode || !title) return null;
+
+        const description = cleanHtml(job.Description);
+        const city = text(job.City) ?? text(listed.City);
+        const state = text(job.State) ?? text(listed.State);
+        const country = text(job.Country) ?? text(listed.Country);
+        const location = [city, state, country].filter(Boolean).join(', ') || undefined;
+        const portalPath = `/portal/${encodeURIComponent(organizationName)}/job`;
+        const postingUrl = `https://jobs.crelate.com${portalPath}/${encodeURIComponent(jobCode)}`;
+        const applyUrl = `https://jobs.crelate.com${portalPath}/apply/${encodeURIComponent(jobCode)}`;
+
+        const normalized: NormalizedJob = {
+          external_id: text(job.Id) ?? text(listed.Id) ?? jobCode,
+          title,
+          location,
+          department: crelateTags(job.Tags) ?? crelateTags(listed.Tags),
+          employment_type: resolveEmploymentType(title, undefined, description),
+          description,
+          apply_url: applyUrl,
+          posting_url: postingUrl,
+          remote: /\bremote\b/i.test([location, description].filter(Boolean).join(' ')),
+          posted_at: date(job.LastPostedOnDate) ?? date(listed.LastPostedOnDate),
+          portal_country: country,
+          portal_company_name: text(job.CompanyName)
+            ?? text(listed.CompanyName)
+            ?? organizationDisplayName,
+        };
+        return normalized;
+      } catch {
+        /* One missing, malformed, or timed-out detail must not suppress every other current role.
+           It is still excluded itself because the list response contains only a truncated body. */
+        return null;
+      }
+    },
+  );
+
+  return details.filter((job): job is NormalizedJob => job !== null);
+}
+
 export async function fetchSourceJobs(
   source: Pick<JobSourceInput, 'ats_name' | 'board_token'>,
   fetcher: typeof fetch = fetch,
@@ -885,6 +1058,7 @@ export async function fetchSourceJobs(
   // endpoint carries a usable description, so both need their own multi-request fetch.
   if (source.ats_name === 'rippling') return fetchRipplingJobs(source, fetcher);
   if (source.ats_name === 'breezy') return fetchBreezyJobs(source, fetcher);
+  if (source.ats_name === 'crelate') return fetchCrelateJobs(source, fetcher);
 
   const response = await fetcher(sourceEndpoint(source), {
     headers: { Accept: 'application/json', 'User-Agent': 'LitosJobMonitor/1.0' },

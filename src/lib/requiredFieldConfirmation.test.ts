@@ -17,6 +17,7 @@ import {
   AUTONOMOUS_PORTAL_FAMILIES,
   buildManagedPortalActions,
   COMMIT_REQUIRED_CONTROLS_FOR_SUBMIT,
+  CRELATE_FINAL_SUBMIT_SELECTOR,
   MANAGED_ACTION_LIMIT,
   MANAGED_FINAL_SUBMIT_SELECTOR,
   MANAGED_WORKABLE_APPLICATION_SCOPE_SELECTOR,
@@ -123,10 +124,13 @@ function proof(
 test('every managed application submit defaults to v3 and reserves its confirmation barrier', () => {
   for (const family of AUTONOMOUS_PORTAL_FAMILIES) {
     const actions = buildManagedPortalActions(family as SupportedPortal, packet, true);
+    const finalSelector = family === 'crelate'
+      ? CRELATE_FINAL_SUBMIT_SELECTOR
+      : MANAGED_FINAL_SUBMIT_SELECTOR;
     assert.ok(actions.length <= MANAGED_ACTION_LIMIT, `${family} exceeded the managed action limit`);
     assert.deepEqual(actions.at(-1), {
       type: 'confirmAndSubmit',
-      selector: MANAGED_FINAL_SUBMIT_SELECTOR,
+      selector: finalSelector,
       label: 'required_field_confirmation',
       optional: false,
       timeout: 10_000,
@@ -136,7 +140,7 @@ test('every managed application submit defaults to v3 and reserves its confirmat
       chooserPolicy: MANAGED_SUBMIT_CHOOSER_POLICY,
     });
     assert.equal(actions.filter((action) => action.type === 'click'
-      && action.selector === MANAGED_FINAL_SUBMIT_SELECTOR).length, 0);
+      && action.selector === finalSelector).length, 0);
   }
 });
 

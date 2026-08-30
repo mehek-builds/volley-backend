@@ -90,15 +90,13 @@ test('Phase 2 keeps the verified employer catalog diverse across all seven polla
    * It claimed that past 400 "the poller leaves the tail of the catalog unpolled". It does not.
    * The follow-up segment already exists and is already tested: the poll selects only sources not
    * yet seen in this drain (drainEligible, oldest-first, limit POLL_SOURCE_LIMIT), reports
-   * polling_complete: false while any remain, and .github/workflows/job-monitor.yml re-calls the
-   * endpoint up to five times with the same drain_started_at. The real ceiling is five passes of
-   * 400, and the test named "source 401 completes on the second pass of the same drain run"
-   * covers exactly this.
+   * polling_complete: false while any remain, and the Railway cron re-calls the endpoint with the
+   * same drain_started_at. Its 100-segment default supports 40,000 reviewed sources per scheduled
+   * run, and the cron test proves a 5,000-source catalog completes in 13 segments.
    *
    * CROSSED DELIBERATELY twice: the autonomous-family probe round crossed source 401 on 2026-08-29,
-   * then the 100,000-posting supply round crossed source 801 on 2026-08-30. The daily cron now needs
-   * three passes to finish. The tripwire remains at the real ceiling of five passes so the next
-   * deliberate crossing is the one that needs a capacity decision. */
+   * then the 100,000-posting supply round crossed source 801 on 2026-08-30. The production Railway
+   * scheduler now drains the whole reviewed catalog instead of enforcing the old five-pass ceiling. */
   assert.equal(POLL_SEGMENT_SIZE, 400, 'one segment; the drain carries whatever does not fit');
   assert.ok(
     JOB_SOURCES.length > POLL_SEGMENT_SIZE,
@@ -108,10 +106,7 @@ test('Phase 2 keeps the verified employer catalog diverse across all seven polla
     JOB_SOURCES.length > POLL_SEGMENT_SIZE * 2,
     'the 100,000-posting catalog deliberately needs a third drain segment',
   );
-  assert.ok(
-    JOB_SOURCES.length <= POLL_SEGMENT_SIZE * 5,
-    'the real ceiling: five drain passes of one segment each, per .github/workflows/job-monitor.yml',
-  );
+  assert.ok(JOB_SOURCES.length <= POLL_SEGMENT_SIZE * 100, 'the catalog fits the Railway drain ceiling');
 });
 
 test('no two sources claim the same board, and none is blank', () => {
