@@ -1,6 +1,10 @@
-import { test } from 'node:test';
+import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
+import Anthropic from '@anthropic-ai/sdk';
+import OpenAI from 'openai';
 import {
+  parseResumeFromPdf,
+  parseResumeWithClaude,
   parsedProfileFromModelText,
   parsedProfileWithOneRepair,
   printedGpaIn,
@@ -8,6 +12,13 @@ import {
   splitSpokenLanguages,
   SYSTEM_PROMPT,
 } from './parse';
+
+const messagesPrototype = Object.getPrototypeOf(new Anthropic({ apiKey: 'test-key' }).messages) as {
+  create: (...args: unknown[]) => unknown;
+};
+const responsesPrototype = Object.getPrototypeOf(new OpenAI({ apiKey: 'test-key' }).responses) as {
+  create: (...args: unknown[]) => unknown;
+};
 
 // R-047, found in live QA 2026-07-23. Mehek's uploaded resume reads "Bachelor of Science in Computer
 // Science & Business Administration, Finance Emphasis". The parser stored "Bachelor of Science in
@@ -72,6 +83,94 @@ function modelProfile(target_roles: unknown): string {
     grad_year: 0, target_roles,
   });
 }
+
+test('an invalid Anthropic key cannot take down text resume parsing while OpenAI is healthy', async (t) => {
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  t.after(() => {
+    mock.restoreAll();
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  });
+
+  const calls: Record<string, unknown>[] = [];
+  mock.method(responsesPrototype, 'create', async (body: Record<string, unknown>) => {
+    calls.push(body);
+    return {
+      status: 'completed',
+      output_text: modelProfile(FIVE_ROLES),
+      incomplete_details: null,
+      usage: { input_tokens: 100, output_tokens: 40, input_tokens_details: {} },
+    };
+  });
+  mock.method(messagesPrototype, 'create', async () => {
+    throw Object.assign(new Error('API key is invalid'), { status: 401 });
+  });
+
+  const parsed = await parseResumeWithClaude('A Candidate\nSoftware engineer');
+
+  assert.equal(parsed.full_name, 'A Candidate');
+  assert.equal(calls.length, 1);
+  assert.equal(
+    ((calls[0].text as { format?: { type?: string } }).format?.type),
+    'json_schema',
+    'resume parsing must use provider-enforced structured output',
+  );
+});
+
+test('resume parsing falls back to Anthropic when OpenAI is unavailable', async (t) => {
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  t.after(() => {
+    mock.restoreAll();
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  });
+
+  mock.method(responsesPrototype, 'create', async () => {
+    throw Object.assign(new Error('OpenAI unavailable'), { status: 503 });
+  });
+  let anthropicCalls = 0;
+  mock.method(messagesPrototype, 'create', async () => {
+    anthropicCalls += 1;
+    return { content: [{ type: 'text', text: modelProfile(FIVE_ROLES) }] };
+  });
+
+  const parsed = await parseResumeWithClaude('A Candidate\nSoftware engineer');
+
+  assert.equal(parsed.full_name, 'A Candidate');
+  assert.equal(anthropicCalls, 1);
+});
+
+test('scanned PDF parsing sends the document to OpenAI before Anthropic', async (t) => {
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  t.after(() => {
+    mock.restoreAll();
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  });
+
+  let openAIBody: Record<string, unknown> | undefined;
+  mock.method(responsesPrototype, 'create', async (body: Record<string, unknown>) => {
+    openAIBody = body;
+    return {
+      status: 'completed',
+      output_text: modelProfile(FIVE_ROLES),
+      incomplete_details: null,
+      usage: { input_tokens: 100, output_tokens: 40, input_tokens_details: {} },
+    };
+  });
+  mock.method(messagesPrototype, 'create', async () => {
+    throw new Error('Anthropic must not run when OpenAI reads the scan');
+  });
+
+  await parseResumeFromPdf(Buffer.from('%PDF-1.7 scanned resume'));
+
+  const message = (openAIBody?.input as Array<{ content?: Array<{ type?: string; file_data?: string }> }>)[0];
+  const file = message.content?.find((item) => item.type === 'input_file');
+  assert.equal(file?.file_data, Buffer.from('%PDF-1.7 scanned resume').toString('base64'));
+});
 
 test('the parser accepts exactly five distinct non-empty target roles and trims them', () => {
   const parsed = parsedProfileFromModelText(modelProfile([

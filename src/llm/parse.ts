@@ -1,5 +1,11 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { isUpstreamApiError } from '../lib/llmFailure';
+import {
+  generateOpenAIText,
+  logOpenAIFallback,
+  openAIConfigured,
+  type OpenAITextRequest,
+} from './openAIProvider';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -214,6 +220,79 @@ Rules:
   interdisciplinary roles are valid when the resume evidence supports them.
 - Return empty arrays for missing sections, never null
 - If grad_year is truly unknown, use 0`;
+
+const RESUME_JSON_SCHEMA: NonNullable<OpenAITextRequest['jsonSchema']> = {
+  name: 'litos_resume_profile',
+  schema: {
+    type: 'object',
+    properties: {
+      full_name: { type: 'string' },
+      email: { type: 'string' },
+      phone: { type: 'string' },
+      location: { type: 'string' },
+      linkedin_url: { type: 'string' },
+      github_url: { type: 'string' },
+      portfolio_url: { type: 'string' },
+      experience: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            company: { type: 'string' }, title: { type: 'string' }, location: { type: 'string' },
+            start: { type: 'string' }, end: { type: 'string' }, description: { type: 'string' },
+          },
+          required: ['company', 'title', 'location', 'start', 'end', 'description'],
+          additionalProperties: false,
+        },
+      },
+      skills: { type: 'array', items: { type: 'string' } },
+      languages: { type: 'array', items: { type: 'string' } },
+      projects: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' }, role: { type: 'string' }, date_range: { type: 'string' },
+            description: { type: 'string' },
+          },
+          required: ['name', 'role', 'date_range', 'description'],
+          additionalProperties: false,
+        },
+      },
+      leadership: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            organization: { type: 'string' }, title: { type: 'string' }, location: { type: 'string' },
+            start: { type: 'string' }, end: { type: 'string' }, description: { type: 'string' },
+          },
+          required: ['organization', 'title', 'location', 'start', 'end', 'description'],
+          additionalProperties: false,
+        },
+      },
+      school: { type: 'string' },
+      school_location: { type: 'string' },
+      degree: { type: 'string' },
+      grad_date: { type: 'string' },
+      grad_year: { type: 'integer' },
+      currently_enrolled: { type: 'boolean' },
+      coursework: { type: 'array', items: { type: 'string' } },
+      objective: { type: 'string' },
+      target_roles: { type: 'array', items: { type: 'string' }, minItems: 5, maxItems: 5 },
+      gpa: { type: 'string' },
+      gpa_scale: { type: 'string' },
+      major: { type: 'string' },
+    },
+    required: [
+      'full_name', 'email', 'phone', 'location', 'linkedin_url', 'github_url', 'portfolio_url',
+      'experience', 'skills', 'languages', 'projects', 'leadership', 'school', 'school_location',
+      'degree', 'grad_date', 'grad_year', 'currently_enrolled', 'coursework', 'objective',
+      'target_roles', 'gpa', 'gpa_scale', 'major',
+    ],
+    additionalProperties: false,
+  },
+};
 
 /* Spoken language names, lowercased, used to pull a language back out of `skills`.
  *
@@ -476,6 +555,27 @@ export async function parsedProfileWithOneRepair(
 }
 
 export async function parseResumeWithClaude(resumeText: string): Promise<ParsedProfile> {
+  if (openAIConfigured()) {
+    try {
+      const request = async (repairFailure?: string) => {
+        const generated = await generateOpenAIText({
+          instructions: SYSTEM_PROMPT,
+          input: repairFailure
+            ? `Parse this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles.\n\n${resumeText}`
+            : `Parse this resume text and return the JSON:\n\n${resumeText}`,
+          maxOutputTokens: 4096,
+          jsonSchema: RESUME_JSON_SCHEMA,
+          reasoningEffort: 'low',
+        });
+        return generated.text;
+      };
+      const parsed = await parsedProfileWithOneRepair(await request(), request);
+      return reconcileGpaWithSource(parsed, resumeText);
+    } catch (error) {
+      logOpenAIFallback('resume parsing', error);
+    }
+  }
+
   try {
     const request = async (repairFailure?: string) => {
       const response = await client.messages.create({
@@ -524,6 +624,40 @@ export async function parseResumeWithClaude(resumeText: string): Promise<ParsedP
  * exists to prevent.
  */
 export async function parseResumeFromPdf(pdf: Buffer): Promise<ParsedProfile> {
+  if (openAIConfigured()) {
+    try {
+      const request = async (repairFailure?: string) => {
+        const generated = await generateOpenAIText({
+          instructions: SYSTEM_PROMPT,
+          input: [{
+            role: 'user',
+            content: [
+              {
+                type: 'input_file',
+                filename: 'resume.pdf',
+                file_data: pdf.toString('base64'),
+                detail: 'high',
+              },
+              {
+                type: 'input_text',
+                text: repairFailure
+                  ? `Read this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles. Transcribe exactly what is printed and leave uncertain fields empty.`
+                  : 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
+              },
+            ],
+          }],
+          maxOutputTokens: 4096,
+          jsonSchema: RESUME_JSON_SCHEMA,
+          reasoningEffort: 'low',
+        });
+        return generated.text;
+      };
+      return await parsedProfileWithOneRepair(await request(), request);
+    } catch (error) {
+      logOpenAIFallback('scanned resume parsing', error);
+    }
+  }
+
   try {
     const request = async (repairFailure?: string) => {
       const response = await client.messages.create({
