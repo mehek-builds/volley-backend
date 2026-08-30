@@ -86,6 +86,11 @@ describe('GET /profile serving (serveProfileJson)', () => {
     assert.deepEqual(served.skills, ['Python']);
     assert.equal(served.email, EMAIL);
   });
+
+  test('never serves the private resume upload replay key', () => {
+    const served = serveProfileJson({ ...PARSED, _litos_resume_upload_key: 'a'.repeat(64) }, null, EMAIL);
+    assert.equal('_litos_resume_upload_key' in served, false);
+  });
 });
 
 describe('draft input (applyDeclaredSkills)', () => {

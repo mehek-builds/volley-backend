@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { isUpstreamApiError } from '../lib/llmFailure';
+import OpenAI from 'openai';
+import { isModelUnavailable, isUpstreamApiError, ModelTimeoutError } from '../lib/llmFailure';
 import {
   generateOpenAIText,
   logOpenAIFallback,
@@ -8,6 +9,61 @@ import {
 } from './openAIProvider';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+/* Resume upload is an interactive onboarding request, not a background generation job. The whole
+ * provider chain shares one deadline so validation repair and cross-provider fallback cannot each
+ * spend a fresh SDK timeout. Both SDKs otherwise default to ten minutes, and Anthropic retries
+ * twice, which turned one upload into a 75 second spinner in production on 2026-08-30. */
+export const RESUME_PARSE_BUDGET_MS = 24_000;
+export const RESUME_PROVIDER_CALL_CAP_MS = 8_000;
+const MIN_RESUME_PROVIDER_CALL_MS = 750;
+
+export function resumeParseDeadlineFromUploadStart(uploadStartedAtMs: number): number {
+  return uploadStartedAtMs + RESUME_PARSE_BUDGET_MS;
+}
+
+export function resumeParseCallTimeoutMs(deadlineMs: number, nowMs = Date.now()): number {
+  const remainingMs = deadlineMs - nowMs;
+  if (remainingMs < MIN_RESUME_PROVIDER_CALL_MS) {
+    throw new ModelTimeoutError('Resume parsing exceeded the interactive latency budget');
+  }
+  return Math.min(RESUME_PROVIDER_CALL_CAP_MS, remainingMs);
+}
+
+function isResumeProviderTimeout(provider: 'openai' | 'anthropic', error: unknown): boolean {
+  return provider === 'openai'
+    ? error instanceof OpenAI.APIConnectionTimeoutError || error instanceof OpenAI.APIUserAbortError
+    : error instanceof Anthropic.APIConnectionTimeoutError || error instanceof Anthropic.APIUserAbortError;
+}
+
+async function measuredResumeParseStage<T>(
+  provider: 'openai' | 'anthropic',
+  source: 'text' | 'scan',
+  pass: 'initial' | 'repair',
+  deadlineMs: number,
+  run: (timeoutMs: number) => Promise<T>,
+): Promise<T> {
+  const timeoutMs = resumeParseCallTimeoutMs(deadlineMs);
+  const startedAt = Date.now();
+  try {
+    const result = await run(timeoutMs);
+    console.info(
+      `[llm] resume_parse_stage provider=${provider} source=${source} pass=${pass} outcome=success elapsed_ms=${Date.now() - startedAt} timeout_ms=${timeoutMs}`,
+    );
+    return result;
+  } catch (error) {
+    console.warn(
+      `[llm] resume_parse_stage provider=${provider} source=${source} pass=${pass} outcome=error elapsed_ms=${Date.now() - startedAt} timeout_ms=${timeoutMs}`,
+    );
+    if (isResumeProviderTimeout(provider, error)) throw new ModelTimeoutError();
+    throw error;
+  }
+}
+
+type ResumeParseOptions = {
+  deadlineMs?: number;
+  signal?: AbortSignal;
+};
 
 export interface ParsedProfile {
   full_name: string;
@@ -554,19 +610,31 @@ export async function parsedProfileWithOneRepair(
   }
 }
 
-export async function parseResumeWithClaude(resumeText: string): Promise<ParsedProfile> {
+export async function parseResumeWithClaude(
+  resumeText: string,
+  options: ResumeParseOptions = {},
+): Promise<ParsedProfile> {
+  const deadlineMs = options.deadlineMs ?? resumeParseDeadlineFromUploadStart(Date.now());
   if (openAIConfigured()) {
     try {
       const request = async (repairFailure?: string) => {
-        const generated = await generateOpenAIText({
-          instructions: SYSTEM_PROMPT,
-          input: repairFailure
-            ? `Parse this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles.\n\n${resumeText}`
-            : `Parse this resume text and return the JSON:\n\n${resumeText}`,
-          maxOutputTokens: 4096,
-          jsonSchema: RESUME_JSON_SCHEMA,
-          reasoningEffort: 'low',
-        });
+        const generated = await measuredResumeParseStage(
+          'openai',
+          'text',
+          repairFailure ? 'repair' : 'initial',
+          deadlineMs,
+          (timeoutMs) => generateOpenAIText({
+            instructions: SYSTEM_PROMPT,
+            input: repairFailure
+              ? `Parse this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles.\n\n${resumeText}`
+              : `Parse this resume text and return the JSON:\n\n${resumeText}`,
+            maxOutputTokens: 4096,
+            jsonSchema: RESUME_JSON_SCHEMA,
+            reasoningEffort: 'low',
+            timeoutMs,
+            signal: options.signal,
+          }),
+        );
         return generated.text;
       };
       const parsed = await parsedProfileWithOneRepair(await request(), request);
@@ -578,17 +646,23 @@ export async function parseResumeWithClaude(resumeText: string): Promise<ParsedP
 
   try {
     const request = async (repairFailure?: string) => {
-      const response = await client.messages.create({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 2048,
-        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-        messages: [{
-          role: 'user',
-          content: repairFailure
-            ? `Parse this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles.\n\n${resumeText}`
-            : `Parse this resume text and return the JSON:\n\n${resumeText}`,
-        }],
-      });
+      const response = await measuredResumeParseStage(
+        'anthropic',
+        'text',
+        repairFailure ? 'repair' : 'initial',
+        deadlineMs,
+        (timeout) => client.messages.create({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 2048,
+          system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+          messages: [{
+            role: 'user',
+            content: repairFailure
+              ? `Parse this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles.\n\n${resumeText}`
+              : `Parse this resume text and return the JSON:\n\n${resumeText}`,
+          }],
+        }, { timeout, maxRetries: 0, signal: options.signal }),
+      );
       const textBlock = response.content.find((block) => block.type === 'text');
       return textBlock?.type === 'text' ? textBlock.text : '';
     };
@@ -598,10 +672,10 @@ export async function parseResumeWithClaude(resumeText: string): Promise<ParsedP
     // document instead of trusted. See reconcileGpaWithSource for the live misread that forced it.
     return reconcileGpaWithSource(parsed, resumeText);
   } catch (error) {
-    /* An error that arrived with an HTTP status came from the API, so it keeps its own message.
-       This catch used to wrap everything, which is how a 400 "Your credit balance is too low"
-       reached production logs on 2026-08-15 described as invalid JSON. See lib/llmFailure.ts. */
-    if (isUpstreamApiError(error)) throw error;
+    /* Provider HTTP failures and our own deadline sentinel keep their meaning. This catch used to
+       wrap everything, which is how a 400 "Your credit balance is too low" reached production logs
+       on 2026-08-15 described as invalid JSON. See lib/llmFailure.ts. */
+    if (isUpstreamApiError(error) || isModelUnavailable(error)) throw error;
     throw new Error(`Claude returned invalid JSON for resume parsing: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}`);
   }
 }
@@ -623,33 +697,45 @@ export async function parseResumeWithClaude(resumeText: string): Promise<ParsedP
  * text, this runs once per student at signup, and a misread degree is the R-047 failure this parser
  * exists to prevent.
  */
-export async function parseResumeFromPdf(pdf: Buffer): Promise<ParsedProfile> {
+export async function parseResumeFromPdf(
+  pdf: Buffer,
+  options: ResumeParseOptions = {},
+): Promise<ParsedProfile> {
+  const deadlineMs = options.deadlineMs ?? resumeParseDeadlineFromUploadStart(Date.now());
   if (openAIConfigured()) {
     try {
       const request = async (repairFailure?: string) => {
-        const generated = await generateOpenAIText({
-          instructions: SYSTEM_PROMPT,
-          input: [{
-            role: 'user',
-            content: [
-              {
-                type: 'input_file',
-                filename: 'resume.pdf',
-                file_data: pdf.toString('base64'),
-                detail: 'high',
-              },
-              {
-                type: 'input_text',
-                text: repairFailure
-                  ? `Read this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles. Transcribe exactly what is printed and leave uncertain fields empty.`
-                  : 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
-              },
-            ],
-          }],
-          maxOutputTokens: 4096,
-          jsonSchema: RESUME_JSON_SCHEMA,
-          reasoningEffort: 'low',
-        });
+        const generated = await measuredResumeParseStage(
+          'openai',
+          'scan',
+          repairFailure ? 'repair' : 'initial',
+          deadlineMs,
+          (timeoutMs) => generateOpenAIText({
+            instructions: SYSTEM_PROMPT,
+            input: [{
+              role: 'user',
+              content: [
+                {
+                  type: 'input_file',
+                  filename: 'resume.pdf',
+                  file_data: pdf.toString('base64'),
+                  detail: 'high',
+                },
+                {
+                  type: 'input_text',
+                  text: repairFailure
+                    ? `Read this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles. Transcribe exactly what is printed and leave uncertain fields empty.`
+                    : 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
+                },
+              ],
+            }],
+            maxOutputTokens: 4096,
+            jsonSchema: RESUME_JSON_SCHEMA,
+            reasoningEffort: 'low',
+            timeoutMs,
+            signal: options.signal,
+          }),
+        );
         return generated.text;
       };
       return await parsedProfileWithOneRepair(await request(), request);
@@ -660,26 +746,32 @@ export async function parseResumeFromPdf(pdf: Buffer): Promise<ParsedProfile> {
 
   try {
     const request = async (repairFailure?: string) => {
-      const response = await client.messages.create({
-        model: 'claude-sonnet-5',
-        max_tokens: 4096,
-        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-        messages: [{
-          role: 'user',
-          content: [
-            {
-              type: 'document',
-              source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') },
-            },
-            {
-              type: 'text',
-              text: repairFailure
-                ? `Read this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles. Transcribe exactly what is printed and leave uncertain fields empty.`
-                : 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
-            },
-          ],
-        }],
-      });
+      const response = await measuredResumeParseStage(
+        'anthropic',
+        'scan',
+        repairFailure ? 'repair' : 'initial',
+        deadlineMs,
+        (timeout) => client.messages.create({
+          model: 'claude-sonnet-5',
+          max_tokens: 4096,
+          system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+          messages: [{
+            role: 'user',
+            content: [
+              {
+                type: 'document',
+                source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') },
+              },
+              {
+                type: 'text',
+                text: repairFailure
+                  ? `Read this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles. Transcribe exactly what is printed and leave uncertain fields empty.`
+                  : 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
+              },
+            ],
+          }],
+        }, { timeout, maxRetries: 0, signal: options.signal }),
+      );
       const textBlock = response.content.find((block) => block.type === 'text');
       return textBlock?.type === 'text' ? textBlock.text : '';
     };
@@ -687,7 +779,7 @@ export async function parseResumeFromPdf(pdf: Buffer): Promise<ParsedProfile> {
     return await parsedProfileWithOneRepair(initial, request);
   } catch (error) {
     // Same rule as the text path above: their errors keep their words, ours get ours.
-    if (isUpstreamApiError(error)) throw error;
+    if (isUpstreamApiError(error) || isModelUnavailable(error)) throw error;
     throw new Error(`Claude returned invalid JSON for scanned resume parsing: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}`);
   }
 }

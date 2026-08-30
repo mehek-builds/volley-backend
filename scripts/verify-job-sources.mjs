@@ -156,15 +156,15 @@ console.log(`\n${results.length} sources: ${counts.join(', ')}.`);
  * `empty`, `cannot-tell` and `unreachable` do NOT fail, because each is a state a healthy source
  * passes through. A company with no open roles this week has an empty board and postings again next
  * week; Lever and Ashby publish no name, so three postings that never say the brand prove nothing;
- * a timeout is the network. Failing on any of them makes the check a weather report on 394 third-
- * party boards, which goes red on pull requests that touched none of them - and a check that is
+ * a timeout is the network. Failing on any of them makes the check a weather report on hundreds of
+ * third-party boards, which goes red on pull requests that touched none of them - and a check that is
  * red by default is a check nobody reads on the day it finds a real mislabelling.
  *
  * They still print, in full, every run. The cost of that split is that a board empty for good
  * decays quietly rather than failing, so the printed EMPTY list is worth reading when it grows.
  *
- * UNREACHABLE IS CAPPED, because "not fatal" one board at a time is not the same as "not fatal" 394
- * at a time. Nothing above distinguishes a bad minute from the check not running at all: a runner
+ * UNREACHABLE IS CAPPED, because "not fatal" one board at a time is not the same as "not fatal" for
+ * the whole catalog. Nothing above distinguishes a bad minute from the check not running at all: a runner
  * with no egress, or a provider changing its response envelope so every normalizer throws (those
  * errors carry no HTTP status, so they land here too), would put every source in this bucket and
  * exit 0 having verified nothing. That is the silent zero this file was written to end - the

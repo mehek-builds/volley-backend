@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isModelUnavailable, isUpstreamApiError } from './llmFailure';
+import { isModelUnavailable, isUpstreamApiError, ModelTimeoutError, modelFailureReason } from './llmFailure';
 
 /** What the Anthropic SDK throws: an Error carrying a numeric HTTP status. */
 function apiError(status: number, message: string): Error {
@@ -46,4 +46,11 @@ test('a non-Error throw does not crash the classifier', () => {
   assert.equal(isModelUnavailable(null), false);
   assert.equal(isModelUnavailable(undefined), false);
   assert.equal(isUpstreamApiError({ status: '429' }), false, 'a string status is not a status');
+});
+
+test('an application timeout is unavailable without pretending to be an upstream HTTP error', () => {
+  const timeout = new ModelTimeoutError();
+  assert.equal(isUpstreamApiError(timeout), false);
+  assert.equal(isModelUnavailable(timeout), true);
+  assert.equal(modelFailureReason(timeout), 'timeout');
 });

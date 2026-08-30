@@ -1,6 +1,12 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { toBullets, bankEntriesFrom, planBankReconciliation } from './profile';
+import {
+  toBullets,
+  bankEntriesFrom,
+  planBankReconciliation,
+  publicResumeProfile,
+  resumeUploadKeyFromHeader,
+} from './profile';
 import type { ParsedProfile } from '../llm/parse';
 import { CATEGORIES, targetingBodySchema } from './targeting';
 
@@ -345,5 +351,38 @@ describe('every bank writer carries every bank field', () => {
       /location:/,
       'zod strips unknown keys, so a field absent from entrySchema is dropped before the insert',
     );
+  });
+});
+
+describe('resume upload retry safety', () => {
+  const source = readFileSync('src/routes/profile.ts', 'utf8');
+
+  test('a disconnected request stops before durable profile writes', () => {
+    const disconnectGuard = source.indexOf('if (disconnectController.signal.aborted) return;');
+    const profileInsert = source.indexOf('.insert(profiles)', disconnectGuard);
+    assert.ok(disconnectGuard >= 0 && profileInsert > disconnectGuard);
+  });
+
+  test('experience reconciliation is serialized per user inside a transaction', () => {
+    const reconciliation = source.slice(
+      source.indexOf('const result = await db.transaction(async (tx) => {'),
+      source.indexOf("'failed to persist parsed profile and experience bank'"),
+    );
+    assert.match(reconciliation, /pg_advisory_xact_lock\(hashtextextended/);
+    assert.match(reconciliation, /await tx\.insert\(experience_bank\)/);
+    assert.doesNotMatch(reconciliation, /await db\.insert\(experience_bank\)/);
+  });
+
+  test('only deterministic SHA-256 upload keys enter the replay path', () => {
+    const key = 'a'.repeat(64);
+    assert.equal(resumeUploadKeyFromHeader(key), key);
+    assert.equal(resumeUploadKeyFromHeader([key]), key);
+    assert.equal(resumeUploadKeyFromHeader('not-a-digest'), null);
+  });
+
+  test('the private retry key never enters the public profile response', () => {
+    const stored = { ...profile(), _litos_resume_upload_key: 'b'.repeat(64) };
+    const visible = publicResumeProfile(stored);
+    assert.equal('_litos_resume_upload_key' in visible, false);
   });
 });

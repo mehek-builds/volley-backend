@@ -31,6 +31,16 @@ function apiStatus(error: unknown): number | undefined {
   return typeof status === 'number' ? status : undefined;
 }
 
+/** Application-owned timeout sentinel. It is not an upstream HTTP response. */
+export class ModelTimeoutError extends Error {
+  readonly kind = 'model_timeout';
+
+  constructor(message = 'Model request exceeded its latency budget') {
+    super(message);
+    this.name = 'ModelTimeoutError';
+  }
+}
+
 /**
  * Did this error come from the API rather than from our own validation?
  *
@@ -56,6 +66,7 @@ export function isUpstreamApiError(error: unknown): boolean {
  * than being smoothed into "try again later" and hidden.
  */
 export function isModelUnavailable(error: unknown): boolean {
+  if (error instanceof ModelTimeoutError) return true;
   const status = apiStatus(error);
   if (status === undefined) return false;
   if (status === 401 || status === 402 || status === 403 || status === 429) return true;
@@ -81,6 +92,7 @@ export type ModelFailureReason = 'credit' | 'auth' | 'rate_limit' | 'overloaded'
 
 /** Categorise a model failure without leaking the provider's message onto a public endpoint. */
 export function modelFailureReason(error: unknown): ModelFailureReason {
+  if (error instanceof ModelTimeoutError) return 'timeout';
   const status = apiStatus(error);
   const message = messageOf(error).toLowerCase();
   if (status === 429) return 'rate_limit';
