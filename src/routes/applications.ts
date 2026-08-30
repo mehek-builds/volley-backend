@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { deleteObjects, putObject } from '../lib/objectStorage';
+import { deleteObjects, objectStorageUsesRailway, putObject } from '../lib/objectStorage';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { and, eq, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -1724,11 +1724,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           },
         );
       } catch (error) {
-        await deleteObjects(blob.url).catch(() => undefined);
+        await deleteObjects(blob.pathname).catch(() => undefined);
         throw error;
       }
       if (updated.length === 0) {
-        await deleteObjects(blob.url).catch(() => undefined);
+        await deleteObjects(blob.pathname).catch(() => undefined);
         return reply.status(409).send({ error: 'The application state changed before the resume edit finished' });
       }
 
@@ -1740,7 +1740,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
          * rebuild dropped _documents entirely and this response was accidentally safe. */
         spec: specWithoutDocumentPointers(updatedSpec),
         download_url: `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, blob.pathname, {
-          ...(process.env.OBJECT_STORAGE_BUCKET ? {} : { blobUrl: blob.url }),
+          ...(objectStorageUsesRailway() ? {} : { blobUrl: blob.url }),
           fileName: resumeFileNameForRole(contact.full_name, ((row.job_context ?? {}) as { role?: unknown }).role),
         })}`,
       });

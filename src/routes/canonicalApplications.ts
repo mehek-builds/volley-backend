@@ -21,6 +21,7 @@ import { companyDomainFor } from '../lib/companyDomains';
 import { INVENTORY_LIMIT } from '../engine/pipeline';
 import { requireAuth } from '../middleware/auth';
 import { apiBaseFor } from '../lib/apiBase';
+import { objectStorageUsesRailway } from '../lib/objectStorage';
 import { mintDownloadToken } from '../lib/resumeAccess';
 import { manualSubmissionTransition } from '../lib/canonicalApplicationLifecycle';
 
@@ -759,7 +760,7 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
         source: artifact.source,
         file_name: 'litos-resume.pdf',
         download_url: `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, artifact.rendered_object_key, {
-          blobUrl: artifact.rendered_blob_url ?? undefined,
+          blobUrl: objectStorageUsesRailway() ? undefined : artifact.rendered_blob_url ?? undefined,
           fileName: 'litos-resume.pdf',
         })}`,
         requires_authorization: false,

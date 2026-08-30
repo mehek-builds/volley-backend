@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { del, put } from '@vercel/blob';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { generated_resumes, user_documents } from '../db/schema';
 import { DOCUMENT_ENCRYPTION_SCHEME, openDocument, sealDocument } from './documentCrypto';
-import { resolveBlobUrl } from './resumeAccess';
+import { deleteObjects, objectStorageUsesRailway, putObject, resolveObjectUrl } from './objectStorage';
 
 export type UserDocumentRow = typeof user_documents.$inferSelect;
 export type ApplicationRow = typeof generated_resumes.$inferSelect;
@@ -285,8 +284,7 @@ export async function putUserDocument(input: PutUserDocumentInput): Promise<User
   }
 
   const objectKey = userDocumentObjectKey(input.userId);
-  const blob = await put(objectKey, sealDocument(input.bytes), {
-    access: 'public',
+  const blob = await putObject(objectKey, sealDocument(input.bytes), {
     // The stored bytes are ciphertext, not a PDF. Declaring application/pdf here would be a lie the
     // store then serves as a Content-Type header, and a browser that follows a leaked URL would be
     // handed an unreadable "PDF" instead of an obvious opaque download.
@@ -312,11 +310,11 @@ export async function putUserDocument(input: PutUserDocumentInput): Promise<User
       first_application_id: input.firstApplicationId ?? null,
     }).returning();
   } catch (error) {
-    await del(blob.url).catch(() => undefined);
+    await deleteObjects(blob.pathname).catch(() => undefined);
     throw error;
   }
   if (!rows[0]) {
-    await del(blob.url).catch(() => undefined);
+    await deleteObjects(blob.pathname).catch(() => undefined);
     throw new Error('The document could not be saved');
   }
   return rows[0];
@@ -341,11 +339,13 @@ type DocumentBytesDependencies = {
 export async function documentBytesFromPointer(
   pointer: { blobUrl: string | null; objectKey: string },
   dependencies: DocumentBytesDependencies = {
-    resolveObjectUrl: resolveBlobUrl,
+    resolveObjectUrl,
     fetchObject: (url) => fetch(url),
   },
 ): Promise<Buffer> {
-  const url = pointer.blobUrl || (await dependencies.resolveObjectUrl(pointer.objectKey));
+  const url = objectStorageUsesRailway()
+    ? await dependencies.resolveObjectUrl(pointer.objectKey)
+    : pointer.blobUrl || (await dependencies.resolveObjectUrl(pointer.objectKey));
   if (!url) throw new Error('That file is unavailable');
   const response = await dependencies.fetchObject(url);
   if (!response.ok) throw new Error('That file could not be downloaded');
@@ -512,11 +512,13 @@ export async function tombstoneUserDocument(userId: string, documentId: string):
     .limit(1);
   if (!row) return false;
 
-  const url = row.blob_url || (await resolveBlobUrl(row.object_key).catch(() => null));
+  const url = objectStorageUsesRailway()
+    ? await resolveObjectUrl(row.object_key).catch(() => null)
+    : row.blob_url || (await resolveObjectUrl(row.object_key).catch(() => null));
   // A row whose object cannot be located at all is already in the state this function is trying to
   // reach, so the tombstone still goes down. A del() that FAILS is different and is allowed to
   // throw: that is a file still sitting in public storage.
-  if (url) await del(url);
+  if (url) await deleteObjects(row.object_key);
 
   const updated = await db.update(user_documents).set({
     deleted_at: new Date(),

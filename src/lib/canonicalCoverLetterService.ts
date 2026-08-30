@@ -1,4 +1,3 @@
-import { del, put } from '@vercel/blob';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
@@ -17,7 +16,7 @@ import { contestedMetrics } from '../engine/grounding';
 import { generateCoverLetter, validateCoverLetter } from '../llm/coverLetter';
 import { renderCoverLetterPdf } from './coverLetterPdf';
 import { immutableDocumentContentHash } from './immutableDocumentHash';
-import { resolveBlobUrl } from './resumeAccess';
+import { deleteObjects, putObject as storePutObject, resolveObjectUrl } from './objectStorage';
 import { coverLetterFileNameForRole } from './resumeFileName';
 import { readApplicationReview, type ApplicationReviewState } from './applicationReview';
 import { recoverOwnedGeneratedDocument } from './downloadDocumentRecovery';
@@ -263,10 +262,10 @@ class CanonicalCoverLetterSelectionMovedError extends Error {}
 export async function reconcileCanonicalCoverLetterForPacket(
   row: GeneratedResumeRow,
   dependencies: CanonicalCoverLetterReconcileDependencies = {
-    resolveObjectUrl: resolveBlobUrl,
+    resolveObjectUrl,
     recoverDocument: recoverOwnedGeneratedDocument,
-    putObject: (objectKey, bytes) => put(objectKey, bytes, { access: 'public', contentType: 'application/pdf' }),
-    deleteObject: del,
+    putObject: (objectKey, bytes) => storePutObject(objectKey, bytes, { contentType: 'application/pdf' }),
+    deleteObject: deleteObjects,
   },
 ): Promise<GeneratedResumeRow> {
   return reconcileCanonicalCoverLetterAttempt(row, dependencies, 0);
@@ -511,11 +510,8 @@ export type CanonicalCoverLetterStorageDependencies = {
 
 const canonicalCoverLetterStorageDependencies: CanonicalCoverLetterStorageDependencies = {
   renderPdf: renderCoverLetterPdf,
-  putObject: (objectKey, bytes, contentType) => put(objectKey, bytes, {
-    access: 'public',
-    contentType,
-  }),
-  deleteObject: del,
+  putObject: (objectKey, bytes, contentType) => storePutObject(objectKey, bytes, { contentType }),
+  deleteObject: deleteObjects,
 };
 
 async function persistCanonicalBody(input: {
@@ -819,8 +815,7 @@ export async function deleteCanonicalCoverLetters(input: {
   );
   for (const row of result.rows) {
     if (!result.deletedArtifactIds.has(row.artifact.id)) continue;
-    const url = row.artifact.rendered_blob_url
-      ?? (row.artifact.rendered_object_key ? await resolveBlobUrl(row.artifact.rendered_object_key).catch(() => null) : null);
-    if (url) await del(url).catch(() => undefined);
+    const objectKey = row.artifact.rendered_object_key;
+    if (objectKey) await deleteObjects(objectKey).catch(() => undefined);
   }
 }

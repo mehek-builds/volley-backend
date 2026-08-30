@@ -225,7 +225,7 @@ async function persistCoverLetter(
     if (!blobState.current) throw new Error('Cover letter persistence returned no blob');
     return { cover_letter: persisted, blob_url: blobState.current.url };
   } catch (error) {
-    if (blobState.current) await deleteObjects(blobState.current.url).catch(() => undefined);
+    if (blobState.current) await deleteObjects(blobState.current.pathname).catch(() => undefined);
     throw error;
   }
 }
@@ -359,6 +359,6 @@ export async function deleteStoredCoverLetter(row: ApplicationRow) {
   if (!changed[0]) throw new Error('Application changed before the cover letter could be removed');
   if (existing?.object_key) {
     const url = await resolveBlobUrl(existing.object_key).catch(() => null);
-    if (url) await deleteObjects(url).catch(() => undefined);
+    if (url) await deleteObjects(existing.object_key).catch(() => undefined);
   }
 }

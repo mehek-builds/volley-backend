@@ -145,7 +145,7 @@ test('every blob this codebase writes has a retention decision recorded', async 
   let writes = 0;
   for (const file of roots) {
     const source = await readFile(path.join(__dirname, '..', file), 'utf8');
-    writes += source.match(/await (?:put|blobPut)\(/g)?.length ?? 0;
+    writes += source.match(/await (?:putObject|blobPut)\(/g)?.length ?? 0;
   }
   assert.equal(
     writes,

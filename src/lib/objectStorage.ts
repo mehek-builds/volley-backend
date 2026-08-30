@@ -21,15 +21,19 @@ export type PutObjectOptions = {
 
 function railwayConfigured(): boolean {
   return Boolean(
-    process.env.OBJECT_STORAGE_BUCKET?.trim()
-    && process.env.OBJECT_STORAGE_ACCESS_KEY_ID?.trim()
-    && process.env.OBJECT_STORAGE_SECRET_ACCESS_KEY?.trim()
-    && process.env.OBJECT_STORAGE_ENDPOINT?.trim(),
+    (process.env.OBJECT_STORAGE_BUCKET?.trim() || process.env.BUCKET?.trim())
+    && (process.env.OBJECT_STORAGE_ACCESS_KEY_ID?.trim() || process.env.ACCESS_KEY_ID?.trim())
+    && (process.env.OBJECT_STORAGE_SECRET_ACCESS_KEY?.trim() || process.env.SECRET_ACCESS_KEY?.trim())
+    && (process.env.OBJECT_STORAGE_ENDPOINT?.trim() || process.env.ENDPOINT?.trim()),
   );
 }
 
 export function objectStorageConfigured(): boolean {
   return railwayConfigured() || Boolean(process.env.BLOB_READ_WRITE_TOKEN?.trim());
+}
+
+export function objectStorageUsesRailway(): boolean {
+  return railwayConfigured();
 }
 
 function provider(): 'railway' | 'vercel' {
@@ -43,19 +47,19 @@ let cachedClient: S3Client | null = null;
 function client(): S3Client {
   if (cachedClient) return cachedClient;
   cachedClient = new S3Client({
-    endpoint: process.env.OBJECT_STORAGE_ENDPOINT,
-    region: process.env.OBJECT_STORAGE_REGION || 'auto',
-    forcePathStyle: true,
+    endpoint: process.env.OBJECT_STORAGE_ENDPOINT || process.env.ENDPOINT,
+    region: process.env.OBJECT_STORAGE_REGION || process.env.REGION || 'auto',
+    forcePathStyle: (process.env.OBJECT_STORAGE_URL_STYLE || 'virtual').trim().toLowerCase() === 'path',
     credentials: {
-      accessKeyId: process.env.OBJECT_STORAGE_ACCESS_KEY_ID!,
-      secretAccessKey: process.env.OBJECT_STORAGE_SECRET_ACCESS_KEY!,
+      accessKeyId: (process.env.OBJECT_STORAGE_ACCESS_KEY_ID || process.env.ACCESS_KEY_ID)!,
+      secretAccessKey: (process.env.OBJECT_STORAGE_SECRET_ACCESS_KEY || process.env.SECRET_ACCESS_KEY)!,
     },
   });
   return cachedClient;
 }
 
 function bucket(): string {
-  const value = process.env.OBJECT_STORAGE_BUCKET?.trim();
+  const value = process.env.OBJECT_STORAGE_BUCKET?.trim() || process.env.BUCKET?.trim();
   if (!value) throw new Error('OBJECT_STORAGE_BUCKET is not configured');
   return value;
 }
@@ -207,10 +211,17 @@ export async function deleteObjects(objectKeysOrUrls: string | string[]): Promis
   }
   const keys = targets.map((target) => {
     if (!/^https?:\/\//i.test(target)) return target;
-    const token = new URL(target).searchParams.get('t');
+    const parsed = new URL(target);
+    const token = parsed.searchParams.get('t');
     const key = token ? readObjectReadToken(token) : null;
-    if (!key) throw new Error('Refusing to delete an unrecognized object URL');
-    return key;
+    if (key) return key;
+    if (parsed.hostname.endsWith('.public.blob.vercel-storage.com')) {
+      const legacyKey = decodeURIComponent(parsed.pathname.replace(/^\/+/, ''));
+      if (legacyKey && !legacyKey.startsWith('/') && !legacyKey.includes('..') && !legacyKey.includes('\\')) {
+        return legacyKey;
+      }
+    }
+    throw new Error('Refusing to delete an unrecognized object URL');
   });
   for (let offset = 0; offset < keys.length; offset += 1000) {
     await client().send(new DeleteObjectsCommand({

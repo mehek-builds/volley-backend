@@ -240,8 +240,8 @@ describe('the restore is wired at the packet-audit gate, not at buildPacket', ()
        rerendered bytes require a fresh applicant acknowledgement. The behavioural tests drive the
        real function and database write, including the exceptional byte-identical carry case. */
     assert.match(restore, /await write\(objectKey, bytes\)/);
-    // The default writer is the blob store, so the seam a test injects changes nothing in prod.
-    assert.match(restore, /put\(key, payload, \{ access: 'public', contentType: 'application\/pdf' \}\)/);
+    // The default writer is the provider-neutral store, so the seam a test injects changes nothing in prod.
+    assert.match(restore, /storePutObject\(key, payload, \{ contentType: 'application\/pdf' \}\)/);
     assert.match(restore, /pdfGenerationBinding: createPdfGenerationBinding\(/);
     assert.match(restore, /dependencies\.persistAudit\(refreshed\)/);
   });

@@ -2,7 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
-import { putObject, readObject } from '../lib/objectStorage';
+import { objectStorageUsesRailway, putObject, readObject } from '../lib/objectStorage';
 import { db } from '../db/index';
 import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { claimOnboardingBuildGrant, releaseOnboardingBuildGrant } from '../lib/onboardingBuildGrant';
@@ -119,7 +119,7 @@ async function refreshedResumeReplay(
   const resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(
     userId,
     artifact.object_key,
-    { blobUrl: artifact.blob_url ?? undefined },
+    { blobUrl: objectStorageUsesRailway() ? undefined : artifact.blob_url ?? undefined },
   )}`;
   const application = response.application && typeof response.application === 'object' && !Array.isArray(response.application)
     ? { ...(response.application as Record<string, unknown>), download_url: resumeUrl }
@@ -1325,7 +1325,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // 404 as "deleted" for the whole window a student is submitting in. put()'s URL is a
       // strong read target and it is in hand right here.
       resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey, {
-        ...(process.env.OBJECT_STORAGE_BUCKET ? {} : { blobUrl: blob.url }),
+        ...(objectStorageUsesRailway() ? {} : { blobUrl: blob.url }),
         fileName: resumeFileName,
       })}`;
     } catch (err) {

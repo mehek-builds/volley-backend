@@ -152,6 +152,7 @@ import { sanitizeProviderBlockers } from '../lib/fieldLabel';
 import { documentAsksOpenToReuse, requiredDocumentAsks, type RequiredDocumentAsk } from '../lib/requiredDocuments';
 import { isCronAuthorized, isCronConfigured } from '../lib/cronAuth';
 import { PacketDocumentExpiredError, resolveBlobUrl } from '../lib/resumeAccess';
+import { objectStorageUsesRailway } from '../lib/objectStorage';
 import { storedGeneratedResumeBlobUrl } from '../lib/resumeArtifactVersions';
 import { rerenderFrozenCoverLetter } from '../lib/packetDocumentRecovery';
 import { PACKET_EXPIRED_REASON } from '../lib/packetResumeRestore';
@@ -1451,7 +1452,7 @@ export async function buildPacket(
     });
   const resume = await resumeBytesForPacket(row.resume_object_key, controlledTest, {
     verifiedBytes: verifiedResumeBytes,
-    initialObjectUrl: storedResumeBlobUrl ?? undefined,
+    initialObjectUrl: objectStorageUsesRailway() ? undefined : storedResumeBlobUrl ?? undefined,
     resolveObjectUrl: resolveBlobUrl,
     fetchObject: (url) => fetch(url),
   });
