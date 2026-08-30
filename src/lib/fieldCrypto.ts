@@ -11,7 +11,9 @@ import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:
 // a real job application.
 //
 // ENCRYPTION_KEY_NEXT is the deliberately narrow transition mechanism. While it is present, new
-// values are written with it and reads accept either it or ENCRYPTION_KEY. That makes a live,
+// values are written with it and reads accept it, ENCRYPTION_KEY, and the optional temporary
+// ENCRYPTION_KEY_LEGACY. The legacy slot exists only to recover envelopes created before an earlier
+// primary-key change; it is never used for writes. That makes a live,
 // transactionally locked re-encryption pass safe: a request waiting behind the lock cannot add a
 // fresh old-key value after the pass. Once every stored envelope is rewritten, the deployment
 // promotes NEXT to ENCRYPTION_KEY and removes NEXT. This is not an invitation to change one env var
@@ -69,6 +71,11 @@ function configuredNextSecret(): string | null {
   return secret || null;
 }
 
+function configuredLegacySecret(): string | null {
+  const secret = process.env.ENCRYPTION_KEY_LEGACY?.trim();
+  return secret || null;
+}
+
 function keyForSecret(secret: string): Buffer {
   const cached = cachedKeys.get(secret);
   if (cached) return cached;
@@ -106,6 +113,8 @@ export function assertEncryptionKeyConfigured(): void {
   keyForSecret(configuredPrimarySecret());
   const next = configuredNextSecret();
   if (next) keyForSecret(next);
+  const legacy = configuredLegacySecret();
+  if (legacy) keyForSecret(legacy);
 }
 
 export function encryptionKeyTransitionConfigured(): boolean {
@@ -143,8 +152,10 @@ export function encryptField(plaintext: string): string {
 export function decryptField(encoded: string): string {
   const primary = configuredPrimarySecret();
   const next = configuredNextSecret();
+  const legacy = configuredLegacySecret();
   let lastError: unknown;
-  for (const secret of next && next !== primary ? [next, primary] : [primary]) {
+  const candidates = [...new Set([next, primary, legacy].filter((secret): secret is string => Boolean(secret)))];
+  for (const secret of candidates) {
     try {
       return decryptWithSecret(encoded, secret);
     } catch (err) {

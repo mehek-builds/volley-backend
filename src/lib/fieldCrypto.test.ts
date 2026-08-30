@@ -20,13 +20,21 @@ test('the legacy key-derivation salt is immutable across product renames', () =>
 // that throws instead of returning garbage, and the shape test that tells a legacy plaintext row
 // apart from a value the key can no longer read.
 
-function withKeys<T>(key: string | undefined, next: string | undefined, fn: () => T): T {
+function withKeys<T>(
+  key: string | undefined,
+  next: string | undefined,
+  fn: () => T,
+  legacy?: string,
+): T {
   const prev = process.env.ENCRYPTION_KEY;
   const prevNext = process.env.ENCRYPTION_KEY_NEXT;
+  const prevLegacy = process.env.ENCRYPTION_KEY_LEGACY;
   if (key === undefined) delete process.env.ENCRYPTION_KEY;
   else process.env.ENCRYPTION_KEY = key;
   if (next === undefined) delete process.env.ENCRYPTION_KEY_NEXT;
   else process.env.ENCRYPTION_KEY_NEXT = next;
+  if (legacy === undefined) delete process.env.ENCRYPTION_KEY_LEGACY;
+  else process.env.ENCRYPTION_KEY_LEGACY = legacy;
   try {
     return fn();
   } finally {
@@ -34,6 +42,8 @@ function withKeys<T>(key: string | undefined, next: string | undefined, fn: () =
     else process.env.ENCRYPTION_KEY = prev;
     if (prevNext === undefined) delete process.env.ENCRYPTION_KEY_NEXT;
     else process.env.ENCRYPTION_KEY_NEXT = prevNext;
+    if (prevLegacy === undefined) delete process.env.ENCRYPTION_KEY_LEGACY;
+    else process.env.ENCRYPTION_KEY_LEGACY = prevLegacy;
   }
 }
 
@@ -92,6 +102,19 @@ test('the guarded re-encryption pass promotes an old envelope to the next key', 
   });
   withKey('next-key', () => {
     assert.equal(decryptField(rewritten), '3.89');
+  });
+});
+
+test('a transition can recover an envelope from one explicit legacy key', () => {
+  const storedUnderLegacyKey = withKey('historical-key', () => encryptField('3.89'));
+  const rewritten = withKeys('current-key', 'next-key', () =>
+    reencryptFieldWithNextKey(storedUnderLegacyKey), 'historical-key');
+
+  withKey('next-key', () => {
+    assert.equal(decryptField(rewritten), '3.89');
+  });
+  withKey('historical-key', () => {
+    assert.throws(() => decryptField(rewritten), FieldDecryptError);
   });
 });
 

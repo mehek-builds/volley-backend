@@ -9,7 +9,13 @@ import {
   type EncryptionRekeyDependencies,
 } from './encryptionRekey';
 
-const ENV_KEYS = ['ENCRYPTION_KEY', 'ENCRYPTION_KEY_NEXT', 'INTERNAL_CRON_SECRET', 'CRON_SECRET'] as const;
+const ENV_KEYS = [
+  'ENCRYPTION_KEY',
+  'ENCRYPTION_KEY_NEXT',
+  'ENCRYPTION_KEY_LEGACY',
+  'INTERNAL_CRON_SECRET',
+  'CRON_SECRET',
+] as const;
 const savedEnvironment = new Map(ENV_KEYS.map((key) => [key, process.env[key]]));
 
 afterEach(() => {
@@ -23,8 +29,10 @@ afterEach(() => {
 function encryptUnder(key: string, plaintext: string): string {
   const previous = process.env.ENCRYPTION_KEY;
   const previousNext = process.env.ENCRYPTION_KEY_NEXT;
+  const previousLegacy = process.env.ENCRYPTION_KEY_LEGACY;
   process.env.ENCRYPTION_KEY = key;
   delete process.env.ENCRYPTION_KEY_NEXT;
+  delete process.env.ENCRYPTION_KEY_LEGACY;
   try {
     return encryptField(plaintext);
   } finally {
@@ -32,6 +40,8 @@ function encryptUnder(key: string, plaintext: string): string {
     else process.env.ENCRYPTION_KEY = previous;
     if (previousNext === undefined) delete process.env.ENCRYPTION_KEY_NEXT;
     else process.env.ENCRYPTION_KEY_NEXT = previousNext;
+    if (previousLegacy === undefined) delete process.env.ENCRYPTION_KEY_LEGACY;
+    else process.env.ENCRYPTION_KEY_LEGACY = previousLegacy;
   }
 }
 
