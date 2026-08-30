@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
-import { list } from '@vercel/blob';
+import { get, list } from '@vercel/blob';
 
 const bucket = process.env.OBJECT_STORAGE_BUCKET?.trim() || process.env.BUCKET?.trim();
 const accessKeyId = process.env.OBJECT_STORAGE_ACCESS_KEY_ID?.trim() || process.env.ACCESS_KEY_ID?.trim();
@@ -39,6 +39,20 @@ async function allVercelBlobs() {
   return blobs;
 }
 
+async function readVercelBlob(blob) {
+  const access = new URL(blob.url).hostname.endsWith('.private.blob.vercel-storage.com')
+    ? 'private'
+    : 'public';
+  const result = await get(blob.pathname, { access });
+  if (!result || result.statusCode !== 200 || !result.stream) {
+    throw new Error(`Could not read ${blob.pathname}: ${result?.statusCode ?? 404}`);
+  }
+  return {
+    body: Buffer.from(await new Response(result.stream).arrayBuffer()),
+    contentType: result.blob.contentType || 'application/octet-stream',
+  };
+}
+
 const blobs = await allVercelBlobs();
 let copied = 0;
 let skipped = 0;
@@ -47,10 +61,7 @@ for (const [index, blob] of blobs.entries()) {
     if (error?.$metadata?.httpStatusCode === 404) return null;
     throw error;
   });
-  const response = await fetch(blob.url);
-  if (!response.ok) throw new Error(`Could not read ${blob.pathname}: ${response.status}`);
-  const body = Buffer.from(await response.arrayBuffer());
-  const contentType = response.headers.get('content-type') || 'application/octet-stream';
+  const { body, contentType } = await readVercelBlob(blob);
   const sourceHash = createHash('sha256').update(body).digest('hex');
 
   if (existing?.ContentLength === body.length) {
