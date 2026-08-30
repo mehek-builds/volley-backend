@@ -2251,7 +2251,11 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     await upsertSources(allSources);
     /* Every run reconciles the database against the reviewed list, so a company removed in a pull
        request stops appearing on the board without anybody remembering to go and disable it. */
-    const retired = await retireUnlistedSources(allSources);
+    /* Remote discovery makes the persisted fleet larger than the static catalog. Automatic
+       retirement is therefore unsafe: an older release or a partial catalog must not disable
+       sources that were independently verified by a newer release. Explicit operator actions
+       remain the only authority for disabling a source. */
+    const retired: string[] = [];
     const [sourceCount] = await db
       .select({ total: sql<number>`count(*)::int` })
       .from(career_page_sources)

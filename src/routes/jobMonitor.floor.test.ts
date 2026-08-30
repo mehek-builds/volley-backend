@@ -78,6 +78,12 @@ test('the scheduled catalog includes reviewed sources and deduplicated operator 
   assert.deepEqual(mergeJobSources(reviewed, configured), [configured[0], reviewed[1]]);
 });
 
+test('the monitor never retires the persisted source fleet from a smaller static catalog', () => {
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  assert.doesNotMatch(source, /await retireUnlistedSources\(allSources\)/);
+  assert.match(source, /const retired: string\[\] = \[\]/);
+});
+
 test('post-poll metric statements leave time for the cron to answer', () => {
   assert.equal(MONITOR_METRICS_STATEMENT_TIMEOUT_MS, 30_000);
   assert.equal(TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS, 5_000);
