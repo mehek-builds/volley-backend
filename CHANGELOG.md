@@ -4,6 +4,10 @@
 
 ### Changed
 
+- Resume parsing now races both configured model providers inside one short deadline, cancels the
+  losing request, and falls back to bounded local extraction when neither provider responds.
+- Base and job-tailored resume creation now share a 15-second model budget and can continue from
+  grounded uploaded evidence without spending another provider retry on wording-only repairs.
 - Eligible postings remain discoverable for 90 days rather than 14, so the board keeps a role for
   as long as its employer is still listing it. Closed postings still leave the board immediately;
   the window governs only how long an untouched posting date is treated as believable. Rows are
@@ -14,6 +18,11 @@
 
 ### Fixed
 
+- Resume uploads no longer fail onboarding only because model-inferred target roles are unavailable.
+- PDF text reconstruction and local parsing now enforce item, character, entry, bullet, and skill
+  ceilings so malformed or unusually large documents cannot create unbounded work.
+- Provider-outage resume creation preserves every grounded sparse entry for review while keeping
+  factual, contact, grounding, selection, and PDF safety checks as hard requirements.
 - Managed application email receiving proofs now renew through append-only signed delivery events
   before the seven-day health window expires.
 - Managed receiving canaries use a PostgreSQL-compatible legacy-proof timestamp bound, preventing

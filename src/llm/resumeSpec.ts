@@ -7,6 +7,18 @@ import { STRONG_VERBS } from '../engine/resumeValidate';
 import { generateOpenAIText, logOpenAIFallback, openAIConfigured } from './openAIProvider';
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+export const RESUME_GENERATION_INTERACTIVE_BUDGET_MS = 15_000;
+
+export function resumeGenerationDeadlineMs(nowMs: number, callerAllowanceMs?: number): number {
+  return nowMs + Math.min(
+    callerAllowanceMs ?? RESUME_GENERATION_INTERACTIVE_BUDGET_MS,
+    RESUME_GENERATION_INTERACTIVE_BUDGET_MS,
+  );
+}
+
+export function resumeGenerationRemainingMs(deadlineMs: number, nowMs: number): number {
+  return Math.max(1, deadlineMs - nowMs);
+}
 
 export interface ResumeSpec {
   // The role this resume targets. This is a targeting headline, not a claim that the candidate
@@ -46,6 +58,8 @@ export interface ResumeSpec {
   // is what this said and what the prompt asked for - with no skills source in the system, that
   // instruction was an invitation to keyword-stuff, and the model took it (R-015).
   skills: string[];
+  /** Present only when provider failure forced a grounded, model-free continuity draft. */
+  generation_method?: 'model' | 'local_fallback';
   /* Why the FIRST experience entry leads this resume, cited against the posting. Metadata, not
      content: no renderer reads it and resumeSpecText excludes it, so it reaches neither the page
      nor the match score. See engine/leadAlignment.ts for what it is checked against and why the
@@ -347,9 +361,9 @@ export async function generateResumeSpec(
   // The applicant's declared skills (profiles.skills). Empty/undefined means they never gave us a
   // list, which the validator treats as soft-grounding rather than as "they have no skills".
   skills?: string[] | null,
-  // Hard per-call wall-clock bound. The route runs inside Vercel's 60s function ceiling and passes
-  // its real remaining budget here; a call that outlives it is aborted (APIUserAbortError), which
-  // the route's overload classifier deliberately treats as NOT retryable - it is our own deadline.
+  // Caller wall-clock allowance. This function applies the lower interactive cap above and shares
+  // it across providers, so the route budget can never turn one visible build into a multi-minute
+  // wait. A call that outlives the cap is aborted and degrades to grounded local output.
   timeoutMs?: number,
   /* The applicant's APPROVED base resume, when they have one.
    *
@@ -357,6 +371,8 @@ export async function generateResumeSpec(
   baseSpec?: ResumeSpec | null,
   priorityEntry?: ExperienceBankEntry | null,
 ): Promise<ResumeSpec> {
+  const generationDeadlineMs = resumeGenerationDeadlineMs(Date.now(), timeoutMs);
+  const remainingGenerationMs = () => resumeGenerationRemainingMs(generationDeadlineMs, Date.now());
   /* THE BASE RESUME IS THE STARTING POINT, NOT MORE CONTEXT.
    *
    * Without this the tailored path re-selected from the raw bank on every application, which had
@@ -444,7 +460,7 @@ How to use it:
         instructions: `${RESUME_SYSTEM_PROMPT}\n\n${contextBlock}`,
         input: userContent,
         maxOutputTokens: 16384,
-        timeoutMs,
+        timeoutMs: remainingGenerationMs(),
         jsonSchema: { name: 'litos_resume_spec', schema: RESUME_JSON_SCHEMA },
       });
       return parseGeneratedResumeSpec(generated.text, 'OpenAI', 'completed');
@@ -453,8 +469,9 @@ How to use it:
     }
   }
 
-  const response = await client.messages.create(
-    {
+  try {
+    const response = await client.messages.create(
+      {
       model: 'claude-sonnet-5',
       // max_tokens is a SHARED budget for thinking AND the JSON, not just the JSON. Measured on a
       // real call: thinking_tokens=1360 of output_tokens=2242, so reasoning ate ~60% of the response
@@ -488,19 +505,98 @@ How to use it:
         },
       ],
     },
-    // When the caller supplies a budget, the abort signal hard-bounds the call and maxRetries: 0
-    // hands ALL capacity retries to the route's own counter (resume.ts). The SDK's built-in retries
+    // The shared interactive deadline hard-bounds this fallback and maxRetries: 0 hands ALL
+    // capacity retries to the route's own counter (resume.ts). The SDK's built-in retries
     // would multiply the route's attempts and, worse, honor a long Retry-After with a sleep the
     // route cannot see or budget-gate - which is exactly the hidden stall that 504s a 60s function.
-    timeoutMs !== undefined ? { signal: AbortSignal.timeout(timeoutMs), maxRetries: 0 } : undefined,
-  );
+      { signal: AbortSignal.timeout(remainingGenerationMs()), maxRetries: 0 },
+    );
 
-  const textBlock = response.content.find((block) => block.type === 'text');
-  const text = textBlock?.type === 'text' ? textBlock.text : '';
+    const textBlock = response.content.find((block) => block.type === 'text');
+    const text = textBlock?.type === 'text' ? textBlock.text : '';
 
-  if (response.stop_reason === 'max_tokens') {
-    throw new Error(`Resume spec truncated at max_tokens (${text.length} chars) - raise the cap`);
+    if (response.stop_reason === 'max_tokens') {
+      throw new Error(`Resume spec truncated at max_tokens (${text.length} chars) - raise the cap`);
+    }
+
+    return parseGeneratedResumeSpec(text, 'Claude', response.stop_reason ?? 'unknown');
+  } catch (error) {
+    const fallback = resumeSpecFromEvidence(role, bank, education, skills, baseSpec, priorityEntry);
+    console.warn(`[llm] tailored_resume provider=local outcome=success entries=${fallback.experience.length} reason=${error instanceof Error ? error.name : 'error'}`);
+    return fallback;
   }
+}
 
-  return parseGeneratedResumeSpec(text, 'Claude', response.stop_reason ?? 'unknown');
+/** Grounded continuity draft for a job when both model providers fail. */
+export function resumeSpecFromEvidence(
+  role: string,
+  bank: ExperienceBankEntry[],
+  education: {
+    school: string;
+    degree?: string;
+    grad_date?: string;
+    grad_year?: number;
+    coursework?: string[];
+  },
+  skills?: string[] | null,
+  baseSpec?: ResumeSpec | null,
+  priorityEntry?: ExperienceBankEntry | null,
+): ResumeSpec {
+  const experience: ResumeSpec['experience'] = [];
+  const identity = (org: string, title: string) => `${org.toLowerCase().trim()}\u0000${title.toLowerCase().trim()}`;
+  const seen = new Set<string>();
+  const add = (entry: ResumeSpec['experience'][number]) => {
+    if (experience.length >= RESUME_CONTENT_LIMITS.maxEntries) return;
+    const key = identity(entry.org, entry.title);
+    if (!entry.org.trim() || seen.has(key) || entry.bullets.length === 0) return;
+    seen.add(key);
+    experience.push({ ...entry, bullets: entry.bullets.map((bullet) => bullet.replace(/\u2014/g, '-')).slice(0, 3) });
+  };
+  for (const entry of baseSpec?.experience ?? []) add(entry);
+  if (priorityEntry) {
+    const priority = {
+      type: priorityEntry.type as 'job' | 'project' | 'leadership',
+      org: priorityEntry.org,
+      title: priorityEntry.title ?? '',
+      location: priorityEntry.location ?? '',
+      date_range: priorityEntry.date_range ?? '',
+      bullets: Array.isArray(priorityEntry.bullet_variants)
+        ? priorityEntry.bullet_variants.filter((bullet): bullet is string => typeof bullet === 'string')
+        : [],
+    };
+    const key = identity(priority.org, priority.title);
+    if (priority.org.trim() && !seen.has(key) && priority.bullets.length > 0) {
+      seen.add(key);
+      experience.unshift({
+        ...priority,
+        bullets: priority.bullets.map((bullet) => bullet.replace(/\u2014/g, '-')).slice(0, 3),
+      });
+    }
+  }
+  for (const entry of bank) {
+    if (experience.length >= RESUME_CONTENT_LIMITS.maxEntries) break;
+    add({
+      type: entry.type as 'job' | 'project' | 'leadership',
+      org: entry.org,
+      title: entry.title ?? '',
+      location: entry.location ?? '',
+      date_range: entry.date_range ?? '',
+      bullets: Array.isArray(entry.bullet_variants)
+        ? entry.bullet_variants.filter((bullet): bullet is string => typeof bullet === 'string')
+        : [],
+    });
+  }
+  if (experience.length === 0) throw new Error('No grounded experience entries are available for this resume');
+  return {
+    ...normalizeSpec({
+      target_role: role,
+      school: education.school,
+      degree: education.degree ?? '',
+      grad_date: education.grad_date ?? (education.grad_year ? String(education.grad_year) : ''),
+      coursework: education.coursework?.join(', ') ?? '',
+      experience: experience.slice(0, RESUME_CONTENT_LIMITS.maxEntries),
+      skills: [...new Set(skills ?? baseSpec?.skills ?? [])].slice(0, 10),
+    }),
+    generation_method: 'local_fallback',
+  };
 }

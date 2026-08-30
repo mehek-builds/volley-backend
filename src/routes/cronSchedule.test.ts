@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 // The privacy page states the 30-day window as fact, and vercel.json is the only place that
@@ -70,9 +71,20 @@ test('the other scheduled jobs are still scheduled', () => {
   const paths = new Set(scheduledCrons().map((cron) => cron.path));
   for (const path of [
     '/internal/adapter-health-check',
-    '/internal/job-monitor',
     '/internal/application-submission-runner',
   ]) {
     assert.ok(paths.has(path), `${path} is no longer scheduled`);
   }
+});
+
+test('the Railway worker is the only recurring job monitor owner', () => {
+  const paths = new Set(scheduledCrons().map((cron) => cron.path));
+  assert.equal(paths.has('/internal/job-monitor'), false, 'Vercel must not run a second job monitor');
+
+  const workflow = readFileSync('.github/workflows/job-monitor.yml', 'utf8');
+  assert.match(workflow, /^\s+workflow_dispatch:\s*$/m, 'the diagnostic workflow must remain manually callable');
+  assert.doesNotMatch(workflow, /^\s+schedule:/m, 'the diagnostic workflow must not schedule a second monitor');
+
+  const packageJson = require('../../package.json') as { scripts?: Record<string, string> };
+  assert.equal(packageJson.scripts?.['worker:job-monitor'], 'node scripts/run-job-monitor-worker.mjs');
 });

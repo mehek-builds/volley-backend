@@ -61,8 +61,8 @@ test('the relaxed predicates are the stated preferences and nothing else', () =>
 
   /* Both title predicates go: the role-type pattern (`title ~* ...`) and the desired title terms
      (`title ilike ...`). Asserted on the COLUMN rather than on the word "intern", because the
-     baseline freshness window mentions Internship on its own - internships get a longer window -
-     so a match on that word would pass this case while proving nothing. */
+     baseline used to mention Internship on its own, so a match on that word would pass this case
+     while proving nothing. */
   assert.match(targetedSql, /"monitored_jobs"\."title"/);
   assert.doesNotMatch(relaxedSql, /"monitored_jobs"\."title"/);
 

@@ -583,14 +583,14 @@ describe('exact-country resolver', () => {
     const resume = readFileSync('src/routes/resume.ts', 'utf8');
     assert.match(
       resume,
-      /if \(!body\.job_id && ownedCanonicalApplication\.job_id\) \{[\s\S]{0,400}?postingRow\(ownedCanonicalApplication\.job_id\)/,
+      /if \(!body\.job_id && ownedCanonicalApplication\.job_id\) \{[\s\S]{0,400}?ownedHistoricalActionPostingRow\([\s\S]{0,100}?ownedCanonicalApplication\.job_id/,
       'the canonical application\'s own posting is the fallback when the body names none',
     );
     assert.match(resume, /postingLocation = canonicalPosting\?\.location \?\? null/);
     assert.match(resume, /postingPortalCountry = canonicalPosting\?\.portal_country \?\? null/);
     // AFTER the binding gate, so the row read is provably the same posting this request is about.
     assert.ok(
-      resume.indexOf("code: 'application_context_mismatch'") < resume.indexOf('postingRow(ownedCanonicalApplication.job_id)'),
+      resume.indexOf("code: 'application_context_mismatch'") < resume.indexOf('ownedHistoricalActionPostingRow('),
       'the mismatch refusal must come first',
     );
   });

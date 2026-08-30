@@ -26,11 +26,11 @@ test('durable Rippling copies use a content-addressed public path with immutable
   assert.equal(uploadedPath, `company-logos/rippling/utility/${digest}.png`);
   assert.deepEqual(uploadedBody, Buffer.from(png));
   assert.deepEqual(uploadedOptions, {
-    access: 'public',
     addRandomSuffix: false,
     allowOverwrite: true,
     contentType: 'image/png',
     cacheControlMaxAge: 365 * 24 * 60 * 60,
+    publicRead: true,
   });
   assert.equal(result, `https://litos.public.blob.vercel-storage.com/${uploadedPath}`);
 });

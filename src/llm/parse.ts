@@ -16,6 +16,7 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
  * twice, which turned one upload into a 75 second spinner in production on 2026-08-30. */
 export const RESUME_PARSE_BUDGET_MS = 24_000;
 export const RESUME_PROVIDER_CALL_CAP_MS = 8_000;
+export const RESUME_PROVIDER_HEDGE_DELAY_MS = 750;
 const MIN_RESUME_PROVIDER_CALL_MS = 750;
 
 export function resumeParseDeadlineFromUploadStart(uploadStartedAtMs: number): number {
@@ -63,6 +64,10 @@ async function measuredResumeParseStage<T>(
 type ResumeParseOptions = {
   deadlineMs?: number;
   signal?: AbortSignal;
+  /** Extracted text used when neither vision provider can read a scanned PDF in time. */
+  fallbackText?: string;
+  /** Test-only latency control. Production always uses RESUME_PROVIDER_HEDGE_DELAY_MS. */
+  hedgeDelayMs?: number;
 };
 
 export interface ParsedProfile {
@@ -159,6 +164,8 @@ export interface ParsedProfile {
   // Replaced on every upload. It is the durable cursor for the evidence review that must happen
   // before the uploaded experience becomes the spine of generated resumes.
   recent_experience_review?: unknown;
+  /** Operational provenance. The UI may invite review, but must never treat this as a failure. */
+  parse_method?: 'model' | 'local_fallback';
 }
 
 // R-047, the failure the degree rule below exists to prevent. An uploaded resume reading
@@ -470,6 +477,214 @@ export function parsedProfileFromModelText(text: string): ParsedProfile {
   return parsed;
 }
 
+const LOCAL_SECTION = /^(?:work\s+|professional\s+|relevant\s+)?experience$|^employment(?:\s+history)?$|^education$|^skills?(?:\s+&\s+interests)?$|^projects?$|^leadership(?:\s+experience)?$|^activities$/i;
+const LOCAL_INLINE_SECTION = /^((?:work\s+|professional\s+|relevant\s+)?experience|employment(?:\s+history)?|education|skills?(?:\s+&\s+interests)?|projects?|leadership(?:\s+experience)?|activities)\s*[:|]\s*(.+)$/i;
+const LOCAL_DATE = /\b(?:(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+)?(?:19|20)\d{2}\b|\bpresent\b/i;
+const LOCAL_BULLET = /^[\s\u2022\u25cf\u25aa\u25e6\-*]+/;
+export const LOCAL_PARSE_LIMITS = {
+  inputChars: 200_000,
+  lines: 4_000,
+  lineChars: 1_000,
+  entriesPerSection: 25,
+  bulletsPerEntry: 8,
+  bulletChars: 1_000,
+  descriptionChars: 8_000,
+  skills: 100,
+  fieldChars: 300,
+} as const;
+
+function uniqueLocal(values: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const value = raw.trim().replace(/\s+/g, ' ');
+    const key = value.toLowerCase();
+    if (!value || seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+}
+
+function localResumeLines(text: string): string[] {
+  const withSections = text.slice(0, LOCAL_PARSE_LIMITS.inputChars)
+    .replace(/\r/g, '\n')
+    .replace(/[\u2022\u25cf\u25aa\u25e6]/g, '\n$& ');
+  return withSections
+    .split(/\n+/)
+    .map((line) => line.trim().replace(/\s+/g, ' ').slice(0, LOCAL_PARSE_LIMITS.lineChars))
+    .filter(Boolean)
+    .slice(0, LOCAL_PARSE_LIMITS.lines);
+}
+
+function localSections(lines: string[]): Map<string, string[]> {
+  const sections = new Map<string, string[]>();
+  let current = 'header';
+  sections.set(current, []);
+  const sectionFor = (label: string) => /education/i.test(label) ? 'education'
+    : /skill/i.test(label) ? 'skills'
+      : /project/i.test(label) ? 'projects'
+        : /leadership|activities/i.test(label) ? 'leadership'
+          : 'experience';
+  for (const line of lines) {
+    const label = line.replace(/[:|]+$/, '').trim();
+    if (LOCAL_SECTION.test(label)) {
+      current = sectionFor(label);
+      if (!sections.has(current)) sections.set(current, []);
+      continue;
+    }
+    const inline = line.match(LOCAL_INLINE_SECTION);
+    if (inline) {
+      current = sectionFor(inline[1]);
+      if (!sections.has(current)) sections.set(current, []);
+      sections.get(current)?.push(inline[2]);
+      continue;
+    }
+    sections.get(current)?.push(line);
+  }
+  return sections;
+}
+
+function localName(header: string[]): string {
+  for (const line of header.slice(0, 8)) {
+    if (/@|https?:|www\.|linkedin|github|\d{3}[-().\s]\d{3}/i.test(line)) continue;
+    const cleaned = line.replace(/[|,].*$/, '').trim();
+    const words = cleaned.split(/\s+/);
+    if (words.length >= 2 && words.length <= 6 && cleaned.length <= 80 && /^[\p{L}.' -]+$/u.test(cleaned)) {
+      return cleaned;
+    }
+  }
+  return '';
+}
+
+function localEntryParts(lines: string[]): { primary: string; secondary: string; start: string; end: string; description: string }[] {
+  const entries: { primary: string; secondary: string; start: string; end: string; description: string }[] = [];
+  let pending: string[] = [];
+  let current: { primary: string; secondary: string; start: string; end: string; bullets: string[] } | null = null;
+  const finish = () => {
+    if (!current) return;
+    const description = uniqueLocal(current.bullets)
+      .slice(0, LOCAL_PARSE_LIMITS.bulletsPerEntry)
+      .join('\n')
+      .slice(0, LOCAL_PARSE_LIMITS.descriptionChars);
+    if (current.primary && description && entries.length < LOCAL_PARSE_LIMITS.entriesPerSection) {
+      entries.push({
+        ...current,
+        primary: current.primary.slice(0, LOCAL_PARSE_LIMITS.fieldChars),
+        secondary: current.secondary.slice(0, LOCAL_PARSE_LIMITS.fieldChars),
+        description,
+      });
+    }
+    current = null;
+  };
+
+  for (const rawLine of lines) {
+    const isBullet = LOCAL_BULLET.test(rawLine) && !LOCAL_DATE.test(rawLine);
+    const line = rawLine.replace(LOCAL_BULLET, '').trim();
+    if (!line) continue;
+    if (isBullet) {
+      if (current && current.bullets.length < LOCAL_PARSE_LIMITS.bulletsPerEntry) {
+        current.bullets.push(line.slice(0, LOCAL_PARSE_LIMITS.bulletChars));
+      }
+      continue;
+    }
+    if (LOCAL_DATE.test(line)) {
+      finish();
+      const dateMatches = [...line.matchAll(new RegExp(LOCAL_DATE.source, 'gi'))].map((match) => match[0]);
+      const withoutDates = line
+        .replace(new RegExp(LOCAL_DATE.source, 'gi'), '')
+        .replace(/(?:\s*[-|,]\s*)+$/g, '')
+        .trim();
+      const metadata = [...pending.slice(-2), ...(withoutDates ? [withoutDates] : [])]
+        .flatMap((part) => part.split(/\s+[|]\s+|\s{2,}/))
+        .map((part) => part.trim())
+        .filter(Boolean);
+      current = {
+        primary: metadata[0] ?? '',
+        // Company and location commonly share one line, followed by title and dates. The last
+        // metadata field is therefore the title, while the first remains the organization.
+        secondary: metadata.length > 1 ? metadata[metadata.length - 1] : '',
+        start: dateMatches[0] ?? '',
+        end: dateMatches[1] ?? (/present/i.test(line) ? 'Present' : ''),
+        bullets: [],
+      };
+      pending = [];
+      continue;
+    }
+    if (current && current.bullets.length === 0) {
+      current.bullets.push(line.slice(0, LOCAL_PARSE_LIMITS.bulletChars));
+    } else {
+      if (current) finish();
+      pending.push(line);
+    }
+  }
+  finish();
+  return entries;
+}
+
+/**
+ * Last-resort parser for readable text resumes. It never infers or rewrites facts. Its purpose is
+ * continuity: provider latency may reduce automatic enrichment, but it may not block signup.
+ */
+export function parseResumeLocally(resumeText: string): ParsedProfile {
+  const lines = localResumeLines(resumeText);
+  const sections = localSections(lines);
+  const header = sections.get('header') ?? [];
+  const headerText = header.slice(0, 12).join('\n');
+  const email = headerText.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0] ?? '';
+  const phone = headerText.match(/(?:\+?\d[\d().\s-]{7,}\d)/)?.[0]?.trim() ?? '';
+  const urls = headerText.match(/(?:(?:https?:\/\/|www\.)\S+|(?:linkedin|github)\.com\/\S+)/gi)
+    ?.map((url) => url.replace(/[),.;]+$/, '')) ?? [];
+  const education = sections.get('education') ?? [];
+  const school = education.find((line) => /university|college|institute|school/i.test(line)) ?? '';
+  const degree = education.find((line) => /\b(?:bachelor|master|doctor|associate|b\.?s\.?|b\.?a\.?|m\.?s\.?|m\.?a\.?|mba|ph\.?d)\b/i.test(line)) ?? '';
+  const gradLine = education.find((line) => LOCAL_DATE.test(line)) ?? '';
+  const gradYears = gradLine.match(/\b(?:19|20)\d{2}\b/g) ?? [];
+  const gradYear = gradYears.length > 0 ? Number(gradYears[gradYears.length - 1]) : 0;
+  const skills = uniqueLocal((sections.get('skills') ?? [])
+    .flatMap((line) => line.replace(LOCAL_BULLET, '').split(/[,;|]/))
+    .filter((skill) => skill.trim().length > 0 && skill.trim().length <= 80))
+    .slice(0, LOCAL_PARSE_LIMITS.skills);
+  const jobs = localEntryParts(sections.get('experience') ?? []);
+  const projects = localEntryParts(sections.get('projects') ?? []);
+  const leadership = localEntryParts(sections.get('leadership') ?? []);
+
+  return {
+    full_name: localName(header),
+    ...(email ? { email } : {}),
+    ...(phone ? { phone } : {}),
+    ...(urls.find((url) => /linkedin/i.test(url)) ? { linkedin_url: urls.find((url) => /linkedin/i.test(url)) } : {}),
+    ...(urls.find((url) => /github/i.test(url)) ? { github_url: urls.find((url) => /github/i.test(url)) } : {}),
+    experience: jobs.map((entry) => ({
+      company: entry.primary,
+      title: entry.secondary,
+      start: entry.start,
+      end: entry.end,
+      description: entry.description,
+    })),
+    skills,
+    projects: projects.map((entry) => ({
+      name: entry.primary,
+      ...(entry.secondary ? { role: entry.secondary } : {}),
+      date_range: [entry.start, entry.end].filter(Boolean).join(' - '),
+      description: entry.description,
+    })),
+    leadership: leadership.map((entry) => ({
+      organization: entry.primary,
+      title: entry.secondary,
+      start: entry.start,
+      end: entry.end,
+      description: entry.description,
+    })),
+    school,
+    degree,
+    grad_date: gradLine,
+    grad_year: gradYear,
+    target_roles: [],
+    parse_method: 'local_fallback',
+  };
+}
+
 /* The GPA the resume itself prints, read deterministically from the source text.
  *
  * Exists because the model does not always transcribe the number correctly. Caught on a live
@@ -610,73 +825,116 @@ export async function parsedProfileWithOneRepair(
   }
 }
 
+function resumeProviderSignal(external: AbortSignal | undefined, local: AbortSignal): AbortSignal {
+  return external ? AbortSignal.any([external, local]) : local;
+}
+
+function waitForResumeHedge(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (delayMs <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, delayMs);
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error('Resume parsing aborted'));
+    }, { once: true });
+  });
+}
+
+async function parseTextWithOpenAI(
+  resumeText: string,
+  deadlineMs: number,
+  signal: AbortSignal,
+): Promise<ParsedProfile> {
+  const request = async (repairFailure?: string) => {
+    const generated = await measuredResumeParseStage(
+      'openai',
+      'text',
+      repairFailure ? 'repair' : 'initial',
+      deadlineMs,
+      (timeoutMs) => generateOpenAIText({
+        instructions: SYSTEM_PROMPT,
+        input: repairFailure
+          ? `Parse this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles.\n\n${resumeText}`
+          : `Parse this resume text and return the JSON:\n\n${resumeText}`,
+        maxOutputTokens: 4096,
+        jsonSchema: RESUME_JSON_SCHEMA,
+        reasoningEffort: 'low',
+        timeoutMs,
+        signal,
+      }),
+    );
+    return generated.text;
+  };
+  const parsed = await parsedProfileWithOneRepair(await request(), request);
+  return reconcileGpaWithSource(parsed, resumeText);
+}
+
+async function parseTextWithAnthropic(
+  resumeText: string,
+  deadlineMs: number,
+  signal: AbortSignal,
+): Promise<ParsedProfile> {
+  const request = async (repairFailure?: string) => {
+    const response = await measuredResumeParseStage(
+      'anthropic',
+      'text',
+      repairFailure ? 'repair' : 'initial',
+      deadlineMs,
+      (timeout) => client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 2048,
+        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        messages: [{
+          role: 'user',
+          content: repairFailure
+            ? `Parse this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles.\n\n${resumeText}`
+            : `Parse this resume text and return the JSON:\n\n${resumeText}`,
+        }],
+      }, { timeout, maxRetries: 0, signal }),
+    );
+    const textBlock = response.content.find((block) => block.type === 'text');
+    return textBlock?.type === 'text' ? textBlock.text : '';
+  };
+  const parsed = await parsedProfileWithOneRepair(await request(), request);
+  return reconcileGpaWithSource(parsed, resumeText);
+}
+
 export async function parseResumeWithClaude(
   resumeText: string,
   options: ResumeParseOptions = {},
 ): Promise<ParsedProfile> {
   const deadlineMs = options.deadlineMs ?? resumeParseDeadlineFromUploadStart(Date.now());
+  const openAIController = new AbortController();
+  const anthropicController = new AbortController();
+  const openAISignal = resumeProviderSignal(options.signal, openAIController.signal);
+  const anthropicSignal = resumeProviderSignal(options.signal, anthropicController.signal);
+  const attempts: Promise<ParsedProfile>[] = [];
   if (openAIConfigured()) {
-    try {
-      const request = async (repairFailure?: string) => {
-        const generated = await measuredResumeParseStage(
-          'openai',
-          'text',
-          repairFailure ? 'repair' : 'initial',
-          deadlineMs,
-          (timeoutMs) => generateOpenAIText({
-            instructions: SYSTEM_PROMPT,
-            input: repairFailure
-              ? `Parse this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles.\n\n${resumeText}`
-              : `Parse this resume text and return the JSON:\n\n${resumeText}`,
-            maxOutputTokens: 4096,
-            jsonSchema: RESUME_JSON_SCHEMA,
-            reasoningEffort: 'low',
-            timeoutMs,
-            signal: options.signal,
-          }),
-        );
-        return generated.text;
-      };
-      const parsed = await parsedProfileWithOneRepair(await request(), request);
-      return reconcileGpaWithSource(parsed, resumeText);
-    } catch (error) {
+    attempts.push(parseTextWithOpenAI(resumeText, deadlineMs, openAISignal).catch((error) => {
       logOpenAIFallback('resume parsing', error);
-    }
+      throw error;
+    }));
   }
-
+  attempts.push((async () => {
+    if (openAIConfigured()) {
+      await waitForResumeHedge(options.hedgeDelayMs ?? RESUME_PROVIDER_HEDGE_DELAY_MS, anthropicSignal);
+    }
+    return parseTextWithAnthropic(resumeText, deadlineMs, anthropicSignal);
+  })());
   try {
-    const request = async (repairFailure?: string) => {
-      const response = await measuredResumeParseStage(
-        'anthropic',
-        'text',
-        repairFailure ? 'repair' : 'initial',
-        deadlineMs,
-        (timeout) => client.messages.create({
-          model: 'claude-haiku-4-5-20251001',
-          max_tokens: 2048,
-          system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-          messages: [{
-            role: 'user',
-            content: repairFailure
-              ? `Parse this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles.\n\n${resumeText}`
-              : `Parse this resume text and return the JSON:\n\n${resumeText}`,
-          }],
-        }, { timeout, maxRetries: 0, signal: options.signal }),
-      );
-      const textBlock = response.content.find((block) => block.type === 'text');
-      return textBlock?.type === 'text' ? textBlock.text : '';
-    };
-    const initial = await request();
-    const parsed = await parsedProfileWithOneRepair(initial, request);
-    // The one field on this parse that becomes a factual claim to an employer, checked against the
-    // document instead of trusted. See reconcileGpaWithSource for the live misread that forced it.
-    return reconcileGpaWithSource(parsed, resumeText);
+    const parsed = await Promise.any(attempts);
+    openAIController.abort();
+    anthropicController.abort();
+    return parsed;
   } catch (error) {
-    /* Provider HTTP failures and our own deadline sentinel keep their meaning. This catch used to
-       wrap everything, which is how a 400 "Your credit balance is too low" reached production logs
-       on 2026-08-15 described as invalid JSON. See lib/llmFailure.ts. */
-    if (isUpstreamApiError(error) || isModelUnavailable(error)) throw error;
-    throw new Error(`Claude returned invalid JSON for resume parsing: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}`);
+    openAIController.abort();
+    anthropicController.abort();
+    if (options.signal?.aborted) throw options.signal.reason ?? error;
+    const local = parseResumeLocally(resumeText);
+    console.warn(
+      `[llm] resume_parse_stage provider=local source=text pass=initial outcome=success elapsed_ms=0 entries=${local.experience.length + local.projects.length + (local.leadership?.length ?? 0)}`,
+    );
+    return local;
   }
 }
 
@@ -697,89 +955,115 @@ export async function parseResumeWithClaude(
  * text, this runs once per student at signup, and a misread degree is the R-047 failure this parser
  * exists to prevent.
  */
+async function parseScanWithOpenAI(pdf: Buffer, deadlineMs: number, signal: AbortSignal): Promise<ParsedProfile> {
+  const request = async (repairFailure?: string) => {
+    const generated = await measuredResumeParseStage(
+      'openai',
+      'scan',
+      repairFailure ? 'repair' : 'initial',
+      deadlineMs,
+      (timeoutMs) => generateOpenAIText({
+        instructions: SYSTEM_PROMPT,
+        input: [{
+          role: 'user',
+          content: [
+            { type: 'input_file', filename: 'resume.pdf', file_data: pdf.toString('base64'), detail: 'high' },
+            {
+              type: 'input_text',
+              text: repairFailure
+                ? `Read this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles. Transcribe exactly what is printed and leave uncertain fields empty.`
+                : 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
+            },
+          ],
+        }],
+        maxOutputTokens: 4096,
+        jsonSchema: RESUME_JSON_SCHEMA,
+        reasoningEffort: 'low',
+        timeoutMs,
+        signal,
+      }),
+    );
+    return generated.text;
+  };
+  return parsedProfileWithOneRepair(await request(), request);
+}
+
+async function parseScanWithAnthropic(pdf: Buffer, deadlineMs: number, signal: AbortSignal): Promise<ParsedProfile> {
+  const request = async (repairFailure?: string) => {
+    const response = await measuredResumeParseStage(
+      'anthropic',
+      'scan',
+      repairFailure ? 'repair' : 'initial',
+      deadlineMs,
+      (timeout) => client.messages.create({
+        model: 'claude-sonnet-5',
+        max_tokens: 4096,
+        system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'document',
+              source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') },
+            },
+            {
+              type: 'text',
+              text: repairFailure
+                ? `Read this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles. Transcribe exactly what is printed and leave uncertain fields empty.`
+                : 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
+            },
+          ],
+        }],
+      }, { timeout, maxRetries: 0, signal }),
+    );
+    const textBlock = response.content.find((block) => block.type === 'text');
+    return textBlock?.type === 'text' ? textBlock.text : '';
+  };
+  return parsedProfileWithOneRepair(await request(), request);
+}
+
 export async function parseResumeFromPdf(
   pdf: Buffer,
   options: ResumeParseOptions = {},
 ): Promise<ParsedProfile> {
   const deadlineMs = options.deadlineMs ?? resumeParseDeadlineFromUploadStart(Date.now());
+  const openAIController = new AbortController();
+  const anthropicController = new AbortController();
+  const openAISignal = resumeProviderSignal(options.signal, openAIController.signal);
+  const anthropicSignal = resumeProviderSignal(options.signal, anthropicController.signal);
+  const attempts: Promise<ParsedProfile>[] = [];
   if (openAIConfigured()) {
-    try {
-      const request = async (repairFailure?: string) => {
-        const generated = await measuredResumeParseStage(
-          'openai',
-          'scan',
-          repairFailure ? 'repair' : 'initial',
-          deadlineMs,
-          (timeoutMs) => generateOpenAIText({
-            instructions: SYSTEM_PROMPT,
-            input: [{
-              role: 'user',
-              content: [
-                {
-                  type: 'input_file',
-                  filename: 'resume.pdf',
-                  file_data: pdf.toString('base64'),
-                  detail: 'high',
-                },
-                {
-                  type: 'input_text',
-                  text: repairFailure
-                    ? `Read this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles. Transcribe exactly what is printed and leave uncertain fields empty.`
-                    : 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
-                },
-              ],
-            }],
-            maxOutputTokens: 4096,
-            jsonSchema: RESUME_JSON_SCHEMA,
-            reasoningEffort: 'low',
-            timeoutMs,
-            signal: options.signal,
-          }),
-        );
-        return generated.text;
-      };
-      return await parsedProfileWithOneRepair(await request(), request);
-    } catch (error) {
+    attempts.push(parseScanWithOpenAI(pdf, deadlineMs, openAISignal).catch((error) => {
       logOpenAIFallback('scanned resume parsing', error);
-    }
+      throw error;
+    }));
   }
+  attempts.push((async () => {
+    if (openAIConfigured()) {
+      await waitForResumeHedge(options.hedgeDelayMs ?? RESUME_PROVIDER_HEDGE_DELAY_MS, anthropicSignal);
+    }
+    return parseScanWithAnthropic(pdf, deadlineMs, anthropicSignal);
+  })());
 
   try {
-    const request = async (repairFailure?: string) => {
-      const response = await measuredResumeParseStage(
-        'anthropic',
-        'scan',
-        repairFailure ? 'repair' : 'initial',
-        deadlineMs,
-        (timeout) => client.messages.create({
-          model: 'claude-sonnet-5',
-          max_tokens: 4096,
-          system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-          messages: [{
-            role: 'user',
-            content: [
-              {
-                type: 'document',
-                source: { type: 'base64', media_type: 'application/pdf', data: pdf.toString('base64') },
-              },
-              {
-                type: 'text',
-                text: repairFailure
-                  ? `Read this resume again. The prior JSON failed validation: ${repairFailure}. Return one complete corrected JSON object, including exactly five supported and adjacent target_roles. Transcribe exactly what is printed and leave uncertain fields empty.`
-                  : 'This resume is a scan or an image, so there is no text layer to read. Read the pages visually and return the JSON. Transcribe exactly what is printed; never guess at a word you cannot make out, and leave a field empty rather than inventing a plausible value.',
-              },
-            ],
-          }],
-        }, { timeout, maxRetries: 0, signal: options.signal }),
-      );
-      const textBlock = response.content.find((block) => block.type === 'text');
-      return textBlock?.type === 'text' ? textBlock.text : '';
-    };
-    const initial = await request();
-    return await parsedProfileWithOneRepair(initial, request);
+    const parsed = await Promise.any(attempts);
+    openAIController.abort();
+    anthropicController.abort();
+    return parsed;
   } catch (error) {
-    // Same rule as the text path above: their errors keep their words, ours get ours.
-    if (isUpstreamApiError(error) || isModelUnavailable(error)) throw error;
-    throw new Error(`Claude returned invalid JSON for scanned resume parsing: ${error instanceof Error ? error.message.slice(0, 200) : 'unknown error'}`);
+    openAIController.abort();
+    anthropicController.abort();
+    if (options.signal?.aborted) throw options.signal.reason ?? error;
+    if (options.fallbackText !== undefined) {
+      const local = parseResumeLocally(options.fallbackText);
+      console.warn(
+        `[llm] resume_parse_stage provider=local source=scan pass=initial outcome=success elapsed_ms=0 entries=${local.experience.length + local.projects.length + (local.leadership?.length ?? 0)}`,
+      );
+      return local;
+    }
+    const failures = error instanceof AggregateError ? error.errors : [error];
+    const providerError = failures.find((failure) => isUpstreamApiError(failure) || isModelUnavailable(failure));
+    if (providerError) throw providerError;
+    throw new Error(`Resume providers returned invalid JSON for scanned resume parsing: ${failures.map((failure) => failure instanceof Error ? failure.message : String(failure)).join('; ').slice(0, 200)}`);
   }
 }

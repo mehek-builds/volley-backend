@@ -2,7 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
-import { put } from '@vercel/blob';
+import { objectStorageUsesRailway, putObject, readObject } from '../lib/objectStorage';
 import { db } from '../db/index';
 import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { claimOnboardingBuildGrant, releaseOnboardingBuildGrant } from '../lib/onboardingBuildGrant';
@@ -32,7 +32,12 @@ import {
   validateResumeVisualLayout,
   type ResumeVisualLayout,
 } from '../engine/resumeRender';
-import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '../engine/resumeValidate';
+import {
+  isProviderDependentResumeStyleIssue,
+  validateResumeSpec,
+  validatePdfLayout,
+  pruneUngroundedContent,
+} from '../engine/resumeValidate';
 import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import {
@@ -53,7 +58,7 @@ import {
 import { extractPdfText } from '../lib/pdfText';
 import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
 import { PRODUCT_NAME } from '../lib/product';
-import { applyResumePolicy, educationFrom, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
+import { allowedSparseEntriesForGeneration, applyResumePolicy, educationFrom, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
 import { academicRecordRowFor } from './profile';
 import { warmRequirementCache } from '../engine/warmRequirements';
 import {
@@ -118,7 +123,7 @@ async function refreshedResumeReplay(
   const resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(
     userId,
     artifact.object_key,
-    { blobUrl: artifact.blob_url ?? undefined },
+    { blobUrl: objectStorageUsesRailway() ? undefined : artifact.blob_url ?? undefined },
   )}`;
   const application = response.application && typeof response.application === 'object' && !Array.isArray(response.application)
     ? { ...(response.application as Record<string, unknown>), download_url: resumeUrl }
@@ -316,6 +321,12 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
 //    experience bank, so it is most fragile exactly when capacity is tight.
 const MAX_OVERLOAD_ATTEMPTS = 4;
 const MIN_CALL_BUDGET_MS = 6000; // never start a model call with less than this left
+
+export function shouldRetryResumeSpec(spec: ResumeSpec, issues: string[], attempt: number): boolean {
+  return issues.length > 0
+    && spec.generation_method !== 'local_fallback'
+    && attempt < MAX_SPEC_ATTEMPTS;
+}
 const MAX_BACKOFF_MS = 6000;
 
 // Anthropic returns 529 overloaded_error during a capacity incident and 429 when rate limited; the
@@ -1016,7 +1027,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
       const result = validateResumeSpec(spec, jdText, bank, declaredSkills, education, body.role);
       const typographyIssues = findResumeTypographyIssues(spec, applicationContact);
-      specIssues = [...result.issues, ...typographyIssues];
+      const allValidationIssues = [...result.issues, ...typographyIssues];
+      const providerStyleIssues = spec.generation_method === 'local_fallback'
+        ? allValidationIssues.filter(isProviderDependentResumeStyleIssue)
+        : [];
+      specIssues = allValidationIssues.filter((issue) => !providerStyleIssues.includes(issue));
       /* requireFirst: false. The priority entry has to be ON the resume; which entry LEADS it is
          decided against this posting, by leadAlignmentIssues below. See baseResumeSelectionIssues
          for why the position half of that check belongs to the base resume and not here. */
@@ -1030,10 +1045,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         ? leadSelectionIssues
         : leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } });
       specIssues.push(...leadIssues);
-      specWarnings = result.warnings;
+      specWarnings = [
+        ...result.warnings,
+        ...providerStyleIssues.map((issue) => ({ entry: 'Resume wording', bullet: '', flags: [issue] })),
+      ];
       atsCoverage = result.ats_keyword_coverage_pct;
 
-      if (specIssues.length === 0 || attempt === MAX_SPEC_ATTEMPTS) break;
+      // A grounded local spec means both providers were unavailable. Repeating the same calls with
+      // validation feedback cannot improve an outage fallback and only restores the long spinner.
+      if (!shouldRetryResumeSpec(spec, specIssues, attempt)) break;
       fastify.log.warn({ specIssues }, 'resume spec failed validation, retrying with feedback');
     }
     if (!spec) {
@@ -1078,6 +1098,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     spec = enforceExperienceBulletFloor(spec, bank, {
       priorityEntryId: priorityEntry?.id,
       allowSparsePriority: recentReview?.continue_with_found === true,
+      allowSparseAll: spec.generation_method === 'local_fallback',
       onDropped: ({ org, bullets }) =>
         droppedForLength.push(
           `Left ${org} off: it has ${bullets === 1 ? 'one bullet' : `${bullets} bullets`} and we recommend at least ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Add another and it goes on.`,
@@ -1147,6 +1168,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const visualValidation = validateResumeVisualLayout(visualLayout);
       visualWarnings = visualValidation.warnings;
       visualIssues = visualValidation.issues;
+      if (spec.generation_method === 'local_fallback') {
+        const providerStyleIssues = visualIssues.filter(isProviderDependentResumeStyleIssue);
+        visualIssues = visualIssues.filter((issue) => !providerStyleIssues.includes(issue));
+        visualWarnings.push(...providerStyleIssues.map((issue) => `Review source wording: ${issue}`));
+      }
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to render resume PDF' });
@@ -1165,11 +1191,23 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       education,
       body.role,
       {
-        allowedSingleBulletEntries: recentReview?.continue_with_found && priorityEntry
-          ? [priorityEntry]
-          : [],
+        allowedSingleBulletEntries: allowedSparseEntriesForGeneration(
+          spec.generation_method,
+          bank,
+          priorityEntry ? [priorityEntry] : [],
+          recentReview?.continue_with_found === true,
+        ),
       },
     );
+    if (spec.generation_method === 'local_fallback') {
+      const providerStyleIssues = finalSpecValidation.issues.filter(isProviderDependentResumeStyleIssue);
+      finalSpecValidation.issues = finalSpecValidation.issues.filter(
+        (issue) => !providerStyleIssues.includes(issue),
+      );
+      finalSpecValidation.warnings.push(
+        ...providerStyleIssues.map((issue) => ({ entry: 'Resume wording', bullet: '', flags: [issue] })),
+      );
+    }
     if (priorityEntry) {
       finalSpecValidation.issues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
     }
@@ -1305,8 +1343,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // What we control is who ever learns the resulting URL, and the answer is nobody: the
       // blob URL is permanent and unauthenticated, so it stays server-side and the client gets
       // a capability link to /resume/download instead. See lib/resumeAccess.ts.
-      const blob = await put(requestedKey, pdfBuffer, {
-        access: 'public',
+      const blob = await putObject(requestedKey, pdfBuffer, {
         contentType: 'application/pdf',
       });
       // Store the pathname the API actually assigned, NOT the one we asked for. `addRandomSuffix`
@@ -1322,7 +1359,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // lookup rides list(), which is eventually consistent with no bound - a fresh resume can
       // 404 as "deleted" for the whole window a student is submitting in. put()'s URL is a
       // strong read target and it is in hand right here.
-      resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey, { blobUrl: blob.url, fileName: resumeFileName })}`;
+      resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey, {
+        ...(objectStorageUsesRailway() ? {} : { blobUrl: blob.url }),
+        fileName: resumeFileName,
+      })}`;
     } catch (err) {
       fastify.log.error(err);
       if (useLegacyMonthlyCounter) await releaseCounterSlot(userId, period, 'resumes');
@@ -1671,29 +1711,22 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // R-040: tokens minted since the fix carry the blob URL itself (payload.b) - a strong
     // point-read with no list() consistency dependence. Tokens from before the fix (<= 5 min
     // old at any moment) fall back to the list()-based key lookup they were minted against.
-    let blobUrl: string | null;
-    if (payload.b) {
-      blobUrl = payload.b;
-    } else {
-      try {
-        blobUrl = await resolveBlobUrl(payload.k);
-      } catch (err) {
-        fastify.log.error(err);
-        return reply.status(502).send({ error: 'Could not reach resume storage' });
-      }
-    }
     let pdf: Buffer | null = null;
-    let storageConfirmedMissing = !blobUrl;
-    if (blobUrl) {
-      try {
-        const upstream = await fetch(blobUrl);
+    let storageConfirmedMissing = false;
+    try {
+      if (payload.b) {
+        const upstream = await fetch(payload.b);
         if (upstream.status === 404 || upstream.status === 410) storageConfirmedMissing = true;
         else if (!upstream.ok) throw new Error(`blob fetch ${upstream.status}`);
         else pdf = Buffer.from(await upstream.arrayBuffer());
-      } catch (err) {
-        fastify.log.error(err);
-        return reply.status(502).send({ error: 'Could not read resume from storage' });
+      } else {
+        const stored = await readObject(payload.k);
+        if (stored) pdf = stored;
+        else storageConfirmedMissing = true;
       }
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(502).send({ error: 'Could not read resume from storage' });
     }
     if (!pdf && storageConfirmedMissing) {
       const recovery = await recoverOwnedGeneratedDocument({ userId: payload.u, objectKey: payload.k });

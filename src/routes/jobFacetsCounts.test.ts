@@ -413,7 +413,6 @@ test('scheduled discovery preserves an operator disable until an explicit operat
     .find((candidate) => candidate.board_token === source.board_token)!;
   assert.equal(row.enabled, true, 'the operator write path can deliberately restore the source');
 });
-
 test('a posting outside the verification window is counted by neither', async () => {
   // The board hides unverified postings, so a count that included them would overstate the denominator
   // and quietly drag measured coverage down for rows no job seeker is shown.

@@ -69,6 +69,15 @@ test('the manual monitor fallback summary always reports postings and grouped ro
   assert.match(workflow, /\(\.polling_complete \| type\) == "boolean"/);
 });
 
+test('the logo gate measures every counted row against its exact employer board', () => {
+  const route = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const gate = readFileSync('scripts/check-logo-coverage.mjs', 'utf8');
+  assert.match(route, /company_logo_sources: companyLogoSources/);
+  assert.match(route, /groupBy\(monitored_jobs\.company_name, career_page_sources\.career_url\)/);
+  assert.match(gate, /miss: '404'/, 'a monogram must not pass as a verified logo');
+  assert.match(gate, /Every surfaced posting has a verified company logo/);
+});
+
 test('the scheduled catalog includes reviewed sources and deduplicated operator overrides', () => {
   const reviewed: JobSourceInput[] = [
     { company_name: 'Reviewed', ats_name: 'workable', board_token: 'same', career_url: 'https://example.com/reviewed' },
@@ -98,11 +107,18 @@ test('source identity normalization uses the provider executable-token contract'
   }]), /Invalid breezy board token/);
 });
 
+test('the monitor never retires the persisted source fleet from a smaller static catalog', () => {
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  assert.doesNotMatch(source, /await retireUnlistedSources\(allSources\)/);
+  assert.match(source, /const retired: string\[\] = \[\]/);
+});
+
 test('post-poll metric statements leave time for the cron to answer', () => {
   assert.equal(MONITOR_METRICS_STATEMENT_TIMEOUT_MS, 30_000);
   assert.equal(TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS, 5_000);
+  assert.equal(POLL_TIME_BUDGET_MS, 9 * 60_000);
   assert.ok(TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS < MONITOR_METRICS_STATEMENT_TIMEOUT_MS);
-  assert.ok(MONITOR_METRICS_STATEMENT_TIMEOUT_MS < 300_000 - POLL_TIME_BUDGET_MS);
+  assert.ok(MONITOR_METRICS_STATEMENT_TIMEOUT_MS < 14 * 60_000 - POLL_TIME_BUDGET_MS);
 });
 
 test('source 401 completes on the second pass of the same drain run', () => {

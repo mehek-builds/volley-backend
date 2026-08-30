@@ -1,0 +1,104 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  mintObjectReadToken,
+  isPublicObjectKey,
+  isPublicObjectReadUrlForKey,
+  objectReadUrl,
+  objectStorageConfigured,
+  objectStorageUsesRailway,
+  publicObjectReadUrl,
+  readObjectReadToken,
+} from './objectStorage';
+
+const storageVariables = [
+  'ACCESS_KEY_ID',
+  'BLOB_READ_WRITE_TOKEN',
+  'BUCKET',
+  'ENDPOINT',
+  'ENCRYPTION_KEY',
+  'OBJECT_STORAGE_ACCESS_KEY_ID',
+  'OBJECT_STORAGE_BUCKET',
+  'OBJECT_STORAGE_ENDPOINT',
+  'OBJECT_STORAGE_PUBLIC_BASE_URL',
+  'OBJECT_STORAGE_SECRET_ACCESS_KEY',
+  'PUBLIC_API_BASE',
+  'SECRET_ACCESS_KEY',
+] as const;
+
+async function withStorageEnv(
+  values: Partial<Record<(typeof storageVariables)[number], string | undefined>>,
+  run: () => void | Promise<void>,
+) {
+  const previous = Object.fromEntries(storageVariables.map((key) => [key, process.env[key]]));
+  try {
+    for (const key of storageVariables) delete process.env[key];
+    for (const [key, value] of Object.entries(values)) {
+      if (value !== undefined) process.env[key] = value;
+    }
+    await run();
+  } finally {
+    for (const key of storageVariables) {
+      const value = previous[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test('Railway native bucket credentials configure the private object store', async () => {
+  await withStorageEnv({
+    BUCKET: 'litos-files',
+    ACCESS_KEY_ID: 'access-key',
+    SECRET_ACCESS_KEY: 'secret-key',
+    ENDPOINT: 'https://storage.railway.app',
+  }, () => {
+    assert.equal(objectStorageConfigured(), true);
+    assert.equal(objectStorageUsesRailway(), true);
+  });
+});
+
+test('Vercel Blob remains a rollback provider when Railway credentials are absent', async () => {
+  await withStorageEnv({ BLOB_READ_WRITE_TOKEN: 'rollback-token' }, () => {
+    assert.equal(objectStorageConfigured(), true);
+    assert.equal(objectStorageUsesRailway(), false);
+  });
+});
+
+test('private object links are opaque, authenticated, and bound to the exact key', async () => {
+  await withStorageEnv({
+    ENCRYPTION_KEY: 'migration-test-encryption-key',
+    PUBLIC_API_BASE: 'https://api.trylitos.com',
+  }, () => {
+    const key = 'users/user-1/resumes/resume.pdf';
+    const token = mintObjectReadToken(key);
+    assert.equal(readObjectReadToken(token), key);
+    assert.equal(readObjectReadToken(`${token.slice(0, -1)}x`), null);
+    assert.match(objectReadUrl(key), /^https:\/\/api\.trylitos\.com\/storage\/object\?t=/);
+    assert.doesNotMatch(objectReadUrl(key), /users|resume\.pdf/);
+  });
+});
+
+test('object tokens refuse traversal-shaped keys', async () => {
+  await withStorageEnv({ ENCRYPTION_KEY: 'migration-test-encryption-key' }, () => {
+    assert.equal(readObjectReadToken(mintObjectReadToken('../private.pdf')), null);
+    assert.equal(readObjectReadToken(mintObjectReadToken('users\\private.pdf')), null);
+    assert.equal(readObjectReadToken(mintObjectReadToken('/absolute.pdf')), null);
+  });
+});
+
+test('only content-addressed Rippling logos receive stable public object links', async () => {
+  await withStorageEnv({
+    PUBLIC_API_BASE: 'https://api.trylitos.com',
+  }, () => {
+    const digest = 'a'.repeat(64);
+    const key = `company-logos/rippling/utility/${digest}.webp`;
+    const url = `https://api.trylitos.com/storage/public/${key}`;
+    assert.equal(isPublicObjectKey(key), true);
+    assert.equal(publicObjectReadUrl(key), url);
+    assert.equal(isPublicObjectReadUrlForKey(url, key), true);
+    assert.equal(isPublicObjectReadUrlForKey(`${url}?download=1`, key), false);
+    assert.equal(isPublicObjectKey('users/user-1/resumes/private.pdf'), false);
+    assert.throws(() => publicObjectReadUrl('../private.pdf'), /not public/);
+  });
+});

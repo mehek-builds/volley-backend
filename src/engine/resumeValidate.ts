@@ -355,6 +355,14 @@ export interface ValidationResult {
   ats_keyword_coverage_pct: number;
 }
 
+/** Style defects that normally drive a model rewrite but must not block grounded outage output. */
+export function isProviderDependentResumeStyleIssue(issue: string): boolean {
+  return issue.startsWith('bullet not action-verb-first')
+    || issue.startsWith('bullet has ')
+    || issue.startsWith(`bullet exceeds ${BULLET_MAX_CHARS} chars`)
+    || /entry \d+, bullet \d+ renders as \d+ lines/.test(issue);
+}
+
 // ---- Grounding: every org/title/number in the output must trace back to the experience bank ----
 // This is the deterministic backstop for the product's #1 promise ("never invents a job, a skill,
 // or a number"). The generator prompt already forbids fabrication; this catches drift the prompt

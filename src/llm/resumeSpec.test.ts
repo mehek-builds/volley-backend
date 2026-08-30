@@ -1,6 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeSpec, RESUME_SYSTEM_PROMPT } from './resumeSpec';
+import {
+  normalizeSpec,
+  RESUME_GENERATION_INTERACTIVE_BUDGET_MS,
+  RESUME_SYSTEM_PROMPT,
+  resumeGenerationDeadlineMs,
+  resumeGenerationRemainingMs,
+} from './resumeSpec';
+
+test('tailored providers share one interactive deadline', () => {
+  assert.equal(resumeGenerationDeadlineMs(1_000), 1_000 + RESUME_GENERATION_INTERACTIVE_BUDGET_MS);
+  assert.equal(resumeGenerationDeadlineMs(1_000, 5_000), 6_000);
+  assert.equal(
+    resumeGenerationDeadlineMs(1_000, RESUME_GENERATION_INTERACTIVE_BUDGET_MS),
+    1_000 + RESUME_GENERATION_INTERACTIVE_BUDGET_MS,
+  );
+  assert.equal(resumeGenerationDeadlineMs(1_000, 240_000), 1_000 + RESUME_GENERATION_INTERACTIVE_BUDGET_MS);
+  assert.equal(resumeGenerationRemainingMs(16_000, 7_000), 9_000);
+  assert.equal(resumeGenerationRemainingMs(16_000, 20_000), 1);
+});
 
 // Regression coverage for the "partial model JSON crashes resume generation" bug (audit #4):
 // a syntactically valid but incomplete spec (e.g. no "experience" key) used to reach

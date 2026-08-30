@@ -138,7 +138,7 @@ async function seedAttachableWorld(overrides: {
         "logo_verification_status", "logo_verification_method", "logo_verified_at")
      values ($1, 'Verkada', $2, 'verkada', 'https://job-boards.greenhouse.io/verkada', $3,
              'Verkada', false, 'https://assets.example/verkada-logo.png',
-             'verified', 'test_fixture', now())`,
+             'verified', 'first_party_ats_employer_logo', now())`,
     [SOURCE, overrides.atsName ?? 'greenhouse', overrides.sourceEnabled !== false],
   );
   await database.query(

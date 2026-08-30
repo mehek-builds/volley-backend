@@ -456,6 +456,8 @@ export function enforceExperienceBulletFloor(
   options: {
     priorityEntryId?: string | null;
     allowSparsePriority?: boolean;
+    /** Provider-outage continuity: preserve source-grounded one-bullet entries for user review. */
+    allowSparseAll?: boolean;
     /* NAMES WHAT WAS LEFT OFF, and why, so a dropped job is told rather than silently gone.
      *
      * An entry below the floor used to disappear with nothing said about it. The student read a
@@ -482,13 +484,23 @@ export function enforceExperienceBulletFloor(
     const sparsePriority = Boolean(
       options.allowSparsePriority && source?.id && source.id === options.priorityEntryId,
     );
-    if (bullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry && !sparsePriority) {
+    if (bullets.length < RESUME_CONTENT_LIMITS.minBulletsPerEntry && !sparsePriority && !options.allowSparseAll) {
       options.onDropped?.({ org: entry.org, bullets: bullets.length });
       return [];
     }
     return [{ ...entry, bullets: bullets.slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry) }];
   });
   return { ...spec, experience };
+}
+
+export function allowedSparseEntriesForGeneration(
+  generationMethod: ResumeSpec['generation_method'],
+  bank: ExperienceBankEntry[],
+  priorityEntries: ExperienceBankEntry[],
+  continueWithFound: boolean,
+): ExperienceBankEntry[] {
+  if (generationMethod === 'local_fallback') return bank;
+  return continueWithFound && priorityEntries[0] ? [priorityEntries[0]] : [];
 }
 
 function metricCount(text: string): number {

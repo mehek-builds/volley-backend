@@ -3,7 +3,18 @@ import assert from 'node:assert/strict';
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import {
+  BASE_RESUME_MODEL_CALL_CAP_MS,
+  baseResumeSpecFromEvidence,
+  generateBaseResumeSpec,
+} from './baseResume';
+import {
+  RESUME_GENERATION_INTERACTIVE_BUDGET_MS,
+  generateResumeSpec,
+  resumeSpecFromEvidence,
+} from './resumeSpec';
+import {
   parseResumeFromPdf,
+  parseResumeLocally,
   parseResumeWithClaude,
   parsedProfileFromModelText,
   parsedProfileWithOneRepair,
@@ -11,6 +22,8 @@ import {
   reconcileGpaWithSource,
   RESUME_PARSE_BUDGET_MS,
   RESUME_PROVIDER_CALL_CAP_MS,
+  RESUME_PROVIDER_HEDGE_DELAY_MS,
+  LOCAL_PARSE_LIMITS,
   resumeParseDeadlineFromUploadStart,
   resumeParseCallTimeoutMs,
   splitSpokenLanguages,
@@ -19,6 +32,7 @@ import {
 
 const messagesPrototype = Object.getPrototypeOf(new Anthropic({ apiKey: 'test-key' }).messages) as {
   create: (...args: unknown[]) => unknown;
+  stream: (...args: unknown[]) => unknown;
 };
 const responsesPrototype = Object.getPrototypeOf(new OpenAI({ apiKey: 'test-key' }).responses) as {
   create: (...args: unknown[]) => unknown;
@@ -123,7 +137,9 @@ test('an invalid Anthropic key cannot take down text resume parsing while OpenAI
 
   assert.equal(parsed.full_name, 'A Candidate');
   assert.equal(calls.length, 1);
-  assert.equal(providerSignal, controller.signal);
+  assert.ok(providerSignal, 'the provider receives a cancellation signal');
+  assert.equal(controller.signal.aborted, false, 'winning the hedge must not abort the request signal');
+  assert.equal(providerSignal?.aborted, true, 'the completed hedge cancels provider-owned work');
   assert.equal(
     ((calls[0].text as { format?: { type?: string } }).format?.type),
     'json_schema',
@@ -149,7 +165,7 @@ test('resume parsing falls back to Anthropic when OpenAI is unavailable', async 
     return { content: [{ type: 'text', text: modelProfile(FIVE_ROLES) }] };
   });
 
-  const parsed = await parseResumeWithClaude('A Candidate\nSoftware engineer');
+  const parsed = await parseResumeWithClaude('A Candidate\nSoftware engineer', { hedgeDelayMs: 0 });
 
   assert.equal(parsed.full_name, 'A Candidate');
   assert.equal(anthropicCalls, 1);
@@ -208,7 +224,7 @@ test('the resume parse deadline refuses a new provider call instead of resetting
   );
 });
 
-test('provider SDK timeouts become retryable model-unavailable errors', async (t) => {
+test('provider SDK timeouts fall back locally instead of blocking onboarding', async (t) => {
   const originalKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = 'test-openai-key';
   t.after(() => {
@@ -224,17 +240,258 @@ test('provider SDK timeouts become retryable model-unavailable errors', async (t
     throw new Anthropic.APIConnectionTimeoutError();
   });
 
-  await assert.rejects(
-    () => parseResumeWithClaude('A Candidate\nSoftware engineer'),
-    (error: unknown) => (error as { kind?: string }).kind === 'model_timeout',
-  );
+  const source = [
+    'A Candidate',
+    'EXPERIENCE',
+    'Litos',
+    'Software Engineer | Jan 2025 - Present',
+    '• Built reliable onboarding software for student job seekers',
+  ].join('\n');
+  const parsed = await parseResumeWithClaude(source, { hedgeDelayMs: 0 });
+  assert.equal(parsed.parse_method, 'local_fallback');
+  assert.equal(parsed.full_name, 'A Candidate');
+  assert.equal(parsed.experience[0]?.company, 'Litos');
   await assert.rejects(
     () => parseResumeFromPdf(Buffer.from('%PDF-1.7 scanned resume')),
     (error: unknown) => (error as { kind?: string }).kind === 'model_timeout',
   );
+  const scanFallback = await parseResumeFromPdf(Buffer.from('%PDF-1.7 scanned resume'), {
+    fallbackText: source,
+  });
+  assert.equal(scanFallback.parse_method, 'local_fallback');
 });
 
-test('work before parsing consumes the route-supplied resume deadline', async (t) => {
+test('the local parser transcribes common resume sections without inventing target roles', () => {
+  const parsed = parseResumeLocally([
+    'Mehek Mandal',
+    'mehek@example.com | +1 (213) 555-0100 | linkedin.com/in/mehek',
+    'EXPERIENCE',
+    'Litos | Dubai, UAE',
+    'Product Manager | Jan 2025 - Present',
+    '• Built a resume onboarding flow used by student job seekers',
+    'PROJECTS',
+    'Signup Reliability',
+    'Owner | Aug 2026 - Present',
+    '• Reduced upload failures through deterministic fallback parsing',
+    'EDUCATION',
+    'University of Southern California, Marshall School of Business',
+    'Bachelor of Science, Expected May 2027',
+    'SKILLS: Product strategy, SQL, TypeScript',
+  ].join('\n'));
+
+  assert.equal(parsed.full_name, 'Mehek Mandal');
+  assert.equal(parsed.email, 'mehek@example.com');
+  assert.equal(parsed.school, 'University of Southern California, Marshall School of Business');
+  assert.equal(parsed.grad_year, 2027);
+  assert.deepEqual(parsed.skills, ['Product strategy', 'SQL', 'TypeScript']);
+  assert.equal(parsed.experience[0]?.company, 'Litos');
+  assert.equal(parsed.experience[0]?.title, 'Product Manager');
+  assert.equal(parsed.projects[0]?.name, 'Signup Reliability');
+  assert.deepEqual(parsed.target_roles, []);
+  assert.equal(parsed.parse_method, 'local_fallback');
+});
+
+test('the Anthropic hedge starts before a slow OpenAI request settles', async (t) => {
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  t.after(() => {
+    mock.restoreAll();
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  });
+
+  let releaseOpenAI: (() => void) | undefined;
+  mock.method(responsesPrototype, 'create', () => new Promise((resolve) => {
+    releaseOpenAI = () => resolve({
+      status: 'completed', output_text: modelProfile(FIVE_ROLES), incomplete_details: null,
+      usage: { input_tokens: 1, output_tokens: 1, input_tokens_details: {} },
+    });
+  }));
+  let anthropicCalls = 0;
+  mock.method(messagesPrototype, 'create', async () => {
+    anthropicCalls += 1;
+    return { content: [{ type: 'text', text: modelProfile(FIVE_ROLES) }] };
+  });
+
+  const parsed = await parseResumeWithClaude('A Candidate\nSoftware engineer', { hedgeDelayMs: 0 });
+  releaseOpenAI?.();
+  assert.equal(parsed.full_name, 'A Candidate');
+  assert.equal(anthropicCalls, 1);
+  assert.ok(RESUME_PROVIDER_HEDGE_DELAY_MS < RESUME_PROVIDER_CALL_CAP_MS);
+});
+
+test('main and job-specific resume creation have grounded model-free fallbacks', () => {
+  const bank = [{
+    id: 'entry-1',
+    user_id: 'user-1',
+    type: 'job',
+    org: 'Litos',
+    title: 'Product Manager',
+    location: 'Dubai, UAE',
+    date_range: 'Jan 2025 - Present',
+    bullet_variants: [
+      'Built a reliable resume onboarding flow used by student job seekers',
+      'Reduced signup failures by adding deterministic parsing safeguards',
+    ],
+    tags: [],
+  }] as unknown as Parameters<typeof baseResumeSpecFromEvidence>[0];
+  const education = {
+    school: 'University of Southern California',
+    degree: 'Bachelor of Science',
+    grad_date: 'May 2027',
+  };
+
+  const base = baseResumeSpecFromEvidence(bank, education, ['SQL', 'TypeScript'], bank);
+  assert.equal(base.generation_method, 'local_fallback');
+  assert.equal(base.experience[0]?.org, 'Litos');
+  assert.deepEqual(base.experience[0]?.bullets, bank[0].bullet_variants);
+
+  const approvedBase = {
+    ...base,
+    experience: [{ ...base.experience[0], bullets: ['Built the applicant-approved onboarding wording for student job seekers'] }],
+  };
+  const tailored = resumeSpecFromEvidence(
+    'Product Manager',
+    bank,
+    education,
+    ['SQL', 'TypeScript'],
+    approvedBase,
+    bank[0],
+  );
+  assert.equal(tailored.generation_method, 'local_fallback');
+  assert.equal(tailored.target_role, 'Product Manager');
+  assert.equal(tailored.experience[0]?.org, 'Litos');
+  assert.deepEqual(tailored.experience[0]?.bullets, approvedBase.experience[0]?.bullets);
+});
+
+test('base resume generation emits and returns its grounded fallback when streaming fails', async (t) => {
+  t.after(() => mock.restoreAll());
+  let streamOptions: { signal?: AbortSignal; maxRetries?: number } | undefined;
+  mock.method(messagesPrototype, 'stream', (_body: unknown, options: { signal?: AbortSignal; maxRetries?: number }) => {
+    streamOptions = options;
+    return ({
+    on: () => undefined,
+    finalMessage: async () => { throw Object.assign(new Error('provider unavailable'), { status: 503 }); },
+    });
+  });
+  const bank = [{
+    id: 'entry-1', user_id: 'user-1', type: 'job', org: 'Litos', title: 'Product Manager',
+    location: 'Dubai, UAE', date_range: '2025 - Present',
+    bullet_variants: ['Built reliable onboarding software for student job seekers'], tags: [],
+  }] as unknown as Parameters<typeof generateBaseResumeSpec>[0];
+  const events: unknown[] = [];
+  const result = await generateBaseResumeSpec(
+    bank,
+    { school: 'USC', degree: 'B.S.', grad_date: 'May 2027' },
+    ['TypeScript'],
+    (event) => events.push(event),
+  );
+
+  assert.equal(result.generation_method, 'local_fallback');
+  assert.equal(streamOptions?.maxRetries, 0);
+  assert.ok(streamOptions?.signal, `base generation must be capped at ${BASE_RESUME_MODEL_CALL_CAP_MS}ms`);
+  assert.deepEqual(events, [
+    { type: 'restart' },
+    { type: 'education', education_position: 'after_experience' },
+    { type: 'entry', index: 0, entry: result.experience[0] },
+    { type: 'skills', skills: ['TypeScript'] },
+  ]);
+});
+
+test('job-specific generation returns a grounded fallback after both providers fail', async (t) => {
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  t.after(() => {
+    mock.restoreAll();
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  });
+  let openAITimeout = 0;
+  let anthropicSignal: AbortSignal | undefined;
+  mock.method(responsesPrototype, 'create', async (_body: unknown, options: { timeout?: number }) => {
+    openAITimeout = options.timeout ?? 0;
+    throw Object.assign(new Error('openai down'), { status: 503 });
+  });
+  mock.method(messagesPrototype, 'create', async (_body: unknown, options: { signal?: AbortSignal }) => {
+    anthropicSignal = options.signal;
+    throw Object.assign(new Error('anthropic down'), { status: 503 });
+  });
+  const bank = [{
+    id: 'entry-1', user_id: 'user-1', type: 'job', org: 'Litos', title: 'Product Manager',
+    location: 'Dubai, UAE', date_range: '2025 - Present',
+    bullet_variants: ['Built reliable onboarding software for student job seekers'], tags: [],
+  }] as unknown as Parameters<typeof generateResumeSpec>[3];
+
+  const result = await generateResumeSpec(
+    'Build reliable onboarding systems', 'Example', 'Product Manager', bank,
+    { school: 'USC', degree: 'B.S.', grad_date: 'May 2027' }, undefined,
+    ['TypeScript'], 240_000, null, bank[0],
+  );
+
+  assert.equal(result.generation_method, 'local_fallback');
+  assert.equal(result.experience[0]?.org, 'Litos');
+  assert.ok(openAITimeout <= RESUME_GENERATION_INTERACTIVE_BUDGET_MS);
+  assert.ok(anthropicSignal, 'Anthropic fallback receives the remaining shared latency budget');
+});
+
+test('caller aborts are never converted into local parse success', async (t) => {
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  t.after(() => {
+    mock.restoreAll();
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  });
+  const pending = (_body: unknown, options: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+    options.signal?.addEventListener('abort', () => reject(options.signal?.reason), { once: true });
+  });
+  mock.method(responsesPrototype, 'create', pending);
+  mock.method(messagesPrototype, 'create', pending);
+
+  for (const invoke of [
+    (signal: AbortSignal) => parseResumeWithClaude('A Candidate\nEXPERIENCE', { signal, hedgeDelayMs: 0 }),
+    (signal: AbortSignal) => parseResumeFromPdf(Buffer.from('%PDF-1.7'), { signal, hedgeDelayMs: 0, fallbackText: 'A Candidate' }),
+  ]) {
+    const controller = new AbortController();
+    const reason = new Error('client disconnected');
+    const promise = invoke(controller.signal);
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort(reason);
+    await assert.rejects(() => promise, reason);
+  }
+});
+
+test('the local parser bounds untrusted text before persistence', () => {
+  const skills = Array.from({ length: LOCAL_PARSE_LIMITS.skills + 20 }, (_, index) => `Skill ${index}`).join(', ');
+  const bullets = Array.from({ length: LOCAL_PARSE_LIMITS.bulletsPerEntry + 5 }, (_, index) => `• Built bounded item ${index}`);
+  const entries = Array.from({ length: LOCAL_PARSE_LIMITS.entriesPerSection + 5 }, (_, index) => [
+    `Company ${index}`,
+    `Engineer | 202${index % 10} - Present`,
+    ...bullets,
+  ].join('\n'));
+  const parsed = parseResumeLocally([
+    'A Candidate',
+    'EXPERIENCE',
+    ...entries,
+    'SKILLS',
+    skills,
+  ].join('\n'));
+
+  assert.ok(parsed.experience.length <= LOCAL_PARSE_LIMITS.entriesPerSection);
+  assert.ok(parsed.experience.every((entry) => entry.description.split('\n').length <= LOCAL_PARSE_LIMITS.bulletsPerEntry));
+  assert.ok(parsed.experience.every((entry) => entry.description.length <= LOCAL_PARSE_LIMITS.descriptionChars));
+  assert.ok(parsed.skills.length <= LOCAL_PARSE_LIMITS.skills);
+  assert.ok(parsed.experience.every((entry) => entry.company.length <= LOCAL_PARSE_LIMITS.fieldChars));
+});
+
+test('the local parser handles the full input ceiling of whitespace without backtracking', () => {
+  const started = performance.now();
+  const parsed = parseResumeLocally(' '.repeat(LOCAL_PARSE_LIMITS.inputChars));
+  assert.equal(parsed.full_name, '');
+  assert.ok(performance.now() - started < 1_000, 'bounded whitespace input should complete within one second');
+});
+
+test('an exhausted route deadline uses the local parser without calling a provider', async (t) => {
   const originalKey = process.env.OPENAI_API_KEY;
   process.env.OPENAI_API_KEY = 'test-openai-key';
   t.after(() => {
@@ -248,10 +505,11 @@ test('work before parsing consumes the route-supplied resume deadline', async (t
   mock.method(responsesPrototype, 'create', async () => { providerCalls += 1; return {}; });
   mock.method(messagesPrototype, 'create', async () => { providerCalls += 1; return {}; });
 
-  await assert.rejects(
-    () => parseResumeWithClaude('A Candidate\nSoftware engineer', { deadlineMs: 10_500 }),
-    (error: unknown) => (error as { kind?: string }).kind === 'model_timeout',
-  );
+  const parsed = await parseResumeWithClaude('A Candidate\nSoftware engineer', {
+    deadlineMs: 10_500,
+    hedgeDelayMs: 0,
+  });
+  assert.equal(parsed.parse_method, 'local_fallback');
   assert.equal(providerCalls, 0);
 });
 

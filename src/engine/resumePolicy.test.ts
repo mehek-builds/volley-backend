@@ -4,9 +4,32 @@ import type { ExperienceBankEntry } from '../db/schema';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { extractPdfText } from '../lib/pdfText';
 import { validatePdfLayout, validateResumeSpec } from './resumeValidate';
-import { applyResumePolicy, deriveCandidateContext, educationGpaLine, enforceExperienceBulletFloor, orgScore, SAME_EMPLOYER_SCORE } from './resumePolicy';
+import { allowedSparseEntriesForGeneration, applyResumePolicy, deriveCandidateContext, educationGpaLine, enforceExperienceBulletFloor, orgScore, SAME_EMPLOYER_SCORE } from './resumePolicy';
 import { planResumeLayout, renderResumePdf } from './resumeRender';
 import { RESUME_CONTENT_LIMITS } from './resumeContentPolicy';
+
+test('provider-outage continuity preserves a grounded one-bullet entry for review', () => {
+  const source = bankEntry('sparse', 'job', 'Acme', 'Intern', ['Helped users']);
+  const spec = {
+    school: 'USC', degree: 'B.S.', grad_date: '2027', coursework: '', skills: [],
+    experience: [{ type: 'job' as const, org: 'Acme', title: 'Intern', date_range: '2025 - Present', bullets: ['Helped users'] }],
+  };
+  assert.equal(enforceExperienceBulletFloor(spec, [source]).experience.length, 0);
+  assert.equal(enforceExperienceBulletFloor(spec, [source], { allowSparseAll: true }).experience.length, 1);
+});
+
+test('provider-outage continuity takes precedence over a prior continue-with-found review', () => {
+  const priority = bankEntry('priority', 'job', 'Acme', 'Intern', ['Helped users']);
+  const second = bankEntry('second', 'project', 'Campus Search', 'Builder', ['Built search']);
+  assert.deepEqual(
+    allowedSparseEntriesForGeneration('local_fallback', [priority, second], [priority], true),
+    [priority, second],
+  );
+  assert.deepEqual(
+    allowedSparseEntriesForGeneration('model', [priority, second], [priority], true),
+    [priority],
+  );
+});
 
 function bankEntry(
   id: string,

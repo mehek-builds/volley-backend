@@ -44,6 +44,35 @@ import {
   type RecentExperienceReview,
 } from '../engine/recentExperience';
 
+const MAX_PDF_LAYOUT_ITEMS = 50_000;
+const MAX_PDF_LAYOUT_TEXT_CHARS = 500_000;
+// pdf.js text geometry uses PDF points. Two points keeps superscript and font-baseline jitter on
+// one visual row without merging ordinary adjacent lines.
+const PDF_ROW_Y_TOLERANCE = 2;
+
+export function resumeTextWithLayout(pages: Awaited<ReturnType<typeof extractPdfText>>['pages']): string {
+  if (pages.reduce((count, page) => count + page.length, 0) > MAX_PDF_LAYOUT_ITEMS) return '';
+  if (pages.reduce(
+    (count, page) => count + page.reduce((pageCount, item) => pageCount + item.text.length, 0),
+    0,
+  ) > MAX_PDF_LAYOUT_TEXT_CHARS) return '';
+  return pages.map((page) => {
+    const rows: Array<{ y: number; items: typeof page }> = [];
+    for (const item of [...page].sort((a, b) => b.y - a.y || a.x - b.x)) {
+      // Items are already sorted by descending y, so only the current row can be within the
+      // tolerance. Searching every prior row made dense PDFs quadratic before parsing even began.
+      const row = rows[rows.length - 1];
+      if (row && Math.abs(row.y - item.y) <= PDF_ROW_Y_TOLERANCE) row.items.push(item);
+      else rows.push({ y: item.y, items: [item] });
+    }
+    return rows
+      .sort((a, b) => b.y - a.y)
+      .map((row) => row.items.sort((a, b) => a.x - b.x).map((item) => item.text).join(' ').trim())
+      .filter(Boolean)
+      .join('\n');
+  }).filter(Boolean).join('\n\n');
+}
+
 // R-052. Bounded on purpose: these are the only parsed fields a student may correct by hand, and
 // the ceilings stop a paste of an entire resume landing in the school field. Every value is trimmed
 // by the handler, so " " is rejected here as empty rather than stored as whitespace.
@@ -838,7 +867,9 @@ export async function profileRoutes(fastify: FastifyInstance) {
       // 400 a student's real resume at signup.
       if (sourceFormat === 'pdf') {
         const parsed = await extractPdfText(resumeBuffer);
-        resumeText = parsed.text;
+        // Preserve visual rows. pdf-parse's flat text joins columns and section headings into one
+        // stream, which is usable for a model but not for the deterministic provider-outage path.
+        resumeText = resumeTextWithLayout(parsed.pages) || parsed.text;
         sourcePages = parsed.numpages;
       } else {
         resumeText = await extractDocxText(resumeBuffer);
@@ -907,6 +938,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
         ? await parseResumeFromPdf(resumeBuffer, {
           deadlineMs: parseDeadlineMs,
           signal: disconnectController.signal,
+          fallbackText: resumeText,
         })
         : await parseResumeWithClaude(resumeText, {
           deadlineMs: parseDeadlineMs,
@@ -1194,6 +1226,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
     fastify.log.info({
       source_format: sourceFormat,
       scanned: looksScanned,
+      parse_method: parsedProfile.parse_method ?? 'model',
       source_pages: sourcePages,
       extraction_elapsed_ms: extractionElapsedMs,
       parse_elapsed_ms: parseElapsedMs,

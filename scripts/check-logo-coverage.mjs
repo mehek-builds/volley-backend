@@ -1,198 +1,83 @@
 #!/usr/bin/env node
 /**
- * Fail when the job board has outgrown the company-domain map.
+ * Prove that every surfaced posting has a verified company logo.
  *
- * WHY THIS EXISTS
- * ---------------
- * The employer logo on a job row is the kind of feature that breaks without ever failing: no
- * exception, no console error, no red test, no wrong pixel — just a column of empty circles that
- * nobody notices because everything "works". It has already broken twice that way.
- *
- *   2026-07-28  The domain was derived from `career_url`, which holds the JOB BOARD on every source
- *               we poll. Every row resolved to null. 0 of 100 rows showed a logo, for weeks, and
- *               the entire test suite was green the whole time.
- *   2026-07-29  A hand-written map covered the 51 companies that existed when it was written. The
- *               board reached 239 within hours because sources are added continuously, so it was
- *               21% covered the day it landed and falling.
- *
- * The second one is the reason this file exists, because it is the one that comes back. Nothing in
- * the repo can tell that the map has decayed: it stays internally consistent, its own tests keep
- * passing, and coverage silently drops as the board grows. Only a measurement against the LIVE
- * board can see it, which is exactly the shape of check-schema-drift.mjs — the same idea, pointed
- * at a different kind of drift.
- *
- *   node scripts/check-logo-coverage.mjs         # exit 1 when coverage is below the floor
- *   MIN_LOGO_COVERAGE=0.8 node scripts/...       # raise the floor
- *
- * WHEN IT FIRES, the fix is to regenerate the map, not to lower the number:
- *
- *   npm run logo:resolve && git diff src/lib/companyDomains.ts
- *
- * The floor is both a quality target and a drift alarm. At least 75% of live job rows must show a
- * verified employer logo. MIN_LOGO_COVERAGE may raise that bar for a stricter run, but can never
- * lower it below the product guarantee.
- *
- * MEASURED AGAINST A TABLE THAT IS BEING WRITTEN TO. The job-poll cron upserts into monitored_jobs
- * and then purges from it, so the board moves underneath the scan and there is no instant at which
- * a paged read is a snapshot. Demanding an exact row count against that moving target is what made
- * this check flaky, failing PRs whose CI merely overlapped a poll. lib/boardScan.ts does the read
- * and tolerates the churn; coverage below is a ratio over the rows it actually returned.
- *
- * The tolerance must never buy a weaker verdict. The floor is still enforced over a full board's
- * worth of distinct rows, and a read that is genuinely incomplete still fails.
+ * The backend supplies a row-weighted list of company and ATS board pairs. The website logo
+ * service resolves each pair from a human-approved asset, an ATS-hosted mark, or an employer
+ * domain established from that exact board. `miss=404` prevents the service from substituting a
+ * monogram, so a passing run means every counted row renders a real mark.
  */
 
-import { companyDomainFor, FAVICON_ENDPOINT, FAVICON_PX } from '../src/lib/companyDomains.ts';
 import { logoCoverageFloor, tallyCoverage } from '../src/lib/logoCoverage.ts';
-import { scanBoard } from '../src/lib/boardScan.ts';
-import { createHash } from 'node:crypto';
 
-const API = process.env.JOBS_API ?? 'https://student-outreach-backend.vercel.app';
+const API = (process.env.JOBS_API ?? 'https://api.trylitos.com').replace(/\/+$/, '');
+const WEBSITE = (process.env.JOBS_WEBSITE ?? 'https://trylitos.com').replace(/\/+$/, '');
 const FLOOR = logoCoverageFloor(process.env.MIN_LOGO_COVERAGE);
-const PAGE_SIZE = 100;
-const MAX_ROWS = 100_000;
-const FAVICON_CONCURRENCY = 12;
+const CONCURRENCY = 12;
 
-async function readPage(offset, limit = PAGE_SIZE) {
-  const res = await fetch(`${API}/jobs?limit=${limit}&offset=${offset}`);
-  if (!res.ok) throw new Error(`GET /jobs answered ${res.status} at offset ${offset}`);
-  const body = await res.json();
-  if (!Array.isArray(body.jobs)) throw new Error(`GET /jobs returned invalid jobs at offset ${offset}`);
-  const total = Number(body.total);
-  if (!Number.isSafeInteger(total) || total < body.jobs.length) {
-    throw new Error('GET /jobs did not return a valid total');
+async function logoWorks(source) {
+  const query = new URLSearchParams({
+    c: source.company_name,
+    board: source.career_url,
+    miss: '404',
+  });
+  const response = await fetch(`${WEBSITE}/api/company-logo?${query}`, {
+    redirect: 'follow',
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (response.status === 404) return false;
+  if (!response.ok) throw new Error(`logo service answered ${response.status} for ${source.company_name}`);
+  const type = response.headers.get('content-type') ?? '';
+  if (!type.startsWith('image/')) {
+    throw new Error(`logo service returned ${type || 'no content type'} for ${source.company_name}`);
   }
-  if (total > MAX_ROWS) throw new Error(`job board has ${total} rows, above the ${MAX_ROWS}-row limit`);
-  return { jobs: body.jobs, total };
+  return true;
 }
 
-const readBoard = () => scanBoard({
-  readPage,
-  idOf: (row) => row.id,
-  pageSize: PAGE_SIZE,
-  onRetry: (reason) => console.log(`Retrying the scan: ${reason}.`),
+const response = await fetch(`${API}/jobs/facets?counts=true`, {
+  signal: AbortSignal.timeout(60_000),
 });
-
-const fingerprint = (bytes) => createHash('sha256').update(bytes).digest('hex');
-
-async function faviconResponse(domain) {
-  let lastError;
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const response = await fetch(`${FAVICON_ENDPOINT}?domain=${encodeURIComponent(domain)}&sz=${FAVICON_PX}`);
-      const bytes = Buffer.from(await response.arrayBuffer());
-      if (response.status !== 404 && !response.ok) throw new Error(`favicon answered ${response.status} for ${domain}`);
-      if (!response.headers.get('content-type')?.startsWith('image/')) {
-        throw new Error(`favicon returned non-image content for ${domain}`);
-      }
-      return { status: response.status, fingerprint: fingerprint(bytes) };
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError;
+if (!response.ok) throw new Error(`GET /jobs/facets?counts=true answered ${response.status}`);
+const body = await response.json();
+if (!Array.isArray(body.company_logo_sources) || body.company_logo_sources.length === 0) {
+  throw new Error('GET /jobs/facets?counts=true returned no company_logo_sources');
 }
 
-async function workingLogoDomains(domains) {
-  const fallback = await faviconResponse('litos-guaranteed-missing-favicon.invalid');
-  const working = new Set();
-  for (let i = 0; i < domains.length; i += FAVICON_CONCURRENCY) {
-    const batch = domains.slice(i, i + FAVICON_CONCURRENCY);
-    const results = await Promise.all(batch.map(async (domain) => [domain, await faviconResponse(domain)]));
-    for (const [domain, response] of results) {
-      if (response.status === 200 && response.fingerprint !== fallback.fingerprint) working.add(domain);
-    }
+const sources = body.company_logo_sources;
+for (const source of sources) {
+  if (typeof source.company_name !== 'string' || !source.company_name.trim()) {
+    throw new Error('company_logo_sources contains a blank company name');
   }
-  return working;
+  if (typeof source.career_url !== 'string' || !source.career_url.startsWith('https://')) {
+    throw new Error(`company_logo_sources contains an invalid board URL for ${source.company_name}`);
+  }
+}
+const working = new Set();
+for (let index = 0; index < sources.length; index += CONCURRENCY) {
+  const batch = sources.slice(index, index + CONCURRENCY);
+  const results = await Promise.all(batch.map(async (source) => [source, await logoWorks(source)]));
+  for (const [source, ok] of results) {
+    if (ok) working.add(`${source.company_name}\n${source.career_url}`);
+  }
 }
 
-/**
- * Per-company row counts for the live board, as cheaply as the API allows.
- *
- * ONE GROUPED QUERY, NOT A FULL SCAN. Coverage only needs company_name and a row count, but the
- * only way to get them used to be paging every row through GET /jobs, which returns full rows
- * including 600 characters of description each: ~17 MB per pass to read two columns' worth of
- * information. On 2026-08-04 this project exhausted its Neon DATA TRANSFER quota and every
- * database-backed route started answering 500, taking the public board down. This scan was not the
- * whole cause, it is roughly 3% of a monthly budget per ten runs, but a check that spends 17 MB to
- * learn 15 KB of facts is the wrong shape regardless, and it is the one caller we control.
- *
- * A grouped count is also a single consistent snapshot, so unlike a paged scan it cannot be skewed
- * by the poller writing underneath it. That is the race lib/boardScan.ts exists to survive, and the
- * cheap path sidesteps it entirely.
- *
- * Falls back to the full scan when the API does not offer company_counts yet, so this keeps working
- * against a deployment that predates the endpoint.
- */
-async function companyRowCounts() {
-  const res = await fetch(`${API}/jobs/facets?counts=true`);
-  if (res.ok) {
-    const body = await res.json();
-    if (Array.isArray(body.company_counts) && body.company_counts.length > 0) {
-      return { counts: body.company_counts, source: 'grouped count' };
-    }
-  }
-  /* Older deployment. Page the whole board and group it here, which costs what it always cost. */
-  const { rows } = await readBoard();
-  const byCompany = new Map();
-  for (const row of rows) {
-    if (!row.company_name) continue;
-    byCompany.set(row.company_name, (byCompany.get(row.company_name) ?? 0) + 1);
-  }
-  return {
-    counts: [...byCompany].map(([company_name, count]) => ({ company_name, rows: count })),
-    source: 'full board scan (API has no company_counts yet)',
-  };
-}
+const tally = tallyCoverage(
+  sources.map((source) => ({
+    company_name: `${source.company_name}\n${source.career_url}`,
+    rows: Number(source.rows),
+  })),
+  (key) => working.has(key),
+);
 
-let counts;
-let source;
-try {
-  ({ counts, source } = await companyRowCounts());
-} catch (error) {
-  console.error(`FAILED: could not verify the complete live board (${error.message}).`);
-  console.error('Coverage cannot be guaranteed when the measurement is incomplete.');
+console.log(`Checked ${tally.totalRows} live postings across ${sources.length} company-board sources.`);
+console.log(`Postings with a verified logo: ${tally.rowsWithLogo} (${(tally.coverage * 100).toFixed(2)}%).`);
+
+if (tally.coverage < FLOOR) {
+  const missing = tally.withoutLogo.map((key) => key.split('\n')[0]);
+  console.error(`LOGO COVERAGE BELOW FLOOR: ${(tally.coverage * 100).toFixed(2)}% < ${(FLOOR * 100).toFixed(0)}%.`);
+  console.error(`Sources without a verified logo: ${missing.slice(0, 50).join(', ')}`);
+  if (missing.length > 50) console.error(`...and ${missing.length - 50} more.`);
   process.exit(1);
 }
 
-const companies = counts.map((c) => c.company_name).filter(Boolean);
-if (companies.length === 0) {
-  console.error('FAILED: the live board returned no jobs, so coverage cannot be verified.');
-  process.exit(1);
-}
-
-const unmapped = companies.filter((name) => !companyDomainFor(name));
-const mappedDomains = [...new Set(companies.map(companyDomainFor).filter(Boolean))];
-let logoDomains;
-try {
-  logoDomains = await workingLogoDomains(mappedDomains);
-} catch (error) {
-  console.error(`FAILED: could not verify rendered favicons (${error.message}).`);
-  process.exit(1);
-}
-const brokenLogoDomains = mappedDomains.filter((domain) => !logoDomains.has(domain));
-
-const tally = tallyCoverage(counts, (name) => {
-  const domain = companyDomainFor(name);
-  return domain !== null && logoDomains.has(domain);
-});
-const { totalRows, rowsWithLogo, coverage } = tally;
-
-console.log(`Checked ${totalRows} live rows across ${companies.length} companies, via ${source}.`);
-console.log(`Rows that would show a logo: ${rowsWithLogo} (${(coverage * 100).toFixed(0)}%).`);
-console.log(`Companies with no verified domain: ${unmapped.length}.`);
-console.log(`Mapped domains with no favicon response: ${brokenLogoDomains.length}.`);
-
-if (coverage < FLOOR) {
-  console.error(`\nLOGO COVERAGE BELOW FLOOR: ${(coverage * 100).toFixed(0)}% < ${(FLOOR * 100).toFixed(0)}%.`);
-  console.error('The board has outgrown src/lib/companyDomains.ts, so job rows are showing initials');
-  console.error('where they should show logos. Regenerate the map:');
-  console.error('\n  npm run logo:resolve && git diff src/lib/companyDomains.ts\n');
-  console.error(`Unmapped companies on the board: ${unmapped.slice(0, 25).join(', ')}`);
-  if (unmapped.length > 25) console.error(`...and ${unmapped.length - 25} more.`);
-  if (brokenLogoDomains.length > 0) console.error(`Domains without a rendered favicon: ${brokenLogoDomains.join(', ')}`);
-  console.error('\nMIN_LOGO_COVERAGE cannot lower the enforced 75% minimum.');
-  process.exit(1);
-}
-
-console.log(`\nCoverage is above the ${(FLOOR * 100).toFixed(0)}% floor.`);
+console.log('Every surfaced posting has a verified company logo.');

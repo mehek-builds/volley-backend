@@ -2,17 +2,22 @@
  * One monitor invocation selects at most one segment.
  *
  * The catalog is intentionally segmented at 400 sources before it grows past that boundary. The
- * GitHub workflow drains subsequent oldest-first segments, while the daily Vercel invocation still
- * covers today's 355 reviewed sources in one pass. Keeping this separate from the time budget makes
- * growth predictable: adding source 401 changes the response to polling_complete=false instead of
- * silently expanding one serverless invocation.
+ * scheduler drains subsequent oldest-first segments under one timestamp. Keeping this separate
+ * from the time budget makes growth predictable: adding source 401 changes the response to
+ * polling_complete=false instead of silently expanding one invocation.
  */
 export const POLL_SEGMENT_SIZE = 400;
 /** Deprecated response-field alias. Its value remains the actual per-invocation selection cap. */
 export const POLL_SOURCE_LIMIT = POLL_SEGMENT_SIZE;
 export const POLL_CONCURRENCY = 12;
-export const POLL_TIME_BUDGET_MS = 210_000;
-export const POLL_START_RESERVE_MS = 30_000;
+/**
+ * Railway cron services have no platform execution cutoff, so this is an application-owned bound.
+ * Nine minutes is long enough to drain a 400-source segment, including Workable's shared rate
+ * limit, while leaving five minutes for metrics and a clean response before the cron client's
+ * fourteen-minute per-segment deadline.
+ */
+export const POLL_TIME_BUDGET_MS = 9 * 60_000;
+export const POLL_START_RESERVE_MS = 60_000;
 export const WORKABLE_START_INTERVAL_MS = 1_100;
 
 type PollSource = { ats_name: string };

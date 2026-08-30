@@ -17,6 +17,7 @@ import {
 } from '../llm/baseResume';
 import {
   applyResumePolicy,
+  allowedSparseEntriesForGeneration,
   educationFrom,
   enforceExperienceBulletFloor,
   normalizeDashesForPrint,
@@ -41,6 +42,7 @@ import {
   weakVerbBullets,
   overlongBullets,
   misWordedBullets,
+  isProviderDependentResumeStyleIssue,
 } from '../engine/resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import { openSseResponse, trackSseConnection } from '../lib/sseResponse';
@@ -64,11 +66,19 @@ import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
  * client draws position, never progress (DESIGN.md Guardrails).
  */
 
-const REQUEST_DEADLINE_MS = 120_000; // vercel.json allows 300s; this is the model-call bound.
-/* The point past which another repair pass cannot finish inside the function's 300s. One more model
- * call can take REQUEST_DEADLINE_MS, and the render plus PDF parse plus checks after it need room
- * of their own, so the loop stops well before the ceiling rather than at it. */
-const REPAIR_PASS_BUDGET_MS = 140_000;
+// Overall route allowance. Individual generation and repair calls have much lower interactive caps
+// in llm/baseResume.ts, so an upstream stall degrades to grounded local output instead of using it.
+const REQUEST_DEADLINE_MS = 120_000;
+/* An interactive ceiling, independent of Vercel's much larger kill limit. With one 15s generation
+ * and 8s targeted repairs, this prevents quality polishing from recreating a minute-long spinner. */
+const REPAIR_PASS_BUDGET_MS = 35_000;
+
+export function baseResumeRepairAllowed(
+  generationMethod: ResumeSpec['generation_method'],
+  elapsedMs: number,
+): boolean {
+  return generationMethod !== 'local_fallback' && elapsedMs <= REPAIR_PASS_BUDGET_MS;
+}
 
 /* Lives in llm/baseResume.ts now (VERB_REPAIR_MENU), so the repair prompt and this route's
  * regeneration feedback read one list. Re-exported here for the tests that pin its contents. */
@@ -379,6 +389,11 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
           education,
           declaredSkills,
           (piece: BaseResumeEvent) => {
+            if (piece.type === 'restart') {
+              sawFirstEntry = false;
+              send({ event: 'restart' });
+              return;
+            }
             // The transition from choosing entries to writing them is observable rather than
             // timed: the first completed entry IS the moment selection finished.
             if (piece.type === 'entry' && !sawFirstEntry) {
@@ -498,17 +513,20 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       };
 
       for (let pass = 1; pass <= MAX_REPAIR_PASSES; pass += 1) {
+        // The continuity spec exists because providers are unavailable. Calling the same provider
+        // up to four more times for stylistic repairs recreates the multi-minute spinner this path
+        // is meant to remove. Preserve grounded source wording and let the deterministic gate report
+        // any remaining quality issue immediately.
+        if (rawSpec.generation_method === 'local_fallback') break;
         const weak = weakVerbBullets(rawSpec);
         const overlong = overlongBullets(rawSpec);
         const misWorded = misWordedBullets(rawSpec);
         const missingPriorities = baseResumeSelectionIssues(rawSpec, priorityEntries);
         if (weak.length === 0 && overlong.length === 0 && misWorded.length === 0 && missingPriorities.length === 0) break;
-        /* REQUEST_DEADLINE_MS bounds one model call, not the request. A repair pass is seconds
-         * now, but the regeneration branch can still spend a full call, and blowing vercel.json's
-         * 300s maxDuration kills the function mid-stream: the client gets a truncated SSE with
-         * neither a done nor an error frame, and the finally never runs. So the loop stops when
-         * there is no longer room for another call plus the render and check that follow it. */
-        if (Date.now() - buildStartedAt > REPAIR_PASS_BUDGET_MS) {
+        /* The lower call caps live in llm/baseResume.ts, while this route-level budget also leaves
+         * room for rendering and checks. Crossing Vercel's 300s maxDuration would truncate the SSE
+         * before either a done or error frame, so no new repair begins after this point. */
+        if (!baseResumeRepairAllowed(rawSpec.generation_method, Date.now() - buildStartedAt)) {
           fastify.log.warn({ userId, pass }, 'out of time for another repair pass; shipping with warnings');
           break;
         }
@@ -558,6 +576,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       const spec = enforceExperienceBulletFloor(pruned.spec, bank, {
         priorityEntryId: selectedEntryId,
         allowSparsePriority: recentReview?.continue_with_found === true,
+        allowSparseAll: rawSpec.generation_method === 'local_fallback',
         onDropped: ({ org, bullets }) =>
           droppedForLength.push(
             `Left ${org} off: it has ${bullets === 1 ? 'one bullet' : `${bullets} bullets`} and we recommend at least ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Add another and it goes on.`,
@@ -580,7 +599,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
       const lateMisWorded = misWordedBullets(finalSpec);
       if (
         (lateWeak.length > 0 || lateOverlong.length > 0 || lateMisWorded.length > 0)
-        && Date.now() - buildStartedAt <= REPAIR_PASS_BUDGET_MS
+        && baseResumeRepairAllowed(finalSpec.generation_method, Date.now() - buildStartedAt)
       ) {
         const lateTargets = repairTargetsFor(lateWeak, lateOverlong, lateMisWorded);
         const lateRepaired = await repairBaseResumeBullets(finalSpec, [...lateTargets.values()], { timeoutMs: REQUEST_DEADLINE_MS });
@@ -663,11 +682,18 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
           education,
           undefined,
           {
-            allowedSingleBulletEntries: recentReview?.continue_with_found && priorityEntries[0]
-              ? [priorityEntries[0]]
-              : [],
+            allowedSingleBulletEntries: allowedSparseEntriesForGeneration(
+              finalSpec.generation_method,
+              bank,
+              priorityEntries,
+              recentReview?.continue_with_found === true,
+            ),
           },
         );
+        const providerStyleIssues = finalSpec.generation_method === 'local_fallback'
+          ? finalValidation.issues.filter(isProviderDependentResumeStyleIssue)
+          : [];
+        warnings.push(...providerStyleIssues.map((issue) => `Review source wording: ${issue}`));
         /* NO EMAIL GATE HERE ANY MORE, and nothing replaces it, because the case it was reaching
          * for is already covered twice over.
          *
@@ -682,7 +708,7 @@ export async function baseResumeRoutes(fastify: FastifyInstance) {
          * check here could never fire, since this array is only built once that render has
          * succeeded. */
         const issues = [
-          ...finalValidation.issues,
+          ...finalValidation.issues.filter((issue) => !providerStyleIssues.includes(issue)),
           ...baseResumeSelectionIssues(printed, priorityEntries),
           ...layout.issues,
           ...findPdfSafeMarginIssues(parsedPdf.pages, rendered.layout),

@@ -15,6 +15,7 @@ import {
   uploadCanonicalCoverLetter,
 } from '../lib/canonicalCoverLetterService';
 import { readApplicationReview } from '../lib/applicationReview';
+import { objectStorageUsesRailway } from '../lib/objectStorage';
 import { mintDownloadToken } from '../lib/resumeAccess';
 import { requireAuth } from '../middleware/auth';
 import {
@@ -95,7 +96,7 @@ function responseFor(
     download_url: `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(
       target.application.user_id,
       result.cover_letter.object_key,
-      { blobUrl: result.blob_url },
+      { blobUrl: objectStorageUsesRailway() ? undefined : result.blob_url },
     )}`,
   };
 }

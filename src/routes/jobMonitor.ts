@@ -1956,11 +1956,10 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
           inArray(monitored_jobs.external_id, ids),
         ));
       }
-      /* One statement per posting meant 7,109 round trips for a full sweep and
-         a 469s run, against a 300s Vercel ceiling (vercel.json) — the daily
-         cron would have died halfway through the alphabet, leaving every
-         un-reached source's jobs flipped to is_active = false by the sweep
-         above. That failure empties the public board rather than staling it.
+      /* One statement per posting meant 7,109 round trips for a full sweep and a 469s run. A
+         scheduler deadline could stop halfway through the alphabet, leaving every unreached
+         source's jobs flipped to is_active = false by the sweep above. That failure empties the
+         public board rather than staling it.
          Chunked so a single board the size of Databricks still fits well
          inside Postgres's 65,535-parameter cap: 21 columns x 200 rows. */
       for (let index = 0; index < ingestable.length; index += UPSERT_CHUNK) {
@@ -3471,6 +3470,24 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .orderBy(sql`count(*) desc`)
       : null;
 
+    /* The production logo gate needs the same weighted inventory, split by the exact employer
+       board that proves identity. Company name alone is insufficient: Block is the canonical
+       example, where guessing the name finds block.co while its Greenhouse board proves block.xyz.
+       Only returned to the explicit counts=true measurement request. */
+    const companyLogoSources = facetQuery?.counts === 'true'
+      ? await db
+        .select({
+          company_name: monitored_jobs.company_name,
+          career_url: career_page_sources.career_url,
+          rows: sql<number>`count(*)::int`,
+        })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(where)
+        .groupBy(monitored_jobs.company_name, career_page_sources.career_url)
+        .orderBy(sql`count(*) desc`)
+      : null;
+
     /* Cities, not location strings.
        An employer's `location` is whatever they typed: often a list ("Boston;
        New York City; Pennsylvania"), often carrying a country ("San Mateo, CA,
@@ -3513,6 +3530,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
             .map((r) => ({ company_name: r.v, rows: r.n })),
         }
         : {}),
+      ...(companyLogoSources ? { company_logo_sources: companyLogoSources } : {}),
       /* `titles` is gone on purpose. It returned the board's most common RAW
          posting titles — "Senior Product Manager - Network Path" — which is not
          what a person types into a field labelled Job title. The board now
@@ -3899,8 +3917,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .where(pollQueueEligible)
       .orderBy(sql`${career_page_sources.last_polled_at} asc nulls first`)
       .limit(POLL_SOURCE_LIMIT);
-    /* Stop starting work at three minutes and cap the scheduler at three and a half, leaving at
-       least 90 seconds before Vercel's 300-second hard stop for the final batch, metrics and reply.
+    /* The application-owned Railway budget leaves time for the final batch, metrics and reply.
        A source that is not attempted keeps its old last_polled_at, so the oldest-first query puts
        it first next time. Workable starts are separately spaced below its shared provider limit. */
     const pollRun = await pollSourcesWithinBudget(sources, pollSource);
@@ -3957,7 +3974,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      * one step; it erodes as tokens rotate and boards go quiet, and a figure in every cron response
      * is what makes that erosion visible before it crosses the line.
      *
-     * A breach answers 5xx ON PURPOSE. This route is the daily Vercel cron, and a cron that returns
+     * A breach answers 5xx ON PURPOSE. This route is the daily Railway cron, and a cron that returns
      * 200 is a cron nobody looks at - which is exactly how career_page_sources sat empty for months
      * while every check reported success. Failing the run is the only signal that reaches anyone.
      * The poll itself still committed; this reports the state, it does not roll anything back.

@@ -5,6 +5,7 @@ import {
   bankEntriesFrom,
   planBankReconciliation,
   publicResumeProfile,
+  resumeTextWithLayout,
   resumeUploadKeyFromHeader,
 } from './profile';
 import type { ParsedProfile } from '../llm/parse';
@@ -45,6 +46,27 @@ describe('toBullets', () => {
   test('empty description yields no variants at all', () => {
     assert.deepEqual(toBullets(''), []);
     assert.deepEqual(toBullets('   \n  '), []);
+  });
+});
+
+describe('resumeTextWithLayout', () => {
+  test('groups an already sorted page without duplicating items across rows', () => {
+    const text = resumeTextWithLayout([[
+      { text: 'World', x: 50, y: 100, width: 20, height: 10 },
+      { text: 'Hello', x: 10, y: 101, width: 20, height: 10 },
+      { text: 'Next', x: 10, y: 90, width: 20, height: 10 },
+    ]]);
+    assert.equal(text, 'Hello World\nNext');
+  });
+
+  test('declines layout reconstruction above the geometry ceiling', () => {
+    const item = { text: 'x', x: 1, y: 1, width: 1, height: 1 };
+    assert.equal(resumeTextWithLayout([Array.from({ length: 50_001 }, () => item)]), '');
+  });
+
+  test('declines layout reconstruction above the decoded-text ceiling', () => {
+    const item = { text: 'x'.repeat(500_001), x: 1, y: 1, width: 1, height: 1 };
+    assert.equal(resumeTextWithLayout([[item]]), '');
   });
 });
 

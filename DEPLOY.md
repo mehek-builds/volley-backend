@@ -272,21 +272,27 @@ verifier-issued evidence.
 Use this order for the Railway migration:
 
 1. Run `npm run db:job-logo-evidence:columns` against the production database.
-2. Deploy the current API revision privately on Railway.
-3. Stop the legacy Vercel job-monitor cron and the scheduled GitHub job-monitor workflow. Keep only
+2. Run `npm run db:job-board-performance` against the production database. This installs the
+   versioned grouped projection, its atomic refresh function, and the posting and search indexes.
+3. Deploy the current API revision privately on Railway.
+4. Stop the legacy Vercel job-monitor cron and the scheduled GitHub job-monitor workflow. Keep only
    the workflow's manual fallback.
-4. Run `npm run db:job-logo-evidence:finalize`.
-5. Start exactly one Railway worker replica with `npm run worker:job-monitor`.
-6. Wait for the worker's `complete_drain` event and verify every certified inventory floor.
-7. Route public traffic to Railway only after the evidence gate is enabled and the floors pass.
+5. Run `npm run db:job-logo-evidence:finalize`.
+6. Set the Railway worker service start command to `npm run worker:job-monitor` and scale it to
+   exactly one replica. Set the API service start command to `node dist/index.js`.
+7. Wait for the worker's `complete_drain` event and verify every certified inventory floor.
+8. Route public traffic to Railway only after the evidence gate is enabled and the floors pass.
 
 The API requires `DATABASE_URL`, `JWT_SIGNING_SECRET` or `JOB_BOARD_CURSOR_SECRET`,
 `INTERNAL_CRON_SECRET`, `PUBLIC_API_BASE`, an explicitly validated `TRUST_PROXY_HOPS`, and `GIT_SHA`
 from Railway's deployed commit metadata. The worker requires the same `INTERNAL_CRON_SECRET` and a
-Railway `LITOS_API_BASE`. Both services require `BLOB_READ_WRITE_TOKEN`: resume storage uses it, and
-the verifier copies expiring first-party Rippling logos into durable public storage before their
-evidence can qualify. Set `STRATUS_API_KEY` when autonomous submission runs on Railway. Keep the
-Vercel-specific `VERCEL` variable unset. The API and worker secret values must match.
+Railway `LITOS_API_BASE`. The API service requires the Railway Bucket credentials `BUCKET`,
+`ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, and `ENDPOINT`, or their `OBJECT_STORAGE_*` aliases. It copies
+expiring first-party Rippling logos into stable, content-addressed public objects before their
+evidence can qualify. `BLOB_READ_WRITE_TOKEN` is only a rollback provider during migration and is
+not required by the Railway runtime. Set `STRATUS_API_KEY` when autonomous submission runs on
+Railway. Keep the Vercel-specific `VERCEL` variable unset. The API and worker secret values must
+match.
 
 The worker keeps one `drain_started_at` watermark while it processes bounded 400-source polling
 segments and the independent logo-proof queue. The hard certification floors are 500,000 unique
@@ -295,6 +301,13 @@ fresh current-drain proof to count, so a preserved stale row cannot satisfy the 
 worker sleeps for two hours only after a successful complete drain. Configure an external alert on
 the age of the last `complete_drain` log, because a failed drain intentionally retries rather than
 declaring success.
+
+The 500,000-row PostgreSQL 16 benchmark uses 5,000 sources, 60,000 grouped roles, and a cursor at
+90 percent depth. The measured deep posting, searched posting, and grouped cursor queries complete
+in under 36 milliseconds. The full certification refresh completes in about 19.4 seconds locally.
+Production allows up to 120 seconds for that refresh and returns structured stage-specific timeout
+evidence. After consecutive timeouts the worker emits `persistent_metrics_timeout_alert` and never
+emits `complete_drain`.
 
 In GitHub, set `INTERNAL_CRON_SECRET` to the same value as Railway and set the `LITOS_API_BASE`
 Actions variable to the Railway API before retiring Vercel. The job-monitor workflow is manual-only;

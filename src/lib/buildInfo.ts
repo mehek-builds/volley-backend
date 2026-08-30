@@ -41,7 +41,7 @@
  * without leaving the terminal and a deployment id is not, so the SHA is the first thing to read;
  * the id is what still identifies the deployment when no SHA was supplied at all.
  */
-export type RevisionSource = 'vercel-git' | 'git-sha' | 'none';
+export type RevisionSource = 'railway-git' | 'vercel-git' | 'git-sha' | 'none';
 
 export interface BuildRevision {
   /** The commit this code was built from, or null when nothing supplied one. */
@@ -64,6 +64,8 @@ export interface BuildRevision {
  * sets the variable to the empty string and that must not read as an answer.
  */
 export function resolveRevision(env: NodeJS.ProcessEnv = process.env): BuildRevision {
+  const fromRailway = env.RAILWAY_GIT_COMMIT_SHA?.trim();
+  if (fromRailway) return { revision: fromRailway, revision_source: 'railway-git' };
   const fromVercel = env.VERCEL_GIT_COMMIT_SHA?.trim();
   if (fromVercel) return { revision: fromVercel, revision_source: 'vercel-git' };
   const fromScript = env.GIT_SHA?.trim();
@@ -80,5 +82,5 @@ export function resolveRevision(env: NodeJS.ProcessEnv = process.env): BuildRevi
  * same identity in a hostname. Both are absent locally, where null is correct.
  */
 export function resolveBuild(env: NodeJS.ProcessEnv = process.env): string | null {
-  return env.VERCEL_DEPLOYMENT_ID || env.VERCEL_URL || null;
+  return env.RAILWAY_DEPLOYMENT_ID || env.VERCEL_DEPLOYMENT_ID || env.VERCEL_URL || null;
 }

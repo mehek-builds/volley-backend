@@ -13,11 +13,11 @@ test('legacy persistence proves the transaction writable before Blob work and re
   const runner = persistence.indexOf('const runPersistTransaction = (database: typeof db) => database.transaction(async (tx) => {');
   const packetLock = persistence.indexOf('const [currentPacket] = await tx.select()');
   const applicationLock = persistence.indexOf('const [canonicalApplication] = await tx.select()');
-  const upload = persistence.indexOf('const storedBlob = await put(');
+  const upload = persistence.indexOf('const storedBlob = await putObject(');
   const firstMutation = persistence.indexOf('const [storedArtifact] = await tx.insert(artifacts)');
   const retry = persistence.indexOf('const persisted = await withReadOnlyRetry(');
   const directFallback = persistence.indexOf('onExhausted: () => withDedicatedDatabase');
-  const cleanup = persistence.indexOf('if (blobState.current) await del(');
+  const cleanup = persistence.indexOf('if (blobState.current) await deleteObjects(');
 
   assert.ok(render >= 0 && render < runner);
   assert.ok(runner >= 0 && runner < packetLock);
@@ -27,7 +27,7 @@ test('legacy persistence proves the transaction writable before Blob work and re
   assert.ok(firstMutation >= 0 && firstMutation < retry);
   assert.ok(retry >= 0 && retry < directFallback);
   assert.ok(directFallback >= 0 && directFallback < cleanup);
-  assert.match(persistence, /\.limit\(1\)\.for\('update'\);[\s\S]*\.limit\(1\)\.for\('update'\);[\s\S]*const storedBlob = await put\(/);
+  assert.match(persistence, /\.limit\(1\)\.for\('update'\);[\s\S]*\.limit\(1\)\.for\('update'\);[\s\S]*const storedBlob = await putObject\(/);
   assert.match(persistence, /withReadOnlyRetry\(\s*\(\) => runPersistTransaction\(db\)/);
   assert.match(persistence, /onExhausted: \(\) => withDedicatedDatabase\(\(directDb\) =>/);
 });

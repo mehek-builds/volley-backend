@@ -9,7 +9,7 @@ import {
   gapSuggestionsFrom,
   gapsAskedFrom,
   gapsFrom,
-  hasFiveTargetRoles,
+  hasResumeEvidence,
   gapsAskedColumnPresent,
   hasSetupGapsFrom,
   includesGapsStepFrom,
@@ -494,12 +494,12 @@ describe('resume-informed focus completion', () => {
   });
 });
 
-describe('five-role resume contract', () => {
-  test('only five distinct non-empty parsed roles unlock focus suggestions', () => {
-    assert.equal(hasFiveTargetRoles({ target_roles: ['One', 'Two', 'Three', 'Four'] }), false);
-    assert.equal(hasFiveTargetRoles({ target_roles: ['One', 'Two', 'Three', 'Four', 'one'] }), false);
-    assert.equal(hasFiveTargetRoles({ target_roles: ['One', 'Two', 'Three', 'Four', 'Five'] }), true);
-    assert.equal(hasFiveTargetRoles(null), false);
+describe('usable resume evidence contract', () => {
+  test('a grounded bank row and a name complete upload even without model-inferred roles', () => {
+    assert.equal(hasResumeEvidence({ full_name: 'Mehek Mandal' }, 1), true);
+    assert.equal(hasResumeEvidence({ full_name: 'Mehek Mandal' }, 0), false);
+    assert.equal(hasResumeEvidence({ full_name: '  ' }, 1), false);
+    assert.equal(hasResumeEvidence(null, 1), false);
   });
 });
 

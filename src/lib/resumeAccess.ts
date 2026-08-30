@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
-import { list, del } from '@vercel/blob';
+import { deleteObjects, listObjects, resolveObjectUrl } from './objectStorage';
 
 // Generated resumes carry the student's full name, phone, address and work history, and
 // @vercel/blob@0.27.3 can only write `access: 'public'` (the type is that one literal - there
@@ -338,8 +338,7 @@ export function readDownloadToken(token: string, now = Date.now()): DownloadToke
 // key made this return null for every resume ever generated - a 404 on every download, swallowed
 // by the extension's catch, shipping applications with no resume and logging nothing.
 export async function resolveBlobUrl(objectKey: string): Promise<string | null> {
-  const { blobs } = await list({ prefix: objectKey, limit: 5 });
-  return blobs.find((b) => b.pathname === objectKey)?.url ?? null;
+  return resolveObjectUrl(objectKey);
 }
 
 // The two Blob calls this module makes, as an injectable seam. Narrowed to the surface actually
@@ -358,8 +357,11 @@ export type ResumeBlobStore = {
 };
 
 const productionBlobStore: ResumeBlobStore = {
-  list: (options) => list(options),
-  del: (urls) => del(urls),
+  list: async (options) => ({
+    blobs: await listObjects(options.prefix),
+    hasMore: false,
+  }),
+  del: (urls) => deleteObjects(urls),
 };
 
 // @vercel/blob's del() rejects a batch above this size outright, so an oversized call deletes
