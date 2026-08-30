@@ -118,6 +118,8 @@ export async function buildApp(options: BuildAppOptions = {}) {
   assertEncryptionKeyConfigured();
 
   const fastify = Fastify({
+    // Public logo tenant tokens share the poller's validated 128-character path-segment bound.
+    routerOptions: { maxParamLength: 128 },
     // Vercel is the only public ingress, so one proxy hop is trusted there. Local and
     // self-hosted processes do not trust spoofable forwarding headers unless configured.
     trustProxy: trustProxySetting(),

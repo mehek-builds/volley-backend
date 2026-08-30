@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync } from 'node:crypto';
 import {
   DeleteObjectsCommand,
   GetObjectCommand,
@@ -19,7 +19,7 @@ export type PutObjectOptions = {
   addRandomSuffix?: boolean;
 };
 
-const PUBLIC_LOGO_KEY_RE = /^company-logos\/(rippling)\/([a-z0-9][a-z0-9._-]{0,199})\/([a-f0-9]{64})\.(png|jpg|gif|webp)$/;
+const PUBLIC_LOGO_KEY_RE = /^company-logos\/(rippling)\/([a-z0-9](?:[a-z0-9._~-]{0,126}[a-z0-9])?)\/([a-f0-9]{64})\.(png|jpg|gif|webp)$/;
 const PUBLIC_LOGO_CONTENT_TYPES = new Map([
   ['png', 'image/png'],
   ['jpg', 'image/jpeg'],
@@ -154,8 +154,10 @@ export async function putPublicLogoObject(
   contentType: string,
 ): Promise<{ url: string; pathname: string }> {
   if (provider() !== 'railway') throw new Error('Railway object storage is required for public logos');
+  const match = PUBLIC_LOGO_KEY_RE.exec(objectKey);
   const expectedContentType = publicLogoContentType(objectKey);
-  if (!expectedContentType || expectedContentType !== contentType) {
+  const actualDigest = createHash('sha256').update(body).digest('hex');
+  if (!match || !expectedContentType || expectedContentType !== contentType || match[3] !== actualDigest) {
     throw new Error('Invalid public logo object');
   }
   await client().send(new PutObjectCommand({

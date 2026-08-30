@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { createHash } from 'node:crypto';
+import { mock, test } from 'node:test';
+import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import {
   mintObjectReadToken,
   objectReadUrl,
   objectStorageConfigured,
   objectStorageUsesRailway,
+  putPublicLogoObject,
   publicLogoContentType,
   publicLogoObjectKey,
   publicLogoObjectUrl,
@@ -91,14 +94,71 @@ test('public logo links accept only content-addressed Rippling image keys', asyn
   await withStorageEnv({ PUBLIC_API_BASE: 'https://api.trylitos.com' }, () => {
     const digest = 'a'.repeat(64);
     const key = `company-logos/rippling/utility/${digest}.webp`;
+    const longestTenant = `a${'b'.repeat(126)}z`;
     assert.equal(
       publicLogoObjectUrl(key),
       `https://api.trylitos.com/storage/logo/rippling/utility/${digest}.webp`,
     );
     assert.equal(publicLogoContentType(key), 'image/webp');
     assert.equal(publicLogoObjectKey({ provider: 'rippling', tenant: 'utility', file: `${digest}.webp` }), key);
+    assert.equal(
+      publicLogoObjectKey({ provider: 'rippling', tenant: 'acme_co.v2~west', file: `${digest}.png` }),
+      `company-logos/rippling/acme_co.v2~west/${digest}.png`,
+    );
+    assert.equal(
+      publicLogoObjectKey({ provider: 'rippling', tenant: longestTenant, file: `${digest}.png` }),
+      `company-logos/rippling/${longestTenant}/${digest}.png`,
+    );
+    assert.equal(publicLogoObjectKey({ provider: 'rippling', tenant: `${longestTenant}z`, file: `${digest}.png` }), null);
+    assert.equal(publicLogoObjectKey({ provider: 'rippling', tenant: 'utility~', file: `${digest}.png` }), null);
+    assert.equal(publicLogoObjectKey({ provider: 'rippling', tenant: 'utility.', file: `${digest}.png` }), null);
     assert.equal(publicLogoObjectKey({ provider: 'rippling', tenant: '..', file: `${digest}.png` }), null);
     assert.equal(publicLogoObjectKey({ provider: 'lever', tenant: 'utility', file: `${digest}.png` }), null);
     assert.throws(() => publicLogoObjectUrl('users/user-1/resume.pdf'), /Invalid public logo object key/);
   });
+});
+
+test('public logo upload verifies its digest and sends immutable S3 cache metadata', async () => {
+  const body = Buffer.from('verified logo bytes');
+  const digest = createHash('sha256').update(body).digest('hex');
+  const objectKey = `company-logos/rippling/acme~west/${digest}.png`;
+  const commands: unknown[] = [];
+  const send = mock.method(S3Client.prototype, 'send', async (command: unknown) => {
+    commands.push(command);
+    return {};
+  });
+
+  try {
+    await withStorageEnv({
+      BUCKET: 'litos-files',
+      ACCESS_KEY_ID: 'access-key',
+      SECRET_ACCESS_KEY: 'secret-key',
+      ENDPOINT: 'https://storage.railway.app',
+      BLOB_READ_WRITE_TOKEN: 'rollback-token',
+      PUBLIC_API_BASE: 'https://api.trylitos.com',
+    }, async () => {
+      const stored = await putPublicLogoObject(objectKey, body, 'image/png');
+      assert.deepEqual(stored, {
+        url: `https://api.trylitos.com/storage/logo/rippling/acme~west/${digest}.png`,
+        pathname: objectKey,
+      });
+      assert.equal(commands.length, 1);
+      assert.ok(commands[0] instanceof PutObjectCommand);
+      assert.equal(commands[0].input.Bucket, 'litos-files');
+      assert.equal(commands[0].input.Key, objectKey);
+      assert.equal(commands[0].input.ContentType, 'image/png');
+      assert.equal(commands[0].input.CacheControl, 'public, max-age=31536000, immutable');
+      await assert.rejects(
+        putPublicLogoObject(
+          `company-logos/rippling/acme~west/${'0'.repeat(64)}.png`,
+          body,
+          'image/png',
+        ),
+        /Invalid public logo object/,
+      );
+      assert.equal(commands.length, 1);
+    });
+  } finally {
+    send.mock.restore();
+  }
 });

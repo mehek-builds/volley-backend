@@ -16,12 +16,20 @@ function contentTypeFor(key: string): string {
   return 'application/octet-stream';
 }
 
-export async function objectStorageRoutes(fastify: FastifyInstance) {
+export type ObjectStorageRouteDependencies = {
+  readStoredObject?: typeof readObject;
+};
+
+export async function objectStorageRoutes(
+  fastify: FastifyInstance,
+  dependencies: ObjectStorageRouteDependencies = {},
+) {
+  const readStoredObject = dependencies.readStoredObject ?? readObject;
   fastify.get('/storage/logo/:provider/:tenant/:file', async (request: FastifyRequest, reply: FastifyReply) => {
     const key = publicLogoObjectKey(request.params as { provider?: string; tenant?: string; file?: string });
     if (!key) return reply.status(404).send({ error: 'Object not found' });
     try {
-      const body = await readObject(key);
+      const body = await readStoredObject(key);
       if (!body) return reply.status(404).send({ error: 'Object not found' });
       return reply
         .header('Content-Type', publicLogoContentType(key) ?? contentTypeFor(key))
@@ -39,7 +47,7 @@ export async function objectStorageRoutes(fastify: FastifyInstance) {
     const key = token ? readObjectReadToken(token) : null;
     if (!key) return reply.status(403).send({ error: 'Invalid object link' });
     try {
-      const body = await readObject(key);
+      const body = await readStoredObject(key);
       if (!body) return reply.status(404).send({ error: 'Object not found' });
       return reply
         .header('Content-Type', contentTypeFor(key))
