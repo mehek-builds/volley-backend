@@ -88,6 +88,7 @@ export function mintObjectReadToken(objectKey: string): string {
 export function readObjectReadToken(token: string): string | null {
   try {
     const raw = Buffer.from(token, 'base64url');
+    if (raw.toString('base64url') !== token) return null;
     if (raw.length <= 28) return null;
     const decipher = createDecipheriv('aes-256-gcm', tokenKey(), raw.subarray(0, 12));
     decipher.setAuthTag(raw.subarray(12, 28));
