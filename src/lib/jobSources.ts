@@ -323,7 +323,6 @@ const BASE_ENTRIES: Entry[] = [
   ['ionq', 'greenhouse', 'ionq'],
   ['psiquantum', 'greenhouse', 'psiquantum'],
   ['quintoandar', 'greenhouse', 'quintoandar'],
-  ['phonepe', 'greenhouse', 'phonepe'],
   ['lightmatter', 'greenhouse', 'lightmatter'],
   ['dataiku', 'greenhouse', 'dataiku'],
   ['groww', 'greenhouse', 'groww'],
