@@ -11,7 +11,7 @@ import {
   resetApplicationAliasDeliverabilityCache,
 } from './applicationEmailDeliverability';
 
-const ENDPOINT = 'https://student-outreach-backend.vercel.app/webhooks/application-email/inbound';
+const ENDPOINT = 'https://api.trylitos.com/webhooks/application-email/inbound';
 
 async function withAliasEnv<T>(run: () => Promise<T>): Promise<T> {
   const saved = {

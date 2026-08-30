@@ -293,8 +293,8 @@ test('resume edits refuse a stale personal email before rendering or storing a r
   const identityCheck = editRoute.indexOf('const currentResumeEmail = resumeEmailOfRecord');
   assert.ok(identityCheck >= 0);
   assert.ok(identityCheck < editRoute.indexOf('await renderResumePdf'));
-  assert.ok(identityCheck < editRoute.indexOf('await put('));
   assert.match(editRoute, /!resumePacketEmailIsCurrent\(storedContact\.email, currentResumeEmail\)/);
+  assert.ok(identityCheck < editRoute.indexOf('await putObject('));
   assert.match(editRoute, /resume_email_regeneration_required/);
 });
 

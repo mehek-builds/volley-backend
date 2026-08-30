@@ -1,6 +1,6 @@
-import { del, put } from '@vercel/blob';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { deleteObjects, putObject } from './objectStorage';
 import { and, eq, sql } from 'drizzle-orm';
 import { db, withDedicatedDatabase } from '../db/index';
 import { withReadOnlyRetry } from '../db/readOnlyRetry';
@@ -143,8 +143,7 @@ async function persistCoverLetter(
       if (canonicalCoverLetterMutationBlocked(canonicalApplication, currentPacket.spec)) {
         throw new CanonicalCoverLetterLockedError();
       }
-      const storedBlob = await put(`users/${row.user_id}/resumes/${row.id}-cover-letter-${Date.now()}.pdf`, pdf, {
-        access: 'public',
+      const storedBlob = await putObject(`users/${row.user_id}/resumes/${row.id}-cover-letter-${Date.now()}.pdf`, pdf, {
         contentType: 'application/pdf',
       });
       blobState.current = storedBlob;
@@ -226,7 +225,7 @@ async function persistCoverLetter(
     if (!blobState.current) throw new Error('Cover letter persistence returned no blob');
     return { cover_letter: persisted, blob_url: blobState.current.url };
   } catch (error) {
-    if (blobState.current) await del(blobState.current.url).catch(() => undefined);
+    if (blobState.current) await deleteObjects(blobState.current.url).catch(() => undefined);
     throw error;
   }
 }
@@ -360,6 +359,6 @@ export async function deleteStoredCoverLetter(row: ApplicationRow) {
   if (!changed[0]) throw new Error('Application changed before the cover letter could be removed');
   if (existing?.object_key) {
     const url = await resolveBlobUrl(existing.object_key).catch(() => null);
-    if (url) await del(url).catch(() => undefined);
+    if (url) await deleteObjects(url).catch(() => undefined);
   }
 }

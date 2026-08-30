@@ -12,6 +12,7 @@ import {
 } from '../lib/resumeAccess';
 import { purgeExpiredEntitledUsageResults } from '../lib/entitlements';
 import { purgeExpiredNetworkImportPreviews } from '../lib/networkPreviewRetention';
+import { objectStorageConfigured } from '../lib/objectStorage';
 
 // The breakdown fields are optional because they describe a sweep's own bookkeeping, not the
 // contract a caller depends on: the production implementation always fills them, and a test
@@ -103,9 +104,9 @@ async function handleSweep(
     fastify.log.warn('resume retention sweep REFUSED: caller presented no valid secret; if this is Vercel Cron, CRON_SECRET does not match and the sweep is not running');
     return reply.status(401).send({ error: 'unauthorized' });
   }
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    fastify.log.warn('resume retention sweep REFUSED: BLOB_READ_WRITE_TOKEN is not set, so resume files are NOT being deleted');
-    return reply.status(503).send({ error: 'BLOB_READ_WRITE_TOKEN not configured' });
+  if (!objectStorageConfigured()) {
+    fastify.log.warn('resume retention sweep REFUSED: object storage is not configured, so resume files are NOT being deleted');
+    return reply.status(503).send({ error: 'object storage not configured' });
   }
 
   try {
