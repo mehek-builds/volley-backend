@@ -32,12 +32,12 @@ jobs:
       - name: Drain the bounded polling queue
         env:
           INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
-          API_BASE: ${{ vars.LITOS_API_BASE || 'https://student-outreach-backend.vercel.app' }}
+          API_BASE: ${{ vars.LITOS_API_BASE }}
         run: |
           set -euo pipefail
 
-          if [ -z "${INTERNAL_CRON_SECRET}" ]; then
-            echo "::error::INTERNAL_CRON_SECRET is not set on this repository."
+          if [ -z "${INTERNAL_CRON_SECRET}" ] || [ -z "${API_BASE}" ]; then
+            echo "::error::INTERNAL_CRON_SECRET and LITOS_API_BASE must both be set on this repository."
             exit 1
           fi
 
