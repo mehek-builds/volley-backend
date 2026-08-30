@@ -138,13 +138,9 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
  * stops being a place a job seeker can browse and becomes a list they exhaust in one sitting, so a
  * board that quietly shrinks is a broken product that still returns HTTP 200.
  *
- * RAISED FROM 10,000 to 50,000 on 2026-08-29 (Mehek's call), the SAME DAY greenhouse/lever/ashby/
- * workable/rippling/breezy/recruitee all became pollable. That is deliberate, not a coincidence to
- * paper over: the live board measured 34,369 postings that morning, so this floor is set ABOVE
- * current supply on purpose, the same way the 1,000 -> 10,000 raise on 2026-07-28 was. See the note
- * at the top of this file's history: never fix a breach by lowering the number. Expect the daily cron
- * to answer 5xx from the moment this ships until sourcing genuinely clears 50,000, and read that as
- * the alarm doing its job, not as a regression to roll back.
+ * RAISED TO 100,000 on 2026-08-30 (Mehek's call), with all seven autonomous families pollable and
+ * 1,049 reviewed sources projected to surface 119,240 postings. The floor is deliberately below the
+ * 120,000 early warning line and 125,000 operating target. Never fix a breach by lowering it.
  *
  * COUNTED THE WAY A USER SEES IT, which is the only count that means anything: active postings, from
  * enabled sources, on portals Litos can finish autonomously. That last clause is why this constant
@@ -204,7 +200,7 @@ export const MINIMUM_SURFACED_INTERNSHIPS = 2_000;
 /**
  * REQUIRED HEADROOM OVER THE FLOOR.
  *
- * 50,000 is the committed inventory. The warning line is 20 percent above it, giving source decay
+ * 100,000 is the committed inventory. The warning line is 20 percent above it, giving source decay
  * room before the product breaks its commitment.
  */
 export const REQUIRED_HEADROOM_MULTIPLE = 1.2;
@@ -1258,11 +1254,10 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
     const now = new Date();
     await db.transaction(async (tx) => {
       await tx.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, source.id));
-      /* One statement per posting meant 7,109 round trips for a full sweep and
-         a 469s run, against a 300s Vercel ceiling (vercel.json) — the daily
-         cron would have died halfway through the alphabet, leaving every
-         un-reached source's jobs flipped to is_active = false by the sweep
-         above. That failure empties the public board rather than staling it.
+      /* One statement per posting meant 7,109 round trips for a full sweep and a 469s run. A
+         scheduler deadline could stop halfway through the alphabet, leaving every unreached
+         source's jobs flipped to is_active = false by the sweep above. That failure empties the
+         public board rather than staling it.
          Chunked so a single board the size of Databricks still fits well
          inside Postgres's 65,535-parameter cap: 21 columns x 200 rows. */
       for (let index = 0; index < fresh.length; index += UPSERT_CHUNK) {
@@ -2341,8 +2336,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .where(and(eq(career_page_sources.enabled, true), drainEligible))
       .orderBy(sql`${career_page_sources.last_polled_at} asc nulls first`)
       .limit(POLL_SOURCE_LIMIT);
-    /* Stop starting work at three minutes and cap the scheduler at three and a half, leaving at
-       least 90 seconds before Vercel's 300-second hard stop for the final batch, metrics and reply.
+    /* The application-owned Railway budget leaves time for the final batch, metrics and reply.
        A source that is not attempted keeps its old last_polled_at, so the oldest-first query puts
        it first next time. Workable starts are separately spaced below its shared provider limit. */
     const pollRun = await pollSourcesWithinBudget(sources, pollSource);
@@ -2359,7 +2353,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      * one step; it erodes as tokens rotate and boards go quiet, and a figure in every cron response
      * is what makes that erosion visible before it crosses the line.
      *
-     * A breach answers 5xx ON PURPOSE. This route is the daily Vercel cron, and a cron that returns
+     * A breach answers 5xx ON PURPOSE. This route is the daily Railway cron, and a cron that returns
      * 200 is a cron nobody looks at - which is exactly how career_page_sources sat empty for months
      * while every check reported success. Failing the run is the only signal that reaches anyone.
      * The poll itself still committed; this reports the state, it does not roll anything back.

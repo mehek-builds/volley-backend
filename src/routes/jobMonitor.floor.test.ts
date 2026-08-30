@@ -71,8 +71,9 @@ test('the scheduled catalog includes reviewed sources and deduplicated operator 
 test('post-poll metric statements leave time for the cron to answer', () => {
   assert.equal(MONITOR_METRICS_STATEMENT_TIMEOUT_MS, 30_000);
   assert.equal(TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS, 5_000);
+  assert.equal(POLL_TIME_BUDGET_MS, 9 * 60_000);
   assert.ok(TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS < MONITOR_METRICS_STATEMENT_TIMEOUT_MS);
-  assert.ok(MONITOR_METRICS_STATEMENT_TIMEOUT_MS < 300_000 - POLL_TIME_BUDGET_MS);
+  assert.ok(MONITOR_METRICS_STATEMENT_TIMEOUT_MS < 14 * 60_000 - POLL_TIME_BUDGET_MS);
 });
 
 test('source 401 completes on the second pass of the same drain run', () => {

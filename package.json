@@ -62,6 +62,7 @@
     "db:migration:backup": "node scripts/migrate-postgres.mjs backup",
     "db:migration:restore": "node scripts/migrate-postgres.mjs restore",
     "db:migration:verify": "node scripts/verify-database-migration.mjs",
+    "test:railway-cron": "node --test scripts/railway-cron.test.mjs",
     "db:push": "drizzle-kit push:pg",
     "db:indexes": "node scripts/apply-performance-indexes.mjs",
     "db:job-monitor": "node scripts/apply-job-monitor-schema.mjs",
