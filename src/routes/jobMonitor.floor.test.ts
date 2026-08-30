@@ -58,6 +58,15 @@ test('the scheduled cron summary always reports postings and grouped roles', () 
   assert.match(workflow, /\(\.polling_complete \| type\) == "boolean"/);
 });
 
+test('the logo gate measures every counted row against its exact employer board', () => {
+  const route = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const gate = readFileSync('scripts/check-logo-coverage.mjs', 'utf8');
+  assert.match(route, /company_logo_sources: companyLogoSources/);
+  assert.match(route, /groupBy\(monitored_jobs\.company_name, career_page_sources\.career_url\)/);
+  assert.match(gate, /miss: '404'/, 'a monogram must not pass as a verified logo');
+  assert.match(gate, /Every surfaced posting has a verified company logo/);
+});
+
 test('the scheduled catalog includes reviewed sources and deduplicated operator overrides', () => {
   const reviewed: JobSourceInput[] = [
     { company_name: 'Reviewed', ats_name: 'workable', board_token: 'same', career_url: 'https://example.com/reviewed' },

@@ -2096,6 +2096,24 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         .orderBy(sql`count(*) desc`)
       : null;
 
+    /* The production logo gate needs the same weighted inventory, split by the exact employer
+       board that proves identity. Company name alone is insufficient: Block is the canonical
+       example, where guessing the name finds block.co while its Greenhouse board proves block.xyz.
+       Only returned to the explicit counts=true measurement request. */
+    const companyLogoSources = facetQuery?.counts === 'true'
+      ? await db
+        .select({
+          company_name: monitored_jobs.company_name,
+          career_url: career_page_sources.career_url,
+          rows: sql<number>`count(*)::int`,
+        })
+        .from(monitored_jobs)
+        .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+        .where(where)
+        .groupBy(monitored_jobs.company_name, career_page_sources.career_url)
+        .orderBy(sql`count(*) desc`)
+      : null;
+
     /* Cities, not location strings.
        An employer's `location` is whatever they typed: often a list ("Boston;
        New York City; Pennsylvania"), often carrying a country ("San Mateo, CA,
@@ -2138,6 +2156,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
             .map((r) => ({ company_name: r.v, rows: r.n })),
         }
         : {}),
+      ...(companyLogoSources ? { company_logo_sources: companyLogoSources } : {}),
       /* `titles` is gone on purpose. It returned the board's most common RAW
          posting titles — "Senior Product Manager - Network Path" — which is not
          what a person types into a field labelled Job title. The board now
