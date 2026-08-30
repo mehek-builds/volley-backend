@@ -1,6 +1,6 @@
 export type ApplicationEmailRouteMode = 'managed_resend' | 'custom_domain' | 'mailbox';
 
-export const DEFAULT_INBOUND_WEBHOOK_URL = 'https://student-outreach-backend.vercel.app/webhooks/application-email/inbound';
+export const DEFAULT_INBOUND_WEBHOOK_URL = 'https://api.trylitos.com/webhooks/application-email/inbound';
 const INBOUND_WEBHOOK_PATH = '/webhooks/application-email/inbound';
 
 export type ApplicationEmailMailboxRoute = {

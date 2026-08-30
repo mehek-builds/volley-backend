@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@aws-sdk/client-s3": "^3.1121.0",
     "@expo-google-fonts/tinos": "0.4.2",
     "@fastify/cors": "^11.3.0",
     "@fastify/multipart": "^10.1.0",
@@ -58,6 +59,10 @@
     "test:e2e": "tsx e2e/applied-badge.e2e.mts && tsx e2e/grouped-inventory.e2e.mts && tsx e2e/packet-alias.e2e.mts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
+    "db:migration:backup": "node scripts/migrate-postgres.mjs backup",
+    "db:migration:restore": "node scripts/migrate-postgres.mjs restore",
+    "db:migration:verify": "node scripts/verify-database-migration.mjs",
+    "test:railway-cron": "node --test scripts/railway-cron.test.mjs",
     "db:push": "drizzle-kit push:pg",
     "db:indexes": "node scripts/apply-performance-indexes.mjs",
     "db:job-monitor": "node scripts/apply-job-monitor-schema.mjs",

@@ -202,13 +202,13 @@ test('an unconfigured cron secret is a 503 refusal, never a success', async () =
   });
 });
 
-test('a missing Blob token is a 503 refusal, never a success', async () => {
+test('missing object storage configuration is a 503 refusal, never a success', async () => {
   const harness = dependencyHarness();
   await withEnv({ BLOB_READ_WRITE_TOKEN: undefined }, async () => {
     await withApp(harness.dependencies, async (app) => {
       const response = await app.inject({ method: 'GET', url: sweepUrl, headers: authorizedHeaders });
       assert.equal(response.statusCode, 503);
-      assert.deepEqual(response.json(), { error: 'BLOB_READ_WRITE_TOKEN not configured' });
+      assert.deepEqual(response.json(), { error: 'object storage not configured' });
       assert.equal(harness.calls.sweep, 0, 'a sweep without a token would delete nothing and report success');
       assert.equal(harness.calls.clear, 0);
     });

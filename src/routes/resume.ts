@@ -2,7 +2,7 @@ import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
-import { put } from '@vercel/blob';
+import { objectStorageUsesRailway, putObject, readObject } from '../lib/objectStorage';
 import { db } from '../db/index';
 import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
 import { claimOnboardingBuildGrant, releaseOnboardingBuildGrant } from '../lib/onboardingBuildGrant';
@@ -119,7 +119,7 @@ async function refreshedResumeReplay(
   const resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(
     userId,
     artifact.object_key,
-    { blobUrl: artifact.blob_url ?? undefined },
+    { blobUrl: objectStorageUsesRailway() ? undefined : artifact.blob_url ?? undefined },
   )}`;
   const application = response.application && typeof response.application === 'object' && !Array.isArray(response.application)
     ? { ...(response.application as Record<string, unknown>), download_url: resumeUrl }
@@ -1308,8 +1308,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // What we control is who ever learns the resulting URL, and the answer is nobody: the
       // blob URL is permanent and unauthenticated, so it stays server-side and the client gets
       // a capability link to /resume/download instead. See lib/resumeAccess.ts.
-      const blob = await put(requestedKey, pdfBuffer, {
-        access: 'public',
+      const blob = await putObject(requestedKey, pdfBuffer, {
         contentType: 'application/pdf',
       });
       // Store the pathname the API actually assigned, NOT the one we asked for. `addRandomSuffix`
@@ -1325,7 +1324,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       // lookup rides list(), which is eventually consistent with no bound - a fresh resume can
       // 404 as "deleted" for the whole window a student is submitting in. put()'s URL is a
       // strong read target and it is in hand right here.
-      resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey, { blobUrl: blob.url, fileName: resumeFileName })}`;
+      resumeUrl = `${apiBaseFor(request)}/resume/download?t=${mintDownloadToken(userId, objectKey, {
+        ...(objectStorageUsesRailway() ? {} : { blobUrl: blob.url }),
+        fileName: resumeFileName,
+      })}`;
     } catch (err) {
       fastify.log.error(err);
       if (useLegacyMonthlyCounter) await releaseCounterSlot(userId, period, 'resumes');
@@ -1679,29 +1681,22 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     // R-040: tokens minted since the fix carry the blob URL itself (payload.b) - a strong
     // point-read with no list() consistency dependence. Tokens from before the fix (<= 5 min
     // old at any moment) fall back to the list()-based key lookup they were minted against.
-    let blobUrl: string | null;
-    if (payload.b) {
-      blobUrl = payload.b;
-    } else {
-      try {
-        blobUrl = await resolveBlobUrl(payload.k);
-      } catch (err) {
-        fastify.log.error(err);
-        return reply.status(502).send({ error: 'Could not reach resume storage' });
-      }
-    }
     let pdf: Buffer | null = null;
-    let storageConfirmedMissing = !blobUrl;
-    if (blobUrl) {
-      try {
-        const upstream = await fetch(blobUrl);
+    let storageConfirmedMissing = false;
+    try {
+      if (payload.b) {
+        const upstream = await fetch(payload.b);
         if (upstream.status === 404 || upstream.status === 410) storageConfirmedMissing = true;
         else if (!upstream.ok) throw new Error(`blob fetch ${upstream.status}`);
         else pdf = Buffer.from(await upstream.arrayBuffer());
-      } catch (err) {
-        fastify.log.error(err);
-        return reply.status(502).send({ error: 'Could not read resume from storage' });
+      } else {
+        const stored = await readObject(payload.k);
+        if (stored) pdf = stored;
+        else storageConfirmedMissing = true;
       }
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(502).send({ error: 'Could not read resume from storage' });
     }
     if (!pdf && storageConfirmedMissing) {
       const recovery = await recoverOwnedGeneratedDocument({ userId: payload.u, objectKey: payload.k });

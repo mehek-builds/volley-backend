@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { put } from '@vercel/blob';
 import { and, eq, sql } from 'drizzle-orm';
 import { db } from '../db/index';
 import { generated_resumes } from '../db/schema';
@@ -13,6 +12,7 @@ import {
 } from './packetAudit';
 import { rerenderFrozenResume } from './packetDocumentRecovery';
 import { createPdfGenerationBinding } from './pdfGenerationBinding';
+import { putObject as storePutObject } from './objectStorage';
 import { PacketDocumentExpiredError, resolveBlobUrl } from './resumeAccess';
 
 type ResumeRow = typeof generated_resumes.$inferSelect;
@@ -209,7 +209,7 @@ export async function restoreExpiredPacketResume(
 
   const objectKey = `users/${row.user_id}/resumes/${row.id}-restored-${randomUUID()}.pdf`;
   const write = dependencies.putObject
-    ?? ((key: string, payload: Buffer) => put(key, payload, { access: 'public', contentType: 'application/pdf' }));
+    ?? ((key: string, payload: Buffer) => storePutObject(key, payload, { contentType: 'application/pdf' }));
   const blob = await write(objectKey, bytes);
 
   const quality = ((row.spec as Record<string, unknown>)?._quality ?? {}) as Record<string, unknown>;

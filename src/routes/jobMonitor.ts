@@ -134,9 +134,13 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
 /**
  * THE BOARD MUST NEVER FALL BELOW THIS MANY SURFACED JOBS.
  *
- * A hard product floor, not a target and not a nice-to-have. Below ten thousand postings the board
+ * A hard product floor, not a target and not a nice-to-have. Below fifty thousand postings the board
  * stops being a place a job seeker can browse and becomes a list they exhaust in one sitting, so a
  * board that quietly shrinks is a broken product that still returns HTTP 200.
+ *
+ * RAISED TO 100,000 on 2026-08-30 (Mehek's call), with all seven autonomous families pollable and
+ * 1,049 reviewed sources projected to surface 119,240 postings. The floor is deliberately below the
+ * 120,000 early warning line and 125,000 operating target. Never fix a breach by lowering it.
  *
  * COUNTED THE WAY A USER SEES IT, which is the only count that means anything: active postings, from
  * enabled sources, on portals Litos can finish autonomously. That last clause is why this constant
@@ -149,10 +153,11 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
  *   - sources failing their polls (check career_page_sources.last_error)
  *   - a portal demoted out of AUTONOMOUS_PORTAL_FAMILIES, taking its boards with it
  *   - the deactivation sweep in pollSource wiping boards (see the empty-response guard there)
- * The fix is more sources or a restored adapter. Workable is now both autonomous and pollable, so
- * adding verified Workable account tokens is the cheapest source-expansion lever.
+ * The fix is more sources. All seven pollable families now have a fetchSourceJobs branch (see
+ * POLLABLE_JOB_BOARDS); the cheapest remaining lever is another verified source round across these
+ * families, not a new adapter.
  */
-export const MINIMUM_SURFACED_JOBS = 10_000;
+export const MINIMUM_SURFACED_JOBS = 100_000;
 
 /** Distinct roles use the public board's exact grouping key: company, title, and ATS family. */
 export const MINIMUM_SURFACED_GROUPED_ROLES = 10_000;
@@ -163,11 +168,12 @@ export const MINIMUM_SPONSOR_SURFACED_JOBS = 5_000;
 /**
  * THE INTERNSHIP COMMITMENT: 2,000 surfaced internships (Mehek's call, 2026-08-03).
  *
- * NOT YET ENFORCED AS A 5xx, AND THE GAP IS THE REASON. Measured the day it was set: the board
- * surfaced 158 internships and every source we have, probed live at any age, carried 367 in
- * 36,435 postings - 1.0%. Adding the 26 densest boards we could find took it to ~240. So 2,000 is
- * roughly 8x the entire supply reachable through the four pollable board APIs today, and wiring it
- * to a 500 now would make the daily cron permanently red. That would not surface the shortfall; it
+ * NOT YET ENFORCED AS A 5xx, AND THE GAP IS THE REASON. Measured the day it was set (2026-08-03,
+ * against the four pollable board APIs of that day): the board surfaced 158 internships and every
+ * source we have, probed live at any age, carried 367 in 36,435 postings - 1.0%. Adding the 26
+ * densest boards we could find took it to ~240. So 2,000 was roughly 8x the entire supply reachable
+ * then, and wiring it to a 500 now would make the daily cron permanently red. That would not surface
+ * the shortfall; it
  * would retire the one alarm that currently means "the board is broken NOW", which is exactly the
  * failure MINIMUM_SURFACED_JOBS exists to prevent. Reported on every run instead, so the distance
  * is watched daily rather than asserted once.
@@ -194,7 +200,7 @@ export const MINIMUM_SURFACED_INTERNSHIPS = 2_000;
 /**
  * REQUIRED HEADROOM OVER THE FLOOR.
  *
- * 10,000 is the committed inventory. The warning line is 20 percent above it, giving source decay
+ * 100,000 is the committed inventory. The warning line is 20 percent above it, giving source decay
  * room before the product breaks its commitment.
  */
 export const REQUIRED_HEADROOM_MULTIPLE = 1.2;
@@ -207,8 +213,15 @@ export function groupedRoleAlertTriggered(surfacedGroupedRoles: number): boolean
   return surfacedGroupedRoles < GROUPED_ROLE_ALERT_THRESHOLD;
 }
 
-/** Supply goals measured separately from the hard floor and early warning line. */
-export const TARGET_SURFACED_POSTINGS = 15_000;
+/**
+ * Supply goals measured separately from the hard floor and early warning line.
+ *
+ * Raised 15,000 -> 100,000 on 2026-08-29 alongside the floor (Mehek's call), matching the scale a
+ * competitor board claims ("100,000+ top-notch positions daily") - though that number is itself
+ * inconsistent across the competitor's own marketing (see litos-competitor-teardown-4-new-2026-08-02
+ * .md), so treat it as a stretch target set for parity, not as a verified market ceiling.
+ */
+export const TARGET_SURFACED_POSTINGS = 125_000;
 export const TARGET_SURFACED_GROUPED_ROLES = 12_000;
 
 export function inventoryTargetMet(surfacedPostings: number, surfacedGroupedRoles: number): boolean {
@@ -1241,11 +1254,10 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
     const now = new Date();
     await db.transaction(async (tx) => {
       await tx.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, source.id));
-      /* One statement per posting meant 7,109 round trips for a full sweep and
-         a 469s run, against a 300s Vercel ceiling (vercel.json) — the daily
-         cron would have died halfway through the alphabet, leaving every
-         un-reached source's jobs flipped to is_active = false by the sweep
-         above. That failure empties the public board rather than staling it.
+      /* One statement per posting meant 7,109 round trips for a full sweep and a 469s run. A
+         scheduler deadline could stop halfway through the alphabet, leaving every unreached
+         source's jobs flipped to is_active = false by the sweep above. That failure empties the
+         public board rather than staling it.
          Chunked so a single board the size of Databricks still fits well
          inside Postgres's 65,535-parameter cap: 21 columns x 200 rows. */
       for (let index = 0; index < fresh.length; index += UPSERT_CHUNK) {
@@ -2324,8 +2336,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
       .where(and(eq(career_page_sources.enabled, true), drainEligible))
       .orderBy(sql`${career_page_sources.last_polled_at} asc nulls first`)
       .limit(POLL_SOURCE_LIMIT);
-    /* Stop starting work at three minutes and cap the scheduler at three and a half, leaving at
-       least 90 seconds before Vercel's 300-second hard stop for the final batch, metrics and reply.
+    /* The application-owned Railway budget leaves time for the final batch, metrics and reply.
        A source that is not attempted keeps its old last_polled_at, so the oldest-first query puts
        it first next time. Workable starts are separately spaced below its shared provider limit. */
     const pollRun = await pollSourcesWithinBudget(sources, pollSource);
@@ -2342,7 +2353,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      * one step; it erodes as tokens rotate and boards go quiet, and a figure in every cron response
      * is what makes that erosion visible before it crosses the line.
      *
-     * A breach answers 5xx ON PURPOSE. This route is the daily Vercel cron, and a cron that returns
+     * A breach answers 5xx ON PURPOSE. This route is the daily Railway cron, and a cron that returns
      * 200 is a cron nobody looks at - which is exactly how career_page_sources sat empty for months
      * while every check reported success. Failing the run is the only signal that reaches anyone.
      * The poll itself still committed; this reports the state, it does not roll anything back.

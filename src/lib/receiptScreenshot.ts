@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { put } from '@vercel/blob';
+import { putObject } from './objectStorage';
 
 const RECEIPT_CAPTURE_PATH = '/receipts';
 const MAX_RECEIPT_BYTES = 20 * 1024 * 1024;
@@ -77,7 +77,11 @@ export async function storeSubmissionScreenshot(
   const expected = screenshotBytes(body);
   const capture = receiptCaptureTarget();
   if (!capture) {
-    const blobPut = dependencies.blobPut ?? (put as BlobPut);
+    const blobPut = dependencies.blobPut ?? (async (key, value, options) =>
+      putObject(key, value, {
+        contentType: options.contentType,
+        addRandomSuffix: options.addRandomSuffix,
+      }));
     const blob = await blobPut(objectKey, body, {
       access: 'public',
       contentType: 'image/png',

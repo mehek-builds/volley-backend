@@ -77,11 +77,14 @@ test('Phase 2 configures exactly 49 verified Workable employers with canonical c
   }
 });
 
-test('Phase 2 keeps the verified employer catalog diverse across Greenhouse, Lever, Ashby, and Workable', () => {
-  // 398 reviewed sources, minus five dead or stale boards removed by CI source-identity reviews.
-  assert.equal(JOB_SOURCES.length, 393, 'the reviewed Phase 2 catalog must not silently shrink');
+test('Phase 2 keeps the verified employer catalog diverse across all seven pollable ATS families', () => {
+  // 469 reviewed sources plus 580 verified Greenhouse sources for the 100,000-posting floor.
+  assert.equal(JOB_SOURCES.length, 1_049, 'the reviewed catalog must not silently shrink or grow');
   const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
-  assert.deepEqual([...families].sort(), ['ashby', 'greenhouse', 'lever', 'workable']);
+  assert.deepEqual(
+    [...families].sort(),
+    ['ashby', 'breezy', 'greenhouse', 'lever', 'recruitee', 'rippling', 'workable'],
+  );
   /* A REVIEW TRIPWIRE, NOT A CAPACITY LIMIT, and the comment that used to be here was wrong.
    *
    * It claimed that past 400 "the poller leaves the tail of the catalog unpolled". It does not.
@@ -92,13 +95,23 @@ test('Phase 2 keeps the verified employer catalog diverse across Greenhouse, Lev
    * 400, and the test named "source 401 completes on the second pass of the same drain run"
    * covers exactly this.
    *
-   * The assertion is kept anyway, deliberately: crossing 400 means the daily cron starts needing
-   * a second pass to finish, which changes its runtime and its failure modes, and that is worth
-   * one deliberate edit rather than discovering it from a slow morning. When a sourcing round
-   * genuinely needs source 401, raise the number here and confirm the workflow still completes
-   * inside its five passes - do not treat this as a reason not to add sources. */
-  assert.ok(JOB_SOURCES.length <= POLL_SEGMENT_SIZE, 'crossing 400 makes the cron a two-pass drain');
+   * CROSSED DELIBERATELY twice: the autonomous-family probe round crossed source 401 on 2026-08-29,
+   * then the 100,000-posting supply round crossed source 801 on 2026-08-30. The daily cron now needs
+   * three passes to finish. The tripwire remains at the real ceiling of five passes so the next
+   * deliberate crossing is the one that needs a capacity decision. */
   assert.equal(POLL_SEGMENT_SIZE, 400, 'one segment; the drain carries whatever does not fit');
+  assert.ok(
+    JOB_SOURCES.length > POLL_SEGMENT_SIZE,
+    'this assertion is itself the record of when the catalog first crossed one segment',
+  );
+  assert.ok(
+    JOB_SOURCES.length > POLL_SEGMENT_SIZE * 2,
+    'the 100,000-posting catalog deliberately needs a third drain segment',
+  );
+  assert.ok(
+    JOB_SOURCES.length <= POLL_SEGMENT_SIZE * 5,
+    'the real ceiling: five drain passes of one segment each, per .github/workflows/job-monitor.yml',
+  );
 });
 
 test('no two sources claim the same board, and none is blank', () => {

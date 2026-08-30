@@ -61,6 +61,7 @@ import { applicationEmailRouteSelection } from './lib/applicationEmailRoute';
 import { warmApplicationAliasDeliverability } from './lib/applicationEmailDeliverability';
 import { aggregateServiceHealthStatus } from './lib/serviceHealth';
 import { createSubmissionCutoverHook, resolveSubmissionCutover } from './lib/submissionCutover';
+import { objectStorageRoutes } from './routes/objectStorage';
 
 export interface BuildAppOptions {
   rateLimit?: RateLimitConfig;
@@ -447,6 +448,7 @@ export async function buildApp(options: BuildAppOptions = {}) {
   await fastify.register(emailConnectionRoutes);
   await fastify.register(applicationEmailRoutes);
   await fastify.register(resumeRoutes);
+  await fastify.register(objectStorageRoutes);
   await fastify.register(baseResumeRoutes);
   await fastify.register(accountRoutes);
   await fastify.register(resumeRetentionRoutes);

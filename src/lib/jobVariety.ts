@@ -62,6 +62,16 @@ const FINANCIAL = new Set([
   'gsa capital', 'vatic labs', 'engineers gate', 'dv trading', 'jump crypto', 'airwallex',
   // The international round, 2026-08-04. Fintech and banking outside the US.
   'inter', 'solaris', 'raisin', 'mollie', 'ledger', 'vtex',
+  // The 2026-08-30 supply round.
+  'private equity insights', 'capco', 'horace mann - agent opportunities',
+  // Reviewed employers from the 100,000-posting expansion.
+  'codat', 'sap fioneer', 'financeit', 'facet', 'payabl.', 'wrisk', 'elevation capital',
+  'drw', 'bitpanda', 'hudson river trading', 'five rings', 'tala', 'cfo insights', 'okx',
+  'icapital', 'xp inc.', 'sezzle', 'ebury', 'c6 bank', 'agibank', 'careers at kkr',
+  'moniepoint', 'addepar', 'payoneer', 'upstart', 'cottingham & butler', 'fundraise up',
+  'mercer advisors', 'paypay', 'careers at tide', 'alpaca', 'stepstone group', 'thunes',
+  'bill', 'blockchain.com', 'alpha financial markets consulting', 'human interest', 'kbra',
+  'galaxy', 'ieq capital', 'sumup', 'plata card', 'glg', 'epic brokers',
 ]);
 
 const HEALTH = new Set([
@@ -70,6 +80,34 @@ const HEALTH = new Set([
   'onemedical', 'openevidence', 'papa', 'parsleyhealth', 'recursion', 'science 37',
   'suki', 'talkspace', 'tebra', 'truveta', 'veracyte', 'zocdoc',
   'twist bioscience', 'alan', 'wellhub',
+  // The 2026-08-29 autonomous-poller probe round (Rippling, Breezy, Recruitee).
+  'beta bionics', 'reveleer',
+  // The 2026-08-30 supply round.
+  'pulse healthcare', 'bayada home health care', 'liquid personnel', 'centria autism',
+  'upstream rehabilitation', 'veterinary emergency group (veg)', 'ouihelp', 'medelite group, llc.',
+  // Reviewed employers from the 100,000-posting expansion.
+  'create wellness, inc.', 'lifely', 'oscar health', 'clover health', 'maven clinic', 'headway',
+  'evolve physical therapy', 'vetsez', 'student medicover', 'luminis health',
+  'vitalcaring group', 'veterinary practice partners', 'convenientmd',
+  'mineralys therapeutics', 'charlie health', 'revolution medicines', 'ennoble care',
+  'eliot community human services', 'the specialty alliance', 'precision medicine group',
+  'lakefield veterinary group', 'otterbein seniorlife', 'wellthy care network',
+  'kestra medical technologies inc.', 'helping hands family', 'inhome therapy',
+  'precision for medicine', 'theoria medical', 'vetevolve', 'welbehealth', 'family of kidz',
+  'doctolib', 'vail health hospital', 'bethesda health group', 'cortica - neurodevelopmental',
+  'compass pathways', 'acorn health', 'lila sciences', 'specialty1 partners',
+  'eating recovery center', 'united vein & vascular centers', 'bond vet',
+  'flagship pioneering, inc.', 'shields health solutions', 'veritas veterinary partners',
+  'skilled wound care', 'ivx health', 'simtra biopharma solutions', 'sono bello',
+  'bridgebio pharma', 'azurity pharmaceuticals - us', 'corcept therapeutics', 'diana health',
+  'genscript/probio', 'axsome therapeutics', 'blackbird health', 'sol mental health',
+  'billiontoone', 'dental365', 'garner health', 'cohere health', 'inovalon',
+  'modern animal', 'nexhealth', 'heartflow', 'clinchoice', 'cortica', 'kyo',
+  'metro vein centers', 'heart + paw', 'talkspace psychiatry', 'vaxcyte',
+  'acadia pharmaceuticals inc.', 'holistic industries', 'tactile medical', 'woven care',
+  'northpoint recovery holdings, llc', 'oral surgery partners', 'revance',
+  'mirum pharmaceuticals', 'phynet dermatology llc (external)', 'centria healthcare',
+  'jukebox health', 'pharmacann',
 ]);
 
 const AEROSPACE_MOBILITY = new Set([
@@ -82,11 +120,38 @@ const AEROSPACE_MOBILITY = new Set([
   'formlabs', 'protolabs',
   // The international round, 2026-08-04: mobility and logistics outside the US.
   'cabify', 'ninja van', 'despegar',
+  // Reviewed employers from the 100,000-posting expansion.
+  'anduril industries', 'relativity space', 'redwood materials', 'geotab', 'planet', 'motive',
+  'varda space industries', 'saronic', 'epirus', 'zipline', 'ast spacemobile', 'true anomaly',
+  'vast', 'archer', 'voyager technologies, inc.', 'helsing', 'gotion, inc.', 'wayve', 'via',
+  'k2 space', 'muon space', 'isar aerospace se', 'ursa major', 'airtrunk', 'inversion',
+  'neros technologies', 'harbinger motors inc.', 'aviation institute of maintenance',
+  'freeform', 'gfiber', 'kodiak', 'divergent', 'agility robotics', 'faraday future',
+  'avride', 'torc robotics', 'defense unicorns', 'stratolaunch', 'gatik ai', 'wing',
+  'space kinetic', 'latitude ai', 'vulcan elements', 'path robotics', 'quantum space',
+  'ambiq micro, inc.', 'autoscout24', 'may mobility', 'spire', 'stoke space',
 ]);
 
 const CONSUMER = new Set([
   'airbnb', 'calendly', 'duolingo', 'faire', 'instacart', 'match group', 'peloton',
   'pinterest', 'quintoandar', 'reddit', 'remote', 'squarespace', 'tripadvisor',
+  // The 2026-08-29 autonomous-poller probe round.
+  'polaroid',
+  // The 2026-08-30 supply round.
+  'carvana', 'alo', 'equipmentshare', 'coupang', 'feverup', 'doordash usa',
+  // Reviewed employers from the 100,000-posting expansion.
+  'domes resorts & reserves', 'base.com', 'huckberry', 'mercari, inc. (india)', 'webook.com',
+  'toast', 'navan', 'hellofresh', 'getyourguide', 'sweetgreen', 'instawork', 'stockx',
+  'rent the runway', 'everlane', 'house buyers of america', 'on', 'dig inn chefs-in-training',
+  'picnic', 'agoda', 'wolt - english', 'green thumb', 'guidepost montessori', 'jd sports',
+  'gorjana', 'suitsupply', 'cookunity', 'toojay’s deli • bakery • restaurant', 'quince',
+  'lush handmade cosmetics', 'mejuri', 'apartment life', 'reformation', 'van leeuwen ice cream',
+  'fairstead esc llc', 'hawthorne residential partners', 'j&j snack foods', 'avanath',
+  'mcclure oil corporation', 'opentable', 'tecovas', 'brilliant earth', 'blank street',
+  'ifood', 'takealot.com', 'sunnyside*', 'chowbus', 'weight watchers', 'saxbys',
+  'too good to go', 'naked farmer careers', 'shipbob, inc.', 'method co.',
+  '3 day blinds (sales)', "kinder's", 'fairlife', 'classpass', 'revlon corporate',
+  "sotheby's", 'skin laundry', 'cargurus', 'la senza', 'texas car title & payday loan services, inc',
 ]);
 
 const MEDIA_GAMING = new Set([
@@ -94,9 +159,29 @@ const MEDIA_GAMING = new Set([
   'suno', 'take-two', 'twitch',
   // The international round, 2026-08-04.
   'wildlife studios', 'sorare', 'musixmatch', 'trivago',
+  // The 2026-08-30 supply round.
+  'wpp media', 'vml', 'genius sports statistician network',
+  // Reviewed employers from the 100,000-posting expansion.
+  'rockstar', 'the new york times', 'fanduel', 'crunchyroll', 'seatgeek', 'vox media group',
+  'axios', 'sports reference', 'framestore', 'amsterdam music harbour', 'united media',
+  'monks', 'tegnainc.', 'dept®', 'playstation global', 'aeg worldwide', 'wpp', 'hasbro',
+  'fanatics collectibles', 'sony music global job board', 'ogilvy',
+  'vml/wpp enterprise solutions', '2k', 'betsson group', 'townsquare media', 'omnicom media',
+  'mrbeast', 'taboola', 'krafton', 'rockstar games', 'fanatics betting & gaming',
+  'vaynermedia llc', 'pubmatic', 'la28 (web)', 'the national football league',
+  'code and theory', 'viral nation inc.', 'cision', 'akqa', 'miq digital', 'zynga',
+  'financial times', 'wargaming', 'genius sports', 'major league baseball', 'landor',
 ]);
 
-const EDUCATION = new Set(['elicit', 'khan academy']);
+const EDUCATION = new Set([
+  'elicit', 'khan academy',
+  // Reviewed employers from the 100,000-posting expansion.
+  'ad education', 'common app', 'street child', 'newsela', 'udemy',
+  'chan zuckerberg initiative', 'american antiquarian society', 'accel schools',
+  'ixl learning', 'success academy charter schools', 'arco educação',
+  'effective school solutions', 'think academy us', 'hillel international',
+  'the princeton review', 'one acre fund', 'wonderschool', 'worldstrides',
+]);
 
 const TECHNOLOGY = new Set([
   'abnormal ai', 'airtable', 'amplitude', 'anthropic', 'asana', 'ashby', 'baseten',
@@ -126,6 +211,37 @@ const TECHNOLOGY = new Set([
   'zscaler', 'etched', 'snowflake', 'cohere', 'together ai',
   // The international round, 2026-08-04.
   'celonis', 'enpal',
+  // The 2026-08-29 autonomous-poller probe round (Rippling, Breezy, Recruitee). All seven are
+  // software/SaaS companies proper, not merely employers who happen to publish software roles -
+  // the bar this list has always held to (see the note above).
+  'rippling', 'talentneuron', 'vosyn', 'envipco', 'ibexa', 'greenflux', 'crowdsec',
+  'mercedes-benz.io', 'famly', 'freeday', 'cbs corporate business solutions', 'property leads',
+  // The 2026-08-30 supply round.
+  'speechify', 'axon', 'asm',
+  // Reviewed employers from the 100,000-posting expansion.
+  'rogo', 'intro', 'causaly', 'mercor', 'huzzle', 'supportyourapp', 'capgemini', 'pearl',
+  'workmotion', 'goglobal', 'lrn corporation', 'blink - the employee app', 'runware',
+  'pinely', 'town web', 'esri', 'infuse', 'nebius', 'canonical', 'avepoint', 'hrtechx',
+  'coreweave', 'alphasense', 'veeam software', 'sentinelone', 'nice', 'datavant', 'xometry',
+  'appian corporation', 'astera labs', 'digitalocean', 'zeta global', 'workato', 'netskope',
+  'five9', 'intersystems', 'artefact', 'guidepoint', 'fin', 'clara', 'diligent corporation',
+  'smartsheet', 'fictiv', 'cato networks', 'doit', 'stackadapt', 'exadel', 'glean',
+  'alarm.com', 'dialpad', 'alphasights', 'onetrust', 'opswat', 'harness', 'jetbrains',
+  'proton', 'tailscale', 'impact.com', 'smartly', 'knowbe4', 'ping identity', 'wrike',
+  'commvault', 'appier', 'digicert', 'beyondtrust', 'c3 ai', 'caylent', 'bloomreach',
+  'ensono', 'inmobi', 'trace3', 'appdirect', 'boomi', 'cribl', 'lovable', 'sambanova',
+  'keeper security', 'podium', 'neo4j', 'new relic', 'qualtrics', 'behavox', 'id.me',
+  'similarweb', 'thoughtworks', 'lightning ai', 'yipitdata', 'parloa', 'talkdesk',
+  'alphasense india', 'backbase', '‎connectwise', 'appsflyer', 'brainlabs', 'conga', 'moloco',
+  'newrocket', 'ivalua', 'sonicwall', 'tanium', 'phdata', 'one trust', 'ubiquiti',
+  'anaplan', 'chaos industries', 'eos', 'valtech', 'human agency', 'nox group', 'encora',
+  'spektrum', 'grvty', 'proof', 'general matter', 'woolpert', 'powerx', 'metrostar',
+  'highwire', 'peregrine technologies', 'apptronik', 'myriad360', 'orion innovation',
+  'tulip interfaces', 'neuraflash, part of accenture', 'engine', 'new era technology',
+  'wave', 'a11', 'black duck software, inc.', 'verve', 'mindsquare ag', 'levio',
+  'dragos', 'electrosoft', 'lighthouse', 'growe talents', 'spot hopper', 'm9 solutions',
+  'glance', 'nex', 'accordion', 'catawiki', 'exiger', 'sitreps', 'spaulding ridge',
+  'gigs', 'firstmind', 'precision aq', 'i360technologies, inc.',
 ]);
 
 export function classifyEmployerIndustry(company: string): EmployerIndustry {
@@ -137,6 +253,18 @@ export function classifyEmployerIndustry(company: string): EmployerIndustry {
   if (MEDIA_GAMING.has(key)) return 'media_gaming';
   if (EDUCATION.has(key)) return 'education';
   if (TECHNOLOGY.has(key)) return 'technology';
+
+  /* The 100,000-posting expansion is larger than a hand-maintained famous-company list. These
+   * fallbacks classify only names that state an industry directly. They do not infer an employer's
+   * industry from its open roles, and ambiguous names still remain unclassified. Exact reviewed
+   * entries above keep precedence when a name contains terms from more than one category. */
+  if (/\b(health|medical|medicine|pharma|clinic|hospital|care|caring|therapy|therapeutics|therapeutic|vet|veterinary|dental|autism|wellness|hospice|biotech|neuro|dermatology|oncology|rehab|surgery|life sciences|nourish)\b/.test(key)) return 'healthcare_life_sciences';
+  if (/\b(bank|capital|financial|finance|pay|insurance|investment|investments|trading|card|fund|wealth|equity|broker|advisors)\b/.test(key)) return 'financial_services';
+  if (/\b(space|mobility|motors?|automotive|aviation|aerospace|robotics|energy|manufacturing|industrial|electric|semiconductor|defense|nuclear|transportation)\b/.test(key)) return 'aerospace_mobility';
+  if (/\b(media|games?|gaming|sports?|music|news|publishing|advertising|marketing|creative|entertainment|league|football)\b/.test(key)) return 'media_gaming';
+  if (/\b(school|schools|academy|education|learning|montessori|university)\b/.test(key)) return 'education';
+  if (/\b(software|technology|technologies|data|cloud|cyber|systems|digital|analytics|networks?|electronics|labs?|platform|computing|internet|tech|security)\b/.test(key)) return 'technology';
+  if (/\b(restaurants?|property|properties|retail|home|foods?|coffee|market|marketplace|travel|hotel|house|residential|real estate|commerce|fashion)\b/.test(key)) return 'consumer_marketplaces';
   return 'unclassified';
 }
 

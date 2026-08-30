@@ -1,4 +1,5 @@
 import type { JobSourceInput } from './jobMonitor';
+import { HUNDRED_THOUSAND_FLOOR_DISCOVERY } from '../data/jobSources100k';
 
 /* The companies Litos watches.
  *
@@ -558,12 +559,147 @@ const INTERNATIONAL_INTERNSHIP_ENTRIES: Entry[] = [
   ['Ninja Van', 'lever', 'ninjavan'],
 ];
 
+/* ── Added 2026-08-29: Rippling, Breezy and Recruitee, the day fetchSourceJobs learned to poll them ──
+ *
+ * These three sat in AUTONOMOUS_PORTAL_FAMILIES unpolled for weeks (see the 2026-08-04 note by
+ * POLLABLE_JOB_BOARDS): Litos could finish an application on any of them, but nothing ever fetched
+ * their boards. Only three tokens are seeded here - one per platform, each confirmed live and
+ * non-empty by hand on 2026-08-29 - rather than a probed batch like the lists above. A wider probe
+ * round (the same shape as INTERNATIONAL_INTERNSHIP_ENTRIES) is the next real lever on these three,
+ * not a reason to hold this PR for it.
+ */
+const PHASE_3_AUTONOMOUS_POLLER_ENTRIES: Entry[] = [
+  ['Rippling', 'rippling', 'rippling'],
+  ['Transparent Hiring', 'breezy', 'transparent-hiring'],
+  ['cbs Corporate Business Solutions', 'recruitee', 'cbsconsulting'],
+];
+
+/* ── Added 2026-08-29 (same day): the probe round PHASE_3's own note asked for ──────────────────
+ *
+ * 61 tokens found by site-scoped search against ats.rippling.com, breezy.hr and recruitee.com
+ * (the same discovery technique as the international round above, substituting search for blind
+ * guessing - a guessed token risks exactly the sas/bcg/tcs/disney trap the top of this file warns
+ * about, so every one of these was found via a real indexed posting first, THEN verified live
+ * against the platform's own API with the platform's own company-name field checked against the
+ * name the search result already gave it, not the other way around). 48 of 61 confirmed live and
+ * non-empty on 2026-08-29; 13 dropped (duckduckgo, karllagerfeld and digitalinsurancegroup 404 -
+ * search indexed a page from before they moved off their platform subdomain; constellr, 1x,
+ * intramotev-autonomous-rail, amanda-rosengreen, teal-media and nextec-group answered but currently
+ * carry zero open postings; the remainder are folded into the counts above). Small yield per probed
+ * token, same as canon's prior rounds - this is the ceiling of what site-scoped search surfaces in
+ * one pass, not a claim that no more exist.
+ */
+const PHASE_4_AUTONOMOUS_POLLER_PROBE_ENTRIES: Entry[] = [
+  ['TalentNeuron', 'rippling', 'talentneuroncareers'],
+
+  ['Vosyn', 'breezy', 'vosyn'],
+  ['Center for a New American Security', 'breezy', 'center-for-a-new-american-security'],
+  ['American Antiquarian Society', 'breezy', 'american-antiquarian-society'],
+  ['Turning Point USA', 'breezy', 'turning-point-usa'],
+  ['Sports Reference', 'breezy', 'sports-reference-llc'],
+  ['Envisio', 'breezy', 'envisio'],
+  ['Awakened Ambition', 'breezy', 'awakened-ambition'],
+  ['ProperExpression', 'breezy', 'proper-expression'],
+  ['Spotlight Marketing and Branding', 'breezy', 'spotlight-marketing-and-branding'],
+  ['Evolve Physical Therapy', 'breezy', 'evolve-physical-therapy'],
+  ['Inspiring Lives Today', 'breezy', 'inspiring-lives-today'],
+  ['VetsEZ', 'breezy', 'vetsez'],
+  ['Beta Bionics', 'breezy', 'beta-bionics-inc'],
+  ['Sunday', 'breezy', 'sunday'],
+  ['Reveleer', 'breezy', 'reveleer'],
+  ['Clever Real Estate', 'breezy', 'clever-real-estate'],
+  ['NuView Analytics', 'breezy', 'nuview'],
+  ['SalesDraft Recruiting', 'breezy', 'salesdraft-recruiting'],
+  ['JWay Group', 'breezy', 'jway-group'],
+  ['Getty Advance', 'breezy', 'getty-advance'],
+  ['Chicago Retail Consulting', 'breezy', 'chicago-retail-consulting'],
+  ['Property Leads', 'breezy', 'property-leads'],
+
+  ['AnywhereWorks', 'recruitee', 'anywhereworks'],
+  ['Framestore', 'recruitee', 'framestore'],
+  ['Amsterdam Music Harbour', 'recruitee', 'spinninrecordsandwmgbenelux'],
+  ['SkyGeo', 'recruitee', 'skygeo'],
+  ['Third Way', 'recruitee', 'thirdway'],
+  ['Blue Forest', 'recruitee', 'blueforest'],
+  ['Freeday', 'recruitee', 'freeday'],
+  ['Ibexa', 'recruitee', 'ibexa'],
+  ['GreenFlux', 'recruitee', 'greenflux'],
+  ['Envipco', 'recruitee', 'envipco'],
+  ['Famly', 'recruitee', 'famly'],
+  ['ChargerHelp', 'recruitee', 'chargerhelp'],
+  ['PrimeWorks', 'recruitee', 'primeworks'],
+  ['Appetiser', 'recruitee', 'appetiser'],
+  ['Pugpig', 'recruitee', 'pugpig'],
+  ['Polaroid', 'recruitee', 'polaroid'],
+  ['Crowdsec', 'recruitee', 'crowdsec'],
+  ['Mercedes-Benz.io', 'recruitee', 'mbio'],
+  ['WEBB Traders', 'recruitee', 'webbtraders'],
+  ['Hudson Manpower', 'recruitee', 'hudsonmanpower'],
+  ['Student Medicover', 'recruitee', 'studentmedicover'],
+  ['everdrop', 'recruitee', 'everdrop'],
+  ['Yource', 'recruitee', 'yource'],
+  ['Creative Clicks', 'recruitee', 'creativeclicks'],
+  ['Bundl', 'recruitee', 'bundl'],
+];
+
+/* Added 2026-08-30: Greenhouse supply round for the 50,000-posting floor.
+ *
+ * The production board held 34,259 surfaced postings before this round. These 25 boards published
+ * 25,155 postings inside Litos's ingest and freshness gates when checked through Greenhouse's own
+ * API. The 9,414-posting buffer above the gap is intentional because employers close roles every
+ * day. Names come from the API's company_name field, not from guessed tokens. The candidates came
+ * from the CC0 open-jobs slug catalog and were then re-verified directly against Greenhouse.
+ */
+const PHASE_5_FIFTY_THOUSAND_FLOOR_ENTRIES: Entry[] = [
+  ['Pulse Healthcare', 'greenhouse', 'pulse'],
+  ['BAYADA Home Health Care', 'greenhouse', 'bayada'],
+  ['Carvana', 'greenhouse', 'carvana'],
+  ['Liquid Personnel', 'greenhouse', 'liquidpersonnel'],
+  ['Speechify', 'greenhouse', 'speechify'],
+  ['Centria Autism', 'greenhouse', 'centriaautism'],
+  ['Upstream Rehabilitation', 'greenhouse', 'urpt'],
+  ['Private Equity Insights', 'greenhouse', 'privateequityinsights'],
+  ['Veterinary Emergency Group (VEG)', 'greenhouse', 'veterinaryemergencygroupst'],
+  ['ALO', 'greenhouse', 'aloyoga'],
+  ['WPP Media', 'greenhouse', 'wppmedia'],
+  ['EquipmentShare', 'greenhouse', 'equipmentsharecom'],
+  ['Meridial', 'greenhouse', 'agency'],
+  ['Capco', 'greenhouse', 'capco'],
+  ['Ouihelp', 'greenhouse', 'ouihelp'],
+  ['Coupang', 'greenhouse', 'coupang'],
+  ['Accenture Federal Services', 'greenhouse', 'accenturefederalservices'],
+  ['VML', 'greenhouse', 'wundermanthompson'],
+  ['FeverUp', 'greenhouse', 'feverup'],
+  ['Axon', 'greenhouse', 'axon'],
+  ['MedElite Group, LLC.', 'greenhouse', 'medelitellc'],
+  ['Genius Sports Statistician Network', 'greenhouse', 'geniussportssn'],
+  ['DoorDash USA', 'greenhouse', 'doordashusa'],
+  ['ASM', 'greenhouse', 'asm'],
+  ['Horace Mann - Agent Opportunities', 'greenhouse', 'horacemannagents'],
+];
+
+/* Added 2026-08-30: the measured supply round for the 100,000-posting floor.
+ *
+ * The bounded discovery pass checked every remaining Greenhouse slug in the CC0 open-jobs catalog,
+ * removed duplicate company boards and obvious internal, referral, and sandbox tenants, then kept
+ * 580 public employer boards. Greenhouse reported 60,001 postings inside the 90-day freshness
+ * window. The generated file preserves the employer-reported company name, token, and discovery
+ * count so the selection can be audited without rerunning the network scan.
+ */
+const PHASE_6_HUNDRED_THOUSAND_FLOOR_ENTRIES: Entry[] = HUNDRED_THOUSAND_FLOOR_DISCOVERY.map(
+  ({ company_name, board_token }) => [company_name, 'greenhouse', board_token],
+);
+
 const ENTRIES: readonly Entry[] = [
   ...BASE_ENTRIES,
   ...PHASE_2_WORKABLE_ENTRIES,
   ...PHASE_2_UNDERREPRESENTED_ENTRIES,
   ...INTERNSHIP_DENSITY_ENTRIES,
   ...INTERNATIONAL_INTERNSHIP_ENTRIES,
+  ...PHASE_3_AUTONOMOUS_POLLER_ENTRIES,
+  ...PHASE_4_AUTONOMOUS_POLLER_PROBE_ENTRIES,
+  ...PHASE_5_FIFTY_THOUSAND_FLOOR_ENTRIES,
+  ...PHASE_6_HUNDRED_THOUSAND_FLOOR_ENTRIES,
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {
@@ -572,6 +708,9 @@ function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {
     case 'lever': return `https://jobs.lever.co/${token}`;
     case 'ashby': return `https://jobs.ashbyhq.com/${token}`;
     case 'workable': return `https://apply.workable.com/${token}/`;
+    case 'rippling': return `https://ats.rippling.com/${token}/jobs`;
+    case 'breezy': return `https://${token}.breezy.hr`;
+    case 'recruitee': return `https://${token}.recruitee.com`;
   }
 }
 
