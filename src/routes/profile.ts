@@ -9,6 +9,7 @@ import { decryptRow } from './applicationProfile';
 import {
   parseResumeWithClaude,
   parseResumeFromPdf,
+  resumeParseDeadlineFromUploadStart,
   mergeLanguages,
   splitSpokenLanguages,
   ParsedProfile,
@@ -449,7 +450,8 @@ export function serveProfileJson(
   // which leaves the parse's academic fields exactly as they were.
   applicationRow?: Record<string, unknown>,
 ): Record<string, unknown> {
-  const base = (parsedJson && typeof parsedJson === 'object' ? parsedJson : {}) as Record<string, unknown>;
+  const stored = (parsedJson && typeof parsedJson === 'object' ? parsedJson : {}) as Record<string, unknown>;
+  const { _litos_resume_upload_key: _uploadKey, ...base } = stored;
   const declared = declaredSkillsList(declaredSkills);
   return {
     ...base,
@@ -711,6 +713,24 @@ interface ExistingBankEntry {
   location: string | null;
 }
 
+const RESUME_UPLOAD_KEY_PATTERN = /^[a-f0-9]{64}$/;
+const RESUME_UPLOAD_KEY_FIELD = '_litos_resume_upload_key' as const;
+type StoredResumeProfile = ParsedProfile & { [RESUME_UPLOAD_KEY_FIELD]?: string };
+
+export function resumeUploadKeyFromHeader(value: string | string[] | undefined): string | null {
+  const key = Array.isArray(value) ? value[0] : value;
+  return key && RESUME_UPLOAD_KEY_PATTERN.test(key) ? key : null;
+}
+
+function storedResumeProfile(value: unknown): StoredResumeProfile | null {
+  return value && typeof value === 'object' ? value as StoredResumeProfile : null;
+}
+
+export function publicResumeProfile(profile: StoredResumeProfile): ParsedProfile {
+  const { [RESUME_UPLOAD_KEY_FIELD]: _uploadKey, ...publicProfile } = profile;
+  return publicProfile as ParsedProfile;
+}
+
 export function planBankReconciliation(
   parsed: ParsedProfile,
   userId: string,
@@ -754,6 +774,12 @@ export async function profileRoutes(fastify: FastifyInstance) {
   // POST /profile - upload resume + parse
   fastify.post('/profile', { preHandler: requireAuth }, async (request: FastifyRequest, reply: FastifyReply) => {
     const userId = request.jwtPayload!.userId;
+    const uploadStartedAt = Date.now();
+    const uploadIdempotencyKey = resumeUploadKeyFromHeader(request.headers['idempotency-key']);
+    const disconnectController = new AbortController();
+    reply.raw.once('close', () => {
+      if (!reply.raw.writableEnded) disconnectController.abort();
+    });
 
     let resumeBuffer: Buffer | null = null;
     let resumeFilename: string | undefined;
@@ -842,6 +868,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
      * tested were image-only. We read those pages visually instead. */
     const minimumChars = Math.max(50, 700 * Math.max(1, sourcePages));
     const looksScanned = sourceFormat === 'pdf' && (!resumeText || resumeText.trim().length < minimumChars);
+    const extractionElapsedMs = Date.now() - uploadStartedAt;
 
     /* THE ADDRESS AN EMPLOYER REPLIES TO, resolved BEFORE the parse try below and deliberately
      * outside it.
@@ -872,10 +899,19 @@ export async function profileRoutes(fastify: FastifyInstance) {
     // narrow Pick that academicSeedFrom accepts would otherwise become this variable's type and
     // reject the source_pages stamp two lines down.
     let parsedProfile: ParsedProfile;
+    const parseStartedAt = Date.now();
+    let parseElapsedMs = 0;
     try {
+      const parseDeadlineMs = resumeParseDeadlineFromUploadStart(uploadStartedAt);
       parsedProfile = looksScanned
-        ? await parseResumeFromPdf(resumeBuffer)
-        : await parseResumeWithClaude(resumeText);
+        ? await parseResumeFromPdf(resumeBuffer, {
+          deadlineMs: parseDeadlineMs,
+          signal: disconnectController.signal,
+        })
+        : await parseResumeWithClaude(resumeText, {
+          deadlineMs: parseDeadlineMs,
+          signal: disconnectController.signal,
+        });
       // Carried on the parse rather than in its own column: it is a fact ABOUT this parse of this
       // file, so it should be replaced wholesale when a student re-uploads, which is exactly what
       // parsed_json already does.
@@ -893,8 +929,16 @@ export async function profileRoutes(fastify: FastifyInstance) {
         ...(resumeEmail ? { resume_email: resumeEmail } : {}),
         ...(sourcePages > 0 ? { source_pages: sourcePages } : {}),
       };
+      parseElapsedMs = Date.now() - parseStartedAt;
     } catch (err) {
-      fastify.log.error(err);
+      fastify.log.error({
+        err,
+        source_format: sourceFormat,
+        scanned: looksScanned,
+        extraction_elapsed_ms: extractionElapsedMs,
+        parse_elapsed_ms: Date.now() - parseStartedAt,
+        total_elapsed_ms: Date.now() - uploadStartedAt,
+      }, 'resume upload parse failed');
       /* THE MODEL BEING UNAVAILABLE IS NOT A VERDICT ON THE UPLOAD.
        *
        * On 2026-08-15 the Anthropic balance ran out and every upload got "Failed to parse resume
@@ -923,6 +967,10 @@ export async function profileRoutes(fastify: FastifyInstance) {
       });
     }
 
+    // A disconnected browser cannot receive the result. Stop before any durable mutation so its
+    // timeout cannot race a retry that the student starts from the error state.
+    if (disconnectController.signal.aborted) return;
+
     /* THE SKILLS THE STUDENT ACTUALLY LISTED, into the column that is authoritative for them.
      *
      * `profiles.skills` is the only source the SKILLS line may come from (R-015), and nothing was
@@ -945,41 +993,124 @@ export async function profileRoutes(fastify: FastifyInstance) {
       .map((skill) => (typeof skill === 'string' ? skill.trim() : ''))
       .filter((skill) => skill.length > 0);
 
+    // Compatibility bridge for clients that saved category and role type before uploading their
+    // resume. The new state machine requires titles too, and an old cached client has no title
+    // field to send. Seed only an absent or empty list from the parse, never overwrite titles the
+    // applicant already chose. New clients immediately show the focus step and can replace this
+    // seed with their confirmed selection.
+    // Reconcile the parse into the experience bank without replacing anything the student edited.
+    // New roles are inserted, and blank title/date metadata may be filled. Existing bullets,
+    // titles, and dates are never overwritten.
+    let bank_seeded = 0;
+    let bank_enriched = 0;
+    let bank_total = 0;
+    let recentReview: RecentExperienceReview | null = null;
     try {
-      await db
-        .insert(profiles)
-        .values({
-          user_id: userId,
-          parsed_json: parsedProfile,
-          ...(parsedSkills.length > 0 ? { skills: parsedSkills } : {}),
-          // The uploaded bytes are parsing input, not account storage. A new row starts with no
-          // pointers. Conflict updates omit these fields until legacy Blob deletion succeeds.
-          resume_object_key: null,
-          resume_url: null,
-          voice_pref: voice_pref ?? null,
-          updated_at: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: profiles.user_id,
-          set: {
-            parsed_json: parsedProfile,
-            /* Only when the column is still empty. COALESCE rather than a read-then-write so a
-               concurrent upload cannot overwrite a list the student curated between the two. */
-            ...(parsedSkills.length > 0
-              ? { skills: sql`coalesce(${profiles.skills}, ${JSON.stringify(parsedSkills)}::jsonb)` }
-              : {}),
+      const result = await db.transaction(async (tx) => {
+        // Every durable core write for one account starts behind the same lock. Retried or
+        // double-clicked uploads cannot overwrite the profile before they serialize their bank.
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`profile-upload:${userId}`}, 0::bigint))`);
+        if (disconnectController.signal.aborted) return null;
+        const [lockedProfileRow] = await tx
+          .select({ parsed_json: profiles.parsed_json })
+          .from(profiles)
+          .where(eq(profiles.user_id, userId))
+          .limit(1);
+        const lockedStoredProfile = storedResumeProfile(lockedProfileRow?.parsed_json);
+        if (uploadIdempotencyKey
+          && lockedStoredProfile?.[RESUME_UPLOAD_KEY_FIELD] === uploadIdempotencyKey) {
+          const bank = await tx.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
+          const review = reviewFromProfile(lockedStoredProfile)
+            ?? buildRecentExperienceReview(bank as RecentExperienceEntry[]);
+          return {
+            bankSeeded: 0,
+            bankEnriched: 0,
+            bankTotal: bank.length,
+            profileWithReview: lockedStoredProfile,
+            review,
+          };
+        }
+        const profileForStorage: StoredResumeProfile = uploadIdempotencyKey
+          ? { ...parsedProfile, [RESUME_UPLOAD_KEY_FIELD]: uploadIdempotencyKey }
+          : parsedProfile;
+        await tx
+          .insert(profiles)
+          .values({
+            user_id: userId,
+            parsed_json: profileForStorage,
+            ...(parsedSkills.length > 0 ? { skills: parsedSkills } : {}),
+            // Uploaded bytes are parsing input, not account storage. A new row starts pointer-free.
+            resume_object_key: null,
+            resume_url: null,
             voice_pref: voice_pref ?? null,
             updated_at: new Date(),
-          },
-        });
+          })
+          .onConflictDoUpdate({
+            target: profiles.user_id,
+            set: {
+              parsed_json: profileForStorage,
+              ...(parsedSkills.length > 0
+                ? { skills: sql`coalesce(${profiles.skills}, ${JSON.stringify(parsedSkills)}::jsonb)` }
+                : {}),
+              voice_pref: voice_pref ?? null,
+              updated_at: new Date(),
+            },
+          });
+        const existing = await tx
+          .select({
+            id: experience_bank.id,
+            type: experience_bank.type,
+            org: experience_bank.org,
+            title: experience_bank.title,
+            date_range: experience_bank.date_range,
+            location: experience_bank.location,
+          })
+          .from(experience_bank)
+          .where(eq(experience_bank.user_id, userId));
+        const reconciliation = planBankReconciliation(parsedProfile, userId, existing);
+        if (reconciliation.inserts.length > 0) {
+          await tx.insert(experience_bank).values(reconciliation.inserts);
+        }
+        for (const enrichment of reconciliation.enrichments) {
+          const values = {
+            ...(enrichment.title ? { title: enrichment.title } : {}),
+            ...(enrichment.date_range ? { date_range: enrichment.date_range } : {}),
+            ...(enrichment.location ? { location: enrichment.location } : {}),
+          };
+          await tx.update(experience_bank).set(values).where(eq(experience_bank.id, enrichment.id));
+        }
+        const bank = await tx.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
+        const review = buildRecentExperienceReview(bank as RecentExperienceEntry[]);
+        const profileWithReview = { ...profileForStorage, recent_experience_review: review };
+        await tx
+          .update(profiles)
+          .set({ parsed_json: profileWithReview, updated_at: new Date() })
+          .where(eq(profiles.user_id, userId));
+        return {
+          bankSeeded: reconciliation.inserts.length,
+          bankEnriched: reconciliation.enrichments.length,
+          bankTotal: bank.length,
+          profileWithReview,
+          review,
+        };
+      });
+      if (!result) return;
+      bank_seeded = result.bankSeeded;
+      bank_enriched = result.bankEnriched;
+      bank_total = result.bankTotal;
+      parsedProfile = result.profileWithReview;
+      recentReview = result.review;
     } catch (err) {
-      fastify.log.error(err);
-      return reply.status(500).send({ error: 'Failed to save profile to database' });
+      fastify.log.error({ err, userId }, 'failed to persist parsed profile and experience bank'); // vocab-allow: server log
+      return reply.status(500).send({ error: 'Failed to save the parsed resume' });
     }
 
-    // Replacement must not strand the previous raw upload. Keep its legacy DB pointers until Blob
-    // deletion succeeds, then clear them. A failure leaves a recoverable pointer and the daily
-    // sweep retries the same delete-then-clear order. The new upload itself is never stored.
+    if (disconnectController.signal.aborted) return;
+    const parsedTargetRoles = parsedTargetRolesForSeed(parsedProfile.target_roles);
+
+    // Replacement must not strand the previous raw upload. Keep legacy pointers until Blob
+    // deletion succeeds, then clear them. This cleanup is intentionally outside the transaction:
+    // an external Blob call must not hold the per-user database lock.
     try {
       await deleteUploadedResumeThenClear(
         () => deleteUploadedResumeBlobsForUser(userId),
@@ -992,12 +1123,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
       fastify.log.warn({ err, userId }, 'could not retire legacy uploaded resume; retention sweep will retry');
     }
 
-    // Compatibility bridge for clients that saved category and role type before uploading their
-    // resume. The new state machine requires titles too, and an old cached client has no title
-    // field to send. Seed only an absent or empty list from the parse, never overwrite titles the
-    // applicant already chose. New clients immediately show the focus step and can replace this
-    // seed with their confirmed selection.
-    const parsedTargetRoles = parsedTargetRolesForSeed(parsedProfile.target_roles);
+    if (disconnectController.signal.aborted) return;
     if (parsedTargetRoles.length > 0) {
       try {
         const encodedRoles = JSON.stringify(parsedTargetRoles);
@@ -1020,51 +1146,7 @@ export async function profileRoutes(fastify: FastifyInstance) {
       }
     }
 
-    // Reconcile the parse into the experience bank without replacing anything the student edited.
-    // New roles are inserted, and blank title/date metadata may be filled. Existing bullets,
-    // titles, and dates are never overwritten.
-    let bank_seeded = 0;
-    let bank_enriched = 0;
-    let bank_total = 0;
-    let recentReview: RecentExperienceReview | null = null;
-    try {
-      const existing = await db
-        .select({
-          id: experience_bank.id,
-          type: experience_bank.type,
-          org: experience_bank.org,
-          title: experience_bank.title,
-          date_range: experience_bank.date_range,
-          location: experience_bank.location,
-        })
-        .from(experience_bank)
-        .where(eq(experience_bank.user_id, userId));
-      const reconciliation = planBankReconciliation(parsedProfile, userId, existing);
-      if (reconciliation.inserts.length > 0) {
-        await db.insert(experience_bank).values(reconciliation.inserts);
-        bank_seeded = reconciliation.inserts.length;
-      }
-      bank_total = existing.length + bank_seeded;
-      for (const enrichment of reconciliation.enrichments) {
-        const values = {
-          ...(enrichment.title ? { title: enrichment.title } : {}),
-          ...(enrichment.date_range ? { date_range: enrichment.date_range } : {}),
-          ...(enrichment.location ? { location: enrichment.location } : {}),
-        };
-        await db.update(experience_bank).set(values).where(eq(experience_bank.id, enrichment.id));
-        bank_enriched += 1;
-      }
-      const bank = await db.select().from(experience_bank).where(eq(experience_bank.user_id, userId));
-      recentReview = buildRecentExperienceReview(bank as RecentExperienceEntry[]);
-      parsedProfile = { ...parsedProfile, recent_experience_review: recentReview };
-      await db
-        .update(profiles)
-        .set({ parsed_json: parsedProfile, updated_at: new Date() })
-        .where(eq(profiles.user_id, userId));
-    } catch (err) {
-      fastify.log.error({ err, userId }, 'failed to seed experience bank from resume parse'); // vocab-allow: server log
-      return reply.status(500).send({ error: 'Failed to prepare the recent experience review' });
-    }
+    if (disconnectController.signal.aborted) return;
 
     // Fill the academic gaps the upload already answered. Best-effort and non-fatal: the parse is
     // what the student came for, and a failure here costs one extra question rather than signup.
@@ -1109,8 +1191,17 @@ export async function profileRoutes(fastify: FastifyInstance) {
       academicRecord = seedRowExists ? {} : undefined;
     }
 
+    fastify.log.info({
+      source_format: sourceFormat,
+      scanned: looksScanned,
+      source_pages: sourcePages,
+      extraction_elapsed_ms: extractionElapsedMs,
+      parse_elapsed_ms: parseElapsedMs,
+      total_elapsed_ms: Date.now() - uploadStartedAt,
+    }, 'resume upload completed');
+
     return reply.status(200).send({
-      ...parsedProfile,
+      ...publicResumeProfile(parsedProfile as StoredResumeProfile),
       ...academicsOfRecord(academicRecord),
       bank_seeded,
       bank_total,

@@ -9,6 +9,10 @@ import {
   parsedProfileWithOneRepair,
   printedGpaIn,
   reconcileGpaWithSource,
+  RESUME_PARSE_BUDGET_MS,
+  RESUME_PROVIDER_CALL_CAP_MS,
+  resumeParseDeadlineFromUploadStart,
+  resumeParseCallTimeoutMs,
   splitSpokenLanguages,
   SYSTEM_PROMPT,
 } from './parse';
@@ -94,8 +98,13 @@ test('an invalid Anthropic key cannot take down text resume parsing while OpenAI
   });
 
   const calls: Record<string, unknown>[] = [];
-  mock.method(responsesPrototype, 'create', async (body: Record<string, unknown>) => {
+  let providerSignal: AbortSignal | undefined;
+  mock.method(responsesPrototype, 'create', async (
+    body: Record<string, unknown>,
+    options: { signal?: AbortSignal },
+  ) => {
     calls.push(body);
+    providerSignal = options.signal;
     return {
       status: 'completed',
       output_text: modelProfile(FIVE_ROLES),
@@ -107,10 +116,14 @@ test('an invalid Anthropic key cannot take down text resume parsing while OpenAI
     throw Object.assign(new Error('API key is invalid'), { status: 401 });
   });
 
-  const parsed = await parseResumeWithClaude('A Candidate\nSoftware engineer');
+  const controller = new AbortController();
+  const parsed = await parseResumeWithClaude('A Candidate\nSoftware engineer', {
+    signal: controller.signal,
+  });
 
   assert.equal(parsed.full_name, 'A Candidate');
   assert.equal(calls.length, 1);
+  assert.equal(providerSignal, controller.signal);
   assert.equal(
     ((calls[0].text as { format?: { type?: string } }).format?.type),
     'json_schema',
@@ -140,6 +153,106 @@ test('resume parsing falls back to Anthropic when OpenAI is unavailable', async 
 
   assert.equal(parsed.full_name, 'A Candidate');
   assert.equal(anthropicCalls, 1);
+});
+
+test('resume provider calls are capped and share one end-to-end deadline', async (t) => {
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  let now = 1_000;
+  t.after(() => {
+    mock.restoreAll();
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  });
+
+  mock.method(Date, 'now', () => now);
+  const openAITimeouts: number[] = [];
+  let openAICalls = 0;
+  mock.method(responsesPrototype, 'create', async (_body: unknown, options: { timeout?: number }) => {
+    openAITimeouts.push(options.timeout ?? 0);
+    openAICalls += 1;
+    now += 9_000;
+    if (openAICalls === 1) {
+      return {
+        status: 'completed',
+        output_text: modelProfile(['Only one role']),
+        incomplete_details: null,
+        usage: { input_tokens: 100, output_tokens: 40, input_tokens_details: {} },
+      };
+    }
+    throw Object.assign(new Error('OpenAI repair unavailable'), { status: 503 });
+  });
+
+  let anthropicOptions: { timeout?: number; maxRetries?: number } | undefined;
+  mock.method(messagesPrototype, 'create', async (_body: unknown, options: { timeout?: number; maxRetries?: number }) => {
+    anthropicOptions = options;
+    return { content: [{ type: 'text', text: modelProfile(FIVE_ROLES) }] };
+  });
+
+  const parsed = await parseResumeWithClaude('A Candidate\nSoftware engineer');
+
+  assert.equal(parsed.full_name, 'A Candidate');
+  assert.deepEqual(openAITimeouts, [RESUME_PROVIDER_CALL_CAP_MS, RESUME_PROVIDER_CALL_CAP_MS]);
+  assert.equal(anthropicOptions?.timeout, RESUME_PARSE_BUDGET_MS - 18_000);
+  assert.equal(anthropicOptions?.maxRetries, 0);
+});
+
+test('the resume parse deadline refuses a new provider call instead of resetting the SDK timeout', () => {
+  assert.equal(resumeParseDeadlineFromUploadStart(1_000), 1_000 + RESUME_PARSE_BUDGET_MS);
+  const deadline = 25_000;
+  assert.equal(resumeParseCallTimeoutMs(deadline, 1_000), RESUME_PROVIDER_CALL_CAP_MS);
+  assert.equal(resumeParseCallTimeoutMs(deadline, 20_000), 5_000);
+  assert.throws(
+    () => resumeParseCallTimeoutMs(deadline, 24_500),
+    (error: unknown) => (error as { kind?: string }).kind === 'model_timeout',
+  );
+});
+
+test('provider SDK timeouts become retryable model-unavailable errors', async (t) => {
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  t.after(() => {
+    mock.restoreAll();
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  });
+
+  mock.method(responsesPrototype, 'create', async () => {
+    throw new OpenAI.APIConnectionTimeoutError();
+  });
+  mock.method(messagesPrototype, 'create', async () => {
+    throw new Anthropic.APIConnectionTimeoutError();
+  });
+
+  await assert.rejects(
+    () => parseResumeWithClaude('A Candidate\nSoftware engineer'),
+    (error: unknown) => (error as { kind?: string }).kind === 'model_timeout',
+  );
+  await assert.rejects(
+    () => parseResumeFromPdf(Buffer.from('%PDF-1.7 scanned resume')),
+    (error: unknown) => (error as { kind?: string }).kind === 'model_timeout',
+  );
+});
+
+test('work before parsing consumes the route-supplied resume deadline', async (t) => {
+  const originalKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = 'test-openai-key';
+  t.after(() => {
+    mock.restoreAll();
+    if (originalKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = originalKey;
+  });
+
+  mock.method(Date, 'now', () => 10_000);
+  let providerCalls = 0;
+  mock.method(responsesPrototype, 'create', async () => { providerCalls += 1; return {}; });
+  mock.method(messagesPrototype, 'create', async () => { providerCalls += 1; return {}; });
+
+  await assert.rejects(
+    () => parseResumeWithClaude('A Candidate\nSoftware engineer', { deadlineMs: 10_500 }),
+    (error: unknown) => (error as { kind?: string }).kind === 'model_timeout',
+  );
+  assert.equal(providerCalls, 0);
 });
 
 test('scanned PDF parsing sends the document to OpenAI before Anthropic', async (t) => {

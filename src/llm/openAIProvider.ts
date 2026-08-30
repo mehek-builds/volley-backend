@@ -22,6 +22,7 @@ export type OpenAITextRequest = {
   input: string | ResponseInput;
   maxOutputTokens: number;
   timeoutMs?: number;
+  signal?: AbortSignal;
   jsonSchema?: {
     name: string;
     schema: Record<string, unknown>;
@@ -77,7 +78,9 @@ export async function generateOpenAIText(request: OpenAITextRequest): Promise<Op
           : {}),
       },
     },
-    request.timeoutMs !== undefined ? { timeout: request.timeoutMs } : undefined,
+    request.timeoutMs !== undefined || request.signal !== undefined
+      ? { timeout: request.timeoutMs, signal: request.signal }
+      : undefined,
   );
 
   if (response.status !== 'completed') {
