@@ -90,6 +90,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Accenture Federal Services",
+      "normalized": "ACCENTURE FEDERAL SERVICES",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Access Bank PLC",
       "normalized": "ACCESS BANK",
       "sponsors": false,
@@ -318,6 +332,29 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ],
       "filing_cities": [
         "NEW YORK"
+      ]
+    },
+    {
+      "company": "ALO",
+      "normalized": "ALO",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "ALO",
+      "legal_names": [
+        "ALO LLC",
+        "Alo LLC"
+      ],
+      "approvals": 1,
+      "denials": 0,
+      "fiscal_years": [
+        2022
+      ],
+      "lca_certifications": 17,
+      "filing_states": [
+        "CA"
+      ],
+      "filing_cities": [
+        "BEVERLY HILLS"
       ]
     },
     {
@@ -614,6 +651,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "ASM",
+      "normalized": "ASM",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Assembled",
       "normalized": "ASSEMBLED",
       "sponsors": true,
@@ -751,6 +802,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Axon",
+      "normalized": "AXON",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Base.com",
       "normalized": "BASE COM",
       "sponsors": false,
@@ -785,6 +850,36 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ],
       "filing_cities": [
         "SAN FRANCISCO"
+      ]
+    },
+    {
+      "company": "BAYADA Home Health Care",
+      "normalized": "BAYADA HOME HEALTH CARE",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "BAYADA HOME HEALTH CARE",
+      "legal_names": [
+        "BAYADA HOME HEALTH CARE INC",
+        "Bayada Home Health Care, Inc."
+      ],
+      "approvals": 6,
+      "denials": 0,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 1,
+      "filing_states": [
+        "NC",
+        "NJ"
+      ],
+      "filing_cities": [
+        "CONCORD",
+        "GREENSBORO",
+        "MERCHANTVILLE",
+        "PENNSAUKEN",
+        "WINSTON SALEM"
       ]
     },
     {
@@ -1243,6 +1338,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Capco",
+      "normalized": "CAPCO",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Capgemini",
       "normalized": "CAPGEMINI",
       "sponsors": false,
@@ -1282,6 +1391,31 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         "PALO ALTO",
         "SAN CARLOS",
         "SAN FRANCISCO"
+      ]
+    },
+    {
+      "company": "Carvana",
+      "normalized": "CARVANA",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "CARVANA",
+      "legal_names": [
+        "CARVANA LLC",
+        "Carvana, LLC"
+      ],
+      "approvals": 131,
+      "denials": 3,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 44,
+      "filing_states": [
+        "AZ"
+      ],
+      "filing_cities": [
+        "TEMPE"
       ]
     },
     {
@@ -1340,6 +1474,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "Center for a New American Security",
       "normalized": "CENTER FOR A NEW AMERICAN SECURITY",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Centria Autism",
+      "normalized": "CENTRIA AUTISM",
       "sponsors": false,
       "evidence": null,
       "matched_key": null,
@@ -1814,6 +1962,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Coupang",
+      "normalized": "COUPANG",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Create Wellness, Inc.",
       "normalized": "CREATE WELLNESS",
       "sponsors": false,
@@ -2221,6 +2383,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "DoorDash USA",
+      "normalized": "DOORDASH USA",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "doppel",
       "normalized": "DOPPEL",
       "sponsors": true,
@@ -2595,6 +2771,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "EquipmentShare",
+      "normalized": "EQUIPMENTSHARE",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Etched",
       "normalized": "ETCHED",
       "sponsors": false,
@@ -2782,6 +2972,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "FeverUp",
+      "normalized": "FEVERUP",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Figma",
@@ -3144,6 +3348,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "NEW YORK"
       ]
+    },
+    {
+      "company": "Genius Sports Statistician Network",
+      "normalized": "GENIUS SPORTS STATISTICIAN NETWORK",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Geotab",
@@ -3564,6 +3782,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         "SAN FRANCISCO",
         "SAN MATEO"
       ]
+    },
+    {
+      "company": "Horace Mann - Agent Opportunities",
+      "normalized": "HORACE MANN AGENT OPPORTUNITIES",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "HubSpot",
@@ -4344,6 +4576,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Liquid Personnel",
+      "normalized": "LIQUID PERSONNEL",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "llamaindex",
       "normalized": "LLAMAINDEX",
       "sponsors": true,
@@ -4594,6 +4840,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "MedElite Group, LLC.",
+      "normalized": "MEDELITE GROUP",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "Mercari, Inc. (India)",
       "normalized": "MERCARI INC INDIA",
       "sponsors": false,
@@ -4702,6 +4962,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
         "CHICAGO",
         "SAN FRANCISCO"
       ]
+    },
+    {
+      "company": "Meridial",
+      "normalized": "MERIDIAL",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Middle Seat",
@@ -5392,6 +5666,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Ouihelp",
+      "normalized": "OUIHELP",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "PagerDuty",
       "normalized": "PAGERDUTY",
       "sponsors": true,
@@ -5568,31 +5856,6 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "lca_certifications": 0,
       "filing_states": [],
       "filing_cities": []
-    },
-    {
-      "company": "phonepe",
-      "normalized": "PHONEPE",
-      "sponsors": true,
-      "evidence": "both",
-      "matched_key": "PHONEPE PRIVATE",
-      "legal_names": [
-        "PHONEPE PRIVATE LTD",
-        "PhonePe Limited",
-        "PhonePe Private Limited"
-      ],
-      "approvals": 1,
-      "denials": 0,
-      "fiscal_years": [
-        2022
-      ],
-      "lca_certifications": 7,
-      "filing_states": [
-        "CA"
-      ],
-      "filing_cities": [
-        "EL SEGUNDO",
-        "MENLO PARK"
-      ]
     },
     {
       "company": "Physical Intelligence",
@@ -5846,6 +6109,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Private Equity Insights",
+      "normalized": "PRIVATE EQUITY INSIGHTS",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "ProperExpression",
       "normalized": "PROPEREXPRESSION",
       "sponsors": false,
@@ -5915,6 +6192,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
     {
       "company": "Pugpig",
       "normalized": "PUGPIG",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
+      "company": "Pulse Healthcare",
+      "normalized": "PULSE HEALTHCARE",
       "sponsors": false,
       "evidence": null,
       "matched_key": null,
@@ -7252,6 +7543,32 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Speechify",
+      "normalized": "SPEECHIFY",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "SPEECHIFY",
+      "legal_names": [
+        "SPEECHIFY INC",
+        "Speechify Inc.",
+        "Speechify, Inc."
+      ],
+      "approvals": 3,
+      "denials": 0,
+      "fiscal_years": [
+        2022,
+        2023
+      ],
+      "lca_certifications": 4,
+      "filing_states": [
+        "FL"
+      ],
+      "filing_cities": [
+        "SAINT PETERSBURG",
+        "ST. PETERSBURG"
+      ]
+    },
+    {
       "company": "Sports Reference",
       "normalized": "SPORTS REFERENCE",
       "sponsors": false,
@@ -8138,6 +8455,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": []
     },
     {
+      "company": "Upstream Rehabilitation",
+      "normalized": "UPSTREAM REHABILITATION",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "validio",
       "normalized": "VALIDIO",
       "sponsors": false,
@@ -8322,6 +8653,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       ]
     },
     {
+      "company": "Veterinary Emergency Group (VEG)",
+      "normalized": "VETERINARY EMERGENCY GROUP VEG",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
+    },
+    {
       "company": "VetsEZ",
       "normalized": "VETSEZ",
       "sponsors": false,
@@ -8361,6 +8706,34 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "NEW YORK",
         "TAMPA"
+      ]
+    },
+    {
+      "company": "VML",
+      "normalized": "VML",
+      "sponsors": true,
+      "evidence": "both",
+      "matched_key": "VML",
+      "legal_names": [
+        "VML LLC"
+      ],
+      "approvals": 20,
+      "denials": 1,
+      "fiscal_years": [
+        2021,
+        2022,
+        2023
+      ],
+      "lca_certifications": 15,
+      "filing_states": [
+        "MI",
+        "MO",
+        "NY"
+      ],
+      "filing_cities": [
+        "KALAMAZOO",
+        "KANSAS CITY",
+        "NEW YORK"
       ]
     },
     {
@@ -8631,6 +9004,20 @@ export const H1B_SPONSOR_FILE: H1bSponsorFile = {
       "filing_cities": [
         "OLD GREENWICH"
       ]
+    },
+    {
+      "company": "WPP Media",
+      "normalized": "WPP MEDIA",
+      "sponsors": false,
+      "evidence": null,
+      "matched_key": null,
+      "legal_names": [],
+      "approvals": 0,
+      "denials": 0,
+      "fiscal_years": [],
+      "lca_certifications": 0,
+      "filing_states": [],
+      "filing_cities": []
     },
     {
       "company": "Wrisk",

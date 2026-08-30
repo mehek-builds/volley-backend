@@ -158,9 +158,8 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
  *   - a portal demoted out of AUTONOMOUS_PORTAL_FAMILIES, taking its boards with it
  *   - the deactivation sweep in pollSource wiping boards (see the empty-response guard there)
  * The fix is more sources. All seven pollable families now have a fetchSourceJobs branch (see
- * POLLABLE_JOB_BOARDS); the cheapest remaining lever is a wider probe round for Rippling, Breezy and
- * Recruitee tokens (only one seeded source per platform as of 2026-08-29) and for verified Workable
- * account tokens, not a new adapter.
+ * POLLABLE_JOB_BOARDS); the cheapest remaining lever is another verified source round across these
+ * families, not a new adapter.
  */
 export const MINIMUM_SURFACED_JOBS = 50_000;
 

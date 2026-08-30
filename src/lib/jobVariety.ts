@@ -62,6 +62,8 @@ const FINANCIAL = new Set([
   'gsa capital', 'vatic labs', 'engineers gate', 'dv trading', 'jump crypto', 'airwallex',
   // The international round, 2026-08-04. Fintech and banking outside the US.
   'inter', 'solaris', 'raisin', 'mollie', 'ledger', 'vtex',
+  // The 2026-08-30 supply round.
+  'private equity insights', 'capco', 'horace mann - agent opportunities',
 ]);
 
 const HEALTH = new Set([
@@ -72,6 +74,9 @@ const HEALTH = new Set([
   'twist bioscience', 'alan', 'wellhub',
   // The 2026-08-29 autonomous-poller probe round (Rippling, Breezy, Recruitee).
   'beta bionics', 'reveleer',
+  // The 2026-08-30 supply round.
+  'pulse healthcare', 'bayada home health care', 'liquid personnel', 'centria autism',
+  'upstream rehabilitation', 'veterinary emergency group (veg)', 'ouihelp', 'medelite group, llc.',
 ]);
 
 const AEROSPACE_MOBILITY = new Set([
@@ -91,6 +96,8 @@ const CONSUMER = new Set([
   'pinterest', 'quintoandar', 'reddit', 'remote', 'squarespace', 'tripadvisor',
   // The 2026-08-29 autonomous-poller probe round.
   'polaroid',
+  // The 2026-08-30 supply round.
+  'carvana', 'alo', 'equipmentshare', 'coupang', 'feverup', 'doordash usa',
 ]);
 
 const MEDIA_GAMING = new Set([
@@ -98,6 +105,8 @@ const MEDIA_GAMING = new Set([
   'suno', 'take-two', 'twitch',
   // The international round, 2026-08-04.
   'wildlife studios', 'sorare', 'musixmatch', 'trivago',
+  // The 2026-08-30 supply round.
+  'wpp media', 'vml', 'genius sports statistician network',
 ]);
 
 const EDUCATION = new Set(['elicit', 'khan academy']);
@@ -135,6 +144,8 @@ const TECHNOLOGY = new Set([
   // the bar this list has always held to (see the note above).
   'rippling', 'talentneuron', 'vosyn', 'envipco', 'ibexa', 'greenflux', 'crowdsec',
   'mercedes-benz.io', 'famly', 'freeday', 'cbs corporate business solutions', 'property leads',
+  // The 2026-08-30 supply round.
+  'speechify', 'axon', 'asm',
 ]);
 
 export function classifyEmployerIndustry(company: string): EmployerIndustry {

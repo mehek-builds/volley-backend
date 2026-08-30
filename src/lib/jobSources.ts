@@ -641,6 +641,42 @@ const PHASE_4_AUTONOMOUS_POLLER_PROBE_ENTRIES: Entry[] = [
   ['Bundl', 'recruitee', 'bundl'],
 ];
 
+/* Added 2026-08-30: Greenhouse supply round for the 50,000-posting floor.
+ *
+ * The production board held 34,259 surfaced postings before this round. These 25 boards published
+ * 25,155 postings inside Litos's ingest and freshness gates when checked through Greenhouse's own
+ * API. The 9,414-posting buffer above the gap is intentional because employers close roles every
+ * day. Names come from the API's company_name field, not from guessed tokens. The candidates came
+ * from the CC0 open-jobs slug catalog and were then re-verified directly against Greenhouse.
+ */
+const PHASE_5_FIFTY_THOUSAND_FLOOR_ENTRIES: Entry[] = [
+  ['Pulse Healthcare', 'greenhouse', 'pulse'],
+  ['BAYADA Home Health Care', 'greenhouse', 'bayada'],
+  ['Carvana', 'greenhouse', 'carvana'],
+  ['Liquid Personnel', 'greenhouse', 'liquidpersonnel'],
+  ['Speechify', 'greenhouse', 'speechify'],
+  ['Centria Autism', 'greenhouse', 'centriaautism'],
+  ['Upstream Rehabilitation', 'greenhouse', 'urpt'],
+  ['Private Equity Insights', 'greenhouse', 'privateequityinsights'],
+  ['Veterinary Emergency Group (VEG)', 'greenhouse', 'veterinaryemergencygroupst'],
+  ['ALO', 'greenhouse', 'aloyoga'],
+  ['WPP Media', 'greenhouse', 'wppmedia'],
+  ['EquipmentShare', 'greenhouse', 'equipmentsharecom'],
+  ['Meridial', 'greenhouse', 'agency'],
+  ['Capco', 'greenhouse', 'capco'],
+  ['Ouihelp', 'greenhouse', 'ouihelp'],
+  ['Coupang', 'greenhouse', 'coupang'],
+  ['Accenture Federal Services', 'greenhouse', 'accenturefederalservices'],
+  ['VML', 'greenhouse', 'wundermanthompson'],
+  ['FeverUp', 'greenhouse', 'feverup'],
+  ['Axon', 'greenhouse', 'axon'],
+  ['MedElite Group, LLC.', 'greenhouse', 'medelitellc'],
+  ['Genius Sports Statistician Network', 'greenhouse', 'geniussportssn'],
+  ['DoorDash USA', 'greenhouse', 'doordashusa'],
+  ['ASM', 'greenhouse', 'asm'],
+  ['Horace Mann - Agent Opportunities', 'greenhouse', 'horacemannagents'],
+];
+
 const ENTRIES: readonly Entry[] = [
   ...BASE_ENTRIES,
   ...PHASE_2_WORKABLE_ENTRIES,
@@ -649,6 +685,7 @@ const ENTRIES: readonly Entry[] = [
   ...INTERNATIONAL_INTERNSHIP_ENTRIES,
   ...PHASE_3_AUTONOMOUS_POLLER_ENTRIES,
   ...PHASE_4_AUTONOMOUS_POLLER_PROBE_ENTRIES,
+  ...PHASE_5_FIFTY_THOUSAND_FLOOR_ENTRIES,
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {

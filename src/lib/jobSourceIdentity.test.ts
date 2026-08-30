@@ -78,8 +78,8 @@ test('Phase 2 configures exactly 49 verified Workable employers with canonical c
 });
 
 test('Phase 2 keeps the verified employer catalog diverse across all seven pollable ATS families', () => {
-  // 393 current sources, plus three seed sources and a 48-source verified probe round.
-  assert.equal(JOB_SOURCES.length, 444, 'the reviewed catalog must not silently shrink or grow');
+  // 393 current sources, three seed sources, 48 new-family sources, and 25 high-yield Greenhouse sources.
+  assert.equal(JOB_SOURCES.length, 469, 'the reviewed catalog must not silently shrink or grow');
   const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
   assert.deepEqual(
     [...families].sort(),
@@ -95,7 +95,7 @@ test('Phase 2 keeps the verified employer catalog diverse across all seven polla
    * 400, and the test named "source 401 completes on the second pass of the same drain run"
    * covers exactly this.
    *
-   * CROSSED DELIBERATELY on 2026-08-29 (445 sources): the 2026-08-29 probe round is the "source 401"
+   * CROSSED DELIBERATELY on 2026-08-29: the autonomous-family probe round is the "source 401"
    * this comment always said would come. The daily cron now needs two passes to finish rather than
    * one, which changes its runtime and log shape - worth noticing here rather than on a slow
    * morning. The tripwire moves to the real ceiling (five passes of POLL_SEGMENT_SIZE) so the NEXT
