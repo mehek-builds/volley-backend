@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import type { ResponseInput } from 'openai/resources/responses/responses';
 
 export const OPENAI_GENERATION_MODEL = process.env.OPENAI_GENERATION_MODEL?.trim() || 'gpt-5.6-terra';
 
@@ -18,7 +19,7 @@ export type OpenAITextResult = {
 
 export type OpenAITextRequest = {
   instructions: string;
-  input: string;
+  input: string | ResponseInput;
   maxOutputTokens: number;
   timeoutMs?: number;
   jsonSchema?: {
