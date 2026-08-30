@@ -400,12 +400,11 @@ export function hasFocusTargeting(target: { categories?: unknown; titles?: unkno
     && target.role_types.length > 0;
 }
 
-export function hasFiveTargetRoles(parsed: { target_roles?: unknown } | null | undefined): boolean {
-  if (!Array.isArray(parsed?.target_roles)) return false;
-  const roles = parsed.target_roles
-    .filter((role): role is string => typeof role === 'string' && role.trim().length > 0)
-    .map((role) => role.trim().toLowerCase());
-  return new Set(roles).size >= 5;
+export function hasResumeEvidence(
+  parsed: { full_name?: unknown } | null | undefined,
+  bankCount: number,
+): boolean {
+  return typeof parsed?.full_name === 'string' && parsed.full_name.trim().length > 0 && bankCount > 0;
 }
 
 export function hasWorkEligibilityDeclaration(input: {
@@ -736,9 +735,9 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     // enough: /resume/generate and /application/answer both hard-400 without bank entries, so a
     // student with a parse but no bank has an account that looks set up and cannot generate
     // anything. Treating that as step 0 sends them back to the one screen that fixes it.
-    // Checks a REQUIRED key, not object truthiness: `!!{}` is true, so a parse that returned
-    // nothing usable would advance the student past step 01 with no name, school or grad_year -
-    // and the targeting screen would then derive its period options from grad_year 0.
+    // Focus is collected before upload in the current flow, so inferred target roles enrich a
+    // successful model parse but are not resume evidence and cannot hold an otherwise usable local
+    // fallback on this screen. A name plus a grounded bank row is the contract generation needs.
     const parsed = profile?.parsed_json as {
       full_name?: string;
       source_pages?: number;
@@ -746,7 +745,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
       languages?: unknown;
       recent_experience_review?: { completed?: boolean };
     } | null | undefined;
-    const has_resume = !!parsed?.full_name && hasFiveTargetRoles(parsed) && (bankCount?.n ?? 0) > 0;
+    const has_resume = hasResumeEvidence(parsed, bankCount?.n ?? 0);
     const has_applied = (applyCount?.n ?? 0) > 0;
 
     // The base resume: built once from the bank, with no job description. Stored rather than
@@ -756,14 +755,9 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const learned = HARVEST_FIELDS.filter((f) => readable(appProfile, f) !== null);
     const gaps = gapsFrom(appProfile);
 
-    // Targeting follows the upload. The parser now returns five ordered role suggestions based on
-    // dated experience, past titles and skills, and the client derives an initial employment type
-    // from the same profile. Putting the resume first means the first targeting screen is mostly a
-    // confirmation instead of a blank form.
-    // Require the resume-informed fields, not only the legacy category answer. Existing users may
-    // already have categories from the old pre-upload screen while titles are still null. Treating
-    // that row as complete would skip the new five-role confirmation and leave no later screen
-    // where those titles can be collected.
+    // Focus leads the current flow and is independent of model-inferred resume roles. Require the
+    // fields that screen actually collects. Existing users may still have only a category from the
+    // older flow, so titles and role type remain required before focus is complete.
     const has_focus = hasFocusTargeting(target);
 
     /* THE SPONSORSHIP QUESTION, and why it is a step of its own rather than a field on the focus

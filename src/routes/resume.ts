@@ -32,7 +32,12 @@ import {
   validateResumeVisualLayout,
   type ResumeVisualLayout,
 } from '../engine/resumeRender';
-import { validateResumeSpec, validatePdfLayout, pruneUngroundedContent } from '../engine/resumeValidate';
+import {
+  isProviderDependentResumeStyleIssue,
+  validateResumeSpec,
+  validatePdfLayout,
+  pruneUngroundedContent,
+} from '../engine/resumeValidate';
 import { mintDownloadToken, readDownloadToken, resolveBlobUrl } from '../lib/resumeAccess';
 import { apiBaseFor } from '../lib/apiBase';
 import {
@@ -53,7 +58,7 @@ import {
 import { extractPdfText } from '../lib/pdfText';
 import { createPdfGenerationBinding } from '../lib/pdfGenerationBinding';
 import { PRODUCT_NAME } from '../lib/product';
-import { applyResumePolicy, educationFrom, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
+import { allowedSparseEntriesForGeneration, applyResumePolicy, educationFrom, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
 import { academicRecordRowFor } from './profile';
 import { warmRequirementCache } from '../engine/warmRequirements';
 import { postingRow, resolveJdText } from './jdMatch';
@@ -317,6 +322,12 @@ function refreshedHistorySpec(spec: unknown, profile: ApplicationProfileLike, jo
 //    experience bank, so it is most fragile exactly when capacity is tight.
 const MAX_OVERLOAD_ATTEMPTS = 4;
 const MIN_CALL_BUDGET_MS = 6000; // never start a model call with less than this left
+
+export function shouldRetryResumeSpec(spec: ResumeSpec, issues: string[], attempt: number): boolean {
+  return issues.length > 0
+    && spec.generation_method !== 'local_fallback'
+    && attempt < MAX_SPEC_ATTEMPTS;
+}
 const MAX_BACKOFF_MS = 6000;
 
 // Anthropic returns 529 overloaded_error during a capacity incident and 429 when rate limited; the
@@ -981,7 +992,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
       const result = validateResumeSpec(spec, jdText, bank, declaredSkills, education, body.role);
       const typographyIssues = findResumeTypographyIssues(spec, applicationContact);
-      specIssues = [...result.issues, ...typographyIssues];
+      const allValidationIssues = [...result.issues, ...typographyIssues];
+      const providerStyleIssues = spec.generation_method === 'local_fallback'
+        ? allValidationIssues.filter(isProviderDependentResumeStyleIssue)
+        : [];
+      specIssues = allValidationIssues.filter((issue) => !providerStyleIssues.includes(issue));
       /* requireFirst: false. The priority entry has to be ON the resume; which entry LEADS it is
          decided against this posting, by leadAlignmentIssues below. See baseResumeSelectionIssues
          for why the position half of that check belongs to the base resume and not here. */
@@ -995,10 +1010,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         ? leadSelectionIssues
         : leadAlignmentIssues(spec, jdText, { context: { company: body.company, role: body.role } });
       specIssues.push(...leadIssues);
-      specWarnings = result.warnings;
+      specWarnings = [
+        ...result.warnings,
+        ...providerStyleIssues.map((issue) => ({ entry: 'Resume wording', bullet: '', flags: [issue] })),
+      ];
       atsCoverage = result.ats_keyword_coverage_pct;
 
-      if (specIssues.length === 0 || attempt === MAX_SPEC_ATTEMPTS) break;
+      // A grounded local spec means both providers were unavailable. Repeating the same calls with
+      // validation feedback cannot improve an outage fallback and only restores the long spinner.
+      if (!shouldRetryResumeSpec(spec, specIssues, attempt)) break;
       fastify.log.warn({ specIssues }, 'resume spec failed validation, retrying with feedback');
     }
     if (!spec) {
@@ -1043,6 +1063,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     spec = enforceExperienceBulletFloor(spec, bank, {
       priorityEntryId: priorityEntry?.id,
       allowSparsePriority: recentReview?.continue_with_found === true,
+      allowSparseAll: spec.generation_method === 'local_fallback',
       onDropped: ({ org, bullets }) =>
         droppedForLength.push(
           `Left ${org} off: it has ${bullets === 1 ? 'one bullet' : `${bullets} bullets`} and we recommend at least ${RESUME_CONTENT_LIMITS.minBulletsPerEntry}. Add another and it goes on.`,
@@ -1112,6 +1133,11 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       const visualValidation = validateResumeVisualLayout(visualLayout);
       visualWarnings = visualValidation.warnings;
       visualIssues = visualValidation.issues;
+      if (spec.generation_method === 'local_fallback') {
+        const providerStyleIssues = visualIssues.filter(isProviderDependentResumeStyleIssue);
+        visualIssues = visualIssues.filter((issue) => !providerStyleIssues.includes(issue));
+        visualWarnings.push(...providerStyleIssues.map((issue) => `Review source wording: ${issue}`));
+      }
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({ error: 'Failed to render resume PDF' });
@@ -1130,11 +1156,23 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       education,
       body.role,
       {
-        allowedSingleBulletEntries: recentReview?.continue_with_found && priorityEntry
-          ? [priorityEntry]
-          : [],
+        allowedSingleBulletEntries: allowedSparseEntriesForGeneration(
+          spec.generation_method,
+          bank,
+          priorityEntry ? [priorityEntry] : [],
+          recentReview?.continue_with_found === true,
+        ),
       },
     );
+    if (spec.generation_method === 'local_fallback') {
+      const providerStyleIssues = finalSpecValidation.issues.filter(isProviderDependentResumeStyleIssue);
+      finalSpecValidation.issues = finalSpecValidation.issues.filter(
+        (issue) => !providerStyleIssues.includes(issue),
+      );
+      finalSpecValidation.warnings.push(
+        ...providerStyleIssues.map((issue) => ({ entry: 'Resume wording', bullet: '', flags: [issue] })),
+      );
+    }
     if (priorityEntry) {
       finalSpecValidation.issues.push(...baseResumeSelectionIssues(spec, [priorityEntry], { requireFirst: false }));
     }

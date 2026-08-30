@@ -8,6 +8,7 @@ import {
   validateResumeSpec,
   overlongBullets,
   BULLET_MAX_CHARS,
+  isProviderDependentResumeStyleIssue,
 } from './resumeValidate';
 import type { ResumeSpec } from '../llm/resumeSpec';
 import type { ExperienceBankEntry } from '../db/schema';
@@ -27,6 +28,15 @@ function bankEntry(partial: Partial<ExperienceBankEntry>): ExperienceBankEntry {
     ...partial,
   } as ExperienceBankEntry;
 }
+
+test('outage continuity relaxes only provider-dependent style issues', () => {
+  assert.equal(isProviderDependentResumeStyleIssue('bullet not action-verb-first ("Helped"): "Helped users"'), true);
+  assert.equal(isProviderDependentResumeStyleIssue('bullet has 3 words (min 8): "Built the thing"'), true);
+  assert.equal(isProviderDependentResumeStyleIssue(`bullet exceeds ${BULLET_MAX_CHARS} chars: "Built"`), true);
+  assert.equal(isProviderDependentResumeStyleIssue('no experience entries selected'), false);
+  assert.equal(isProviderDependentResumeStyleIssue('grounding: invented organization'), false);
+  assert.equal(isProviderDependentResumeStyleIssue('education school differs from uploaded resume'), false);
+});
 
 function spec(experience: ResumeSpec['experience']): ResumeSpec {
   return {

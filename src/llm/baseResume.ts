@@ -1,6 +1,17 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { ExperienceBankEntry } from '../db/schema';
 import { RESUME_CONTENT_LIMITS } from '../engine/resumeContentPolicy';
+
+export const BASE_RESUME_MODEL_CALL_CAP_MS = 15_000;
+export const BASE_RESUME_REPAIR_CALL_CAP_MS = 8_000;
+
+export function baseResumeModelTimeoutMs(callerAllowanceMs?: number): number {
+  return Math.min(callerAllowanceMs ?? BASE_RESUME_MODEL_CALL_CAP_MS, BASE_RESUME_MODEL_CALL_CAP_MS);
+}
+
+export function baseResumeRepairTimeoutMs(callerAllowanceMs?: number): number {
+  return Math.min(callerAllowanceMs ?? BASE_RESUME_REPAIR_CALL_CAP_MS, BASE_RESUME_REPAIR_CALL_CAP_MS);
+}
 import { relevanceScore } from '../engine/resumePolicy';
 import { BULLET_MAX_CHARS, BULLET_MIN_WORDS, BULLET_MAX_WORDS, STRONG_VERBS, startsWithStrongVerb } from '../engine/resumeValidate';
 import { normalizeSpec, type ResumeSpec } from './resumeSpec';
@@ -290,6 +301,7 @@ export function enforcePrioritySelection(
 
 /** Emitted as the model streams, so /start can draw the resume as it is decided rather than after. */
 export type BaseResumeEvent =
+  | { type: 'restart' }
   | { type: 'education'; education_position: 'top' | 'after_experience' }
   | { type: 'entry'; index: number; entry: ResumeSpec['experience'][number] }
   | { type: 'skills'; skills: string[] };
@@ -424,6 +436,69 @@ export function parseSpecText(text: string): ResumeSpec {
   }
 }
 
+/** A grounded continuity spec used only when the base-resume model call fails. */
+export function baseResumeSpecFromEvidence(
+  bank: ExperienceBankEntry[],
+  education: BaseResumeEducation,
+  skills: string[] | null | undefined,
+  priorityEntries: ExperienceBankEntry[] = [],
+): ResumeSpec {
+  const ordered: ExperienceBankEntry[] = [];
+  const seen = new Set<string>();
+  const add = (entry: ExperienceBankEntry) => {
+    if (ordered.length >= RESUME_CONTENT_LIMITS.maxEntries) return;
+    const key = entryIdentity(entry);
+    if (seen.has(key) || !Array.isArray(entry.bullet_variants) || entry.bullet_variants.length === 0) return;
+    seen.add(key);
+    ordered.push(entry);
+  };
+  priorityEntries.forEach(add);
+  [...bank]
+    .sort((a, b) => Number(isCurrentEntry(b)) - Number(isCurrentEntry(a)) || latestYear(b) - latestYear(a))
+    .forEach(add);
+  const experience = ordered.flatMap((entry) => {
+    const bullets = uniqueStrings(Array.isArray(entry.bullet_variants) ? entry.bullet_variants : [])
+      .map((bullet) => bullet.replace(/\u2014/g, '-'))
+      .slice(0, RESUME_CONTENT_LIMITS.maxBulletsPerEntry);
+    if (bullets.length === 0) return [];
+    return [{
+      type: entry.type as 'job' | 'project' | 'leadership',
+      org: entry.org,
+      title: entry.title ?? '',
+      location: entry.location ?? '',
+      date_range: entry.date_range ?? '',
+      bullets,
+    }];
+  });
+  if (experience.length === 0) throw new Error('No grounded experience entries are available for a main resume');
+  return {
+    ...normalizeSpec({
+    school: education.school,
+    degree: education.degree ?? '',
+    grad_date: education.grad_date ?? (education.grad_year ? String(education.grad_year) : ''),
+    coursework: education.coursework?.join(', ') ?? '',
+    education_position: education.currently_enrolled ? 'top' : 'after_experience',
+    experience,
+      skills: uniqueStrings(skills ?? []).slice(0, 10),
+    }),
+    generation_method: 'local_fallback',
+  };
+}
+
+function uniqueStrings(values: unknown[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (typeof value !== 'string') continue;
+    const clean = value.trim();
+    const key = clean.toLowerCase();
+    if (!clean || seen.has(key)) continue;
+    seen.add(key);
+    out.push(clean);
+  }
+  return out;
+}
+
 export async function generateBaseResumeSpec(
   bank: ExperienceBankEntry[],
   education: BaseResumeEducation,
@@ -450,8 +525,8 @@ export async function generateBaseResumeSpec(
   const contextBlock = `Education source (copy facts exactly; this is the only authority for school, degree, graduation date, enrollment, and coursework):\n${JSON.stringify(education)}${skillsBlock}\n\nExperience bank:\n${JSON.stringify(bank)}${priorityBlock}`;
 
   const reader = new BaseResumeStreamReader();
-
-  const stream = client.messages.stream(
+  try {
+    const stream = client.messages.stream(
     {
       model: 'claude-sonnet-5',
       /* Thinking is OFF, and the whole 15-second onboarding promise rides on it. Sonnet 5 runs
@@ -479,20 +554,30 @@ export async function generateBaseResumeSpec(
       ],
       messages: [{ role: 'user', content: `Return the base resume JSON.${feedbackBlock}` }],
     },
-    options.timeoutMs !== undefined
-      ? { signal: AbortSignal.timeout(options.timeoutMs), maxRetries: 0 }
-      : undefined,
+    {
+      signal: AbortSignal.timeout(baseResumeModelTimeoutMs(options.timeoutMs)),
+      maxRetries: 0,
+    },
   );
 
-  stream.on('text', (delta) => {
-    for (const event of reader.push(delta)) onEvent(event);
-  });
+    stream.on('text', (delta) => {
+      for (const event of reader.push(delta)) onEvent(event);
+    });
 
-  const response = await stream.finalMessage();
-  if (response.stop_reason === 'max_tokens') {
-    throw new Error('Base resume truncated at max_tokens - raise the cap');
+    const response = await stream.finalMessage();
+    if (response.stop_reason === 'max_tokens') {
+      throw new Error('Base resume truncated at max_tokens - raise the cap');
+    }
+    return parseSpecText(reader.text());
+  } catch (error) {
+    const fallback = baseResumeSpecFromEvidence(bank, education, skills, options.priorityEntries);
+    console.warn(`[llm] base_resume provider=local outcome=success entries=${fallback.experience.length} reason=${error instanceof Error ? error.name : 'error'}`);
+    onEvent({ type: 'restart' });
+    onEvent({ type: 'education', education_position: fallback.education_position ?? 'after_experience' });
+    fallback.experience.forEach((entry, index) => onEvent({ type: 'entry', index, entry }));
+    onEvent({ type: 'skills', skills: fallback.skills });
+    return fallback;
   }
-  return parseSpecText(reader.text());
 }
 
 /** One bullet the repair pass must rewrite, with the reasons stated for the prompt. */
@@ -573,9 +658,10 @@ export async function repairBaseResumeBullets(
           content: `Repair these bullets:\n${JSON.stringify(targets.map((target, index) => ({ index, ...target })))}`,
         }],
       },
-      options.timeoutMs !== undefined
-        ? { signal: AbortSignal.timeout(options.timeoutMs), maxRetries: 0 }
-        : undefined,
+      {
+        signal: AbortSignal.timeout(baseResumeRepairTimeoutMs(options.timeoutMs)),
+        maxRetries: 0,
+      },
     );
     // Truncation means an unparseable array; fail toward the original like every other bad reply.
     if (response.stop_reason === 'max_tokens') return spec;

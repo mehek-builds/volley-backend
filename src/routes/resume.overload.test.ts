@@ -1,6 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isTransientOverload, overloadBackoffMs } from './resume';
+import { isTransientOverload, overloadBackoffMs, shouldRetryResumeSpec } from './resume';
+import type { ResumeSpec } from '../llm/resumeSpec';
+
+const RETRY_SPEC = {
+  school: 'USC', degree: 'B.S.', grad_date: '2027', coursework: '', experience: [], skills: [],
+} as ResumeSpec;
+
+test('grounded local resume output never spends a second provider attempt on style feedback', () => {
+  assert.equal(shouldRetryResumeSpec({ ...RETRY_SPEC, generation_method: 'local_fallback' }, ['weak bullet'], 1), false);
+  assert.equal(shouldRetryResumeSpec(RETRY_SPEC, ['weak bullet'], 1), true);
+  assert.equal(shouldRetryResumeSpec(RETRY_SPEC, [], 1), false);
+  assert.equal(shouldRetryResumeSpec(RETRY_SPEC, ['weak bullet'], 2), false);
+});
 
 // Regression coverage for R-003 (live QA 2026-07-16): a real Anthropic `overloaded_error` incident
 // killed a whole fill. /resume/generate returned a generic 500 "Failed to generate resume spec",
