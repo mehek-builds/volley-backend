@@ -446,10 +446,22 @@ function boardCompanies() {
   // this alternation still said greenhouse|lever|ashby|workable and silently skipped all three new
   // entries rather than erroring). If POLLABLE_JOB_BOARDS grows again, this line is the other half.
   const entries = source.match(/\[\s*'([^']+)'\s*,\s*'(greenhouse|lever|ashby|workable|rippling|breezy|recruitee)'\s*,\s*'([^']+)'\s*\]/g) ?? [];
-  return entries.map((raw) => {
+  const literalCompanies = entries.map((raw) => {
     const [, company] = raw.match(/\[\s*'([^']+)'/);
     return company;
   });
+
+  /* The 100,000-posting expansion is generated from a bounded public-board discovery pass. Keep
+     this plain-Node build free of a TypeScript runtime by reading its JSON-shaped object literals.
+     JSON.parse decodes apostrophes, Unicode, and escaped quotes without inventing another parser. */
+  const generatedSource = readFileSync(
+    join(HERE, '..', 'src', 'data', 'jobSources100k.ts'),
+    'utf8',
+  );
+  const generatedCompanies = [...generatedSource.matchAll(/"company_name"\s*:\s*("(?:\\.|[^"\\])*")/g)]
+    .map((match) => JSON.parse(match[1]));
+
+  return [...literalCompanies, ...generatedCompanies];
 }
 
 /** Every filing entity that belongs to one board company, from one source. */

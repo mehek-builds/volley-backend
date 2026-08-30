@@ -1,4 +1,5 @@
 import type { JobSourceInput } from './jobMonitor';
+import { HUNDRED_THOUSAND_FLOOR_DISCOVERY } from '../data/jobSources100k';
 
 /* The companies Litos watches.
  *
@@ -677,6 +678,18 @@ const PHASE_5_FIFTY_THOUSAND_FLOOR_ENTRIES: Entry[] = [
   ['Horace Mann - Agent Opportunities', 'greenhouse', 'horacemannagents'],
 ];
 
+/* Added 2026-08-30: the measured supply round for the 100,000-posting floor.
+ *
+ * The bounded discovery pass checked every remaining Greenhouse slug in the CC0 open-jobs catalog,
+ * removed duplicate company boards and obvious internal, referral, and sandbox tenants, then kept
+ * 580 public employer boards. Greenhouse reported 60,001 postings inside the 90-day freshness
+ * window. The generated file preserves the employer-reported company name, token, and discovery
+ * count so the selection can be audited without rerunning the network scan.
+ */
+const PHASE_6_HUNDRED_THOUSAND_FLOOR_ENTRIES: Entry[] = HUNDRED_THOUSAND_FLOOR_DISCOVERY.map(
+  ({ company_name, board_token }) => [company_name, 'greenhouse', board_token],
+);
+
 const ENTRIES: readonly Entry[] = [
   ...BASE_ENTRIES,
   ...PHASE_2_WORKABLE_ENTRIES,
@@ -686,6 +699,7 @@ const ENTRIES: readonly Entry[] = [
   ...PHASE_3_AUTONOMOUS_POLLER_ENTRIES,
   ...PHASE_4_AUTONOMOUS_POLLER_PROBE_ENTRIES,
   ...PHASE_5_FIFTY_THOUSAND_FLOOR_ENTRIES,
+  ...PHASE_6_HUNDRED_THOUSAND_FLOOR_ENTRIES,
 ];
 
 function careerUrl(ats: JobSourceInput['ats_name'], token: string): string {

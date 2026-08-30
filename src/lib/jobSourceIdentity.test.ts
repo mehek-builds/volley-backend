@@ -78,8 +78,8 @@ test('Phase 2 configures exactly 49 verified Workable employers with canonical c
 });
 
 test('Phase 2 keeps the verified employer catalog diverse across all seven pollable ATS families', () => {
-  // 393 current sources, three seed sources, 48 new-family sources, and 25 high-yield Greenhouse sources.
-  assert.equal(JOB_SOURCES.length, 469, 'the reviewed catalog must not silently shrink or grow');
+  // 469 reviewed sources plus 580 verified Greenhouse sources for the 100,000-posting floor.
+  assert.equal(JOB_SOURCES.length, 1_049, 'the reviewed catalog must not silently shrink or grow');
   const families = new Set(JOB_SOURCES.map((source) => source.ats_name));
   assert.deepEqual(
     [...families].sort(),
@@ -95,15 +95,18 @@ test('Phase 2 keeps the verified employer catalog diverse across all seven polla
    * 400, and the test named "source 401 completes on the second pass of the same drain run"
    * covers exactly this.
    *
-   * CROSSED DELIBERATELY on 2026-08-29: the autonomous-family probe round is the "source 401"
-   * this comment always said would come. The daily cron now needs two passes to finish rather than
-   * one, which changes its runtime and log shape - worth noticing here rather than on a slow
-   * morning. The tripwire moves to the real ceiling (five passes of POLL_SEGMENT_SIZE) so the NEXT
-   * deliberate crossing is the one that needs a look, not this one re-flagging itself forever. */
+   * CROSSED DELIBERATELY twice: the autonomous-family probe round crossed source 401 on 2026-08-29,
+   * then the 100,000-posting supply round crossed source 801 on 2026-08-30. The daily cron now needs
+   * three passes to finish. The tripwire remains at the real ceiling of five passes so the next
+   * deliberate crossing is the one that needs a capacity decision. */
   assert.equal(POLL_SEGMENT_SIZE, 400, 'one segment; the drain carries whatever does not fit');
   assert.ok(
     JOB_SOURCES.length > POLL_SEGMENT_SIZE,
     'this assertion is itself the record of when the catalog first crossed one segment',
+  );
+  assert.ok(
+    JOB_SOURCES.length > POLL_SEGMENT_SIZE * 2,
+    'the 100,000-posting catalog deliberately needs a third drain segment',
   );
   assert.ok(
     JOB_SOURCES.length <= POLL_SEGMENT_SIZE * 5,

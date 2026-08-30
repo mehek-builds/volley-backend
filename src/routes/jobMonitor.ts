@@ -161,7 +161,7 @@ const jobParamsSchema = z.object({ id: z.string().uuid() });
  * POLLABLE_JOB_BOARDS); the cheapest remaining lever is another verified source round across these
  * families, not a new adapter.
  */
-export const MINIMUM_SURFACED_JOBS = 50_000;
+export const MINIMUM_SURFACED_JOBS = 100_000;
 
 /** Distinct roles use the public board's exact grouping key: company, title, and ATS family. */
 export const MINIMUM_SURFACED_GROUPED_ROLES = 10_000;
@@ -225,7 +225,7 @@ export function groupedRoleAlertTriggered(surfacedGroupedRoles: number): boolean
  * inconsistent across the competitor's own marketing (see litos-competitor-teardown-4-new-2026-08-02
  * .md), so treat it as a stretch target set for parity, not as a verified market ceiling.
  */
-export const TARGET_SURFACED_POSTINGS = 100_000;
+export const TARGET_SURFACED_POSTINGS = 125_000;
 export const TARGET_SURFACED_GROUPED_ROLES = 12_000;
 
 export function inventoryTargetMet(surfacedPostings: number, surfacedGroupedRoles: number): boolean {

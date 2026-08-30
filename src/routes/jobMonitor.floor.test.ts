@@ -30,15 +30,15 @@ import { AUTONOMOUS_PORTAL_FAMILIES, portalCanAutoSubmit } from '../lib/portalSu
 import { hasUsableDescription, POLLABLE_JOB_BOARDS } from '../lib/jobMonitor';
 import { POLL_TIME_BUDGET_MS } from '../lib/jobPollScheduler';
 
-test('the board has independent fifty-thousand posting and ten-thousand grouped-role floors', () => {
+test('the board has independent hundred-thousand posting and ten-thousand grouped-role floors', () => {
   // Pinned as a value, not just a comparison. If someone "fixes" a breach by lowering the number,
   // this test is what makes that show up as a deliberate edit in a diff rather than a quiet tweak.
-  assert.equal(MINIMUM_SURFACED_JOBS, 50_000);
+  assert.equal(MINIMUM_SURFACED_JOBS, 100_000);
   assert.equal(MINIMUM_SURFACED_GROUPED_ROLES, 10_000);
   assert.equal(MINIMUM_SPONSOR_SURFACED_JOBS, 5_000);
-  assert.equal(boardIsBelowFloor(49_999), true);
-  assert.equal(boardIsBelowFloor(50_000), false, 'exactly at the floor is not below it');
-  assert.equal(boardIsBelowFloor(50_001), false);
+  assert.equal(boardIsBelowFloor(99_999), true);
+  assert.equal(boardIsBelowFloor(100_000), false, 'exactly at the floor is not below it');
+  assert.equal(boardIsBelowFloor(100_001), false);
   assert.equal(boardIsBelowFloor(0), true, 'an empty board is the case this exists for');
 });
 
@@ -141,30 +141,30 @@ test('the freshness window is three months', () => {
 
 test('posting and grouped-role warnings are evaluated together', () => {
   assert.equal(REQUIRED_HEADROOM_MULTIPLE, 1.2);
-  assert.equal(REQUIRED_SURFACED_JOBS, 60_000);
+  assert.equal(REQUIRED_SURFACED_JOBS, 120_000);
   assert.equal(REQUIRED_SURFACED_GROUPED_ROLES, 11_000);
   assert.equal(GROUPED_ROLE_ALERT_THRESHOLD, 11_000);
   assert.equal(groupedRoleAlertTriggered(11_000), false, 'the threshold itself is healthy');
   assert.equal(groupedRoleAlertTriggered(10_999), true, 'the alert fires before the hard floor');
   assert.equal(groupedRoleAlertTriggered(10_000), true, 'the hard-floor boundary remains alerted');
-  assert.equal(boardHealth(60_001, 11_001), 'ok');
-  assert.equal(boardHealth(60_000, 11_000), 'ok', 'exactly at both warning lines is healthy');
-  assert.equal(boardHealth(59_999, 11_000), 'low', 'posting headroom warns');
-  assert.equal(boardHealth(60_000, 10_999), 'low', 'grouped-role headroom warns');
-  assert.equal(boardHealth(50_000, 10_000), 'low', 'exactly at both floors is not a breach');
-  assert.equal(boardHealth(49_999, 12_000), 'breached', 'postings can breach independently');
-  assert.equal(boardHealth(60_000, 9_999), 'breached', 'grouped roles can breach independently');
+  assert.equal(boardHealth(120_001, 11_001), 'ok');
+  assert.equal(boardHealth(120_000, 11_000), 'ok', 'exactly at both warning lines is healthy');
+  assert.equal(boardHealth(119_999, 11_000), 'low', 'posting headroom warns');
+  assert.equal(boardHealth(120_000, 10_999), 'low', 'grouped-role headroom warns');
+  assert.equal(boardHealth(100_000, 10_000), 'low', 'exactly at both floors is not a breach');
+  assert.equal(boardHealth(99_999, 12_000), 'breached', 'postings can breach independently');
+  assert.equal(boardHealth(120_000, 9_999), 'breached', 'grouped roles can breach independently');
   assert.equal(boardHealth(0, 0), 'breached');
 });
 
-test('Phase 2 supply targets remain above both early warning lines', () => {
-  assert.equal(TARGET_SURFACED_POSTINGS, 100_000);
+test('supply targets remain above both early warning lines', () => {
+  assert.equal(TARGET_SURFACED_POSTINGS, 125_000);
   assert.equal(TARGET_SURFACED_GROUPED_ROLES, 12_000);
   assert.ok(TARGET_SURFACED_POSTINGS > REQUIRED_SURFACED_JOBS);
   assert.ok(TARGET_SURFACED_GROUPED_ROLES > REQUIRED_SURFACED_GROUPED_ROLES);
-  assert.equal(inventoryTargetMet(100_000, 12_000), true, 'exactly at both targets passes');
-  assert.equal(inventoryTargetMet(99_999, 12_000), false, 'posting target is independent');
-  assert.equal(inventoryTargetMet(100_000, 11_999), false, 'grouped-role target is independent');
+  assert.equal(inventoryTargetMet(125_000, 12_000), true, 'exactly at both targets passes');
+  assert.equal(inventoryTargetMet(124_999, 12_000), false, 'posting target is independent');
+  assert.equal(inventoryTargetMet(125_000, 11_999), false, 'grouped-role target is independent');
 });
 
 test('a thin board warns without failing the run, so the 5xx keeps meaning "broken now"', () => {
@@ -172,7 +172,7 @@ test('a thin board warns without failing the run, so the 5xx keeps meaning "brok
   // boardIsBelowFloor, or the early warning would page someone and the real breach signal would be
   // trained away.
   for (const n of [10_999, 10_500, 10_000]) {
-    assert.equal(boardHealth(60_000, n), 'low', String(n));
+    assert.equal(boardHealth(120_000, n), 'low', String(n));
     assert.ok(n >= MINIMUM_SURFACED_GROUPED_ROLES, `${n} must warn, not 5xx`);
   }
 });
