@@ -7,15 +7,5 @@
   },
   "rewrites": [
     { "source": "/(.*)", "destination": "/api" }
-  ],
-  "crons": [
-    { "path": "/internal/adapter-health-check", "schedule": "0 13 * * *" },
-    { "path": "/internal/resume-retention-sweep", "schedule": "30 3 * * *" },
-    { "path": "/internal/job-monitor", "schedule": "0 6 * * *" },
-    { "path": "/internal/autopilot-matcher", "schedule": "10 4 * * *" },
-    { "path": "/internal/application-submission-runner", "schedule": "15 4 * * *" },
-    { "path": "/internal/managed-receiving-canary", "schedule": "0 15 * * *" },
-    { "path": "/internal/strong-match-notifications", "schedule": "0 8 * * *" },
-    { "path": "/internal/activity-digest", "schedule": "30 13 * * *" }
   ]
 }

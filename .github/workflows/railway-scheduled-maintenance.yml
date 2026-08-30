@@ -1,0 +1,59 @@
+name: railway-scheduled-maintenance
+
+on:
+  schedule:
+    - cron: '30 3 * * *'
+    - cron: '0 13 * * *'
+    - cron: '30 13 * * *'
+    - cron: '0 15 * * *'
+  workflow_dispatch:
+    inputs:
+      route:
+        description: Maintenance route to run
+        required: true
+        type: choice
+        options:
+          - resume-retention-sweep
+          - adapter-health-check
+          - activity-digest
+          - managed-receiving-canary
+
+permissions:
+  contents: read
+
+concurrency:
+  group: railway-scheduled-maintenance-${{ github.event.schedule || inputs.route }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    if: github.event_name == 'workflow_dispatch' || vars.LITOS_SCHEDULED_MAINTENANCE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Call the exact Railway maintenance route
+        env:
+          API_BASE: ${{ vars.LITOS_API_BASE }}
+          INTERNAL_CRON_SECRET: ${{ secrets.INTERNAL_CRON_SECRET }}
+          SCHEDULE: ${{ github.event.schedule }}
+          MANUAL_ROUTE: ${{ inputs.route }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${API_BASE}" ] || [ -z "${INTERNAL_CRON_SECRET}" ]; then
+            echo "::error::LITOS_API_BASE and INTERNAL_CRON_SECRET must both be configured."
+            exit 1
+          fi
+
+          case "${SCHEDULE}" in
+            '30 3 * * *') route='resume-retention-sweep' ;;
+            '0 13 * * *') route='adapter-health-check' ;;
+            '30 13 * * *') route='activity-digest' ;;
+            '0 15 * * *') route='managed-receiving-canary' ;;
+            '') route="${MANUAL_ROUTE}" ;;
+            *) echo "::error::Unknown schedule ${SCHEDULE}"; exit 1 ;;
+          esac
+
+          curl -sS --fail-with-body --max-time 300 \
+            -H "x-internal-secret: ${INTERNAL_CRON_SECRET}" \
+            "${API_BASE}/internal/${route}"
