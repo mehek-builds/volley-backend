@@ -64,6 +64,10 @@ export function loadConfig(environment = process.env) {
   const secret = (environment.INTERNAL_CRON_SECRET ?? '').trim();
   if (!secret) throw new Error('INTERNAL_CRON_SECRET is required');
 
+  const deployedSha = (environment.RAILWAY_GIT_COMMIT_SHA ?? '').trim()
+    || (environment.GIT_SHA ?? '').trim()
+    || null;
+
   const retryMs = integerSetting(environment.JOB_MONITOR_RETRY_MS, 30_000, {
     name: 'JOB_MONITOR_RETRY_MS',
     max: MAX_TIMER_MS - 1,
@@ -85,6 +89,7 @@ export function loadConfig(environment = process.env) {
   return Object.freeze({
     apiBase: apiOrigin(environment.LITOS_API_BASE ?? ''),
     secret,
+    deployedSha,
     retryMs,
     floorBreachRetryMs,
     cycleIntervalMs: integerSetting(
@@ -547,6 +552,7 @@ export async function runWorkerLoop({
       logger.log(JSON.stringify({
         event: 'complete_drain',
         ...result,
+        deployed_sha: config.deployedSha ?? null,
         started_at: startedAt.toISOString(),
         completed_at: now().toISOString(),
         next_cycle_in_ms: config.cycleIntervalMs,
