@@ -1826,8 +1826,28 @@ export const career_page_sources = pgTable('career_page_sources', {
   ats_name: text('ats_name').notNull(), // 'greenhouse' | 'lever' | 'ashby' | 'workable'
   board_token: text('board_token').notNull(),
   career_url: text('career_url').notNull(),
+  // Persisted employer-brand evidence, separate from career_url because that URL normally belongs
+  // to the ATS. A verified source needs either the employer's bare domain or a direct HTTPS logo
+  // asset. Public inventory joins through this evidence and therefore cannot count a posting whose
+  // tile would fall back to an initial.
+  company_domain: text('company_domain'),
+  company_logo_url: text('company_logo_url'),
+  // 'unverified' | 'verified' | 'failed'. Text rather than an enum so adding a failure reason never
+  // requires rewriting the table. The check below still fails closed on misspellings.
+  logo_verification_status: text('logo_verification_status').default('unverified').notNull(),
+  // How the evidence was established, for example reviewed_company_domain_map, ats_asset, or
+  // board_backlink. A timestamp without provenance is not enough to audit a wrong-company logo.
+  logo_verification_method: text('logo_verification_method'),
+  logo_verified_at: timestamp('logo_verified_at', { withTimezone: true }),
+  // Every verifier attempt is tracked separately from the last successful proof. This lets a
+  // transient provider failure keep a still-fresh logo visible while throttling the next retry.
+  logo_last_checked_at: timestamp('logo_last_checked_at', { withTimezone: true }),
+  logo_verification_error: text('logo_verification_error'),
   enabled: boolean('enabled').default(true).notNull(),
   last_polled_at: timestamp('last_polled_at', { withTimezone: true }),
+  // Unlike last_polled_at, failures never advance this. Certification can therefore require a
+  // successful first-party list observation from the exact worker drain it is certifying.
+  last_successful_poll_at: timestamp('last_successful_poll_at', { withTimezone: true }),
   last_error: text('last_error'),
   // Set when this company has an H-1B filing record (see sponsor_employers). NULL means either
   // "checked, nothing found" or "never checked" - the difference is visible in the generated data
@@ -1850,7 +1870,26 @@ export const career_page_sources = pgTable('career_page_sources', {
   created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (t) => ({
   boardUnique: uniqueIndex('career_page_sources_ats_board_unique').on(t.ats_name, t.board_token),
+  normalizedIdentityCheck: check('career_page_sources_normalized_identity_check', sql`
+    ${t.ats_name} = lower(btrim(${t.ats_name}))
+    and ${t.board_token} = lower(btrim(${t.board_token}))
+    and ${t.ats_name} <> ''
+    and ${t.board_token} <> ''
+  `),
   enabledIdx: index('career_page_sources_enabled_idx').on(t.enabled),
+  verifiedLogoIdx: index('career_page_sources_verified_logo_idx')
+    .on(t.enabled, t.logo_verification_status, t.logo_verified_at),
+  logoStatusCheck: check('career_page_sources_logo_status_check', sql`
+    ${t.logo_verification_status} in ('unverified', 'verified', 'failed')
+  `),
+  logoEvidenceCheck: check('career_page_sources_logo_evidence_check', sql`
+    ${t.logo_verification_status} <> 'verified'
+    or (
+      ${t.logo_verified_at} is not null
+      and nullif(btrim(${t.logo_verification_method}), '') is not null
+      and ${t.company_logo_url} ~ '^https://[^[:space:]]+$'
+    )
+  `),
 }));
 
 // ---- sponsor_employers ----
@@ -1906,6 +1945,13 @@ export const monitored_jobs = pgTable('monitored_jobs', {
   department: text('department'),
   employment_type: text('employment_type'),
   description: text('description').notNull(),
+  /* True only when the full ingestion validator accepted the title and description. This is
+   * persisted so every read surface can enforce the same contract without re-running JavaScript
+   * heuristics inside SQL. Legacy rows default false and become eligible on their next clean poll. */
+  ingest_eligible: boolean('ingest_eligible').default(false).notNull(),
+  /* Versioned cross-source identity used only for conservative certification totals. Legacy rows
+   * remain null until a clean first-party repoll writes a current fingerprint. */
+  certification_fingerprint: text('certification_fingerprint'),
   /* The ~2 KB slice of `description` that ranking actually scores, built at poll time by
    * lib/descriptionDigest.ts.
    *
@@ -1943,6 +1989,11 @@ export const monitored_jobs = pgTable('monitored_jobs', {
   // government contract, a country it has no entity in), and the posting is the authority on
   // itself. Defaults to 'unstated', which surfaces nothing on its own.
   sponsorship_status: text('sponsorship_status').default('unstated').notNull(),
+  // 'job_country' | 'us_h1b' | null. The status says whether the posting offers sponsorship; this
+  // records what the affirmative clause covers. Generic visa sponsorship belongs to the posting's
+  // own country. H-1B is US-only and must not make a Berlin role look eligible for German work
+  // permit sponsorship. Null is retained for rows created before clause-level scope was persisted.
+  sponsorship_scope: text('sponsorship_scope'),
   // 'us' | 'non_us' | 'unknown', from the location string at poll time (see lib/jobLocation.ts).
   //
   // An H-1B is a US work visa, so an EMPLOYER's filing record is evidence about its US roles and
@@ -1992,9 +2043,49 @@ export const monitored_jobs = pgTable('monitored_jobs', {
 }, (t) => ({
   sourceExternalUnique: uniqueIndex('monitored_jobs_source_external_unique').on(t.source_id, t.external_id),
   activePostedIdx: index('monitored_jobs_active_posted_idx').on(t.is_active, t.posted_at),
+  activeLastSeenIdx: index('monitored_jobs_active_last_seen_idx').on(t.is_active, t.last_seen_at),
+  verifiedInventoryIdx: index('monitored_jobs_verified_inventory_idx')
+    .on(t.is_active, t.ingest_eligible, t.last_seen_at),
+  /* Cursor reads seek through recency at production scale. NULLS LAST must match the route exactly
+     or PostgreSQL cannot satisfy the public ordering from this index. */
+  cursorIdx: index('monitored_jobs_cursor_idx')
+    .on(
+      t.posted_at.desc().nullsLast(),
+      t.first_seen_at.desc(),
+      t.id.desc(),
+    )
+    .where(sql`${t.is_active} = true and ${t.ingest_eligible} = true`),
+  /* Once an indexed group cursor selects 26 role keys, this index fetches only their postings for
+     response aggregation instead of rebuilding every group on every page. */
+  groupMemberIdx: index('monitored_jobs_group_member_idx')
+    .on(
+      t.company_name,
+      t.title,
+      t.source_id,
+      t.posted_at.desc().nullsLast(),
+      t.first_seen_at.desc(),
+      t.id.desc(),
+    )
+    .where(sql`${t.is_active} = true and ${t.ingest_eligible} = true`),
   companyIdx: index('monitored_jobs_company_idx').on(t.company_name),
   // The sponsor-only board reads (is_active, sponsorship_status) on every request it serves.
   sponsorshipIdx: index('monitored_jobs_sponsorship_idx').on(t.is_active, t.sponsorship_status, t.job_country),
+  sponsorshipScopeIdx: index('monitored_jobs_sponsorship_scope_idx')
+    .on(t.is_active, t.sponsorship_status, t.sponsorship_scope, t.job_country),
+  sponsorshipScopeCheck: check('monitored_jobs_sponsorship_scope_check', sql`
+    (
+      ${t.sponsorship_status} = 'offers'
+      and ${t.sponsorship_scope} is not null
+      and ${t.sponsorship_scope} in ('job_country', 'us_h1b')
+    ) or (
+      ${t.sponsorship_status} <> 'offers'
+      and ${t.sponsorship_scope} is null
+    )
+  `),
+  certificationFingerprintCheck: check('monitored_jobs_certification_fingerprint_check', sql`
+    ${t.certification_fingerprint} is null
+    or ${t.certification_fingerprint} ~ '^v1:[0-9a-f]{64}:[0-9a-f]{64}$'
+  `),
   /* Added with the job-type filter and the internship window (2026-08-04). Two query shapes need
      it and activePostedIdx serves neither:
        1. `employment_type = 'Internship'` selects ~2% of the table, and without an index on the
@@ -2004,6 +2095,79 @@ export const monitored_jobs = pgTable('monitored_jobs', {
           activePostedIdx stops being usable as a range scan on EVERY board surface - /jobs,
           /jobs/grouped, /jobs/facets, surfacedJobCount and boardInventoryMetrics all share it. */
   typePostedIdx: index('monitored_jobs_type_posted_idx').on(t.is_active, t.employment_type, t.posted_at),
+}));
+
+// One ready generation of the unfiltered grouped cursor projection, plus its immediate predecessor
+// for a request that races the atomic generation switch. The cursor filter hash binds the current
+// generation, so a later request fails closed after a refresh instead of drifting across datasets.
+export const job_board_group_projection_state = pgTable('job_board_group_projection_state', {
+  singleton: boolean('singleton').primaryKey().default(true),
+  generation: uuid('generation').notNull().unique(),
+  previous_generation: uuid('previous_generation'),
+  projection_as_of: timestamp('projection_as_of', { withTimezone: true }).notNull(),
+  certification_started_at: timestamp('certification_started_at', { withTimezone: true }).notNull(),
+  surfaced_postings: integer('surfaced_postings').notNull(),
+  surfaced_grouped_roles: integer('surfaced_grouped_roles').notNull(),
+  surfaced_sponsor_only_jobs: integer('surfaced_sponsor_only_jobs').notNull(),
+  surfaced_internships: integer('surfaced_internships').notNull(),
+  certified_unique_jobs: integer('certified_unique_jobs').notNull(),
+  certified_unique_grouped_roles: integer('certified_unique_grouped_roles').notNull(),
+  certified_unique_sponsor_jobs: integer('certified_unique_sponsor_jobs').notNull(),
+  certified_unique_internships: integer('certified_unique_internships').notNull(),
+  refreshed_at: timestamp('refreshed_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  singletonCheck: check('job_board_group_projection_state_singleton_check', sql`${t.singleton} = true`),
+  nonnegativeMetricsCheck: check('job_board_group_projection_state_metrics_check', sql`
+    ${t.surfaced_postings} >= 0
+    and ${t.surfaced_grouped_roles} >= 0
+    and ${t.surfaced_sponsor_only_jobs} >= 0
+    and ${t.surfaced_internships} >= 0
+    and ${t.certified_unique_jobs} >= 0
+    and ${t.certified_unique_grouped_roles} >= 0
+    and ${t.certified_unique_sponsor_jobs} >= 0
+    and ${t.certified_unique_internships} >= 0
+  `),
+}));
+
+export const job_board_group_projection = pgTable('job_board_group_projection', {
+  generation: uuid('generation').notNull(),
+  id: uuid('id').notNull(),
+  cursor_tie_id: uuid('cursor_tie_id').notNull(),
+  company_name: text('company_name').notNull(),
+  title: text('title').notNull(),
+  locations: text('locations').array().notNull(),
+  openings: integer('openings').notNull(),
+  apply_url: text('apply_url').notNull(),
+  remote: boolean('remote').notNull(),
+  posted_at: timestamp('posted_at', { withTimezone: true }),
+  first_seen_at: timestamp('first_seen_at', { withTimezone: true }).notNull(),
+  ats_name: text('ats_name').notNull(),
+  career_url: text('career_url').notNull(),
+  company_domain: text('company_domain'),
+  company_logo_url: text('company_logo_url'),
+  logo_verification_status: text('logo_verification_status').notNull(),
+  logo_verification_method: text('logo_verification_method'),
+  logo_verified_at: timestamp('logo_verified_at', { withTimezone: true }),
+  salary_min: doublePrecision('salary_min'),
+  salary_max: doublePrecision('salary_max'),
+  salary_currency: text('salary_currency'),
+  salary_interval: text('salary_interval'),
+  employment_type: text('employment_type'),
+  posting_offers: jsonb('posting_offers').notNull(),
+  employer_sponsors: boolean('employer_sponsors').notNull(),
+}, (t) => ({
+  generationIdPk: primaryKey({
+    name: 'job_board_group_projection_generation_id_pk',
+    columns: [t.generation, t.id],
+  }),
+  cursorIdx: index('job_board_group_projection_cursor_idx').on(
+    t.generation,
+    t.posted_at.desc().nullsLast(),
+    t.first_seen_at.desc(),
+    t.cursor_tie_id.desc(),
+  ),
+  groupKeyIdx: index('job_board_group_projection_group_key_idx')
+    .on(t.generation, t.company_name, t.title, t.ats_name),
 }));
 
 // ---- posting_questions ----

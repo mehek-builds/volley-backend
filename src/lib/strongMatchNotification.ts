@@ -208,7 +208,7 @@ export async function strongMatchForAccount(
 
   const since = matchLookbackSince(now);
   const conditions = [
-    ...boardConditions({ sponsorOnly, targeting: jobTargeting }),
+    ...boardConditions({ sponsorOnly, targeting: jobTargeting, requireVerifiedEvidence: true }),
     /* first_seen_at, never posted_at. posted_at is nullable on a large share of the board, so a
        window over it would silently exclude every Greenhouse posting; and it is the employer's
        claim, while first_seen_at is ours. The email says "Found" for the same reason. */
@@ -252,7 +252,15 @@ export async function strongMatchForAccount(
       scored_description: sql<string>`coalesce(nullif(${monitored_jobs.description_digest}, ''), left(${monitored_jobs.description}, ${SCORING_CHARS}))`,
     })
     .from(monitored_jobs)
-    .where(inArray(monitored_jobs.id, poolIds));
+    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
+    /* Recheck the complete board contract at the materialization read. Source identity, logo
+       proof, ingestion eligibility, and freshness can change after the candidate-id query. A row
+       that lost any of that proof in between must disappear here instead of becoming an email. */
+    .where(and(
+      ...conditions,
+      inArray(monitored_jobs.id, poolIds),
+      notInArray(monitored_jobs.id, announced),
+    ));
 
   const poolById = new Map(pool.map((row) => [row.id, row]));
   const ordered = poolIds

@@ -56,13 +56,17 @@ import { PRODUCT_NAME } from '../lib/product';
 import { applyResumePolicy, educationFrom, enforceExperienceBulletFloor, type CandidateEducation } from '../engine/resumePolicy';
 import { academicRecordRowFor } from './profile';
 import { warmRequirementCache } from '../engine/warmRequirements';
-import { postingRow, resolveJdText } from './jdMatch';
+import {
+  actionPostingRowForUser,
+  ownedHistoricalActionPostingRow,
+  resolveJdText,
+  type ActionPostingRow,
+} from './jdMatch';
 import { baseResumeSelectionIssues } from '../llm/baseResume';
 import { leadAlignmentIssues, selectJdAlignedLead } from '../engine/leadAlignment';
 import { deriveEditedTerms, readApplicationReview, type ApplicationReviewState } from '../lib/applicationReview';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
 import {
-  AUTONOMOUS_PORTAL_FAMILIES,
   canonicalMonitoredPortalUrl,
   canonicalSupportedPortalUrl,
   detectPortal,
@@ -189,22 +193,17 @@ function generatedResumeContextText(row: typeof generated_resumes.$inferSelect, 
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
-async function monitoredApplicationUrlForGenerate(body: ResumeGenerateBody): Promise<string | undefined> {
-  if (!body.application || !body.job_id) return undefined;
-  const [job] = await db.select({
-    apply_url: monitored_jobs.apply_url,
-    ats_name: career_page_sources.ats_name,
-    board_token: career_page_sources.board_token,
-  })
-    .from(monitored_jobs)
-    .innerJoin(career_page_sources, eq(monitored_jobs.source_id, career_page_sources.id))
-    .where(and(
-      eq(monitored_jobs.id, body.job_id),
-      eq(career_page_sources.enabled, true),
-      inArray(career_page_sources.ats_name, [...AUTONOMOUS_PORTAL_FAMILIES]),
-    ))
-    .limit(1);
-  return job ? canonicalMonitoredPortalUrl(job.apply_url, job.ats_name, job.board_token) : undefined;
+function monitoredApplicationUrlForGenerate(
+  body: ResumeGenerateBody,
+  posting: ActionPostingRow | null,
+): string | undefined {
+  if (!body.application || !body.job_id || !posting) return undefined;
+  return canonicalMonitoredPortalUrl(
+    posting.apply_url,
+    posting.ats_name,
+    posting.board_token,
+    posting.external_id,
+  );
 }
 
 function normalizedJobIdentity(value: string | null): string {
@@ -578,21 +577,16 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     let jdText = body.jd_text;
     let postingLocation: string | null = null;
     let postingPortalCountry: string | null = null;
-    if (body.job_id) {
-      /* Through the SAME scoped helper the review screen uses, not a second inline query.
-       *
-       * This read was inline and unscoped, so an arbitrary uuid returned up to 60k characters of
-       * any posting the board refuses to serve, echoed straight back in the response's stored spec.
-       * Sharing the helper also keeps the JD a packet is generated against identical to the JD its
-       * review screen scores, which two copies of the same predicate would not guarantee. */
-      const row = await postingRow(body.job_id);
-      postingLocation = row?.location ?? null;
-      postingPortalCountry = row?.portal_country ?? null;
-      jdText = resolveJdText(jdText, row?.description);
-    }
-
+    let resolvedPosting: ActionPostingRow | null = null;
+    let ownedCanonicalApplication: {
+      id: string;
+      job_id: string | null;
+      company_name: string;
+      role: string;
+      portal_url: string | null;
+    } | null = null;
     if (body.application_id) {
-      const [ownedCanonicalApplication] = await db.select({
+      const ownedCanonicalApplications = await db.select({
         id: applications.id,
         job_id: applications.job_id,
         company_name: applications.company_name,
@@ -602,6 +596,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         eq(applications.id, body.application_id),
         eq(applications.user_id, userId),
       )).limit(1);
+      ownedCanonicalApplication = ownedCanonicalApplications[0] ?? null;
       if (!ownedCanonicalApplication) {
         return reply.status(404).send({ error: 'Canonical application not found', code: 'application_not_found' });
       }
@@ -623,7 +618,44 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           mismatches,
         });
       }
+    }
 
+    if (body.job_id) {
+      /* A raw UUID resolves only through the current verified board. The helper permits the
+       * historical fallback only when this same user already owns an application or packet bound
+       * to the row. Supplying a stale or unverified id alongside caller text cannot smuggle that id
+       * into a new packet. */
+      resolvedPosting = await actionPostingRowForUser(body.job_id, userId);
+      if (!resolvedPosting) {
+        return reply.status(404).send({
+          error: 'Current verified posting not found',
+          code: 'job_not_available',
+        });
+      }
+      postingLocation = resolvedPosting.location;
+      postingPortalCountry = resolvedPosting.portal_country;
+      jdText = resolveJdText(jdText, resolvedPosting.description);
+    }
+
+    /* A monitored job is an action capability, not a hint. Once the caller supplies job_id, only
+       the URL reconstructed from that row's exact provider, board token, and posting identity may
+       reach a browser runner. A cross-family or malformed row fails here before quota, generation,
+       rendering, or storage. Caller URLs remain available only for the separate no-job flow. */
+    const canonicalApplicationPortalUrl = body.application
+      ? body.job_id
+        ? monitoredApplicationUrlForGenerate(body, resolvedPosting)
+        : canonicalSupportedPortalUrl(body.application.portal_url, body.application.ats_name)
+          ?? body.application.portal_url
+      : undefined;
+    if (body.application && body.job_id && !canonicalApplicationPortalUrl) {
+      return reply.status(404).send({
+        error: 'Current verified posting not found',
+        code: 'job_not_available',
+      });
+    }
+    const canonicalApplicationPortalSupported = isPortalSupported(canonicalApplicationPortalUrl);
+
+    if (ownedCanonicalApplication) {
       /* THE POSTING THE CANONICAL RECORD ALREADY NAMES, when the request itself did not name one.
        *
        * `canonicalApplicationBindingMismatches` tolerates `incoming.jobId === undefined` on purpose
@@ -646,9 +678,9 @@ export async function resumeRoutes(fastify: FastifyInstance) {
        * the profile. Refusing is correct when no country can be established; being unable to
        * establish one from a posting the server can see is not.
        *
-       * Read only AFTER the binding gate above has passed, so the row is provably the same posting
-       * this request is about, and through the same scoped `postingRow` helper for the same
-       * disclosure reason recorded there.
+       * Read only AFTER the binding gate above has passed. The historical helper independently
+       * proves that this user owns a row bound to the posting, so closure can never turn a known
+       * packet into an authorization failure and knowledge of an unrelated UUID grants nothing.
        *
        * DELIBERATELY NOT `jdText`, and not `job_context.job_id`. The JD the resume is tailored
        * against and the id the duplicate/autopilot matchers key on are both decisions this change
@@ -656,7 +688,10 @@ export async function resumeRoutes(fastify: FastifyInstance) {
        * which packets count as duplicates, neither of which is the defect being closed here.
        */
       if (!body.job_id && ownedCanonicalApplication.job_id) {
-        const canonicalPosting = await postingRow(ownedCanonicalApplication.job_id);
+        const canonicalPosting = await ownedHistoricalActionPostingRow(
+          ownedCanonicalApplication.job_id,
+          userId,
+        );
         postingLocation = canonicalPosting?.location ?? null;
         postingPortalCountry = canonicalPosting?.portal_country ?? null;
       }
@@ -1308,11 +1343,6 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     };
     const now = new Date().toISOString();
 
-    const monitoredApplicationUrl = await monitoredApplicationUrlForGenerate(body);
-    const canonicalApplicationPortalUrl = body.application
-      ? monitoredApplicationUrl ?? canonicalSupportedPortalUrl(body.application.portal_url, body.application.ats_name) ?? body.application.portal_url
-      : undefined;
-    const canonicalApplicationPortalSupported = isPortalSupported(canonicalApplicationPortalUrl);
     const parsedProfile = (profileRows[0]?.parsed_json && typeof profileRows[0].parsed_json === 'object'
       ? profileRows[0].parsed_json
       : {}) as Record<string, unknown>;
@@ -1757,6 +1787,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
     const monitoredRows = jobIds.length === 0 ? [] : await db
       .select({
         id: monitored_jobs.id,
+        external_id: monitored_jobs.external_id,
         apply_url: monitored_jobs.apply_url,
         ats_name: career_page_sources.ats_name,
         board_token: career_page_sources.board_token,
@@ -1772,7 +1803,15 @@ export async function resumeRoutes(fastify: FastifyInstance) {
       ));
     const monitoredJobs = new Map(
       monitoredRows
-        .map((job) => ({ ...job, apply_url: canonicalMonitoredPortalUrl(job.apply_url, job.ats_name, job.board_token) }))
+        .map((job) => ({
+          ...job,
+          apply_url: canonicalMonitoredPortalUrl(
+            job.apply_url,
+            job.ats_name,
+            job.board_token,
+            job.external_id,
+          ),
+        }))
         .filter((job): job is typeof job & { apply_url: string } => Boolean(job.apply_url))
         .map((job) => [job.id, {
           applyUrl: job.apply_url,
