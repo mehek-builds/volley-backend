@@ -159,6 +159,10 @@ test('every pollSource database unit installs bounded lock and statement timeout
   assertTimeoutsPrecede(emptyGuard, '.select({ active:', 'empty-board guard');
   assertTimeoutsPrecede(atomicWrite, 'tx.update(monitored_jobs)', 'atomic source and job write');
   assertTimeoutsPrecede(failureWrite, 'tx.update(career_page_sources)', 'failure-state write');
+  assert.ok(
+    atomicWrite.indexOf('for update') < atomicWrite.indexOf('tx.update(monitored_jobs)'),
+    'the atomic poll write must lock its source row before mutating monitored jobs',
+  );
   assert.equal(poll.match(/set local lock_timeout/g)?.length, 3);
   assert.equal(poll.match(/set local statement_timeout/g)?.length, 3);
 });

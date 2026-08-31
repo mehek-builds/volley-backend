@@ -158,6 +158,45 @@ test('logo queue waits for every started sibling before surfacing an operation f
   assert.equal(queueSettled, true);
 });
 
+test('logo queue retains the final Workable barrier after an ordinary provider fails', async () => {
+  let clock = 0;
+  let workableSucceeded = false;
+
+  await assert.rejects(runProviderAwareLogoQueue([
+    { ats_name: 'workable', index: 0 },
+    { ats_name: 'greenhouse', index: 1 },
+  ], async (candidate) => {
+    if (candidate.ats_name === 'greenhouse') throw new Error('ordinary provider write failed');
+    workableSucceeded = true;
+  }, {
+    concurrency: 2,
+    providerConcurrency: 2,
+    workableStartIntervalMs: 500,
+    now: () => clock,
+    sleep: async (milliseconds) => { clock += milliseconds; },
+  }), /ordinary provider write failed/);
+
+  assert.equal(workableSucceeded, true, 'the successful Workable sibling must have started');
+  assert.equal(clock, 500, 'failure must not release the route before the final provider barrier');
+});
+
+test('logo verification shares the monitor advisory lock across API replicas', () => {
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const handler = source.slice(
+    source.indexOf("fastify.get('/internal/job-monitor/verify-logos'"),
+    source.indexOf("fastify.get('/internal/job-monitor'", source.indexOf("fastify.get('/internal/job-monitor/verify-logos'") + 1),
+  );
+  const acquire = handler.indexOf('const releaseMonitorLock = await tryAcquireJobMonitorLock()');
+  const firstQueueRead = handler.indexOf('const now = Date.now()');
+  const release = handler.indexOf('await releaseMonitorLock()');
+
+  assert.ok(acquire >= 0, 'logo verification must acquire the shared PostgreSQL lock');
+  assert.ok(firstQueueRead > acquire, 'the lock must cover every logo queue read, claim, and write');
+  assert.match(handler, /if \(!releaseMonitorLock\) \{[\s\S]*reply\.status\(409\)/);
+  assert.match(handler, /try \{[\s\S]*\} finally \{\s*await releaseMonitorLock\(\);/);
+  assert.ok(release > firstQueueRead, 'the lock must be released only after queue work settles');
+});
+
 test('one degraded provider cannot make a logo request exceed its bounded candidate budget', () => {
   const candidates = [
     ...Array.from({ length: 200 }, (_, index) => ({ ats_name: 'greenhouse', index })),

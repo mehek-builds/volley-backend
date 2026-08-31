@@ -444,26 +444,41 @@ export async function runProviderAwareLogoQueue<T extends { ats_name: string }>(
     let settled = false;
     let hasFailure = false;
     let firstFailure: unknown;
+    const rejectWhenProviderBarrierClears = () => {
+      if (settled || !hasFailure || active !== 0) return;
+      const delay = Math.max(0, nextWorkableStart - now());
+      if (delay > 0) {
+        if (!completionTimerPending) {
+          completionTimerPending = true;
+          void sleep(delay).then(() => {
+            completionTimerPending = false;
+            rejectWhenProviderBarrierClears();
+          }, () => {
+            completionTimerPending = false;
+            settled = true;
+            reject(firstFailure);
+          });
+        }
+        return;
+      }
+      settled = true;
+      reject(firstFailure);
+    };
     const fail = (error: unknown) => {
       if (settled) return;
       if (!hasFailure) {
         hasFailure = true;
         firstFailure = error;
       }
-      /* The route holds a database advisory lock around this queue. Do not reject while a started
-         sibling can still mutate proof state, or the request releases that lock too early. */
-      if (active === 0) {
-        settled = true;
-        reject(firstFailure);
-      }
+      /* The route holds the shared database advisory lock around this queue. Do not reject while a
+         started sibling can still mutate proof state, or while the final Workable start barrier is
+         active, because either return would release cross-replica pacing protection too early. */
+      rejectWhenProviderBarrierClears();
     };
     const schedule = () => {
       if (settled) return;
       if (hasFailure) {
-        if (active === 0) {
-          settled = true;
-          reject(firstFailure);
-        }
+        rejectWhenProviderBarrierClears();
         return;
       }
       if (completed === candidates.length && now() < nextWorkableStart) {
@@ -2166,6 +2181,13 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       await tx.execute(sql.raw(
         `set local statement_timeout = '${POLL_SOURCE_STATEMENT_TIMEOUT_MS}ms'`,
       ));
+      /* Logo verification locks the source row before it can update that source's postings. Keep
+         the poll transaction in the same source-then-jobs order so the two write paths cannot form
+         a PostgreSQL row-lock cycle if an operator invokes one outside the shared route lock. */
+      await tx.execute(sql`select ${career_page_sources.id}
+        from ${career_page_sources}
+        where ${career_page_sources.id} = ${source.id}
+        for update`);
       await tx.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, source.id));
       /* Rippling, Breezy, and Crelate confirm open IDs before fetching descriptions. A failed or
          deferred detail request cannot revoke that stronger list evidence. Reactivate those
@@ -3853,6 +3875,14 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     if (!parsed.success) {
       return reply.status(400).send({ error: 'Invalid logo-verification query', detail: parsed.error.issues });
     }
+    const releaseMonitorLock = await tryAcquireJobMonitorLock();
+    if (!releaseMonitorLock) {
+      return reply.status(409).send({
+        error: 'A job-monitor run is already in progress. Retry after it finishes.',
+        verification_complete: false,
+      });
+    }
+    try {
     const now = Date.now();
     const retryBefore = new Date(now - FAILED_LOGO_RETRY_MS);
     const transientRetryBefore = new Date(now - TRANSIENT_LOGO_RETRY_MS);
@@ -4174,6 +4204,9 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         retry_at: crelateBlock.blockedUntil?.toISOString() ?? null,
       },
     });
+    } finally {
+      await releaseMonitorLock();
+    }
   });
 
   fastify.get('/internal/job-monitor', async (request: FastifyRequest, reply: FastifyReply) => {
