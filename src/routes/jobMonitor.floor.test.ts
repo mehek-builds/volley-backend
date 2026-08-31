@@ -9,7 +9,13 @@ import {
   MONITOR_METRICS_STATEMENT_TIMEOUT_MS,
   MONITOR_DRAIN_STARTED_AT_FUTURE_SKEW_MS,
   POLL_SOURCE_LOCK_TIMEOUT_MS,
+  POLL_SOURCE_PERSISTENCE_ATTEMPTS,
+  POLL_SOURCE_PERSISTENCE_RETRY_DELAY_MS,
+  POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS,
   POLL_SOURCE_STATEMENT_TIMEOUT_MS,
+  PURGE_POSTINGS_DELETE_TIMEOUT_MS,
+  PURGE_POSTINGS_LOCK_TIMEOUT_MS,
+  PURGE_POSTINGS_VACUUM_TIMEOUT_MS,
   TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS,
   MINIMUM_SURFACED_GROUPED_ROLES,
   MINIMUM_SURFACED_JOBS,
@@ -32,6 +38,7 @@ import {
   pollingQueueStatus,
   publicVerifiedEvidenceGateEnabled,
   mergeJobSources,
+  mergeCurrentDrainPollFailures,
   monitorQuerySchema,
   shouldKeepPostingsOnEmptyFetch,
   targetRoleCoverageMetrics,
@@ -165,6 +172,102 @@ test('every pollSource database unit installs bounded lock and statement timeout
   );
   assert.equal(poll.match(/set local lock_timeout/g)?.length, 3);
   assert.equal(poll.match(/set local statement_timeout/g)?.length, 3);
+});
+
+test('terminal poll failures stay visible without keeping a source in the drain queue', () => {
+  assert.equal(POLL_SOURCE_PERSISTENCE_ATTEMPTS, 3);
+  assert.equal(POLL_SOURCE_PERSISTENCE_RETRY_DELAY_MS, 250);
+  assert.equal(POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS, 35_000);
+  assert.ok(
+    POLL_SOURCE_PERSISTENCE_ATTEMPTS * POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS
+      + POLL_SOURCE_PERSISTENCE_RETRY_DELAY_MS
+        * POLL_SOURCE_PERSISTENCE_ATTEMPTS
+        * (POLL_SOURCE_PERSISTENCE_ATTEMPTS - 1) / 2
+      < POLL_SOURCE_STATEMENT_TIMEOUT_MS,
+    'all bounded retries together must fit inside the former single-attempt ceiling',
+  );
+
+  const poison = {
+    source_id: 'poison-source',
+    company: 'Poison Source',
+    jobs: 0 as const,
+    ok: false as const,
+    error: 'constraint failed next_detail_cursor=400',
+  };
+  const merged = mergeCurrentDrainPollFailures([{
+    source_id: 'healthy-source',
+    company: 'Healthy Source',
+    jobs: 1,
+    ok: true as const,
+  }], [poison]);
+  assert.deepEqual(merged, [{
+    source_id: 'healthy-source',
+    company: 'Healthy Source',
+    jobs: 1,
+    ok: true,
+  }, poison]);
+  assert.equal(merged.filter((result) => !result.ok).length, 1);
+
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const poll = source.slice(
+    source.indexOf('export async function pollSource'),
+    source.indexOf('export type CurrentDrainPollFailure'),
+  );
+  assert.match(poll, /retryTransient\(\(\) => db\.transaction/);
+  assert.match(poll, /attempts: POLL_SOURCE_PERSISTENCE_ATTEMPTS/);
+  assert.match(poll, /statement_timeout = '\$\{POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS\}ms'/);
+  assert.match(poll, /keepInCurrentDrainOnError = false;\s*throw error;/,
+    'exhausted persistence retries must terminally advance last_polled_at');
+  assert.match(poll, /last_error: message/,
+    'the terminal attempt must retain the exact error and cursor markers');
+
+  const handler = source.slice(source.indexOf("fastify.get('/internal/job-monitor'"));
+  assert.match(handler, /currentDrainPollFailures\(drainStartedAt\)/);
+  assert.match(handler, /mergeCurrentDrainPollFailures\(pollRun\.results, persistedFailures\)/);
+  assert.doesNotMatch(handler, /persistedFailures[\s\S]{0,500}reply\.status\(500\)/,
+    'completed-but-failed sources must not hot-loop the same drain');
+
+  const worker = readFileSync('scripts/run-job-monitor-worker.mjs', 'utf8');
+  const completeProof = worker.slice(
+    worker.indexOf('export function certifiedDrainProofComplete'),
+    worker.indexOf('export async function runCompleteDrain'),
+  );
+  assert.match(completeProof, /nonnegativeCount\(result\.poll_failed_sources\)/);
+  assert.doesNotMatch(completeProof, /poll_failed_sources\s*===\s*0/,
+    'complete_drain must retain explicit terminal failures without reopening the drained queue');
+  assert.match(worker, /poll_failed_sources: monitor\.body\.failed/);
+  assert.match(worker, /poll_failure_summaries: pollFailureSummaries\(monitor\.body\)/);
+});
+
+test('post-poll purge and vacuum are bounded below the worker request timeout', () => {
+  assert.equal(PURGE_POSTINGS_LOCK_TIMEOUT_MS, 5_000);
+  assert.equal(PURGE_POSTINGS_DELETE_TIMEOUT_MS, 60_000);
+  assert.equal(PURGE_POSTINGS_VACUUM_TIMEOUT_MS, 60_000);
+  assert.ok(
+    POLL_TIME_BUDGET_MS
+      + PURGE_POSTINGS_DELETE_TIMEOUT_MS
+      + PURGE_POSTINGS_VACUUM_TIMEOUT_MS
+      + MONITOR_METRICS_STATEMENT_TIMEOUT_MS
+      < 15 * 60_000,
+    'polling, maintenance and monitoring must leave time for a response',
+  );
+
+  const source = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  const purge = source.slice(
+    source.indexOf('export async function purgeExpiredPostings'),
+    source.indexOf('/** The floor rule as a predicate'),
+  );
+  const deleteStatement = purge.indexOf('return tx.delete(monitored_jobs)');
+  assert.ok(purge.indexOf('set local lock_timeout') < deleteStatement);
+  assert.ok(purge.indexOf('set local statement_timeout') < deleteStatement);
+  assert.ok(purge.indexOf("set_config('lock_timeout'") < purge.indexOf("client.query('vacuum monitored_jobs')"));
+  assert.ok(purge.indexOf("set_config('statement_timeout'") < purge.indexOf("client.query('vacuum monitored_jobs')"));
+  assert.match(purge, /reset lock_timeout[\s\S]*reset statement_timeout[\s\S]*client\.release/);
+
+  const handler = source.slice(source.indexOf("fastify.get('/internal/job-monitor'"));
+  assert.match(handler, /catch \(error\) \{[\s\S]*JobBoardPurgeTimeoutError[\s\S]*metrics_stage: error\.stage/);
+  assert.match(handler, /\} finally \{\s*await releaseMonitorLock\(\);/,
+    'purge timeout responses must still release the shared advisory lock');
 });
 
 test('source 401 completes on the second pass of the same drain run', () => {

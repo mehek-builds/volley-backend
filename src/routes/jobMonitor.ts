@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
-import { db } from '../db/index';
+import { db, pool } from '../db/index';
 import {
   career_page_sources,
   job_board_group_projection,
@@ -88,6 +88,7 @@ import {
   POLL_TIME_BUDGET_MS,
   WORKABLE_START_INTERVAL_MS,
   pollSourcesWithinBudget,
+  retryTransient,
 } from '../lib/jobPollScheduler';
 import { tryAcquireJobMonitorLock } from '../lib/jobMonitorLock';
 import {
@@ -729,6 +730,19 @@ export const POLL_SOURCE_LOCK_TIMEOUT_MS = 5_000;
 /* One large board may update thousands of rows in chunks. Two minutes leaves room for that bounded
    database work while guaranteeing a stuck statement cannot consume the 15-minute worker request. */
 export const POLL_SOURCE_STATEMENT_TIMEOUT_MS = 120_000;
+export const POLL_SOURCE_PERSISTENCE_ATTEMPTS = 3;
+export const POLL_SOURCE_PERSISTENCE_RETRY_DELAY_MS = 250;
+/* Three post-fetch attempts together remain below the original two-minute transaction ceiling, so
+   a poison row cannot extend one active poll past the worker's reserved response budget. */
+export const POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS = 35_000;
+/**
+ * Keep post-poll maintenance inside the worker's 15-minute request boundary. The delete is
+ * correctness work and fails the request when PostgreSQL cancels it. VACUUM is best-effort, but it
+ * still needs a server-side bound so the route cannot retain the shared advisory lock forever.
+ */
+export const PURGE_POSTINGS_LOCK_TIMEOUT_MS = 5_000;
+export const PURGE_POSTINGS_DELETE_TIMEOUT_MS = 60_000;
+export const PURGE_POSTINGS_VACUUM_TIMEOUT_MS = 60_000;
 /** Variety classification is diagnostic, so keep its Node payload bounded at production scale. */
 export const MONITOR_VARIETY_SAMPLE_SIZE = 25_000;
 
@@ -742,11 +756,33 @@ export class JobBoardMetricsTimeoutError extends Error {
   }
 }
 
+export class JobBoardPurgeTimeoutError extends Error {
+  constructor(
+    readonly stage: 'purge_delete',
+    readonly timeoutMs: number,
+  ) {
+    super(`Job board ${stage} exceeded its ${timeoutMs}ms database timeout`);
+    this.name = 'JobBoardPurgeTimeoutError';
+  }
+}
+
+function postgresErrorCode(error: unknown): unknown {
+  let current: unknown = error;
+  const seen = new Set<object>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    if ('code' in current && current.code !== undefined) return current.code;
+    current = 'cause' in current ? current.cause : undefined;
+  }
+  return undefined;
+}
+
 function isPostgresStatementTimeout(error: unknown): boolean {
-  return Boolean(error
-    && typeof error === 'object'
-    && 'code' in error
-    && (error as { code?: unknown }).code === '57014');
+  return postgresErrorCode(error) === '57014';
+}
+
+function isPostgresLockTimeout(error: unknown): boolean {
+  return postgresErrorCode(error) === '55P03';
 }
 
 /**
@@ -972,17 +1008,38 @@ export const CLOSED_POSTING_RETENTION_DAYS = 2;
  * looks exactly like a purge that works.
  */
 export async function purgeExpiredPostings(): Promise<number> {
-  const result = await db.delete(monitored_jobs).where(or(
-    // Left its board, and the grace period for diagnosing why has passed.
-    and(
-      eq(monitored_jobs.is_active, false),
-      sql`${monitored_jobs.last_seen_at} < now() - (${CLOSED_POSTING_RETENTION_DAYS} || ' days')::interval`,
-    ),
-    /* A row no supported ATS has returned for two full verification windows cannot be counted as
-       current. This applies equally to internships and every other role because it measures the
-       observation, not the employer's publication date. */
-    sql`${monitored_jobs.last_seen_at} < now() - (${PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS} || ' days')::interval`,
-  ));
+  let result: Awaited<ReturnType<typeof db.delete>>;
+  try {
+    result = await db.transaction(async (tx) => {
+      await tx.execute(sql.raw(
+        `set local lock_timeout = '${PURGE_POSTINGS_LOCK_TIMEOUT_MS}ms'`,
+      ));
+      await tx.execute(sql.raw(
+        `set local statement_timeout = '${PURGE_POSTINGS_DELETE_TIMEOUT_MS}ms'`,
+      ));
+      return tx.delete(monitored_jobs).where(or(
+        // Left its board, and the grace period for diagnosing why has passed.
+        and(
+          eq(monitored_jobs.is_active, false),
+          sql`${monitored_jobs.last_seen_at} < now() - (${CLOSED_POSTING_RETENTION_DAYS} || ' days')::interval`,
+        ),
+        /* A row no supported ATS has returned for two full verification windows cannot be counted
+           as current. This applies equally to internships and every other role because it measures
+           the observation, not the employer's publication date. */
+        sql`${monitored_jobs.last_seen_at} < now() - (${PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS} || ' days')::interval`,
+      ));
+    });
+  } catch (error) {
+    if (isPostgresStatementTimeout(error) || isPostgresLockTimeout(error)) {
+      throw new JobBoardPurgeTimeoutError(
+        'purge_delete',
+        isPostgresLockTimeout(error)
+          ? PURGE_POSTINGS_LOCK_TIMEOUT_MS
+          : PURGE_POSTINGS_DELETE_TIMEOUT_MS,
+      );
+    }
+    throw error;
+  }
   const purged = (result as { rowCount?: number }).rowCount ?? 0;
 
   /* Reclaim after deleting, or the rolling window costs more space than it saves.
@@ -1000,7 +1057,28 @@ export async function purgeExpiredPostings(): Promise<number> {
    * Best-effort: a failed vacuum must never fail the poll. The postings are already correct at this
    * point; this is housekeeping. */
   try {
-    await db.execute(sql`vacuum ${monitored_jobs}`);
+    const client = await pool.connect();
+    let operationError: unknown;
+    try {
+      await client.query(
+        "select set_config('lock_timeout', $1, false), set_config('statement_timeout', $2, false)",
+        [`${PURGE_POSTINGS_LOCK_TIMEOUT_MS}ms`, `${PURGE_POSTINGS_VACUUM_TIMEOUT_MS}ms`],
+      );
+      await client.query('vacuum monitored_jobs');
+    } catch (error) {
+      operationError = error;
+      throw error;
+    } finally {
+      let resetError: Error | undefined;
+      try {
+        await client.query('reset lock_timeout');
+        await client.query('reset statement_timeout');
+      } catch (error) {
+        resetError = error instanceof Error ? error : new Error(String(error));
+      }
+      client.release(resetError);
+      if (!operationError && resetError) throw resetError;
+    }
   } catch {
     // Intentionally swallowed. See above: the board is correct with or without this.
   }
@@ -2063,6 +2141,20 @@ export async function upsertSources(
   }
 }
 
+function pollFailureMessage(error: unknown): string {
+  let current: unknown = error;
+  let message = 'Career page poll failed';
+  const seen = new Set<object>();
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current);
+    if ('message' in current && typeof current.message === 'string' && current.message.trim()) {
+      message = current.message;
+    }
+    current = 'cause' in current ? current.cause : undefined;
+  }
+  return message;
+}
+
 export async function pollSource(source: typeof career_page_sources.$inferSelect) {
   const startingDetailCursor = detailCursorFromLastError(source.last_error);
   const startingDetailCursorKey = detailCursorKeyFromLastError(source.last_error);
@@ -2176,39 +2268,40 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       ? null
       : portalName ?? source.portal_company_name;
     const detailStatus = detailRefreshStatus(fetched.detail_progress);
-    await db.transaction(async (tx) => {
-      await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
-      await tx.execute(sql.raw(
-        `set local statement_timeout = '${POLL_SOURCE_STATEMENT_TIMEOUT_MS}ms'`,
-      ));
-      /* Logo verification locks the source row before it can update that source's postings. Keep
-         the poll transaction in the same source-then-jobs order so the two write paths cannot form
-         a PostgreSQL row-lock cycle if an operator invokes one outside the shared route lock. */
-      await tx.execute(sql`select ${career_page_sources.id}
-        from ${career_page_sources}
-        where ${career_page_sources.id} = ${source.id}
-        for update`);
-      await tx.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, source.id));
+    try {
+      await retryTransient(() => db.transaction(async (tx) => {
+        await tx.execute(sql.raw(`set local lock_timeout = '${POLL_SOURCE_LOCK_TIMEOUT_MS}ms'`));
+        await tx.execute(sql.raw(
+          `set local statement_timeout = '${POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS}ms'`,
+        ));
+        /* Logo verification locks the source row before it can update that source's postings. Keep
+           the poll transaction in the same source-then-jobs order so the two write paths cannot form
+           a PostgreSQL row-lock cycle if an operator invokes one outside the shared route lock. */
+        await tx.execute(sql`select ${career_page_sources.id}
+          from ${career_page_sources}
+          where ${career_page_sources.id} = ${source.id}
+          for update`);
+        await tx.update(monitored_jobs).set({ is_active: false }).where(eq(monitored_jobs.source_id, source.id));
       /* Rippling, Breezy, and Crelate confirm open IDs before fetching descriptions. A failed or
          deferred detail request cannot revoke that stronger list evidence. Reactivate those
          existing rows with their last good descriptions while the persisted cursor advances.
          Successful details are deliberately excluded from this set: if a refreshed description
          is now a placeholder, the ingest quality gate is allowed to remove it. */
-      for (let index = 0; index < fetched.preserve_external_ids.length; index += UPSERT_CHUNK) {
-        const ids = fetched.preserve_external_ids.slice(index, index + UPSERT_CHUNK);
-        await tx.update(monitored_jobs).set({ is_active: true }).where(and(
-          eq(monitored_jobs.source_id, source.id),
-          inArray(monitored_jobs.external_id, ids),
-        ));
-      }
+        for (let index = 0; index < fetched.preserve_external_ids.length; index += UPSERT_CHUNK) {
+          const ids = fetched.preserve_external_ids.slice(index, index + UPSERT_CHUNK);
+          await tx.update(monitored_jobs).set({ is_active: true }).where(and(
+            eq(monitored_jobs.source_id, source.id),
+            inArray(monitored_jobs.external_id, ids),
+          ));
+        }
       /* One statement per posting meant 7,109 round trips for a full sweep and a 469s run. A
          scheduler deadline could stop halfway through the alphabet, leaving every unreached
          source's jobs flipped to is_active = false by the sweep above. That failure empties the
          public board rather than staling it.
          Chunked so a single board the size of Databricks still fits well
          inside Postgres's 65,535-parameter cap: 21 columns x 200 rows. */
-      for (let index = 0; index < ingestable.length; index += UPSERT_CHUNK) {
-        const chunk = ingestable.slice(index, index + UPSERT_CHUNK).map(({
+        for (let index = 0; index < ingestable.length; index += UPSERT_CHUNK) {
+          const chunk = ingestable.slice(index, index + UPSERT_CHUNK).map(({
           pay,
           portal_country: portalCountry,
           portal_company_name: _portalCompanyName,
@@ -2265,7 +2358,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             job_country: jobCountry,
           };
         });
-        await tx.insert(monitored_jobs).values(chunk).onConflictDoUpdate({
+          await tx.insert(monitored_jobs).values(chunk).onConflictDoUpdate({
           target: [monitored_jobs.source_id, monitored_jobs.external_id],
           set: {
             company_name: sql`excluded.company_name`,
@@ -2296,18 +2389,28 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
             salary_currency: sql`excluded.salary_currency`,
             salary_interval: sql`excluded.salary_interval`,
           },
-        });
-      }
-      /* Cursor state and the job window are one atomic fact. Committing either without the other
-         can skip a window forever after a transient database or source-status write failure. */
-      await tx.update(career_page_sources).set({
-        ...completedPollFields(fetched.detail_progress, now),
-        last_error: detailStatus,
-        ...(portalName ? { portal_company_name: portalName } : {}),
-        ...(agrees === null ? {} : { portal_name_mismatch: agrees === false }),
-        ...(agrees === false ? { sponsor_employer_id: null } : {}),
-      }).where(eq(career_page_sources.id, source.id));
-    });
+          });
+        }
+        /* Cursor state and the job window are one atomic fact. Committing either without the other
+           can skip a window forever after a transient database or source-status write failure. */
+        await tx.update(career_page_sources).set({
+          ...completedPollFields(fetched.detail_progress, now),
+          last_error: detailStatus,
+          ...(portalName ? { portal_company_name: portalName } : {}),
+          ...(agrees === null ? {} : { portal_name_mismatch: agrees === false }),
+          ...(agrees === false ? { sponsor_employer_id: null } : {}),
+        }).where(eq(career_page_sources.id, source.id));
+      }), {
+        attempts: POLL_SOURCE_PERSISTENCE_ATTEMPTS,
+        delayMs: POLL_SOURCE_PERSISTENCE_RETRY_DELAY_MS,
+      });
+    } catch (error) {
+      /* A deterministic row or constraint failure must not pin the oldest-first queue forever.
+         Every retry above rolled back as one transaction, so terminal advancement records only
+         that the source was attempted. It never mints last_successful_poll_at or job evidence. */
+      keepInCurrentDrainOnError = false;
+      throw error;
+    }
     /* WHO DOES THE PORTAL SAY THIS BOARD BELONGS TO?
      *
      * Recorded on every poll, and a disagreement UNLINKS the source from its sponsoring employer.
@@ -2335,7 +2438,7 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
       ...(agrees === false ? { portal_says: portalName } : {}),
     };
   } catch (error) {
-    const baseMessage = error instanceof Error ? error.message : 'Career page poll failed';
+    const baseMessage = pollFailureMessage(error);
     const cursorMarker = retryDetailCursor === null ? '' : ` next_detail_cursor=${retryDetailCursor}`;
     const keyMarker = detailCursorKeyMarker(retryDetailCursorKey);
     const marker = `${cursorMarker}${keyMarker ? ` ${keyMarker}` : ''}`;
@@ -2352,6 +2455,53 @@ export async function pollSource(source: typeof career_page_sources.$inferSelect
     });
     return { source_id: source.id, company: source.company_name, jobs: 0, ok: false as const, error: message };
   }
+}
+
+export type CurrentDrainPollFailure = {
+  source_id: string;
+  company: string;
+  jobs: 0;
+  ok: false;
+  error: string;
+};
+
+/**
+ * A terminally attempted source no longer belongs in the queue, but its failure must remain in
+ * every recount for this drain. last_successful_poll_at is intentionally older, so the source's
+ * jobs cannot contribute to certified inventory even though last_polled_at permits queue progress.
+ */
+export async function currentDrainPollFailures(
+  drainStartedAt: Date,
+): Promise<CurrentDrainPollFailure[]> {
+  const rows = await db.select({
+    source_id: career_page_sources.id,
+    company: career_page_sources.company_name,
+    error: career_page_sources.last_error,
+  }).from(career_page_sources).where(and(
+    gte(career_page_sources.last_polled_at, drainStartedAt),
+    isNotNull(career_page_sources.last_error),
+    or(
+      isNull(career_page_sources.last_successful_poll_at),
+      lt(career_page_sources.last_successful_poll_at, drainStartedAt),
+    ),
+  ));
+  return rows.map((row) => ({
+    source_id: row.source_id,
+    company: row.company,
+    jobs: 0,
+    ok: false,
+    error: row.error!,
+  }));
+}
+
+export function mergeCurrentDrainPollFailures<
+  TResult extends { source_id: string; jobs: number; ok: boolean },
+>(results: readonly TResult[], persistedFailures: readonly CurrentDrainPollFailure[]) {
+  const reportedSourceIds = new Set(results.map((result) => result.source_id));
+  return [
+    ...results,
+    ...persistedFailures.filter((failure) => !reportedSourceIds.has(failure.source_id)),
+  ];
 }
 
 /* The board's filter set, in ONE place.
@@ -4303,7 +4453,8 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
        A source that is not attempted keeps its old last_polled_at, so the oldest-first query puts
        it first next time. Workable starts are separately spaced below its shared provider limit. */
     const pollRun = await pollSourcesWithinBudget(sources, pollSource);
-    const results = pollRun.results;
+    const persistedFailures = await currentDrainPollFailures(drainStartedAt);
+    const results = mergeCurrentDrainPollFailures(pollRun.results, persistedFailures);
     const [remaining] = await db
       .select({ total: sql<number>`count(*)::int` })
       .from(career_page_sources)
@@ -4364,7 +4515,24 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
      */
     /* Purge before counting, so inventory and purged_postings describe the same moment. Counting
        first would report a board that includes rows this run was about to delete. */
-    const purged = await purgeExpiredPostings();
+    let purged: number;
+    try {
+      purged = await purgeExpiredPostings();
+    } catch (error) {
+      if (!(error instanceof JobBoardPurgeTimeoutError)) throw error;
+      request.log.error({
+        metricsStage: error.stage,
+        timeoutMs: error.timeoutMs,
+        drainStartedAt: drainStartedAt.toISOString(),
+      }, 'Job board purge timed out');
+      return reply.status(503).send({
+        ...pollingPayload,
+        metrics_deferred: true,
+        metrics_error: 'statement_timeout',
+        metrics_stage: error.stage,
+        metrics_timeout_ms: error.timeoutMs,
+      });
+    }
 
     /* Three thresholds from one inventory snapshot: postings and grouped roles over the full board,
      * plus postings on the sponsor-only view. The sponsor view is the fragile one: it drains when

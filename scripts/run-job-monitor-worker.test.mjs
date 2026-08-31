@@ -34,15 +34,16 @@ function monitor(status, {
   metricsError,
   metricsStage,
   metricsTimeoutMs,
+  pollFailures = [],
 } = {}) {
   const body = {
     polling_complete: pollingComplete,
     remaining_polling_sources: pollingComplete ? 0 : 1,
     drain_started_at: drainStartedAt,
-    results: [],
+    results: pollFailures,
     selected_sources: pollingComplete ? 0 : 400,
     deferred_sources: pollingComplete ? 0 : 1,
-    failed: 0,
+    failed: pollFailures.length,
     surfaced_postings: surfacedPostings,
     surfaced_grouped_roles: surfacedGroupedRoles,
     surfaced_sponsor_only_jobs: surfacedSponsorOnlyJobs,
@@ -315,6 +316,48 @@ test('a completed queue always gets a fresh HTTP 200 final recount before comple
   assert.deepEqual(sleeps, [], 'successful queue completion must go straight to the final recount');
   assert.equal(messages.log.at(-1).event, 'final_monitor_recount');
   assert.equal(messages.log.at(-1).certified, true);
+});
+
+test('complete_drain retains terminal poll failures after the queue reaches zero', async () => {
+  const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
+  const logoPath = '/internal/job-monitor/verify-logos?limit=100';
+  const poisonFailure = {
+    source_id: 'poison-source',
+    company: 'Poison Source',
+    jobs: 0,
+    ok: false,
+    error: 'deterministic persistence failure',
+  };
+  const sequence = [
+    {
+      path: initializedDrainPath(),
+      response: monitor(200, { pollingComplete: true, pollFailures: [poisonFailure] }),
+    },
+    { path: logoPath, response: logos(true) },
+    { path: logoPath, response: logos(true) },
+    {
+      path: drainPath,
+      response: monitor(200, { pollingComplete: true, pollFailures: [poisonFailure] }),
+    },
+  ];
+  const result = await runCompleteDrain({
+    config: testConfig(),
+    requestJson: sequenceRequester(sequence).requestJson,
+    sleepFn: async () => {},
+    logger: silentLogger().logger,
+    now: () => new Date(DRAIN_STARTED_AT),
+  });
+
+  assert.equal(result.certified, true);
+  assert.equal(result.remaining_polling_sources, 0);
+  assert.equal(result.poll_failed_sources, 1);
+  assert.deepEqual(result.poll_failure_summaries, [{
+    source_id: 'poison-source',
+    company: 'Poison Source',
+    error: 'deterministic persistence failure',
+  }]);
+  assert.equal(certifiedDrainProofComplete(result), true);
+  assert.equal(sequence.length, 0);
 });
 
 test('a final structured HTTP 500 returns a noncertified result and never proves completion', async () => {
