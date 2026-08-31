@@ -6,6 +6,7 @@ import {
   normalizeGreenhouseJobs,
   normalizeLeverJobs,
   normalizeRecruiteeJobs,
+  validatedBreezyPostingUrl,
 } from './jobMonitor';
 
 const DESCRIPTION = 'Build and operate reliable production systems with the product engineering team.';
@@ -129,6 +130,21 @@ test('Recruitee requires its documented slug and exact tenant-owned offer routes
   ];
   for (const invalid of cases) {
     assert.deepEqual(normalizeRecruiteeJobs(recruitee(invalid), 'acme'), [], JSON.stringify(invalid));
+  }
+});
+
+test('Breezy accepts only the exact posting or one slug segment for the verified list id', () => {
+  assert.equal(
+    validatedBreezyPostingUrl('https://acme.breezy.hr/p/job-1-platform-engineer', 'acme', 'job-1'),
+    'https://acme.breezy.hr/p/job-1-platform-engineer',
+  );
+  for (const invalid of [
+    'https://acme.breezy.hr/p/job-1/apply',
+    'https://acme.breezy.hr/p/job-1/anything',
+    'https://acme.breezy.hr/p/job-1-platform-engineer/apply',
+    'https://acme.breezy.hr/p/job-1-platform-engineer/anything',
+  ]) {
+    assert.equal(validatedBreezyPostingUrl(invalid, 'acme', 'job-1'), null, invalid);
   }
 });
 

@@ -1165,10 +1165,9 @@ export function validatedBreezyPostingUrl(
   try {
     const url = new URL(raw);
     const pathPrefix = `/p/${externalId}`;
-    const postingPath = url.pathname === pathPrefix
-      || url.pathname === `${pathPrefix}/`
-      || url.pathname.startsWith(`${pathPrefix}-`)
-      || url.pathname.startsWith(`${pathPrefix}/`);
+    const suffix = url.pathname.slice(pathPrefix.length);
+    const postingPath = url.pathname.startsWith(pathPrefix)
+      && (suffix === '' || suffix === '/' || /^-[^/]+\/?$/.test(suffix));
     if (url.protocol !== 'https:'
       || url.username || url.password || url.port || url.search || url.hash
       || url.hostname.toLowerCase() !== `${tenant}.breezy.hr`

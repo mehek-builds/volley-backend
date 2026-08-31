@@ -32,6 +32,7 @@ import {
   type SubmittedApplicationReviewQuestion,
 } from '../lib/applicationReview';
 import { repairReviewPortalFromMonitoredJob } from '../lib/applicationPortalRepair';
+import { monitoredPortalProofUnavailable } from '../lib/applicationPortalRepair';
 import { browserDeliveryRuntimeIdentity, connectToSession, getBrowserSession, getLiveViewUrl, isBrowserbaseConfigured } from '../lib/browserbase';
 import { apiBaseFor } from '../lib/apiBase';
 import { extractPdfText } from '../lib/pdfText';
@@ -741,6 +742,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         review = readApplicationReview(row.spec);
         if (!review) throw new Error('Application review is not available for this resume');
         const auditSourceReview = await repairReviewPortalFromMonitoredJob(row, review);
+        if (monitoredPortalProofUnavailable(row, auditSourceReview)) {
+          return reply.status(409).send({
+            error: 'Current verified posting not found',
+            code: 'job_not_available',
+          });
+        }
         /* AUDIT THE PACKET THE SEND GATE WILL CHECK, not the one sitting in the row.
          *
          * submit-request gates on currentAcknowledgedPacketAudit(row, { questions:
@@ -801,6 +808,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const packetReview = readApplicationReview(packetRow.spec);
         if (!packetReview) throw new Error('Application review is not available for this resume');
         const repairedPacketReview = await repairReviewPortalFromMonitoredJob(packetRow, packetReview);
+        if (monitoredPortalProofUnavailable(packetRow, repairedPacketReview)) {
+          return reply.status(409).send({
+            error: 'Current verified posting not found',
+            code: 'job_not_available',
+          });
+        }
         if (!cached.valid && (packetRow.resume_object_key !== row.resume_object_key
           || !isDeepStrictEqual(packetRow.spec, row.spec))) {
           auditQuestions = await resolvedPacketAuditQuestions(packetRow, repairedPacketReview);
@@ -2049,6 +2062,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       let current = readApplicationReview(stored);
       if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       current = await repairReviewPortalFromMonitoredJob(row, current);
+      if (monitoredPortalProofUnavailable(row, current)) {
+        return reply.status(409).send({
+          error: 'Current verified posting not found',
+          code: 'job_not_available',
+        });
+      }
       const disposition = submitRequestDisposition(
         current.status,
         Boolean(current.submission_claimed_at),

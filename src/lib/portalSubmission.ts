@@ -8963,6 +8963,7 @@ export function canonicalMonitoredPortalUrl(
   atsName?: string | null,
   boardToken?: string | null,
   externalId?: string | null,
+  trustedPostingUrl?: string | null,
 ): string | undefined {
   if (!rawUrl) return undefined;
   const expectedFamily = atsName?.trim().toLowerCase();
@@ -9107,14 +9108,28 @@ export function canonicalMonitoredPortalUrl(
       return `https://${token.toLowerCase()}.breezy.hr/p/${encodeURIComponent(segments[1])}/apply`;
     }
     case 'recruitee': {
+      let trustedSlug = '';
+      try {
+        if (!trustedPostingUrl) return undefined;
+        const posting = new URL(trustedPostingUrl);
+        const postingSegments = posting.pathname.split('/').filter(Boolean).map((segment) => decodeURIComponent(segment));
+        if (posting.protocol !== 'https:' || posting.username || posting.password || posting.port
+          || posting.search || posting.hash
+          || posting.hostname.toLowerCase() !== `${token.toLowerCase()}.recruitee.com`
+          || postingSegments.length !== 2 || postingSegments[0]?.toLowerCase() !== 'o'
+          || !postingSegments[1] || /[/\\\u0000-\u001f\u007f]/.test(postingSegments[1])) return undefined;
+        trustedSlug = postingSegments[1];
+      } catch {
+        return undefined;
+      }
       if (url.hostname.toLowerCase() !== `${token.toLowerCase()}.recruitee.com`
-        || segments[0]?.toLowerCase() !== 'o' || !segments[1]
+        || segments[0]?.toLowerCase() !== 'o' || segments[1] !== trustedSlug
         || (segments.length !== 2
           && !(segments.length === 4 && segments[2]?.toLowerCase() === 'c'
             && segments[3]?.toLowerCase() === 'new'))) {
         return undefined;
       }
-      return `https://${token.toLowerCase()}.recruitee.com/o/${encodeURIComponent(segments[1])}/c/new`;
+      return `https://${token.toLowerCase()}.recruitee.com/o/${encodeURIComponent(trustedSlug)}/c/new`;
     }
     case 'crelate': {
       const postingId = segments[3]?.toLowerCase() === 'apply' ? segments[4] : segments[3];

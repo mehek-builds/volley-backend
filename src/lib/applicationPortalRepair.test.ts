@@ -127,6 +127,23 @@ test('a manual packet with no monitored job keeps its supported portal URL witho
   }
 });
 
+test('a malformed declared monitored job id fails closed instead of becoming a manual packet', async () => {
+  const select = mock.method(db, 'select', (() => {
+    throw new Error('an invalid monitored id must fail before a database read');
+  }) as unknown as typeof db.select);
+  try {
+    const repaired = await repairReviewPortalFromMonitoredJob(
+      row({ job_id: 'not-a-uuid', company: 'Acme' }),
+      review('https://jobs.lever.co/other/lever-job-1/apply', 'lever'),
+    );
+    assert.equal(repaired.portal_url, undefined);
+    assert.equal(repaired.ats_name, undefined);
+    assert.equal(repaired.portal_supported, false);
+  } finally {
+    select.mock.restore();
+  }
+});
+
 test('history rebinds a job-bound supported URL before preserving generic portal state', () => {
   const current = review('https://jobs.lever.co/other/lever-job-1/apply', 'lever');
   const repaired = repairHistoryReviewPortalFromMonitoredJob(

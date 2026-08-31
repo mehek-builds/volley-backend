@@ -164,6 +164,7 @@ test('monitored application URLs are bound to their exact provider, tenant, and 
       'recruitee',
       'acme',
       '12345',
+      'https://acme.recruitee.com/o/software-engineer',
     ),
     'https://acme.recruitee.com/o/software-engineer/c/new',
   );
@@ -187,6 +188,13 @@ test('monitored application URLs are bound to their exact provider, tenant, and 
     canonicalMonitoredPortalUrl('https://apply.workable.com/evil/j/A1B2C3/apply', 'workable', 'acme', 'A1B2C3'),
     canonicalMonitoredPortalUrl('https://ats.rippling.com/evil/jobs/job-1', 'rippling', 'acme', 'job-1'),
     canonicalMonitoredPortalUrl('https://acme.breezy.hr/p/job-2-title', 'breezy', 'acme', 'job-1'),
+    canonicalMonitoredPortalUrl(
+      'https://acme.recruitee.com/o/evil-role/c/new',
+      'recruitee',
+      'acme',
+      '12345',
+      'https://acme.recruitee.com/o/software-engineer',
+    ),
     canonicalMonitoredPortalUrl('https://jobs.crelate.com/portal/evil/job/rz89zks8z4rxa3rksi7ftm4h1y', 'crelate', 'acme', 'rz89zks8z4rxa3rksi7ftm4h1y'),
     canonicalMonitoredPortalUrl('https://jobs.lever.co/acme/job-1', 'lever', 'acme/path', 'job-1'),
     canonicalMonitoredPortalUrl('https://apply.workable.com/j/A1B2C3', 'workable', 'acme?redirect=evil', 'A1B2C3'),

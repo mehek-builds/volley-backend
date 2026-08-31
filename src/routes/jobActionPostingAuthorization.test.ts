@@ -6,6 +6,7 @@ const jdMatch = readFileSync('src/routes/jdMatch.ts', 'utf8');
 const resume = readFileSync('src/routes/resume.ts', 'utf8');
 const onboarding = readFileSync('src/routes/onboarding.ts', 'utf8');
 const canonicalApplications = readFileSync('src/routes/canonicalApplications.ts', 'utf8');
+const postingQuestions = readFileSync('src/routes/postingQuestions.ts', 'utf8');
 
 test('every JD-derived action rejects an unresolved supplied job id', () => {
   for (const [start, end] of [
@@ -16,7 +17,7 @@ test('every JD-derived action rejects an unresolved supplied job id', () => {
     const handler = jdMatch.slice(jdMatch.indexOf(start), jdMatch.indexOf(end, jdMatch.indexOf(start) + start.length));
     assert.match(handler, /await actionPostingRowForUser\(requestedJobId, userId\)/);
     assert.match(handler, /if \(requestedJobId && !posting\)/);
-    assert.match(handler, /code: 'job_not_available'/);
+    assert.match(handler, /reply\.status\(409\)\.send\(\{[\s\S]*code: 'job_not_available'/);
   }
 });
 
@@ -52,6 +53,7 @@ test('resume rejects an invalid monitored action URL before quota or generation'
   assert.ok(quota > failedCanonicalUrl);
   assert.ok(generation > failedCanonicalUrl);
   assert.match(handler.slice(failedCanonicalUrl, quota), /code: 'job_not_available'/);
+  assert.match(handler.slice(failedCanonicalUrl, quota), /reply\.status\(409\)\.send/);
   assert.doesNotMatch(
     handler,
     /monitoredApplicationUrlForGenerate\(resolvedPosting\)\s*\?\?/,
@@ -85,7 +87,42 @@ test('direct canonical application creation binds supplied job ids to the monito
   const refusal = handler.indexOf("code: 'job_not_available'", canonical);
   const upsert = handler.indexOf('upsertCanonicalApplicationForUser(', refusal);
   assert.ok(sourceRead >= 0 && canonical > sourceRead && refusal > canonical && upsert > refusal);
+  assert.match(handler.slice(canonical, upsert), /reply\.status\(409\)\.send/);
   assert.match(handler, /portalUrl = monitoredPortalUrl/);
+});
+
+test('onboarding reports unavailable monitored jobs as action conflicts', () => {
+  const handler = onboarding.slice(
+    onboarding.indexOf("fastify.post('/onboarding/answers'"),
+    onboarding.indexOf("fastify.post('/onboarding/gaps-asked'"),
+  );
+  assert.match(handler, /reply\.status\(409\)\.send\(\{[\s\S]*code: 'job_not_available'/);
+});
+
+test('pre-apply question discovery reports unavailable monitored proof as an action conflict', () => {
+  const handler = postingQuestions.slice(
+    postingQuestions.indexOf("fastify.get('/postings/:jobId/questions'"),
+  );
+  const sourceRead = handler.indexOf('await loadPostingTarget(params.jobId)');
+  const refusal = handler.indexOf("code: 'job_not_available'", sourceRead);
+  const browserGate = handler.indexOf('isBrowserbaseConfigured()', refusal);
+  assert.ok(sourceRead >= 0 && refusal > sourceRead && browserGate > refusal);
+  assert.match(handler.slice(sourceRead, browserGate), /reply\.status\(409\)\.send/);
+});
+
+test('packet audit and submit request refuse unavailable monitored proof before action work', () => {
+  const applications = readFileSync('src/routes/applications.ts', 'utf8');
+  for (const [start, end] of [
+    ["fastify.post(\n    '/applications/:id/packet-audit'", "fastify.post(\n    '/applications/:id/packet-audit/acknowledge'"],
+    ["fastify.post(\n    '/applications/:id/submit-request'", "fastify.get(\n    '/applications/:id/submission/channels'"],
+  ] as const) {
+    const handler = applications.slice(applications.indexOf(start), applications.indexOf(end));
+    const repair = handler.indexOf('repairReviewPortalFromMonitoredJob');
+    const refusal = handler.indexOf("code: 'job_not_available'", repair);
+    assert.ok(repair >= 0 && refusal > repair);
+    assert.match(handler.slice(repair, refusal), /monitoredPortalProofUnavailable/);
+    assert.match(handler.slice(repair, refusal), /reply\.status\(409\)\.send/);
+  }
 });
 
 test('onboarding verifies the posting before reusable answers or legal declarations are written', () => {

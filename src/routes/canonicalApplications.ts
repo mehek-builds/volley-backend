@@ -451,9 +451,10 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
         posting.ats_name,
         posting.board_token,
         posting.external_id,
+        posting.posting_url,
       ) : undefined;
       if (!posting || !monitoredPortalUrl) {
-        return reply.status(404).send({
+        return reply.status(409).send({
           error: 'Current verified posting not found',
           code: 'job_not_available',
         });

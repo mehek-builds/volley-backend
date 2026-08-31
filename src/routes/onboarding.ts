@@ -1033,7 +1033,7 @@ export async function onboardingRoutes(fastify: FastifyInstance) {
     const userId = request.jwtPayload!.userId;
     const posting = await actionPostingRowForUser(parsed.data.job_id, userId);
     if (parsed.data.job_id && !posting) {
-      return reply.status(404).send({
+      return reply.status(409).send({
         error: 'Current verified posting not found',
         code: 'job_not_available',
       });

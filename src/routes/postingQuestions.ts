@@ -73,6 +73,7 @@ async function loadPostingTarget(jobId: string): Promise<PostingTarget | null> {
   const [row] = await db.select({
     external_id: monitored_jobs.external_id,
     apply_url: monitored_jobs.apply_url,
+    posting_url: monitored_jobs.posting_url,
     company_name: monitored_jobs.company_name,
     title: monitored_jobs.title,
     // Capped the same way jdMatch caps it. The JD is read here only so that the handful of
@@ -100,6 +101,7 @@ async function loadPostingTarget(jobId: string): Promise<PostingTarget | null> {
     row.ats_name,
     row.board_token,
     row.external_id,
+    row.posting_url,
   );
   if (!applyUrl) return null;
   let portal: SupportedPortal;
@@ -287,7 +289,12 @@ export async function postingQuestionsRoutes(fastify: FastifyInstance) {
     }
 
     const target = await loadPostingTarget(params.jobId);
-    if (!target) return reply.status(404).send({ error: 'That posting is not on the board.' });
+    if (!target) {
+      return reply.status(409).send({
+        error: 'Current verified posting not found',
+        code: 'job_not_available',
+      });
+    }
 
     const stored = await loadStoredScan(params.jobId);
     let questions = stored?.questions ?? [];

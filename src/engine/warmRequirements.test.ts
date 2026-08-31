@@ -130,7 +130,8 @@ describe('a packet is tailored and scored against the WHOLE posting', () => {
   test('generate resolves the full description from job_id', () => {
     // The resolution moved into the shared, scoped helper; generate now delegates rather than
     // carrying its own copy of both the query and the predicate.
-    assert.match(generate, /resolvedPosting = await actionPostingRowForUser\(body\.job_id, userId\);/);
+    assert.match(generate, /const effectiveJobId = body\.job_id \?\? ownedCanonicalApplication\?\.job_id/);
+    assert.match(generate, /resolvedPosting = await actionPostingRowForUser\(effectiveJobId, userId\);/);
     assert.match(generate, /jdText = resolveJdText\(jdText, resolvedPosting\.description\);/);
     assert.match(requirements, /left\(\$\{monitored_jobs\.description\}, 60000\)/);
   });
@@ -231,7 +232,7 @@ describe('the posting read is scoped, and the paid route is metered', () => {
   test('generate reads the posting through that same helper, not its own query', () => {
     // A second inline query is a second place to forget the scoping, and a second predicate that
     // can drift from the one the review screen uses.
-    assert.match(generate, /resolvedPosting = await actionPostingRowForUser\(body\.job_id, userId\);/);
+    assert.match(generate, /resolvedPosting = await actionPostingRowForUser\(effectiveJobId, userId\);/);
     const handler = generate.slice(
       generate.indexOf("fastify.post('/resume/generate'"),
       generate.indexOf("fastify.get('/resume/download'"),

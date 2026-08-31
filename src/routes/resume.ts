@@ -199,6 +199,7 @@ function monitoredApplicationUrlForGenerate(posting: ActionPostingRow | null): s
     posting.ats_name,
     posting.board_token,
     posting.external_id,
+    posting.posting_url,
   );
 }
 
@@ -595,7 +596,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
        * into a new packet. */
       resolvedPosting = await actionPostingRowForUser(effectiveJobId, userId);
       if (!resolvedPosting) {
-        return reply.status(404).send({
+        return reply.status(409).send({
           error: 'Current verified posting not found',
           code: 'job_not_available',
         });
@@ -607,7 +608,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
 
     const monitoredApplicationUrl = monitoredApplicationUrlForGenerate(resolvedPosting);
     if (effectiveJobId && !monitoredApplicationUrl) {
-      return reply.status(404).send({
+      return reply.status(409).send({
         error: 'Current verified posting not found',
         code: 'job_not_available',
       });
@@ -618,6 +619,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         resolvedPosting.ats_name,
         resolvedPosting.board_token,
         resolvedPosting.external_id,
+        resolvedPosting.posting_url,
       );
       if (!boundStoredPortalUrl || boundStoredPortalUrl !== monitoredApplicationUrl) {
         return reply.status(409).send({
@@ -640,7 +642,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
           ?? body.application.portal_url
       : undefined;
     if (body.application && effectiveJobId && !canonicalApplicationPortalUrl) {
-      return reply.status(404).send({
+      return reply.status(409).send({
         error: 'Current verified posting not found',
         code: 'job_not_available',
       });
@@ -1761,6 +1763,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
         id: monitored_jobs.id,
         external_id: monitored_jobs.external_id,
         apply_url: monitored_jobs.apply_url,
+        posting_url: monitored_jobs.posting_url,
         ats_name: career_page_sources.ats_name,
         board_token: career_page_sources.board_token,
         company_name: monitored_jobs.company_name,
@@ -1782,6 +1785,7 @@ export async function resumeRoutes(fastify: FastifyInstance) {
             job.ats_name,
             job.board_token,
             job.external_id,
+            job.posting_url,
           ),
         }))
         .filter((job): job is typeof job & { apply_url: string } => Boolean(job.apply_url))

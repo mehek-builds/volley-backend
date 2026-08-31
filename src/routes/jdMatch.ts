@@ -241,6 +241,7 @@ export type ActionPostingRow = {
   job_country: string | null;
   description: string | null;
   apply_url: string;
+  posting_url: string;
   ats_name: string;
   board_token: string;
 };
@@ -257,6 +258,7 @@ const actionPostingSelection = {
   // than the engine's own bound just because it skipped the schema on its way in.
   description: sql<string>`left(${monitored_jobs.description}, 60000)`,
   apply_url: monitored_jobs.apply_url,
+  posting_url: monitored_jobs.posting_url,
   ats_name: career_page_sources.ats_name,
   board_token: career_page_sources.board_token,
 } as const;
@@ -269,6 +271,7 @@ function normalizeActionPostingRow(row: {
   job_country: string;
   description: string;
   apply_url: string;
+  posting_url: string;
   ats_name: string;
   board_token: string;
 }): ActionPostingRow {
@@ -280,6 +283,7 @@ function normalizeActionPostingRow(row: {
     job_country: row.job_country,
     description: row.description,
     apply_url: row.apply_url,
+    posting_url: row.posting_url,
     ats_name: row.ats_name,
     board_token: row.board_token,
   };
@@ -433,7 +437,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     const requestedJobId = parsed.data.job_context?.job_id;
     const posting = await actionPostingRowForUser(requestedJobId, userId);
     if (requestedJobId && !posting) {
-      return reply.status(404).send({
+      return reply.status(409).send({
         error: 'Current verified posting not found',
         code: 'job_not_available',
       });
@@ -545,7 +549,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     const requestedJobId = body.job_context?.job_id;
     const posting = await actionPostingRowForUser(requestedJobId, userId);
     if (requestedJobId && !posting) {
-      return reply.status(404).send({
+      return reply.status(409).send({
         error: 'Current verified posting not found',
         code: 'job_not_available',
       });
@@ -873,7 +877,7 @@ export async function jdMatchRoutes(fastify: FastifyInstance) {
     const requestedJobId = parsed.data.job_context?.job_id;
     const posting = await actionPostingRowForUser(requestedJobId, userId);
     if (requestedJobId && !posting) {
-      return reply.status(404).send({
+      return reply.status(409).send({
         error: 'Current verified posting not found',
         code: 'job_not_available',
       });
