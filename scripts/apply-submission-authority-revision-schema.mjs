@@ -7,6 +7,7 @@
  * authority rows and their cache-coherence token atomic, including on rollback.
  */
 
+import tls from 'node:tls';
 import pg from 'pg';
 
 const SCHEMA_VERSION = 'submission-authority-v1';
@@ -258,7 +259,26 @@ async function main() {
     process.exit(2);
   }
 
-  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  const client = new pg.Client({
+    connectionString: process.env.DATABASE_URL,
+    // Same TLS posture as scripts/check-schema-drift.mjs, for the same reason: from a GitHub
+    // runner this URL is Railway's public TCP proxy, whose PostgreSQL presents a certificate
+    // from Railway's PRIVATE root (CN=root-ca). Without the pinned root the connect dies with
+    // "self-signed certificate in certificate chain" before a single statement runs. The SAN is
+    // [localhost, postgres.railway.internal], so the identity check names the internal host, a
+    // real check only Railway's own instance can pass, not a bypass. Locally (from inside the
+    // container over the private domain) src/db/index.ts is the enforcing layer instead, and a
+    // localhost DATABASE_URL keeps the no-TLS dev behavior every other script here has.
+    ssl: /localhost|127\.0\.0\.1/.test(process.env.DATABASE_URL)
+      ? undefined
+      : process.env.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT?.trim()
+        ? {
+            rejectUnauthorized: true,
+            ca: `${process.env.SCHEMA_CHECK_DATABASE_SSL_ROOT_CERT.trim().replace(/\\n/g, '\n')}\n`,
+            checkServerIdentity: (host, cert) => tls.checkServerIdentity('postgres.railway.internal', cert),
+          }
+        : { rejectUnauthorized: true },
+  });
   await client.connect();
   try {
     await client.query("set lock_timeout = '2min'");
