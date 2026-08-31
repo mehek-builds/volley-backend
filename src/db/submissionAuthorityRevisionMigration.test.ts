@@ -386,8 +386,30 @@ test('submission authority revision migration is atomic, owner-safe, and idempot
       insert into managed_submission_account_deletion_drains (user_id)
       values ('${USER_C}')
     `));
+    await assertNextRevision(database, USER_C, () => database.exec(`
+      insert into browser_provider_resource_cleanups (
+        id, user_id, provider, resource_type, creation_expires_at
+      ) values (
+        'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee3', '${USER_C}', 'browserbase', 'session', now()
+      )
+    `));
+    await assertNextRevision(database, USER_C, () => database.exec(`
+      insert into managed_prepare_object_cleanups (object_key, user_id, packet_id)
+      values ('users/${USER_C}/managed-main-resumes/stale.pdf', '${USER_C}',
+        'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3')
+    `));
     await database.exec(`delete from users where id = '${USER_C}'`);
     assert.equal(await revision(database, USER_C), null, 'account deletion cascades without recreating revision state');
+    const retainedObjectCleanup = await database.query<{ total: number }>(`
+      select count(*)::int as total
+      from managed_prepare_object_cleanups
+      where user_id = '${USER_C}'
+    `);
+    assert.equal(
+      retainedObjectCleanup.rows[0]?.total,
+      1,
+      'an exact late-upload cleanup obligation must outlive the deleted account',
+    );
 
     await database.exec(`
       alter table submission_authority_revisions

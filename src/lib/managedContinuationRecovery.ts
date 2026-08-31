@@ -14,7 +14,7 @@ export type ManagedContinuationRecoveryPlan =
   | {
       kind: 'invalid';
       reason: 'binding_mismatch' | 'execution_mismatch' | 'deadline_invalid';
-      submissionAttempt: ManagedSubmissionAttempt;
+      submissionAttempt: ManagedSubmissionAttempt | null;
     }
   | { kind: 'expired'; submissionAttempt: ManagedSubmissionAttempt; providerDeadlineAt: string }
   | { kind: 'poll'; submissionAttempt: ManagedSubmissionAttempt; providerDeadlineAt: string };
@@ -38,11 +38,11 @@ export function planManagedContinuationRecovery(input: {
     || state.status !== 'verification_pending'
     || state.continuationResumed !== true) return { kind: 'none' };
   if (!input.bindingMatches) {
-    return { kind: 'invalid', reason: 'binding_mismatch', submissionAttempt: input.submissionAttempt };
+    return { kind: 'invalid', reason: 'binding_mismatch', submissionAttempt: null };
   }
   if (state.continuationExecutionFingerprint
     !== managedContinuationAttemptFingerprint(input.submissionAttempt)) {
-    return { kind: 'invalid', reason: 'execution_mismatch', submissionAttempt: input.submissionAttempt };
+    return { kind: 'invalid', reason: 'execution_mismatch', submissionAttempt: null };
   }
   const providerDeadlineAt = state.continuationCallDeadlineAt;
   const providerDeadlineMs = providerDeadlineAt ? Date.parse(providerDeadlineAt) : Number.NaN;

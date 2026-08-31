@@ -83,6 +83,8 @@ export async function bumpSubmissionAuthorityRevision(
 
 const DIRECT_OWNER_TABLES = [
   'managed_submission_account_deletion_drains',
+  'browser_provider_resource_cleanups',
+  'managed_prepare_object_cleanups',
   'application_submission_attempt_events',
   'application_submission_events',
   'generated_resumes',

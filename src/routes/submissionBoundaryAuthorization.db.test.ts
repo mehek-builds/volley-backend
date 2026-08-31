@@ -21,12 +21,20 @@ let appendSubmissionAttemptEvent:
   typeof import('../lib/submissionAttemptLedger').appendSubmissionAttemptEvent;
 let authorizeFinalSubmissionBoundary:
   typeof import('../lib/submissionAttemptLedger').authorizeFinalSubmissionBoundary;
+let submissionBoundaryAuthorization:
+  typeof import('../lib/submissionAttemptLedger').submissionBoundaryAuthorization;
 let freezePostingIdentity: typeof import('../lib/submissionAttemptLedger').freezePostingIdentity;
 let submissionAttemptEventId: typeof import('../lib/submissionAttemptLedger').submissionAttemptEventId;
 let lockSubmissionAttemptUser: typeof import('../lib/submissionAttemptLedger').lockSubmissionAttemptUser;
 let duplicateApplicationVerdict: typeof import('../lib/duplicateApplication').duplicateApplicationVerdict;
 let canonicalApplicationForNewPacketAttempt:
   typeof import('../lib/canonicalPacketBinding').canonicalApplicationForNewPacketAttempt;
+let reserveBrowserProviderResource:
+  typeof import('../lib/browserProviderResourceCleanup').reserveBrowserProviderResource;
+let createFencedBrowserSession:
+  typeof import('../lib/browserProviderResourceCleanup').createFencedBrowserSession;
+let drainBrowserProviderResourcesBeforeAccountDeletion:
+  typeof import('../lib/browserProviderResourceCleanup').drainBrowserProviderResourcesBeforeAccountDeletion;
 
 before(async () => {
   database = await PGlite.create();
@@ -49,12 +57,18 @@ before(async () => {
   ({
     appendSubmissionAttemptEvent,
     authorizeFinalSubmissionBoundary,
+    submissionBoundaryAuthorization,
     freezePostingIdentity,
     submissionAttemptEventId,
     lockSubmissionAttemptUser,
   } = await import('../lib/submissionAttemptLedger'));
   ({ duplicateApplicationVerdict } = await import('../lib/duplicateApplication'));
   ({ canonicalApplicationForNewPacketAttempt } = await import('../lib/canonicalPacketBinding'));
+  ({
+    reserveBrowserProviderResource,
+    createFencedBrowserSession,
+    drainBrowserProviderResourcesBeforeAccountDeletion,
+  } = await import('../lib/browserProviderResourceCleanup'));
 });
 
 after(async () => {
@@ -145,6 +159,30 @@ test('a different execution activation cannot reuse an existing boundary lease',
   assert.equal(conflict.kind, 'activation_conflict');
 });
 
+test('the database clock expires the exact retained capability lease before disclosure', async () => {
+  const binding = await openedBinding();
+  const opened = await backendDb.transaction((tx: any) => authorizeFinalSubmissionBoundary(binding, {
+    executor: tx,
+    factKey: 'retained-debugger-boundary',
+    activationId: randomUUID(),
+    evidenceCode: 'retained_debugger_boundary_authorized',
+    ttlMs: 5,
+  }));
+  assert.equal(opened.kind, 'fresh');
+  await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  const current = await backendDb.transaction(async (tx: any) => {
+    await lockSubmissionAttemptUser(tx, binding.userId);
+    return submissionBoundaryAuthorization(binding.userId, binding.attemptId, { executor: tx });
+  });
+  assert.ok(current);
+  assert.equal(current.active, false);
+  if (opened.kind === 'fresh') {
+    assert.equal(current.leaseId, opened.authorization.leaseId);
+    assert.equal(current.activationId, opened.authorization.activationId);
+    assert.ok(Date.parse(current.serverNow) >= Date.parse(current.expiresAt));
+  }
+});
+
 test('an account-deletion drain fences opened and future employer capabilities under the user lock', async () => {
   const opened = await openedBinding();
   await backendDb.transaction(async (tx: any) => {
@@ -183,6 +221,237 @@ test('an account-deletion drain fences opened and future employer capabilities u
     eq(schema.application_submission_attempt_events.attempt_id, opened.attemptId),
   ));
   assert.deepEqual(events.map((event: { event_kind: string }) => event.event_kind), ['attempt_opened']);
+});
+
+test('a provider creation reservation survives its crash window and a queued creator loses to deletion', async () => {
+  const userId = randomUUID();
+  await backendDb.insert(schema.users).values({
+    id: userId,
+    email: `provider-cleanup-${userId}@example.test`,
+  });
+  const durable = await reserveBrowserProviderResource({
+    userId,
+    provider: 'browserbase',
+    resourceType: 'session',
+  });
+  const [cleanup] = await backendDb.select().from(schema.browser_provider_resource_cleanups)
+    .where(eq(schema.browser_provider_resource_cleanups.id, durable.reservationId)).limit(1);
+  assert.equal(cleanup.user_id, userId);
+  assert.equal(cleanup.provider_resource_id, null);
+  assert.equal(cleanup.provider_confirmed_gone_at, null);
+
+  let reportLocked!: () => void;
+  let releaseLock!: () => void;
+  const locked = new Promise<void>((resolve) => { reportLocked = resolve; });
+  const lockGate = new Promise<void>((resolve) => { releaseLock = resolve; });
+  const deletion = backendDb.transaction(async (tx: any) => {
+    await lockSubmissionAttemptUser(tx, userId);
+    reportLocked();
+    await lockGate;
+    await tx.insert(schema.managed_submission_account_deletion_drains).values({ user_id: userId });
+  });
+  await locked;
+  const queuedCreation = reserveBrowserProviderResource({
+    userId,
+    provider: 'browserbase',
+    resourceType: 'session',
+  });
+  const queuedRefusal = assert.rejects(
+    queuedCreation,
+    (error: unknown) => typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && error.code === 'SUBMISSION_ACCOUNT_DELETION_DRAINING',
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  releaseLock();
+  await deletion;
+  await queuedRefusal;
+  const obligations = await backendDb.select().from(schema.browser_provider_resource_cleanups)
+    .where(eq(schema.browser_provider_resource_cleanups.user_id, userId));
+  assert.equal(obligations.length, 1, 'the pre-POST cleanup obligation must remain independently durable');
+});
+
+test('provider POST binds its exact durable cleanup obligation before returning the capability', async () => {
+  const userId = randomUUID();
+  const sessionId = `provider-session-${userId}`;
+  await backendDb.insert(schema.users).values({
+    id: userId,
+    email: `provider-post-fence-${userId}@example.test`,
+  });
+  const previousKey = process.env.BROWSERBASE_API_KEY;
+  const previousProvider = process.env.BROWSER_PROVIDER;
+  const previousFetch = globalThis.fetch;
+  process.env.BROWSERBASE_API_KEY = 'browserbase-create-fence-test-key';
+  process.env.BROWSER_PROVIDER = 'browserbase';
+  let providerPostObserved = false;
+  try {
+    globalThis.fetch = (async (input, init) => {
+      assert.match(String(input), /\/sessions$/);
+      assert.equal(init?.method, 'POST');
+      providerPostObserved = true;
+      return new Response(JSON.stringify({ id: sessionId }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+    const session = await createFencedBrowserSession({
+      userId,
+      provider: 'browserbase',
+      portalUrl: 'https://boards.greenhouse.io/example/jobs/123',
+    });
+    assert.equal(session.id, sessionId);
+    assert.equal(providerPostObserved, true);
+    const [cleanup] = await backendDb.select().from(schema.browser_provider_resource_cleanups)
+      .where(eq(schema.browser_provider_resource_cleanups.user_id, userId)).limit(1);
+    assert.equal(cleanup.provider_resource_id, sessionId);
+    assert.equal(cleanup.provider_confirmed_gone_at, null);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.BROWSERBASE_API_KEY;
+    else process.env.BROWSERBASE_API_KEY = previousKey;
+    if (previousProvider === undefined) delete process.env.BROWSER_PROVIDER;
+    else process.env.BROWSER_PROVIDER = previousProvider;
+  }
+});
+
+test('account cleanup stays pending until the provider confirms the exact session is gone', async () => {
+  const userId = randomUUID();
+  const cleanupId = randomUUID();
+  const sessionId = 'browserbase-session-for-deletion';
+  await backendDb.insert(schema.users).values({
+    id: userId,
+    email: `provider-release-${userId}@example.test`,
+  });
+  await backendDb.insert(schema.browser_provider_resource_cleanups).values({
+    id: cleanupId,
+    user_id: userId,
+    provider: 'browserbase',
+    resource_type: 'session',
+    provider_resource_id: sessionId,
+    creation_expires_at: new Date(),
+  });
+  const previousKey = process.env.BROWSERBASE_API_KEY;
+  const previousFetch = globalThis.fetch;
+  process.env.BROWSERBASE_API_KEY = 'browserbase-cleanup-test-key';
+  let terminal = false;
+  const requests: Array<{ method: string; url: string }> = [];
+  try {
+    globalThis.fetch = (async (input, init) => {
+      const method = init?.method ?? 'GET';
+      requests.push({ method, url: String(input) });
+      if (method === 'POST') {
+        return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        id: sessionId,
+        status: terminal ? 'COMPLETED' : 'REQUEST_RELEASE',
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const pending = await drainBrowserProviderResourcesBeforeAccountDeletion(userId);
+    assert.deepEqual(pending, { ready: false, pending: 1, confirmed: 0 });
+    const [stillOutstanding] = await backendDb.select().from(schema.browser_provider_resource_cleanups)
+      .where(eq(schema.browser_provider_resource_cleanups.id, cleanupId)).limit(1);
+    assert.ok(stillOutstanding.release_requested_at);
+    assert.equal(stillOutstanding.provider_confirmed_gone_at, null);
+
+    terminal = true;
+    const completed = await drainBrowserProviderResourcesBeforeAccountDeletion(userId);
+    assert.deepEqual(completed, { ready: true, pending: 0, confirmed: 1 });
+    const [gone] = await backendDb.select().from(schema.browser_provider_resource_cleanups)
+      .where(eq(schema.browser_provider_resource_cleanups.id, cleanupId)).limit(1);
+    assert.ok(gone.provider_confirmed_gone_at);
+    assert.equal(requests.some((request) => request.method === 'POST'), true);
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.BROWSERBASE_API_KEY;
+    else process.env.BROWSERBASE_API_KEY = previousKey;
+  }
+});
+
+test('a crashed create is cleared only after an expired reservation query finds no provider session', async () => {
+  const userId = randomUUID();
+  const cleanupId = randomUUID();
+  await backendDb.insert(schema.users).values({
+    id: userId,
+    email: `provider-create-crash-${userId}@example.test`,
+  });
+  await backendDb.insert(schema.browser_provider_resource_cleanups).values({
+    id: cleanupId,
+    user_id: userId,
+    provider: 'browserbase',
+    resource_type: 'session',
+    creation_expires_at: new Date('2020-01-01T00:00:00.000Z'),
+  });
+  const previousKey = process.env.BROWSERBASE_API_KEY;
+  const previousFetch = globalThis.fetch;
+  process.env.BROWSERBASE_API_KEY = 'browserbase-cleanup-test-key';
+  try {
+    globalThis.fetch = (async (input) => {
+      assert.match(String(input), /\/sessions\?q=/);
+      return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    assert.deepEqual(
+      await drainBrowserProviderResourcesBeforeAccountDeletion(userId),
+      { ready: true, pending: 0, confirmed: 1 },
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.BROWSERBASE_API_KEY;
+    else process.env.BROWSERBASE_API_KEY = previousKey;
+  }
+});
+
+test('an ambiguous recovered create atomically persists every exact remote cleanup obligation', async () => {
+  const userId = randomUUID();
+  const cleanupId = randomUUID();
+  await backendDb.insert(schema.users).values({
+    id: userId,
+    email: `provider-create-multiple-${userId}@example.test`,
+  });
+  await backendDb.insert(schema.browser_provider_resource_cleanups).values({
+    id: cleanupId,
+    user_id: userId,
+    provider: 'browserbase',
+    resource_type: 'session',
+    creation_expires_at: new Date('2020-01-01T00:00:00.000Z'),
+  });
+  const previousKey = process.env.BROWSERBASE_API_KEY;
+  const previousFetch = globalThis.fetch;
+  process.env.BROWSERBASE_API_KEY = 'browserbase-multiple-cleanup-test-key';
+  try {
+    globalThis.fetch = (async (input) => {
+      assert.match(String(input), /\/sessions\?q=/);
+      return new Response(JSON.stringify([
+        { id: 'ambiguous-session-a' },
+        { id: 'ambiguous-session-b' },
+      ]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    assert.deepEqual(
+      await drainBrowserProviderResourcesBeforeAccountDeletion(userId),
+      { ready: false, pending: 2, confirmed: 0 },
+    );
+    const cleanups = await backendDb.select().from(schema.browser_provider_resource_cleanups)
+      .where(eq(schema.browser_provider_resource_cleanups.user_id, userId));
+    const abstractReservation = cleanups.find((cleanup: any) => cleanup.id === cleanupId);
+    assert.ok(abstractReservation?.provider_confirmed_gone_at);
+    assert.deepEqual(
+      cleanups
+        .filter((cleanup: any) => cleanup.id !== cleanupId)
+        .map((cleanup: any) => cleanup.provider_resource_id)
+        .sort(),
+      ['ambiguous-session-a', 'ambiguous-session-b'],
+    );
+    assert.equal(
+      cleanups.filter((cleanup: any) => cleanup.id !== cleanupId)
+        .every((cleanup: any) => cleanup.provider_confirmed_gone_at === null),
+      true,
+    );
+  } finally {
+    globalThis.fetch = previousFetch;
+    if (previousKey === undefined) delete process.env.BROWSERBASE_API_KEY;
+    else process.env.BROWSERBASE_API_KEY = previousKey;
+  }
 });
 
 test('a retained-session capability commits duplicate clearance, canonical binding, claim, opening, and boundary together', async () => {

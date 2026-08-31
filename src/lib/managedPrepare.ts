@@ -10,6 +10,7 @@ import {
   artifacts,
   career_page_sources,
   generated_resumes,
+  managed_prepare_object_cleanups,
   monitored_jobs,
   profiles,
   users,
@@ -262,6 +263,58 @@ function managedPrepareReservationObjectKeyMatches(input: {
     && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(reservationId);
 }
 
+/**
+ * Retry every immutable superseded-render cleanup obligation without ever deleting a key that is
+ * still referenced. Obligations intentionally remain durable after a successful delete: an old
+ * renderer may upload late, and the next prepare or account prefix scrub must delete it again.
+ */
+export async function retryManagedPrepareObjectCleanup(
+  userId: string,
+  dependencyOverrides: Pick<Partial<ManagedPrepareDependencies>, 'deleteResume'> = {},
+): Promise<number> {
+  const deleteResume = dependencyOverrides.deleteResume ?? defaultDependencies.deleteResume;
+  const rows = await db.select({
+    objectKey: generated_resumes.resume_object_key,
+  }).from(generated_resumes).where(eq(generated_resumes.user_id, userId));
+  const referenced = new Set(rows.map((row) => row.objectKey));
+  const prefix = `users/${userId}/managed-main-resumes/`;
+  const obligations = await db.select({ objectKey: managed_prepare_object_cleanups.object_key })
+    .from(managed_prepare_object_cleanups)
+    .where(eq(managed_prepare_object_cleanups.user_id, userId));
+  const cleanupKeys = obligations.map((row) => row.objectKey)
+    .filter((key) => key.startsWith(prefix) && !referenced.has(key));
+  let deleted = 0;
+  for (const key of cleanupKeys) {
+    await deleteResume(key);
+    const [owner] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId)).limit(1);
+    if (owner) {
+      try {
+        await db.update(managed_prepare_object_cleanups).set({
+          last_attempt_at: sql`clock_timestamp()`,
+        }).where(and(
+          eq(managed_prepare_object_cleanups.user_id, userId),
+          eq(managed_prepare_object_cleanups.object_key, key),
+        ));
+      } catch (error) {
+        const [stillExists] = await db.select({ id: users.id }).from(users)
+          .where(eq(users.id, userId)).limit(1);
+        if (stillExists) throw error;
+      }
+    }
+    deleted += 1;
+  }
+  return deleted;
+}
+
+/** Daily independent retry for late stale-render uploads, even if the packet is never opened again. */
+export async function retryAllManagedPrepareObjectCleanup(): Promise<number> {
+  const owners = await db.selectDistinct({ userId: managed_prepare_object_cleanups.user_id })
+    .from(managed_prepare_object_cleanups);
+  let deleted = 0;
+  for (const owner of owners) deleted += await retryManagedPrepareObjectCleanup(owner.userId);
+  return deleted;
+}
+
 function exactManagedReview(row: ResumeRow, applicationId: string): ApplicationReviewState | null {
   const metadata = managedPrepareMetadata(row.spec);
   const review = readApplicationReview(row.spec);
@@ -395,6 +448,7 @@ export async function prepareManagedApplication(
   dependencyOverrides: Partial<ManagedPrepareDependencies> = {},
 ): Promise<ManagedPrepareResult> {
   const dependencies = { ...defaultDependencies, ...dependencyOverrides };
+  await retryManagedPrepareObjectCleanup(input.userId, dependencies).catch(() => undefined);
   const [[posting], [profile], [account]] = await Promise.all([
     db.select({
       id: monitored_jobs.id,
@@ -593,10 +647,15 @@ export async function prepareManagedApplication(
           return prepareError(409, 'managed_packet_preparing', 'Litos is already preparing this exact packet. Try again shortly.');
         }
         const reservationId = dependencies.newId();
-        // The object identity stays stable across lease takeovers. A worker that uploads and then
-        // crashes can therefore leave only the key still referenced by this exact packet, never an
-        // unreferenced PII object under an expired reservation ID.
-        const requestedKey = expectedReservationKey;
+        // Every renderer owns an immutable object identity. Reusing the expired key lets a stale
+        // worker overwrite the winner after the winner commits. The old key remains as a durable
+        // cleanup obligation so a crash after a late stale upload cannot strand applicant PII.
+        const requestedKey = managedPrepareReservationObjectKey({
+          userId: input.userId,
+          jobId: posting.id,
+          mainResumeDigest,
+          reservationId,
+        });
         const nextReservation = managedPrepareReservation({
           applicationId,
           packetId: existing.id,
@@ -607,6 +666,20 @@ export async function prepareManagedApplication(
           reservedAt: reservationNow,
           requestedObjectKey: requestedKey,
         });
+        await tx.insert(managed_prepare_object_cleanups).values([
+          {
+            object_key: expectedReservationKey,
+            user_id: input.userId,
+            packet_id: existing.id,
+            created_at: reservationNow,
+          },
+          {
+            object_key: requestedKey,
+            user_id: input.userId,
+            packet_id: existing.id,
+            created_at: reservationNow,
+          },
+        ]).onConflictDoNothing();
         const nextSpec = { ...currentBaseResume, _managed_prepare: nextReservation };
         const [takenOver] = await tx.update(generated_resumes).set({
           spec: nextSpec,
@@ -681,6 +754,12 @@ export async function prepareManagedApplication(
       resume_object_key: requestedKey,
     }).returning();
     if (!inserted) return prepareError(500, 'managed_packet_persistence_failed', 'Litos could not reserve the prepared packet. Nothing was opened or sent.');
+    await tx.insert(managed_prepare_object_cleanups).values({
+      object_key: requestedKey,
+      user_id: input.userId,
+      packet_id: packetId,
+      created_at: reservationNow,
+    }).onConflictDoNothing();
     return {
       row: inserted,
       created: true,
@@ -703,6 +782,19 @@ export async function prepareManagedApplication(
     const abandonReservation = async (): Promise<boolean> => db.transaction(async (tx) => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`canonical-application:${input.userId}`}, 0::bigint))`);
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`managed-prepare:${input.userId}:${posting.id}`}, 0::bigint))`);
+        const [current] = await tx.select({
+          objectKey: generated_resumes.resume_object_key,
+          spec: generated_resumes.spec,
+        }).from(generated_resumes).where(and(
+          eq(generated_resumes.id, stage.row.id),
+          eq(generated_resumes.user_id, input.userId),
+        )).limit(1);
+        if (!current) return true;
+        // A takeover now has a different immutable key. This worker can always remove its own key,
+        // including when it uploaded after the takeover committed.
+        if (current.objectKey !== reservation.requestedKey) return true;
+        const currentReservation = managedPrepareReservationMetadata(current.spec);
+        if (currentReservation?.reservation_id !== reservation.id) return false;
         const deleted = await tx.delete(generated_resumes).where(and(
           eq(generated_resumes.id, stage.row.id),
           eq(generated_resumes.user_id, input.userId),
@@ -912,7 +1004,7 @@ export async function prepareManagedApplication(
   };
   const finalSpec = { ...(stage.row.spec as Record<string, unknown>), _review: finalReview };
 
-  return db.transaction(async (tx): Promise<ManagedPrepareResult> => {
+  const committedResult = await db.transaction(async (tx): Promise<ManagedPrepareResult> => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`canonical-application:${input.userId}`}, 0::bigint))`);
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`managed-prepare:${input.userId}:${posting.id}`}, 0::bigint))`);
     const [currentRow] = await tx.select().from(generated_resumes).where(and(
@@ -1013,4 +1105,6 @@ export async function prepareManagedApplication(
       reused: !stage.created,
     };
   });
+  await retryManagedPrepareObjectCleanup(input.userId, dependencies).catch(() => undefined);
+  return committedResult;
 }

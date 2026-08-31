@@ -271,7 +271,7 @@ test('the centralized runner refuses stale lead evidence before every claim and 
   for (const channel of [
     'submitControlled(row',
     'submitViaAtsSubmissionChannel(',
-    'runManagedBrowser(',
+    'runManagedBrowserWithAccountFence(',
     'clickFinalSubmit(',
   ]) {
     assert.ok(submit.indexOf(channel) > submitGate, `${channel} must remain behind the lead citation gate`);

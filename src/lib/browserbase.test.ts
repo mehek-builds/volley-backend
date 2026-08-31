@@ -583,6 +583,8 @@ test('session body disables CAPTCHA solving and restricts navigation to the port
       context: { id: 'context-1', persist: true },
       allowedDomains: ['boards.greenhouse.io'],
       solveCaptchas: false,
+      recordSession: false,
+      logSession: false,
     },
   });
 });
@@ -595,8 +597,35 @@ test('legacy project ID remains optional and compatible', () => {
       context: { id: 'context-1', persist: true },
       allowedDomains: ['jobs.lever.co'],
       solveCaptchas: false,
+      recordSession: false,
+      logSession: false,
     },
   });
+});
+
+test('a context-free session carries the durable creation reservation and disables provider recordings', () => {
+  assert.deepEqual(
+    browserSessionBody(
+      undefined,
+      'https://boards.greenhouse.io/acme/jobs/123',
+      'project-1',
+      'browserbase',
+      '11111111-1111-4111-8111-111111111111',
+    ),
+    {
+      projectId: 'project-1',
+      keepAlive: true,
+      userMetadata: {
+        litos_resource_reservation_id: '11111111-1111-4111-8111-111111111111',
+      },
+      browserSettings: {
+        allowedDomains: ['boards.greenhouse.io'],
+        solveCaptchas: false,
+        recordSession: false,
+        logSession: false,
+      },
+    },
+  );
 });
 
 test('Stratus session body preserves the browser identity and pauses on protection challenges', () => {

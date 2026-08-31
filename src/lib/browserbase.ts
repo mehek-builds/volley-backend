@@ -695,10 +695,12 @@ function managedBrowserErrorMessage(
   return `${message}; action_audit=${managedActionAudit(actions)}`;
 }
 
-type SessionResponse = {
+export type SessionResponse = {
   id: string;
   connectUrl?: string;
   connect_url?: string;
+  status?: string;
+  userMetadata?: Record<string, string>;
 };
 
 const STRATUS_SELECTOR_MAX_LENGTH = 500;
@@ -935,17 +937,25 @@ function managedActionAudit(actions: ManagedBrowserAction[]): string {
   });
 }
 
-function config() {
-  const provider: BrowserProvider = process.env.BROWSER_PROVIDER === 'stratus-managed'
+function config(providerOverride?: Exclude<BrowserProvider, 'stratus-managed'>) {
+  const provider: BrowserProvider = providerOverride ?? (process.env.BROWSER_PROVIDER === 'stratus-managed'
     ? 'stratus-managed'
     : process.env.BROWSER_PROVIDER === 'stratus' || Boolean(process.env.STRATUS_BASE_URL)
       ? 'stratus'
-      : 'browserbase';
-  const apiKey = process.env.BROWSER_API_KEY
-    ?? (provider !== 'browserbase' ? process.env.STRATUS_API_KEY : process.env.BROWSERBASE_API_KEY);
+      : 'browserbase');
+  const apiKey = providerOverride === 'browserbase'
+    ? process.env.BROWSERBASE_API_KEY ?? process.env.BROWSER_API_KEY
+    : providerOverride === 'stratus'
+      ? process.env.STRATUS_API_KEY ?? process.env.BROWSER_API_KEY
+      : process.env.BROWSER_API_KEY
+        ?? (provider !== 'browserbase' ? process.env.STRATUS_API_KEY : process.env.BROWSERBASE_API_KEY);
   const projectId = process.env.BROWSERBASE_PROJECT_ID;
   const stratusBaseUrl = process.env.STRATUS_BASE_URL?.replace(/\/$/, '');
-  const apiRoot = (process.env.BROWSER_API_ROOT
+  const apiRoot = ((providerOverride === 'browserbase'
+    ? process.env.BROWSERBASE_API_ROOT
+    : providerOverride === 'stratus'
+      ? undefined
+      : process.env.BROWSER_API_ROOT)
     ?? (provider === 'stratus' && stratusBaseUrl ? `${stratusBaseUrl}/v1` : 'https://api.browserbase.com/v1'))
     .replace(/\/$/, '');
   if (!apiKey) {
@@ -954,18 +964,36 @@ function config() {
   return { apiKey, projectId, provider, apiRoot };
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const { apiKey, apiRoot, provider } = config();
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  options: { timeoutMs?: number; provider?: Exclude<BrowserProvider, 'stratus-managed'> } = {},
+): Promise<T> {
+  const { apiKey, apiRoot, provider } = config(options.provider);
+  const timeoutMs = options.timeoutMs;
+  if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60_000)) {
+    throw new Error('Secure browser provider timeout must be between 1 ms and 60 seconds');
+  }
   const response = await fetch(`${apiRoot}${path}`, {
     ...init,
+    ...(timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
     headers: {
       'Content-Type': 'application/json',
       [provider === 'stratus' ? 'X-Stratus-API-Key' : 'X-BB-API-Key']: apiKey,
       ...(init.headers ?? {}),
     },
   });
-  if (!response.ok) throw new Error(`Secure browser provider request failed with status ${response.status}`);
-  return response.json() as Promise<T>;
+  if (!response.ok) throw new BrowserProviderRequestError(response.status);
+  if (response.status === 204) return undefined as T;
+  const text = await response.text();
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
+export class BrowserProviderRequestError extends Error {
+  constructor(readonly status: number) {
+    super(`Secure browser provider request failed with status ${status}`);
+    this.name = 'BrowserProviderRequestError';
+  }
 }
 
 export function isBrowserbaseConfigured(): boolean {
@@ -1468,11 +1496,6 @@ export async function acknowledgeManagedBrowserTerminalResult(
   };
 }
 
-export async function createBrowserContext(): Promise<string> {
-  const result = await request<{ id: string }>('/contexts', { method: 'POST', body: '{}' });
-  return result.id;
-}
-
 /**
  * How long a PERSISTENT browser session stays alive, in seconds.
  *
@@ -1497,17 +1520,21 @@ export const BROWSER_SESSION_TIMEOUT_SECONDS = 3600;
 export const HANDOFF_WINDOW_MS = (BROWSER_SESSION_TIMEOUT_SECONDS - 5 * 60) * 1_000;
 
 export function browserSessionBody(
-  contextId: string,
+  contextId: string | undefined,
   portalUrl: string,
   projectId?: string,
   provider: BrowserProvider = 'browserbase',
+  resourceReservationId?: string,
 ) {
   const hostname = new URL(portalUrl).hostname;
   if (provider === 'stratus') {
     return {
       keepAlive: true,
       timeout: BROWSER_SESSION_TIMEOUT_SECONDS,
-      contextId,
+      ...(contextId ? { contextId } : {}),
+      ...(resourceReservationId
+        ? { userMetadata: { litos_resource_reservation_id: resourceReservationId } }
+        : {}),
       browserSettings: {
         protectionPolicy: {
           allowedHosts: [hostname],
@@ -1521,30 +1548,96 @@ export function browserSessionBody(
   return {
     ...(projectId ? { projectId } : {}),
     keepAlive: true,
+    ...(resourceReservationId
+      ? { userMetadata: { litos_resource_reservation_id: resourceReservationId } }
+      : {}),
     browserSettings: {
-      context: { id: contextId, persist: true },
+      ...(contextId ? { context: { id: contextId, persist: true } } : {}),
       allowedDomains: [hostname],
       solveCaptchas: false,
+      recordSession: false,
+      logSession: false,
     },
   };
 }
 
-export async function createBrowserSession(contextId: string, portalUrl: string): Promise<SessionResponse> {
-  const { projectId, provider } = config();
+export async function createReservedBrowserSession(
+  portalUrl: string,
+  resourceReservationId: string,
+  providerOverride?: Exclude<BrowserProvider, 'stratus-managed'>,
+): Promise<SessionResponse> {
+  if (!MANAGED_SUBMISSION_UUID.test(resourceReservationId)) {
+    throw new Error('Browser provider resource reservation must be a UUID');
+  }
+  const { projectId, provider } = config(providerOverride);
   if (provider === 'stratus-managed') throw new Error('Managed Stratus uses bounded runs instead of persistent sessions');
   return request<SessionResponse>('/sessions', {
     method: 'POST',
-    body: JSON.stringify(browserSessionBody(contextId, portalUrl, projectId, provider)),
-  });
+    body: JSON.stringify(browserSessionBody(undefined, portalUrl, projectId, provider, resourceReservationId)),
+  }, { timeoutMs: 15_000, provider });
+}
+
+export async function releaseBrowserSession(
+  sessionId: string,
+  provider?: Exclude<BrowserProvider, 'stratus-managed'>,
+): Promise<void> {
+  const { projectId } = config(provider);
+  await request<void>(`/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ status: 'REQUEST_RELEASE', ...(projectId ? { projectId } : {}) }),
+  }, { timeoutMs: 10_000, provider });
+}
+
+export async function browserSessionIsConfirmedGone(
+  sessionId: string,
+  provider?: Exclude<BrowserProvider, 'stratus-managed'>,
+): Promise<boolean> {
+  try {
+    const session = await request<SessionResponse>(`/sessions/${encodeURIComponent(sessionId)}`, {}, { timeoutMs: 10_000, provider });
+    return ['ERROR', 'TIMED_OUT', 'COMPLETED'].includes(String(session.status ?? '').toUpperCase());
+  } catch (error) {
+    if (error instanceof BrowserProviderRequestError && error.status === 404) return true;
+    throw error;
+  }
+}
+
+export async function browserSessionsForResourceReservation(
+  reservationId: string,
+  provider?: Exclude<BrowserProvider, 'stratus-managed'>,
+): Promise<SessionResponse[]> {
+  const query = `user_metadata['litos_resource_reservation_id']:'${reservationId}'`;
+  const result = await request<SessionResponse[] | { sessions?: SessionResponse[] }>(
+    `/sessions?q=${encodeURIComponent(query)}`,
+    {},
+    { timeoutMs: 10_000, provider },
+  );
+  return Array.isArray(result) ? result : result.sessions ?? [];
+}
+
+export async function deleteBrowserContext(
+  contextId: string,
+  provider?: Exclude<BrowserProvider, 'stratus-managed'>,
+): Promise<void> {
+  try {
+    await request<void>(`/contexts/${encodeURIComponent(contextId)}`, { method: 'DELETE' }, { timeoutMs: 10_000, provider });
+  } catch (error) {
+    if (error instanceof BrowserProviderRequestError && error.status === 404) return;
+    throw error;
+  }
 }
 
 export async function getBrowserSession(sessionId: string): Promise<SessionResponse> {
   return request<SessionResponse>(`/sessions/${encodeURIComponent(sessionId)}`);
 }
 
-export async function getLiveViewUrl(sessionId: string): Promise<string> {
+export async function getLiveViewUrl(
+  sessionId: string,
+  options: { timeoutMs?: number } = {},
+): Promise<string> {
   const result = await request<{ debuggerFullscreenUrl?: string; debuggerUrl?: string }>(
     `/sessions/${encodeURIComponent(sessionId)}/debug`,
+    {},
+    { timeoutMs: options.timeoutMs ?? 5_000 },
   );
   const url = result.debuggerFullscreenUrl ?? result.debuggerUrl;
   if (!url) throw new Error('Secure browser provider did not return a live view URL');

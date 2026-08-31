@@ -107,7 +107,9 @@ test('a retained session is exposed only after a fresh exact manual boundary and
     'tx.update(generated_resumes)',
     "eventKind: 'attempt_opened'",
     'authorizeFinalSubmissionBoundary(binding',
-    'retainedSessionUrl = await getLiveViewUrl(retainedSessionId)',
+    'retainedSessionUrl = await getLiveViewUrl(retainedSessionId, { timeoutMs: 5_000 })',
+    'const currentAuthorization = await submissionBoundaryAuthorization(',
+    '!currentAuthorization.active',
     "kind: 'authorized' as const",
     "result.kind === 'authorized' && result.retainedSessionId",
   ]);
@@ -119,6 +121,8 @@ test('a retained session is exposed only after a fresh exact manual boundary and
     ),
     /getLiveViewUrl\(/,
   );
+  assert.match(manual, /currentAuthorization\.leaseId !== authorization\.authorization\.leaseId/);
+  assert.match(manual, /currentAuthorization\.attemptId !== authorization\.authorization\.attemptId/);
 });
 
 test('passive reviews never disclose employer handoff URLs', () => {

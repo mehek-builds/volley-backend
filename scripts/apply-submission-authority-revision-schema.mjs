@@ -14,6 +14,8 @@ const MIGRATION_LOCK = [1414090051, 20260828];
 
 const DIRECT_OWNER_TABLES = [
   'managed_submission_account_deletion_drains',
+  'browser_provider_resource_cleanups',
+  'managed_prepare_object_cleanups',
   'application_submission_attempt_events',
   'application_submission_events',
   'generated_resumes',
@@ -58,6 +60,77 @@ async function assertPrerequisiteTables(client) {
 }
 
 async function assertCatalog(client) {
+  const providerColumns = await client.query(`
+    select column_name, data_type, is_nullable
+    from information_schema.columns
+    where table_schema = current_schema()
+      and table_name = 'browser_provider_resource_cleanups'
+  `);
+  const providerColumnContract = new Map([
+    ['id', ['uuid', 'NO']],
+    ['user_id', ['uuid', 'NO']],
+    ['provider', ['text', 'NO']],
+    ['resource_type', ['text', 'NO']],
+    ['provider_resource_id', ['text', 'YES']],
+    ['creation_expires_at', ['timestamp with time zone', 'NO']],
+    ['release_requested_at', ['timestamp with time zone', 'YES']],
+    ['provider_confirmed_gone_at', ['timestamp with time zone', 'YES']],
+    ['created_at', ['timestamp with time zone', 'NO']],
+    ['updated_at', ['timestamp with time zone', 'NO']],
+  ]);
+  const providerColumnByName = new Map(providerColumns.rows.map((row) => [row.column_name, row]));
+  for (const [name, [dataType, nullable]] of providerColumnContract) {
+    const column = providerColumnByName.get(name);
+    if (!column || column.data_type !== dataType || column.is_nullable !== nullable) {
+      throw new Error(`Browser provider cleanup column does not match the contract: ${name}`);
+    }
+  }
+  const providerIndexes = await client.query(`
+    select indexname, indexdef
+    from pg_indexes
+    where schemaname = current_schema()
+      and tablename = 'browser_provider_resource_cleanups'
+  `);
+  const providerIndexByName = new Map(providerIndexes.rows.map((row) => [
+    row.indexname,
+    normalizedDefinition(row.indexdef),
+  ]));
+  if (!providerIndexByName.get('browser_provider_resource_cleanups_provider_resource_unique')
+    ?.includes('where (provider_resource_id is not null)')) {
+    throw new Error('Browser provider cleanup unique resource index does not match the contract');
+  }
+  const objectCleanupColumns = await client.query(`
+    select column_name, data_type, is_nullable
+    from information_schema.columns
+    where table_schema = current_schema()
+      and table_name = 'managed_prepare_object_cleanups'
+  `);
+  const objectCleanupByName = new Map(objectCleanupColumns.rows.map((row) => [row.column_name, row]));
+  for (const [name, dataType, nullable] of [
+    ['object_key', 'text', 'NO'],
+    ['user_id', 'uuid', 'NO'],
+    ['packet_id', 'uuid', 'NO'],
+    ['created_at', 'timestamp with time zone', 'NO'],
+    ['last_attempt_at', 'timestamp with time zone', 'YES'],
+  ]) {
+    const column = objectCleanupByName.get(name);
+    if (!column || column.data_type !== dataType || column.is_nullable !== nullable) {
+      throw new Error(`Managed prepare object cleanup column does not match the contract: ${name}`);
+    }
+  }
+  const objectCleanupForeignKeys = await client.query(`
+    select constraint_row.conname
+    from pg_constraint constraint_row
+    inner join pg_class table_row on table_row.oid = constraint_row.conrelid
+    inner join pg_namespace namespace_row on namespace_row.oid = table_row.relnamespace
+    where namespace_row.nspname = current_schema()
+      and table_row.relname = 'managed_prepare_object_cleanups'
+      and constraint_row.contype = 'f'
+  `);
+  if (objectCleanupForeignKeys.rowCount !== 0) {
+    throw new Error('Managed prepare object cleanup must outlive account deletion');
+  }
+
   const columns = await client.query(`
     select column_name, data_type, is_nullable, column_default
     from information_schema.columns
@@ -197,6 +270,50 @@ async function main() {
         user_id uuid primary key references users(id) on delete cascade,
         requested_at timestamptz not null default now()
       )
+    `);
+    await client.query(`
+      create table if not exists browser_provider_resource_cleanups (
+        id uuid primary key,
+        user_id uuid not null references users(id) on delete cascade,
+        provider text not null,
+        resource_type text not null,
+        provider_resource_id text,
+        creation_expires_at timestamptz not null,
+        release_requested_at timestamptz,
+        provider_confirmed_gone_at timestamptz,
+        created_at timestamptz not null default now(),
+        updated_at timestamptz not null default now(),
+        constraint browser_provider_resource_cleanups_provider_check
+          check (provider in ('browserbase', 'stratus')),
+        constraint browser_provider_resource_cleanups_resource_type_check
+          check (resource_type in ('session', 'context'))
+      )
+    `);
+    await client.query(`
+      create index if not exists browser_provider_resource_cleanups_owner_outstanding_idx
+        on browser_provider_resource_cleanups (user_id, provider_confirmed_gone_at)
+    `);
+    await client.query(`
+      create unique index if not exists browser_provider_resource_cleanups_provider_resource_unique
+        on browser_provider_resource_cleanups (provider, resource_type, provider_resource_id)
+        where provider_resource_id is not null
+    `);
+    await client.query(`
+      create table if not exists managed_prepare_object_cleanups (
+        object_key text primary key,
+        user_id uuid not null,
+        packet_id uuid not null,
+        created_at timestamptz not null default now(),
+        last_attempt_at timestamptz
+      )
+    `);
+    await client.query(`
+      alter table managed_prepare_object_cleanups
+        drop constraint if exists managed_prepare_object_cleanups_user_id_fkey
+    `);
+    await client.query(`
+      create index if not exists managed_prepare_object_cleanups_owner_idx
+        on managed_prepare_object_cleanups (user_id, created_at)
     `);
     await assertPrerequisiteTables(client);
 

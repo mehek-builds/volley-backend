@@ -279,6 +279,54 @@ export const managed_submission_account_deletion_drains = pgTable('managed_submi
   requested_at: timestamp('requested_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
+/* Independent cleanup fence for provider resources created outside a database transaction. The
+ * reservation row exists before the provider request. Its opaque id is attached as provider user
+ * metadata, so account deletion can recover a session even if the process dies after creation but
+ * before the provider id is bound locally. The user row may be deleted only after every reservation
+ * has provider-confirmed_gone_at.
+ */
+export const browser_provider_resource_cleanups = pgTable('browser_provider_resource_cleanups', {
+  id: uuid('id').primaryKey(),
+  user_id: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  provider: text('provider').notNull(),
+  resource_type: text('resource_type').notNull(),
+  provider_resource_id: text('provider_resource_id'),
+  creation_expires_at: timestamp('creation_expires_at', { withTimezone: true }).notNull(),
+  release_requested_at: timestamp('release_requested_at', { withTimezone: true }),
+  provider_confirmed_gone_at: timestamp('provider_confirmed_gone_at', { withTimezone: true }),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updated_at: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (t) => ({
+  ownerOutstandingIdx: index('browser_provider_resource_cleanups_owner_outstanding_idx')
+    .on(t.user_id, t.provider_confirmed_gone_at),
+  providerResourceUnique: uniqueIndex('browser_provider_resource_cleanups_provider_resource_unique')
+    .on(t.provider, t.resource_type, t.provider_resource_id)
+    .where(sql`${t.provider_resource_id} is not null`),
+  providerCheck: check('browser_provider_resource_cleanups_provider_check', sql`
+    ${t.provider} in ('browserbase', 'stratus')
+  `),
+  resourceTypeCheck: check('browser_provider_resource_cleanups_resource_type_check', sql`
+    ${t.resource_type} in ('session', 'context')
+  `),
+}));
+
+/* Immutable managed-render keys can receive a late upload from a superseded worker. Keep the exact
+ * key in an independent row forever, even after a successful delete, so the nightly sweep can
+ * remove a later resurrection without depending on mutable packet JSON.
+ */
+export const managed_prepare_object_cleanups = pgTable('managed_prepare_object_cleanups', {
+  object_key: text('object_key').primaryKey(),
+  // Deliberately no user FK: a stale renderer can upload after account-prefix cleanup and user
+  // deletion. The exact object-key obligation must outlive the account so the independent sweep
+  // can remove that late resurrection.
+  user_id: uuid('user_id').notNull(),
+  packet_id: uuid('packet_id').notNull(),
+  created_at: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  last_attempt_at: timestamp('last_attempt_at', { withTimezone: true }),
+}, (t) => ({
+  ownerIdx: index('managed_prepare_object_cleanups_owner_idx').on(t.user_id, t.created_at),
+}));
+
 /* ---- tables live in prod that main does not otherwise use ----
  *
  * All three were created by codex/regional-pricing's apply script before that branch merged, and

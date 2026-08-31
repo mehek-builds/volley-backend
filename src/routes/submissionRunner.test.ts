@@ -3271,7 +3271,7 @@ test('prepare() stops account-walled portals before it opens any browser', async
   assert.ok(gateAt > 0, 'prepare() must check isAccountWalledFamily');
 
   // Every way prepare() can start paying for a browser. The gate has to come before all of them.
-  for (const spend of ['prepareManaged(', 'createBrowserContext(', 'createBrowserSession(']) {
+  for (const spend of ['prepareManaged(', 'createFencedBrowserSession(']) {
     const spendAt = prepareBody.indexOf(spend);
     if (spendAt === -1) continue;
     assert.ok(
@@ -3279,6 +3279,38 @@ test('prepare() stops account-walled portals before it opens any browser', async
       `the account-walled gate must precede ${spend} - otherwise the student approves a login page`,
     );
   }
+});
+
+test('every managed provider start and direct session creation stay inside the account deletion fence', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join } = await import('node:path');
+  const runnerSource = readFileSync(join(__dirname, 'submissionRunner.ts'), 'utf8');
+  const fenceStart = runnerSource.indexOf('async function runManagedBrowserWithAccountFence(');
+  const fenceEnd = runnerSource.indexOf('\n}', fenceStart) + 2;
+  const fence = runnerSource.slice(fenceStart, fenceEnd);
+  assert.ok(fenceStart > 0);
+  assert.ok(fence.indexOf('lockSubmissionAttemptUser(tx, userId)')
+    < fence.indexOf('assertSubmissionAccountNotDraining(tx, userId)'));
+  assert.ok(fence.indexOf('assertSubmissionAccountNotDraining(tx, userId)')
+    < fence.indexOf('return runManagedBrowser(...args)'));
+  assert.equal(
+    [...runnerSource.matchAll(/\brunManagedBrowser\(/g)].length,
+    1,
+    'managed provider runs must go only through the locked account fence',
+  );
+
+  const resourceSource = readFileSync(join(__dirname, '../lib/browserProviderResourceCleanup.ts'), 'utf8');
+  const createStart = resourceSource.indexOf('export async function createFencedBrowserSession(');
+  const createEnd = resourceSource.indexOf('\nasync function markResourceGone', createStart);
+  const create = resourceSource.slice(createStart, createEnd);
+  assert.ok(create.indexOf('reserveBrowserProviderResource({')
+    < create.indexOf('await lockSubmissionAttemptUser(tx, input.userId)'));
+  assert.ok(create.indexOf('await lockSubmissionAttemptUser(tx, input.userId)')
+    < create.indexOf('await assertSubmissionAccountNotDraining(tx, input.userId)'));
+  assert.ok(create.indexOf('await assertSubmissionAccountNotDraining(tx, input.userId)')
+    < create.indexOf('await createReservedBrowserSession('));
+  assert.ok(create.indexOf('await createReservedBrowserSession(')
+    < create.indexOf('provider_resource_id: session.id'));
 });
 
 // ─── Which stage a prepare-time stall records ─────────────────────────────────
@@ -5067,7 +5099,7 @@ test('every irreversible runner channel builds once, verifies, then sends that e
   const managed = submitBody.slice(managedStart, directStart);
   assert.ok(managed.indexOf("const packet = packetForEmployerDelivery(builtPacket, claimedReview, 'browser')") >= 0);
   assert.ok(managed.indexOf("assertVerifiedBuiltPacket(packet, packetAudit.audit, packetAudit.questions, 'browser', envelope)")
-    < managed.indexOf('runManagedBrowser(applicationUrl, buildManagedCaptchaProbeActions()'),
+    < managed.indexOf('runManagedBrowserWithAccountFence('),
   'managed send must verify before its first employer request');
   assert.match(managed, /buildManagedPortalActions\(portal, packet, true, applicationUrl\)/,
     'managed submit must bind its exact posting URL into the remote atomic-click contract');

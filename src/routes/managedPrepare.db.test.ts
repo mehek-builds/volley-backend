@@ -266,7 +266,7 @@ function prepare(headers: Record<string, string> = { authorization }, body: unkn
 }
 
 beforeEach(async () => {
-  await database.exec('truncate "users", "career_page_sources" cascade');
+  await database.exec('truncate "managed_prepare_object_cleanups", "users", "career_page_sources" cascade');
   storedDocuments.clear();
   renderCalls = 0;
   storeCalls = 0;
@@ -474,13 +474,13 @@ test('render and object storage do not hold the production one-connection pool',
   assert.equal(result.state, 'ready_for_review');
 });
 
-test('a crash-after-upload takeover retains one referenced object key instead of orphaning a PII PDF', async () => {
+test('A pauses before upload, B commits, then A cannot overwrite B and its late object is cleaned', async () => {
   await seedUser(STUDENT, 'student@example.test');
   const { prepareManagedApplication } = await import('../lib/managedPrepare');
   let clock = new Date('2026-08-31T12:00:00.000Z');
   let releaseFirstUpload!: () => void;
-  let reportFirstUploadCompleted!: () => void;
-  const firstUploadCompleted = new Promise<void>((resolve) => { reportFirstUploadCompleted = resolve; });
+  let reportFirstUploadEntered!: () => void;
+  const firstUploadEntered = new Promise<void>((resolve) => { reportFirstUploadEntered = resolve; });
   const firstUploadCrashGate = new Promise<void>((resolve) => { releaseFirstUpload = resolve; });
   const firstBytes = Buffer.from('%PDF-1.4\nstale-worker\n%%EOF\n');
   const secondBytes = Buffer.from('%PDF-1.4\ntakeover-winner\n%%EOF\n');
@@ -490,13 +490,12 @@ test('a crash-after-upload takeover retains one referenced object key instead of
     now: () => new Date(clock),
     renderMainResume: async ({ spec }) => ({ buffer: firstBytes, spec }),
     storeResume: async (requestedKey, bytes) => {
-      const stored = await dependencies.storeResume!(requestedKey, bytes);
-      reportFirstUploadCompleted();
+      reportFirstUploadEntered();
       await firstUploadCrashGate;
-      return stored;
+      return dependencies.storeResume!(requestedKey, bytes);
     },
   });
-  await firstUploadCompleted;
+  await firstUploadEntered;
   const [reservedBeforeTakeover] = (await database.query<Record<string, any>>(
     'select "spec", "resume_object_key" from "generated_resumes" where "user_id" = $1',
     [STUDENT],
@@ -516,23 +515,65 @@ test('a crash-after-upload takeover retains one referenced object key instead of
   )).rows;
   assert.equal(second.state, 'ready_for_review');
   assert.equal(committed?.spec._managed_prepare.phase, 'stored');
-  assert.equal(committed?.resume_object_key, staleObjectKey);
+  assert.notEqual(committed?.resume_object_key, staleObjectKey);
+  const cleanupObligation = await database.query<{ object_key: string }>(
+    'select "object_key" from "managed_prepare_object_cleanups" where "user_id" = $1',
+    [STUDENT],
+  );
+  assert.deepEqual(
+    cleanupObligation.rows.map((row) => row.object_key).sort(),
+    [staleObjectKey, committed?.resume_object_key].sort(),
+    'every immutable render key remains durable independently of packet JSON and account lifetime',
+  );
   assert.deepEqual(storedDocuments.get(committed?.resume_object_key), secondBytes);
 
   releaseFirstUpload();
   await assert.rejects(
     first,
-    (error: unknown) => (error as { code?: string }).code === 'main_resume_storage_failed',
+    (error: unknown) => (error as { code?: string }).code === 'managed_packet_changed',
   );
   const storedKeys = [...storedDocuments.keys()];
   const referencedKeys = (await database.query<{ resume_object_key: string }>(
     'select "resume_object_key" from "generated_resumes" where "user_id" = $1',
     [STUDENT],
   )).rows.map((row) => row.resume_object_key);
-  assert.deepEqual(storedKeys, [staleObjectKey]);
-  assert.deepEqual(referencedKeys, [staleObjectKey]);
-  assert.deepEqual(storedDocuments.get(staleObjectKey), secondBytes);
-  assert.equal(deleteCalls, 0, 'a stale worker must not delete the stable key owned by its takeover');
+  assert.deepEqual(storedKeys, [committed?.resume_object_key]);
+  assert.deepEqual(referencedKeys, [committed?.resume_object_key]);
+  assert.deepEqual(storedDocuments.get(committed?.resume_object_key), secondBytes);
+  assert.equal(storedDocuments.has(staleObjectKey), false);
+  assert.ok(deleteCalls >= 1, 'a stale worker must delete only its own immutable late upload');
+});
+
+test('an exact render cleanup obligation survives account deletion and removes a late upload', async () => {
+  await seedUser(STUDENT, 'student@example.test');
+  const {
+    prepareManagedApplication,
+    retryManagedPrepareObjectCleanup,
+  } = await import('../lib/managedPrepare');
+  const prepared = await prepareManagedApplication({ userId: STUDENT, jobId: JOB }, dependencies);
+  const [packet] = (await database.query<{ resume_object_key: string }>(
+    'select "resume_object_key" from "generated_resumes" where "id" = $1',
+    [prepared.packet_id],
+  )).rows;
+  assert.ok(packet?.resume_object_key);
+  await database.query('delete from "users" where "id" = $1', [STUDENT]);
+  const obligations = await database.query<{ object_key: string }>(
+    'select "object_key" from "managed_prepare_object_cleanups" where "user_id" = $1',
+    [STUDENT],
+  );
+  assert.deepEqual(obligations.rows.map((row) => row.object_key), [packet.resume_object_key]);
+
+  storedDocuments.set(packet.resume_object_key, Buffer.from('%PDF-1.4\nlate-after-account-delete\n%%EOF\n'));
+  assert.equal(
+    await retryManagedPrepareObjectCleanup(STUDENT, dependencies),
+    1,
+  );
+  assert.equal(storedDocuments.has(packet.resume_object_key), false);
+  const retained = await database.query<{ object_key: string }>(
+    'select "object_key" from "managed_prepare_object_cleanups" where "user_id" = $1',
+    [STUDENT],
+  );
+  assert.deepEqual(retained.rows.map((row) => row.object_key), [packet.resume_object_key]);
 });
 
 test('a failed external render releases only its reservation so an immediate retry can reuse the object identity', async () => {

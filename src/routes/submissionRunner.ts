@@ -43,8 +43,6 @@ import {
   acknowledgeManagedBrowserTerminalResult,
   browserDeliveryRuntimeIdentity,
   continueManagedBrowser,
-  createBrowserContext,
-  createBrowserSession,
   getBrowserSession,
   getManagedBrowserTerminalResult,
   HANDOFF_WINDOW_MS,
@@ -65,6 +63,7 @@ import {
   runManagedBrowser,
   startManagedBrowserRequestBudget,
 } from '../lib/browserbase';
+import { createFencedBrowserSession } from '../lib/browserProviderResourceCleanup';
 import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from '../lib/workableApplicationUrl';
 import {
   managedContinuationAttemptFingerprint,
@@ -842,6 +841,18 @@ export async function assertFinalRunnerBoundaryClear(
   if (result.kind === 'blocked') throw new FinalSubmissionBoundaryBlockedError(result.verdict);
   if (result.kind === 'already_authorized') throw new FinalSubmissionBoundaryAlreadyAuthorizedError();
   return result.authorization;
+}
+
+/** Keep provider preparation inside the same user-fence critical section as its final drain check. */
+async function runManagedBrowserWithAccountFence(
+  userId: string,
+  ...args: Parameters<typeof runManagedBrowser>
+): Promise<ManagedBrowserResult> {
+  return db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, userId);
+    await assertSubmissionAccountNotDraining(tx, userId);
+    return runManagedBrowser(...args);
+  });
 }
 
 /** Keep an initial provider callback behind its immutable database-clock authorization expiry. */
@@ -2385,17 +2396,21 @@ export async function drainManagedTerminalCleanupBeforeAccountDeletion(
       spec,
       MANAGED_TERMINAL_CLEANUP_QUARANTINE_KEY,
     );
-    const managedExecutionMayStillExist = Boolean(
-      review?.submission_claim_id
+    const claimedExecutionMayStillExist = Boolean(review?.submission_claim_id
+      && !review.browser_session_id
       && (
-        review.status === 'submitting'
-        || review.status === 'submission_claimed'
-        || review.status === 'awaiting_security_code'
-        || (review.verification?.runner === 'stratus-managed'
-          && (review.verification.status === 'searching'
-            || review.verification.status === 'verification_pending'))
-      ),
-    );
+      review.status === 'submitting'
+      || review.status === 'submission_claimed'
+      || review.status === 'awaiting_security_code'
+      || (review.verification?.runner === 'stratus-managed'
+        && (review.verification.status === 'searching'
+          || review.verification.status === 'verification_pending'))
+    ));
+    // Managed preparation has no persistent session id and must finish before deletion. A direct
+    // filling row is drained by the independent provider-resource fence below this check, so it
+    // must not prevent account deletion from reaching the release request.
+    const managedExecutionMayStillExist = (review?.status === 'filling' && !review.browser_session_id)
+      || claimedExecutionMayStillExist;
     if (hasCleanupOutbox || hasCleanupQuarantine || managedExecutionMayStillExist) {
       blockedPackets += 1;
     }
@@ -6936,7 +6951,8 @@ async function prepareManaged(
   // An array rather than a nullable local so the assignment inside the catch callback is visible to
   // the code below it; TypeScript does not narrow across a closure it cannot prove ran.
   const discoveryFailures: string[] = [];
-  const discoveryResult = await runManagedBrowser(
+  const discoveryResult = await runManagedBrowserWithAccountFence(
+    row.user_id,
     applicationUrl,
     managedActionsWithExactPageUrl(buildManagedDiscoveryActions(portal, packet), applicationUrl),
   )
@@ -7056,7 +7072,12 @@ async function prepareManaged(
         : label.match(/^closed_control:(.+)$/)?.[1];
       return id ? [id] : [];
     }))];
-    const result = await runManagedBrowser(applicationUrl, actions, { screenshot: false })
+    const result = await runManagedBrowserWithAccountFence(
+      row.user_id,
+      applicationUrl,
+      actions,
+      { screenshot: false },
+    )
       .catch((error: unknown) => {
         const reason = describeDiscoveryFailure(error);
         optionProbeBatchFailures.push({ controlIds, reason });
@@ -7546,7 +7567,8 @@ async function prepareManaged(
     progress_stage: 'Filling your answers',
     progress_updated_at: new Date().toISOString(),
   }));
-  const result = await runManagedBrowser(
+  const result = await runManagedBrowserWithAccountFence(
+    row.user_id,
     applicationUrl,
     managedActionsWithExactPageUrl(fillActions, applicationUrl),
   );
@@ -8143,7 +8165,8 @@ async function prepareManagedAttendedAccountGate(
   // exception: the packet is built here only to validate it before Chrome is offered the handoff.
   const packet = omitTranscript(omitCoverLetter(await buildPacket(row, packetUsesControlledResumeFixture(portal))));
   const applicationUrl = portalApplicationUrl(portal, current.portal_url!);
-  const result = await runManagedBrowser(
+  const result = await runManagedBrowserWithAccountFence(
+    row.user_id,
     applicationUrl,
     buildManagedAttendedAccountProbeActions(portal),
     { screenshot: false },
@@ -8463,8 +8486,13 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       transcriptSupported: current.transcript_supported,
     }),
   );
-  const contextId = current.browser_context_id ?? (await createBrowserContext());
-  const session = await createBrowserSession(contextId, portalUrl);
+  const directProvider = browserDeliveryRuntimeIdentity().provider;
+  if (directProvider === 'stratus-managed') throw new Error('Managed provider reached direct session creation');
+  const session = await createFencedBrowserSession({
+    userId: row.user_id,
+    provider: directProvider,
+    portalUrl,
+  });
   {
     const verificationRequestedAt = new Date();
     const connected = await connectToSession(session);
@@ -8472,7 +8500,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     await writeReview(row, nextReview(current, {
       status: 'filling',
       submission_run_id: runId,
-      browser_context_id: contextId,
+      browser_context_id: undefined,
       browser_session_id: session.id,
       submission_error: undefined,
     }));
@@ -8629,7 +8657,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
       log: fastify.log,
       patch: {
         submission_run_id: runId,
-        browser_context_id: contextId,
+        browser_context_id: undefined,
         browser_session_id: session.id,
         questions: mergedQuestions,
         ...(discoveryMetadataMeasurementComplete ? { question_metadata_blockers: questionMetadataBlockers } : {}),
@@ -8735,7 +8763,7 @@ async function prepare(row: ResumeRow, fastify: FastifyInstance, unattended = fa
     const review = nextReview(current, {
       ...preparedReviewPatch(authorization, safe),
       submission_run_id: runId,
-      browser_context_id: contextId,
+      browser_context_id: undefined,
       browser_session_id: session.id,
       filled_fields: result.filledFields,
       /* Same field, same shape, same always-written array as the managed path. Writing it on both
@@ -9392,7 +9420,12 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     // Costs one extra remote session and page load per managed submission. That is the price of the
     // statelessness, and it is worth naming: the challenge state is read from a DIFFERENT page load
     // than the one that submits.
-    const captchaProbe = await runManagedBrowser(applicationUrl, buildManagedCaptchaProbeActions(), { screenshot: false })
+    const captchaProbe = await runManagedBrowserWithAccountFence(
+      row.user_id,
+      applicationUrl,
+      buildManagedCaptchaProbeActions(),
+      { screenshot: false },
+    )
       // A probe that cannot run must not take down a submission that would otherwise succeed. It
       // fails open to the pre-probe behaviour, same as managedResultRequiresCaptchaAttention does.
       // Only the message is logged, bounded: the runner's error string is remote-controlled and
@@ -9488,7 +9521,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
     );
     let result: ManagedBrowserResult;
     try {
-      result = await runManagedBrowser(
+      result = await runManagedBrowserWithAccountFence(
+        row.user_id,
         applicationUrl,
         initialActions,
         {
@@ -9505,7 +9539,8 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
         && isWorkablePhoneReadbackAssertionLabel(error.assertionLabel)
         && managedApplicationUsesAtomicSubmitV4(portal, applicationUrl)) {
         try {
-          const evidenceRun = await runManagedBrowser(
+          const evidenceRun = await runManagedBrowserWithAccountFence(
+            row.user_id,
             applicationUrl,
             buildWorkablePhoneEvidenceActions(),
             { screenshot: false },

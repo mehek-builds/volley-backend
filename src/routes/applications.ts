@@ -1294,12 +1294,30 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         });
         if (authorization.kind !== 'fresh') throw new Error('MANUAL_HANDOFF_BOUNDARY_CONFLICT');
         let retainedSessionUrl: string | undefined;
+        let disclosureAuthorization = authorization.authorization;
         if (retainedSessionId) {
           try {
-            retainedSessionUrl = await getLiveViewUrl(retainedSessionId);
+            retainedSessionUrl = await getLiveViewUrl(retainedSessionId, { timeoutMs: 5_000 });
           } catch {
             throw new Error('MANUAL_HANDOFF_RETAINED_SESSION_UNAVAILABLE');
           }
+          // The provider call is bounded but still consumes time. Read the database clock again
+          // while the shared user lock is held, then bind disclosure to the exact lease opened
+          // above. A URL obtained after expiry, replacement, or binding drift never leaves Litos.
+          const currentAuthorization = await submissionBoundaryAuthorization(
+            userId,
+            binding.attemptId,
+            { executor: tx },
+          );
+          if (!currentAuthorization
+            || !currentAuthorization.active
+            || currentAuthorization.attemptId !== authorization.authorization.attemptId
+            || currentAuthorization.leaseId !== authorization.authorization.leaseId
+            || currentAuthorization.activationId !== authorization.authorization.activationId
+            || currentAuthorization.expiresAt !== authorization.authorization.expiresAt) {
+            throw new Error('MANUAL_HANDOFF_RETAINED_SESSION_LEASE_EXPIRED');
+          }
+          disclosureAuthorization = currentAuthorization;
         }
         return {
           kind: 'authorized' as const,
@@ -1308,12 +1326,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           retainedSessionUrl,
           next,
           claimId,
-          authorization: authorization.authorization,
+          authorization: disclosureAuthorization,
         };
       }).catch((error: unknown) => {
         if (error instanceof Error
           && error.message === 'MANUAL_HANDOFF_RETAINED_SESSION_UNAVAILABLE') {
           return { kind: 'retained_session_unavailable' as const };
+        }
+        if (error instanceof Error
+          && error.message === 'MANUAL_HANDOFF_RETAINED_SESSION_LEASE_EXPIRED') {
+          return { kind: 'retained_session_lease_expired' as const };
         }
         throw error;
       });
@@ -1326,6 +1348,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (result.kind === 'retained_session_unavailable') {
         return reply.status(409).send({
           error: 'The retained company session is no longer available. Reload this application before continuing.',
+          code: 'MANUAL_HANDOFF_STALE',
+        });
+      }
+      if (result.kind === 'retained_session_lease_expired') {
+        return reply.status(409).send({
+          error: 'The retained company session authorization expired before it could be opened. Reload this application before continuing.',
           code: 'MANUAL_HANDOFF_STALE',
         });
       }
