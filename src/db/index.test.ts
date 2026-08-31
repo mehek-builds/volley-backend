@@ -4,11 +4,25 @@ import { rootCertificates } from 'node:tls';
 import ConnectionParameters from 'pg/lib/connection-parameters';
 import { parse as parseConnectionString } from 'pg-connection-string';
 import {
+  DATABASE_CONNECTION_TIMEOUT_MS,
   databaseConnectionConfig,
+  dedicatedDatabaseClientConfig,
   dedicatedDatabaseUrl,
+  pool,
   sslOptionForHost,
   withVerifiedSslMode,
 } from './index';
+
+test('bounds shared and dedicated PostgreSQL connection acquisition', () => {
+  assert.equal(DATABASE_CONNECTION_TIMEOUT_MS, 10_000);
+  assert.equal(pool.options.connectionTimeoutMillis, DATABASE_CONNECTION_TIMEOUT_MS);
+  assert.equal(
+    dedicatedDatabaseClientConfig({
+      DATABASE_URL: 'postgresql://postgres:password@localhost:5432/litos',
+    }).connectionTimeoutMillis,
+    DATABASE_CONNECTION_TIMEOUT_MS,
+  );
+});
 
 test('derives a direct Neon endpoint for connection-bound advisory locks', () => {
   const url = dedicatedDatabaseUrl({

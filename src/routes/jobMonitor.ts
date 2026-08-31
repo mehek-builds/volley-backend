@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, lt, lte, ne, notInArray, or, sql, type SQL } from 'drizzle-orm';
+import type { PoolClient } from 'pg';
 import { z } from 'zod';
-import { db, pool } from '../db/index';
+import { DATABASE_CONNECTION_TIMEOUT_MS, db, pool } from '../db/index';
 import {
   career_page_sources,
   job_board_group_projection,
@@ -742,6 +743,7 @@ export const POLL_SOURCE_PERSISTENCE_STATEMENT_TIMEOUT_MS = 35_000;
  */
 export const PURGE_POSTINGS_LOCK_TIMEOUT_MS = 5_000;
 export const PURGE_POSTINGS_DELETE_TIMEOUT_MS = 60_000;
+export const PURGE_POSTINGS_VACUUM_CHECKOUT_TIMEOUT_MS = 5_000;
 export const PURGE_POSTINGS_VACUUM_TIMEOUT_MS = 60_000;
 /** Variety classification is diagnostic, so keep its Node payload bounded at production scale. */
 export const MONITOR_VARIETY_SAMPLE_SIZE = 25_000;
@@ -758,7 +760,7 @@ export class JobBoardMetricsTimeoutError extends Error {
 
 export class JobBoardPurgeTimeoutError extends Error {
   constructor(
-    readonly stage: 'purge_delete',
+    readonly stage: 'purge_checkout' | 'purge_delete' | 'purge_vacuum_checkout',
     readonly timeoutMs: number,
   ) {
     super(`Job board ${stage} exceeded its ${timeoutMs}ms database timeout`);
@@ -783,6 +785,12 @@ function isPostgresStatementTimeout(error: unknown): boolean {
 
 function isPostgresLockTimeout(error: unknown): boolean {
   return postgresErrorCode(error) === '55P03';
+}
+
+function isDatabaseConnectionTimeout(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.message === 'timeout exceeded when trying to connect'
+    || error.message === 'Connection terminated due to connection timeout';
 }
 
 /**
@@ -993,6 +1001,41 @@ export function publicVerifiedEvidenceGateEnabled(
  */
 export const CLOSED_POSTING_RETENTION_DAYS = 2;
 
+type PurgeVacuumClient = Pick<PoolClient, 'query' | 'release'>;
+
+/**
+ * Keep the best-effort VACUUM from waiting behind a full pool for the rest of the process lifetime.
+ * The shared pool has its own longer bound. This shorter route deadline also releases a client that
+ * arrives after the caller has moved on, so a driver regression cannot silently shrink the pool.
+ */
+export async function connectPurgeVacuumClient(
+  connect: () => Promise<PurgeVacuumClient> = () => pool.connect(),
+  timeoutMs = PURGE_POSTINGS_VACUUM_CHECKOUT_TIMEOUT_MS,
+): Promise<PurgeVacuumClient> {
+  let timedOut = false;
+  let timeoutHandle: ReturnType<typeof setTimeout>;
+  const checkout = connect().then((client) => {
+    if (timedOut) {
+      client.release();
+      throw new JobBoardPurgeTimeoutError('purge_vacuum_checkout', timeoutMs);
+    }
+    return client;
+  });
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeoutHandle = setTimeout(() => {
+      timedOut = true;
+      reject(new JobBoardPurgeTimeoutError('purge_vacuum_checkout', timeoutMs));
+    }, timeoutMs);
+    timeoutHandle.unref?.();
+  });
+
+  try {
+    return await Promise.race([checkout, deadline]);
+  } finally {
+    if (!timedOut) clearTimeout(timeoutHandle!);
+  }
+}
+
 /**
  * Delete rows that can never be shown again: closed postings past their retention, and anything that
  * aged out of the window before the ingest filter existed.
@@ -1030,6 +1073,12 @@ export async function purgeExpiredPostings(): Promise<number> {
       ));
     });
   } catch (error) {
+    if (isDatabaseConnectionTimeout(error)) {
+      throw new JobBoardPurgeTimeoutError(
+        'purge_checkout',
+        DATABASE_CONNECTION_TIMEOUT_MS,
+      );
+    }
     if (isPostgresStatementTimeout(error) || isPostgresLockTimeout(error)) {
       throw new JobBoardPurgeTimeoutError(
         'purge_delete',
@@ -1057,7 +1106,7 @@ export async function purgeExpiredPostings(): Promise<number> {
    * Best-effort: a failed vacuum must never fail the poll. The postings are already correct at this
    * point; this is housekeeping. */
   try {
-    const client = await pool.connect();
+    const client = await connectPurgeVacuumClient();
     let operationError: unknown;
     try {
       await client.query(

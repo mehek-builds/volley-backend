@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
+import { DATABASE_CONNECTION_TIMEOUT_MS } from '../db';
 import {
   CLOSED_POSTING_RETENTION_DAYS,
   PURGE_UNVERIFIED_POSTINGS_AFTER_DAYS,
@@ -15,6 +16,7 @@ import {
   POLL_SOURCE_STATEMENT_TIMEOUT_MS,
   PURGE_POSTINGS_DELETE_TIMEOUT_MS,
   PURGE_POSTINGS_LOCK_TIMEOUT_MS,
+  PURGE_POSTINGS_VACUUM_CHECKOUT_TIMEOUT_MS,
   PURGE_POSTINGS_VACUUM_TIMEOUT_MS,
   TARGET_ROLE_COVERAGE_STATEMENT_TIMEOUT_MS,
   MINIMUM_SURFACED_GROUPED_ROLES,
@@ -242,10 +244,13 @@ test('terminal poll failures stay visible without keeping a source in the drain 
 test('post-poll purge and vacuum are bounded below the worker request timeout', () => {
   assert.equal(PURGE_POSTINGS_LOCK_TIMEOUT_MS, 5_000);
   assert.equal(PURGE_POSTINGS_DELETE_TIMEOUT_MS, 60_000);
+  assert.equal(PURGE_POSTINGS_VACUUM_CHECKOUT_TIMEOUT_MS, 5_000);
   assert.equal(PURGE_POSTINGS_VACUUM_TIMEOUT_MS, 60_000);
   assert.ok(
     POLL_TIME_BUDGET_MS
+      + DATABASE_CONNECTION_TIMEOUT_MS
       + PURGE_POSTINGS_DELETE_TIMEOUT_MS
+      + PURGE_POSTINGS_VACUUM_CHECKOUT_TIMEOUT_MS
       + PURGE_POSTINGS_VACUUM_TIMEOUT_MS
       + MONITOR_METRICS_STATEMENT_TIMEOUT_MS
       < 15 * 60_000,
@@ -260,6 +265,7 @@ test('post-poll purge and vacuum are bounded below the worker request timeout', 
   const deleteStatement = purge.indexOf('return tx.delete(monitored_jobs)');
   assert.ok(purge.indexOf('set local lock_timeout') < deleteStatement);
   assert.ok(purge.indexOf('set local statement_timeout') < deleteStatement);
+  assert.match(purge, /const client = await connectPurgeVacuumClient\(\)/);
   assert.ok(purge.indexOf("set_config('lock_timeout'") < purge.indexOf("client.query('vacuum monitored_jobs')"));
   assert.ok(purge.indexOf("set_config('statement_timeout'") < purge.indexOf("client.query('vacuum monitored_jobs')"));
   assert.match(purge, /reset lock_timeout[\s\S]*reset statement_timeout[\s\S]*client\.release/);

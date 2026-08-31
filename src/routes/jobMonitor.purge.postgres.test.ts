@@ -156,3 +156,50 @@ test('purge lock contention cancels server-side, releases the monitor lock and r
     else process.env.DATABASE_URL = previousDatabaseUrl;
   }
 });
+
+test('vacuum checkout deadline releases a client that arrives late from an exhausted max-one pool', {
+  timeout: 10_000,
+}, async () => {
+  const postgres = await startEphemeralPostgres();
+  const exhaustedPool = new pg.Pool({
+    connectionString: postgres.databaseUrl,
+    max: 1,
+    // Exercise the route's defense independently of pg-pool's shared constructor timeout.
+    connectionTimeoutMillis: 0,
+  });
+  const heldClient = await exhaustedPool.connect();
+  let heldClientReleased = false;
+  try {
+    const monitor = await import('./jobMonitor');
+    const startedAt = Date.now();
+    await assert.rejects(
+      monitor.connectPurgeVacuumClient(() => exhaustedPool.connect(), 50),
+      (error: unknown) => {
+        assert.ok(error instanceof monitor.JobBoardPurgeTimeoutError);
+        assert.equal(error.stage, 'purge_vacuum_checkout');
+        assert.equal(error.timeoutMs, 50);
+        return true;
+      },
+    );
+    assert.ok(Date.now() - startedAt < 1_000, 'route checkout must fail before the worker request');
+    assert.equal(exhaustedPool.waitingCount, 1, 'the driver checkout is still pending after the route deadline');
+
+    heldClient.release();
+    heldClientReleased = true;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (Number(exhaustedPool.waitingCount) === 0 && exhaustedPool.idleCount === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(exhaustedPool.waitingCount, 0, 'the late checkout must leave no queued waiter');
+    assert.equal(exhaustedPool.idleCount, 1, 'the late client must be released back to the pool');
+
+    const reacquired = await exhaustedPool.connect();
+    assert.equal((await reacquired.query('select 1 as available')).rows[0].available, 1);
+    reacquired.release();
+    assert.equal(exhaustedPool.totalCount, 1, 'the late checkout must not leak or replace the only client');
+  } finally {
+    if (!heldClientReleased) heldClient.release();
+    await exhaustedPool.end().catch(() => undefined);
+    await postgres.stop();
+  }
+});

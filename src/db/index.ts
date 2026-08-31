@@ -144,6 +144,13 @@ export type DatabaseConnectionConfig = {
   ssl: undefined | { rejectUnauthorized: true; ca?: string };
 };
 
+/**
+ * Bound both an initial PostgreSQL connection and a checkout queued behind a full shared pool.
+ * pg otherwise defaults to waiting forever, which can outlive an HTTP request and any lock its
+ * still-running handler owns.
+ */
+export const DATABASE_CONNECTION_TIMEOUT_MS = 10_000;
+
 const CONNECTION_STRING_TLS_PARAMETERS = ['ssl', 'sslcert', 'sslkey', 'sslrootcert'] as const;
 
 function validatedRailwayRootCertificate(value: string | undefined): string {
@@ -217,6 +224,7 @@ export function databaseConnectionConfig(
 const poolConnectionConfig = databaseConnectionConfig(connectionString);
 const pool = new Pool({
   ...poolConnectionConfig,
+  connectionTimeoutMillis: DATABASE_CONNECTION_TIMEOUT_MS,
   // Keep the per-instance pool tiny on serverless (one container == one or few requests)
   // to avoid exhausting the database's connection limit across many warm lambdas.
   max: process.env.VERCEL ? 1 : 10,
@@ -313,16 +321,21 @@ export function dedicatedDatabaseUrl(env: NodeJS.ProcessEnv = process.env): stri
   return url.toString();
 }
 
-/** A dedicated session for features such as PostgreSQL advisory locks that must stay connection-bound. */
-export async function connectDedicatedDatabaseClient() {
-  const directConnectionString = dedicatedDatabaseUrl();
-  const client = new Client({
+export function dedicatedDatabaseClientConfig(env: NodeJS.ProcessEnv = process.env) {
+  const directConnectionString = dedicatedDatabaseUrl(env);
+  return {
     // Same reason as the pool above. dedicatedDatabaseUrl's own contract is unchanged: it still
     // returns the URL with every parameter the caller gave it, because DEPLOY.md documents it as
     // the direct endpoint and a caller reading it should see what they configured. Only what is
     // handed to pg is normalized.
-    ...databaseConnectionConfig(directConnectionString),
-  });
+    ...databaseConnectionConfig(directConnectionString, env),
+    connectionTimeoutMillis: DATABASE_CONNECTION_TIMEOUT_MS,
+  };
+}
+
+/** A dedicated session for features such as PostgreSQL advisory locks that must stay connection-bound. */
+export async function connectDedicatedDatabaseClient() {
+  const client = new Client(dedicatedDatabaseClientConfig());
   await client.connect();
   return client;
 }
