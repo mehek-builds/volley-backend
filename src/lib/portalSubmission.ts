@@ -63,6 +63,7 @@ import {
   type ReferralSourceEvidence,
 } from './referralSource';
 import { embeddedGreenhouseApplicationUrl, embeddedGreenhouseJobId } from './greenhouseEmbeddedBoards';
+import { normalizeExecutableAtsBoardToken } from './atsBoardToken';
 import {
   postingCountryCodeFromJobContext,
   postingCountryFromJobContext,
@@ -8965,21 +8966,48 @@ export function canonicalMonitoredPortalUrl(
 ): string | undefined {
   if (!rawUrl) return undefined;
   const expectedFamily = atsName?.trim().toLowerCase();
-  const token = boardToken?.trim();
-  if (!expectedFamily || !isAutonomousPortalFamily(expectedFamily) || !token) return undefined;
+  if (!expectedFamily || !isAutonomousPortalFamily(expectedFamily)) return undefined;
+  const token = normalizeExecutableAtsBoardToken(expectedFamily, boardToken);
+  if (!token) return undefined;
   if (expectedFamily === 'greenhouse') {
     try {
       const url = new URL(rawUrl);
-      if (url.protocol !== 'https:') return undefined;
-      const pathJobId = url.pathname.match(/^\/[^/]+\/jobs\/(\d+)/)?.[1] ?? '';
-      const greenhouseJobId = url.searchParams.get('gh_jid') ?? url.searchParams.get('token') ?? pathJobId;
-      if (/^\d+$/.test(greenhouseJobId)
-        && (!externalId || greenhouseJobId === externalId)) {
-        const embedHost = url.hostname.toLowerCase() === 'job-boards.eu.greenhouse.io'
-          ? 'job-boards.eu.greenhouse.io'
-          : 'job-boards.greenhouse.io';
-        return `https://${embedHost}/embed/job_app?for=${encodeURIComponent(token)}&token=${greenhouseJobId}`;
+      if (url.protocol !== 'https:' || url.username || url.password || url.port || url.hash) return undefined;
+      const host = url.hostname.toLowerCase();
+      const nativeHosts = new Set([
+        'boards.greenhouse.io',
+        'job-boards.greenhouse.io',
+        'job-boards.eu.greenhouse.io',
+      ]);
+      let greenhouseJobId = '';
+      if (nativeHosts.has(host)) {
+        const jobPath = url.pathname.match(/^\/([^/]+)\/jobs\/(\d+)\/?$/i);
+        if (jobPath) {
+          if (jobPath[1].toLowerCase() !== token) return undefined;
+          greenhouseJobId = jobPath[2];
+        } else if (url.pathname === '/embed/job_app') {
+          const declaredTenant = url.searchParams.get('for') ?? url.searchParams.get('b');
+          if (declaredTenant && declaredTenant.toLowerCase() !== token) return undefined;
+          greenhouseJobId = url.searchParams.get('token') ?? '';
+        } else {
+          return undefined;
+        }
+      } else {
+        const embedded = embeddedGreenhouseApplicationUrl(url);
+        if (embedded) {
+          const embeddedUrl = new URL(embedded);
+          if ((embeddedUrl.searchParams.get('for') ?? '').toLowerCase() !== token) return undefined;
+          greenhouseJobId = embeddedUrl.searchParams.get('token') ?? '';
+        } else {
+          greenhouseJobId = databricksGreenhouseJobId(url) ?? '';
+        }
       }
+      if (!/^\d+$/.test(greenhouseJobId)
+        || (externalId && greenhouseJobId !== externalId)) return undefined;
+      const embedHost = host === 'job-boards.eu.greenhouse.io'
+        ? 'job-boards.eu.greenhouse.io'
+        : 'job-boards.greenhouse.io';
+      return `https://${embedHost}/embed/job_app?for=${encodeURIComponent(token)}&token=${greenhouseJobId}`;
     } catch {
       return undefined;
     }
@@ -9046,12 +9074,19 @@ export function canonicalMonitoredPortalUrl(
       return `https://jobs.ashbyhq.com/${encodeURIComponent(segments[0])}/${encodeURIComponent(segments[1])}/application`;
     }
     case 'workable': {
+      const hasTenant = segments[0]?.toLowerCase() !== 'j';
+      const tenant = hasTenant ? segments[0] : token;
+      const jIndex = hasTenant ? 1 : 0;
+      const idIndex = jIndex + 1;
+      const suffixIndex = idIndex + 1;
       if (url.hostname.toLowerCase() !== 'apply.workable.com'
-        || segments[0]?.toLowerCase() !== 'j' || !idMatches(segments[1])
-        || (segments.length !== 2 && !(segments.length === 3 && segments[2] === 'apply'))) {
+        || !tokenMatches(tenant) || segments[jIndex]?.toLowerCase() !== 'j'
+        || !idMatches(segments[idIndex])
+        || (segments.length !== suffixIndex
+          && !(segments.length === suffixIndex + 1 && segments[suffixIndex] === 'apply'))) {
         return undefined;
       }
-      return `https://apply.workable.com/j/${encodeURIComponent(segments[1])}/apply`;
+      return `https://apply.workable.com/${encodeURIComponent(token)}/j/${encodeURIComponent(segments[idIndex])}/apply`;
     }
     case 'rippling': {
       if (url.hostname.toLowerCase() !== 'ats.rippling.com'

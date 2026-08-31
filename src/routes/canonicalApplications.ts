@@ -24,6 +24,8 @@ import { apiBaseFor } from '../lib/apiBase';
 import { objectStorageUsesRailway } from '../lib/objectStorage';
 import { mintDownloadToken } from '../lib/resumeAccess';
 import { manualSubmissionTransition } from '../lib/canonicalApplicationLifecycle';
+import { canonicalMonitoredPortalUrl } from '../lib/portalSubmission';
+import { actionPostingRowForUser } from './jdMatch';
 
 export { manualSubmissionTransition };
 
@@ -442,10 +444,27 @@ export async function canonicalApplicationRoutes(fastify: FastifyInstance) {
     if (!parsed.success) return reply.status(400).send({ error: 'Invalid application', detail: parsed.error.issues });
     const userId = request.jwtPayload!.userId;
     let portalUrl: string | null;
-    try {
-      portalUrl = canonicalPortalUrl(parsed.data.portal_url);
-    } catch (error) {
-      return reply.status(400).send({ error: error instanceof Error ? error.message : 'Invalid portal URL' });
+    if (parsed.data.job_id) {
+      const posting = await actionPostingRowForUser(parsed.data.job_id, userId);
+      const monitoredPortalUrl = posting ? canonicalMonitoredPortalUrl(
+        posting.apply_url,
+        posting.ats_name,
+        posting.board_token,
+        posting.external_id,
+      ) : undefined;
+      if (!posting || !monitoredPortalUrl) {
+        return reply.status(404).send({
+          error: 'Current verified posting not found',
+          code: 'job_not_available',
+        });
+      }
+      portalUrl = monitoredPortalUrl;
+    } else {
+      try {
+        portalUrl = canonicalPortalUrl(parsed.data.portal_url);
+      } catch (error) {
+        return reply.status(400).send({ error: error instanceof Error ? error.message : 'Invalid portal URL' });
+      }
     }
     const companyScopeKey = canonicalCompanyScope({
       companyId: parsed.data.company_id,
