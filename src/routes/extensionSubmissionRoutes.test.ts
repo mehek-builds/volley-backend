@@ -27,6 +27,24 @@ test('Free attended submissions stay manual while standing consent remains entit
   );
 });
 
+test('standing-consent extension authority is revalidated under lock and returns its exact expiry', () => {
+  const route = source.slice(
+    source.indexOf("'/applications/:id/submission/extension-start'"),
+    source.indexOf("'/applications/:id/submission/extension-outcome'"),
+  );
+  const transaction = route.slice(route.indexOf('const runExtensionStartTransaction'));
+  const lock = transaction.indexOf('await lockSubmissionAttemptUser(tx, userId)');
+  const consent = transaction.indexOf('AUTOMATIC_SUBMISSION_CONSENT_VERSION', lock);
+  const entitlement = transaction.indexOf('await getEntitlementSnapshot(userId, new Date(), tx)', consent);
+  const opening = transaction.indexOf("eventKind: 'attempt_opened'", entitlement);
+  const authorization = transaction.indexOf('authorizeFinalSubmissionBoundary(binding', opening);
+  assert.ok(lock >= 0 && consent > lock && entitlement > consent && opening > entitlement
+    && authorization > opening);
+  assert.match(route, /activation_id: result\.activationId/);
+  assert.match(route, /activation_lease_id: result\.activationLeaseId/);
+  assert.match(route, /activation_expires_at: result\.activationExpiresAt/);
+});
+
 test('attended extension refill returns the exact owned generated packet and a fresh resume capability', () => {
   const route = source.slice(
     source.indexOf("'/applications/:id/submission/extension-packet'"),

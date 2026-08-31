@@ -145,6 +145,30 @@ test('every managed acknowledgement carries the exact durable result ID returned
   );
 });
 
+test('an initial terminal GET failure folds after database expiry and queues exact result retrieval', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('export async function recoverManagedSubmissionTerminalResult(');
+  const end = runner.indexOf('async function claimSubmission(', start);
+  const recovery = runner.slice(start, end);
+  const retrieval = recovery.indexOf('terminal = await getManagedBrowserTerminalResult(submissionAttempt');
+  const failure = recovery.indexOf('const freshAuthorization = await submissionBoundaryAuthorization(', retrieval);
+  const expiry = recovery.indexOf("if (freshAuthorization?.active) return 'pending'", failure);
+  const fold = recovery.indexOf('await persistUnverified(', expiry);
+  const cleanup = recovery.indexOf('await queueManagedTerminalCleanupResultRetrieval(', fold);
+  assert.ok(retrieval >= 0 && failure > retrieval && expiry > failure && fold > expiry && cleanup > fold);
+});
+
+test('terminal cleanup runs independently before the terminal application selector', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf("fastify.get('/internal/application-submission-runner'");
+  const cron = runner.slice(start);
+  const cleanup = cron.indexOf('retryManagedTerminalCleanupOutbox(fastify)');
+  const selection = cron.indexOf('const rows = await db');
+  assert.ok(cleanup >= 0 && selection > cleanup);
+  assert.match(runner, /_managed_terminal_cleanup/);
+  assert.match(runner, /resultId: string \| null/);
+});
+
 test('managed verification resumes once by token, never by URL, then verifies the receipt', async () => {
   const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
   const firstSubmit = runner.indexOf('buildManagedPortalActions(portal, packet, true, applicationUrl)');
@@ -243,6 +267,21 @@ test('consent and the exact email route are revalidated after polling and before
   assert.match(actionGate, /verificationRoute === 'personal_address'[\s\S]*db\.select\(\{ enabled: users\.automatic_verification_enabled \}\)[\s\S]*actionPersonalVerificationEnabled/);
   assert.match(actionGate, /preClickVerificationContinuationBlockedReview\([\s\S]*return;/);
   assert.doesNotMatch(actionGate, /securityCodeFingerprint\(row\.id, prepared\.code\)|continueManagedBrowser/);
+});
+
+test('the locked continuation CAS rechecks consent version and entitlement immediately before resume', async () => {
+  const runner = await readFile('src/routes/submissionRunner.ts', 'utf8');
+  const start = runner.indexOf('export async function assertManagedSecurityCodeContinuationBoundaryClear(');
+  const end = runner.indexOf('function mergeManagedSecurityCodeEvidence(', start);
+  const boundary = runner.slice(start, end);
+  const lock = boundary.indexOf('await lockSubmissionAttemptUser(tx, row.user_id)');
+  const user = boundary.indexOf('consentVersion: users.automatic_submission_consent_version');
+  const entitlement = boundary.indexOf('await getEntitlementSnapshot(', user);
+  const authorization = boundary.indexOf('if (!finalBoundaryAuthorizationMatches(', entitlement);
+  const resume = boundary.indexOf('continuation_resumed: true', authorization);
+  const write = boundary.indexOf('await tx.update(generated_resumes)', resume);
+  assert.ok(lock >= 0 && user > lock && entitlement > user && authorization > entitlement
+    && resume > authorization && write > resume);
 });
 
 test('uncertain continuation outcome is handed off without a retry or URL reopen', async () => {

@@ -98,7 +98,8 @@ import {
   extensionEmployerDeliveryBindingIssue,
   extensionEmployerDeliveryProjection,
 } from '../lib/employerDeliveryIdentity';
-import { requireFeature } from '../lib/entitlements';
+import { getEntitlementSnapshot, requireFeature } from '../lib/entitlements';
+import { AUTOMATIC_SUBMISSION_CONSENT_VERSION } from '../lib/automationConsent';
 import { appendEditedResumeArtifactVersion } from '../lib/resumeArtifactVersions';
 import {
   extensionHandoffPacketMatches,
@@ -1370,6 +1371,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         const consentRow = consent[0];
         const disposition = canStartExtensionSubmission(current, parsed.data.authorization, consentRow?.automatic_submission_enabled === true);
         if (disposition !== 'start') return { kind: disposition, row, current };
+        if (parsed.data.authorization === 'standing_consent') {
+          const standingConsentIsCurrent = consentRow?.automatic_submission_enabled === true
+            && Boolean(consentRow.automatic_submission_consented_at)
+            && consentRow.automatic_submission_consent_version === AUTOMATIC_SUBMISSION_CONSENT_VERSION;
+          if (!standingConsentIsCurrent) return { kind: 'consent_required' as const, row, current };
+          const entitlement = await getEntitlementSnapshot(userId, new Date(), tx);
+          if (!entitlement.features.automatic_submission) {
+            return { kind: 'entitlement_required' as const, row, current };
+          }
+        }
         if (!precheckPacketQuestions || !precheckSensitiveProfile || !precheckPacketVersion) {
           return { kind: 'changed' as const };
         }
@@ -1500,7 +1511,15 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         if (authorization.kind !== 'fresh') {
           throw new Error('EXTENSION_BOUNDARY_AUTHORIZATION_CONFLICT');
         }
-        return { kind: 'started' as const, row, claimId, next };
+        return {
+          kind: 'started' as const,
+          row,
+          claimId,
+          next,
+          activationId: authorization.authorization.activationId,
+          activationLeaseId: authorization.authorization.leaseId,
+          activationExpiresAt: authorization.authorization.expiresAt,
+        };
       });
       const result = await withReadOnlyRetry(
         () => runExtensionStartTransaction(db),
@@ -1521,6 +1540,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (result.kind === 'not_found') return reply.status(404).send({ error: 'Application not found' });
       if (result.kind === 'no_review') return reply.status(409).send({ error: 'Application review is not available for this resume' });
       if (result.kind === 'consent_required') return reply.status(403).send({ error: 'Automatic submission is turned off' });
+      if (result.kind === 'entitlement_required') {
+        return reply.status(402).send({
+          error: 'Automatic submission is no longer included in the current plan.',
+          code: 'AUTOMATIC_SUBMISSION_ENTITLEMENT_REQUIRED',
+        });
+      }
       if (result.kind === 'submitted') return reply.send({ application_id: result.row.id, already_submitted: true, review: result.current });
       if (result.kind === 'in_flight') return reply.status(409).send({ error: 'This application already has an active submission' });
       if (result.kind === 'reject') return reply.status(409).send({ error: 'This application cannot be submitted again from its current state' });
@@ -1555,7 +1580,14 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       }
       if (result.kind === 'cap') return reply.status(429).send({ error: 'Daily automatic submission safety limit reached' });
       if (result.kind === 'changed') return reply.status(409).send({ error: 'The application state changed before the extension could reserve it' });
-      return reply.send({ application_id: result.row.id, claim_id: result.claimId, review: result.next });
+      return reply.send({
+        application_id: result.row.id,
+        claim_id: result.claimId,
+        activation_id: result.activationId,
+        activation_lease_id: result.activationLeaseId,
+        activation_expires_at: result.activationExpiresAt,
+        review: result.next,
+      });
     },
   );
 

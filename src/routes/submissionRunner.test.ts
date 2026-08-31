@@ -54,6 +54,7 @@ import {
   managedContinuationSubmissionAttempt,
   managedSecurityCodeContinuationRecoveryIsHeld,
   managedInitialSubmissionAttempt,
+  finalBoundaryAuthorizationMatches,
   undecidedOptionalQuestionLabels,
 } from './submissionRunner';
 import { resolveSubmittedApplicationAnswers } from '../lib/submittedAnswers';
@@ -132,6 +133,26 @@ test('managed initial, security-code, and observation calls have distinct stable
   assert.notEqual(observation.executionId, initial.executionId);
   assert.notEqual(observation.executionId, security.executionId);
   assert.deepEqual(managedContinuationSubmissionAttempt(binding, 'security_code'), security);
+});
+
+test('disable and re-enable cannot revive a standing-consent capability from an older version', () => {
+  const review = {
+    submission_authorization: {
+      source: 'standing_consent',
+      consented_at: '2026-08-31T09:00:00.000Z',
+      consent_version: 'standing-consent-v1',
+    },
+  } as ApplicationReviewState;
+  assert.equal(finalBoundaryAuthorizationMatches(review, {
+    enabled: true,
+    consentedAt: new Date('2026-08-31T10:00:00.000Z'),
+    consentVersion: 'standing-consent-v2',
+  }, true), false);
+  assert.equal(finalBoundaryAuthorizationMatches(review, {
+    enabled: true,
+    consentedAt: new Date('2026-08-31T09:00:00.000Z'),
+    consentVersion: 'standing-consent-v1',
+  }, true), true);
 });
 
 test('only durable pre-dispatch and consumed continuation states stay scheduler-held', () => {
