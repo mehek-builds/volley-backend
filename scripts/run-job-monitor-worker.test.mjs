@@ -11,6 +11,10 @@ import {
 
 const DRAIN_STARTED_AT = '2026-08-30T10:15:00.000Z';
 
+function initializedDrainPath(drainStartedAt = DRAIN_STARTED_AT) {
+  return `/internal/job-monitor?drain_started_at=${encodeURIComponent(drainStartedAt)}&initialize_drain=true`;
+}
+
 function monitor(status, {
   drainStartedAt = DRAIN_STARTED_AT,
   pollingComplete,
@@ -115,12 +119,13 @@ function silentLogger() {
   };
 }
 
-test('a failed first monitor request retries sequentially with the same client-owned cursor', async () => {
+test('timeout and malformed initialization retries keep the same client-owned cursor and flag', async () => {
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: drainPath, response: { status: 0, body: null, error: 'request timed out' } },
-    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+    { path: initializedDrainPath(), response: { status: 0, body: null, error: 'request timed out' } },
+    { path: initializedDrainPath(), response: { status: 200, body: null, error: null } },
+    { path: initializedDrainPath(), response: monitor(200, { pollingComplete: true }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: monitor(200, { pollingComplete: true }) },
@@ -152,9 +157,10 @@ test('a failed first monitor request retries sequentially with the same client-o
   assert.equal(result.certified, true);
   assert.equal(result.drain_started_at, DRAIN_STARTED_AT);
   assert.equal(maximumActiveRequests, 1);
-  assert.deepEqual(sleeps, [37]);
+  assert.deepEqual(sleeps, [37, 37]);
   assert.equal(calls.includes('/internal/job-monitor'), false);
-  assert.equal(calls.filter((path) => path === drainPath).length, 3);
+  assert.equal(calls.filter((path) => path === initializedDrainPath()).length, 3);
+  assert.equal(calls.filter((path) => path === drainPath).length, 1);
   assert.equal(sequence.length, 0);
 });
 
@@ -191,8 +197,8 @@ test('the outer worker keeps its cursor when a bounded drain attempt throws', as
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: drainPath, response: { status: 0, body: null, error: 'request timed out' } },
-    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+    { path: initializedDrainPath(), response: { status: 0, body: null, error: 'request timed out' } },
+    { path: initializedDrainPath(), response: monitor(200, { pollingComplete: true }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: monitor(200, { pollingComplete: true }) },
@@ -216,14 +222,15 @@ test('the outer worker keeps its cursor when a bounded drain attempt throws', as
   assert.equal(sequence.length, 0);
   assert.deepEqual(sleeps, [37, 37, 999]);
   assert.equal(requester.calls.includes('/internal/job-monitor'), false);
-  assert.equal(requester.calls.filter((path) => path === drainPath).length, 3);
+  assert.equal(requester.calls.filter((path) => path === initializedDrainPath()).length, 2);
+  assert.equal(requester.calls.filter((path) => path === drainPath).length, 1);
 });
 
 test('a completed queue always gets a fresh HTTP 200 final recount before completion', async () => {
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: drainPath, response: monitor(500, { pollingComplete: false, surfacedPostings: 2 }) },
+    { path: initializedDrainPath(), response: monitor(500, { pollingComplete: false, surfacedPostings: 2 }) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: monitor(500, { pollingComplete: true, surfacedPostings: 3 }) },
     { path: logoPath, response: logos(true) },
@@ -264,7 +271,7 @@ test('a final structured HTTP 500 returns a noncertified result and never proves
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: drainPath, response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }) },
+    { path: initializedDrainPath(), response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }) },
@@ -294,7 +301,7 @@ test('HTTP 200 without complete floor evidence is not accepted as final proof', 
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+    { path: initializedDrainPath(), response: monitor(200, { pollingComplete: true }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: monitor(200, { pollingComplete: true, includeSponsorFloor: false }) },
@@ -326,7 +333,7 @@ test('the final logo check can reopen its queue without changing drain_started_a
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+    { path: initializedDrainPath(), response: monitor(200, { pollingComplete: true }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(false) },
     { path: logoPath, response: logos(true) },
@@ -349,14 +356,15 @@ test('the final logo check can reopen its queue without changing drain_started_a
   assert.equal(result.passes, 2);
   assert.deepEqual(sleeps, []);
   assert.equal(requester.calls.filter((path) => path === '/internal/job-monitor').length, 0);
-  assert.equal(requester.calls.filter((path) => path === drainPath).length, 2);
+  assert.equal(requester.calls.filter((path) => path === initializedDrainPath()).length, 1);
+  assert.equal(requester.calls.filter((path) => path === drainPath).length, 1);
 });
 
 test('a deferred transient logo retry sleeps without resetting the drain cursor', async () => {
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+    { path: initializedDrainPath(), response: monitor(200, { pollingComplete: true }) },
     {
       path: logoPath,
       response: logos(false, { retryAfterMs: 123, scheduledTransientSources: 1 }),
@@ -419,7 +427,7 @@ test('the worker waits for the public evidence gate before certifying', async ()
   const drainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(DRAIN_STARTED_AT)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+    { path: initializedDrainPath(), response: monitor(200, { pollingComplete: true }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: monitor(200, { pollingComplete: true, gateEnabled: false }) },
@@ -563,7 +571,7 @@ test('every transient final-recount failure class is bounded', async (t) => {
   for (const [name, failure] of Object.entries(cases)) {
     await t.test(name, async () => {
       const sequence = [
-        { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+        { path: initializedDrainPath(), response: monitor(200, { pollingComplete: true }) },
         { path: '/internal/job-monitor/verify-logos?limit=100', response: logos(true) },
         { path: '/internal/job-monitor/verify-logos?limit=100', response: logos(true) },
         { path: drainPath, response: failure },
@@ -592,12 +600,15 @@ test('the worker uses a longer floor backoff and starts the next drain with a fr
   const secondDrainPath = `/internal/job-monitor?drain_started_at=${encodeURIComponent(secondDrainStartedAt)}`;
   const logoPath = '/internal/job-monitor/verify-logos?limit=100';
   const sequence = [
-    { path: firstDrainPath, response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }) },
+    {
+      path: initializedDrainPath(DRAIN_STARTED_AT),
+      response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }),
+    },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: firstDrainPath, response: monitor(500, { pollingComplete: true, surfacedPostings: 499_999 }) },
     {
-      path: secondDrainPath,
+      path: initializedDrainPath(secondDrainStartedAt),
       response: monitor(200, { drainStartedAt: secondDrainStartedAt, pollingComplete: true }),
     },
     { path: logoPath, response: logos(true) },
@@ -627,8 +638,10 @@ test('the worker uses a longer floor backoff and starts the next drain with a fr
   assert.equal(sequence.length, 0);
   assert.deepEqual(sleeps, [370, 999]);
   assert.equal(requester.calls.filter((path) => path === '/internal/job-monitor').length, 0);
-  assert.equal(requester.calls.filter((path) => path === firstDrainPath).length, 2);
-  assert.equal(requester.calls.filter((path) => path === secondDrainPath).length, 2);
+  assert.equal(requester.calls.filter((path) => path === initializedDrainPath(DRAIN_STARTED_AT)).length, 1);
+  assert.equal(requester.calls.filter((path) => path === firstDrainPath).length, 1);
+  assert.equal(requester.calls.filter((path) => path === initializedDrainPath(secondDrainStartedAt)).length, 1);
+  assert.equal(requester.calls.filter((path) => path === secondDrainPath).length, 1);
   const scheduled = messages.error.find((entry) => entry.event === 'inventory_floor_repoll_scheduled');
   assert.equal(scheduled.retry_ms, 370);
   assert.equal(scheduled.next_drain_uses_fresh_cursor, true);
@@ -649,7 +662,7 @@ test('persistent projection timeout emits a distinct alert and never completes t
     metricsTimeoutMs: 120_000,
   });
   const sequence = [
-    { path: drainPath, response: timedOut() },
+    { path: initializedDrainPath(), response: timedOut() },
     { path: '/internal/job-monitor/verify-logos?limit=100', response: logos(true) },
     { path: '/internal/job-monitor/verify-logos?limit=100', response: logos(true) },
     { path: drainPath, response: timedOut() },
@@ -691,7 +704,7 @@ test('only consecutive metrics timeouts trigger the persistent timeout result', 
     metricsTimeoutMs: 120_000,
   });
   const sequence = [
-    { path: drainPath, response: monitor(200, { pollingComplete: true }) },
+    { path: initializedDrainPath(), response: monitor(200, { pollingComplete: true }) },
     { path: logoPath, response: logos(true) },
     { path: logoPath, response: logos(true) },
     { path: drainPath, response: { status: 409, body: null, error: null } },

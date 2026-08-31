@@ -239,10 +239,11 @@ export function inventoryFloorAssessment(body) {
   };
 }
 
-function monitorPath(drainStartedAt) {
-  return drainStartedAt
-    ? `/internal/job-monitor?drain_started_at=${encodeURIComponent(drainStartedAt)}`
-    : '/internal/job-monitor';
+function monitorPath(drainStartedAt, initializeDrain = false) {
+  if (!drainStartedAt) return '/internal/job-monitor';
+  const query = new URLSearchParams({ drain_started_at: drainStartedAt });
+  if (initializeDrain) query.set('initialize_drain', 'true');
+  return `/internal/job-monitor?${query.toString()}`;
 }
 
 function sameDrain(body, drainStartedAt) {
@@ -314,6 +315,8 @@ export async function runCompleteDrain({
   logger = console,
   drainStartedAt: requestedDrainStartedAt = null,
   now = () => new Date(),
+  initializeDrainPending = true,
+  onDrainInitialized = () => undefined,
 }) {
   const startedAt = dateFromClock(now, 'runCompleteDrain clock');
   const drainStartedAt = validatedDrainStartedAt(
@@ -326,6 +329,7 @@ export async function runCompleteDrain({
   let pass = 0;
   let finalRecountAttempts = 0;
   let metricsTimeoutAttempts = 0;
+  let initializeDrain = initializeDrainPending;
 
   while (!shouldStop()) {
     if (!pollingComplete || !logoComplete) {
@@ -335,7 +339,7 @@ export async function runCompleteDrain({
       }
 
       if (!pollingComplete) {
-        const monitor = await requestJson(monitorPath(drainStartedAt));
+        const monitor = await requestJson(monitorPath(drainStartedAt, initializeDrain));
         const metricsTimedOut = monitorMetricsTimedOut(monitor);
         if (monitor.status === 409) {
           logger.log(JSON.stringify({ event: 'monitor_locked', pass, retry_ms: config.retryMs }));
@@ -355,6 +359,10 @@ export async function runCompleteDrain({
           }));
           await sleepFn(config.retryMs);
           continue;
+        }
+        if (initializeDrain) {
+          initializeDrain = false;
+          onDrainInitialized();
         }
         pollingComplete = monitor.body.polling_complete;
         logMonitorPass(logger, 'monitor_pass', pass, monitor, drainStartedAt, {
@@ -561,6 +569,7 @@ export async function runWorkerLoop({
   now = () => new Date(),
 }) {
   let activeDrainStartedAt = config.resumeDrainStartedAt ?? null;
+  let initializeDrainPending = true;
   while (!shouldStop()) {
     const startedAt = now();
     activeDrainStartedAt ??= dateFromClock(now, 'runWorkerLoop clock').toISOString();
@@ -573,6 +582,8 @@ export async function runWorkerLoop({
         logger,
         drainStartedAt: activeDrainStartedAt,
         now,
+        initializeDrainPending,
+        onDrainInitialized: () => { initializeDrainPending = false; },
       });
       if (!result) break;
 
@@ -595,6 +606,7 @@ export async function runWorkerLoop({
         }));
         if (!shouldStop()) await sleepFn(config.floorBreachRetryMs);
         activeDrainStartedAt = null;
+        initializeDrainPending = true;
         continue;
       }
 
@@ -607,6 +619,7 @@ export async function runWorkerLoop({
         next_cycle_in_ms: config.cycleIntervalMs,
       }));
       activeDrainStartedAt = null;
+      initializeDrainPending = true;
     } catch (error) {
       logger.error(JSON.stringify({
         event: 'drain_failed',

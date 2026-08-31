@@ -197,9 +197,16 @@ const sourceSchema = z.object({
 }));
 
 const sourcesBodySchema = z.object({ sources: z.array(sourceSchema).min(1).max(100) });
-const monitorQuerySchema = z.object({
+export const monitorQuerySchema = z.object({
   drain_started_at: z.string().datetime({ offset: true }).optional(),
+  initialize_drain: z.literal('true').optional(),
 });
+export function jobMonitorDrainShouldInitialize(
+  drainStartedAt: string | undefined,
+  initializeDrain: boolean,
+) {
+  return !drainStartedAt || initializeDrain;
+}
 const logoVerificationQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(100),
 });
@@ -3846,6 +3853,10 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     const drainStartedAt = parsedQuery.data.drain_started_at
       ? new Date(parsedQuery.data.drain_started_at)
       : new Date();
+    const initializeDrain = jobMonitorDrainShouldInitialize(
+      parsedQuery.data.drain_started_at,
+      parsedQuery.data.initialize_drain === 'true',
+    );
     const releaseMonitorLock = await tryAcquireJobMonitorLock();
     if (!releaseMonitorLock) {
       return reply.status(409).send({
@@ -3870,7 +3881,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
     let discoveryTrustedComplete = false;
     let discoveryProvenance: JobSourceDiscoveryResult['provenance'] | null = null;
     let discoveryError: string | null = null;
-    if (!parsedQuery.data.drain_started_at) {
+    if (initializeDrain) {
       try {
         const discovery = await discoverJobSources();
         discoveryCandidateSourceCount = discovery.candidateSources.length;
@@ -3886,7 +3897,7 @@ export async function jobMonitorRoutes(fastify: FastifyInstance) {
         request.log.warn({ error: discoveryError }, 'job source discovery failed; preserving persisted sources');
       }
     }
-    const brandedSources = parsedQuery.data.drain_started_at ? [] : catalogBrandedJobSources();
+    const brandedSources = initializeDrain ? catalogBrandedJobSources() : [];
     const discoveredAndBranded = mergeJobSources(discoveredSources, brandedSources);
     const scheduledSources = mergeJobSources(discoveredAndBranded, JOB_SOURCES);
     const operatorConfiguredSources = configuredSources();

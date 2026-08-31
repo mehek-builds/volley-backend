@@ -24,9 +24,11 @@ import {
   detailRefreshStatus,
   groupedRoleAlertTriggered,
   inventoryTargetMet,
+  jobMonitorDrainShouldInitialize,
   pollingQueueStatus,
   publicVerifiedEvidenceGateEnabled,
   mergeJobSources,
+  monitorQuerySchema,
   shouldKeepPostingsOnEmptyFetch,
   targetRoleCoverageMetrics,
   groupedSponsorshipFor,
@@ -129,6 +131,28 @@ test('source 401 completes on the second pass of the same drain run', () => {
   const workflow = readFileSync('.github/workflows/job-monitor.yml', 'utf8');
   assert.match(workflow, /drain_started_at=""/);
   assert.match(workflow, /\?drain_started_at=\$\{drain_started_at\}/);
+});
+
+test('a client-owned cursor can initialize discovery exactly for the first logical drain call', () => {
+  const drainStartedAt = '2026-08-30T10:15:00.000Z';
+  assert.equal(jobMonitorDrainShouldInitialize(undefined, false), true,
+    'the manual no-cursor path remains a fresh drain');
+  assert.equal(jobMonitorDrainShouldInitialize(drainStartedAt, true), true,
+    'the worker can initialize discovery while supplying its own cursor');
+  assert.equal(jobMonitorDrainShouldInitialize(drainStartedAt, false), false,
+    'subsequent segments skip discovery for the same cursor');
+  assert.equal(monitorQuerySchema.safeParse({
+    drain_started_at: drainStartedAt,
+    initialize_drain: 'true',
+  }).success, true);
+  assert.equal(monitorQuerySchema.safeParse({
+    drain_started_at: drainStartedAt,
+    initialize_drain: 'false',
+  }).success, false, 'only the explicit true initialization signal is accepted');
+
+  const route = readFileSync('src/routes/jobMonitor.ts', 'utf8');
+  assert.match(route, /if \(initializeDrain\) \{/);
+  assert.match(route, /const brandedSources = initializeDrain/);
 });
 
 test('target-role database aggregates are shaped without exposing literal role text', async () => {
