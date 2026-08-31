@@ -434,6 +434,66 @@ test('default profile and email DB readers complete with the production one-conn
   }
 });
 
+test('render and object storage do not hold the production one-connection pool', async () => {
+  await seedUser(STUDENT, 'student@example.test');
+  assert.equal(backendPool.options.max, 1, 'VERCEL must configure the production pool limit');
+  const { prepareManagedApplication } = await import('../lib/managedPrepare');
+  let releaseRender!: () => void;
+  let reportRenderEntered!: () => void;
+  const renderEntered = new Promise<void>((resolve) => { reportRenderEntered = resolve; });
+  const renderGate = new Promise<void>((resolve) => { releaseRender = resolve; });
+  const preparing = prepareManagedApplication({ userId: STUDENT, jobId: JOB }, {
+    ...dependencies,
+    renderMainResume: async ({ spec }) => {
+      reportRenderEntered();
+      await renderGate;
+      return { buffer: Buffer.from('%PDF-1.4\nnonblocking\n%%EOF\n'), spec };
+    },
+  });
+  await renderEntered;
+
+  try {
+    const competingRead = backendDb.select({ id: schema.users.id }).from(schema.users)
+      .where(eq(schema.users.id, STUDENT)).limit(1);
+    const outcome = await Promise.race([
+      competingRead.then((rows: unknown[]) => ({ kind: 'rows' as const, rows })),
+      new Promise<{ kind: 'timeout' }>((resolve) => setTimeout(() => resolve({ kind: 'timeout' }), 250)),
+    ]);
+    assert.equal(outcome.kind, 'rows', 'render must not starve unrelated DB work behind the sole pool connection');
+    if (outcome.kind === 'rows') assert.equal(outcome.rows.length, 1);
+  } finally {
+    releaseRender();
+  }
+  const result = await preparing;
+  assert.equal(result.state, 'ready_for_review');
+});
+
+test('a failed external render releases only its reservation so an immediate retry can reuse the object identity', async () => {
+  await seedUser(STUDENT, 'student@example.test');
+  const { prepareManagedApplication } = await import('../lib/managedPrepare');
+  await assert.rejects(
+    prepareManagedApplication({ userId: STUDENT, jobId: JOB }, {
+      ...dependencies,
+      renderMainResume: async () => { throw new Error('controlled render failure'); },
+    }),
+    (error: unknown) => (error as { code?: string }).code === 'main_resume_render_failed',
+  );
+  const afterFailure = await database.query<{ count: number }>(
+    'select count(*)::int as count from "generated_resumes" where "user_id" = $1',
+    [STUDENT],
+  );
+  assert.equal(afterFailure.rows[0]?.count, 0);
+
+  const recovered = await prepareManagedApplication({ userId: STUDENT, jobId: JOB }, dependencies);
+  assert.equal(recovered.state, 'ready_for_review');
+  const packet = await database.query<{ resume_object_key: string }>(
+    'select "resume_object_key" from "generated_resumes" where "id" = $1',
+    [recovered.packet_id],
+  );
+  assert.match(packet.rows[0]?.resume_object_key ?? '', /\/[0-9a-f]{64}\.pdf$/u);
+  assert.equal(packet.rows[0]?.resume_object_key.includes(`/${JOB}/`), true);
+});
+
 test('replays the exact committed result without rendering, storing, or building twice', async () => {
   await seedUser(STUDENT, 'student@example.test');
   const first = await prepare();

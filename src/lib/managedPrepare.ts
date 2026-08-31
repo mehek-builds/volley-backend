@@ -73,7 +73,18 @@ type ManagedPrepareMetadata = {
   main_resume_digest: string;
   rendered_blob_url: string;
   state: ManagedPrepareState;
+  phase?: 'stored';
 };
+
+type ManagedPrepareReservationMetadata = Omit<ManagedPrepareMetadata, 'rendered_blob_url' | 'phase'> & {
+  phase: 'reserved';
+  reservation_id: string;
+  reserved_at: string;
+  lease_expires_at: string;
+  requested_object_key: string;
+};
+
+const MANAGED_PREPARE_RESERVATION_MS = 5 * 60 * 1000;
 
 type RenderedMainResume = {
   buffer: Buffer;
@@ -169,8 +180,58 @@ function managedPrepareMetadata(spec: unknown): ManagedPrepareMetadata | null {
     || !/^[a-f0-9]{64}$/u.test(raw.main_resume_digest)
     || typeof raw.rendered_blob_url !== 'string'
     || !raw.rendered_blob_url.trim()
+    || (raw.phase !== undefined && raw.phase !== 'stored')
     || !['ready_for_review', 'needs_attention'].includes(String(raw.state))) return null;
   return raw as ManagedPrepareMetadata;
+}
+
+function managedPrepareReservationMetadata(spec: unknown): ManagedPrepareReservationMetadata | null {
+  const raw = record(record(spec)?._managed_prepare);
+  if (!raw
+    || raw.version !== MANAGED_PREPARE_VERSION
+    || typeof raw.canonical_application_id !== 'string'
+    || typeof raw.packet_id !== 'string'
+    || typeof raw.job_id !== 'string'
+    || raw.resume_source !== 'main_resume'
+    || typeof raw.main_resume_digest !== 'string'
+    || !/^[a-f0-9]{64}$/u.test(raw.main_resume_digest)
+    || raw.phase !== 'reserved'
+    || typeof raw.reservation_id !== 'string'
+    || !raw.reservation_id
+    || typeof raw.reserved_at !== 'string'
+    || !Number.isFinite(Date.parse(raw.reserved_at))
+    || typeof raw.lease_expires_at !== 'string'
+    || !Number.isFinite(Date.parse(raw.lease_expires_at))
+    || typeof raw.requested_object_key !== 'string'
+    || !raw.requested_object_key
+    || !['ready_for_review', 'needs_attention'].includes(String(raw.state))) return null;
+  return raw as ManagedPrepareReservationMetadata;
+}
+
+function managedPrepareReservation(input: {
+  applicationId: string;
+  packetId: string;
+  jobId: string;
+  mainResumeDigest: string;
+  state: ManagedPrepareState;
+  reservationId: string;
+  reservedAt: Date;
+  requestedObjectKey: string;
+}): ManagedPrepareReservationMetadata {
+  return {
+    version: MANAGED_PREPARE_VERSION,
+    canonical_application_id: input.applicationId,
+    packet_id: input.packetId,
+    job_id: input.jobId,
+    resume_source: 'main_resume',
+    main_resume_digest: input.mainResumeDigest,
+    state: input.state,
+    phase: 'reserved',
+    reservation_id: input.reservationId,
+    reserved_at: input.reservedAt.toISOString(),
+    lease_expires_at: new Date(input.reservedAt.getTime() + MANAGED_PREPARE_RESERVATION_MS).toISOString(),
+    requested_object_key: input.requestedObjectKey,
+  };
 }
 
 function exactManagedReview(row: ResumeRow, applicationId: string): ApplicationReviewState | null {
@@ -363,9 +424,17 @@ export async function prepareManagedApplication(
     blobUrl?: string;
     created: boolean;
     completed?: ManagedPrepareResult;
+    reservation?: {
+      id: string;
+      previousSpec: unknown;
+      baseResume: ResumeSpec;
+      parsedProfile: Record<string, unknown>;
+      accountEmail?: string;
+      requestedKey: string;
+    };
   };
 
-  const stage = await db.transaction(async (tx): Promise<PreparedStage> => {
+  let stage = await db.transaction(async (tx): Promise<PreparedStage> => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`canonical-application:${input.userId}`}, 0::bigint))`);
     await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`managed-prepare:${input.userId}:${posting.id}`}, 0::bigint))`);
 
@@ -401,17 +470,20 @@ export async function prepareManagedApplication(
       return prepareError(409, 'managed_packet_ambiguous', 'Litos found more than one packet for this exact application and stopped safely.');
     }
 
+    const requestedKey = `users/${input.userId}/managed-main-resumes/${posting.id}/${mainResumeDigest}.pdf`;
     const existing = candidates[0];
     if (existing) {
       const metadata = managedPrepareMetadata(existing.spec);
-      if (!metadata
-        || metadata.packet_id !== existing.id
-        || metadata.job_id !== posting.id
-        || metadata.canonical_application_id !== applicationId) {
+      const reservation = managedPrepareReservationMetadata(existing.spec);
+      const identity = metadata ?? reservation;
+      if (!identity
+        || identity.packet_id !== existing.id
+        || identity.job_id !== posting.id
+        || identity.canonical_application_id !== applicationId) {
         return prepareError(409, 'managed_packet_identity_mismatch', 'The saved packet does not match this application. Nothing was opened or sent.');
       }
-      const completedReview = exactManagedReview(existing, applicationId);
-      if (completedReview) {
+      const completedReview = metadata ? exactManagedReview(existing, applicationId) : null;
+      if (metadata && completedReview) {
         const [artifact] = await tx.select().from(artifacts).where(and(
           eq(artifacts.user_id, input.userId),
           eq(artifacts.legacy_generated_resume_id, existing.id),
@@ -473,6 +545,59 @@ export async function prepareManagedApplication(
         };
       }
 
+      const terminal = currentApplication.submission_state === 'submitted'
+        || currentApplication.tracker_state === 'applied';
+      if (terminal) {
+        return prepareError(409, 'managed_application_already_submitted', 'This application is already submitted and its packet cannot be replaced.');
+      }
+
+      if (reservation) {
+        if (reservation.requested_object_key !== requestedKey
+          || existing.resume_object_key !== requestedKey) {
+          return prepareError(409, 'managed_packet_identity_mismatch', 'The saved packet does not match this application. Nothing was opened or sent.');
+        }
+        const reservationNow = dependencies.now();
+        if (Date.parse(reservation.lease_expires_at) > reservationNow.getTime()) {
+          return prepareError(409, 'managed_packet_preparing', 'Litos is already preparing this exact packet. Try again shortly.');
+        }
+        const reservationId = dependencies.newId();
+        const nextReservation = managedPrepareReservation({
+          applicationId,
+          packetId: existing.id,
+          jobId: posting.id,
+          mainResumeDigest,
+          state: destination.state,
+          reservationId,
+          reservedAt: reservationNow,
+          requestedObjectKey: requestedKey,
+        });
+        const nextSpec = { ...currentBaseResume, _managed_prepare: nextReservation };
+        const [takenOver] = await tx.update(generated_resumes).set({ spec: nextSpec }).where(and(
+          eq(generated_resumes.id, existing.id),
+          eq(generated_resumes.user_id, input.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(existing.spec)}::jsonb`,
+          eq(generated_resumes.resume_object_key, requestedKey),
+        )).returning();
+        if (!takenOver) {
+          return prepareError(409, 'managed_packet_changed', 'The packet changed while Litos was preparing it. Reload and try again.');
+        }
+        return {
+          row: takenOver,
+          created: false,
+          reservation: {
+            id: reservationId,
+            previousSpec: takenOver.spec,
+            baseResume: currentBaseResume,
+            parsedProfile: record(currentProfile.parsed) ?? {},
+            accountEmail: currentAccount?.email ?? account?.email ?? undefined,
+            requestedKey,
+          },
+        };
+      }
+      if (!metadata) {
+        return prepareError(409, 'managed_packet_identity_mismatch', 'The saved packet does not match this application. Nothing was opened or sent.');
+      }
+
       const [unexpectedArtifact] = await tx.select({ id: artifacts.id }).from(artifacts).where(and(
         eq(artifacts.user_id, input.userId),
         eq(artifacts.legacy_generated_resume_id, existing.id),
@@ -490,109 +615,198 @@ export async function prepareManagedApplication(
     }
 
     const packetId = dependencies.newId();
-    const parsedProfile = record(currentProfile.parsed) ?? {};
-    const accountEmail = currentAccount?.email ?? account?.email ?? undefined;
-    const resumeEmail = resumeEmailForUpload(parsedProfile, accountEmail ?? undefined);
-    const applicationProfile = await dependencies.loadApplicationProfile(input.userId, tx);
-    const contact = mainResumeContactHeader(
-      parsedProfile,
-      applicationProfile as Record<string, unknown>,
-      resumeEmail,
-    );
-    const applicantEmail = await dependencies.planApplicantEmail({
-      userId: input.userId,
-      applicationId: packetId,
-      contactEmail: resumeEmail,
-      accountEmail,
-      contactFromRequest: false,
-    }, { executor: tx });
-    trackedApplicantEmail(applicantEmail);
-
-    let rendered: RenderedMainResume;
-    try {
-      rendered = await dependencies.renderMainResume({ spec: currentBaseResume, contact });
-    } catch {
-      return prepareError(422, 'main_resume_render_failed', 'Litos could not render your saved main resume. Nothing was opened or sent.');
-    }
-    if (!Buffer.isBuffer(rendered.buffer) || rendered.buffer.byteLength === 0) {
-      return prepareError(500, 'main_resume_render_failed', 'Litos could not render your saved main resume. Nothing was opened or sent.');
-    }
-    const renderedSpec = normalizeSpec(rendered.spec);
-    const requestedKey = `users/${input.userId}/managed-main-resumes/${posting.id}/${mainResumeDigest}.pdf`;
-    const stored = await dependencies.storeResume(requestedKey, rendered.buffer);
-    if (stored.pathname !== requestedKey || !stored.url.trim()) {
-      return prepareError(500, 'main_resume_storage_failed', 'Litos could not store the exact main resume packet. Nothing was opened or sent.');
-    }
-
-    const now = dependencies.now().toISOString();
-    const review: ApplicationReviewState = {
-      jd_text: jdText,
-      role: posting.role,
-      status: 'resume_ready',
-      applicant_email: applicantEmail.choice,
-      edited_terms: [],
-      questions: [],
-      skipped_reasons: [],
-      filled_fields: [],
-      updated_at: now,
-    };
-    const metadata: ManagedPrepareMetadata = {
-      version: MANAGED_PREPARE_VERSION,
-      canonical_application_id: applicationId,
-      packet_id: packetId,
-      job_id: posting.id,
-      resume_source: 'main_resume',
-      main_resume_digest: mainResumeDigest,
-      rendered_blob_url: stored.url,
+    const reservationId = dependencies.newId();
+    const reservationNow = dependencies.now();
+    const reservation = managedPrepareReservation({
+      applicationId,
+      packetId,
+      jobId: posting.id,
+      mainResumeDigest,
       state: destination.state,
-    };
-    const storedSpec = {
-      ...renderedSpec,
-      _contact: contact,
-      _applicant_email: applicantEmail.choice,
-      _application_email: applicantEmail.identity,
-      _managed_prepare: metadata,
-      _review: review,
-      _quality: {
-        pdfGenerationBinding: createPdfGenerationBinding(
-          renderedSpec,
-          stored.pathname,
-          rendered.buffer,
-          contact.email ?? '',
-        ),
-      },
-    };
+      reservationId,
+      reservedAt: reservationNow,
+      requestedObjectKey: requestedKey,
+    });
+    const reservedSpec = { ...currentBaseResume, _managed_prepare: reservation };
     const [inserted] = await tx.insert(generated_resumes).values({
       id: packetId,
       user_id: input.userId,
       job_context: jobContext,
-      spec: storedSpec,
-      resume_object_key: stored.pathname,
+      spec: reservedSpec,
+      resume_object_key: requestedKey,
     }).returning();
-    if (!inserted) return prepareError(500, 'managed_packet_persistence_failed', 'Litos could not save the prepared packet. Nothing was opened or sent.');
-
-    await tx.insert(application_email_aliases).values({
-      alias: applicantEmail.identity.alias,
-      user_id: input.userId,
-      generated_resume_id: packetId,
-      forward_to: applicantEmail.identity.forwards_to,
-      status: 'active',
-      updated_at: dependencies.now(),
-    }).onConflictDoNothing();
-    const [storedAlias] = await tx.select().from(application_email_aliases).where(and(
-      eq(application_email_aliases.alias, applicantEmail.identity.alias),
-      eq(application_email_aliases.user_id, input.userId),
-      eq(application_email_aliases.generated_resume_id, packetId),
-      eq(application_email_aliases.forward_to, applicantEmail.identity.forwards_to),
-      eq(application_email_aliases.status, 'active'),
-    )).limit(1);
-    if (!storedAlias) {
-      return prepareError(409, 'managed_application_email_conflict', 'Litos could not bind one application email to this exact packet. Nothing was opened or sent.');
-    }
-    return { row: inserted, pdfBytes: rendered.buffer, blobUrl: stored.url, created: true };
+    if (!inserted) return prepareError(500, 'managed_packet_persistence_failed', 'Litos could not reserve the prepared packet. Nothing was opened or sent.');
+    return {
+      row: inserted,
+      created: true,
+      reservation: {
+        id: reservationId,
+        previousSpec: inserted.spec,
+        baseResume: currentBaseResume,
+        parsedProfile: record(currentProfile.parsed) ?? {},
+        accountEmail: currentAccount?.email ?? account?.email ?? undefined,
+        requestedKey,
+      },
+    };
   });
 
   if (stage.completed) return stage.completed;
+
+  if (stage.reservation) {
+    const reservation = stage.reservation;
+    const abandonReservation = async () => {
+      await db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`canonical-application:${input.userId}`}, 0::bigint))`);
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`managed-prepare:${input.userId}:${posting.id}`}, 0::bigint))`);
+        await tx.delete(generated_resumes).where(and(
+          eq(generated_resumes.id, stage.row.id),
+          eq(generated_resumes.user_id, input.userId),
+          sql`${generated_resumes.spec}->'_managed_prepare'->>'phase' = 'reserved'`,
+          sql`${generated_resumes.spec}->'_managed_prepare'->>'reservation_id' = ${reservation.id}`,
+          sql`not exists (
+            select 1 from ${artifacts}
+             where ${artifacts.legacy_generated_resume_id} = ${generated_resumes.id}
+          )`,
+        ));
+      });
+    };
+
+    try {
+      const resumeEmail = resumeEmailForUpload(reservation.parsedProfile, reservation.accountEmail);
+      const applicationProfile = await dependencies.loadApplicationProfile(input.userId);
+      const contact = mainResumeContactHeader(
+        reservation.parsedProfile,
+        applicationProfile as Record<string, unknown>,
+        resumeEmail,
+      );
+      const applicantEmail = await dependencies.planApplicantEmail({
+        userId: input.userId,
+        applicationId: stage.row.id,
+        contactEmail: resumeEmail,
+        accountEmail: reservation.accountEmail,
+        contactFromRequest: false,
+      });
+      trackedApplicantEmail(applicantEmail);
+
+      let rendered: RenderedMainResume;
+      try {
+        rendered = await dependencies.renderMainResume({ spec: reservation.baseResume, contact });
+      } catch {
+        return prepareError(422, 'main_resume_render_failed', 'Litos could not render your saved main resume. Nothing was opened or sent.');
+      }
+      if (!Buffer.isBuffer(rendered.buffer) || rendered.buffer.byteLength === 0) {
+        return prepareError(500, 'main_resume_render_failed', 'Litos could not render your saved main resume. Nothing was opened or sent.');
+      }
+      const renderedSpec = normalizeSpec(rendered.spec);
+      const stored = await dependencies.storeResume(reservation.requestedKey, rendered.buffer);
+      if (stored.pathname !== reservation.requestedKey || !stored.url.trim()) {
+        return prepareError(500, 'main_resume_storage_failed', 'Litos could not store the exact main resume packet. Nothing was opened or sent.');
+      }
+
+      const now = dependencies.now().toISOString();
+      const review: ApplicationReviewState = {
+        jd_text: jdText,
+        role: posting.role,
+        status: 'resume_ready',
+        applicant_email: applicantEmail.choice,
+        edited_terms: [],
+        questions: [],
+        skipped_reasons: [],
+        filled_fields: [],
+        updated_at: now,
+      };
+      const metadata: ManagedPrepareMetadata = {
+        version: MANAGED_PREPARE_VERSION,
+        canonical_application_id: applicationId,
+        packet_id: stage.row.id,
+        job_id: posting.id,
+        resume_source: 'main_resume',
+        main_resume_digest: mainResumeDigest,
+        rendered_blob_url: stored.url,
+        state: destination.state,
+        phase: 'stored',
+      };
+      const storedSpec = {
+        ...renderedSpec,
+        _contact: contact,
+        _applicant_email: applicantEmail.choice,
+        _application_email: applicantEmail.identity,
+        _managed_prepare: metadata,
+        _review: review,
+        _quality: {
+          pdfGenerationBinding: createPdfGenerationBinding(
+            renderedSpec,
+            stored.pathname,
+            rendered.buffer,
+            contact.email ?? '',
+          ),
+        },
+      };
+
+      const preliminary = await db.transaction(async (tx): Promise<ResumeRow> => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`canonical-application:${input.userId}`}, 0::bigint))`);
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`managed-prepare:${input.userId}:${posting.id}`}, 0::bigint))`);
+        const [currentApplication] = await tx.select().from(applications).where(and(
+          eq(applications.id, applicationId),
+          eq(applications.user_id, input.userId),
+        )).limit(1);
+        const [currentProfile] = await tx.select({ baseResume: profiles.base_resume_json }).from(profiles)
+          .where(eq(profiles.user_id, input.userId)).limit(1);
+        if (!currentApplication) {
+          return prepareError(409, 'managed_application_changed', 'The application changed before its packet could be committed.');
+        }
+        if (!currentProfile?.baseResume
+          || packetAuditSha256(normalizeSpec(currentProfile.baseResume)) !== mainResumeDigest) {
+          return prepareError(409, 'main_resume_changed', 'Your main resume changed while Litos was preparing it. Try again.');
+        }
+        if (currentApplication.submission_state === 'submitted'
+          || currentApplication.tracker_state === 'applied') {
+          return prepareError(409, 'managed_application_already_submitted', 'This application is already submitted and its packet cannot be replaced.');
+        }
+        const [updated] = await tx.update(generated_resumes).set({
+          spec: storedSpec,
+          resume_object_key: stored.pathname,
+        }).where(and(
+          eq(generated_resumes.id, stage.row.id),
+          eq(generated_resumes.user_id, input.userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(reservation.previousSpec)}::jsonb`,
+          eq(generated_resumes.resume_object_key, reservation.requestedKey),
+          sql`${generated_resumes.spec}->'_managed_prepare'->>'reservation_id' = ${reservation.id}`,
+        )).returning();
+        if (!updated) {
+          return prepareError(409, 'managed_packet_changed', 'The packet changed while Litos was preparing it. Reload and try again.');
+        }
+        await tx.insert(application_email_aliases).values({
+          alias: applicantEmail.identity.alias,
+          user_id: input.userId,
+          generated_resume_id: updated.id,
+          forward_to: applicantEmail.identity.forwards_to,
+          status: 'active',
+          updated_at: dependencies.now(),
+        }).onConflictDoNothing();
+        const [storedAlias] = await tx.select().from(application_email_aliases).where(and(
+          eq(application_email_aliases.alias, applicantEmail.identity.alias),
+          eq(application_email_aliases.user_id, input.userId),
+          eq(application_email_aliases.generated_resume_id, updated.id),
+          eq(application_email_aliases.forward_to, applicantEmail.identity.forwards_to),
+          eq(application_email_aliases.status, 'active'),
+        )).limit(1);
+        if (!storedAlias) {
+          return prepareError(409, 'managed_application_email_conflict', 'Litos could not bind one application email to this exact packet. Nothing was opened or sent.');
+        }
+        return updated;
+      });
+      stage = {
+        row: preliminary,
+        pdfBytes: rendered.buffer,
+        blobUrl: stored.url,
+        created: stage.created,
+      };
+    } catch (error) {
+      await abandonReservation().catch(() => undefined);
+      throw error;
+    }
+  }
 
   const pdfBytes = stage.pdfBytes ?? await dependencies.readResume(stage.row.resume_object_key);
   if (!pdfBytes || pdfBytes.byteLength === 0) {
