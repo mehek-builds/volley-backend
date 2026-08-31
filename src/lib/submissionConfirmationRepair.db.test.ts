@@ -273,6 +273,196 @@ async function seedRepairCandidate(overrides: {
   return { userId, applicationId, packetId, attemptId };
 }
 
+/* Mirrors the production shape of a pre-ledger submission: the review carries a claim id the
+ * backfill could never reuse, and the migration left two untouched conservative openings, one per
+ * capability source, with null run, claim, and packet-version columns. */
+async function seedLegacyRepairCandidate(overrides: { pressOnGenerated?: boolean } = {}) {
+  const portalUrl = 'https://job-boards.greenhouse.io/embed/job_app?for=jumptrading&token=8002998';
+  const receiptUrl = 'https://job-boards.greenhouse.io/embed/job_app/confirmation?for=jumptrading&token=8002998';
+  const userId = randomUUID();
+  const packetId = randomUUID();
+  const applicationId = randomUUID();
+  const artifactId = randomUUID();
+  const generatedAttemptId = randomUUID();
+  const manualAttemptId = randomUUID();
+  const submissionRunId = randomUUID();
+  const attachedAt = at(-60);
+  const jobContext = {
+    job_id: 'aa283015-a491-4c0f-b41b-0964bb850dc0',
+    company: 'Jump Trading',
+    role: 'Campus Data Engineer (Intern)',
+  };
+  const objectKey = `users/${userId}/resumes/${randomUUID()}.pdf`;
+  const pdfBytes = new TextEncoder().encode(`legacy-repair-packet:${packetId}`);
+  const resumeEmail = `resume-${userId}@example.test`;
+  const applicantEmail = `applicant-${userId}@example.test`;
+  const baseStructuredContent = { summary: 'Exact legacy repair packet' };
+  const structuredContent = {
+    ...baseStructuredContent,
+    _quality: {
+      pdfGenerationBinding: createPdfGenerationBinding(
+        baseStructuredContent,
+        objectKey,
+        pdfBytes,
+        resumeEmail,
+      ),
+    },
+  };
+  const review: ApplicationReviewState = {
+    jd_text: 'Complete the exact Jump Trading application.',
+    role: jobContext.role,
+    portal_url: portalUrl,
+    portal_supported: true,
+    ats_name: 'greenhouse',
+    status: 'submitted',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: RECEIPT_AT,
+    submitted_at: RECEIPT_AT,
+    submission_run_id: submissionRunId,
+    submission_claimed_at: at(-5).toISOString(),
+    // A pre-ledger claim can never equal a deterministic backfilled attempt id.
+    submission_claim_id: randomUUID(),
+    receipt: {
+      confirmation_text: 'Thank you for applying! Your application has been successfully received.',
+      final_url: receiptUrl,
+      screenshot_url: `https://receipts.example/users/${userId}/submission-runs/${submissionRunId}/receipt.png`,
+      captured_at: RECEIPT_AT,
+      source: 'managed_browser',
+    },
+  };
+  const packetAudit = createPacketAudit({
+    ownerId: userId,
+    applicationId: packetId,
+    jdText: review.jd_text,
+    spec: structuredContent,
+    jobContext,
+    questions: review.questions,
+    applicantSnapshot: {},
+    resumeEmail,
+    applicantEmail,
+    employerDelivery: {
+      version: 'employer_delivery_v1',
+      mode: 'extension',
+      sha256: 'e'.repeat(64),
+    },
+    pdfObjectKey: objectKey,
+    pdfBytes,
+    editedTerms: [],
+    clauses: [{
+      text: review.jd_text,
+      start: 0,
+      end: review.jd_text.length,
+      verdict: 'unscoreable',
+    }],
+    rejected: [],
+    degraded: false,
+    terms: { covered: [], missing: [], edited: [] },
+  });
+  review.packet_audit = packetAudit;
+  review.submission_packet_version = packetAudit.packet_version;
+
+  await backendDb.insert(schema.users).values({
+    id: userId,
+    email: `legacy-repair-${userId}@example.test`,
+  });
+  await backendDb.insert(schema.generated_resumes).values({
+    id: packetId,
+    user_id: userId,
+    job_context: jobContext,
+    spec: { ...structuredContent, _review: review },
+    resume_object_key: objectKey,
+    pipeline_stage: 'applied',
+    pipeline_stage_at: new Date(RECEIPT_AT),
+  });
+  await backendDb.insert(schema.artifacts).values({
+    id: artifactId,
+    user_id: userId,
+    legacy_generated_resume_id: packetId,
+    kind: 'tailored_resume',
+    structured_content: structuredContent,
+    rendered_object_key: objectKey,
+    source: 'ai_tailored',
+  });
+  await backendDb.insert(schema.artifact_versions).values({
+    artifact_id: artifactId,
+    version_number: 1,
+    generation_source: 'ai_tailored',
+    content_hash: immutableDocumentContentHash(structuredContent),
+    structured_content: structuredContent,
+    rendered_object_key: objectKey,
+  });
+  await backendDb.insert(schema.applications).values({
+    id: applicationId,
+    user_id: userId,
+    legacy_generated_resume_id: packetId,
+    job_id: jobContext.job_id,
+    company_scope_key: `legacy-repair:${packetId}`,
+    company_name: jobContext.company,
+    role: jobContext.role,
+    portal_url: portalUrl,
+    source_surface: 'dashboard',
+    tracker_state: 'applied',
+    submission_state: 'submitted',
+    application_fingerprint: `legacy-repair:${packetId}`,
+    selected_resume_artifact_id: artifactId,
+    resume_attached: true,
+    resume_source: 'artifact',
+    resume_attached_at: attachedAt,
+  });
+  await backendDb.insert(schema.application_artifacts).values({
+    application_id: applicationId,
+    artifact_id: artifactId,
+    purpose: 'resume',
+    selected: true,
+    attachment_result: 'attached',
+    attached_at: attachedAt,
+  });
+
+  const legacyBinding = (attemptId: string, operation: 'initial_submission' | 'manual_submission'):
+  SubmissionAttemptBinding => ({
+    attemptId,
+    userId,
+    packetId,
+    applicationId,
+    parentAttemptId: null,
+    source: 'legacy_backfill',
+    operation,
+    postingIdentity: freezePostingIdentity(jobContext, portalUrl),
+    submissionRunId: null,
+    submissionClaimId: null,
+    packetVersion: null,
+  });
+  await appendSubmissionAttemptEvent({
+    ...legacyBinding(generatedAttemptId, 'initial_submission'),
+    eventId: submissionAttemptEventId(generatedAttemptId, 'attempt_opened', 'legacy-backfill'),
+    eventKind: 'attempt_opened',
+    evidenceCode: 'legacy_possible_unrecorded_generated_capability',
+    observedAt: at(-30),
+    createdAt: at(-30),
+  });
+  await appendSubmissionAttemptEvent({
+    ...legacyBinding(manualAttemptId, 'manual_submission'),
+    eventId: submissionAttemptEventId(manualAttemptId, 'attempt_opened', 'legacy-backfill'),
+    eventKind: 'attempt_opened',
+    evidenceCode: 'legacy_possible_unrecorded_canonical_fill_capability',
+    observedAt: at(-30),
+    createdAt: at(-30),
+  });
+  if (overrides.pressOnGenerated) {
+    await appendSubmissionAttemptEvent({
+      ...legacyBinding(generatedAttemptId, 'initial_submission'),
+      eventId: submissionAttemptEventId(generatedAttemptId, 'press_observed', 'legacy-backfill-press'),
+      eventKind: 'press_observed',
+      evidenceCode: 'legacy_recorded_press',
+      observedAt: at(-20),
+      createdAt: at(-20),
+    });
+  }
+  return { userId, applicationId, packetId, generatedAttemptId, manualAttemptId };
+}
+
 async function confirmationCount(userId: string, packetId: string): Promise<number> {
   const rows = await backendDb.select().from(schema.application_submission_attempt_events).where(and(
     eq(schema.application_submission_attempt_events.user_id, userId),
@@ -356,6 +546,95 @@ test('repair refuses a generic Ashby application route and mutable success text'
   assert.deepEqual(
     { status: result.status, code: result.status === 'refused' ? result.code : null },
     { status: 'refused', code: 'receipt_not_verified' },
+  );
+  assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 0);
+});
+
+test('a pre-ledger receipt stays refused when no legacy attempt is named', async () => {
+  const fixture = await seedLegacyRepairCandidate();
+  const result = await repairMissingSubmissionConfirmation({
+    userId: fixture.userId,
+    applicationId: fixture.applicationId,
+  });
+  assert.deepEqual(
+    { status: result.status, code: result.status === 'refused' ? result.code : null },
+    { status: 'refused', code: 'attempt_binding_missing' },
+  );
+  assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 0);
+});
+
+test('a named untouched legacy opening repairs once and replays idempotently', async () => {
+  const fixture = await seedLegacyRepairCandidate();
+  const dryRun = await repairMissingSubmissionConfirmation({
+    userId: fixture.userId,
+    applicationId: fixture.applicationId,
+    legacyAttemptId: fixture.generatedAttemptId,
+  });
+  assert.equal(dryRun.status, 'eligible', JSON.stringify(dryRun));
+  assert.equal(dryRun.dryRun, true);
+  assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 0);
+
+  const applied = await repairMissingSubmissionConfirmation({
+    userId: fixture.userId,
+    applicationId: fixture.applicationId,
+    legacyAttemptId: fixture.generatedAttemptId,
+    dryRun: false,
+  });
+  assert.equal(applied.status, 'applied', JSON.stringify(applied));
+  assert.equal(applied.status === 'applied' ? applied.attemptId : null, fixture.generatedAttemptId);
+  assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 1);
+
+  const replay = await repairMissingSubmissionConfirmation({
+    userId: fixture.userId,
+    applicationId: fixture.applicationId,
+    legacyAttemptId: fixture.generatedAttemptId,
+    dryRun: false,
+  });
+  assert.equal(replay.status, 'already_applied', JSON.stringify(replay));
+  assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 1);
+});
+
+test('the manual-capability legacy opening cannot take the managed receipt', async () => {
+  const fixture = await seedLegacyRepairCandidate();
+  const result = await repairMissingSubmissionConfirmation({
+    userId: fixture.userId,
+    applicationId: fixture.applicationId,
+    legacyAttemptId: fixture.manualAttemptId,
+    dryRun: false,
+  });
+  assert.deepEqual(
+    { status: result.status, code: result.status === 'refused' ? result.code : null },
+    { status: 'refused', code: 'receipt_not_verified' },
+  );
+  assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 0);
+});
+
+test('naming an attempt that is not a legacy backfill opening is refused', async () => {
+  const fixture = await seedRepairCandidate();
+  const result = await repairMissingSubmissionConfirmation({
+    userId: fixture.userId,
+    applicationId: fixture.applicationId,
+    legacyAttemptId: fixture.attemptId,
+    dryRun: false,
+  });
+  assert.deepEqual(
+    { status: result.status, code: result.status === 'refused' ? result.code : null },
+    { status: 'refused', code: 'attempt_binding_missing' },
+  );
+  assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 0);
+});
+
+test('a legacy opening that already progressed is refused', async () => {
+  const fixture = await seedLegacyRepairCandidate({ pressOnGenerated: true });
+  const result = await repairMissingSubmissionConfirmation({
+    userId: fixture.userId,
+    applicationId: fixture.applicationId,
+    legacyAttemptId: fixture.generatedAttemptId,
+    dryRun: false,
+  });
+  assert.deepEqual(
+    { status: result.status, code: result.status === 'refused' ? result.code : null },
+    { status: 'refused', code: 'attempt_sequence_incomplete' },
   );
   assert.equal(await confirmationCount(fixture.userId, fixture.packetId), 0);
 });

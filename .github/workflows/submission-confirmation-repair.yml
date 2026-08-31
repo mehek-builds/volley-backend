@@ -11,6 +11,11 @@ on:
         description: Exact canonical application UUID
         required: true
         type: string
+      legacy_attempt_id:
+        description: Exact backfilled legacy_backfill attempt id to confirm (pre-ledger receipts only)
+        required: false
+        default: ''
+        type: string
       apply:
         description: Apply the eligible repair after the mandatory dry run
         required: true
@@ -30,6 +35,7 @@ jobs:
       API_BASE: ${{ vars.LITOS_API_BASE || 'https://student-outreach-backend.vercel.app' }}
       REPAIR_USER_ID: ${{ inputs.user_id }}
       REPAIR_APPLICATION_ID: ${{ inputs.application_id }}
+      REPAIR_LEGACY_ATTEMPT_ID: ${{ inputs.legacy_attempt_id }}
     steps:
       - name: Check out main
         uses: actions/checkout@v4
@@ -85,9 +91,14 @@ jobs:
         run: |
           set -euo pipefail
           output_file=$(mktemp)
+          legacy_args=()
+          if [ -n "$REPAIR_LEGACY_ATTEMPT_ID" ]; then
+            legacy_args=(--legacy-attempt-id "$REPAIR_LEGACY_ATTEMPT_ID")
+          fi
           npx tsx scripts/repair-submission-confirmation.mts \
             --user-id "$REPAIR_USER_ID" \
-            --application-id "$REPAIR_APPLICATION_ID" | tee "$output_file"
+            --application-id "$REPAIR_APPLICATION_ID" \
+            "${legacy_args[@]}" | tee "$output_file"
           jq --exit-status '.status == "eligible" or .status == "already_applied"' "$output_file" >/dev/null
 
       - name: Apply the exact repair
@@ -98,9 +109,14 @@ jobs:
         run: |
           set -euo pipefail
           output_file=$(mktemp)
+          legacy_args=()
+          if [ -n "$REPAIR_LEGACY_ATTEMPT_ID" ]; then
+            legacy_args=(--legacy-attempt-id "$REPAIR_LEGACY_ATTEMPT_ID")
+          fi
           npx tsx scripts/repair-submission-confirmation.mts \
             --user-id "$REPAIR_USER_ID" \
             --application-id "$REPAIR_APPLICATION_ID" \
+            "${legacy_args[@]}" \
             --apply | tee "$output_file"
           jq --exit-status '.status == "applied" or .status == "already_applied"' "$output_file" >/dev/null
 
@@ -112,9 +128,14 @@ jobs:
         run: |
           set -euo pipefail
           output_file=$(mktemp)
+          legacy_args=()
+          if [ -n "$REPAIR_LEGACY_ATTEMPT_ID" ]; then
+            legacy_args=(--legacy-attempt-id "$REPAIR_LEGACY_ATTEMPT_ID")
+          fi
           npx tsx scripts/repair-submission-confirmation.mts \
             --user-id "$REPAIR_USER_ID" \
-            --application-id "$REPAIR_APPLICATION_ID" | tee "$output_file"
+            --application-id "$REPAIR_APPLICATION_ID" \
+            "${legacy_args[@]}" | tee "$output_file"
           jq --exit-status '.status == "already_applied"' "$output_file" >/dev/null
 
       - name: Record repair evidence
@@ -127,5 +148,8 @@ jobs:
             echo "User: $REPAIR_USER_ID"
             echo "Application: $REPAIR_APPLICATION_ID"
             echo "Apply requested: ${{ inputs.apply }}"
+            if [ -n "$REPAIR_LEGACY_ATTEMPT_ID" ]; then
+              echo "Legacy attempt: $REPAIR_LEGACY_ATTEMPT_ID"
+            fi
             echo "Commit: $GITHUB_SHA"
           } >> "$GITHUB_STEP_SUMMARY"

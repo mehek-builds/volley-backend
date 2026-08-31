@@ -117,6 +117,14 @@ function confirmationEvidenceCode(
   events: readonly SubmissionAttemptEventRecord[],
   review: NonNullable<ReturnType<typeof readApplicationReview>>,
 ): string | null {
+  if (binding.source === 'legacy_backfill') {
+    // Only the generated initial-submission capability can carry a managed receipt; the projection
+    // admits a legacy confirmation solely under a legacy_* receipt code with no press events.
+    return binding.operation === 'initial_submission'
+      && review.receipt?.source === 'managed_browser'
+      ? 'legacy_managed_receipt'
+      : null;
+  }
   if (binding.source === 'direct_browser') return 'managed_application_receipt';
   if (binding.source !== 'managed_browser') return null;
   const verificationPress = events.some((event) => event.event_kind === 'press_observed'
@@ -158,6 +166,7 @@ function plannedConfirmationRecord(
 export async function repairMissingSubmissionConfirmation(input: {
   userId: string;
   applicationId: string;
+  legacyAttemptId?: string;
   dryRun?: boolean;
 }): Promise<SubmissionConfirmationRepairResult> {
   const dryRun = input.dryRun !== false;
@@ -252,13 +261,18 @@ export async function repairMissingSubmissionConfirmation(input: {
         return refused(scope, 'immutable_confirmation_exists',
           'An immutable confirmation exists but does not prove this exact canonical receipt tuple.');
       }
+      // Backfilled attempts carry deterministic ids that can never equal a pre-ledger receipt
+      // claim, so the operator names the exact legacy opening instead of matching on the claim.
       const openings = relatedEvents.filter((event) => event.event_kind === 'attempt_opened'
         && event.application_id === input.applicationId
         && event.packet_id === packet.id
-        && event.attempt_id === review.submission_claim_id);
+        && (input.legacyAttemptId
+          ? event.attempt_id === input.legacyAttemptId && event.source === 'legacy_backfill'
+          : event.attempt_id === review.submission_claim_id));
       if (openings.length === 0) {
-        return refused(scope, 'attempt_binding_missing',
-          'No immutable attempt opening matches the canonical application, packet, and receipt claim.');
+        return refused(scope, 'attempt_binding_missing', input.legacyAttemptId
+          ? 'No immutable legacy_backfill attempt opening carries the named attempt for this exact application and packet.'
+          : 'No immutable attempt opening matches the canonical application, packet, and receipt claim.');
       }
       if (openings.length !== 1) {
         return refused(scope, 'attempt_binding_ambiguous',
@@ -266,10 +280,19 @@ export async function repairMissingSubmissionConfirmation(input: {
       }
       const opening = openings[0]!;
       const attemptEvents = relatedEvents.filter((event) => event.attempt_id === opening.attempt_id);
-      const retrySafety = submissionAttemptRetrySafety(attemptEvents);
-      if (retrySafety.kind !== 'blocked_unverified' || retrySafety.reason !== 'pressed') {
-        return refused(scope, 'attempt_sequence_incomplete',
-          'The immutable attempt does not contain one exact authorized press awaiting confirmation.');
+      if (input.legacyAttemptId) {
+        // A conservative backfilled opening is confirmable only while it is untouched: any later
+        // fact means the attempt already progressed and must be resolved through its own route.
+        if (attemptEvents.length !== 1) {
+          return refused(scope, 'attempt_sequence_incomplete',
+            'The named legacy attempt must hold exactly its untouched conservative opening.');
+        }
+      } else {
+        const retrySafety = submissionAttemptRetrySafety(attemptEvents);
+        if (retrySafety.kind !== 'blocked_unverified' || retrySafety.reason !== 'pressed') {
+          return refused(scope, 'attempt_sequence_incomplete',
+            'The immutable attempt does not contain one exact authorized press awaiting confirmation.');
+        }
       }
       const binding = submissionAttemptBindingFromEvent(opening);
       const boundApplication = await canonicalApplicationForAttemptProjection(tx, binding);
