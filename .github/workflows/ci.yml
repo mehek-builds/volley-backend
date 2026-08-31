@@ -172,8 +172,13 @@ jobs:
   logo-coverage:
     needs: changes
   # scripts/check-logo-coverage.mjs scans the LIVE board over the network. Without a cap a wedged
-  # fetch runs to GitHub's 6-hour default.
-    timeout-minutes: 10
+  # fetch runs to GitHub's 6-hour default. The cap has to track the board: at ~9,000 sources the
+  # probe pool clears the check in ~9 minutes (measured 2026-09-01 at ~17 probes/s, the rate the
+  # logo service sustains). Ten was enough for the 381-company grouped count this script used to
+  # be, and killed EVERY run of the per-source rewrite on 2026-08-31, at exactly the cap, before
+  # the script had printed a single line. If the board grows enough that the heartbeat lines show
+  # honest progress running past this, raise it with the measurement rather than trimming it back.
+    timeout-minutes: 20
     # No schedule gate, unlike its neighbours: the hourly cron exists to catch logo drift that only
     # a live measurement can see, and `changes` resolves to true for a schedule event.
     if: needs.changes.outputs.code == 'true'
