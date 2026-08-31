@@ -3306,8 +3306,12 @@ test('every managed provider start, continuation POST, and direct session creati
   assert.ok(continuationFence.indexOf('lockSubmissionAttemptUser(tx, userId)')
     < continuationFence.indexOf('assertSubmissionAccountNotDraining(tx, userId)'));
   assert.ok(continuationFence.indexOf('assertSubmissionAccountNotDraining(tx, userId)')
-    < continuationFence.indexOf('managedProviderFenceDatabaseNow(tx)'));
-  assert.ok(continuationFence.indexOf('managedProviderFenceDatabaseNow(tx)')
+    < continuationFence.indexOf('databaseNow(tx)'));
+  // A budget this fence owns must start after the blocking advisory lock, never before it, or the
+  // lock wait is charged to the provider window and trips the minimum-dispatch assertion.
+  assert.ok(continuationFence.indexOf('lockSubmissionAttemptUser(tx, userId)')
+    < continuationFence.indexOf('startManagedBrowserRequestBudget('));
+  assert.ok(continuationFence.indexOf('databaseNow(tx)')
     < continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock('));
   assert.ok(continuationFence.indexOf('assertManagedBrowserRequestBudgetAtClock(')
     < continuationFence.indexOf('return continueManagedBrowser('));

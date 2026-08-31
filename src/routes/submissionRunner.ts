@@ -64,7 +64,7 @@ import {
   runManagedBrowser,
   startManagedBrowserRequestBudget,
 } from '../lib/browserbase';
-import { createFencedBrowserSession } from '../lib/browserProviderResourceCleanup';
+import { createFencedBrowserSession, databaseNow } from '../lib/browserProviderResourceCleanup';
 import { resolvedApprovedApplicationPageUrl, sortManagedPageUrlParams } from '../lib/workableApplicationUrl';
 import {
   managedContinuationAttemptFingerprint,
@@ -857,16 +857,6 @@ async function runManagedBrowserWithAccountFence(
   });
 }
 
-async function managedProviderFenceDatabaseNow(
-  executor: Pick<typeof db, 'execute'>,
-): Promise<Date> {
-  const result = await executor.execute(sql`select clock_timestamp() as now`);
-  const value = (result.rows[0] as { now?: Date | string } | undefined)?.now;
-  const parsed = value instanceof Date ? value : new Date(value ?? Number.NaN);
-  if (Number.isNaN(parsed.getTime())) throw new Error('Database provider-dispatch clock was unavailable');
-  return parsed;
-}
-
 /** Keep every retained-session provider POST behind the account drain until the call finishes. */
 async function continueManagedBrowserWithAccountFence(
   userId: string,
@@ -883,20 +873,27 @@ async function continueManagedBrowserWithAccountFence(
   if (options.minimumDispatchBudgetMs === undefined) {
     throw new Error('Fenced managed continuation requires a minimum dispatch budget');
   }
-  const requestBudget = options.requestBudget
-    ?? startManagedBrowserRequestBudget(options.timeoutMs!);
+  if (options.requestBudget && options.providerDeadlineAt === undefined) {
+    throw new Error('Fenced managed continuation with a pre-existing budget requires its provider deadline');
+  }
   const { timeoutMs, ...boundedOptions } = options;
   return db.transaction(async (tx) => {
     await lockSubmissionAttemptUser(tx, userId);
     await assertSubmissionAccountNotDraining(tx, userId);
-    const databaseNow = await managedProviderFenceDatabaseNow(tx);
+    const fenceNow = await databaseNow(tx);
+    /* A budget we own starts only after the advisory lock is held. pg_advisory_xact_lock blocks
+     * with no timeout, and this fence holds it across a whole provider call, so starting the clock
+     * before the wait would charge another caller's provider call to this one and then trip the
+     * minimum-dispatch assertion below on a call that still has its full window. */
+    const requestBudget = options.requestBudget
+      ?? startManagedBrowserRequestBudget(timeoutMs!);
     const providerDeadlineAt = options.providerDeadlineAt
-      ?? new Date(databaseNow.getTime() + timeoutMs!).toISOString();
+      ?? new Date(fenceNow.getTime() + timeoutMs!).toISOString();
     assertManagedBrowserRequestBudgetAtClock(
       requestBudget,
       providerDeadlineAt,
       options.minimumDispatchBudgetMs!,
-      databaseNow.getTime(),
+      fenceNow.getTime(),
     );
     return continueManagedBrowser(continuationToken, actions, {
       ...boundedOptions,

@@ -26,7 +26,8 @@ const RESOURCE_CREATION_RECOVERY_MS = 6 * 60 * 1000;
 type PersistentBrowserProvider = Exclude<BrowserProvider, 'stratus-managed'>;
 type BrowserProviderResourceType = 'session' | 'context';
 
-async function databaseNow(executor: Pick<typeof db, 'execute'>): Promise<Date> {
+/** One database clock read for every provider gate, so the row shape is corrected in one place. */
+export async function databaseNow(executor: Pick<typeof db, 'execute'>): Promise<Date> {
   const result = await executor.execute(sql`select clock_timestamp() as now`);
   const value = (result.rows[0] as { now?: Date | string } | undefined)?.now;
   const parsed = value instanceof Date ? value : new Date(value ?? Number.NaN);
