@@ -10045,17 +10045,12 @@ async function submit(row: ResumeRow, fastify: FastifyInstance, options: {
           }
           try {
             // Exactly one bounded continuation call. An uncertain click is never retried.
-            receiptResult = await continueManagedBrowserWithAccountFence(
-              row.user_id,
-              continuationToken,
-              codeActions,
-              {
-                submissionAttempt: securityCodeSubmissionAttempt,
-                requestBudget: continuationRequestBudget,
-                providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
-                minimumDispatchBudgetMs: MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS,
-              },
-            );
+            receiptResult = await continueManagedBrowserWithAccountFence(row.user_id, continuationToken, codeActions, {
+              submissionAttempt: securityCodeSubmissionAttempt,
+              requestBudget: continuationRequestBudget,
+              providerDeadlineAt: continuationAuthorization.providerDeadlineAt,
+              minimumDispatchBudgetMs: MANAGED_SECURITY_CODE_CONTINUATION_REMOTE_BUDGET_MS,
+            });
             securityCodeTerminalResultId = managedBrowserTerminalResultId(receiptResult);
             if (readManagedSubmitOutcome(receiptResult)?.pressed === true) {
               await appendRunnerAttemptFact(attemptBinding, 'press_observed', 'managed-security-code-submit', {
