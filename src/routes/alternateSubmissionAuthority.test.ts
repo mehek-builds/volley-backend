@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import type { ApplicationReviewState } from '../lib/applicationReview';
+import type { SubmissionAttemptEventRecord } from '../lib/submissionAttemptLedger';
+import {
+  expiredAlternateSubmissionReview,
+  extensionOutcomeBodySchema,
+  extensionStartBodySchema,
+  manualHandoffAvailable,
+  reviewWithoutPassiveHandoffUrl,
+} from './applications';
 
 const applications = readFileSync('src/routes/applications.ts', 'utf8');
 const runner = readFileSync('src/routes/submissionRunner.ts', 'utf8');
@@ -36,9 +45,142 @@ test('extension reservation closes the duplicate race under the shared attempt l
     "eventKind: 'attempt_opened'",
     'authorizeFinalSubmissionBoundary(binding',
     "evidenceCode: 'chrome_extension_employer_boundary_authorized'",
-    "return { kind: 'started' as const",
+    "kind: 'started' as const",
   ]);
   assert.match(transaction, /sql`\$\{generated_resumes\.spec\} = \$\{JSON\.stringify\(precheckRow\.spec\)\}::jsonb`/);
+});
+
+test('extension activation schemas fail closed for clients that do not enforce the server lease', () => {
+  const currentUrl = 'https://jobs.example.test/apply/42';
+  const handoffVersion = 'f'.repeat(64);
+  assert.equal(extensionStartBodySchema.safeParse({
+    authorization: 'user_initiated',
+    current_url: currentUrl,
+    handoff_version: handoffVersion,
+  }).success, false);
+  assert.equal(extensionStartBodySchema.safeParse({
+    authorization: 'user_initiated',
+    activation_contract: 'server-lease-v1',
+    current_url: currentUrl,
+    handoff_version: handoffVersion,
+  }).success, true);
+
+  const legacyOutcome = {
+    claim_id: 'b02dbb51-d173-476c-95dc-4abc8f1b1f96',
+    outcome: 'unknown',
+    final_url: currentUrl,
+  };
+  assert.equal(extensionOutcomeBodySchema.safeParse(legacyOutcome).success, false);
+  assert.equal(extensionOutcomeBodySchema.safeParse({
+    ...legacyOutcome,
+    activation_contract: 'server-lease-v1',
+    activation_id: '92332083-2e38-4805-a2bd-2335cd14fea4',
+    activation_lease_id: '20efaf9e-506c-4fd3-9484-e16513ddc92e',
+    activation_expires_at: '2026-08-31T10:05:00.000Z',
+  }).success, true);
+});
+
+test('passive reviews never disclose employer handoff URLs', () => {
+  const review = {
+    jd_text: 'Role',
+    status: 'needs_attention',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: '2026-08-31T10:00:00.000Z',
+    extension_handoff_url: 'https://jobs.example.test/apply/42',
+    extension_handoff_binding: {
+      version: 'dashboard_handoff_v1',
+      sha256: 'f'.repeat(64),
+    },
+  } as ApplicationReviewState;
+  assert.equal(manualHandoffAvailable(review), true);
+  const safe = reviewWithoutPassiveHandoffUrl(review);
+  assert.equal(safe.extension_handoff_url, undefined);
+  assert.equal(safe.extension_handoff_binding, undefined);
+});
+
+test('an expired alternate lease becomes one simple question and keeps its claim', () => {
+  const attemptId = 'b02dbb51-d173-476c-95dc-4abc8f1b1f96';
+  const observedAt = new Date('2026-08-31T10:00:00.000Z');
+  const baseEvent = {
+    id: '8fa6a1a4-f043-416f-b6bc-d62373f669af',
+    user_id: 'cf48e921-8543-466c-b51f-1598fd723235',
+    application_id: 'fd3a3c21-e8c2-4677-80e4-429d96a40cb9',
+    packet_id: '0cf0dcee-b030-4dd8-aaf4-84df811da7c3',
+    event_id: '8fa6a1a4-f043-416f-b6bc-d62373f669af',
+    attempt_id: attemptId,
+    parent_attempt_id: null,
+    event_kind: 'attempt_opened',
+    source: 'chrome_extension',
+    operation: 'initial_submission',
+    submission_run_id: null,
+    submission_claim_id: attemptId,
+    packet_version: 'f'.repeat(64),
+    posting_key: null,
+    job_id: null,
+    company_role: 'example::engineer',
+    company_name: 'Example',
+    role: 'Engineer',
+    portal_url: 'https://jobs.example.test/apply/42',
+    portal_identity: null,
+    proof_kind: null,
+    evidence_code: 'atomic_extension_claim_reserved',
+    boundary_activation_id: null,
+    boundary_expires_at: null,
+    observed_at: observedAt,
+    created_at: observedAt,
+  } as SubmissionAttemptEventRecord;
+  const boundary = {
+    ...baseEvent,
+    id: '20efaf9e-506c-4fd3-9484-e16513ddc92e',
+    event_id: '20efaf9e-506c-4fd3-9484-e16513ddc92e',
+    event_kind: 'boundary_authorized',
+    evidence_code: 'chrome_extension_employer_boundary_authorized',
+    boundary_activation_id: '92332083-2e38-4805-a2bd-2335cd14fea4',
+    boundary_expires_at: new Date('2026-08-31T10:05:00.000Z'),
+    observed_at: new Date('2026-08-31T10:00:01.000Z'),
+    created_at: new Date('2026-08-31T10:00:01.000Z'),
+  } as SubmissionAttemptEventRecord;
+  const press = {
+    ...baseEvent,
+    id: 'fb730938-b9a4-4809-b0ea-3526cf72ebcb',
+    event_id: 'fb730938-b9a4-4809-b0ea-3526cf72ebcb',
+    event_kind: 'press_observed',
+    evidence_code: 'extension_submit_may_have_been_pressed',
+    observed_at: new Date('2026-08-31T10:00:02.000Z'),
+    created_at: new Date('2026-08-31T10:00:02.000Z'),
+  } as SubmissionAttemptEventRecord;
+  const review = {
+    jd_text: 'Role',
+    status: 'submitting',
+    edited_terms: [],
+    questions: [],
+    skipped_reasons: [],
+    updated_at: observedAt.toISOString(),
+    portal_url: baseEvent.portal_url!,
+    submission_claimed_at: observedAt.toISOString(),
+    submission_claim_id: attemptId,
+    submission_packet_version: baseEvent.packet_version!,
+  } as ApplicationReviewState;
+
+  assert.equal(expiredAlternateSubmissionReview(
+    review,
+    [baseEvent, boundary, press],
+    new Date('2026-08-31T10:04:59.000Z'),
+  ), null);
+  const reconciled = expiredAlternateSubmissionReview(
+    review,
+    [baseEvent, boundary, press],
+    new Date('2026-08-31T10:05:01.000Z'),
+  );
+  assert.ok(reconciled);
+  assert.equal(reconciled.status, 'needs_attention');
+  assert.equal(reconciled.submission_claim_id, attemptId);
+  assert.equal(reconciled.attention_reason,
+    'Did this application reach the employer? Choose Yes or No before Litos does anything else.');
+  assert.deepEqual(reconciled.attention_categories, ['unverified_submission']);
+  assert.equal(reconciled.unverified_submission?.resolution, undefined);
 });
 
 test('extension outcome records press or typed uncertainty and confirms only exact receipts', () => {

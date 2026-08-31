@@ -3,6 +3,7 @@ import { eq, inArray } from 'drizzle-orm';
 import { db } from '../db';
 import {
   application_artifacts,
+  application_email_messages,
   application_submission_attempt_events,
   application_submission_events,
   applications,
@@ -133,6 +134,7 @@ type ArtifactRow = typeof artifacts.$inferSelect;
 type ArtifactVersionRow = typeof artifact_versions.$inferSelect;
 type LinkRow = typeof application_artifacts.$inferSelect;
 type CanonicalReceiptRow = typeof application_submission_events.$inferSelect;
+type EmployerEmailMessageRow = typeof application_email_messages.$inferSelect;
 
 export type AuthoritativeSubmissionProjectionSnapshot = {
   applications: ApplicationRow[];
@@ -141,6 +143,8 @@ export type AuthoritativeSubmissionProjectionSnapshot = {
   packets: PacketRow[];
   attempts: SubmissionAttemptEventRecord[];
   canonicalReceipts: CanonicalReceiptRow[];
+  /** Employer messages are needed only to verify content-bound email confirmation facts. */
+  emailMessages?: EmployerEmailMessageRow[];
   artifacts: ArtifactRow[];
   artifactVersions: ArtifactVersionRow[];
   links: LinkRow[];
@@ -184,10 +188,57 @@ const APPLICANT_FOUND_PACKET_RECEIPT_TEXTS = new Set([
   APPLICANT_FOUND_PACKET_RECEIPT_AFTER_PRESS_TEXT,
   APPLICANT_FOUND_PACKET_RECEIPT_WITHOUT_PRESS_TEXT,
 ]);
+
+export function applicantFoundSubmissionReceiptText(hasPress: boolean): string {
+  return hasPress
+    ? APPLICANT_FOUND_PACKET_RECEIPT_AFTER_PRESS_TEXT
+    : APPLICANT_FOUND_PACKET_RECEIPT_WITHOUT_PRESS_TEXT;
+}
 const SELF_SUBMITTED_RECEIPT_TEXT =
   'Confirmed by you: this employer asked for a document Litos could not attach, so you sent this application yourself.';
+
+export function selfSubmittedSubmissionReceiptText(): string {
+  return SELF_SUBMITTED_RECEIPT_TEXT;
+}
 const EXACT_WORKABLE_RECEIPT_TEXT = 'Your application has been submitted successfully.';
 const CANONICAL_FREE_ARTIFACT_PREFIX = `${CANONICAL_FREE_DOCUMENT_BINDING_PREFIX}artifact:`;
+const EMPLOYER_EMAIL_CONFIRMATION_EVIDENCE_PREFIX = 'employer_email_confirmation_v1:';
+
+export type EmployerEmailConfirmationEvidenceInput = {
+  attemptId: string;
+  userId: string;
+  packetId: string;
+  messageId: string;
+  alias: string;
+  confirmationText: string;
+  finalUrl: string;
+  receivedAt: Date | string;
+};
+
+/** Bind one immutable confirmation fact to the exact stored employer message and receipt. */
+export function employerEmailConfirmationEvidenceCode(
+  input: EmployerEmailConfirmationEvidenceInput,
+): string {
+  const receivedAt = input.receivedAt instanceof Date
+    ? input.receivedAt.toISOString()
+    : new Date(input.receivedAt).toISOString();
+  const sha256 = createHash('sha256').update(JSON.stringify([
+    input.attemptId,
+    input.userId,
+    input.packetId,
+    input.messageId,
+    input.alias.trim().toLowerCase(),
+    input.confirmationText,
+    input.finalUrl,
+    receivedAt,
+  ])).digest('hex');
+  return `${EMPLOYER_EMAIL_CONFIRMATION_EVIDENCE_PREFIX}${sha256}`;
+}
+
+function isEmployerEmailConfirmationEvidenceCode(value: string | null): boolean {
+  return typeof value === 'string'
+    && /^employer_email_confirmation_v1:[a-f0-9]{64}$/u.test(value);
+}
 
 const RECEIPT_SOURCES_BY_ATTEMPT_SOURCE: Partial<Record<SubmissionAttemptSource, readonly string[]>> = {
   managed_browser: ['managed_browser'],
@@ -584,6 +635,40 @@ function exactAttemptSequence(
       && [...providerConfirmationCodes].every((code) => typeof code === 'string'
         && /^legacy_.*(?:confirmation|confirmed|receipt)$/i.test(code));
   }
+  const exactEmployerEmail = attempt.confirmations.length === 1
+    && isEmployerEmailConfirmationEvidenceCode(attempt.confirmations[0]!.evidence_code);
+  if (exactEmployerEmail) {
+    if (!ordinaryOpeningEvidenceIsExact(opening)
+      || !hasBoundary
+      || boundaries.some((event) => !ordinaryBoundaryEvidenceIsExact(opening, event))
+      || presses.some((event) => !ordinaryPressEvidenceIsExact(opening, event))
+      || notSent.length > 0) return false;
+    const openingAt = opening.observed_at.getTime();
+    const boundaryAt = boundaries[0]!.observed_at.getTime();
+    const confirmationAt = attempt.confirmations[0]!.observed_at.getTime();
+    return boundaryAt >= openingAt
+      && confirmationAt >= boundaryAt
+      && presses.every((event) => event.observed_at.getTime() >= boundaryAt
+        && event.observed_at.getTime() <= confirmationAt);
+  }
+  const exactRetainedAttendedReceipt = attempt.confirmations.length === 1
+    && attempt.confirmations[0]!.evidence_code === 'attended_receipt_confirmed'
+    && (opening.source === 'managed_browser' || opening.source === 'direct_browser');
+  if (exactRetainedAttendedReceipt) {
+    if (!ordinaryOpeningEvidenceIsExact(opening)
+      || opening.operation !== 'initial_submission'
+      || !hasBoundary
+      || boundaries.some((event) => !ordinaryBoundaryEvidenceIsExact(opening, event))
+      || presses.some((event) => !ordinaryPressEvidenceIsExact(opening, event))
+      || notSent.length > 0) return false;
+    const openingAt = opening.observed_at.getTime();
+    const boundaryAt = boundaries[0]!.observed_at.getTime();
+    const confirmationAt = attempt.confirmations[0]!.observed_at.getTime();
+    return boundaryAt >= openingAt
+      && confirmationAt >= boundaryAt
+      && presses.every((event) => event.observed_at.getTime() >= boundaryAt
+        && event.observed_at.getTime() <= confirmationAt);
+  }
   if (confirmationCodes.has('applicant_attributed_orphan_confirmation')) return false;
   if (!ordinaryOpeningEvidenceIsExact(opening)) return false;
   const capabilityKind = attendedHandoffCapabilityKind(opening);
@@ -870,6 +955,43 @@ function receiptUrlIsAllowedForConfirmation(
     || (confirmation.evidence_code === 'controlled_receipt_verified'
       && typeof opening.portal_url === 'string'
       && exactControlledTestReceiptRoute(opening.portal_url, finalUrl));
+}
+
+function exactEmployerEmailReceiptMatches(
+  context: ClassifierContext,
+  attempt: AttemptProjection,
+  receipt: NonNullable<ApplicationReviewState['receipt']>,
+): boolean {
+  const opening = attempt.opening;
+  const confirmation = attempt.confirmation;
+  if (!opening
+    || !confirmation
+    || !isEmployerEmailConfirmationEvidenceCode(confirmation.evidence_code)
+    || receipt.source !== 'email_fallback'
+    || receipt.captured_at !== confirmation.observed_at.toISOString()
+    || !receiptUrlMatchesFrozenOpening(opening, receipt.final_url)) return false;
+  const matching = (context.snapshot.emailMessages ?? []).filter((message) => {
+    const receivedAt = message.received_at ?? message.created_at;
+    const confirmationText = message.subject?.trim()
+      || `Application confirmation received at ${message.alias}`;
+    return message.user_id === opening.user_id
+      && message.generated_resume_id === opening.packet_id
+      && message.classification === 'submission_confirmation'
+      && message.direction !== 'outbound'
+      && receivedAt.toISOString() === confirmation.observed_at.toISOString()
+      && confirmationText === receipt.confirmation_text
+      && confirmation.evidence_code === employerEmailConfirmationEvidenceCode({
+        attemptId: opening.attempt_id,
+        userId: opening.user_id,
+        packetId: opening.packet_id,
+        messageId: message.id,
+        alias: message.alias,
+        confirmationText,
+        finalUrl: receipt.final_url,
+        receivedAt,
+      });
+  });
+  return matching.length === 1;
 }
 
 export function measuredPersistedReceiptMatchesOpening(
@@ -1332,6 +1454,17 @@ function classifyGeneratedConfirmation(
   let applicantAttestationAuthority = false;
   if (receipt && !completeReceipt) reasons.push('receipt_incomplete');
   if (completeReceipt && receipt) {
+    const employerEmailReceipt = exactEmployerEmailReceiptMatches(context, attempt, receipt);
+    const retainedAttendedReceipt = confirmation.evidence_code === 'attended_receipt_confirmed'
+      && (opening.source === 'managed_browser' || opening.source === 'direct_browser')
+      && receipt.source === 'attended_handoff'
+      && measuredPersistedReceiptMatchesOpening(
+        opening,
+        confirmation,
+        receipt.final_url,
+        receipt.confirmation_text,
+        receipt.reference_id,
+      );
     const applicantAttestation = applicantAttestationReceiptMatches(
         opening,
         confirmation,
@@ -1345,7 +1478,8 @@ function classifyGeneratedConfirmation(
       receipt.final_url,
     );
     if (receipt.captured_at !== confirmation.observed_at.toISOString()
-      || !(applicantAttestation || legacyAutofillReceipt || measuredPersistedReceiptMatchesOpening(
+      || !(applicantAttestation || legacyAutofillReceipt || employerEmailReceipt || retainedAttendedReceipt
+        || measuredPersistedReceiptMatchesOpening(
         opening,
         confirmation,
         receipt.final_url,
@@ -1361,7 +1495,11 @@ function classifyGeneratedConfirmation(
         ))
       || (applicantAttestation
         ? receipt.source !== 'attended_handoff'
-        : !generatedReceiptSourceIsCompatible(opening.source, receipt.source))
+        : employerEmailReceipt
+          ? receipt.source !== 'email_fallback'
+          : retainedAttendedReceipt
+            ? receipt.source !== 'attended_handoff'
+          : !generatedReceiptSourceIsCompatible(opening.source, receipt.source))
       || (!applicantAttestation && opening.source !== 'legacy_backfill'
         ? canonicalFreeHybrid
           ? review?.submission_claim_id !== opening.attempt_id
@@ -1661,6 +1799,8 @@ async function projectionSnapshot(
     : [];
   const canonicalReceipts = await executor.select().from(application_submission_events)
     .where(eq(application_submission_events.user_id, userId));
+  const emailMessages = await executor.select().from(application_email_messages)
+    .where(eq(application_email_messages.user_id, userId));
   const ownedArtifacts = await executor.select().from(artifacts)
     .where(eq(artifacts.user_id, userId));
   const applicationIds = ownedApplications.map((application) => application.id);
@@ -1681,6 +1821,7 @@ async function projectionSnapshot(
     packets,
     attempts,
     canonicalReceipts,
+    emailMessages,
     artifacts: ownedArtifacts,
     artifactVersions: ownedArtifactVersions,
     links,

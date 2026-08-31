@@ -155,8 +155,8 @@ describe('every claim site goes through the one helper', () => {
     for (const path of SOURCES.filter((candidate) => candidate !== 'src/lib/submissionStop.ts')) {
       uses += (await readFile(path, 'utf8')).match(/submissionClaimPatch\(/g)?.length ?? 0;
     }
-    assert.equal(uses, 4,
-      'the four claim sites: claimSubmission, claimSecurityCodeSubmission, extension-start, unsupported email');
+    assert.equal(uses, 6,
+      'the six claim sites: claimSubmission, claimSecurityCodeSubmission, extension-start, unsupported email, manual handoff, self-submitted');
   });
 
   test('the helper clears the stop, which is the whole reason it exists', () => {

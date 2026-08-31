@@ -19,11 +19,15 @@ test('Free attended submissions stay manual while standing consent remains entit
     source.indexOf("'/applications/:id/submission/extension-start'"),
     source.indexOf("'/applications/:id/submission/extension-outcome'"),
   );
-  assert.match(route, /extensionAuthorizationRequiresAutomaticSubmission\(parsed\.data\.authorization\)/);
-  assert.match(route, /requireFeature\([\s\S]*?'automatic_submission'/);
+  assert.match(route, /parsed\.data\.authorization === 'standing_consent'/);
+  assert.match(route, /consentRow\?\.automatic_submission_enabled === true/);
+  assert.match(route, /consentRow\.automatic_submission_consent_version === AUTOMATIC_SUBMISSION_CONSENT_VERSION/);
+  assert.match(route, /await getEntitlementSnapshot\(userId, new Date\(\), tx\)/);
+  assert.doesNotMatch(route, /requireFeature\(/);
   assert.ok(
-    route.indexOf('extensionAuthorizationRequiresAutomaticSubmission(parsed.data.authorization)')
-      < route.indexOf("'automatic_submission'"),
+    route.indexOf("parsed.data.authorization === 'standing_consent'")
+      < route.indexOf('await getEntitlementSnapshot(userId, new Date(), tx)'),
+    'only the standing-consent branch should spend automatic-submission entitlement',
   );
 });
 
@@ -43,6 +47,7 @@ test('standing-consent extension authority is revalidated under lock and returns
   assert.match(route, /activation_id: result\.activationId/);
   assert.match(route, /activation_lease_id: result\.activationLeaseId/);
   assert.match(route, /activation_expires_at: result\.activationExpiresAt/);
+  assert.match(route, /activation_contract: 'server-lease-v1'/);
 });
 
 test('attended extension refill returns the exact owned generated packet and a fresh resume capability', () => {
@@ -126,33 +131,32 @@ test('extension outcomes only mark confirmed claims applied', () => {
   );
   assert.match(route, /questions:\s*current\.questions/,
     'a receipt must bind to the stored snapshot the extension sent');
+  assert.match(route, /authorization\.activationId !== parsed\.data\.activation_id/);
+  assert.match(route, /authorization\.leaseId !== parsed\.data\.activation_lease_id/);
+  assert.match(route, /authorization\.expiresAt !== parsed\.data\.activation_expires_at/);
   assert.doesNotMatch(route, /resolvedPacketAuditQuestions\(/,
     'post-send profile or clock drift must not prevent receipt recording');
 });
 
-test('attended handoff submission trusts only the retained exact session receipt', () => {
+test('attended handoff submission records either an exact retained receipt or an applicant attestation', () => {
   assert.match(source, /handoffCompleteBodySchema/);
   assert.match(source, /submission\/handoff-complete'[\s\S]*?preHandler: requireAuth/);
-  assert.match(source, /parsed\.data\.outcome === 'submitted'/);
-  assert.match(source, /!current\.browser_session_id/);
-  assert.match(source, /getBrowserSession\(current\.browser_session_id\)/);
-  assert.match(source, /connectToSession\(session\)/);
-  assert.match(source, /observedReceipt = await readReceipt\(connected\.page\)/);
-  assert.match(source, /extensionEmployerReceiptIsSufficient\([\s\S]*?confirmationText: observedReceipt\.confirmationText[\s\S]*?finalUrl: observedReceipt\.finalUrl/);
-  assert.match(source, /source: 'attended_handoff'/);
-  assert.match(source, /pipeline_stage: 'applied'/);
-  assert.doesNotMatch(source, /Submitted by the applicant in the live company page/);
-  assert.doesNotMatch(source, /confirmation_text: parsed\.data\.confirmation_text/);
-  assert.doesNotMatch(source, /final_url: parsed\.data\.final_url/);
-  const handler = source.slice(source.indexOf("'/applications/:id/submission/handoff-complete'"));
-  /* The check moved into preparedRunHandoffExpired, so this used to look for a field name the
-     handler no longer spells. indexOf then returned -1, which is less than everything, and the
-     ordering assertion passed while measuring nothing. Anchored on the call and on its presence, so
-     renaming it again fails here rather than going quiet. */
-  const expiryGate = handler.indexOf('preparedRunHandoffExpired(current)');
-  assert.ok(expiryGate >= 0, 'the handoff completion must still consult the expiry gate');
-  assert.ok(
-    expiryGate < handler.indexOf("parsed.data.outcome === 'submitted'"),
-    'expired handoffs must be rejected before either completion outcome mutates state',
+  const handler = source.slice(
+    source.indexOf("'/applications/:id/submission/handoff-complete'"),
+    source.indexOf("'/applications/:id/submission/self-submitted'"),
   );
+  assert.match(handler, /parsed\.data\.outcome === 'submitted' && current\.browser_session_id/);
+  assert.match(handler, /getBrowserSession\(current\.browser_session_id\)/);
+  assert.match(handler, /connectToSession\(session\)/);
+  assert.match(handler, /observedReceipt = await readReceipt\(connected\.page\)/);
+  assert.match(handler, /extensionEmployerReceiptIsSufficient\([\s\S]*?confirmationText: observedReceipt\.confirmationText[\s\S]*?finalUrl: observedReceipt\.finalUrl/);
+  assert.match(handler, /await lockSubmissionAttemptUser\(tx, userId\)[\s\S]*?\.for\('update'\)/);
+  assert.match(handler, /const applicantAttestation = !observedReceipt/);
+  assert.match(handler, /applicantFoundSubmissionReceiptText\(/);
+  assert.match(handler, /evidenceCode: applicantAttestation \? 'applicant_found_submission' : 'attended_receipt_confirmed'/);
+  assert.match(handler, /authoritativeConfirmedProjectionMatches/);
+  assert.match(handler, /source: 'attended_handoff'/);
+  assert.match(handler, /pipeline_stage: 'applied'/);
+  assert.doesNotMatch(handler, /confirmation_text: parsed\.data\.confirmation_text/);
+  assert.doesNotMatch(handler, /final_url: parsed\.data\.final_url/);
 });

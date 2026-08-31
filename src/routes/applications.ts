@@ -9,7 +9,16 @@ import { withReadOnlyRetry } from '../db/readOnlyRetry';
 import { applyReviewPatch, settleStall } from '../lib/applicationStall';
 import type { ApplicationReviewState } from '../lib/applicationReview';
 import { readExperienceBankOrSeedFromBaseResume } from '../db/experienceBank';
-import { career_page_sources, generated_resumes, monitored_jobs, profiles, users, type ExperienceBankEntry } from '../db/schema';
+import {
+  application_submission_events,
+  applications,
+  career_page_sources,
+  generated_resumes,
+  monitored_jobs,
+  profiles,
+  users,
+  type ExperienceBankEntry,
+} from '../db/schema';
 import {
   findPdfTextFidelityIssues,
   findPdfSafeMarginIssues,
@@ -59,13 +68,15 @@ import {
   submissionQuestionGate,
   submitRequestDisposition,
 } from '../lib/submissionSafety';
-import { releasedExpiredAttendedHandoffReview } from '../lib/expiredHandoffClaimRelease';
+import {
+  expiredAttendedHandoffClaimIsReleasable,
+  releaseExpiredAttendedHandoffClaim,
+} from '../lib/expiredHandoffClaimRelease';
 import { submissionClaimPatch } from '../lib/submissionStop';
 import {
   advanceCanonicalApplicationFromPacketSubmission,
   syncCanonicalApplicationRow,
 } from '../lib/canonicalApplicationSync';
-import { extensionAuthorizationRequiresAutomaticSubmission } from '../lib/submissionAuthorization';
 import {
   detectPortal,
   isManagedAttendedAccountPortal,
@@ -98,7 +109,7 @@ import {
   extensionEmployerDeliveryBindingIssue,
   extensionEmployerDeliveryProjection,
 } from '../lib/employerDeliveryIdentity';
-import { getEntitlementSnapshot, requireFeature } from '../lib/entitlements';
+import { getEntitlementSnapshot } from '../lib/entitlements';
 import { AUTOMATIC_SUBMISSION_CONSENT_VERSION } from '../lib/automationConsent';
 import { appendEditedResumeArtifactVersion } from '../lib/resumeArtifactVersions';
 import {
@@ -131,20 +142,25 @@ import {
   authorizeFinalSubmissionBoundary,
   freezePostingIdentity,
   lockSubmissionAttemptUser,
+  submissionBoundaryAuthorization,
   submissionAttemptBindingFromEvent,
   submissionAttemptEventId,
   submissionAttemptEventsForPacket,
   submissionAttemptsOpenedToday,
+  submissionAttemptRetrySafety,
   type SubmissionAttemptBinding,
+  type SubmissionAttemptEventRecord,
 } from '../lib/submissionAttemptLedger';
 import {
   unsupportedEmailConfirmationEvidenceCode,
   unsupportedEmailConfirmationText,
 } from '../lib/unsupportedEmailReceipt';
 import {
+  applicantFoundSubmissionReceiptText,
   authoritativeConfirmedProjectionMatches,
   authoritativeSubmissionProjection,
   measuredPersistedReceiptMatchesOpening,
+  selfSubmittedSubmissionReceiptText,
 } from '../lib/authoritativeSubmissionProjection';
 
 const paramsSchema = z.object({ id: z.string().uuid() });
@@ -246,13 +262,18 @@ const statusBodySchema = z.object({
 const unverifiedOutcomeBodySchema = z.object({
   found: z.boolean(),
 });
-const extensionStartBodySchema = z.object({
+export const extensionStartBodySchema = z.object({
   authorization: z.enum(['standing_consent', 'user_initiated']),
+  activation_contract: z.literal('server-lease-v1'),
   handoff_version: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   current_url: z.string().url().max(4000).optional(),
 });
 const extensionReceiptUrlSchema = z.string().url().max(4000).refine(isSafeExtensionReceiptUrl, 'Confirmation URL must use HTTPS');
-const extensionOutcomeBodySchema = z.object({
+export const extensionOutcomeBodySchema = z.object({
+  activation_contract: z.literal('server-lease-v1'),
+  activation_id: z.string().uuid(),
+  activation_lease_id: z.string().uuid(),
+  activation_expires_at: z.string().datetime({ offset: true }),
   claim_id: z.string().uuid(),
   outcome: z.enum(['confirmed', 'failed', 'unknown', 'cancelled']),
   confirmation_text: z.string().max(2000).optional(),
@@ -300,6 +321,62 @@ function reviewSpec(review: unknown) {
 
 function approvedReviewSpec(review: unknown, approvedAt: string) {
   return sql`jsonb_set(${reviewSpec(review)}, '{_cover_letter,approved_at}', ${JSON.stringify(approvedAt)}::jsonb, true)`;
+}
+
+/** Stored employer handoff locations stay server-side until the action-time POST authorizes them. */
+export function reviewWithoutPassiveHandoffUrl(review: ApplicationReviewState): ApplicationReviewState {
+  const {
+    extension_handoff_url: _extensionHandoffUrl,
+    extension_handoff_binding: _extensionHandoffBinding,
+    ...safe
+  } = review;
+  return safe;
+}
+
+export function manualHandoffAvailable(review: ApplicationReviewState): boolean {
+  return Boolean(review.extension_handoff_url
+    || ((review.status === 'filling' || review.status === 'needs_attention')
+      && review.browser_session_id));
+}
+
+const ALTERNATE_SUBMISSION_SOURCES = new Set([
+  'chrome_extension',
+  'attended_handoff',
+  'unsupported_email',
+]);
+
+/** An expired employer capability remains possible delivery, so ask once and never resend it. */
+export function expiredAlternateSubmissionReview(
+  review: ApplicationReviewState,
+  events: readonly SubmissionAttemptEventRecord[],
+  now: Date = new Date(),
+): ApplicationReviewState | null {
+  const claimId = review.submission_claim_id;
+  if (!claimId || review.status === 'submitted' || review.submitted_at || review.receipt) return null;
+  const exact = events.filter((event) => event.attempt_id === claimId);
+  const opening = exact.find((event) => event.event_kind === 'attempt_opened');
+  if (!opening
+    || !ALTERNATE_SUBMISSION_SOURCES.has(opening.source)) return null;
+  const safety = submissionAttemptRetrySafety(exact);
+  const boundaries = exact.filter((event) => event.event_kind === 'boundary_authorized');
+  const boundaryExpiry = boundaries.length === 1 ? boundaries[0]!.boundary_expires_at : null;
+  if (safety.kind !== 'blocked_unverified'
+    || (safety.reason !== 'boundary_authorized' && safety.reason !== 'pressed')
+    || !boundaryExpiry
+    || boundaryExpiry.getTime() > now.getTime()) return null;
+  const nowIso = now.toISOString();
+  return applyReviewPatch(review, {
+    status: 'needs_attention',
+    submission_error: undefined,
+    attention_reason: 'Did this application reach the employer? Choose Yes or No before Litos does anything else.',
+    attention_categories: ['unverified_submission'],
+    unverified_submission: {
+      at: safety.at,
+      cause: 'no_confirmation_state',
+      ...(review.portal_url ? { portal_url: review.portal_url } : {}),
+      ...(review.submission_run_id ? { submission_run_id: review.submission_run_id } : {}),
+    },
+  }, () => nowIso);
 }
 
 /* Exported for its own test. Which state a re-run clears and which it carries forward is the whole
@@ -414,28 +491,78 @@ async function repairExpiredAttendedHandoffClaim(
   userId: string,
   log: FastifyRequest['log'],
 ): Promise<NonNullable<Awaited<ReturnType<typeof ownedResume>>> | null> {
-  const current = readApplicationReview(row.spec);
-  if (!current) return null;
-  const released = await releasedExpiredAttendedHandoffReview(row.id, userId, current);
-  if (!released) return null;
-  const updated = await db.update(generated_resumes)
-    .set({ spec: reviewSpec(released) })
-    .where(and(
+  const result = await db.transaction(async (tx) => {
+    await lockSubmissionAttemptUser(tx, userId);
+    const [locked] = await tx.select().from(generated_resumes).where(and(
       eq(generated_resumes.id, row.id),
       eq(generated_resumes.user_id, userId),
-      sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-    ))
-    .returning({ id: generated_resumes.id });
-  if (updated.length === 0) return null;
+    )).limit(1).for('update');
+    const current = locked ? readApplicationReview(locked.spec) : null;
+    if (!locked || !current) return null;
+    const clockResult = await tx.execute(sql`select clock_timestamp() as now`);
+    const clockValue = (clockResult.rows[0] as { now?: Date | string } | undefined)?.now;
+    const databaseNow = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);
+    if (Number.isNaN(databaseNow.getTime())) throw new Error('Database reconciliation clock was unavailable');
+    const events = await submissionAttemptEventsForPacket(userId, locked.id, { executor: tx });
+    const reconciled = expiredAlternateSubmissionReview(current, events, databaseNow);
+    if (reconciled) {
+      const [updated] = await tx.update(generated_resumes)
+        .set({ spec: reviewSpec(reconciled) })
+        .where(and(
+          eq(generated_resumes.id, locked.id),
+          eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+        ))
+        .returning({ id: generated_resumes.id });
+      if (!updated) return null;
+      return { row: locked, review: reconciled, disposition: 'unverified' as const };
+    }
+
+    /* Legacy handoffs can predate the immutable attempt ledger. Only that empty-ledger case may
+     * use the old pre-click release rule, and its canonical observation check runs under the same
+     * user lock as the row write. */
+    const claimEvents = current.submission_claim_id
+      ? events.filter((event) => event.attempt_id === current.submission_claim_id)
+      : [];
+    if (claimEvents.length > 0
+      || !expiredAttendedHandoffClaimIsReleasable(current, databaseNow.getTime())) return null;
+    const [canonicalEvent] = await tx.select({ id: application_submission_events.id })
+      .from(application_submission_events)
+      .innerJoin(applications, eq(application_submission_events.application_id, applications.id))
+      .where(and(
+        eq(application_submission_events.user_id, userId),
+        eq(applications.user_id, userId),
+        eq(applications.legacy_generated_resume_id, locked.id),
+      ))
+      .limit(1);
+    if (canonicalEvent) return null;
+    const released = releaseExpiredAttendedHandoffClaim(current, databaseNow.toISOString());
+    const [updated] = await tx.update(generated_resumes)
+      .set({ spec: reviewSpec(released) })
+      .where(and(
+        eq(generated_resumes.id, locked.id),
+        eq(generated_resumes.user_id, userId),
+        sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+      ))
+      .returning({ id: generated_resumes.id });
+    if (!updated) return null;
+    return { row: locked, review: released, disposition: 'released' as const };
+  });
+  if (!result) return null;
   log.info(
     {
-      applicationId: row.id,
-      releasedClaimId: released.claim_released?.claim_id ?? null,
-      handoffExpiredAt: current.handoff_expires_at,
+      applicationId: result.row.id,
+      claimId: result.review.submission_claim_id ?? result.review.claim_released?.claim_id ?? null,
+      disposition: result.disposition,
     },
-    'Released the submission claim of an expired attended handoff whose run never pressed send',
+    result.disposition === 'unverified'
+      ? 'Reconciled an expired employer capability to an applicant outcome question'
+      : 'Released a legacy attended handoff whose pre-click claim expired',
   );
-  return { ...row, spec: { ...(row.spec as StoredSpec), _review: released } };
+  return {
+    ...result.row,
+    spec: { ...(result.row.spec as StoredSpec), _review: result.review },
+  };
 }
 
 function editableResumeSpec(value: unknown): ResumeSpec {
@@ -1068,53 +1195,160 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       });
       if (!audit.valid) return reply.status(409).send(packetAuditClientError(audit));
       const auditedRow = audit.row;
-
-      // PDF and alias verification perform external reads. Re-read the owner-scoped row after
-      // those awaits and reject unless the complete saved packet is still byte-for-byte the one
-      // that was audited. The URL below is derived only from this refreshed row, never the earlier
-      // snapshot, so a concurrent portal/job/status/claim mutation cannot release a stale URL.
-      const refreshed = await ownedResume(request, reply);
-      if (!refreshed) return;
-      if (refreshed.resume_object_key !== auditedRow.resume_object_key
-        || !isDeepStrictEqual(refreshed.spec, auditedRow.spec)) {
+      const userId = request.jwtPayload!.userId;
+      const result = await db.transaction(async (tx) => {
+        await lockSubmissionAttemptUser(tx, userId);
+        const [locked] = await tx.select().from(generated_resumes).where(and(
+          eq(generated_resumes.id, auditedRow.id),
+          eq(generated_resumes.user_id, userId),
+        )).limit(1).for('update');
+        if (!locked
+          || locked.resume_object_key !== auditedRow.resume_object_key
+          || !isDeepStrictEqual(locked.job_context, auditedRow.job_context)
+          || !sameApplicationPacketSpec(locked.spec, auditedRow.spec)) {
+          return { kind: 'changed' as const };
+        }
+        const current = readApplicationReview(locked.spec);
+        if (!current) return { kind: 'no_review' as const };
+        if ((current.status === 'filling' || current.status === 'needs_attention')
+          && current.browser_session_id) {
+          return {
+            kind: 'live_session' as const,
+            sessionId: current.browser_session_id,
+          };
+        }
+        const url = verifiedDashboardHandoffUrl({
+          applicationId: locked.id,
+          userId: locked.user_id,
+          frozenUrl: current.portal_url,
+          frozenHandoffUrl: current.extension_handoff_url,
+          frozenHandoffBinding: current.extension_handoff_binding,
+          frozenAtsName: current.ats_name,
+          status: current.status,
+          attentionReason: current.attention_reason,
+          attentionCategories: current.attention_categories,
+          submissionClaimedAt: current.submission_claimed_at,
+          submissionClaimId: current.submission_claim_id,
+          submissionPacketVersion: current.submission_packet_version,
+          submissionAttemptedAt: current.submission_attempted_at,
+          submittedAt: current.submitted_at,
+          receipt: current.receipt,
+          unverifiedSubmission: current.unverified_submission,
+        });
+        if (!url) return { kind: 'unavailable' as const };
+        const postingIdentity = freezePostingIdentity(locked.job_context, current.portal_url);
+        const duplicate = await duplicateApplicationVerdict({
+          userId,
+          applicationId: locked.id,
+          jobContext: locked.job_context,
+          portalUrl: current.portal_url,
+        }, tx);
+        if (duplicate.kind !== 'clear') return { kind: 'duplicate_risk' as const, verdict: duplicate };
+        const canonicalApplication = await canonicalApplicationForNewPacketAttempt(tx, {
+          userId,
+          packetId: locked.id,
+          postingIdentity,
+        });
+        const claimId = randomUUID();
+        const now = new Date().toISOString();
+        const next: ApplicationReviewState = {
+          ...current,
+          ...submissionClaimPatch(now, claimId),
+          submission_packet_version: audit.audit.packet_version,
+          submission_authorization: {
+            source: 'user_initiated_extension',
+            authorized_at: now,
+          },
+          updated_at: now,
+        };
+        const [updated] = await tx.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
+          eq(generated_resumes.id, locked.id),
+          eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+          sql`${generated_resumes.spec}->'_review'->>'submission_claimed_at' is null`,
+        )).returning({ id: generated_resumes.id });
+        if (!updated) return { kind: 'changed' as const };
+        const binding: SubmissionAttemptBinding = {
+          attemptId: claimId,
+          userId,
+          packetId: locked.id,
+          applicationId: canonicalApplication.id,
+          parentAttemptId: null,
+          source: 'attended_handoff',
+          operation: 'manual_submission',
+          postingIdentity,
+          submissionRunId: current.submission_run_id ?? null,
+          submissionClaimId: claimId,
+          packetVersion: audit.audit.packet_version,
+        };
+        await appendSubmissionAttemptEvent({
+          ...binding,
+          eventId: submissionAttemptEventId(claimId, 'attempt_opened', 'manual-handoff-reservation'),
+          eventKind: 'attempt_opened',
+          evidenceCode: `attended_handoff_capability_v1:manual_handoff:${audit.audit.audit_digest}:${audit.audit.packet_version}`,
+          observedAt: new Date(now),
+        }, { executor: tx });
+        const authorization = await authorizeFinalSubmissionBoundary(binding, {
+          executor: tx,
+          factKey: 'manual-handoff-boundary',
+          evidenceCode: 'attended_handoff_employer_boundary_authorized',
+        });
+        if (authorization.kind !== 'fresh') throw new Error('MANUAL_HANDOFF_BOUNDARY_CONFLICT');
+        return {
+          kind: 'authorized' as const,
+          url,
+          next,
+          claimId,
+          authorization: authorization.authorization,
+        };
+      });
+      if (result.kind === 'live_session') {
+        try {
+          const url = await getLiveViewUrl(result.sessionId);
+          return reply.send({
+            manual_handoff: {
+              mode: 'retained_session',
+              url,
+              audit_digest: audit.audit.audit_digest,
+              packet_version: audit.audit.packet_version,
+              pdf_sha256: audit.audit.bindings.pdf.sha256,
+              size_bytes: audit.audit.bindings.pdf.sizeBytes,
+            },
+          });
+        } catch {
+          return reply.status(409).send({
+            error: 'The retained company session is no longer available. Reload this application before continuing.',
+            code: 'MANUAL_HANDOFF_STALE',
+          });
+        }
+      }
+      if (result.kind === 'changed') {
         return reply.status(409).send({
           error: 'This application changed while its company handoff was being verified. Reload it before continuing.',
           code: 'MANUAL_HANDOFF_STALE',
         });
       }
-      const refreshedReview = readApplicationReview(refreshed.spec);
-      if (!refreshedReview) {
+      if (result.kind === 'no_review') {
         return reply.status(409).send({ error: 'Application review is not available for this resume' });
       }
-
-      const url = verifiedDashboardHandoffUrl({
-        applicationId: refreshed.id,
-        userId: refreshed.user_id,
-        frozenUrl: refreshedReview.portal_url,
-        frozenHandoffUrl: refreshedReview.extension_handoff_url,
-        frozenHandoffBinding: refreshedReview.extension_handoff_binding,
-        frozenAtsName: refreshedReview.ats_name,
-        status: refreshedReview.status,
-        attentionReason: refreshedReview.attention_reason,
-        attentionCategories: refreshedReview.attention_categories,
-        submissionClaimedAt: refreshedReview.submission_claimed_at,
-        submissionClaimId: refreshedReview.submission_claim_id,
-        submissionPacketVersion: refreshedReview.submission_packet_version,
-        submissionAttemptedAt: refreshedReview.submission_attempted_at,
-        submittedAt: refreshedReview.submitted_at,
-        receipt: refreshedReview.receipt,
-        unverifiedSubmission: refreshedReview.unverified_submission,
-      });
-      if (!url) {
+      if (result.kind === 'unavailable') {
         return reply.status(409).send({
           error: 'This application no longer has a verified company handoff. Reload it before continuing.',
           code: 'MANUAL_HANDOFF_STALE',
         });
       }
-
+      if (result.kind === 'duplicate_risk') {
+        return reply.status(409).send(duplicateRiskResponse(result.verdict));
+      }
       return reply.send({
         manual_handoff: {
-          url,
+          mode: 'chrome_extension',
+          url: result.url,
+          claim_id: result.claimId,
+          activation_contract: 'server-lease-v1',
+          activation_id: result.authorization.activationId,
+          activation_lease_id: result.authorization.leaseId,
+          activation_expires_at: result.authorization.expiresAt,
           audit_digest: audit.audit.audit_digest,
           packet_version: audit.audit.packet_version,
           pdf_sha256: audit.audit.bindings.pdf.sha256,
@@ -1135,6 +1369,27 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const stored = row.spec as StoredSpec;
       const review = readApplicationReview(stored);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
+      let authorizedManualClaim = false;
+      if (review.submission_claim_id && review.submission_packet_version) {
+        const events = (await submissionAttemptEventsForPacket(row.user_id, row.id))
+          .filter((event) => event.attempt_id === review.submission_claim_id);
+        const opening = events.find((event) => event.event_kind === 'attempt_opened');
+        const authorization = await submissionBoundaryAuthorization(
+          row.user_id,
+          review.submission_claim_id,
+        );
+        const safety = submissionAttemptRetrySafety(events);
+        authorizedManualClaim = Boolean(opening
+          && opening.source === 'attended_handoff'
+          && opening.operation === 'manual_submission'
+          && opening.submission_claim_id === review.submission_claim_id
+          && opening.packet_version === review.submission_packet_version
+          && authorization?.active
+          && safety.kind === 'blocked_unverified'
+          && safety.reason === 'boundary_authorized'
+          && safety.leaseId === authorization.leaseId
+          && safety.expiresAt === authorization.expiresAt);
+      }
       if (!extensionHandoffPacketMatches({
         frozenUrl: review.portal_url,
         frozenHandoffUrl: review.extension_handoff_url,
@@ -1142,7 +1397,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         frozenAtsName: review.ats_name,
         status: review.status,
         attentionReason: review.attention_reason,
-        submissionClaimedAt: review.submission_claimed_at,
+        submissionClaimedAt: authorizedManualClaim ? undefined : review.submission_claimed_at,
       })) {
         return reply.status(409).send({ error: 'This saved application does not match the company form open in Chrome' });
       }
@@ -1261,14 +1516,6 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       const params = paramsSchema.safeParse(request.params);
       if (!params.success) return reply.status(400).send({ error: 'Invalid application id' });
       const userId = request.jwtPayload!.userId;
-      if (extensionAuthorizationRequiresAutomaticSubmission(parsed.data.authorization)) {
-        const automaticSubmission = await requireFeature(
-          userId,
-          'automatic_submission',
-          'extension_automatic_submission',
-        );
-        if (!automaticSubmission.allowed) return reply.status(402).send(automaticSubmission.denial);
-      }
       /* THE DUPLICATE GATE for the extension path, and it is the only one of the five that never
        * touches submissionRunner.submit: the extension does the filling and the clicking in the
        * applicant's own browser, and this route is the moment Litos authorizes it to. Refusing at
@@ -1583,6 +1830,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       return reply.send({
         application_id: result.row.id,
         claim_id: result.claimId,
+        activation_contract: 'server-lease-v1',
         activation_id: result.activationId,
         activation_lease_id: result.activationLeaseId,
         activation_expires_at: result.activationExpiresAt,
@@ -1658,6 +1906,17 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           || opening.operation !== 'initial_submission'
           || !events.some((event) => event.event_kind === 'boundary_authorized')) {
           throw new Error('EXTENSION_ATTEMPT_AUTHORITY_MISSING');
+        }
+        const authorization = await submissionBoundaryAuthorization(
+          latest.user_id,
+          parsed.data.claim_id,
+          { executor: tx },
+        );
+        if (!authorization
+          || authorization.activationId !== parsed.data.activation_id
+          || authorization.leaseId !== parsed.data.activation_lease_id
+          || authorization.expiresAt !== parsed.data.activation_expires_at) {
+          throw new Error('EXTENSION_ACTIVATION_LEASE_MISMATCH');
         }
         const binding = submissionAttemptBindingFromEvent(opening);
         const pressMayHaveOccurred = outcome !== 'cancelled';
@@ -2041,8 +2300,12 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (claimed.length === 0) {
         const refreshed = await ownedResume(request, reply);
         if (!refreshed) return;
-        const review = readApplicationReview(refreshed.spec);
-        return reply.status(202).send({ application_id: row.id, review: review ?? current });
+        const responseReview = readApplicationReview(refreshed.spec) ?? current;
+        return reply.status(202).send({
+          application_id: row.id,
+          review: reviewWithoutPassiveHandoffUrl(responseReview),
+          manual_handoff_available: manualHandoffAvailable(responseReview),
+        });
       }
       return reply.send({ application_id: row.id, review: next });
     },
@@ -2885,9 +3148,11 @@ export async function applicationRoutes(fastify: FastifyInstance) {
         eq(generated_resumes.user_id, request.jwtPayload!.userId),
       )).limit(1);
       const responseRow = refreshed ?? row;
+      const responseReview = readApplicationReview(responseRow.spec) ?? processed ?? next;
       return reply.status(202).send({
         application_id: row.id,
-        review: readApplicationReview(responseRow.spec) ?? processed ?? next,
+        review: reviewWithoutPassiveHandoffUrl(responseReview),
+        manual_handoff_available: manualHandoffAvailable(responseReview),
         cover_letter: storedCoverLetter(responseRow),
       });
     },
@@ -2897,8 +3162,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     '/applications/:id/submission/channels',
     { preHandler: requireAuth },
     async (request: FastifyRequest, reply: FastifyReply) => {
-      const row = await ownedResume(request, reply);
+      let row = await ownedResume(request, reply);
       if (!row) return;
+      row = await repairExpiredAttendedHandoffClaim(row, request.jwtPayload!.userId, request.log) ?? row;
       let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       review = await repairReviewPortalFromMonitoredJob(row, review);
@@ -2916,8 +3182,9 @@ export async function applicationRoutes(fastify: FastifyInstance) {
     '/applications/:id/submission',
     { preHandler: requireAuth },
     async (request: FastifyRequest, reply: FastifyReply) => {
-      const row = await ownedResume(request, reply);
+      let row = await ownedResume(request, reply);
       if (!row) return;
+      row = await repairExpiredAttendedHandoffClaim(row, request.jwtPayload!.userId, request.log) ?? row;
       let review = readApplicationReview(row.spec);
       if (!review) return reply.status(409).send({ error: 'Application review is not available for this resume' });
       review = await repairReviewPortalFromMonitoredJob(row, review);
@@ -2936,7 +3203,6 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           new Date(),
         ),
       };
-      let handoff_url: string | undefined;
       let handoff_packet_valid = true;
       if ((review.status === 'filling' || review.status === 'needs_attention') && review.browser_session_id) {
         const audit = await currentAcknowledgedPacketAudit(row, {
@@ -2945,23 +3211,16 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           questions: review.questions,
         });
         handoff_packet_valid = audit.valid;
-        if (audit.valid) {
-          try {
-            handoff_url = await getLiveViewUrl(review.browser_session_id);
-          } catch {
-            handoff_url = undefined;
-          }
-        }
       }
       return reply.send({
         application_id: row.id,
-        review,
+        review: reviewWithoutPassiveHandoffUrl(review),
+        manual_handoff_available: manualHandoffAvailable(review),
         cover_letter: storedCoverLetter(row),
         // Keyed by kind, and built by the one reader that strips object_key. The spec holds the
         // Blob pointer because the packet builder needs it; this envelope must never carry it,
         // since a Blob object is public-read forever to anyone holding its URL.
         documents: storedDocuments(row),
-        handoff_url,
         handoff_packet_valid,
         configured: isBrowserbaseConfigured(),
       });
@@ -2976,8 +3235,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!row) return;
       const parsed = handoffCompleteBodySchema.safeParse(request.body ?? {});
       if (!parsed.success) return reply.status(400).send({ error: 'Invalid handoff completion request' });
-      const stored = row.spec as StoredSpec;
-      const current = readApplicationReview(stored);
+      const current = readApplicationReview(row.spec as StoredSpec);
       if (!current || current.status !== 'needs_attention') {
         return reply.status(409).send({ error: 'This application is not waiting on you' });
       }
@@ -3010,20 +3268,8 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!handoffAudit.valid) {
         return reply.status(409).send(packetAuditClientError(handoffAudit));
       }
-      const now = new Date().toISOString();
-      /* Unchanged in meaning, narrowed to the case it was always describing. This route's
-       * 'submitted' branch below refuses outright without a browser_session_id, so on the path that
-       * genuinely needs a live session the two checks now agree instead of one of them answering
-       * for packets the other would decline. A managed stop, which has no session, keeps its
-       * "I cleared the check" for as long as it sits there. */
-      if (preparedRunHandoffExpired(current)) {
-        return reply.status(409).send({ error: 'That took too long and timed out. Start the application again.' });
-      }
-      if (parsed.data.outcome === 'submitted') {
-        if (!current.browser_session_id) {
-          return reply.status(409).send({ error: 'Open the company page first so we can attach this submission to a live handoff.' });
-        }
-        let observedReceipt: Awaited<ReturnType<typeof readReceipt>>;
+      let observedReceipt: Awaited<ReturnType<typeof readReceipt>> | null = null;
+      if (parsed.data.outcome === 'submitted' && current.browser_session_id) {
         try {
           const session = await getBrowserSession(current.browser_session_id);
           const connected = await connectToSession(session);
@@ -3037,7 +3283,7 @@ export async function applicationRoutes(fastify: FastifyInstance) {
             error: 'Litos could not verify an employer confirmation in the retained company session. Nothing was marked submitted.',
           });
         }
-        if (!extensionEmployerReceiptIsSufficient({
+        if (!observedReceipt || !extensionEmployerReceiptIsSufficient({
           atsName: current.ats_name,
           portalUrl: current.portal_url,
           confirmationText: observedReceipt.confirmationText,
@@ -3047,69 +3293,209 @@ export async function applicationRoutes(fastify: FastifyInstance) {
             error: 'The retained company session does not show a verified receipt for this exact application.',
           });
         }
-        const next = {
-          ...current,
-          status: 'submitted' as const,
+      }
+      const userId = request.jwtPayload!.userId;
+      const result = await db.transaction(async (tx) => {
+        await lockSubmissionAttemptUser(tx, userId);
+        const [locked] = await tx.select().from(generated_resumes).where(and(
+          eq(generated_resumes.id, handoffAudit.row.id),
+          eq(generated_resumes.user_id, userId),
+        )).limit(1).for('update');
+        if (!locked
+          || locked.resume_object_key !== handoffAudit.row.resume_object_key
+          || !isDeepStrictEqual(locked.job_context, handoffAudit.row.job_context)
+          || !sameApplicationPacketSpec(locked.spec, handoffAudit.row.spec)) {
+          return { kind: 'changed' as const };
+        }
+        const latest = readApplicationReview(locked.spec);
+        if (!latest || latest.status !== 'needs_attention' || !latest.submission_claim_id) {
+          return { kind: 'changed' as const };
+        }
+        const clockResult = await tx.execute(sql`select clock_timestamp() as now`);
+        const clockValue = (clockResult.rows[0] as { now?: Date | string } | undefined)?.now;
+        const databaseNow = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);
+        if (Number.isNaN(databaseNow.getTime())) throw new Error('Database completion clock was unavailable');
+        const now = databaseNow.toISOString();
+        const events = (await submissionAttemptEventsForPacket(userId, locked.id, { executor: tx }))
+          .filter((event) => event.attempt_id === latest.submission_claim_id);
+        const opening = events.find((event) => event.event_kind === 'attempt_opened');
+        if (!opening
+          || opening.packet_version !== handoffAudit.audit.packet_version
+          || opening.submission_claim_id !== latest.submission_claim_id
+          || opening.application_id === null) return { kind: 'authority_missing' as const };
+        const binding = submissionAttemptBindingFromEvent(opening);
+        const safety = submissionAttemptRetrySafety(events);
+
+        if (parsed.data.outcome === 'cleared') {
+          if (safety.kind !== 'blocked_unverified') return { kind: 'authority_conflict' as const };
+          if (safety.reason !== 'opened') {
+            const waiting = applyReviewPatch(latest, {
+              status: 'needs_attention',
+              submission_error: undefined,
+              attention_reason: 'Did this application reach the employer? Choose Yes or No before Litos does anything else.',
+              attention_categories: ['unverified_submission'],
+              unverified_submission: {
+                at: safety.at,
+                cause: 'no_confirmation_state',
+                ...(latest.portal_url ? { portal_url: latest.portal_url } : {}),
+                ...(latest.submission_run_id ? { submission_run_id: latest.submission_run_id } : {}),
+              },
+            }, () => now);
+            const [updated] = await tx.update(generated_resumes).set({ spec: reviewSpec(waiting) }).where(and(
+              eq(generated_resumes.id, locked.id),
+              eq(generated_resumes.user_id, userId),
+              sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+              sql`${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'`,
+            )).returning({ id: generated_resumes.id });
+            if (!updated) throw new Error('HANDOFF_UNVERIFIED_WRITE_CONFLICT');
+            return { kind: 'needs_answer' as const, review: waiting };
+          }
+          await appendSubmissionAttemptEvent({
+            ...binding,
+            eventId: submissionAttemptEventId(binding.attemptId, 'not_sent_proven', 'attended-cleared-before-boundary'),
+            eventKind: 'not_sent_proven',
+            proofKind: 'typed_pre_click_stop',
+            evidenceCode: 'attended_challenge_cleared_before_boundary',
+            observedAt: databaseNow,
+          }, { executor: tx });
+          const next = applyReviewPatch(latest, {
+            status: 'ready_for_final_approval',
+            attention_reason: undefined,
+            submission_error: undefined,
+            submission_claimed_at: undefined,
+            submission_claim_id: undefined,
+            submission_packet_version: undefined,
+            submission_authorization: undefined,
+          }, () => now);
+          const [updated] = await tx.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
+            eq(generated_resumes.id, locked.id),
+            eq(generated_resumes.user_id, userId),
+            sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+          )).returning({ id: generated_resumes.id });
+          if (!updated) throw new Error('HANDOFF_CLEAR_WRITE_CONFLICT');
+          return { kind: 'cleared' as const, review: next };
+        }
+
+        const boundary = await submissionBoundaryAuthorization(userId, binding.attemptId, { executor: tx });
+        if (!boundary
+          || events.some((event) => event.event_kind === 'submission_confirmed'
+            || event.event_kind === 'not_sent_proven')) {
+          return { kind: 'authority_conflict' as const };
+        }
+        const applicantAttestation = !observedReceipt;
+        if (applicantAttestation
+          ? opening.source !== 'attended_handoff' || opening.operation !== 'manual_submission'
+          : (opening.source !== 'managed_browser' && opening.source !== 'direct_browser')
+            || opening.operation !== 'initial_submission') {
+          return { kind: 'authority_missing' as const };
+        }
+        const confirmationText = observedReceipt?.confirmationText
+          ?? applicantFoundSubmissionReceiptText(events.some((event) => event.event_kind === 'press_observed'));
+        const finalUrl = observedReceipt?.finalUrl ?? latest.portal_url;
+        if (!finalUrl) return { kind: 'authority_missing' as const };
+        const confirmationPrototype = {
+          ...opening,
+          event_kind: 'submission_confirmed',
+          evidence_code: 'attended_receipt_confirmed',
+          observed_at: databaseNow,
+          created_at: databaseNow,
+        } as SubmissionAttemptEventRecord;
+        if (observedReceipt && !measuredPersistedReceiptMatchesOpening(
+          opening,
+          confirmationPrototype,
+          finalUrl,
+          confirmationText,
+          observedReceipt.referenceId,
+        )) return { kind: 'receipt_invalid' as const };
+        if (applicantAttestation && !events.some((event) => event.event_kind === 'press_observed')) {
+          await appendSubmissionAttemptEvent({
+            ...binding,
+            eventId: submissionAttemptEventId(binding.attemptId, 'press_observed', 'applicant-attended-submit'),
+            eventKind: 'press_observed',
+            evidenceCode: 'applicant_attended_submission',
+            observedAt: databaseNow,
+          }, { executor: tx });
+        }
+        await appendSubmissionAttemptEvent({
+          ...binding,
+          eventId: submissionAttemptEventId(
+            binding.attemptId,
+            'submission_confirmed',
+            applicantAttestation ? 'applicant-attestation' : 'retained-session-receipt',
+          ),
+          eventKind: 'submission_confirmed',
+          evidenceCode: applicantAttestation ? 'applicant_found_submission' : 'attended_receipt_confirmed',
+          observedAt: databaseNow,
+        }, { executor: tx });
+        const next = applyReviewPatch(latest, {
+          status: 'submitted',
           submitted_at: now,
           attention_reason: undefined,
-          /* This spread bypasses applyReviewPatch, so the report's ticks are cleared by hand where
-             the report itself is: they annotate the attention_reason on the line above and must not
-             outlive it. */
-          attention_acknowledgements: undefined,
+          attention_categories: undefined,
           submission_error: undefined,
-          updated_at: now,
           receipt: {
-            confirmation_text: observedReceipt.confirmationText,
-            final_url: observedReceipt.finalUrl,
-            ...(observedReceipt.referenceId ? { reference_id: observedReceipt.referenceId } : {}),
+            confirmation_text: confirmationText,
+            final_url: finalUrl,
+            ...(observedReceipt?.referenceId ? { reference_id: observedReceipt.referenceId } : {}),
             captured_at: now,
-            source: 'attended_handoff' as const,
+            source: 'attended_handoff',
           },
-        };
-        const submitted = await db.update(generated_resumes)
-          .set({
-            spec: reviewSpec(next),
-            pipeline_stage: 'applied',
-            pipeline_stage_at: new Date(now),
-          })
-          .where(and(
-            eq(generated_resumes.id, row.id),
-            eq(generated_resumes.user_id, request.jwtPayload!.userId),
-            sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-            sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
-            sql`${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'`,
-          ))
-          .returning({ id: generated_resumes.id });
-        if (submitted.length === 0) {
-          const refreshed = await ownedResume(request, reply);
-          if (!refreshed) return;
-          const review = readApplicationReview(refreshed.spec);
-          return reply.status(202).send({ application_id: row.id, review: review ?? current });
+        }, () => now);
+        const [updated] = await tx.update(generated_resumes).set({
+          spec: reviewSpec(next),
+          pipeline_stage: 'applied',
+          pipeline_stage_at: databaseNow,
+        }).where(and(
+          eq(generated_resumes.id, locked.id),
+          eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+        )).returning({ id: generated_resumes.id });
+        if (!updated) throw new Error('HANDOFF_SUBMISSION_WRITE_CONFLICT');
+        await syncCanonicalApplicationRow({
+          attemptId: binding.attemptId,
+          packetId: locked.id,
+          userId,
+          applicationId: binding.applicationId,
+          packetVersion: binding.packetVersion,
+          postingIdentity: binding.postingIdentity,
+        }, tx);
+        const canonicalId = binding.applicationId!;
+        const projections = await authoritativeSubmissionProjection({
+          userId,
+          packetIds: [locked.id],
+          applicationIds: [canonicalId],
+          executor: tx,
+        });
+        const exact = { attemptId: binding.attemptId, canonicalApplicationId: canonicalId, packetId: locked.id };
+        if (!authoritativeConfirmedProjectionMatches(projections.byPacketId.get(locked.id), exact)
+          || !authoritativeConfirmedProjectionMatches(projections.byApplicationId.get(canonicalId), exact)) {
+          throw new Error('HANDOFF_CONFIRMATION_PROJECTION_INCOMPLETE');
         }
-        // The verified receipt filed the packet; the canonical row learns the same fact.
-        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
-        return reply.send({ application_id: row.id, review: next, cover_letter: storedCoverLetter(row) });
-      }
-      /* attention_acknowledgements goes with attention_reason: this spread bypasses
-         applyReviewPatch's expiry rule, and ticks must not outlive the report they annotate. */
-      const next = { ...current, status: 'ready_for_final_approval' as const, attention_reason: undefined, attention_acknowledgements: undefined, updated_at: now };
-      const completed = await db.update(generated_resumes)
-        .set({ spec: reviewSpec(next) })
-        .where(and(
-          eq(generated_resumes.id, row.id),
-          eq(generated_resumes.user_id, request.jwtPayload!.userId),
-          sql`${generated_resumes.spec} = ${JSON.stringify(row.spec)}::jsonb`,
-          sql`${generated_resumes.resume_object_key} = ${row.resume_object_key}`,
-          sql`${generated_resumes.spec}->'_review'->>'status' = 'needs_attention'`,
-        ))
-        .returning({ id: generated_resumes.id });
-      if (completed.length === 0) {
+        return { kind: 'submitted' as const, review: next };
+      });
+      if (result.kind === 'changed') {
         const refreshed = await ownedResume(request, reply);
         if (!refreshed) return;
         const review = readApplicationReview(refreshed.spec);
         return reply.status(202).send({ application_id: row.id, review: review ?? current });
       }
-      return reply.send({ application_id: row.id, review: next, cover_letter: storedCoverLetter(row) });
+      if (result.kind === 'authority_missing' || result.kind === 'authority_conflict') {
+        return reply.status(409).send({
+          error: 'This handoff is missing exact submission authority. Litos did not change its outcome.',
+          code: 'HANDOFF_AUTHORITY_MISSING',
+        });
+      }
+      if (result.kind === 'receipt_invalid') {
+        return reply.status(409).send({
+          error: 'The retained company session does not show a receipt bound to this exact job.',
+          code: 'HANDOFF_RECEIPT_INVALID',
+        });
+      }
+      return reply.status(result.kind === 'needs_answer' ? 202 : 200).send({
+        application_id: row.id,
+        review: result.review,
+        cover_letter: storedCoverLetter(row),
+      });
     },
   );
 
@@ -3152,43 +3538,146 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           error: 'Litos can still finish this one. Review the filled form and send it from here.',
         });
       }
-      const now = new Date().toISOString();
-      /* applyReviewPatch, not a spread, for the reason every other terminal write in this file gives:
-         the shared merge is where withTerminalCause enforces that a terminal state carries a cause,
-         and three production rows reached 'failed' with no stated reason when a route built its own
-         review object. */
-      const next = applyReviewPatch(current, {
-        status: 'submitted',
-        submitted_at: now,
-        attention_reason: undefined,
-        attention_categories: undefined,
-        submission_error: undefined,
-        receipt: {
-          /* Named for what it is. The document the employer required is one Litos had no way to put
-             on their form, so the application was completed by her; the receipt must not read as if
-             Litos watched it land. */
-          confirmation_text: 'Confirmed by you: this employer asked for a document Litos could not '
-            + 'attach, so you sent this application yourself.',
-          final_url: current.portal_url ?? '',
-          captured_at: now,
+      const audit = await currentAcknowledgedPacketAudit(row, {
+        questions: current.questions,
+      });
+      if (!audit.valid) return reply.status(409).send(packetAuditClientError(audit));
+      const userId = request.jwtPayload!.userId;
+      const result = await db.transaction(async (tx) => {
+        await lockSubmissionAttemptUser(tx, userId);
+        const [locked] = await tx.select().from(generated_resumes).where(and(
+          eq(generated_resumes.id, audit.row.id),
+          eq(generated_resumes.user_id, userId),
+        )).limit(1).for('update');
+        if (!locked
+          || locked.resume_object_key !== audit.row.resume_object_key
+          || !isDeepStrictEqual(locked.job_context, audit.row.job_context)
+          || !sameApplicationPacketSpec(locked.spec, audit.row.spec)) return { kind: 'changed' as const };
+        const latest = readApplicationReview(locked.spec);
+        if (!latest || latest.status !== 'ready_for_final_approval' || latest.submission_claimed_at) {
+          return { kind: 'changed' as const };
+        }
+        if (documentAsksLitosCannotResolve(latest, storedDocuments(locked)).length === 0) {
+          return { kind: 'resolvable' as const };
+        }
+        if (!latest.portal_url) return { kind: 'portal_missing' as const };
+        const postingIdentity = freezePostingIdentity(locked.job_context, latest.portal_url);
+        const duplicate = await duplicateApplicationVerdict({
+          userId,
+          applicationId: locked.id,
+          jobContext: locked.job_context,
+          portalUrl: latest.portal_url,
+        }, tx);
+        if (duplicate.kind !== 'clear') return { kind: 'duplicate_risk' as const, verdict: duplicate };
+        const canonicalApplication = await canonicalApplicationForNewPacketAttempt(tx, {
+          userId,
+          packetId: locked.id,
+          postingIdentity,
+        });
+        const clockResult = await tx.execute(sql`select clock_timestamp() as now`);
+        const clockValue = (clockResult.rows[0] as { now?: Date | string } | undefined)?.now;
+        const databaseNow = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);
+        if (Number.isNaN(databaseNow.getTime())) throw new Error('Database self-submit clock was unavailable');
+        const claimAt = databaseNow.toISOString();
+        const claimId = randomUUID();
+        const binding: SubmissionAttemptBinding = {
+          attemptId: claimId,
+          userId,
+          packetId: locked.id,
+          applicationId: canonicalApplication.id,
+          parentAttemptId: null,
           source: 'attended_handoff',
-        },
-      }, () => now);
-      const submitted = await db.update(generated_resumes)
-        .set({
+          operation: 'manual_submission',
+          postingIdentity,
+          submissionRunId: latest.submission_run_id ?? null,
+          submissionClaimId: claimId,
+          packetVersion: audit.audit.packet_version,
+        };
+        await appendSubmissionAttemptEvent({
+          ...binding,
+          eventId: submissionAttemptEventId(claimId, 'attempt_opened', 'self-submit-reservation'),
+          eventKind: 'attempt_opened',
+          evidenceCode: `attended_handoff_capability_v1:self_submit:${audit.audit.audit_digest}:${audit.audit.packet_version}`,
+          observedAt: databaseNow,
+        }, { executor: tx });
+        const authorization = await authorizeFinalSubmissionBoundary(binding, {
+          executor: tx,
+          factKey: 'self-submit-boundary',
+          evidenceCode: 'attended_handoff_employer_boundary_authorized',
+        });
+        if (authorization.kind !== 'fresh') throw new Error('SELF_SUBMIT_BOUNDARY_CONFLICT');
+        const completionAt = new Date(authorization.authorization.authorizedAt);
+        const completionIso = completionAt.toISOString();
+        await appendSubmissionAttemptEvent({
+          ...binding,
+          eventId: submissionAttemptEventId(claimId, 'press_observed', 'self-submit-press'),
+          eventKind: 'press_observed',
+          evidenceCode: 'applicant_attended_submission',
+          observedAt: completionAt,
+        }, { executor: tx });
+        await appendSubmissionAttemptEvent({
+          ...binding,
+          eventId: submissionAttemptEventId(claimId, 'submission_confirmed', 'self-submit-receipt'),
+          eventKind: 'submission_confirmed',
+          evidenceCode: 'attended_receipt_confirmed',
+          observedAt: completionAt,
+        }, { executor: tx });
+        const next = applyReviewPatch(latest, {
+          status: 'submitted',
+          submitted_at: completionIso,
+          ...submissionClaimPatch(claimAt, claimId),
+          submission_packet_version: audit.audit.packet_version,
+          submission_authorization: {
+            source: 'user_initiated_extension',
+            authorized_at: authorization.authorization.authorizedAt,
+          },
+          attention_reason: undefined,
+          attention_categories: undefined,
+          submission_error: undefined,
+          receipt: {
+            confirmation_text: selfSubmittedSubmissionReceiptText(),
+            final_url: latest.portal_url,
+            captured_at: completionIso,
+            source: 'attended_handoff',
+          },
+        }, () => completionIso);
+        const [updated] = await tx.update(generated_resumes).set({
           spec: reviewSpec(next),
           pipeline_stage: 'applied',
-          pipeline_stage_at: new Date(now),
-        })
-        .where(and(
-          eq(generated_resumes.id, row.id),
-          eq(generated_resumes.user_id, request.jwtPayload!.userId),
-          // Conditional on the status this answered for, so a send that started somewhere else in
-          // the meantime is not overwritten by an answer about the screen before it.
-          sql`${generated_resumes.spec}->'_review'->>'status' = 'ready_for_final_approval'`,
-        ))
-        .returning({ id: generated_resumes.id });
-      if (submitted.length === 0) {
+          pipeline_stage_at: completionAt,
+        }).where(and(
+          eq(generated_resumes.id, locked.id),
+          eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+        )).returning({ id: generated_resumes.id });
+        if (!updated) throw new Error('SELF_SUBMIT_WRITE_CONFLICT');
+        await syncCanonicalApplicationRow({
+          attemptId: claimId,
+          packetId: locked.id,
+          userId,
+          applicationId: canonicalApplication.id,
+          packetVersion: audit.audit.packet_version,
+          postingIdentity,
+        }, tx);
+        const projections = await authoritativeSubmissionProjection({
+          userId,
+          packetIds: [locked.id],
+          applicationIds: [canonicalApplication.id],
+          executor: tx,
+        });
+        const exact = {
+          attemptId: claimId,
+          canonicalApplicationId: canonicalApplication.id,
+          packetId: locked.id,
+        };
+        if (!authoritativeConfirmedProjectionMatches(projections.byPacketId.get(locked.id), exact)
+          || !authoritativeConfirmedProjectionMatches(
+            projections.byApplicationId.get(canonicalApplication.id),
+            exact,
+          )) throw new Error('SELF_SUBMIT_CONFIRMATION_PROJECTION_INCOMPLETE');
+        return { kind: 'submitted' as const, review: next };
+      });
+      if (result.kind === 'changed') {
         const refreshed = await ownedResume(request, reply);
         if (!refreshed) return;
         return reply.status(202).send({
@@ -3196,11 +3685,20 @@ export async function applicationRoutes(fastify: FastifyInstance) {
           review: readApplicationReview(refreshed.spec) ?? current,
         });
       }
-      // She sent it herself; the canonical row must stop offering to send it for her.
-      await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
+      if (result.kind === 'resolvable') {
+        return reply.status(409).send({
+          error: 'Litos can still finish this one. Review the filled form and send it from here.',
+        });
+      }
+      if (result.kind === 'portal_missing') {
+        return reply.status(409).send({ error: 'This application has no exact employer page to bind the receipt to.' });
+      }
+      if (result.kind === 'duplicate_risk') {
+        return reply.status(409).send(duplicateRiskResponse(result.verdict));
+      }
       return reply.send({
         application_id: row.id,
-        review: next,
+        review: result.review,
         cover_letter: storedCoverLetter(row),
         // Carried so the screen this answers keeps the marks it was drawing. Built by the reader that
         // strips object_key, like every other envelope in this file.
@@ -3522,77 +4020,168 @@ export async function applicationRoutes(fastify: FastifyInstance) {
       if (!parsed.success) {
         return reply.status(400).send({ error: 'Say whether you found the application, with found true or false' });
       }
-      const current = readApplicationReview(row.spec as StoredSpec);
-      if (!current) return reply.status(409).send({ error: 'Application review is not available for this resume' });
-      const pending = current.unverified_submission;
-      if (!pending) {
-        return reply.status(409).send({
-          error: 'This application is not waiting on an unverified submission',
-          status: current.status,
-        });
-      }
-      if (pending.resolution) {
-        // Idempotent rather than an error. The same answer twice is a retry, not a mistake, and a
-        // retry of a resolved 'sent' is also the heal path for a canonical advance that failed the
-        // first time.
-        if (current.status === 'submitted') {
-          await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
+      const userId = request.jwtPayload!.userId;
+      const result = await db.transaction(async (tx) => {
+        await lockSubmissionAttemptUser(tx, userId);
+        const [locked] = await tx.select().from(generated_resumes).where(and(
+          eq(generated_resumes.id, row.id),
+          eq(generated_resumes.user_id, userId),
+        )).limit(1).for('update');
+        const current = locked ? readApplicationReview(locked.spec) : null;
+        if (!locked || !current) return { kind: 'no_review' as const };
+        const pending = current.unverified_submission;
+        if (!pending) return { kind: 'not_waiting' as const, review: current };
+        if (pending.resolution) return { kind: 'already_resolved' as const, review: current };
+        const claimId = current.submission_claim_id;
+        if (!claimId) return { kind: 'authority_missing' as const };
+        const events = (await submissionAttemptEventsForPacket(userId, locked.id, { executor: tx }))
+          .filter((event) => event.attempt_id === claimId);
+        const opening = events.find((event) => event.event_kind === 'attempt_opened');
+        const expectedPacketVersion = current.submission_packet_version
+          ?? current.packet_audit?.packet_version
+          ?? null;
+        if (!opening
+          || opening.submission_claim_id !== claimId
+          || opening.application_id === null
+          || !opening.packet_version
+          || opening.packet_version !== expectedPacketVersion) {
+          return { kind: 'authority_missing' as const };
         }
-        return reply.status(200).send({ application_id: row.id, already_resolved: true, review: current });
-      }
-      const now = new Date().toISOString();
-      const resolved = { ...pending, resolution: parsed.data.found ? 'sent' as const : 'not_sent' as const, resolved_at: now };
-      /* applyReviewPatch, not a spread. Both arms land on a terminal or attention state, and the
-         shared merge is where withTerminalCause enforces that such a state always carries a cause -
-         a rule that exists because three production rows reached 'failed' with attention_reason
-         unset when a route built its own review object. */
-      const next: ApplicationReviewState = parsed.data.found
-        ? applyReviewPatch(current, {
+        const safety = submissionAttemptRetrySafety(events);
+        if (safety.kind !== 'blocked_unverified') return { kind: 'authority_conflict' as const };
+        const binding = submissionAttemptBindingFromEvent(opening);
+        const clockResult = await tx.execute(sql`select clock_timestamp() as now`);
+        const clockValue = (clockResult.rows[0] as { now?: Date | string } | undefined)?.now;
+        const databaseNow = clockValue instanceof Date ? clockValue : new Date(clockValue ?? NaN);
+        if (Number.isNaN(databaseNow.getTime())) throw new Error('Database outcome clock was unavailable');
+        const now = databaseNow.toISOString();
+        const resolved = {
+          ...pending,
+          resolution: parsed.data.found ? 'sent' as const : 'not_sent' as const,
+          resolved_at: now,
+        };
+
+        if (!parsed.data.found) {
+          const boundary = await submissionBoundaryAuthorization(userId, claimId, { executor: tx });
+          if (!boundary) return { kind: 'authority_missing' as const };
+          if (boundary.active) return { kind: 'lease_active' as const, expiresAt: boundary.expiresAt };
+          await appendSubmissionAttemptEvent({
+            ...binding,
+            eventId: submissionAttemptEventId(claimId, 'not_sent_proven', 'applicant-checked-not-sent'),
+            eventKind: 'not_sent_proven',
+            proofKind: 'applicant_checked_not_sent',
+            evidenceCode: 'applicant_checked_not_sent',
+            observedAt: databaseNow,
+          }, { executor: tx });
+          const exactEvents = (await submissionAttemptEventsForPacket(userId, locked.id, { executor: tx }))
+            .filter((event) => event.attempt_id === claimId);
+          const resolvedSafety = submissionAttemptRetrySafety(exactEvents);
+          if (resolvedSafety.kind !== 'safe_not_sent'
+            || resolvedSafety.proofKind !== 'applicant_checked_not_sent') {
+            throw new Error('UNVERIFIED_NOT_SENT_FACT_INCOMPLETE');
+          }
+          const next = applyReviewPatch(current, {
+            status: 'needs_attention',
+            unverified_submission: resolved,
+            submission_claimed_at: undefined,
+            submission_claim_id: undefined,
+            submission_packet_version: undefined,
+            submission_authorization: undefined,
+            attention_reason: 'You checked and the employer does not have this one. Litos can send it again when you are ready.',
+            attention_categories: ['unverified_submission'],
+          }, () => now);
+          const [updated] = await tx.update(generated_resumes).set({ spec: reviewSpec(next) }).where(and(
+            eq(generated_resumes.id, locked.id),
+            eq(generated_resumes.user_id, userId),
+            sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+          )).returning({ id: generated_resumes.id });
+          if (!updated) throw new Error('UNVERIFIED_NOT_SENT_WRITE_CONFLICT');
+          return { kind: 'resolved' as const, review: next };
+        }
+
+        const finalUrl = pending.portal_url ?? current.portal_url;
+        if (!finalUrl) return { kind: 'authority_missing' as const };
+        const hasPress = events.some((event) => event.event_kind === 'press_observed');
+        const confirmationText = applicantFoundSubmissionReceiptText(hasPress);
+        await appendSubmissionAttemptEvent({
+          ...binding,
+          eventId: submissionAttemptEventId(claimId, 'submission_confirmed', 'applicant-found-submission'),
+          eventKind: 'submission_confirmed',
+          evidenceCode: 'applicant_found_submission',
+          observedAt: databaseNow,
+        }, { executor: tx });
+        const next = applyReviewPatch(current, {
           status: 'submitted',
-          submitted_at: pending.at,
+          submitted_at: now,
           submission_error: undefined,
           attention_reason: undefined,
           attention_categories: undefined,
           unverified_submission: resolved,
           receipt: {
-            /* NAMED FOR WHAT IT IS. Litos did not see this confirmation and must never write a
-               sentence implying it did; the applicant did, and the receipt says so. */
-            confirmation_text: 'Confirmed by you: you found this application in the employer\u2019s portal '
-              + 'after Litos pressed Send and lost the answer.',
-            final_url: pending.portal_url ?? current.portal_url ?? '',
+            confirmation_text: confirmationText,
+            final_url: finalUrl,
             captured_at: now,
             source: 'attended_handoff',
           },
-        }, () => now)
-        : applyReviewPatch(current, {
-          status: 'needs_attention',
-          unverified_submission: resolved,
-          // Released, because she has looked and the employer does not have it. This is the single
-          // fact that makes another run safe, and it is the only thing that releases the claim.
-          submission_claimed_at: undefined,
-          submission_claim_id: undefined,
-          attention_reason: 'You checked and the employer does not have this one, so nothing was sent. '
-            + 'Litos can send it again whenever you are ready.',
-          attention_categories: ['unverified_submission'],
         }, () => now);
-      const updated = await db.update(generated_resumes)
-        .set({ spec: reviewSpec(next) })
-        .where(and(
-          eq(generated_resumes.id, row.id),
-          // Conditional on the record still being unresolved, so two clients answering at once
-          // cannot both win and leave the packet in the loser's state.
-          sql`${generated_resumes.spec}->'_review'->'unverified_submission'->>'resolution' is null`,
-        ))
-        .returning({ id: generated_resumes.id });
-      if (updated.length === 0) {
-        return reply.status(409).send({ error: 'This application was resolved somewhere else first' });
+        const [updated] = await tx.update(generated_resumes).set({
+          spec: reviewSpec(next),
+          pipeline_stage: 'applied',
+          pipeline_stage_at: databaseNow,
+        }).where(and(
+          eq(generated_resumes.id, locked.id),
+          eq(generated_resumes.user_id, userId),
+          sql`${generated_resumes.spec} = ${JSON.stringify(locked.spec)}::jsonb`,
+        )).returning({ id: generated_resumes.id });
+        if (!updated) throw new Error('UNVERIFIED_SENT_WRITE_CONFLICT');
+        await syncCanonicalApplicationRow({
+          attemptId: claimId,
+          packetId: locked.id,
+          userId,
+          applicationId: binding.applicationId,
+          packetVersion: binding.packetVersion,
+          postingIdentity: binding.postingIdentity,
+        }, tx);
+        const canonicalId = binding.applicationId!;
+        const projections = await authoritativeSubmissionProjection({
+          userId,
+          packetIds: [locked.id],
+          applicationIds: [canonicalId],
+          executor: tx,
+        });
+        const exact = { attemptId: claimId, canonicalApplicationId: canonicalId, packetId: locked.id };
+        if (!authoritativeConfirmedProjectionMatches(projections.byPacketId.get(locked.id), exact)
+          || !authoritativeConfirmedProjectionMatches(projections.byApplicationId.get(canonicalId), exact)) {
+          throw new Error('UNVERIFIED_CONFIRMATION_PROJECTION_INCOMPLETE');
+        }
+        return { kind: 'resolved' as const, review: next };
+      });
+      if (result.kind === 'no_review') {
+        return reply.status(409).send({ error: 'Application review is not available for this resume' });
       }
-      // Only the arm that landed on 'submitted' filed anything; the released claim changes nothing
-      // canonical. Gated on the persisted status, the same predicate the runner's writeReview uses.
-      if (next.status === 'submitted') {
-        await advanceCanonicalApplicationFromPacketSubmission({ packetId: row.id, userId: request.jwtPayload!.userId });
+      if (result.kind === 'not_waiting') {
+        return reply.status(409).send({
+          error: 'This application is not waiting on an unverified submission',
+          status: result.review.status,
+        });
       }
-      return reply.status(200).send({ application_id: row.id, review: next });
+      if (result.kind === 'already_resolved') {
+        return reply.status(200).send({ application_id: row.id, already_resolved: true, review: result.review });
+      }
+      if (result.kind === 'lease_active') {
+        return reply.status(409).send({
+          error: 'The current employer send window is still active. Wait for it to close before choosing No.',
+          code: 'SUBMISSION_AUTHORIZATION_ACTIVE',
+          activation_expires_at: result.expiresAt,
+        });
+      }
+      if (result.kind === 'authority_missing' || result.kind === 'authority_conflict') {
+        return reply.status(409).send({
+          error: 'This question is not bound to an exact submission attempt. Litos did not change the application.',
+          code: 'UNVERIFIED_ATTEMPT_AUTHORITY_MISSING',
+        });
+      }
+      return reply.status(200).send({ application_id: row.id, review: result.review });
     },
   );
 }

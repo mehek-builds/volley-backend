@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  employerEmailConfirmationEvidenceCode,
   measuredPersistedReceiptMatchesOpening,
 } from './authoritativeSubmissionProjection';
 import type { SubmissionAttemptEventRecord } from './submissionAttemptLedger';
@@ -107,4 +108,32 @@ test('unsupported email projection requires the exact recipient, provider id, an
     unsupportedEmailConfirmationText(accepted),
     'different-id',
   ), false);
+});
+
+test('employer email confirmation evidence is bound to the exact stored message and receipt', () => {
+  const base = {
+    attemptId: 'a3578398-c4cc-414d-9a44-c7943d8effb9',
+    userId: 'cf48e921-8543-466c-b51f-1598fd723235',
+    packetId: '0cf0dcee-b030-4dd8-aaf4-84df811da7c3',
+    messageId: '15490a8b-3375-4b04-b91b-fd8e0d7d236c',
+    alias: 'Jobs+Applicant@Example.Test',
+    confirmationText: 'Application received',
+    finalUrl: 'https://jobs.example.test/apply/42',
+    receivedAt: '2026-08-31T10:00:00.000Z',
+  };
+  const exact = employerEmailConfirmationEvidenceCode(base);
+  assert.match(exact, /^employer_email_confirmation_v1:[a-f0-9]{64}$/);
+  assert.equal(exact, employerEmailConfirmationEvidenceCode({
+    ...base,
+    alias: ' jobs+applicant@example.test ',
+    receivedAt: new Date(base.receivedAt),
+  }));
+  for (const changed of [
+    { messageId: '0e74826d-acd8-48f7-9c4a-415a571a02b3' },
+    { confirmationText: 'Different confirmation' },
+    { finalUrl: 'https://jobs.example.test/apply/43' },
+    { receivedAt: '2026-08-31T10:00:01.000Z' },
+  ]) {
+    assert.notEqual(exact, employerEmailConfirmationEvidenceCode({ ...base, ...changed }));
+  }
 });

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { describe, test } from 'node:test';
 import {
   canonicalApplicationFingerprint,
+  canonicalManualDocumentBindingFromSnapshot,
   canonicalPortalIdentity,
   canonicalPortalUrl,
   fillApplicationSchema,
@@ -13,6 +14,7 @@ import {
   manualSubmissionTransition,
 } from './canonicalApplications';
 import { companyDomainFor } from '../lib/companyDomains';
+import { CANONICAL_FREE_NONE_BINDING } from '../lib/canonicalFreeDocumentBinding';
 
 describe('canonical Free application contract', () => {
   test('prefers stable job identity and otherwise hashes portal identity', () => {
@@ -121,6 +123,13 @@ describe('canonical Free application contract', () => {
     assert.match(route, /portal_identity_mismatch/);
     assert.match(route, /submission_event_binding_conflict/);
     assert.match(route, /submission_event_terminal/);
+    assert.match(route, /await lockSubmissionAttemptUser\(tx, userId\)[\s\S]*?\.for\('update'\)/);
+    assert.match(route, /duplicateApplicationVerdict\([\s\S]*?, tx\)/);
+    assert.match(route, /eventKind: 'attempt_opened'/);
+    assert.match(route, /eventKind: 'boundary_authorized'|authorizeFinalSubmissionBoundary/);
+    assert.match(route, /eventKind: 'press_observed'/);
+    assert.match(route, /eventKind: 'submission_confirmed'/);
+    assert.match(route, /authoritativeConfirmedProjectionMatches/);
     assert.doesNotMatch(route, /automatic_submission|requireFeature|reserveEntitledUsage/);
   });
 
@@ -147,9 +156,47 @@ describe('canonical Free application contract', () => {
     const transactionBody = route.slice(transaction, retry);
     assert.doesNotMatch(
       transactionBody,
-      /await\s+(?!tx\.)|\b(?:fetch|putObject|deleteObject|sendEmail|enqueue|publish)\s*\(/,
-      'the whole-transaction retry callback must remain free of non-database awaited or external side effects',
+      /\b(?:fetch|putObject|deleteObject|sendEmail|enqueue|publish)\s*\(/,
+      'the whole-transaction retry callback must remain free of external side effects',
     );
+    assert.match(transactionBody, /canonicalManualDocumentBinding\(tx, currentApplication\)/);
+    assert.match(transactionBody, /submissionAttemptEventsForPacket\([\s\S]*?\{ executor: tx \}\)/);
+    assert.match(transactionBody, /appendSubmissionAttemptEvent\([\s\S]*?\{ executor: tx \}\)/);
+    assert.match(transactionBody, /authoritativeSubmissionProjection\([\s\S]*?executor: tx/);
+  });
+
+  test('canonical manual outcomes freeze an exact no-resume document binding', () => {
+    const application = {
+      id: 'fd3a3c21-e8c2-4677-80e4-429d96a40cb9',
+      user_id: 'cf48e921-8543-466c-b51f-1598fd723235',
+      selected_resume_artifact_id: null,
+      resume_attached: false,
+      resume_source: 'none',
+      resume_attached_at: null,
+    };
+    assert.equal(canonicalManualDocumentBindingFromSnapshot({
+      application: application as never,
+      links: [],
+      artifact: null,
+      versions: [],
+    }), CANONICAL_FREE_NONE_BINDING);
+    assert.equal(canonicalManualDocumentBindingFromSnapshot({
+      application: { ...application, resume_attached: true } as never,
+      links: [],
+      artifact: null,
+      versions: [],
+    }), null);
+    assert.equal(canonicalManualDocumentBindingFromSnapshot({
+      application: {
+        ...application,
+        resume_source: 'base_resume',
+        resume_attached: true,
+        resume_attached_at: new Date('2026-08-31T10:00:00.000Z'),
+      } as never,
+      links: [],
+      artifact: null,
+      versions: [],
+    }), null);
   });
 
   test('allows base and tailored resume artifacts but not unrelated generated documents', () => {
